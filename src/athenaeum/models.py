@@ -145,6 +145,35 @@ class EscalationItem:
 
 
 @dataclass
+class TokenUsage:
+    """Accumulated API token usage for a pipeline run."""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    api_calls: int = 0
+
+    def add(self, input_tokens: int, output_tokens: int) -> None:
+        """Record tokens from one API call."""
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        self.api_calls += 1
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def estimated_cost_usd(self) -> float:
+        """Estimate cost using Haiku/Sonnet blended rates.
+
+        Uses a conservative blended rate: $1.50/M input, $7.50/M output.
+        """
+        return (
+            self.input_tokens * 1.50 / 1_000_000
+            + self.output_tokens * 7.50 / 1_000_000
+        )
+
+
+@dataclass
 class ProcessingResult:
     """Result of processing one raw file."""
     raw_file: RawFile

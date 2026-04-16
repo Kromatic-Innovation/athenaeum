@@ -32,6 +32,7 @@ from athenaeum.models import (
     EntityIndex,
     ProcessingResult,
     RawFile,
+    TokenUsage,
     load_schema_list,
     parse_frontmatter,
 )
@@ -171,6 +172,7 @@ def process_one(
     valid_tags: list[str],
     valid_access: list[str],
     dry_run: bool = False,
+    usage: TokenUsage | None = None,
 ) -> ProcessingResult:
     """Process a single raw file through all tiers."""
     result = ProcessingResult(raw_file=raw)
@@ -197,6 +199,7 @@ def process_one(
     # --- Tier 2: Classification ---
     classified = tier2_classify(
         raw, matched_names, valid_types, valid_tags, valid_access, client,
+        wiki_root=wiki_root, usage=usage,
     )
     log.info("  T2 classified %d new entities", len(classified))
 
@@ -232,7 +235,7 @@ def process_one(
     # --- Tier 3: Content writing ---
     assert client is not None, "client required for non-dry-run"
     new_entities, updated_uids, escalations = tier3_write(
-        raw, actions, index, wiki_root, client,
+        raw, actions, index, wiki_root, client, usage=usage,
     )
 
     for entity in new_entities:
@@ -309,18 +312,18 @@ def run(
     if not dry_run:
         git_snapshot(knowledge_root, "librarian: pre-processing snapshot")
 
+    usage = TokenUsage()
     total_created = 0
     total_updated = 0
     total_escalated = 0
     total_skipped = 0
-    total_api_calls = 0
     failed_files: list[str] = []
 
     for raw in raw_files:
-        if not dry_run and total_api_calls >= max_api_calls:
+        if not dry_run and usage.api_calls >= max_api_calls:
             log.warning(
                 "API call budget exhausted (%d/%d) — stopping early",
-                total_api_calls, max_api_calls,
+                usage.api_calls, max_api_calls,
             )
             break
 
@@ -330,15 +333,12 @@ def run(
                 raw, index, wiki_root, client,
                 valid_types, valid_tags, valid_access,
                 dry_run=dry_run,
+                usage=usage,
             )
         except Exception:
             log.exception("Failed to process %s", raw.ref)
             failed_files.append(raw.ref)
             continue
-
-        # Estimate API calls: 1 for classify + 1 per created + 1 per updated
-        calls_this_file = 1 + len(result.created) + len(result.updated) if not dry_run else 0
-        total_api_calls += calls_this_file
 
         total_created += len(result.created)
         total_updated += len(result.updated)
@@ -350,10 +350,17 @@ def run(
             log.info("  Deleted: %s", raw.path)
 
     log.info(
-        "Done: %d created, %d updated, %d escalated, %d skipped, %d failed, ~%d API calls",
+        "Done: %d created, %d updated, %d escalated, %d skipped, %d failed",
         total_created, total_updated, total_escalated, total_skipped,
-        len(failed_files), total_api_calls,
+        len(failed_files),
     )
+    if usage.api_calls > 0:
+        log.info(
+            "Token usage: %d API calls, %d input + %d output = %d total"
+            " (~$%.4f estimated)",
+            usage.api_calls, usage.input_tokens, usage.output_tokens,
+            usage.total_tokens, usage.estimated_cost_usd,
+        )
 
     if not dry_run and (total_created > 0 or total_updated > 0):
         rebuild_index(wiki_root)
