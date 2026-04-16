@@ -23,6 +23,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Target directory (default: ~/knowledge)",
     )
 
+    # status command
+    status_parser = subparsers.add_parser("status", help="Show knowledge base status")
+    status_parser.add_argument(
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+
     # run command — execute the librarian pipeline
     run_parser = subparsers.add_parser("run", help="Run the librarian pipeline")
     run_parser.add_argument(
@@ -63,6 +72,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init":
         return _cmd_init(args)
 
+    if args.command == "status":
+        return _cmd_status(args)
+
     if args.command == "run":
         return _cmd_run(args)
 
@@ -74,6 +86,18 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     target = init_knowledge_dir(args.path)
     print(f"Initialized knowledge directory at {target}")
+    return 0
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    from athenaeum.status import format_status, status
+
+    target = args.path.expanduser().resolve()
+    if not target.exists():
+        print(f"Knowledge directory not found: {target}")
+        return 1
+    info = status(target)
+    print(format_status(info))
     return 0
 
 

@@ -28,6 +28,79 @@ athenaeum init
 athenaeum init --path ~/my-knowledge
 ```
 
+## Usage
+
+### Running the pipeline
+
+```bash
+# Run the librarian pipeline (processes raw files into wiki entities)
+athenaeum run
+
+# Dry run — inspect what would happen without writing files
+athenaeum run --dry-run
+
+# Custom paths and limits
+athenaeum run \
+  --raw-root ~/knowledge/raw \
+  --wiki-root ~/knowledge/wiki \
+  --knowledge-root ~/knowledge \
+  --max-files 50 \
+  --max-api-calls 200 \
+  --verbose
+```
+
+### Checking status
+
+```bash
+# Show knowledge base status (entity counts, pending files, last run)
+athenaeum status
+athenaeum status --path ~/my-knowledge
+```
+
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ANTHROPIC_API_KEY` | Yes (unless `--dry-run`) | API key for Tier 2/3 LLM calls |
+| `ATHENAEUM_CLASSIFY_MODEL` | No | Override Tier 2 model (default: `claude-haiku-4-5-20251001`) |
+| `ATHENAEUM_WRITE_MODEL` | No | Override Tier 3 model (default: `claude-sonnet-4-6`) |
+
+### Raw file format
+
+Raw intake files live in `raw/{source}/*.md` and follow the naming convention:
+
+```
+{timestamp}-{uuid8}.md
+```
+
+Example: `20240406T120000Z-aabb0011.md`
+
+Each file is a plain markdown document containing observations, notes, or session
+transcripts. The `{source}` directory name (e.g., `sessions`, `imports`) identifies
+the origin of the data.
+
+### Output
+
+The pipeline produces wiki entity pages in `wiki/` with YAML frontmatter:
+
+```yaml
+---
+uid: a1b2c3d4
+type: person
+name: Alice Zhang
+aliases: [Alice]
+access: internal
+tags: [active]
+created: '2024-04-06'
+updated: '2024-04-06'
+---
+```
+
+Entity pages are indexed in `wiki/_index.md`, grouped by type.
+Conflicts requiring human review are appended to `wiki/_pending_questions.md`.
+
+At the end of each run, token usage and estimated costs are logged.
+
 ## Development
 
 ```bash
