@@ -6,6 +6,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import yaml
 
@@ -26,7 +27,7 @@ def slugify(name: str) -> str:
 
 # --- Frontmatter parsing ---
 
-_FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+_FM_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -125,7 +126,7 @@ class ClassifiedEntity:
 @dataclass
 class EntityAction:
     """A create or update action for Tier 3."""
-    kind: str  # "create" | "update"
+    kind: Literal["create", "update"]
     name: str
     entity_type: str
     tags: list[str]
@@ -204,6 +205,7 @@ class EntityIndex:
         self.wiki_root = wiki_root
         self._by_name: dict[str, tuple[str, Path]] = {}
         self._entities: dict[str, dict] = {}
+        self._entity_format_paths: set[Path] = set()
         self._load()
 
     def _load(self) -> None:
@@ -227,6 +229,7 @@ class EntityIndex:
             self._by_name[key] = (uid or name, fpath)
             if uid:
                 self._entities[uid] = meta
+                self._entity_format_paths.add(fpath)
 
             for alias in meta.get("aliases", []):
                 if alias:
@@ -238,22 +241,19 @@ class EntityIndex:
 
     def has_entity_format(self, path: Path) -> bool:
         """Check if a wiki page uses the full entity template format (has uid field)."""
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            return False
-        meta, _ = parse_frontmatter(text)
-        return bool(meta.get("uid"))
+        return path in self._entity_format_paths
 
     def register(self, entity: WikiEntity) -> None:
         """Add a newly created entity to the index."""
         key = entity.name.lower()
-        self._by_name[key] = (entity.uid, self.wiki_root / entity.filename)
+        path = self.wiki_root / entity.filename
+        self._by_name[key] = (entity.uid, path)
         self._entities[entity.uid] = {
             "uid": entity.uid,
             "type": entity.type,
             "name": entity.name,
         }
+        self._entity_format_paths.add(path)
         for alias in entity.aliases:
             if alias:
-                self._by_name[alias.lower()] = (entity.uid, self.wiki_root / entity.filename)
+                self._by_name[alias.lower()] = (entity.uid, path)

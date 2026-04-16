@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum.models import (
+    EntityAction,
     EntityIndex,
     WikiEntity,
     generate_uid,
@@ -114,6 +115,12 @@ class TestParseFrontmatter:
         assert meta["uid"] == "abc12345"
         assert meta["aliases"] == ["AC", "AcmeCo"]
         assert "# Acme Corp" in body
+
+    def test_crlf_frontmatter(self) -> None:
+        text = "---\r\nname: Test\r\ntype: person\r\n---\r\n\r\nBody content."
+        meta, body = parse_frontmatter(text)
+        assert meta == {"name": "Test", "type": "person"}
+        assert "Body content." in body
 
     def test_invalid_yaml(self) -> None:
         text = "---\n: bad: yaml: [unclosed\n---\n\nBody."
@@ -274,6 +281,12 @@ class TestEntityIndex:
         assert index.has_entity_format(entity_page) is True
         assert index.has_entity_format(old_page) is False
 
+    def test_has_entity_format_after_register(self, wiki_dir: Path) -> None:
+        index = EntityIndex(wiki_dir)
+        entity = WikiEntity(uid="reg12345", type="tool", name="New Tool")
+        index.register(entity)
+        assert index.has_entity_format(wiki_dir / entity.filename) is True
+
     def test_register(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
         entity = WikiEntity(
@@ -321,3 +334,14 @@ class TestLoadSchemaList:
     def test_missing_file(self, tmp_path: Path) -> None:
         result = load_schema_list(tmp_path, "nonexistent.md")
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# EntityAction type annotation
+# ---------------------------------------------------------------------------
+
+
+class TestEntityAction:
+    def test_kind_literal_annotation(self) -> None:
+        annotation = EntityAction.__dataclass_fields__["kind"].type
+        assert "Literal" in annotation
