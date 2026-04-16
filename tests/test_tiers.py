@@ -512,10 +512,13 @@ class TestTier3Write:
         client = MagicMock()
         client.messages.create.side_effect = [create_response, merge_response]
 
-        new_entities, escalations = tier3_write(raw, actions, index, wiki_dir, client)
+        new_entities, updated_uids, escalations = tier3_write(
+            raw, actions, index, wiki_dir, client,
+        )
 
         assert len(new_entities) == 1
         assert new_entities[0].name == "Alice Zhang"
+        assert updated_uids == ["a1b2c3d4"]
         assert len(escalations) == 0
         # Verify the update was written to the existing file
         acme_content = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
@@ -548,6 +551,77 @@ class TestTier3Write:
 
         with pytest.raises(anthropic_mod.APIError):
             tier3_write(raw, actions, index, wiki_dir, client)
+
+    def test_no_disk_write_on_partial_failure(self, wiki_dir: Path) -> None:
+        """If the second action fails, the first action's update must not be written."""
+        import anthropic as anthropic_mod
+
+        raw = _make_raw("Info about Acme and a new person.")
+        index = EntityIndex(wiki_dir)
+
+        actions = [
+            EntityAction(
+                kind="update",
+                name="Acme Corp",
+                entity_type="company",
+                tags=[],
+                access="",
+                existing_uid="a1b2c3d4",
+                observations="Should NOT be written.",
+            ),
+            EntityAction(
+                kind="create",
+                name="Crash Entity",
+                entity_type="person",
+                tags=[],
+                access="internal",
+                existing_uid=None,
+                observations="text",
+            ),
+        ]
+
+        # First call (merge) succeeds, second call (create) fails
+        merge_response = MagicMock()
+        merge_response.content = [MagicMock(text="# Acme Corp\n\nSHOULD NOT APPEAR")]
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            merge_response,
+            anthropic_mod.APIError(message="Crash", request=MagicMock(), body=None),
+        ]
+
+        acme_before = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
+
+        with pytest.raises(anthropic_mod.APIError):
+            tier3_write(raw, actions, index, wiki_dir, client)
+
+        acme_after = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
+        assert acme_after == acme_before, "update was written despite subsequent failure"
+
+    def test_uid_lookup_instead_of_glob(self, wiki_dir: Path) -> None:
+        """tier3_write uses EntityIndex UID lookup, not filesystem glob."""
+        raw = _make_raw("Update info about Acme.")
+        index = EntityIndex(wiki_dir)
+
+        actions = [
+            EntityAction(
+                kind="update",
+                name="Acme Corp",
+                entity_type="company",
+                tags=[],
+                access="",
+                existing_uid="a1b2c3d4",
+                observations="New info.",
+            ),
+        ]
+
+        client = _mock_client("# Acme Corp\n\nUpdated content.")
+        new_entities, updated_uids, escalations = tier3_write(
+            raw, actions, index, wiki_dir, client,
+        )
+
+        assert updated_uids == ["a1b2c3d4"]
+        acme_content = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
+        assert "Updated content" in acme_content
 
 
 # ---------------------------------------------------------------------------
