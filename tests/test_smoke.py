@@ -13,3 +13,10 @@ def test_version_format():
     parts = __version__.split(".")
     assert len(parts) == 3
     assert all(p.isdigit() for p in parts)
+
+
+def test_py_typed_marker():
+    import importlib.resources
+
+    marker = importlib.resources.files("athenaeum") / "py.typed"
+    assert marker.is_file()
