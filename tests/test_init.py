@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from athenaeum.init import _INDEX_CONTENT, _SCHEMA_FILES, _SUBDIRS, init_knowledge_dir
 
 
@@ -100,6 +102,38 @@ def test_cli_init_default(tmp_path: Path, monkeypatch) -> None:
 
     assert exit_code == 0
     assert (target / "wiki" / "_index.md").is_file()
+
+
+def test_git_identity_error_gives_helpful_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #10: When git identity is not configured, init should raise
+    SystemExit with a helpful message instead of a raw CalledProcessError."""
+    import subprocess
+
+    original_run = subprocess.run
+    call_count = 0
+
+    def mock_run(cmd, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        # Let git init and git add succeed; fail on git commit (3rd call)
+        if call_count == 3:
+            raise subprocess.CalledProcessError(
+                128, cmd,
+                stderr=b"Author identity unknown\n"
+                b"*** Please tell me who you are.\n"
+                b"  git config --global user.name ...\n"
+                b"  git config --global user.email ...\n",
+            )
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    target = tmp_path / "knowledge"
+
+    with pytest.raises(SystemExit, match="Git identity not configured"):
+        init_knowledge_dir(target)
 
 
 def test_schema_files_match_bundled(tmp_path: Path) -> None:
