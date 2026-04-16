@@ -281,6 +281,24 @@ class TestEntityIndex:
         assert index.has_entity_format(entity_page) is True
         assert index.has_entity_format(old_page) is False
 
+    def test_get_by_uid(self, wiki_dir: Path) -> None:
+        index = EntityIndex(wiki_dir)
+        path = index.get_by_uid("a1b2c3d4")
+        assert path is not None
+        assert path.name == "a1b2c3d4-acme-corp.md"
+
+    def test_get_by_uid_missing(self, wiki_dir: Path) -> None:
+        index = EntityIndex(wiki_dir)
+        assert index.get_by_uid("nonexistent") is None
+
+    def test_get_by_uid_after_register(self, wiki_dir: Path) -> None:
+        index = EntityIndex(wiki_dir)
+        entity = WikiEntity(uid="newuid01", type="tool", name="New Tool")
+        index.register(entity)
+        path = index.get_by_uid("newuid01")
+        assert path is not None
+        assert path.name == entity.filename
+
     def test_has_entity_format_after_register(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
         entity = WikiEntity(uid="reg12345", type="tool", name="New Tool")

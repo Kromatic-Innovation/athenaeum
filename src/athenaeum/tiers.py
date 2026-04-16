@@ -338,12 +338,17 @@ def tier3_write(
     index: EntityIndex,
     wiki_root: Path,
     client: anthropic.Anthropic,
-) -> tuple[list[WikiEntity], list[EscalationItem]]:
+) -> tuple[list[WikiEntity], list[str], list[EscalationItem]]:
     """Process all entity actions for a raw file through the capable LLM.
 
-    Returns (new_entities, escalation_items).
+    All LLM calls are made first; disk writes are deferred until all
+    actions succeed, preventing partial writes on mid-processing failure.
+
+    Returns (new_entities, updated_uids, escalation_items).
     """
     new_entities: list[WikiEntity] = []
+    pending_updates: list[tuple[Path, str]] = []
+    updated_uids: list[str] = []
     escalations: list[EscalationItem] = []
 
     for action in actions:
@@ -351,13 +356,9 @@ def tier3_write(
             new_entities.append(tier3_create(action, raw.ref, client))
 
         elif action.kind == "update" and action.existing_uid:
-            existing_path = None
-            for p in wiki_root.glob("*.md"):
-                if p.name.startswith(action.existing_uid):
-                    existing_path = p
-                    break
+            existing_path = index.get_by_uid(action.existing_uid)
 
-            if not existing_path:
+            if not existing_path or not existing_path.exists():
                 log.warning("Could not find existing page for uid %s", action.existing_uid)
                 continue
 
@@ -369,12 +370,17 @@ def tier3_write(
                 escalations.append(esc)
             if updated_body:
                 meta["updated"] = date.today().isoformat()
-                existing_path.write_text(
+                pending_updates.append((
+                    existing_path,
                     render_frontmatter(meta) + "\n" + updated_body,
-                    encoding="utf-8",
-                )
+                ))
+                updated_uids.append(action.existing_uid)
 
-    return new_entities, escalations
+    # All LLM calls succeeded — apply updates atomically
+    for path, content in pending_updates:
+        path.write_text(content, encoding="utf-8")
+
+    return new_entities, updated_uids, escalations
 
 
 # ---------------------------------------------------------------------------

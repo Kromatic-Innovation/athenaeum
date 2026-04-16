@@ -149,10 +149,9 @@ class ProcessingResult:
     """Result of processing one raw file."""
     raw_file: RawFile
     created: list[WikiEntity] = field(default_factory=list)
-    updated: list[str] = field(default_factory=list)  # UIDs of updated entities
+    updated: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     escalated: list[EscalationItem] = field(default_factory=list)
-    error: str | None = None
 
 
 # --- Schema loading ---
@@ -205,6 +204,7 @@ class EntityIndex:
         self.wiki_root = wiki_root
         self._by_name: dict[str, tuple[str, Path]] = {}
         self._entities: dict[str, dict] = {}
+        self._by_uid: dict[str, Path] = {}
         self._entity_format_paths: set[Path] = set()
         self._load()
 
@@ -229,6 +229,7 @@ class EntityIndex:
             self._by_name[key] = (uid or name, fpath)
             if uid:
                 self._entities[uid] = meta
+                self._by_uid[uid] = fpath
                 self._entity_format_paths.add(fpath)
 
             for alias in meta.get("aliases", []):
@@ -238,6 +239,10 @@ class EntityIndex:
     def lookup(self, name: str) -> tuple[str, Path] | None:
         """Look up by name or alias (case-insensitive). Returns (uid_or_name, path) or None."""
         return self._by_name.get(name.lower())
+
+    def get_by_uid(self, uid: str) -> Path | None:
+        """Look up entity file path by UID. Returns None if not found."""
+        return self._by_uid.get(uid)
 
     def has_entity_format(self, path: Path) -> bool:
         """Check if a wiki page uses the full entity template format (has uid field)."""
@@ -253,6 +258,7 @@ class EntityIndex:
             "type": entity.type,
             "name": entity.name,
         }
+        self._by_uid[entity.uid] = path
         self._entity_format_paths.add(path)
         for alias in entity.aliases:
             if alias:
