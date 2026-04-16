@@ -14,8 +14,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
     subparsers = parser.add_subparsers(dest="command")
 
-    # init command — placeholder, implemented in #159
-    subparsers.add_parser("init", help="Initialize a new knowledge directory")
+    # init command
+    init_parser = subparsers.add_parser("init", help="Initialize a new knowledge directory")
+    init_parser.add_argument(
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Target directory (default: ~/knowledge)",
+    )
 
     # run command — execute the librarian pipeline
     run_parser = subparsers.add_parser("run", help="Run the librarian pipeline")
@@ -51,12 +57,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "init":
-        print("athenaeum init — not yet implemented")
-        return 1
+        return _cmd_init(args)
 
     if args.command == "run":
         return _cmd_run(args)
 
+    return 0
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    from athenaeum.init import init_knowledge_dir
+
+    target = init_knowledge_dir(args.path)
+    print(f"Initialized knowledge directory at {target}")
     return 0
 
 
