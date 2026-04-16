@@ -8,6 +8,15 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure git identity is available for tests that run git commit."""
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test Runner")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test Runner")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
+
+
 @pytest.fixture
 def wiki_dir(tmp_path: Path) -> Path:
     """Create a minimal wiki directory with sample entity pages."""
