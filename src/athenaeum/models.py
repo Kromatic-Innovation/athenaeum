@@ -157,21 +157,41 @@ class ProcessingResult:
 # --- Schema loading ---
 
 def load_schema_list(schema_path: Path, filename: str) -> list[str]:
-    """Load a list of valid values from a schema markdown table."""
+    """Load a list of valid values from a schema markdown table.
+
+    Parses standard markdown tables, extracting the first cell from each
+    data row. Header and separator rows are skipped.
+    """
     fpath = schema_path / filename
     if not fpath.exists():
         return []
     text = fpath.read_text(encoding="utf-8")
+    lines = text.splitlines()
     values: list[str] = []
-    for line in text.splitlines():
-        line = line.strip()
-        skip_headers = ("|--", "| Level", "| Type", "| Field")
-        if line.startswith("|") and not any(line.startswith(h) for h in skip_headers):
-            cells = [c.strip() for c in line.split("|")]
-            for cell in cells:
-                if cell and cell not in ("---", ""):
-                    values.append(cell)
-                    break
+    # Collect separator row indices so we can skip headers
+    separator_indices: set[int] = set()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("|") and all(
+            c in "-| " for c in stripped
+        ):
+            separator_indices.add(i)
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        # Skip separator rows
+        if i in separator_indices:
+            continue
+        # Skip header rows (the row immediately before a separator)
+        if (i + 1) in separator_indices:
+            continue
+        cells = [c.strip() for c in stripped.split("|")]
+        for cell in cells:
+            if cell:
+                values.append(cell)
+                break
     return values
 
 

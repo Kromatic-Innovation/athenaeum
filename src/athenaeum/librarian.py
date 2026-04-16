@@ -176,7 +176,7 @@ def process_one(
     result = ProcessingResult(raw_file=raw)
 
     # --- Tier 1: Programmatic matching ---
-    matched, _ = tier1_programmatic_match(raw, index)
+    matched = tier1_programmatic_match(raw, index)
     matched_names = [name for name, _, _ in matched]
 
     for name, uid_or_name, fpath in matched:
@@ -352,5 +352,6 @@ def run(
 
     if failed_files:
         log.warning("Failed files (will retry next run): %s", ", ".join(failed_files))
+        return 1
 
     return 0

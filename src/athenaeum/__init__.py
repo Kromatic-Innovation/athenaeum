@@ -2,6 +2,7 @@
 
 __version__ = "0.1.0"
 
+from athenaeum.init import init_knowledge_dir
 from athenaeum.librarian import discover_raw_files, process_one, rebuild_index, run
 from athenaeum.models import (
     ClassifiedEntity,
@@ -27,6 +28,7 @@ __all__ = [
     "WikiEntity",
     "discover_raw_files",
     "generate_uid",
+    "init_knowledge_dir",
     "parse_frontmatter",
     "process_one",
     "rebuild_index",

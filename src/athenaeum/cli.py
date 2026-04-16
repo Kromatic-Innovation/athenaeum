@@ -74,7 +74,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, DEFAULT_RAW_ROOT, DEFAULT_WIKI_ROOT, run
+    from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, run
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -82,10 +82,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         datefmt="%H:%M:%S",
     )
 
+    knowledge_root = args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT
+    raw_root = args.raw_root or (knowledge_root / "raw")
+    wiki_root = args.wiki_root or (knowledge_root / "wiki")
+
     return run(
-        raw_root=args.raw_root or DEFAULT_RAW_ROOT,
-        wiki_root=args.wiki_root or DEFAULT_WIKI_ROOT,
-        knowledge_root=args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT,
+        raw_root=raw_root,
+        wiki_root=wiki_root,
+        knowledge_root=knowledge_root,
         dry_run=args.dry_run,
         max_files=args.max_files,
     )
