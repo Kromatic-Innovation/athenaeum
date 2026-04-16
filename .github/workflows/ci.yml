@@ -30,4 +30,4 @@ jobs:
         run: ruff check src/ tests/
 
       - name: Run tests
-        run: pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=short --cov=athenaeum --cov-report=term-missing --cov-fail-under=75
