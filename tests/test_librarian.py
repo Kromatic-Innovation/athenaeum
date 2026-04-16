@@ -234,6 +234,100 @@ class TestRunIntegration:
         )
         return root
 
+    def test_max_api_calls_stops_processing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Issue #6: run() must stop processing when max_api_calls budget is exhausted."""
+        import json
+        import logging
+
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = self._seed_knowledge_root(tmp_path)
+        sessions = root / "raw" / "sessions"
+
+        # Add a second raw file so there are 2 to process
+        (sessions / "20240410T130000Z-11223344.md").write_text(
+            "Discussed innovation accounting methodology in detail.\n"
+        )
+
+        # Mock client that returns valid classification + creation responses
+        classify_response = MagicMock()
+        classify_response.content = [MagicMock(text=json.dumps([{
+            "name": "Alice Zhang",
+            "entity_type": "person",
+            "tags": ["active"],
+            "access": "internal",
+            "observations": "Product leader.",
+        }]))]
+        create_response = MagicMock()
+        create_response.content = [MagicMock(text="# Alice Zhang\n\nProduct leader.")]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = [
+            classify_response,
+            create_response,
+            # If budget is working, the second file should NOT be processed
+            # and these would never be called
+        ]
+        monkeypatch.setattr(
+            anthropic_mod, "Anthropic", lambda **kwargs: mock_client,
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        caplog.set_level(logging.DEBUG, logger="athenaeum")
+
+        # Set max_api_calls=2 — processing first file uses ~2 calls (1 classify + 1 create)
+        # so the second file should be skipped
+        run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=2,
+        )
+
+        assert any(
+            "budget exhausted" in rec.message.lower() or "API call budget" in rec.message
+            for rec in caplog.records
+        ), "Expected budget exhaustion log message"
+
+    def test_max_retries_passed_to_client(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue #6: Anthropic client must be created with max_retries=3."""
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = self._seed_knowledge_root(tmp_path)
+
+        captured_kwargs: dict = {}
+
+        def mock_anthropic(**kwargs):
+            captured_kwargs.update(kwargs)
+            client = MagicMock()
+            client.messages.create.return_value = MagicMock(
+                content=[MagicMock(text="[]")]
+            )
+            return client
+
+        monkeypatch.setattr(anthropic_mod, "Anthropic", mock_anthropic)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-key")
+
+        run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+        )
+
+        assert captured_kwargs.get("max_retries") == 3
+
     def test_keeps_raw_on_llm_error(
         self,
         tmp_path: Path,

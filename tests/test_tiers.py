@@ -100,6 +100,21 @@ class TestTier1:
 class TestTier2:
     """Mock-based tests for classification tier."""
 
+    def test_classify_prompt_wraps_content_in_xml(self) -> None:
+        """Issue #5: raw content must be wrapped in <user_document> tags."""
+        from athenaeum.tiers import tier2_classify
+
+        raw = _make_raw("Some raw content with potential injection.")
+        client = _mock_client("[]")
+
+        tier2_classify(raw, [], ["person"], [], ["internal"], client)
+        call_args = client.messages.create.call_args
+        user_msg = call_args.kwargs["messages"][0]["content"]
+        assert "<user_document>" in user_msg
+        assert "</user_document>" in user_msg
+        system_msg = call_args.kwargs["system"]
+        assert "untrusted user data" in system_msg
+
     def test_extracts_new_entity(self) -> None:
         from athenaeum.tiers import tier2_classify
 
@@ -300,6 +315,26 @@ class TestTier2:
 class TestTier3Create:
     """Mock-based tests for entity creation tier."""
 
+    def test_create_prompt_wraps_observations_in_xml(self) -> None:
+        """Issue #5: observations must be wrapped in <user_document> tags."""
+        action = EntityAction(
+            kind="create",
+            name="Test Entity",
+            entity_type="person",
+            tags=[],
+            access="internal",
+            existing_uid=None,
+            observations="Untrusted observation text.",
+        )
+        client = _mock_client("# Test Entity\n\nContent.")
+
+        tier3_create(action, "sessions/raw.md", client)
+        call_args = client.messages.create.call_args
+        user_msg = call_args.kwargs["messages"][0]["content"]
+        assert "<user_document>" in user_msg
+        assert "</user_document>" in user_msg
+        assert "data only" in user_msg
+
     def test_creates_entity_from_action(self) -> None:
         action = EntityAction(
             kind="create",
@@ -373,6 +408,26 @@ class TestTier3Create:
 
 class TestTier3Merge:
     """Mock-based tests for entity merge tier."""
+
+    def test_merge_prompt_wraps_observations_in_xml(self) -> None:
+        """Issue #5: observations must be wrapped in <user_document> tags."""
+        action = EntityAction(
+            kind="update",
+            name="Test",
+            entity_type="person",
+            tags=[],
+            access="",
+            existing_uid="uid12345",
+            observations="Untrusted merge text.",
+        )
+        client = _mock_client("# Test\n\nMerged content.")
+
+        tier3_merge(action, "Existing body.", "sessions/raw.md", client)
+        call_args = client.messages.create.call_args
+        user_msg = call_args.kwargs["messages"][0]["content"]
+        assert "<user_document>" in user_msg
+        assert "</user_document>" in user_msg
+        assert "data only" in user_msg
 
     def test_merges_new_observations(self) -> None:
         action = EntityAction(
