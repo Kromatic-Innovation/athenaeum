@@ -32,6 +32,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Knowledge directory (default: ~/knowledge)",
     )
 
+    # serve command — start the MCP memory server
+    serve_parser = subparsers.add_parser("serve", help="Start the MCP memory server")
+    serve_parser.add_argument(
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+
     # run command — execute the librarian pipeline
     run_parser = subparsers.add_parser("run", help="Run the librarian pipeline")
     run_parser.add_argument(
@@ -75,6 +84,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         return _cmd_status(args)
 
+    if args.command == "serve":
+        return _cmd_serve(args)
+
     if args.command == "run":
         return _cmd_run(args)
 
@@ -98,6 +110,23 @@ def _cmd_status(args: argparse.Namespace) -> int:
         return 1
     info = status(target)
     print(format_status(info))
+    return 0
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    from athenaeum.mcp_server import create_server
+
+    target = args.path.expanduser().resolve()
+    raw_root = target / "raw"
+    wiki_root = target / "wiki"
+
+    if not target.exists():
+        print(f"Knowledge directory not found: {target}")
+        print("Run 'athenaeum init' first to create a knowledge directory.")
+        return 1
+
+    server = create_server(raw_root=raw_root, wiki_root=wiki_root)
+    server.run()
     return 0
 
 
