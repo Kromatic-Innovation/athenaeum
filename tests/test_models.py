@@ -359,6 +359,35 @@ class TestLoadSchemaList:
 # ---------------------------------------------------------------------------
 
 
+class TestTokenUsage:
+    def test_add_accumulates(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(100, 50)
+        usage.add(200, 75)
+        assert usage.input_tokens == 300
+        assert usage.output_tokens == 125
+        assert usage.api_calls == 2
+        assert usage.total_tokens == 425
+
+    def test_estimated_cost(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(1_000_000, 1_000_000)
+        # $1.50/M input + $7.50/M output = $9.00
+        assert abs(usage.estimated_cost_usd - 9.0) < 0.01
+
+    def test_empty_usage(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        assert usage.api_calls == 0
+        assert usage.total_tokens == 0
+        assert usage.estimated_cost_usd == 0.0
+
+
 class TestEntityAction:
     def test_kind_literal_annotation(self) -> None:
         annotation = EntityAction.__dataclass_fields__["kind"].type

@@ -115,6 +115,53 @@ class TestTier2:
         system_msg = call_args.kwargs["system"]
         assert "untrusted user data" in system_msg
 
+    def test_classify_includes_observation_filter(
+        self, wiki_dir: Path,
+    ) -> None:
+        """Issue #17: observation-filter.md should be injected into classify prompt."""
+        from athenaeum.tiers import tier2_classify
+
+        schema_dir = wiki_dir / "_schema"
+        schema_dir.mkdir(exist_ok=True)
+        (schema_dir / "observation-filter.md").write_text(
+            "# Observation Filter\n\n## Always Capture\n- People\n"
+        )
+
+        raw = _make_raw("Some content about people.")
+        client = _mock_client("[]")
+
+        tier2_classify(
+            raw, [], ["person"], [], ["internal"], client,
+            wiki_root=wiki_dir,
+        )
+        call_args = client.messages.create.call_args
+        user_msg = call_args.kwargs["messages"][0]["content"]
+        assert "Observation filter" in user_msg
+        assert "Always Capture" in user_msg
+
+    def test_classify_records_token_usage(self) -> None:
+        """Issue #9: token usage should be recorded from API responses."""
+        from athenaeum.models import TokenUsage
+        from athenaeum.tiers import tier2_classify
+
+        raw = _make_raw("Some content.")
+        client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="[]")]
+        mock_response.usage = MagicMock(
+            input_tokens=150, output_tokens=20,
+        )
+        client.messages.create.return_value = mock_response
+
+        usage = TokenUsage()
+        tier2_classify(
+            raw, [], ["person"], [], ["internal"], client,
+            usage=usage,
+        )
+        assert usage.input_tokens == 150
+        assert usage.output_tokens == 20
+        assert usage.api_calls == 1
+
     def test_extracts_new_entity(self) -> None:
         from athenaeum.tiers import tier2_classify
 
@@ -334,6 +381,35 @@ class TestTier3Create:
         assert "<user_document>" in user_msg
         assert "</user_document>" in user_msg
         assert "data only" in user_msg
+
+    def test_create_includes_entity_template(
+        self, wiki_dir: Path,
+    ) -> None:
+        """Issue #17: _entity-template.md should be fed to Tier 3 create."""
+        schema_dir = wiki_dir / "_schema"
+        schema_dir.mkdir(exist_ok=True)
+        (schema_dir / "_entity-template.md").write_text(
+            "# Entity Page Template\n\n## Template\nuid, type, name\n"
+        )
+
+        action = EntityAction(
+            kind="create",
+            name="Test",
+            entity_type="person",
+            tags=[],
+            access="internal",
+            existing_uid=None,
+            observations="Some info.",
+        )
+        client = _mock_client("# Test\n\nContent.")
+
+        tier3_create(
+            action, "ref.md", client, wiki_root=wiki_dir,
+        )
+        call_args = client.messages.create.call_args
+        user_msg = call_args.kwargs["messages"][0]["content"]
+        assert "Entity template" in user_msg
+        assert "Entity Page Template" in user_msg
 
     def test_creates_entity_from_action(self) -> None:
         action = EntityAction(
