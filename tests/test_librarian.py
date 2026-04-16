@@ -315,7 +315,7 @@ class TestRunIntegration:
         monkeypatch.setattr(
             anthropic_mod, "Anthropic", lambda **kwargs: failing_client,
         )
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake-for-test")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
 
         caplog.set_level(logging.DEBUG, logger="athenaeum")
 
@@ -357,4 +357,5 @@ class TestRunIntegration:
             "pre-processing snapshot was not taken"
         )
 
-        assert exit_code == 0
+        # run() returns 1 when any files failed (partial failure)
+        assert exit_code == 1

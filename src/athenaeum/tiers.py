@@ -25,6 +25,8 @@ from athenaeum.models import (
     RawFile,
     WikiEntity,
     generate_uid,
+    parse_frontmatter,
+    render_frontmatter,
 )
 
 log = logging.getLogger("athenaeum")
@@ -49,12 +51,10 @@ def _get_write_model() -> str:
 def tier1_programmatic_match(
     raw: RawFile,
     index: EntityIndex,
-) -> tuple[list[tuple[str, str, Path]], list[str]]:
+) -> list[tuple[str, str, Path]]:
     """Match entity names in raw content against the wiki index.
 
-    Returns:
-        matched: list of (name, uid_or_name, path) for entities found in index
-        unmatched_content: the raw content (passed through for Tier 2)
+    Returns list of (name, uid_or_name, path) for entities found in index.
     """
     matched: list[tuple[str, str, Path]] = []
     content_lower = raw.content.lower()
@@ -69,7 +69,7 @@ def tier1_programmatic_match(
             if pattern.search(raw.content):
                 matched.append((name_key, uid_or_name, fpath))
 
-    return matched, []
+    return matched
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +361,6 @@ def tier3_write(
                 log.warning("Could not find existing page for uid %s", action.existing_uid)
                 continue
 
-            from athenaeum.models import parse_frontmatter, render_frontmatter
             text = existing_path.read_text(encoding="utf-8")
             meta, existing_body = parse_frontmatter(text)
 

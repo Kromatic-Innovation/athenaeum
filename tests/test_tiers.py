@@ -111,27 +111,27 @@ class TestTier1:
     def test_matches_known_entity(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
         raw = _make_raw("Met with the team at Acme Corp about their product.")
-        matched, _ = tier1_programmatic_match(raw, index)
+        matched = tier1_programmatic_match(raw, index)
         names = [name for name, _, _ in matched]
         assert any("acme" in n for n in names)
 
     def test_matches_alias(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
         raw = _make_raw("Got an email from Acme Corporation today.")
-        matched, _ = tier1_programmatic_match(raw, index)
+        matched = tier1_programmatic_match(raw, index)
         assert len(matched) > 0
 
     def test_no_match(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
         raw = _make_raw("Nothing relevant here about any known entities.")
-        matched, _ = tier1_programmatic_match(raw, index)
+        matched = tier1_programmatic_match(raw, index)
         assert len(matched) == 0
 
     def test_word_boundary(self, wiki_dir: Path) -> None:
         index = EntityIndex(wiki_dir)
         # "acme" appears as substring in "pharmacme" -- should NOT match
         raw = _make_raw("The pharmacme product line is interesting.")
-        matched, _ = tier1_programmatic_match(raw, index)
+        matched = tier1_programmatic_match(raw, index)
         acme_matches = [n for n, _, _ in matched if "acme" in n]
         assert len(acme_matches) == 0
 
@@ -141,7 +141,7 @@ class TestTier1:
         # Register a short-name entity
         index._by_name["ai"] = ("short-uid", wiki_dir / "short.md")
         raw = _make_raw("AI is transforming the industry.")
-        matched, _ = tier1_programmatic_match(raw, index)
+        matched = tier1_programmatic_match(raw, index)
         ai_matches = [n for n, _, _ in matched if n == "ai"]
         assert len(ai_matches) == 0
 
