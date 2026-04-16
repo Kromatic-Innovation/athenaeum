@@ -46,6 +46,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Stop after processing this many raw files (default: 50)",
     )
     run_parser.add_argument(
+        "--max-api-calls", type=int, default=200,
+        help="Maximum estimated API calls per run (default: 200)",
+    )
+    run_parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug logging",
     )
@@ -92,6 +96,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         knowledge_root=knowledge_root,
         dry_run=args.dry_run,
         max_files=args.max_files,
+        max_api_calls=args.max_api_calls,
     )
 
 

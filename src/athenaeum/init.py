@@ -66,11 +66,22 @@ def init_knowledge_dir(path: Path) -> Path:
     if not git_dir.exists():
         subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
         subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "Initialize knowledge directory"],
-            cwd=path,
-            check=True,
-            capture_output=True,
-        )
+        try:
+            subprocess.run(
+                ["git", "commit", "-m", "Initialize knowledge directory"],
+                cwd=path,
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            if "user.name" in stderr or "user.email" in stderr or exc.returncode == 128:
+                raise SystemExit(
+                    "Git identity not configured. Please run:\n"
+                    "  git config --global user.name 'Your Name'\n"
+                    "  git config --global user.email 'you@example.com'\n"
+                    "Then retry: athenaeum init"
+                ) from exc
+            raise
 
     return path

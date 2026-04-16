@@ -258,6 +258,7 @@ def run(
     knowledge_root: Path = DEFAULT_KNOWLEDGE_ROOT,
     dry_run: bool = False,
     max_files: int = 50,
+    max_api_calls: int = 200,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -302,7 +303,7 @@ def run(
     log.info("Loaded %d wiki entries into index", len(index._by_name))
 
     client: anthropic.Anthropic | None = (
-        anthropic.Anthropic(api_key=api_key) if api_key else None
+        anthropic.Anthropic(api_key=api_key, max_retries=3) if api_key else None
     )
 
     if not dry_run:
@@ -312,9 +313,17 @@ def run(
     total_updated = 0
     total_escalated = 0
     total_skipped = 0
+    total_api_calls = 0
     failed_files: list[str] = []
 
     for raw in raw_files:
+        if not dry_run and total_api_calls >= max_api_calls:
+            log.warning(
+                "API call budget exhausted (%d/%d) — stopping early",
+                total_api_calls, max_api_calls,
+            )
+            break
+
         log.info("Processing: %s", raw.ref)
         try:
             result = process_one(
@@ -327,6 +336,10 @@ def run(
             failed_files.append(raw.ref)
             continue
 
+        # Estimate API calls: 1 for classify + 1 per created + 1 per updated
+        calls_this_file = 1 + len(result.created) + len(result.updated) if not dry_run else 0
+        total_api_calls += calls_this_file
+
         total_created += len(result.created)
         total_updated += len(result.updated)
         total_escalated += len(result.escalated)
@@ -337,8 +350,9 @@ def run(
             log.info("  Deleted: %s", raw.path)
 
     log.info(
-        "Done: %d created, %d updated, %d escalated, %d skipped, %d failed",
-        total_created, total_updated, total_escalated, total_skipped, len(failed_files),
+        "Done: %d created, %d updated, %d escalated, %d skipped, %d failed, ~%d API calls",
+        total_created, total_updated, total_escalated, total_skipped,
+        len(failed_files), total_api_calls,
     )
 
     if not dry_run and (total_created > 0 or total_updated > 0):
