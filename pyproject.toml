@@ -43,6 +43,9 @@ Homepage = "https://github.com/Kromatic-Innovation/athenaeum"
 Repository = "https://github.com/Kromatic-Innovation/athenaeum"
 Issues = "https://github.com/Kromatic-Innovation/athenaeum/issues"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/athenaeum"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
