@@ -166,7 +166,7 @@ def process_one(
     raw: RawFile,
     index: EntityIndex,
     wiki_root: Path,
-    client: anthropic.Anthropic,
+    client: anthropic.Anthropic | None,
     valid_types: list[str],
     valid_tags: list[str],
     valid_access: list[str],
@@ -230,7 +230,10 @@ def process_one(
         return result
 
     # --- Tier 3: Content writing ---
-    new_entities, escalations = tier3_write(raw, actions, index, wiki_root, client)
+    assert client is not None, "client required for non-dry-run"
+    new_entities, updated_uids, escalations = tier3_write(
+        raw, actions, index, wiki_root, client,
+    )
 
     for entity in new_entities:
         page_path = wiki_root / entity.filename
@@ -239,6 +242,7 @@ def process_one(
         result.created.append(entity)
         log.info("  Created: %s → %s", entity.name, entity.filename)
 
+    result.updated.extend(updated_uids)
     result.escalated.extend(escalations)
 
     # --- Tier 4: Escalation ---
@@ -297,7 +301,9 @@ def run(
     index = EntityIndex(wiki_root)
     log.info("Loaded %d wiki entries into index", len(index._by_name))
 
-    client = anthropic.Anthropic(api_key=api_key) if api_key else None  # type: ignore[arg-type]
+    client: anthropic.Anthropic | None = (
+        anthropic.Anthropic(api_key=api_key) if api_key else None
+    )
 
     if not dry_run:
         git_snapshot(knowledge_root, "librarian: pre-processing snapshot")
@@ -321,17 +327,12 @@ def run(
             failed_files.append(raw.ref)
             continue
 
-        if result.error:
-            log.error("Error processing %s: %s", raw.ref, result.error)
-            failed_files.append(raw.ref)
-            continue
-
         total_created += len(result.created)
         total_updated += len(result.updated)
         total_escalated += len(result.escalated)
         total_skipped += len(result.skipped)
 
-        if not dry_run and not result.error:
+        if not dry_run:
             raw.path.unlink()
             log.info("  Deleted: %s", raw.path)
 
