@@ -80,7 +80,15 @@ def extract_topics(prompt: str, timeout: float = 3.0) -> list[str]:
             messages=[{"role": "user", "content": _USER_TEMPLATE.format(prompt=prompt)}],
         )
     except Exception as exc:
-        log.debug("query_topics: API call failed: %s", exc)
+        # WARNING (not debug): silent fall-through to the regex extractor
+        # hides a degraded state — topics lose proper-noun rescue even
+        # though the feature looks "working". The class name in the log
+        # tells you at a glance whether it's auth (401), network, or an
+        # SDK-level bug without needing to reproduce.
+        log.warning(
+            "query_topics: API call failed (%s); falling back to regex extractor: %s",
+            exc.__class__.__name__, exc,
+        )
         return []
 
     try:

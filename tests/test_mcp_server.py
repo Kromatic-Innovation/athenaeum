@@ -123,7 +123,10 @@ class TestRecall:
 
     def test_recall_top_k(self, wiki_dir: Path) -> None:
         result = recall_search(wiki_dir, "knowledge architecture", top_k=1)
-        assert "showing top 1" in result
+        # After the v0.2.1 backend unification the keyword path no longer
+        # reports total-matched; top_k is enforced via a single result block.
+        assert result.count("### ") == 1
+        assert "Found 1 matching pages" in result
 
     def test_recall_shows_tags(self, wiki_dir: Path) -> None:
         result = recall_search(wiki_dir, "Acme fintech")

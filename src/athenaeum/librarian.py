@@ -304,7 +304,7 @@ def run(
     valid_access = load_schema_list(schema_path, "access-levels.md") or FALLBACK_ACCESS
 
     index = EntityIndex(wiki_root)
-    log.info("Loaded %d wiki entries into index", len(index._by_name))
+    log.info("Loaded %d wiki entries into index", len(index))
 
     client: anthropic.Anthropic | None = (
         anthropic.Anthropic(api_key=api_key, max_retries=3) if api_key else None

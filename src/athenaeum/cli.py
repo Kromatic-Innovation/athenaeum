@@ -189,12 +189,19 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     if not target.exists():
         print(f"Knowledge directory not found: {target}")
-        print("Run 'athenaeum init --path {args.path}' first, then retry.")
+        print(f"Run 'athenaeum init --path {args.path}' first, then retry.")
         return 1
 
     cfg = load_config(target)
     backend = cfg.get("search_backend", "fts5")
     cache_dir = Path("~/.cache/athenaeum").expanduser()
+
+    # Warn on config/cache mismatch. The recall tool silently returns zero
+    # hits when the configured backend's index is missing, so users with
+    # `search_backend: vector` but an fts5-only cache (common when you flip
+    # backends in athenaeum.yaml but forget to rebuild) see recall "work"
+    # but return nothing. Catch that up front.
+    _warn_if_backend_cache_missing(backend, cache_dir)
 
     server = create_server(
         raw_root=raw_root,
@@ -207,6 +214,43 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     return 0
+
+
+def _warn_if_backend_cache_missing(backend: str, cache_dir: Path) -> None:
+    """Print a warning if the configured backend has no cache on disk.
+
+    The keyword backend has no cache. FTS5 expects ``wiki-index.db``;
+    vector expects ``wiki-vectors/``. When either is missing, recall
+    silently returns empty — the warning tells the user to run
+    ``athenaeum rebuild-index``.
+    """
+    if backend == "keyword":
+        return
+    if backend == "fts5":
+        if not (cache_dir / "wiki-index.db").is_file():
+            print(
+                f"[warn] search_backend=fts5 but no index at "
+                f"{cache_dir / 'wiki-index.db'}.\n"
+                f"       Run `athenaeum rebuild-index --path <knowledge>` "
+                f"before relying on recall.",
+                file=sys.stderr,
+            )
+        return
+    if backend == "vector":
+        if not (cache_dir / "wiki-vectors").is_dir():
+            print(
+                f"[warn] search_backend=vector but no index at "
+                f"{cache_dir / 'wiki-vectors'}.\n"
+                f"       Run `athenaeum rebuild-index --path <knowledge>` "
+                f"before relying on recall.",
+                file=sys.stderr,
+            )
+        return
+    print(
+        f"[warn] unknown search_backend {backend!r}; "
+        f"recall will fail until this is fixed in athenaeum.yaml.",
+        file=sys.stderr,
+    )
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
