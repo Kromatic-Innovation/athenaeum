@@ -1,5 +1,9 @@
 # Athenaeum
 
+[![PyPI version](https://img.shields.io/pypi/v/athenaeum.svg)](https://pypi.org/project/athenaeum/)
+[![Python versions](https://img.shields.io/pypi/pyversions/athenaeum.svg)](https://pypi.org/project/athenaeum/)
+[![License](https://img.shields.io/pypi/l/athenaeum.svg)](https://github.com/Kromatic-Innovation/athenaeum/blob/main/LICENSE)
+
 Open source knowledge management pipeline for AI agents — append-only intake, tiered compilation, configurable schemas.
 
 > **Using Claude Code?** Athenaeum ships a transparent memory sidecar — a
