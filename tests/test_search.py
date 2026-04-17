@@ -10,8 +10,8 @@ from athenaeum.search import (
     FTS5Backend,
     SearchBackend,
     VectorBackend,
-    get_backend,
     build_fts5_index,
+    get_backend,
     query_fts5_index,
 )
 
@@ -211,6 +211,29 @@ class TestVectorBackend:
         )
         count = backend.build_index(wiki_with_pages, cache)
         assert count == 4
+
+    def test_build_index_recovers_from_corrupt_vector_dir(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        """Regression: stale/corrupt on-disk state must not break rebuild.
+
+        Reproduces the scenario from issue #32 where chromadb's SQLite and
+        rust-binding state desynced, causing ``create_collection`` to succeed
+        but ``collection.add`` to raise ``NotFoundError``. The fix wipes
+        ``vector_dir`` wholesale on each rebuild.
+        """
+        cache = tmp_path / "cache"
+        vector_dir = cache / "wiki-vectors"
+        vector_dir.mkdir(parents=True)
+        # Garbage that would confuse a freshly-opened PersistentClient
+        (vector_dir / "chroma.sqlite3").write_bytes(b"not a sqlite db")
+        (vector_dir / "stray-file.bin").write_bytes(b"\x00\x01\x02")
+
+        count = VectorBackend().build_index(wiki_with_pages, cache)
+        assert count == 3
+        assert vector_dir.is_dir()
+        # Garbage was replaced, not merged
+        assert not (vector_dir / "stray-file.bin").exists()
 
     def test_query_finds_match(
         self, wiki_with_pages: Path, tmp_path: Path
