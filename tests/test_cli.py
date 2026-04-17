@@ -175,6 +175,79 @@ class TestServe:
         assert "{args.path}" not in out
 
 
+class TestWarnIfBackendCacheMissing:
+    """All four branches of ``_warn_if_backend_cache_missing``.
+
+    First-adopter pain point from the v0.2.0 review: ``search_backend:
+    vector`` in ``athenaeum.yaml`` but only an fts5 cache on disk (common
+    when a user flips backends but forgets to rebuild). The MCP recall
+    tool silently returns zero hits. The warning on ``athenaeum serve``
+    startup is the only early signal — if any of these branches stops
+    emitting, the silent-zero-hits UX regresses. Capture via ``capsys``
+    because the warning goes to stderr.
+    """
+
+    def test_keyword_backend_no_op(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import _warn_if_backend_cache_missing
+
+        _warn_if_backend_cache_missing("keyword", tmp_path)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == "", (
+            "keyword backend has no on-disk cache — warning would be noise"
+        )
+
+    def test_fts5_missing_cache_warns(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import _warn_if_backend_cache_missing
+
+        _warn_if_backend_cache_missing("fts5", tmp_path)
+        err = capsys.readouterr().err
+        assert "search_backend=fts5" in err
+        assert "rebuild-index" in err
+
+    def test_fts5_present_cache_silent(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import _warn_if_backend_cache_missing
+
+        (tmp_path / "wiki-index.db").write_bytes(b"")
+        _warn_if_backend_cache_missing("fts5", tmp_path)
+        assert capsys.readouterr().err == ""
+
+    def test_vector_missing_cache_warns(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import _warn_if_backend_cache_missing
+
+        _warn_if_backend_cache_missing("vector", tmp_path)
+        err = capsys.readouterr().err
+        assert "search_backend=vector" in err
+        assert "rebuild-index" in err
+
+    def test_vector_present_cache_silent(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import _warn_if_backend_cache_missing
+
+        (tmp_path / "wiki-vectors").mkdir()
+        _warn_if_backend_cache_missing("vector", tmp_path)
+        assert capsys.readouterr().err == ""
+
+    def test_unknown_backend_warns(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import _warn_if_backend_cache_missing
+
+        _warn_if_backend_cache_missing("sphinx", tmp_path)
+        err = capsys.readouterr().err
+        assert "unknown search_backend" in err
+        assert "'sphinx'" in err
+
+
 class TestStopwords:
     """`athenaeum stopwords` is the canonical source of the stopword list —
     shell hooks read it instead of hard-coding their own copy. Regression

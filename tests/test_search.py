@@ -330,3 +330,125 @@ class TestConvenienceFunctions:
         assert count == 3
         results = query_fts5_index("acme", str(cache))
         assert len(results) > 0
+
+
+class TestHybridRescueClasses:
+    """Each backend rescues a failure class the other has.
+
+    This is the evidence behind the README claim that the hybrid merge is
+    load-bearing — not just "both backends work on the same wiki" but
+    "neither backend alone surfaces the page on its rescue-class query."
+    Without this pin, a future simplification that drops one backend will
+    still pass ``test_query_finds_match`` on the obvious lexical queries
+    and quietly regress the non-obvious ones.
+
+    See ``docs/recall-architecture.md`` for the full walkthrough.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_chromadb(self) -> None:
+        pytest.importorskip("chromadb")
+
+    @pytest.fixture
+    def rescue_wiki(self, tmp_path: Path) -> Path:
+        """A two-entity wiki that exposes each backend's blind spot.
+
+        - ``return-path.md``: short proper-noun entity (3 words of body). A
+          vector query for "Return Path" embeds closer to pages containing
+          the generic token "path" than to this sparse page. FTS5 phrase
+          matching on the frontmatter finds it.
+        - ``innovation-accounting.md``: a semantically-rich page that never
+          uses the query tokens "iterative feedback loops." FTS5 can't
+          match it; vector embeds the concepts together.
+        """
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+
+        (wiki / "return-path.md").write_text(
+            "---\n"
+            "name: Return Path\n"
+            "tags: [company, past-client]\n"
+            "description: Email deliverability SaaS acquired by Validity\n"
+            "---\n\n"
+            "Brief stub.\n"
+        )
+        (wiki / "innovation-accounting.md").write_text(
+            "---\n"
+            "name: Innovation Accounting\n"
+            "tags: [methodology, metrics]\n"
+            "description: Ries's measurement framework for startups\n"
+            "---\n\n"
+            "A way to measure progress when traditional accounting fails. "
+            "It emphasises learning milestones and validated experiments — "
+            "the cycle of building a small change, measuring the result, "
+            "and adjusting course based on what you learned. The core idea "
+            "is that improvement compounds through short cycles of "
+            "hypothesis, experiment, and adjustment rather than through "
+            "one big plan.\n"
+        )
+        # A distractor page containing the token "path" so the vector query
+        # for "Return Path" has a plausible-but-wrong nearest neighbour.
+        (wiki / "migration-path.md").write_text(
+            "---\n"
+            "name: Migration Path\n"
+            "tags: [infra]\n"
+            "description: Generic upgrade path documentation\n"
+            "---\n\n"
+            "A migration path is the sequence of steps to move a system "
+            "from one state to another.\n"
+        )
+        return wiki
+
+    def test_fts5_rescues_short_proper_noun(
+        self, rescue_wiki: Path, tmp_path: Path
+    ) -> None:
+        """FTS5 must find ``return-path.md`` on the query "Return Path"
+        even though vector embedding places it below a "path"-heavy page.
+        """
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(rescue_wiki, cache)
+        results = FTS5Backend().query("Return Path", cache, n=3)
+        filenames = [r[0] for r in results]
+        assert "return-path.md" in filenames, (
+            "FTS5 must surface the proper-noun entity on a short query — "
+            "this is the failure class vector embedding alone misses."
+        )
+        # And it must rank ahead of the distractor.
+        assert filenames.index("return-path.md") < filenames.index(
+            "migration-path.md"
+        ) if "migration-path.md" in filenames else True
+
+    def test_vector_rescues_semantic_no_overlap(
+        self, rescue_wiki: Path, tmp_path: Path
+    ) -> None:
+        """Vector must find ``innovation-accounting.md`` on a query that
+        shares no literal tokens with its body or frontmatter.
+        """
+        cache = tmp_path / "cache"
+        VectorBackend().build_index(rescue_wiki, cache)
+        results = VectorBackend().query(
+            "iterative feedback loops", cache, n=3
+        )
+        filenames = [r[0] for r in results]
+        assert "innovation-accounting.md" in filenames, (
+            "Vector must surface the semantic neighbour even when the "
+            "query has zero lexical overlap — this is the failure class "
+            "FTS5 alone misses."
+        )
+
+    def test_fts5_misses_semantic_query(
+        self, rescue_wiki: Path, tmp_path: Path
+    ) -> None:
+        """FTS5 alone cannot find ``innovation-accounting.md`` on
+        "iterative feedback loops." If this assertion ever flips (e.g.
+        the page body gets rewritten to contain those words, or a
+        porter-stemmer collision pulls it in), the rescue-class claim
+        needs revisiting — not just the test.
+        """
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(rescue_wiki, cache)
+        results = FTS5Backend().query(
+            "iterative feedback loops", cache, n=3
+        )
+        filenames = [r[0] for r in results]
+        assert "innovation-accounting.md" not in filenames
