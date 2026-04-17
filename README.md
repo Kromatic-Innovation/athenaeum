@@ -2,6 +2,12 @@
 
 Open source knowledge management pipeline for AI agents — append-only intake, tiered compilation, configurable schemas.
 
+> **Using Claude Code?** Athenaeum ships a transparent memory sidecar — a
+> SessionStart + UserPromptSubmit hook pair that auto-recalls wiki pages
+> relevant to each prompt and lets Claude save observations without
+> explicit `/remember` calls. Jump to
+> [Transparent sidecar (hooks)](#transparent-sidecar-hooks).
+
 ## Architecture
 
 Athenaeum implements a novel approach to persistent AI agent memory:
@@ -111,7 +117,7 @@ search_backend: vector
 The recall hook runs a **hybrid FTS5 + vector merge** when vector is
 configured — FTS5 rescues short proper-noun queries that collide in
 vector space, vector discovers semantic neighbours with no lexical
-overlap. See [`docs/recall-architecture.md`](docs/recall-architecture.md)
+overlap. See [`docs/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/recall-architecture.md)
 for why the hybrid is load-bearing and what invariants must not be
 removed.
 
@@ -159,7 +165,7 @@ This gives you:
 - **Auto-remember** — Claude proactively saves important facts without being asked
 - **Context checkpointing** — observations are saved before context window compaction
 
-See [`examples/claude-code/README.md`](examples/claude-code/README.md) for
+See [`examples/claude-code/README.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/examples/claude-code/README.md) for
 complete setup instructions, a smoke test, and the full environment-variable
 reference.
 
@@ -187,7 +193,7 @@ the first thing to check when the hook "ignores" a config change.
 is scoped to its inference endpoint and the general Anthropic Messages
 API rejects it with `401 OAuth authentication is currently not supported`.
 The pipeline and the example hooks need a separate console API key —
-see [`docs/recall-architecture.md`](docs/recall-architecture.md#anthropic_api_key-bootstrap-sessionstart)
+see [`docs/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/recall-architecture.md#anthropic_api_key-bootstrap-sessionstart)
 for the 1Password bootstrap pattern.
 
 ### Raw file format
@@ -243,4 +249,4 @@ ruff check src/ tests/
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE) for details.
+Apache 2.0 — see [LICENSE](https://github.com/Kromatic-Innovation/athenaeum/blob/main/LICENSE) for details.

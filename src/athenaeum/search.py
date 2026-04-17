@@ -45,8 +45,12 @@ class SearchBackend(Protocol):
         *,
         n: int = 5,
         exclude: set[str] | None = None,
+        wiki_root: Path | None = None,
     ) -> list[tuple[str, str, float]]:
         """Search the index.
+
+        ``wiki_root`` is used by scan-on-query backends (e.g. keyword) that
+        don't maintain an on-disk index; indexed backends ignore it.
 
         Returns a list of ``(filename, page_name, score)`` tuples,
         ordered by relevance (best first).
@@ -145,8 +149,10 @@ class FTS5Backend:
         *,
         n: int = 5,
         exclude: set[str] | None = None,
+        wiki_root: Path | None = None,
     ) -> list[tuple[str, str, float]]:
         """Query the FTS5 index. Returns ``(filename, name, score)`` triples."""
+        del wiki_root  # FTS5 reads the pre-built index, not the wiki files
         db_path = cache_dir / _DB_NAME
         if not db_path.is_file():
             return []
@@ -288,8 +294,10 @@ class VectorBackend:
         *,
         n: int = 5,
         exclude: set[str] | None = None,
+        wiki_root: Path | None = None,
     ) -> list[tuple[str, str, float]]:
         """Query the chromadb collection with semantic search."""
+        del wiki_root  # Vector reads the pre-built chromadb collection
         chromadb = self._get_chromadb()
 
         vector_dir = cache_dir / _VECTOR_DIR
@@ -299,7 +307,20 @@ class VectorBackend:
         client = chromadb.PersistentClient(path=str(vector_dir))
         try:
             collection = client.get_collection(_VECTOR_COLLECTION)
-        except Exception:
+        except Exception as exc:
+            # chromadb raises an InvalidCollectionException (and occasionally
+            # bare ValueError from the rust binding) when the collection is
+            # absent or its metadata is corrupt. We can't import the exception
+            # class directly because chromadb reorganises it between releases,
+            # so we catch broadly but log the class name so a real bug
+            # doesn't sit silent — "vector returns nothing" was the top
+            # first-adopter confusion in the v0.2.0 review.
+            import logging
+            logging.getLogger(__name__).warning(
+                "vector get_collection(%s) failed with %s: %s; "
+                "returning empty hits",
+                _VECTOR_COLLECTION, type(exc).__name__, exc,
+            )
             return []
 
         if collection.count() == 0:
@@ -330,12 +351,114 @@ class VectorBackend:
 
 
 # ---------------------------------------------------------------------------
+# Keyword backend (in-memory, scan-on-query)
+# ---------------------------------------------------------------------------
+
+
+def tokenize_keyword_query(query: str) -> list[str]:
+    """Split a query into lowercase tokens of length >=2."""
+    return [t for t in re.split(r"\W+", query.lower()) if len(t) >= 2]
+
+
+def score_keyword_page(
+    tokens: list[str], frontmatter: dict, body: str
+) -> float:
+    """Score a wiki page against keyword tokens.
+
+    Frontmatter fields (``name``, ``aliases``, ``tags``, ``description``,
+    ``title``) match at 3x the weight of body hits.
+    """
+    if not tokens:
+        return 0.0
+
+    fm_parts: list[str] = []
+    for key in ("name", "aliases", "tags", "description", "title"):
+        val = frontmatter.get(key, "")
+        if isinstance(val, list):
+            fm_parts.append(" ".join(str(v) for v in val))
+        else:
+            fm_parts.append(str(val))
+    fm_text = " ".join(fm_parts).lower()
+    body_lower = body.lower()
+
+    score = 0.0
+    for token in tokens:
+        if token in fm_text:
+            score += 3.0
+        if token in body_lower:
+            score += 1.0
+    return score
+
+
+class KeywordBackend:
+    """Scan-on-query keyword scoring over wiki frontmatter + body.
+
+    No pre-built index: every query rereads the wiki. Frontmatter hits
+    are weighted 3x body hits. Intended as a zero-setup fallback for
+    small wikis or tests — FTS5 is the recommended default for real use.
+    """
+
+    def build_index(self, wiki_root: Path, cache_dir: Path) -> int:
+        """No-op: the keyword backend rescans on every query."""
+        del cache_dir
+        return sum(
+            1 for p in wiki_root.rglob("*.md") if not p.name.startswith("_")
+        )
+
+    def query(
+        self,
+        query: str,
+        cache_dir: Path,
+        *,
+        n: int = 5,
+        exclude: set[str] | None = None,
+        wiki_root: Path | None = None,
+    ) -> list[tuple[str, str, float]]:
+        """Score every non-underscore wiki page and return the top-n hits."""
+        del cache_dir
+        if wiki_root is None or not wiki_root.is_dir():
+            return []
+
+        from athenaeum.models import parse_frontmatter
+
+        tokens = tokenize_keyword_query(query)
+        if not tokens:
+            return []
+
+        excluded = exclude or set()
+        scored: list[tuple[float, str, str]] = []
+        for md_file in wiki_root.rglob("*.md"):
+            if md_file.name.startswith("_"):
+                continue
+            try:
+                rel = md_file.relative_to(wiki_root).as_posix()
+            except ValueError:
+                rel = md_file.name
+            if rel in excluded:
+                continue
+            try:
+                text = md_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            fm, body = parse_frontmatter(text)
+            score = score_keyword_page(tokens, fm, body)
+            if score > 0:
+                name = fm.get("name") or md_file.stem
+                scored.append((score, rel, str(name)))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [(fname, name, score) for score, fname, name in scored[:n]]
+
+
+# ---------------------------------------------------------------------------
 # Backend registry
 # ---------------------------------------------------------------------------
 
 _BACKENDS: dict[str, type[SearchBackend]] = {
     "fts5": FTS5Backend,  # type: ignore[dict-item]
     "vector": VectorBackend,  # type: ignore[dict-item]
+    "keyword": KeywordBackend,  # type: ignore[dict-item]
 }
 
 

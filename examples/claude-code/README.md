@@ -31,8 +31,14 @@ agent runtime.
 3. Merge `settings-snippet.json` into `~/.claude/settings.json`, replacing
    `/path/to/` with the directory from step 2.
 
-4. (Optional, MCP remember/recall) Register the MCP server. Add to
-   `~/.claude/settings.json`:
+4. (Optional, MCP remember/recall) Register the MCP server. Preferred
+   — use the Claude Code CLI:
+
+   ```bash
+   claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
+   ```
+
+   Or edit `~/.claude/settings.json` directly:
 
    ```json
    {

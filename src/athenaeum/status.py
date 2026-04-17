@@ -5,18 +5,29 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import TypedDict
 
 from athenaeum.librarian import discover_raw_files
 from athenaeum.models import parse_frontmatter
 
 
-def status(knowledge_root: Path) -> dict:
-    """Gather status information about a knowledge base.
+class StatusInfo(TypedDict):
+    """Shape of the dict returned by :func:`status`.
 
-    Returns a dict with:
-      raw_pending, entity_count, entities_by_type,
-      last_commit_date, last_commit_message, pending_questions
+    Public API — downstream tooling (dashboards, CI gates) can import this
+    for type-checked access to the status payload.
     """
+
+    raw_pending: int
+    entity_count: int
+    entities_by_type: dict[str, int]
+    last_commit_date: str
+    last_commit_message: str
+    pending_questions: int
+
+
+def status(knowledge_root: Path) -> StatusInfo:
+    """Gather status information about a knowledge base."""
     wiki_root = knowledge_root / "wiki"
     raw_root = knowledge_root / "raw"
 
@@ -73,7 +84,7 @@ def status(knowledge_root: Path) -> dict:
     }
 
 
-def format_status(info: dict) -> str:
+def format_status(info: StatusInfo) -> str:
     """Format status dict as human-readable output."""
     lines = ["Athenaeum Status", "=" * 40]
 

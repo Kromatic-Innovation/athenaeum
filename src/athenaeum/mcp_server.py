@@ -10,50 +10,22 @@ Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from athenaeum.models import parse_frontmatter
+from athenaeum.search import score_keyword_page, tokenize_keyword_query
 
 # ---------------------------------------------------------------------------
 # Recall helpers
 # ---------------------------------------------------------------------------
 
-
-def _tokenize_query(query: str) -> list[str]:
-    """Split query into lowercase keyword tokens (>=2 chars)."""
-    return [t for t in re.split(r"\W+", query.lower()) if len(t) >= 2]
-
-
-def _score_page(
-    tokens: list[str], frontmatter: dict, body: str
-) -> float:
-    """Score a wiki page against query tokens.
-
-    Frontmatter matches (name, aliases, tags) are weighted 3x vs body matches.
-    """
-    if not tokens:
-        return 0.0
-
-    fm_parts: list[str] = []
-    for key in ("name", "aliases", "tags", "description", "title"):
-        val = frontmatter.get(key, "")
-        if isinstance(val, list):
-            fm_parts.append(" ".join(str(v) for v in val))
-        else:
-            fm_parts.append(str(val))
-    fm_text = " ".join(fm_parts).lower()
-    body_lower = body.lower()
-
-    score = 0.0
-    for token in tokens:
-        if token in fm_text:
-            score += 3.0
-        if token in body_lower:
-            score += 1.0
-    return score
+# Back-compat re-exports. The keyword scorer now lives in ``athenaeum.search``
+# as a first-class backend alongside FTS5 and vector; these shims keep
+# pre-0.2.1 direct callers working without an import churn.
+_tokenize_query = tokenize_keyword_query
+_score_page = score_keyword_page
 
 
 def _snippet(body: str, tokens: list[str], max_chars: int = 400) -> str:
@@ -99,8 +71,10 @@ def recall_search(
         query: Search query string.
         top_k: Maximum results to return.
         search_backend: ``"keyword"`` (in-memory), ``"fts5"``, or ``"vector"``.
+            All three dispatch through ``athenaeum.search.get_backend`` so
+            results flow through one code path regardless of backend.
         cache_dir: Directory containing the search index (required for
-            fts5/vector backends).
+            fts5/vector backends; ignored by keyword).
 
     Returns a formatted string of matching wiki pages with relevance scores
     and content snippets.
@@ -110,54 +84,12 @@ def recall_search(
     if not wiki_root.is_dir():
         return f"Wiki directory not found at {wiki_root}."
 
-    if search_backend in ("fts5", "vector"):
-        return _recall_via_backend(
-            wiki_root, query, top_k, search_backend, cache_dir
-        )
-
-    # Default: in-memory keyword scoring (original behavior)
-    tokens = _tokenize_query(query)
-    if not tokens:
+    if not tokenize_keyword_query(query):
         return "Query too short \u2014 provide at least one keyword (2+ characters)."
 
-    scored: list[tuple[float, Path, dict, str]] = []
-
-    for md_file in wiki_root.rglob("*.md"):
-        if md_file.name.startswith("_"):
-            continue
-        try:
-            text = md_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-
-        fm, body = parse_frontmatter(text)
-        score = _score_page(tokens, fm, body)
-
-        if score > 0:
-            scored.append((score, md_file, fm, body))
-
-    if not scored:
-        return f"No wiki pages matched query: {query!r}"
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = scored[:top_k]
-
-    parts: list[str] = [f"Found {len(scored)} matching pages (showing top {len(top)}):\n"]
-    for rank, (score, path, fm, body) in enumerate(top, 1):
-        name = fm.get("name", path.stem)
-        rel_path = path.relative_to(wiki_root)
-        tags = fm.get("tags", "\u2014")
-        if isinstance(tags, list):
-            tags = ", ".join(tags)
-        snip = _snippet(body, tokens)
-        parts.append(
-            f"### {rank}. {name} (score: {score:.1f})\n"
-            f"**Path:** wiki/{rel_path}\n"
-            f"**Tags:** {tags}\n\n"
-            f"{snip}\n"
-        )
-
-    return "\n".join(parts)
+    return _recall_via_backend(
+        wiki_root, query, top_k, search_backend, cache_dir
+    )
 
 
 def _recall_via_backend(
@@ -167,21 +99,27 @@ def _recall_via_backend(
     backend_name: str,
     cache_dir: Path | None,
 ) -> str:
-    """Delegate recall to an indexed search backend, then format results."""
+    """Delegate recall to a registered search backend, then format results."""
     from athenaeum.search import get_backend
 
-    backend = get_backend(backend_name)
+    try:
+        backend = get_backend(backend_name)
+    except KeyError as exc:
+        return str(exc)
+
     effective_cache = cache_dir or Path.home() / ".cache" / "athenaeum"
 
     try:
-        hits = backend.query(query, effective_cache, n=top_k)
+        hits = backend.query(
+            query, effective_cache, n=top_k, wiki_root=wiki_root
+        )
     except NotImplementedError as exc:
         return str(exc)
 
     if not hits:
         return f"No wiki pages matched query: {query!r}"
 
-    tokens = _tokenize_query(query)
+    tokens = tokenize_keyword_query(query)
     parts: list[str] = [f"Found {len(hits)} matching pages:\n"]
 
     for rank, (filename, name, score) in enumerate(hits, 1):
