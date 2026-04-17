@@ -178,16 +178,103 @@ class TestFTS5Backend:
 
 
 class TestVectorBackend:
+    @pytest.fixture(autouse=True)
+    def _require_chromadb(self) -> None:
+        pytest.importorskip("chromadb")
+
     def test_satisfies_protocol(self) -> None:
         assert isinstance(VectorBackend(), SearchBackend)
 
-    def test_build_raises(self, tmp_path: Path) -> None:
-        with pytest.raises(NotImplementedError, match="issue #32"):
-            VectorBackend().build_index(tmp_path, tmp_path)
+    def test_build_index(self, wiki_with_pages: Path, tmp_path: Path) -> None:
+        cache = tmp_path / "cache"
+        backend = VectorBackend()
+        count = backend.build_index(wiki_with_pages, cache)
+        assert count == 3
+        assert (cache / "wiki-vectors").is_dir()
 
-    def test_query_raises(self, tmp_path: Path) -> None:
-        with pytest.raises(NotImplementedError, match="issue #32"):
-            VectorBackend().query("test", tmp_path)
+    def test_build_index_skips_underscore(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        backend = VectorBackend()
+        count = backend.build_index(wiki_with_pages, cache)
+        assert count == 3  # _index.md excluded
+
+    def test_build_index_replaces_existing(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        backend = VectorBackend()
+        backend.build_index(wiki_with_pages, cache)
+        (wiki_with_pages / "new-page.md").write_text(
+            "---\nname: New Page\n---\nNew content.\n"
+        )
+        count = backend.build_index(wiki_with_pages, cache)
+        assert count == 4
+
+    def test_query_finds_match(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        backend = VectorBackend()
+        backend.build_index(wiki_with_pages, cache)
+        results = backend.query("lean startup methodology", cache)
+        assert len(results) > 0
+        filenames = [r[0] for r in results]
+        assert "lean-startup.md" in filenames
+
+    def test_query_semantic_match(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        backend = VectorBackend()
+        backend.build_index(wiki_with_pages, cache)
+        # "build measure learn" should match Lean Startup via embeddings
+        results = backend.query("build measure learn", cache)
+        assert len(results) > 0
+        filenames = [r[0] for r in results]
+        assert "lean-startup.md" in filenames
+
+    def test_query_respects_limit(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        backend = VectorBackend()
+        backend.build_index(wiki_with_pages, cache)
+        results = backend.query("methodology", cache, n=1)
+        assert len(results) <= 1
+
+    def test_query_excludes_filenames(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        backend = VectorBackend()
+        backend.build_index(wiki_with_pages, cache)
+        results = backend.query(
+            "lean startup methodology", cache,
+            exclude={"lean-startup.md"},
+        )
+        filenames = [r[0] for r in results]
+        assert "lean-startup.md" not in filenames
+
+    def test_query_no_index(self, tmp_path: Path) -> None:
+        cache = tmp_path / "empty-cache"
+        cache.mkdir()
+        backend = VectorBackend()
+        assert backend.query("anything", cache) == []
+
+    def test_returns_tuples(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        backend = VectorBackend()
+        backend.build_index(wiki_with_pages, cache)
+        results = backend.query("fintech company", cache)
+        assert len(results) > 0
+        fname, name, score = results[0]
+        assert isinstance(fname, str)
+        assert isinstance(name, str)
+        assert isinstance(score, float)
 
 
 class TestGetBackend:

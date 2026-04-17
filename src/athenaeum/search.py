@@ -176,18 +176,87 @@ class FTS5Backend:
 
 
 # ---------------------------------------------------------------------------
-# Vector backend stub (issue #32)
+# Vector backend (chromadb)
 # ---------------------------------------------------------------------------
+
+_VECTOR_DIR = "wiki-vectors"
+_VECTOR_COLLECTION = "wiki"
 
 
 class VectorBackend:
-    """Semantic search via embeddings. Requires ``pip install athenaeum[vector]``."""
+    """Semantic search via chromadb with local embeddings.
+
+    Requires ``pip install athenaeum[vector]`` (chromadb).
+    Uses the default ``all-MiniLM-L6-v2`` embedding model.
+    """
+
+    def _get_chromadb(self) -> Any:
+        try:
+            import chromadb
+            return chromadb
+        except ImportError as exc:
+            raise ImportError(
+                "Vector backend requires chromadb. "
+                "Install with: pip install athenaeum[vector]"
+            ) from exc
 
     def build_index(self, wiki_root: Path, cache_dir: Path) -> int:
-        raise NotImplementedError(
-            "Vector backend not yet implemented. See issue #32.\n"
-            "Install with: pip install athenaeum[vector]"
-        )
+        """Build a chromadb collection from wiki markdown files."""
+        chromadb = self._get_chromadb()
+
+        vector_dir = cache_dir / _VECTOR_DIR
+        vector_dir.mkdir(parents=True, exist_ok=True)
+
+        client = chromadb.PersistentClient(path=str(vector_dir))
+        # Delete and recreate to ensure a clean rebuild
+        try:
+            client.delete_collection(_VECTOR_COLLECTION)
+        except Exception:
+            pass
+        collection = client.create_collection(_VECTOR_COLLECTION)
+
+        ids: list[str] = []
+        documents: list[str] = []
+        metadatas: list[dict[str, str]] = []
+
+        for fname in sorted(os.listdir(wiki_root)):
+            if not fname.endswith(".md") or fname.startswith("_"):
+                continue
+            path = wiki_root / fname
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")[:4000]
+            except OSError:
+                continue
+
+            name = ""
+            if text.startswith("---"):
+                end = text.find("---", 4)
+                if end > 0:
+                    fm = text[4:end]
+                    for line in fm.splitlines():
+                        line = line.strip()
+                        if line.startswith("name:"):
+                            name = line[5:].strip().strip("\"'")
+                            break
+
+            if not name:
+                name = fname.replace(".md", "")
+
+            ids.append(fname)
+            documents.append(text)
+            metadatas.append({"name": name, "filename": fname})
+
+        # chromadb batches internally but has a max batch size
+        batch_size = 5000
+        for i in range(0, len(ids), batch_size):
+            end = min(i + batch_size, len(ids))
+            collection.add(
+                ids=ids[i:end],
+                documents=documents[i:end],
+                metadatas=metadatas[i:end],
+            )
+
+        return len(ids)
 
     def query(
         self,
@@ -197,10 +266,44 @@ class VectorBackend:
         n: int = 5,
         exclude: set[str] | None = None,
     ) -> list[tuple[str, str, float]]:
-        raise NotImplementedError(
-            "Vector backend not yet implemented. See issue #32.\n"
-            "Install with: pip install athenaeum[vector]"
+        """Query the chromadb collection with semantic search."""
+        chromadb = self._get_chromadb()
+
+        vector_dir = cache_dir / _VECTOR_DIR
+        if not vector_dir.is_dir():
+            return []
+
+        client = chromadb.PersistentClient(path=str(vector_dir))
+        try:
+            collection = client.get_collection(_VECTOR_COLLECTION)
+        except Exception:
+            return []
+
+        if collection.count() == 0:
+            return []
+
+        # Build where filter for exclusions
+        where: dict[str, Any] | None = None
+        if exclude and len(exclude) == 1:
+            where = {"filename": {"$ne": next(iter(exclude))}}
+        elif exclude and len(exclude) > 1:
+            where = {"filename": {"$nin": list(exclude)}}
+
+        results = collection.query(
+            query_texts=[query],
+            n_results=min(n, collection.count()),
+            where=where,
         )
+
+        hits: list[tuple[str, str, float]] = []
+        if results["ids"] and results["ids"][0]:
+            for i, doc_id in enumerate(results["ids"][0]):
+                meta = results["metadatas"][0][i] if results["metadatas"] else {}
+                name = meta.get("name", doc_id.replace(".md", ""))
+                distance = results["distances"][0][i] if results["distances"] else 0.0
+                hits.append((doc_id, name, distance))
+
+        return hits
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +353,7 @@ def query_fts5_index(
 def build_vector_index(
     wiki_root: str | Path, cache_dir: str | Path
 ) -> int:
-    """Build a vector index. Stub for issue #32."""
+    """Build a chromadb vector index. Callable from shell hooks."""
     return VectorBackend().build_index(Path(wiki_root), Path(cache_dir))
 
 
@@ -261,5 +364,5 @@ def query_vector_index(
     n: int = 3,
     exclude: set[str] | None = None,
 ) -> list[tuple[str, str, float]]:
-    """Query the vector index. Stub for issue #32."""
+    """Query the chromadb vector index. Callable from shell hooks."""
     return VectorBackend().query(query, Path(cache_dir), n=n, exclude=exclude)
