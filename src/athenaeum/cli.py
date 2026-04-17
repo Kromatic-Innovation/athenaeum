@@ -82,6 +82,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Don't delete the temp knowledge dir on exit (for debugging)",
     )
 
+    # query-topics command — LLM-based topic extraction for hook query rewriting
+    query_topics_parser = subparsers.add_parser(
+        "query-topics",
+        help="Extract substantive search topics from a prompt (Haiku). "
+             "Used by the UserPromptSubmit hook to rewrite queries before "
+             "FTS5/vector search. Prints one topic per line to stdout; "
+             "empty output means fall back to the caller's built-in extractor.",
+    )
+    query_topics_parser.add_argument(
+        "prompt", type=str,
+        help="The user's raw message.",
+    )
+    query_topics_parser.add_argument(
+        "--timeout", type=float, default=3.0,
+        help="Seconds to wait for the LLM before giving up (default: 3.0)",
+    )
+
     # rebuild-index command — rebuild the search index out-of-band
     rebuild_parser = subparsers.add_parser(
         "rebuild-index",
@@ -120,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "rebuild-index":
         return _cmd_rebuild_index(args)
+
+    if args.command == "query-topics":
+        return _cmd_query_topics(args)
 
     if args.command == "test-mcp":
         return _cmd_test_mcp(args)
@@ -237,6 +257,15 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
 
     print(f"Unknown search backend: {backend}", file=sys.stderr)
     return 1
+
+
+def _cmd_query_topics(args: argparse.Namespace) -> int:
+    """Print extracted topics, one per line. Empty output = fall back."""
+    from athenaeum.query_topics import extract_topics
+
+    for topic in extract_topics(args.prompt, timeout=args.timeout):
+        print(topic)
+    return 0
 
 
 def _cmd_test_mcp(args: argparse.Namespace) -> int:
