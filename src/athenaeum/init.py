@@ -61,7 +61,11 @@ def init_knowledge_dir(path: Path) -> Path:
     if not index_file.exists():
         index_file.write_text(_INDEX_CONTENT, encoding="utf-8")
 
-    # 4. Initialize git repo and create initial commit
+    # 4. Create default config (skip if already present)
+    from athenaeum.config import write_default_config
+    write_default_config(path)
+
+    # 5. Initialize git repo and create initial commit
     git_dir = path / ".git"
     if not git_dir.exists():
         subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
