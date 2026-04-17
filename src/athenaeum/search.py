@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sqlite3
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
-
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -205,14 +205,26 @@ class VectorBackend:
         chromadb = self._get_chromadb()
 
         vector_dir = cache_dir / _VECTOR_DIR
+        # Nuke any prior on-disk state before opening a PersistentClient.
+        # chromadb's SQLite metadata and the rust binding's collection store
+        # can desync (stale UUIDs, corrupt sqlite, partial writes), causing
+        # create_collection to return a Collection whose UUID the rust layer
+        # then reports as non-existent on the first .add(). A full wipe on
+        # each rebuild is the simplest robust reset — see issue #32.
+        if vector_dir.exists():
+            shutil.rmtree(vector_dir)
         vector_dir.mkdir(parents=True, exist_ok=True)
 
+        # chromadb caches PersistentClient systems per-path at the module
+        # level. When rebuild runs in a long-lived process (or the same
+        # interpreter invoked it before) a cached system will still know
+        # about the old "wiki" collection after we rmtree'd the dir,
+        # causing create_collection to fail with "already exists". Clear
+        # the cache so the new PersistentClient sees a fresh filesystem.
+        from chromadb.api.client import SharedSystemClient
+        SharedSystemClient.clear_system_cache()
+
         client = chromadb.PersistentClient(path=str(vector_dir))
-        # Delete and recreate to ensure a clean rebuild
-        try:
-            client.delete_collection(_VECTOR_COLLECTION)
-        except Exception:
-            pass
         collection = client.create_collection(_VECTOR_COLLECTION)
 
         ids: list[str] = []
