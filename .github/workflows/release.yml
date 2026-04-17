@@ -72,8 +72,18 @@ jobs:
           name: dist
           path: dist/
 
+      # pypa/gh-action-pypi-publish is a Docker container action. The
+      # container image at `ghcr.io/pypa/gh-action-pypi-publish:<tag>` is
+      # keyed by semver tag, not commit SHA — pinning the action at a SHA
+      # (as we do for the JS-based actions above) causes the Docker pull
+      # to 404 with "manifest unknown". We therefore pin by a specific
+      # semver tag. That tag is still a mutable ref, but the tradeoff is
+      # acceptable here: pypa is a first-party trusted publisher, and
+      # the OIDC exchange with PyPI verifies both the repo and the
+      # workflow ref at publish time. See v0.2.1 release attempt (run
+      # 24582826878) for the failure mode this comment documents.
       - name: Publish to PyPI via Trusted Publishing
-        uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d  # v1.14.0
+        uses: pypa/gh-action-pypi-publish@v1.14.0
         with:
           # PEP 740 attestations — publisher mints a sigstore bundle,
           # PyPI stores it, downstream consumers can
