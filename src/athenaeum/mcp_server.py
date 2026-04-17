@@ -79,6 +79,10 @@ def _snippet(body: str, tokens: list[str], max_chars: int = 400) -> str:
 # ---------------------------------------------------------------------------
 
 
+_MAX_TOP_K = 50
+_MAX_CONTENT_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
 def recall_search(
     wiki_root: Path, query: str, top_k: int = 5
 ) -> str:
@@ -87,6 +91,8 @@ def recall_search(
     Returns a formatted string of matching wiki pages with relevance scores
     and content snippets.
     """
+    top_k = min(top_k, _MAX_TOP_K)
+
     if not wiki_root.is_dir():
         return f"Wiki directory not found at {wiki_root}."
 
@@ -145,6 +151,9 @@ def remember_write(
 
     Returns a confirmation message with the file path, or an error string.
     """
+    if len(content.encode("utf-8", errors="replace")) > _MAX_CONTENT_BYTES:
+        return f"Error: content exceeds {_MAX_CONTENT_BYTES // (1024 * 1024)} MB limit."
+
     safe_source = "".join(c for c in source if c.isalnum() or c in "-_")
     if not safe_source:
         return "Error: source must contain at least one alphanumeric character."

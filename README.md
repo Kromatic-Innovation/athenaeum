@@ -57,6 +57,32 @@ athenaeum status
 athenaeum status --path ~/my-knowledge
 ```
 
+### MCP memory server
+
+Athenaeum includes an MCP-compatible server that gives AI agents `remember` and
+`recall` tools for persistent knowledge management.
+
+```bash
+# Install with MCP support
+pip install athenaeum[mcp]
+
+# Start the server
+athenaeum serve --path ~/knowledge
+```
+
+**Claude Code integration** — add to your MCP config and it auto-starts with every session:
+
+```bash
+claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
+```
+
+The server exposes two tools:
+- **`remember`** — save observations to raw intake (append-only, never overwrites)
+- **`recall`** — search the compiled wiki by keyword (frontmatter-weighted scoring)
+
+Raw files written by `remember` are compiled into wiki entities on the next
+`athenaeum run`.
+
 ### Environment variables
 
 | Variable | Required | Description |

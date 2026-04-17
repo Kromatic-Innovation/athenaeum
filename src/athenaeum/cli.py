@@ -122,11 +122,14 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     if not target.exists():
         print(f"Knowledge directory not found: {target}")
-        print("Run 'athenaeum init' first to create a knowledge directory.")
+        print("Run 'athenaeum init --path {args.path}' first, then retry.")
         return 1
 
     server = create_server(raw_root=raw_root, wiki_root=wiki_root)
-    server.run()
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass
     return 0
 
 

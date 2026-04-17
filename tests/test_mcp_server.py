@@ -129,6 +129,11 @@ class TestRecall:
         result = recall_search(wiki_dir, "Acme fintech")
         assert "fintech" in result
 
+    def test_recall_top_k_capped(self, wiki_dir: Path) -> None:
+        # top_k > _MAX_TOP_K should be silently capped
+        result = recall_search(wiki_dir, "Acme", top_k=1_000_000)
+        assert "Acme Corp" in result
+
 
 # ---------------------------------------------------------------------------
 # Remember
@@ -205,6 +210,14 @@ class TestRemember:
         assert "Saved" in r2
         files = list((raw / "claude-session").glob("*.md"))
         assert len(files) == 2
+
+    def test_rejects_oversized_content(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        huge = "x" * (11 * 1024 * 1024)  # 11 MB
+        result = remember_write(raw, huge)
+        assert "Error" in result
+        assert "limit" in result.lower()
 
 
 # ---------------------------------------------------------------------------
