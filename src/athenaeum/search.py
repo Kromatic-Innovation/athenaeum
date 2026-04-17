@@ -58,8 +58,11 @@ class SearchBackend(Protocol):
 # FTS5 backend
 # ---------------------------------------------------------------------------
 
-# Stopwords stripped before building an FTS5 query.
-_STOPWORDS: frozenset[str] = frozenset(
+# Public stopword list — sorted tuple for deterministic CLI output.
+# Exposed as the single source of truth so shell hooks and downstream
+# callers don't re-hardcode their own copy. See `athenaeum stopwords`
+# CLI subcommand and examples/claude-code/user-prompt-recall.sh.
+STOPWORDS: tuple[str, ...] = tuple(sorted(set(
     "the and for are but not you all can had her was one our out has his how "
     "its let may new now old see way who did get got him she too use with from "
     "have this that they will been call come each find give help here just know "
@@ -73,7 +76,10 @@ _STOPWORDS: frozenset[str] = frozenset(
     "years your into just like made over said some than them then time very "
     "want what when will with year does really right going being looking "
     "trying running check please sure okay yeah thanks".split()
-)
+)))
+
+# Stopwords stripped before building an FTS5 query.
+_STOPWORDS: frozenset[str] = frozenset(STOPWORDS)
 
 _DB_NAME = "wiki-index.db"
 

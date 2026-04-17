@@ -141,6 +141,30 @@ count = build_fts5_index(sys.argv[1], sys.argv[2])
 print(f'[Knowledge] FTS5 index: {count} wiki pages', file=sys.stderr)
 " "$WIKI_ROOT" "$CACHE_DIR" 2>&1 || true
 
+# Cache the canonical stopword list once per session. The per-turn
+# recall hook reads this file instead of hard-coding its own copy,
+# which keeps it in sync with the Python FTS5 filter (issue #46).
+# mktemp+mv keeps the write atomic so a concurrent read never sees
+# a partial file.
+_stopwords_tmp=$(mktemp "${CACHE_DIR}/stopwords.txt.XXXXXX")
+if "$PYTHON" -c "
+import sys, os, importlib.util
+src = os.environ.get('ATHENAEUM_SRC', '')
+path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
+if path and os.path.isfile(path):
+    spec = importlib.util.spec_from_file_location('athenaeum_search_only', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    STOPWORDS = mod.STOPWORDS
+else:
+    from athenaeum.search import STOPWORDS
+print('\n'.join(STOPWORDS))
+" > "$_stopwords_tmp" 2>/dev/null && [ -s "$_stopwords_tmp" ]; then
+  mv "$_stopwords_tmp" "${CACHE_DIR}/stopwords.txt"
+else
+  rm -f "$_stopwords_tmp"
+fi
+
 if [ "${SEARCH_BACKEND:-fts5}" = "vector" ]; then
   "$PYTHON" -c "
 import sys, os, importlib.util

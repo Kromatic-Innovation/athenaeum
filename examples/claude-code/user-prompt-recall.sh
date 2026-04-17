@@ -88,7 +88,17 @@ if [ -n "$TERMS" ]; then
 fi
 
 if [ -z "$TERMS" ]; then
-  STOPWORDS="the and for are but not you all can had her was one our out has his how its let may new now old see way who did get got him she too use with from have this that they will been call come each find give help here just know like long look make many more most much must next only over said same some such take tell than them then very want well went were what when which while work also back been being both came does done down even goes going good keep last left life line made need never part place point right show small still think those turn used using where would about after again could every great might often other shall should since start state still there these thing think three through under until which while world would years your into just like made over said some than them then time very want what when will with year does really right going being looking trying running check please sure okay yeah thanks"
+  # Read the canonical stopword list cached at SessionStart. Single
+  # source of truth with athenaeum.search.STOPWORDS (issue #46); the
+  # file is rewritten on every session start so list updates pick up
+  # automatically. If the cache is missing (e.g. SessionStart hook
+  # didn't run), fall back to a minimal baked-in list so the hook
+  # still works degradedly rather than returning zero terms.
+  if [ -s "${CACHE_DIR}/stopwords.txt" ]; then
+    STOPWORDS=$(tr '\n' '|' < "${CACHE_DIR}/stopwords.txt" | sed 's/|$//')
+  else
+    STOPWORDS="the|and|for|are|but|not|you|all|can|had|was|one|our|out|has|from|with|this|that|they|will|have|been|what|when|which|while|the"
+  fi
   TERMS=$(echo "$PROMPT" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' | grep -vE "^(${STOPWORDS})$" | grep -E '.{3,}' | sort -u | head -8)
 fi
 
