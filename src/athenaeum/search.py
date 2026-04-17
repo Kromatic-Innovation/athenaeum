@@ -1,12 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
 """Search backend abstraction for athenaeum.
 
-Provides pluggable search backends for wiki recall queries.  The default
+Provides pluggable search backends for wiki recall queries. The default
 ``fts5`` backend uses SQLite FTS5 with BM25 ranking and porter stemming.
-A ``vector`` backend stub is provided for issue #32.
+The ``vector`` backend uses chromadb with ``all-MiniLM-L6-v2``. When the
+vector backend is configured, the example recall hook performs a hybrid
+FTS5+vector merge so that short proper-noun queries still resolve
+cleanly — see ``docs/recall-architecture.md`` for why each backend is
+load-bearing.
 
 Shell hook scripts can call the module-level convenience functions
-(``build_fts5_index``, ``query_fts5_index``, etc.) without constructing
-backend objects.
+(``build_fts5_index``, ``query_fts5_index``, ``build_vector_index``,
+``query_vector_index``) without constructing backend objects.
 """
 
 from __future__ import annotations
@@ -53,8 +58,11 @@ class SearchBackend(Protocol):
 # FTS5 backend
 # ---------------------------------------------------------------------------
 
-# Stopwords stripped before building an FTS5 query.
-_STOPWORDS: frozenset[str] = frozenset(
+# Public stopword list — sorted tuple for deterministic CLI output.
+# Exposed as the single source of truth so shell hooks and downstream
+# callers don't re-hardcode their own copy. See `athenaeum stopwords`
+# CLI subcommand and examples/claude-code/user-prompt-recall.sh.
+STOPWORDS: tuple[str, ...] = tuple(sorted(set(
     "the and for are but not you all can had her was one our out has his how "
     "its let may new now old see way who did get got him she too use with from "
     "have this that they will been call come each find give help here just know "
@@ -68,7 +76,10 @@ _STOPWORDS: frozenset[str] = frozenset(
     "years your into just like made over said some than them then time very "
     "want what when will with year does really right going being looking "
     "trying running check please sure okay yeah thanks".split()
-)
+)))
+
+# Stopwords stripped before building an FTS5 query.
+_STOPWORDS: frozenset[str] = frozenset(STOPWORDS)
 
 _DB_NAME = "wiki-index.db"
 

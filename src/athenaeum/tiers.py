@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tiered processing pipeline for the knowledge librarian.
 
 Tier 1: Programmatic entity matching (no LLM)

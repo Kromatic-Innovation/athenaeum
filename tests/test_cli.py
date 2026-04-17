@@ -160,6 +160,37 @@ class TestServe:
         assert captured["search_backend"] == "fts5"
 
 
+class TestStopwords:
+    """`athenaeum stopwords` is the canonical source of the stopword list —
+    shell hooks read it instead of hard-coding their own copy. Regression
+    guard for issue #46: the two copies must stay in sync."""
+
+    def test_prints_one_word_per_line_sorted(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = main(["stopwords"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        lines = out.strip().splitlines()
+        assert lines == sorted(lines), "Output must be sorted for determinism"
+        assert len(lines) > 50, "Stopword list should be non-trivial"
+        assert "the" in lines
+        assert "thanks" in lines
+
+    def test_matches_search_module_constant(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.search import STOPWORDS
+
+        rc = main(["stopwords"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert out.strip().splitlines() == list(STOPWORDS), (
+            "CLI output must match search.STOPWORDS exactly — divergence "
+            "silently degrades the shell-hook fallback extractor."
+        )
+
+
 class TestTestMcp:
     def test_all_steps_pass_with_fastmcp_available(
         self, capsys: pytest.CaptureFixture[str]

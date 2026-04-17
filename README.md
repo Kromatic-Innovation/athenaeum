@@ -70,6 +70,68 @@ pip install athenaeum[mcp]
 athenaeum serve --path ~/knowledge
 ```
 
+Smoke-test the round-trip without a live session:
+
+```bash
+athenaeum test-mcp
+#   PASS  remember_write
+#   PASS  recall_search (keyword)
+#   PASS  create_server (FastMCP)
+#
+# 3 passed, 0 failed
+```
+
+When wired to Claude Code, the agent can save facts mid-conversation:
+
+> **User:** Tristan's partner is Amanda; they met at Stanford GSB.
+>
+> *(Claude calls `remember(content="Tristan's partner is Amanda; they met at Stanford GSB.", source="claude-session")`)*
+>
+> A raw observation lands in `raw/claude-session/20260417T…-…md`. On the
+> next `athenaeum run`, the pipeline compiles it into Tristan's wiki
+> entity (under "Key Contacts") and Amanda's own entity if she doesn't
+> exist yet. Later sessions can ask *"who is Amanda?"* and `recall`
+> returns the compiled page.
+
+### Vector search (optional)
+
+Athenaeum supports a vector search backend (chromadb + `all-MiniLM-L6-v2`)
+for semantic recall alongside the default FTS5 keyword backend.
+
+```bash
+pip install athenaeum[vector]
+```
+
+Enable it in `athenaeum.yaml`:
+
+```yaml
+search_backend: vector
+```
+
+The recall hook runs a **hybrid FTS5 + vector merge** when vector is
+configured — FTS5 rescues short proper-noun queries that collide in
+vector space, vector discovers semantic neighbours with no lexical
+overlap. See [`docs/recall-architecture.md`](docs/recall-architecture.md)
+for why the hybrid is load-bearing and what invariants must not be
+removed.
+
+### Query-topic extraction (optional)
+
+`athenaeum query-topics "your prompt"` runs a Haiku classifier that
+returns substantive topics and ignores meta-instructions:
+
+```bash
+$ athenaeum query-topics "Without calling any tools, quote the block about Return Path verbatim"
+Return Path
+```
+
+Compare to the naive regex+stopword fallback, which returns
+`block,calling,quote,return,tools,verbatim,without` — burying "Return
+Path" behind meta-instruction tokens and dropping the phrase boundary
+entirely. The example recall hook uses `query-topics` to rescue
+named-entity recall on instruction-heavy prompts; it falls back
+silently to the regex extractor if the API key or CLI is unavailable.
+
 **Claude Code integration** — add to your MCP config and it auto-starts with every session:
 
 ```bash
@@ -97,7 +159,9 @@ This gives you:
 - **Auto-remember** — Claude proactively saves important facts without being asked
 - **Context checkpointing** — observations are saved before context window compaction
 
-See `examples/claude-code/` for complete setup instructions and example scripts.
+See [`examples/claude-code/README.md`](examples/claude-code/README.md) for
+complete setup instructions, a smoke test, and the full environment-variable
+reference.
 
 ### Environment variables
 
@@ -106,6 +170,25 @@ See `examples/claude-code/` for complete setup instructions and example scripts.
 | `ANTHROPIC_API_KEY` | Yes (unless `--dry-run`) | API key for Tier 2/3 LLM calls |
 | `ATHENAEUM_CLASSIFY_MODEL` | No | Override Tier 2 model (default: `claude-haiku-4-5-20251001`) |
 | `ATHENAEUM_WRITE_MODEL` | No | Override Tier 3 model (default: `claude-sonnet-4-6`) |
+| `ATHENAEUM_TOPIC_MODEL` | No | Override query-topic model (default: `claude-haiku-4-5-20251001`) |
+| `ATHENAEUM_OP_KEY_PATH` | No | 1Password path for the session-start ANTHROPIC_API_KEY bootstrap (default: `op://Agent Tools/Anthropic API Key/credential`) |
+| `AUTO_RECALL` | No | Per-turn recall on/off (hook shell env; overrides `athenaeum.yaml`'s `auto_recall`). Default: `true` |
+| `SEARCH_BACKEND` | No | `fts5` or `vector` (hook shell env; overrides `athenaeum.yaml`'s `search_backend`). Default: `fts5` |
+| `ATHENAEUM_HOOK_DEBUG` | No | Set to `1` to log vector-backend errors from `user-prompt-recall.sh` to stderr |
+
+**Note on shell-env overrides.** `AUTO_RECALL` and `SEARCH_BACKEND` are
+read from the shell environment after the hook sources
+`~/.cache/athenaeum/config.env`, so anything exported in your shell
+profile beats the cached config. That's intentional (it lets an adopter
+A/B-test a backend without editing `athenaeum.yaml`), but it's also
+the first thing to check when the hook "ignores" a config change.
+
+**Note on Claude Code auth.** Claude Code's own `CLAUDE_CODE_OAUTH_TOKEN`
+is scoped to its inference endpoint and the general Anthropic Messages
+API rejects it with `401 OAuth authentication is currently not supported`.
+The pipeline and the example hooks need a separate console API key —
+see [`docs/recall-architecture.md`](docs/recall-architecture.md#anthropic_api_key-bootstrap-sessionstart)
+for the 1Password bootstrap pattern.
 
 ### Raw file format
 

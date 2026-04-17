@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 """Athenaeum — open source knowledge management pipeline."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from athenaeum.init import init_knowledge_dir
 from athenaeum.librarian import discover_raw_files, process_one, rebuild_index, run

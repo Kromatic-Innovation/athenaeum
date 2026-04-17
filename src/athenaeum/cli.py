@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Athenaeum CLI entry point."""
 
 import argparse
@@ -99,6 +100,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Seconds to wait for the LLM before giving up (default: 3.0)",
     )
 
+    # stopwords command — print the canonical stopword list for shell hooks
+    subparsers.add_parser(
+        "stopwords",
+        help="Print the stopword list (one word per line). "
+             "Used by the example UserPromptSubmit hook's regex fallback "
+             "to stay in sync with the FTS5 query filter.",
+    )
+
     # rebuild-index command — rebuild the search index out-of-band
     rebuild_parser = subparsers.add_parser(
         "rebuild-index",
@@ -144,6 +153,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "test-mcp":
         return _cmd_test_mcp(args)
 
+    if args.command == "stopwords":
+        return _cmd_stopwords(args)
+
     return 0
 
 
@@ -181,7 +193,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         return 1
 
     cfg = load_config(target)
-    backend = cfg.get("search_backend", "keyword")
+    backend = cfg.get("search_backend", "fts5")
     cache_dir = Path("~/.cache/athenaeum").expanduser()
 
     server = create_server(
@@ -257,6 +269,15 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
 
     print(f"Unknown search backend: {backend}", file=sys.stderr)
     return 1
+
+
+def _cmd_stopwords(_args: argparse.Namespace) -> int:
+    """Print the canonical stopword list, one word per line, sorted."""
+    from athenaeum.search import STOPWORDS
+
+    for word in STOPWORDS:
+        print(word)
+    return 0
 
 
 def _cmd_query_topics(args: argparse.Namespace) -> int:
