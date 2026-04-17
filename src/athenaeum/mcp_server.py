@@ -292,11 +292,18 @@ def create_server(
     def recall(query: str, top_k: int = 5) -> str:
         """Search the knowledge wiki for pages relevant to a query.
 
-        Uses keyword matching against frontmatter (name, aliases, tags) and
-        body text. Frontmatter matches are weighted higher for relevance.
+        Dispatches to the configured search backend:
+
+        - ``keyword`` (default fallback): in-memory scoring over frontmatter
+          and body; integer-ish relevance scores, higher is better.
+        - ``fts5``: SQLite FTS5 over a pre-built index; BM25 scores,
+          higher is better.
+        - ``vector``: chromadb embeddings over a pre-built index; distance
+          scores, lower is better.
 
         Args:
-            query: Search query string (keywords, names, topics).
+            query: Search query string (keywords, names, topics — or natural
+                language for semantic recall under the vector backend).
             top_k: Maximum number of results to return (default 5).
 
         Returns:
