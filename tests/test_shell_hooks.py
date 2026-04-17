@@ -135,11 +135,17 @@ class TestUserPromptRecall:
             capture_output=True, text=True, timeout=10,
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "expected additionalContext JSON on stdout"
+        assert result.stdout, "expected hookSpecificOutput JSON on stdout"
 
         payload = json.loads(result.stdout)
-        assert "additionalContext" in payload
-        assert "Customer Development" in payload["additionalContext"]
+        assert "hookSpecificOutput" in payload, (
+            "Claude Code requires additionalContext to be nested under "
+            "hookSpecificOutput with hookEventName; flat {'additionalContext': ...} "
+            "is silently ignored. See issue #39."
+        )
+        hook_output = payload["hookSpecificOutput"]
+        assert hook_output.get("hookEventName") == "UserPromptSubmit"
+        assert "Customer Development" in hook_output["additionalContext"]
 
     def test_silent_on_short_prompt(self, hook_env: dict[str, str]) -> None:
         _require("bash")
