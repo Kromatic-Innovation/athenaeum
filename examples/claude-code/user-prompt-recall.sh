@@ -79,4 +79,4 @@ while IFS=$'\t' read -r fname name score; do
   echo "$fname" >> "$SEEN_FILE"
 done <<< "$RESULTS"
 
-printf '{"additionalContext":"[Knowledge context] Wiki pages relevant to this message (use `recall` MCP tool for full details):\\n%s"}' "$MATCHES"
+printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[Knowledge context] Wiki pages relevant to this message (use `recall` MCP tool for full details):\\n%s"}}' "$MATCHES"
