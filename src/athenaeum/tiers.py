@@ -83,7 +83,7 @@ def tier1_programmatic_match(
     matched: list[tuple[str, str, Path]] = []
     content_lower = raw.content.lower()
 
-    for name_key, (uid_or_name, fpath) in index._by_name.items():
+    for name_key, (uid_or_name, fpath) in index.items():
         # Only match names that are at least 3 chars to avoid false positives
         if len(name_key) < 3:
             continue

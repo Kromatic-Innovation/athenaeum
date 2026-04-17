@@ -7,7 +7,10 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from collections.abc import ItemsView, Iterator
 
 import yaml
 
@@ -31,8 +34,14 @@ def slugify(name: str) -> str:
 _FM_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
 
 
-def parse_frontmatter(text: str) -> tuple[dict, str]:
-    """Split YAML frontmatter from body. Returns (metadata, body)."""
+def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
+    """Split YAML frontmatter from body. Returns ``(metadata, body)``.
+
+    The metadata dict has string keys and arbitrary YAML-scalar/list/dict
+    values (hence ``object``). Callers that need narrower types should
+    validate the fields they depend on — the schema is intentionally
+    open so non-core frontmatter keys round-trip cleanly.
+    """
     m = _FM_RE.match(text)
     if not m:
         return {}, text
@@ -44,8 +53,8 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, body
 
 
-def render_frontmatter(meta: dict) -> str:
-    """Render a dict as YAML frontmatter block."""
+def render_frontmatter(meta: dict[str, object]) -> str:
+    """Render a dict as a YAML frontmatter block."""
     dumped = yaml.dump(meta, default_flow_style=False, sort_keys=False, allow_unicode=True)
     return f"---\n{dumped}---\n"
 
@@ -293,3 +302,20 @@ class EntityIndex:
         for alias in entity.aliases:
             if alias:
                 self._by_name[alias.lower()] = (entity.uid, path)
+
+    def __len__(self) -> int:
+        """Number of unique name/alias keys indexed."""
+        return len(self._by_name)
+
+    def items(self) -> "ItemsView[str, tuple[str, Path]]":
+        """Iterate over ``(name_or_alias_key, (uid_or_name, path))`` pairs.
+
+        Replaces direct access to ``_by_name`` from callers that need to
+        walk the index (e.g. tier-based scans). Returns a live view — do
+        not mutate the index mid-iteration.
+        """
+        return self._by_name.items()
+
+    def __iter__(self) -> "Iterator[str]":
+        """Iterate over indexed name/alias keys."""
+        return iter(self._by_name)

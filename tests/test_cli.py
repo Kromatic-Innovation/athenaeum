@@ -159,6 +159,21 @@ class TestServe:
         assert rc == 0
         assert captured["search_backend"] == "fts5"
 
+    def test_serve_missing_path_renders_path_in_message(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Regression guard for v0.2.0 bug where the 'run athenaeum init'
+        hint printed the literal placeholder `{args.path}` because the
+        f-string prefix was missing. First-adopter-facing error message —
+        if this line drifts back to a non-f-string, pre-init users see
+        the unrendered template and lose trust."""
+        missing = tmp_path / "no-such-knowledge"
+        rc = main(["serve", "--path", str(missing)])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert str(missing) in out
+        assert "{args.path}" not in out
+
 
 class TestStopwords:
     """`athenaeum stopwords` is the canonical source of the stopword list —
