@@ -60,7 +60,10 @@ def test_extracts_topics_from_instruction_heavy_prompt(
     assert captured["__client_kwargs__"]["max_retries"] == 0
 
 
-def test_returns_empty_when_api_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_returns_empty_when_api_raises(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
     class _FakeClient:
@@ -73,7 +76,16 @@ def test_returns_empty_when_api_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     import anthropic
     monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
 
-    assert query_topics.extract_topics("Tell me about Return Path") == []
+    with caplog.at_level(logging.WARNING, logger="athenaeum.query_topics"):
+        assert query_topics.extract_topics("Tell me about Return Path") == []
+
+    # A silent degradation here (dropping to DEBUG or swallowing the log)
+    # would hide misconfiguration in production. Pin that a WARNING is
+    # emitted on every API failure and that it names the exception class
+    # so ops can triage without re-running with debug logging.
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warning_records, "expected WARNING log on API failure"
+    assert any("RuntimeError" in r.getMessage() for r in warning_records)
 
 
 def test_returns_empty_on_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:

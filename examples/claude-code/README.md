@@ -11,6 +11,24 @@ agent runtime.
 | `user-prompt-recall.sh`  | Each user turn       | Hybrid FTS5+vector search, injects top-3 wiki page names         |
 | `pre-compact-save.sh`    | Before compaction    | Reminds the model to call `remember` on anything load-bearing    |
 
+## How the sidecar works (read this first)
+
+Athenaeum has **two phases** and the hooks only handle one of them. Both
+phases must run for `remember` → `recall` to close the loop:
+
+1. **Intake (immediate, hook-driven):** when Claude calls `remember`, an
+   observation lands in `~/knowledge/raw/claude-session/` as a timestamped
+   markdown file. The hooks and MCP server write to `raw/`.
+2. **Compile (batched, you schedule it):** `athenaeum run` reads pending
+   `raw/` files, passes them through the tiered LLM librarian, and writes
+   compiled entity pages to `~/knowledge/wiki/`. The hooks and `recall`
+   only search `wiki/`.
+
+There is no automatic bridge. If you `remember` five things and then
+`recall` returns nothing, the observations are safe on disk — they just
+haven't been compiled yet. Run `athenaeum run` manually, on a cron/launchd
+timer, or at session end. See "Compile raw → wiki" below.
+
 ## Install
 
 1. Initialise a knowledge base if you don't have one:
@@ -50,6 +68,25 @@ agent runtime.
 
 5. Restart Claude Code. The session-start message should say
    `[Knowledge] FTS5 index: N wiki pages`.
+
+6. Schedule periodic compilation (`raw/` → `wiki/`). The hooks alone will
+   never produce wiki pages — you need `athenaeum run` to compile the
+   observations Claude saves via `remember`. Three common options:
+
+   ```bash
+   # Option A: run it manually whenever you want fresh entities
+   athenaeum run --path ~/knowledge
+
+   # Option B: daily cron (macOS/linux) — compile overnight
+   echo "0 3 * * * /usr/local/bin/athenaeum run --path $HOME/knowledge" \
+     | crontab -
+
+   # Option C: launchd plist on macOS — see docs/ for a template
+   ```
+
+   A `remember` call without a subsequent `run` will appear to "work" but
+   produce no `recall` hit. Check `~/knowledge/raw/` for pending files if
+   recall surprises you.
 
 ## Smoke test
 
@@ -113,7 +150,8 @@ still good, just less topic-aware.
 
 | Symptom                                         | Check                                                                                           |
 |-------------------------------------------------|-------------------------------------------------------------------------------------------------|
-| Session message shows `0 wiki pages`            | `$KNOWLEDGE_ROOT/wiki/` is empty or unreadable                                                 |
+| Session message shows `0 wiki pages`            | `$KNOWLEDGE_ROOT/wiki/` is empty or unreadable — if `raw/` has files, run `athenaeum run`       |
+| `remember` saves but `recall` finds nothing     | Raw observations compile to wiki only when `athenaeum run` fires. Check `ls ~/knowledge/raw/` for pending files, then run `athenaeum run --path ~/knowledge` |
 | No `[Knowledge context]` on user turns          | Run `sqlite3 ~/.cache/athenaeum/wiki-index.db 'select count(*) from wiki'` — should be > 0     |
 | Vector backend silent                           | Re-run with `ATHENAEUM_HOOK_DEBUG=1` — usually `pip install athenaeum[vector]` missing         |
 | `query-topics` running without its API key      | `cat ~/.cache/athenaeum/config.env` — should contain `ANTHROPIC_API_KEY=...`                   |

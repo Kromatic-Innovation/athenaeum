@@ -92,6 +92,25 @@ class TestSnippet:
         snip = _snippet("short", ["short"])
         assert snip == "short"
 
+    def test_match_near_start_trims_tail(self) -> None:
+        # Match is early in the body; snippet should keep the match and
+        # append an ellipsis for the trimmed tail, not drop the match.
+        body = "The KEYWORD appears here. " + "tail " * 200
+        snip = _snippet(body, ["keyword"], max_chars=60)
+        assert "keyword" in snip.lower()
+        assert snip.endswith("…") or len(snip) <= 63
+
+    def test_match_near_end_prefixes_ellipsis(self) -> None:
+        # Match is at the end; snippet should prefix an ellipsis so the
+        # reader sees the match, not the irrelevant prefix. Uses a
+        # realistic max_chars (>=80) so the window can reach the match —
+        # the snippet algorithm centers ~80 chars before best_pos, so a
+        # smaller max_chars would clip the window before the match.
+        body = "lead " * 200 + " KEYWORD tail."
+        snip = _snippet(body, ["keyword"], max_chars=200)
+        assert "keyword" in snip.lower()
+        assert snip.startswith("…")
+
 
 # ---------------------------------------------------------------------------
 # Recall
@@ -117,9 +136,16 @@ class TestRecall:
         assert "too short" in result.lower()
 
     def test_recall_skips_underscore_files(self, wiki_dir: Path) -> None:
+        # The fixture contains _index.md which must be skipped by the
+        # backend's `startswith("_")` guard. Direct assertion — previous
+        # form was `"score:" not in result or "_index" not in result`,
+        # which passes trivially when "No wiki pages matched" is returned
+        # (the `a or b` shape masked the actual behavior being tested).
+        # MEMORY.md is intentionally not skipped by the search backend —
+        # only underscore-prefixed files are filtered. EntityIndex (a
+        # different consumer) skips MEMORY.md separately.
         result = recall_search(wiki_dir, "Index")
-        # _index.md should be skipped, so no match from that file
-        assert "score:" not in result or "_index" not in result
+        assert "_index.md" not in result
 
     def test_recall_top_k(self, wiki_dir: Path) -> None:
         result = recall_search(wiki_dir, "knowledge architecture", top_k=1)

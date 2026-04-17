@@ -555,7 +555,12 @@ class TestTier3Merge:
         )
         assert esc is not None
         assert esc.conflict_type == "principled"
-        assert "fintech" in esc.description.lower() or "pivot" in esc.description.lower()
+        # Both tokens appear in the mocked response — pin both so a
+        # regression that swallows description content into empty string
+        # or drops the conflict rationale cannot pass silently.
+        desc = esc.description.lower()
+        assert "fintech" in desc
+        assert "pivot" in desc
         assert body is not None  # still returns merged body after separator
 
     def test_escalation_only_when_no_separator(self) -> None:

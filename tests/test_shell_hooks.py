@@ -179,6 +179,14 @@ class TestUserPromptRecall:
         )
         assert result.returncode == 0
         assert result.stdout == ""
+        # Distinguish "correctly bailed" from "crashed quietly" — a shell
+        # error would leave traceback / syntax-error strings on stderr even
+        # if exit code is 0 due to a trailing `|| true` or similar. The
+        # hook must bail cleanly.
+        stderr = result.stderr
+        assert "Traceback" not in stderr
+        assert "syntax error" not in stderr.lower()
+        assert "command not found" not in stderr.lower()
 
 
 class TestPreCompactSave:
