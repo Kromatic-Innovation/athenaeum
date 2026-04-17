@@ -172,6 +172,16 @@ reference.
 | `ATHENAEUM_WRITE_MODEL` | No | Override Tier 3 model (default: `claude-sonnet-4-6`) |
 | `ATHENAEUM_TOPIC_MODEL` | No | Override query-topic model (default: `claude-haiku-4-5-20251001`) |
 | `ATHENAEUM_OP_KEY_PATH` | No | 1Password path for the session-start ANTHROPIC_API_KEY bootstrap (default: `op://Agent Tools/Anthropic API Key/credential`) |
+| `AUTO_RECALL` | No | Per-turn recall on/off (hook shell env; overrides `athenaeum.yaml`'s `auto_recall`). Default: `true` |
+| `SEARCH_BACKEND` | No | `fts5` or `vector` (hook shell env; overrides `athenaeum.yaml`'s `search_backend`). Default: `fts5` |
+| `ATHENAEUM_HOOK_DEBUG` | No | Set to `1` to log vector-backend errors from `user-prompt-recall.sh` to stderr |
+
+**Note on shell-env overrides.** `AUTO_RECALL` and `SEARCH_BACKEND` are
+read from the shell environment after the hook sources
+`~/.cache/athenaeum/config.env`, so anything exported in your shell
+profile beats the cached config. That's intentional (it lets an adopter
+A/B-test a backend without editing `athenaeum.yaml`), but it's also
+the first thing to check when the hook "ignores" a config change.
 
 **Note on Claude Code auth.** Claude Code's own `CLAUDE_CODE_OAUTH_TOKEN`
 is scoped to its inference endpoint and the general Anthropic Messages

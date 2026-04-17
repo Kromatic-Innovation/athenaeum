@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-04-17
 
+> **Adopter note.** The vector backend and the Claude Code hook flow ship
+> working — but the hook flow assumes you follow the hybrid-recall pattern
+> described in [`docs/recall-architecture.md`](docs/recall-architecture.md).
+> Four load-bearing invariants (`set -a` around config sourcing, hybrid
+> FTS5+vector merge, `hookSpecificOutput.hookEventName` wrapper, console
+> API key vs `CLAUDE_CODE_OAUTH_TOKEN`) each shipped CI-green the first
+> time they broke — every one of them is a silent failure mode. Read
+> `docs/recall-architecture.md` before simplifying any of them.
+
 ### Added
 - **Vector search backend** with chromadb + `all-MiniLM-L6-v2` (#31, #32)
 - `athenaeum query-topics` CLI — Haiku-based query preprocessor that extracts substantive topics from instruction-heavy prompts and ignores meta-instructions (#41, #42)

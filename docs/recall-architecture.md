@@ -83,12 +83,21 @@ Override path via `ATHENAEUM_OP_KEY_PATH`. The fetched key is cached in `~/.cach
 
 ## Load-bearing invariants
 
-Do not simplify any of these without reading this page and the related commit history.
+Do not simplify any of these without reading this page and the related commit history. Every one of them is a **silent failure mode** — no exception, no log, just degraded recall quality. The "What breaks" column is what forces a future reviewer to think twice before deleting the guard.
 
-- `set -a` around `source "$CONFIG_ENV"` — required for subprocess env inheritance.
-- FTS5 is maintained even when vector is primary — required for short-query rescue.
-- JSON output shape includes `hookSpecificOutput.hookEventName` — a flat `{"additionalContext":...}` payload is silently ignored.
-- Console API key is fetched separately from the Claude Code OAuth token — OAuth is rejected by the Messages API with 401.
+| Invariant | Why it's load-bearing | What breaks if removed |
+|---|---|---|
+| `set -a` around `source "$CONFIG_ENV"` | `source` without `-a` sets vars only in the hook shell; child processes inherit a clean env. | `athenaeum query-topics` silently runs keyless. The regex fallback runs on 100% of prompts. Named-entity recall on instruction-heavy prompts degrades to 0. No error logged — the Haiku call just returns empty. |
+| FTS5 maintained even when vector is primary | Short proper-noun queries ("Return Path") embed closer to generic pages containing the common word than to the sparse entity page. | Queries like "Return Path" return `reference_local_paths.md` instead of the entity. The model still gets *an* injection, so the hook looks healthy — the wrong page just quietly crowds out the right one. |
+| `hookSpecificOutput.hookEventName` wrapper | Claude Code discards flat `{"additionalContext":...}` payloads without logging; the hook runs CI-green, `bash -n` is clean, stdout is valid JSON. | `additionalContext` never reaches the model. Zero recall signal. Only detectable by asking the model "did you receive a knowledge context block?" or by reading Claude Code source. |
+| Console API key vs `CLAUDE_CODE_OAUTH_TOKEN` | Messages API rejects OAuth tokens with `401 OAuth authentication is currently not supported`. The tokens look similar (both start `sk-ant-`). | `query-topics` returns empty on every call. Silent fallback to regex extractor. Detectable only by reading the 401 body, which the hook swallows to avoid noisy stderr. |
+
+The shared failure mode — "ships CI-green, degrades silently" — is why
+each of these warrants a "what breaks" column rather than a one-line
+description. If a future PR proposes removing one, the reviewer should
+ask: *how would we detect that this broke?* If the answer is "we
+wouldn't, until recall quality drops and someone complains", keep the
+invariant.
 
 ## References
 

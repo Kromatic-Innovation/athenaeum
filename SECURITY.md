@@ -28,6 +28,7 @@ Athenaeum writes files to a user-controlled knowledge directory and makes authen
 - **Path traversal** via entity filenames or `source` parameters
 - **API key handling** — we expect callers to source keys from their own secret stores; don't embed keys in configuration or logs
 - **MCP server input handling** — the `remember` / `recall` tools accept arbitrary text from AI agents
+- **Example hooks under `examples/claude-code/`** — the shell hooks touch `~/.cache/athenaeum/config.env` (which on 1Password-bootstrap setups contains `ANTHROPIC_API_KEY`) and inject text into Claude Code's context. Treat vulnerabilities in them as library vulnerabilities — command injection, path traversal, secret leakage, and symlink attacks are all in-scope.
 
 The raw intake is intentionally append-only. Attacks that rely on overwriting trusted entities are out of scope unless they bypass the append-only invariant.
 

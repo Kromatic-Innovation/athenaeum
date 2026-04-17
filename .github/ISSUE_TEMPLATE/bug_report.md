@@ -4,6 +4,11 @@ about: Report a reproducible bug
 labels: bug
 ---
 
+> **Before you submit:** `~/.cache/athenaeum/config.env` may contain
+> your `ANTHROPIC_API_KEY` (on setups that use the 1Password bootstrap).
+> Redact it before pasting anything from that file. The same applies to
+> any shell env dump that includes `ANTHROPIC_API_KEY=...`.
+
 ## Summary
 
 <!-- One-sentence description of the bug. -->
