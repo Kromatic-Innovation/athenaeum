@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# SessionStart hook: read config and build the search index.
+# SessionStart hook: read config, optionally bootstrap ANTHROPIC_API_KEY
+# from 1Password, and build the search index.
 #
 # 1. Reads athenaeum.yaml for config (auto_recall, search_backend)
 # 2. Writes a shell-readable cache at ~/.cache/athenaeum/config.env
-# 3. Builds the appropriate search index (FTS5 or vector)
-#
-# The per-turn hook reads config.env (no Python needed at query time for FTS5).
+# 3. If `op` (1Password CLI) is signed in and ANTHROPIC_API_KEY isn't
+#    already exported, fetches it and caches it in config.env. This is
+#    required for the optional LLM topic extractor — Claude Code's own
+#    CLAUDE_CODE_OAUTH_TOKEN is scoped to its inference endpoint and the
+#    general Messages API rejects it with "401 OAuth authentication is
+#    currently not supported".
+# 4. Builds the configured search index (FTS5 and/or vector).
 #
 # Configure in ~/.claude/settings.json:
 #   "hooks": {
@@ -13,7 +18,7 @@
 #       "hooks": [{
 #         "type": "command",
 #         "command": "/path/to/session-start-recall.sh",
-#         "timeout": 15
+#         "timeout": 60
 #       }]
 #     }]
 #   }
@@ -21,11 +26,9 @@
 # Environment variables:
 #   KNOWLEDGE_ROOT       Path to knowledge directory (default: ~/knowledge)
 #   KNOWLEDGE_WIKI_PATH  Path to wiki directory (default: $KNOWLEDGE_ROOT/wiki)
-#   ATHENAEUM_PYTHON     Python interpreter with athenaeum deps (default: python3)
-#   ATHENAEUM_SRC        Path to athenaeum source checkout (optional; enables
-#                        importlib-based loading that bypasses the package
-#                        __init__.py — useful when running from a checkout
-#                        where optional deps like anthropic aren't installed)
+#   ATHENAEUM_PYTHON     Python interpreter with athenaeum deps
+#   ATHENAEUM_SRC        Path to athenaeum source checkout (optional)
+#   ATHENAEUM_OP_KEY_PATH  1Password path (default: op://Agent Tools/Anthropic API Key/credential)
 
 set -euo pipefail
 
@@ -35,21 +38,15 @@ CACHE_DIR="${HOME}/.cache/athenaeum"
 CONFIG_ENV="${CACHE_DIR}/config.env"
 PYTHON="${ATHENAEUM_PYTHON:-python3}"
 
-if [ ! -d "$WIKI_ROOT" ]; then
-  exit 0
-fi
-
+[ -d "$WIKI_ROOT" ] || exit 0
 mkdir -p "$CACHE_DIR"
 
 # ── Read config ────────────────────────────────────────────────────────────
-# Try athenaeum Python module; fall back to pure-shell YAML parsing.
 _read_config_ok=false
 
 if "$PYTHON" -c "
 import sys, os, importlib.util
 src = os.environ.get('ATHENAEUM_SRC', '')
-# Prefer importlib loader from a source checkout (avoids package __init__.py
-# pulling in anthropic/librarian when only the config module is needed).
 cfg_path = os.path.join(src, 'src/athenaeum/config.py') if src else ''
 if cfg_path and os.path.isfile(cfg_path):
     spec = importlib.util.spec_from_file_location('athenaeum_config_only', cfg_path)
@@ -97,16 +94,35 @@ if [ "$_read_config_ok" = false ]; then
   } > "$CONFIG_ENV"
 fi
 
+# shellcheck disable=SC1090
 source "$CONFIG_ENV"
 
+# ── Optional: bootstrap ANTHROPIC_API_KEY from 1Password ────────────────
+# Claude Code authenticates with CLAUDE_CODE_OAUTH_TOKEN, which the
+# general Messages API rejects (401). The LLM topic extractor in
+# user-prompt-recall.sh needs a real console key. When `op` is signed
+# in and ANTHROPIC_API_KEY isn't already set, fetch + cache it.
+# Override path via ATHENAEUM_OP_KEY_PATH. Silent on any failure.
+_KEY_PATH="${ATHENAEUM_OP_KEY_PATH:-op://Agent Tools/Anthropic API Key/credential}"
+if [ -z "${ANTHROPIC_API_KEY:-}" ] && command -v op >/dev/null 2>&1; then
+  if _fetched_key="$(op read "$_KEY_PATH" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
+    tmp_env="${CONFIG_ENV}.tmp"
+    grep -v '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" > "$tmp_env" 2>/dev/null || true
+    printf 'ANTHROPIC_API_KEY=%s\n' "$_fetched_key" >> "$tmp_env"
+    mv "$tmp_env" "$CONFIG_ENV"
+    chmod 600 "$CONFIG_ENV"
+  fi
+fi
+
 # ── Build search index ─────────────────────────────────────────────────────
-if [ "$SEARCH_BACKEND" = "fts5" ]; then
-  "$PYTHON" -c "
+# Always build FTS5 — it's cheap (~1s for 3k pages) and rescues short-query
+# recall even when the vector backend is the primary. See docs/recall-architecture.md.
+"$PYTHON" -c "
 import sys, os, importlib.util
 src = os.environ.get('ATHENAEUM_SRC', '')
-search_path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
-if search_path and os.path.isfile(search_path):
-    spec = importlib.util.spec_from_file_location('athenaeum_search_only', search_path)
+path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
+if path and os.path.isfile(path):
+    spec = importlib.util.spec_from_file_location('athenaeum_search_only', path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     build_fts5_index = mod.build_fts5_index
@@ -114,5 +130,24 @@ else:
     from athenaeum.search import build_fts5_index
 count = build_fts5_index(sys.argv[1], sys.argv[2])
 print(f'[Knowledge] FTS5 index: {count} wiki pages', file=sys.stderr)
+" "$WIKI_ROOT" "$CACHE_DIR" 2>&1 || true
+
+if [ "${SEARCH_BACKEND:-fts5}" = "vector" ]; then
+  "$PYTHON" -c "
+import sys, os, importlib.util
+src = os.environ.get('ATHENAEUM_SRC', '')
+path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
+if path and os.path.isfile(path):
+    spec = importlib.util.spec_from_file_location('athenaeum_search_only', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    build_vector_index = mod.build_vector_index
+else:
+    from athenaeum.search import build_vector_index
+try:
+    count = build_vector_index(sys.argv[1], sys.argv[2])
+    print(f'[Knowledge] Vector index: {count} wiki pages', file=sys.stderr)
+except ImportError as e:
+    print(f'[Knowledge] Vector backend unavailable: {e}', file=sys.stderr)
 " "$WIKI_ROOT" "$CACHE_DIR" 2>&1 || true
 fi

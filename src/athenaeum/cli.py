@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Athenaeum CLI entry point."""
 
 import argparse

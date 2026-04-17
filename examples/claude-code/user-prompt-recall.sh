@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# UserPromptSubmit hook: search wiki FTS5 index for context relevant to
-# the user's message.
+# UserPromptSubmit hook: surface wiki pages relevant to the user's message.
 #
-# Queries a precomputed SQLite FTS5 index (built by session-start-recall.sh
-# at SessionStart). Typical runtime: <50ms for FTS5 alone, ~500-1500ms
-# when the optional LLM topic extractor is active.
+# Runs a hybrid FTS5 + (optional) vector search against the athenaeum index
+# built by session-start-recall.sh. Typical runtime: <50ms (FTS5 only),
+# ~400ms (vector), ~1.5s when the LLM topic extractor is enabled.
 #
-# Query rewriting (optional): if `athenaeum query-topics` is available and
-# ANTHROPIC_API_KEY is set, the raw prompt is first run through Haiku to
-# extract substantive topics (entity names, proper nouns) while ignoring
-# meta-instructions like "quote verbatim" or "don't call tools". This
-# rescues named-entity recall on instruction-heavy prompts. When unset or
-# the extractor returns empty, the hook falls back to a regex+stopword
-# keyword extractor.
+# Why hybrid. FTS5 phrase match rescues short proper-noun queries that
+# collide in vector space ("Return Path" embeds closer to any page
+# containing "path" than to a sparse entity page). Vector search
+# discovers semantic neighbours with no lexical overlap ("iterative
+# feedback loops" -> "Innovation Accounting"). Each backend rescues a
+# class of queries the other handles poorly — the merge is load-bearing.
+#
+# Optional LLM query-rewriting. If `athenaeum query-topics` is available
+# and ANTHROPIC_API_KEY is set, the raw prompt is first run through Haiku
+# to extract substantive topics while ignoring meta-instructions
+# ("quote verbatim", "don't call tools"). Falls back silently to a
+# regex+stopword extractor when unavailable.
 #
 # Configure in ~/.claude/settings.json:
 #   "hooks": {
@@ -25,18 +29,40 @@
 #     }]
 #   }
 #
-# Requires: sqlite3, jq (both ship with macOS)
+# Requires: sqlite3, jq (ship with macOS). Python only when vector is on.
 
 set -euo pipefail
 
-DB_FILE="${HOME}/.cache/athenaeum/wiki-index.db"
+CACHE_DIR="${HOME}/.cache/athenaeum"
+CONFIG_ENV="${CACHE_DIR}/config.env"
+DB_FILE="${CACHE_DIR}/wiki-index.db"
+VECTOR_DIR="${CACHE_DIR}/wiki-vectors"
 ATHENAEUM_CLI="${ATHENAEUM_CLI:-athenaeum}"
+PYTHON="${ATHENAEUM_PYTHON:-python3}"
 
-if [ ! -f "$DB_FILE" ]; then
+# ── Source config ──────────────────────────────────────────────────────
+# `set -a` auto-exports sourced variables so child processes (notably
+# `athenaeum query-topics`, which reads ANTHROPIC_API_KEY from its own
+# env) inherit them. Without it, `source` sets vars only in this shell
+# and the child silently runs without the key.
+if [ -f "$CONFIG_ENV" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$CONFIG_ENV"
+  set +a
+fi
+AUTO_RECALL="${AUTO_RECALL:-true}"
+SEARCH_BACKEND="${SEARCH_BACKEND:-fts5}"
+
+[ "$AUTO_RECALL" = "true" ] || exit 0
+
+# Bail only when BOTH backends are unavailable. Hybrid merge tolerates
+# one being absent.
+if [ ! -f "$DB_FILE" ] && [ ! -d "$VECTOR_DIR" ]; then
   exit 0
 fi
 
-# ── Parse stdin JSON with jq (no Python cold start) ────────────────────
+# ── Parse stdin ─────────────────────────────────────────────────────────
 INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
@@ -46,10 +72,6 @@ if [ -z "$PROMPT" ] || [ ${#PROMPT} -lt 8 ]; then
 fi
 
 # ── Extract search terms ────────────────────────────────────────────────
-# First try the LLM topic extractor (rescues named entities on
-# instruction-heavy prompts). Falls back to the regex extractor when the
-# CLI isn't installed, ANTHROPIC_API_KEY isn't set, or the extractor
-# times out / errors.
 TERMS=""
 if command -v "$ATHENAEUM_CLI" >/dev/null 2>&1 && [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   TERMS=$("$ATHENAEUM_CLI" query-topics "$PROMPT" --timeout 3 2>/dev/null || echo "")
@@ -60,39 +82,68 @@ if [ -z "$TERMS" ]; then
   TERMS=$(echo "$PROMPT" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' | grep -vE "^(${STOPWORDS})$" | grep -E '.{3,}' | sort -u | head -8)
 fi
 
-if [ -z "$TERMS" ]; then
-  exit 0
-fi
+[ -n "$TERMS" ] || exit 0
 
-# Build FTS5 query: "phrase one" OR "phrase two" ...
-# Lowercase each line (FTS5 indexes lowercased tokens) and wrap in quotes
-# for phrase matching — phrases like "Return Path" stay intact.
+# FTS5 query: "term1" OR "term2" OR ... (lowercased, quoted for phrases).
 FTS_QUERY=$(echo "$TERMS" | tr '[:upper:]' '[:lower:]' | sed 's/.*/"&"/' | tr '\n' ' ' | sed 's/ *$//' | sed 's/" "/\" OR \"/g')
+# Vector query: topics concatenated (no meta-drift from full prompt).
+VECTOR_QUERY=$(echo "$TERMS" | tr '\n' ' ' | sed 's/ *$//')
+[ -n "$VECTOR_QUERY" ] || VECTOR_QUERY="$PROMPT"
 
 # ── Session dedup ───────────────────────────────────────────────────────
 SEEN_FILE="/tmp/knowledge-seen-${SESSION_ID}"
 touch "$SEEN_FILE"
-
 EXCLUDE=""
 if [ -s "$SEEN_FILE" ]; then
   EXCLUDE=$(while read -r fn; do printf "AND filename != '%s' " "$fn"; done < "$SEEN_FILE")
 fi
 
-# ── Query FTS5 index ────────────────────────────────────────────────────
-RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
-  SELECT filename, name, rank
-  FROM wiki
-  WHERE wiki MATCH '${FTS_QUERY}'
-  ${EXCLUDE}
-  ORDER BY rank
-  LIMIT 3;
-" 2>/dev/null || echo "")
-
-if [ -z "$RESULTS" ]; then
-  exit 0
+# ── Query backends ──────────────────────────────────────────────────────
+FTS_RESULTS=""
+if [ -f "$DB_FILE" ]; then
+  FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
+    SELECT filename, name, rank
+    FROM wiki
+    WHERE wiki MATCH '${FTS_QUERY}'
+    ${EXCLUDE}
+    ORDER BY rank
+    LIMIT 3;
+  " 2>/dev/null || echo "")
 fi
 
+VECTOR_RESULTS=""
+if [ "$SEARCH_BACKEND" = "vector" ] && [ -d "$VECTOR_DIR" ]; then
+  VECTOR_RESULTS=$("$PYTHON" -c "
+import sys, os, importlib.util
+src = os.environ.get('ATHENAEUM_SRC', '')
+path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
+if path and os.path.isfile(path):
+    spec = importlib.util.spec_from_file_location('athenaeum.search', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    query_vector_index = mod.query_vector_index
+else:
+    from athenaeum.search import query_vector_index
+seen = set()
+seen_file = sys.argv[2]
+if os.path.isfile(seen_file):
+    with open(seen_file) as f:
+        seen = set(l.strip() for l in f)
+for fname, name, score in query_vector_index(sys.argv[1], os.path.expanduser('~/.cache/athenaeum'), n=3, exclude=seen):
+    print(f'{fname}\t{name}\t{score}')
+" "$VECTOR_QUERY" "$SEEN_FILE" 2>/dev/null || echo "")
+fi
+
+# Merge: FTS5 first (lexical precision), then vector, dedupe, cap 3.
+RESULTS=$(printf '%s\n%s\n' "$FTS_RESULTS" "$VECTOR_RESULTS" \
+  | awk -F'\t' 'NF >= 2 && $1 != "" && !seen[$1]++' \
+  | head -3)
+
+[ -n "$RESULTS" ] || exit 0
+
 # ── Format output ───────────────────────────────────────────────────────
+# Must be wrapped in hookSpecificOutput.hookEventName — Claude Code
+# silently ignores a flat {"additionalContext": ...} payload.
 MATCHES=""
 while IFS=$'\t' read -r fname name score; do
   MATCHES="${MATCHES}  - ${name}\n"

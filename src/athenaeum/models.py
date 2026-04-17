@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Data models, YAML frontmatter parsing, and entity index for Athenaeum."""
 
 from __future__ import annotations

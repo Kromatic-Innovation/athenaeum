@@ -70,6 +70,39 @@ pip install athenaeum[mcp]
 athenaeum serve --path ~/knowledge
 ```
 
+### Vector search (optional)
+
+Athenaeum supports a vector search backend (chromadb + `all-MiniLM-L6-v2`)
+for semantic recall alongside the default FTS5 keyword backend.
+
+```bash
+pip install athenaeum[vector]
+```
+
+Enable it in `athenaeum.yaml`:
+
+```yaml
+search_backend: vector
+```
+
+The recall hook runs a **hybrid FTS5 + vector merge** when vector is
+configured — FTS5 rescues short proper-noun queries that collide in
+vector space, vector discovers semantic neighbours with no lexical
+overlap. See [`docs/recall-architecture.md`](docs/recall-architecture.md)
+for why the hybrid is load-bearing and what invariants must not be
+removed.
+
+### Query-topic extraction (optional)
+
+`athenaeum query-topics "your prompt"` runs a Haiku classifier that
+returns substantive topics and ignores meta-instructions. The example
+recall hook uses it to rescue named-entity recall on instruction-heavy
+prompts like *"Without calling any tools, quote the block about Return
+Path verbatim."* — where the regex fallback drops "Return Path" as
+the 10th alphabetical term and vector embedding drifts toward hook
+pages. Falls back silently to the regex extractor if the API key or
+CLI is unavailable.
+
 **Claude Code integration** — add to your MCP config and it auto-starts with every session:
 
 ```bash
@@ -106,6 +139,15 @@ See `examples/claude-code/` for complete setup instructions and example scripts.
 | `ANTHROPIC_API_KEY` | Yes (unless `--dry-run`) | API key for Tier 2/3 LLM calls |
 | `ATHENAEUM_CLASSIFY_MODEL` | No | Override Tier 2 model (default: `claude-haiku-4-5-20251001`) |
 | `ATHENAEUM_WRITE_MODEL` | No | Override Tier 3 model (default: `claude-sonnet-4-6`) |
+| `ATHENAEUM_TOPIC_MODEL` | No | Override query-topic model (default: `claude-haiku-4-5-20251001`) |
+| `ATHENAEUM_OP_KEY_PATH` | No | 1Password path for the session-start ANTHROPIC_API_KEY bootstrap (default: `op://Agent Tools/Anthropic API Key/credential`) |
+
+**Note on Claude Code auth.** Claude Code's own `CLAUDE_CODE_OAUTH_TOKEN`
+is scoped to its inference endpoint and the general Anthropic Messages
+API rejects it with `401 OAuth authentication is currently not supported`.
+The pipeline and the example hooks need a separate console API key —
+see [`docs/recall-architecture.md`](docs/recall-architecture.md#anthropic_api_key-bootstrap-sessionstart)
+for the 1Password bootstrap pattern.
 
 ### Raw file format
 

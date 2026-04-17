@@ -1,12 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
 """Search backend abstraction for athenaeum.
 
-Provides pluggable search backends for wiki recall queries.  The default
+Provides pluggable search backends for wiki recall queries. The default
 ``fts5`` backend uses SQLite FTS5 with BM25 ranking and porter stemming.
-A ``vector`` backend stub is provided for issue #32.
+The ``vector`` backend uses chromadb with ``all-MiniLM-L6-v2``. When the
+vector backend is configured, the example recall hook performs a hybrid
+FTS5+vector merge so that short proper-noun queries still resolve
+cleanly — see ``docs/recall-architecture.md`` for why each backend is
+load-bearing.
 
 Shell hook scripts can call the module-level convenience functions
-(``build_fts5_index``, ``query_fts5_index``, etc.) without constructing
-backend objects.
+(``build_fts5_index``, ``query_fts5_index``, ``build_vector_index``,
+``query_vector_index``) without constructing backend objects.
 """
 
 from __future__ import annotations

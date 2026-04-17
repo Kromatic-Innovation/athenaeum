@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Athenaeum status — inspect current state of a knowledge base."""
 
 from __future__ import annotations
