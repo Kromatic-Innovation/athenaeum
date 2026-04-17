@@ -1,5 +1,6 @@
 {
-  "_comment": "Add these hook entries to ~/.claude/settings.json to enable transparent athenaeum integration.",
+  "_comment": "Add these hook entries to ~/.claude/settings.json for transparent athenaeum integration.",
+  "_architecture": "SessionStart builds a SQLite FTS5 index once. UserPromptSubmit queries it per turn in <50ms.",
   "hooks": {
     "SessionStart": [
       {
@@ -8,7 +9,18 @@
             "type": "command",
             "command": "/path/to/session-start-recall.sh 2>/dev/null || true",
             "timeout": 15,
-            "statusMessage": "Loading knowledge context..."
+            "statusMessage": "Building knowledge index..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/user-prompt-recall.sh 2>/dev/null || true",
+            "timeout": 5
           }
         ]
       }

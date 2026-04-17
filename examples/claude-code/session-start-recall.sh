@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# SessionStart hook: inject relevant wiki context based on cwd.
+# SessionStart hook: build a SQLite FTS5 index of wiki frontmatter.
 #
-# Searches the athenaeum wiki for pages matching the current project name
-# and outputs summaries so Claude "just knows" relevant context.
+# Extracts name, tags, aliases, and description from every wiki page into
+# a full-text search index. The per-turn hook (user-prompt-recall.sh)
+# queries this index in <50ms instead of scanning thousands of files.
 #
 # Configure in ~/.claude/settings.json:
 #   "hooks": {
@@ -21,54 +22,64 @@
 set -euo pipefail
 
 WIKI_ROOT="${KNOWLEDGE_WIKI_PATH:-$HOME/knowledge/wiki}"
+CACHE_DIR="${HOME}/.cache/athenaeum"
+DB_FILE="${CACHE_DIR}/wiki-index.db"
 
 if [ ! -d "$WIKI_ROOT" ]; then
-  exit 0  # No wiki available — silently skip
-fi
-
-# Derive project keywords from cwd
-CWD="$(pwd)"
-PROJECT_NAME="$(basename "$CWD")"
-
-# Build keyword list from cwd path segments (skip generic ones)
-SKIP_WORDS="Code|Users|home|workspace|src|lib|app|var|tmp|usr"
-KEYWORDS=$(echo "$CWD" | tr '/-' '\n' | grep -vE "^($SKIP_WORDS)?$" | grep -E '.{3,}' | tail -5 | tr '\n' '|' | sed 's/|$//')
-
-if [ -z "$KEYWORDS" ]; then
   exit 0
 fi
 
-# Search wiki frontmatter (name, aliases, tags) and first 30 lines of body
-MATCHES=""
-MATCH_COUNT=0
-MAX_RESULTS=3
+mkdir -p "$CACHE_DIR"
 
-for md_file in "$WIKI_ROOT"/*.md; do
-  [ -f "$md_file" ] || continue
-  # Skip index/system files
-  case "$(basename "$md_file")" in _*) continue ;; esac
+python3 -c "
+import os, sys, sqlite3
 
-  if head -30 "$md_file" | grep -qiE "$KEYWORDS" 2>/dev/null; then
-    # Extract name from frontmatter
-    PAGE_NAME=$(grep -m1 '^name:' "$md_file" 2>/dev/null | sed 's/^name:[[:space:]]*//' | tr -d '"'"'" || basename "$md_file" .md)
-    # Extract first non-frontmatter paragraph as summary
-    SUMMARY=$(awk '/^---$/{if(++c==2) next; if(c>1) p=1; next} p && /^[^#]/ && NF{print; exit}' "$md_file" 2>/dev/null || echo "")
+wiki_root = sys.argv[1]
+db_path = sys.argv[2]
 
-    if [ -n "$PAGE_NAME" ]; then
-      MATCHES="${MATCHES}  - ${PAGE_NAME}"
-      [ -n "$SUMMARY" ] && MATCHES="${MATCHES}: ${SUMMARY}"
-      MATCHES="${MATCHES}
-"
-      MATCH_COUNT=$((MATCH_COUNT + 1))
-      [ "$MATCH_COUNT" -ge "$MAX_RESULTS" ] && break
-    fi
-  fi
-done
+if os.path.exists(db_path):
+    os.remove(db_path)
 
-if [ "$MATCH_COUNT" -gt 0 ]; then
-  cat <<EOF
-[Knowledge context for ${PROJECT_NAME}]
-Relevant wiki pages (use \`recall\` MCP tool for details):
-${MATCHES}
-EOF
-fi
+conn = sqlite3.connect(db_path)
+conn.execute('''CREATE VIRTUAL TABLE wiki USING fts5(
+    filename, name, tags, aliases, description,
+    tokenize=\"porter unicode61\"
+)''')
+
+rows = []
+for fname in os.listdir(wiki_root):
+    if not fname.endswith('.md') or fname.startswith('_'):
+        continue
+    path = os.path.join(wiki_root, fname)
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            text = f.read(2000)
+    except OSError:
+        continue
+
+    name = tags = aliases = description = ''
+    if text.startswith('---'):
+        end = text.find('---', 4)
+        if end > 0:
+            fm = text[4:end]
+            for line in fm.splitlines():
+                line = line.strip()
+                if line.startswith('name:'):
+                    name = line[5:].strip().strip('\"').strip(\"'\")
+                elif line.startswith('tags:'):
+                    tags = line[5:].strip().strip('[]')
+                elif line.startswith('aliases:'):
+                    aliases = line[8:].strip().strip('[]')
+                elif line.startswith('description:'):
+                    description = line[12:].strip().strip('\"').strip(\"'\")
+
+    if not name:
+        name = fname.replace('.md', '')
+
+    rows.append((fname, name, tags, aliases, description))
+
+conn.executemany('INSERT INTO wiki VALUES (?,?,?,?,?)', rows)
+conn.commit()
+conn.close()
+print(f'[Knowledge] FTS5 index: {len(rows)} wiki pages', file=sys.stderr)
+" "$WIKI_ROOT" "$DB_FILE" 2>&1 || true

@@ -93,7 +93,7 @@ saves observations without explicit commands, configure Claude Code hooks:
 3. **Add CLAUDE.md instructions** for proactive memory (see `examples/claude-code/CLAUDE.md.example`)
 
 This gives you:
-- **Auto-recall** — relevant wiki pages are injected at session start based on your working directory
+- **Auto-recall** — a SQLite FTS5 index is built at session start (~300ms); each user message triggers a <50ms search that injects relevant wiki pages into context
 - **Auto-remember** — Claude proactively saves important facts without being asked
 - **Context checkpointing** — observations are saved before context window compaction
 
