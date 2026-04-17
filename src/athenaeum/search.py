@@ -1,0 +1,514 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Search backend abstraction for athenaeum.
+
+Provides pluggable search backends for wiki recall queries. The default
+``fts5`` backend uses SQLite FTS5 with BM25 ranking and porter stemming.
+The ``vector`` backend uses chromadb with ``all-MiniLM-L6-v2``. When the
+vector backend is configured, the example recall hook performs a hybrid
+FTS5+vector merge so that short proper-noun queries still resolve
+cleanly — see ``docs/recall-architecture.md`` for why each backend is
+load-bearing.
+
+Shell hook scripts can call the module-level convenience functions
+(``build_fts5_index``, ``query_fts5_index``, ``build_vector_index``,
+``query_vector_index``) without constructing backend objects.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import sqlite3
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
+
+# ---------------------------------------------------------------------------
+# Protocol
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class SearchBackend(Protocol):
+    """Interface that all search backends must satisfy."""
+
+    def build_index(self, wiki_root: Path, cache_dir: Path) -> int:
+        """Build or rebuild the search index.
+
+        Returns the number of wiki pages indexed.
+        """
+        ...
+
+    def query(
+        self,
+        query: str,
+        cache_dir: Path,
+        *,
+        n: int = 5,
+        exclude: set[str] | None = None,
+        wiki_root: Path | None = None,
+    ) -> list[tuple[str, str, float]]:
+        """Search the index.
+
+        ``wiki_root`` is used by scan-on-query backends (e.g. keyword) that
+        don't maintain an on-disk index; indexed backends ignore it.
+
+        Returns a list of ``(filename, page_name, score)`` tuples,
+        ordered by relevance (best first).
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# FTS5 backend
+# ---------------------------------------------------------------------------
+
+# Public stopword list — sorted tuple for deterministic CLI output.
+# Exposed as the single source of truth so shell hooks and downstream
+# callers don't re-hardcode their own copy. See `athenaeum stopwords`
+# CLI subcommand and examples/claude-code/user-prompt-recall.sh.
+STOPWORDS: tuple[str, ...] = tuple(sorted(set(
+    "the and for are but not you all can had her was one our out has his how "
+    "its let may new now old see way who did get got him she too use with from "
+    "have this that they will been call come each find give help here just know "
+    "like long look make many more most much must next only over said same some "
+    "such take tell than them then very want well went were what when which "
+    "while work also back been being both came does done down even goes going "
+    "good keep last left life line made need never part place point right show "
+    "small still think those turn used using where would about after again "
+    "could every great might often other shall should since start state still "
+    "there these thing think three through under until which while world would "
+    "years your into just like made over said some than them then time very "
+    "want what when will with year does really right going being looking "
+    "trying running check please sure okay yeah thanks".split()
+)))
+
+# Stopwords stripped before building an FTS5 query.
+_STOPWORDS: frozenset[str] = frozenset(STOPWORDS)
+
+_DB_NAME = "wiki-index.db"
+
+
+class FTS5Backend:
+    """SQLite FTS5 full-text search with BM25 ranking and porter stemming."""
+
+    def build_index(self, wiki_root: Path, cache_dir: Path) -> int:
+        """Scan wiki markdown files and build an FTS5 index."""
+        db_path = cache_dir / _DB_NAME
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        if db_path.exists():
+            db_path.unlink()
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE VIRTUAL TABLE wiki USING fts5"
+            "(filename, name, tags, aliases, description, "
+            'tokenize="porter unicode61")'
+        )
+
+        rows: list[tuple[str, str, str, str, str]] = []
+        for fname in sorted(os.listdir(wiki_root)):
+            if not fname.endswith(".md") or fname.startswith("_"):
+                continue
+            path = wiki_root / fname
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")[:2000]
+            except OSError:
+                continue
+
+            name, tags, aliases, description = "", "", "", ""
+            if text.startswith("---"):
+                end = text.find("---", 4)
+                if end > 0:
+                    fm = text[4:end]
+                    for line in fm.splitlines():
+                        line = line.strip()
+                        if line.startswith("name:"):
+                            name = line[5:].strip().strip("\"'")
+                        elif line.startswith("tags:"):
+                            tags = line[5:].strip().strip("[]")
+                        elif line.startswith("aliases:"):
+                            aliases = line[8:].strip().strip("[]")
+                        elif line.startswith("description:"):
+                            description = line[12:].strip().strip("\"'")
+
+            if not name:
+                name = fname.replace(".md", "")
+
+            rows.append((fname, name, tags, aliases, description))
+
+        conn.executemany("INSERT INTO wiki VALUES (?,?,?,?,?)", rows)
+        conn.commit()
+        conn.close()
+        return len(rows)
+
+    def query(
+        self,
+        query: str,
+        cache_dir: Path,
+        *,
+        n: int = 5,
+        exclude: set[str] | None = None,
+        wiki_root: Path | None = None,
+    ) -> list[tuple[str, str, float]]:
+        """Query the FTS5 index. Returns ``(filename, name, score)`` triples."""
+        del wiki_root  # FTS5 reads the pre-built index, not the wiki files
+        db_path = cache_dir / _DB_NAME
+        if not db_path.is_file():
+            return []
+
+        # Tokenize and filter stopwords
+        terms = [
+            t
+            for t in re.split(r"\W+", query.lower())
+            if len(t) >= 3 and t not in _STOPWORDS
+        ]
+        if not terms:
+            return []
+
+        # Build FTS5 MATCH expression: "word1" OR "word2" ...
+        fts_query = " OR ".join(f'"{t}"' for t in terms[:8])
+
+        # Build exclusion clause
+        exclude_clause = ""
+        params: list[str] = []
+        if exclude:
+            placeholders = ", ".join("?" for _ in exclude)
+            exclude_clause = f" AND filename NOT IN ({placeholders})"
+            params = list(exclude)
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cursor = conn.execute(
+                f"SELECT filename, name, rank FROM wiki "
+                f"WHERE wiki MATCH ? {exclude_clause} "
+                f"ORDER BY rank LIMIT ?",
+                [fts_query, *params, n],
+            )
+            return [(row[0], row[1], row[2]) for row in cursor.fetchall()]
+        except sqlite3.OperationalError:
+            return []
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Vector backend (chromadb)
+# ---------------------------------------------------------------------------
+
+_VECTOR_DIR = "wiki-vectors"
+_VECTOR_COLLECTION = "wiki"
+
+
+class VectorBackend:
+    """Semantic search via chromadb with local embeddings.
+
+    Requires ``pip install athenaeum[vector]`` (chromadb).
+    Uses the default ``all-MiniLM-L6-v2`` embedding model.
+    """
+
+    def _get_chromadb(self) -> Any:
+        try:
+            import chromadb
+            return chromadb
+        except ImportError as exc:
+            raise ImportError(
+                "Vector backend requires chromadb. "
+                "Install with: pip install athenaeum[vector]"
+            ) from exc
+
+    def build_index(self, wiki_root: Path, cache_dir: Path) -> int:
+        """Build a chromadb collection from wiki markdown files."""
+        chromadb = self._get_chromadb()
+
+        vector_dir = cache_dir / _VECTOR_DIR
+        # Nuke any prior on-disk state before opening a PersistentClient.
+        # chromadb's SQLite metadata and the rust binding's collection store
+        # can desync (stale UUIDs, corrupt sqlite, partial writes), causing
+        # create_collection to return a Collection whose UUID the rust layer
+        # then reports as non-existent on the first .add(). A full wipe on
+        # each rebuild is the simplest robust reset — see issue #32.
+        if vector_dir.exists():
+            shutil.rmtree(vector_dir)
+        vector_dir.mkdir(parents=True, exist_ok=True)
+
+        # chromadb caches PersistentClient systems per-path at the module
+        # level. When rebuild runs in a long-lived process (or the same
+        # interpreter invoked it before) a cached system will still know
+        # about the old "wiki" collection after we rmtree'd the dir,
+        # causing create_collection to fail with "already exists". Clear
+        # the cache so the new PersistentClient sees a fresh filesystem.
+        from chromadb.api.client import SharedSystemClient
+        SharedSystemClient.clear_system_cache()
+
+        client = chromadb.PersistentClient(path=str(vector_dir))
+        collection = client.create_collection(_VECTOR_COLLECTION)
+
+        ids: list[str] = []
+        documents: list[str] = []
+        metadatas: list[dict[str, str]] = []
+
+        for fname in sorted(os.listdir(wiki_root)):
+            if not fname.endswith(".md") or fname.startswith("_"):
+                continue
+            path = wiki_root / fname
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")[:4000]
+            except OSError:
+                continue
+
+            name = ""
+            if text.startswith("---"):
+                end = text.find("---", 4)
+                if end > 0:
+                    fm = text[4:end]
+                    for line in fm.splitlines():
+                        line = line.strip()
+                        if line.startswith("name:"):
+                            name = line[5:].strip().strip("\"'")
+                            break
+
+            if not name:
+                name = fname.replace(".md", "")
+
+            ids.append(fname)
+            documents.append(text)
+            metadatas.append({"name": name, "filename": fname})
+
+        # chromadb batches internally but has a max batch size
+        batch_size = 5000
+        for i in range(0, len(ids), batch_size):
+            end = min(i + batch_size, len(ids))
+            collection.add(
+                ids=ids[i:end],
+                documents=documents[i:end],
+                metadatas=metadatas[i:end],
+            )
+
+        return len(ids)
+
+    def query(
+        self,
+        query: str,
+        cache_dir: Path,
+        *,
+        n: int = 5,
+        exclude: set[str] | None = None,
+        wiki_root: Path | None = None,
+    ) -> list[tuple[str, str, float]]:
+        """Query the chromadb collection with semantic search."""
+        del wiki_root  # Vector reads the pre-built chromadb collection
+        chromadb = self._get_chromadb()
+
+        vector_dir = cache_dir / _VECTOR_DIR
+        if not vector_dir.is_dir():
+            return []
+
+        client = chromadb.PersistentClient(path=str(vector_dir))
+        try:
+            collection = client.get_collection(_VECTOR_COLLECTION)
+        except Exception as exc:
+            # chromadb raises an InvalidCollectionException (and occasionally
+            # bare ValueError from the rust binding) when the collection is
+            # absent or its metadata is corrupt. We can't import the exception
+            # class directly because chromadb reorganises it between releases,
+            # so we catch broadly but log the class name so a real bug
+            # doesn't sit silent — "vector returns nothing" was the top
+            # first-adopter confusion in the v0.2.0 review.
+            import logging
+            logging.getLogger(__name__).warning(
+                "vector get_collection(%s) failed with %s: %s; "
+                "returning empty hits",
+                _VECTOR_COLLECTION, type(exc).__name__, exc,
+            )
+            return []
+
+        if collection.count() == 0:
+            return []
+
+        # Build where filter for exclusions
+        where: dict[str, Any] | None = None
+        if exclude and len(exclude) == 1:
+            where = {"filename": {"$ne": next(iter(exclude))}}
+        elif exclude and len(exclude) > 1:
+            where = {"filename": {"$nin": list(exclude)}}
+
+        results = collection.query(
+            query_texts=[query],
+            n_results=min(n, collection.count()),
+            where=where,
+        )
+
+        hits: list[tuple[str, str, float]] = []
+        if results["ids"] and results["ids"][0]:
+            for i, doc_id in enumerate(results["ids"][0]):
+                meta = results["metadatas"][0][i] if results["metadatas"] else {}
+                name = meta.get("name", doc_id.replace(".md", ""))
+                distance = results["distances"][0][i] if results["distances"] else 0.0
+                hits.append((doc_id, name, distance))
+
+        return hits
+
+
+# ---------------------------------------------------------------------------
+# Keyword backend (in-memory, scan-on-query)
+# ---------------------------------------------------------------------------
+
+
+def tokenize_keyword_query(query: str) -> list[str]:
+    """Split a query into lowercase tokens of length >=2."""
+    return [t for t in re.split(r"\W+", query.lower()) if len(t) >= 2]
+
+
+def score_keyword_page(
+    tokens: list[str], frontmatter: dict, body: str
+) -> float:
+    """Score a wiki page against keyword tokens.
+
+    Frontmatter fields (``name``, ``aliases``, ``tags``, ``description``,
+    ``title``) match at 3x the weight of body hits.
+    """
+    if not tokens:
+        return 0.0
+
+    fm_parts: list[str] = []
+    for key in ("name", "aliases", "tags", "description", "title"):
+        val = frontmatter.get(key, "")
+        if isinstance(val, list):
+            fm_parts.append(" ".join(str(v) for v in val))
+        else:
+            fm_parts.append(str(val))
+    fm_text = " ".join(fm_parts).lower()
+    body_lower = body.lower()
+
+    score = 0.0
+    for token in tokens:
+        if token in fm_text:
+            score += 3.0
+        if token in body_lower:
+            score += 1.0
+    return score
+
+
+class KeywordBackend:
+    """Scan-on-query keyword scoring over wiki frontmatter + body.
+
+    No pre-built index: every query rereads the wiki. Frontmatter hits
+    are weighted 3x body hits. Intended as a zero-setup fallback for
+    small wikis or tests — FTS5 is the recommended default for real use.
+    """
+
+    def build_index(self, wiki_root: Path, cache_dir: Path) -> int:
+        """No-op: the keyword backend rescans on every query."""
+        del cache_dir
+        return sum(
+            1 for p in wiki_root.rglob("*.md") if not p.name.startswith("_")
+        )
+
+    def query(
+        self,
+        query: str,
+        cache_dir: Path,
+        *,
+        n: int = 5,
+        exclude: set[str] | None = None,
+        wiki_root: Path | None = None,
+    ) -> list[tuple[str, str, float]]:
+        """Score every non-underscore wiki page and return the top-n hits."""
+        del cache_dir
+        if wiki_root is None or not wiki_root.is_dir():
+            return []
+
+        from athenaeum.models import parse_frontmatter
+
+        tokens = tokenize_keyword_query(query)
+        if not tokens:
+            return []
+
+        excluded = exclude or set()
+        scored: list[tuple[float, str, str]] = []
+        for md_file in wiki_root.rglob("*.md"):
+            if md_file.name.startswith("_"):
+                continue
+            try:
+                rel = md_file.relative_to(wiki_root).as_posix()
+            except ValueError:
+                rel = md_file.name
+            if rel in excluded:
+                continue
+            try:
+                text = md_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            fm, body = parse_frontmatter(text)
+            score = score_keyword_page(tokens, fm, body)
+            if score > 0:
+                name = fm.get("name") or md_file.stem
+                scored.append((score, rel, str(name)))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [(fname, name, score) for score, fname, name in scored[:n]]
+
+
+# ---------------------------------------------------------------------------
+# Backend registry
+# ---------------------------------------------------------------------------
+
+_BACKENDS: dict[str, type[SearchBackend]] = {
+    "fts5": FTS5Backend,  # type: ignore[dict-item]
+    "vector": VectorBackend,  # type: ignore[dict-item]
+    "keyword": KeywordBackend,  # type: ignore[dict-item]
+}
+
+
+def get_backend(name: str) -> SearchBackend:
+    """Return a backend instance by name. Raises ``KeyError`` for unknown names."""
+    cls = _BACKENDS.get(name)
+    if cls is None:
+        raise KeyError(
+            f"Unknown search backend {name!r}. "
+            f"Available: {', '.join(sorted(_BACKENDS))}"
+        )
+    return cls()
+
+
+# ---------------------------------------------------------------------------
+# Convenience functions for shell hook scripts
+# ---------------------------------------------------------------------------
+
+
+def build_fts5_index(
+    wiki_root: str | Path, cache_dir: str | Path
+) -> int:
+    """Build an FTS5 index. Callable from shell hooks via ``python3 -c``."""
+    return FTS5Backend().build_index(Path(wiki_root), Path(cache_dir))
+
+
+def query_fts5_index(
+    query: str,
+    cache_dir: str | Path,
+    *,
+    n: int = 3,
+    exclude: set[str] | None = None,
+) -> list[tuple[str, str, float]]:
+    """Query the FTS5 index. Callable from shell hooks via ``python3 -c``."""
+    return FTS5Backend().query(query, Path(cache_dir), n=n, exclude=exclude)
+
+
+def build_vector_index(
+    wiki_root: str | Path, cache_dir: str | Path
+) -> int:
+    """Build a chromadb vector index. Callable from shell hooks."""
+    return VectorBackend().build_index(Path(wiki_root), Path(cache_dir))
+
+
+def query_vector_index(
+    query: str,
+    cache_dir: str | Path,
+    *,
+    n: int = 3,
+    exclude: set[str] | None = None,
+) -> list[tuple[str, str, float]]:
+    """Query the chromadb vector index. Callable from shell hooks."""
+    return VectorBackend().query(query, Path(cache_dir), n=n, exclude=exclude)
