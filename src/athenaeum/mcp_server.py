@@ -84,9 +84,22 @@ _MAX_CONTENT_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
 def recall_search(
-    wiki_root: Path, query: str, top_k: int = 5
+    wiki_root: Path,
+    query: str,
+    top_k: int = 5,
+    *,
+    search_backend: str = "keyword",
+    cache_dir: Path | None = None,
 ) -> str:
     """Search the knowledge wiki for pages relevant to *query*.
+
+    Args:
+        wiki_root: Path to the wiki directory.
+        query: Search query string.
+        top_k: Maximum results to return.
+        search_backend: ``"keyword"`` (in-memory), ``"fts5"``, or ``"vector"``.
+        cache_dir: Directory containing the search index (required for
+            fts5/vector backends).
 
     Returns a formatted string of matching wiki pages with relevance scores
     and content snippets.
@@ -96,6 +109,12 @@ def recall_search(
     if not wiki_root.is_dir():
         return f"Wiki directory not found at {wiki_root}."
 
+    if search_backend in ("fts5", "vector"):
+        return _recall_via_backend(
+            wiki_root, query, top_k, search_backend, cache_dir
+        )
+
+    # Default: in-memory keyword scoring (original behavior)
     tokens = _tokenize_query(query)
     if not tokens:
         return "Query too short \u2014 provide at least one keyword (2+ characters)."
@@ -133,6 +152,56 @@ def recall_search(
         parts.append(
             f"### {rank}. {name} (score: {score:.1f})\n"
             f"**Path:** wiki/{rel_path}\n"
+            f"**Tags:** {tags}\n\n"
+            f"{snip}\n"
+        )
+
+    return "\n".join(parts)
+
+
+def _recall_via_backend(
+    wiki_root: Path,
+    query: str,
+    top_k: int,
+    backend_name: str,
+    cache_dir: Path | None,
+) -> str:
+    """Delegate recall to an indexed search backend, then format results."""
+    from athenaeum.search import get_backend
+
+    backend = get_backend(backend_name)
+    effective_cache = cache_dir or Path.home() / ".cache" / "athenaeum"
+
+    try:
+        hits = backend.query(query, effective_cache, n=top_k)
+    except NotImplementedError as exc:
+        return str(exc)
+
+    if not hits:
+        return f"No wiki pages matched query: {query!r}"
+
+    tokens = _tokenize_query(query)
+    parts: list[str] = [f"Found {len(hits)} matching pages:\n"]
+
+    for rank, (filename, name, score) in enumerate(hits, 1):
+        page_path = wiki_root / filename
+        body = ""
+        tags: str | list = "\u2014"
+        if page_path.is_file():
+            try:
+                text = page_path.read_text(encoding="utf-8")
+                fm, body = parse_frontmatter(text)
+                name = fm.get("name", name)
+                tags = fm.get("tags", "\u2014")
+            except (OSError, UnicodeDecodeError):
+                pass
+
+        if isinstance(tags, list):
+            tags = ", ".join(tags)
+        snip = _snippet(body, tokens) if body else ""
+        parts.append(
+            f"### {rank}. {name} (score: {score:.1f})\n"
+            f"**Path:** wiki/{filename}\n"
             f"**Tags:** {tags}\n\n"
             f"{snip}\n"
         )
@@ -186,9 +255,19 @@ def remember_write(
 
 
 def create_server(
-    raw_root: Path, wiki_root: Path
+    raw_root: Path,
+    wiki_root: Path,
+    *,
+    search_backend: str = "keyword",
+    cache_dir: Path | None = None,
 ) -> "FastMCP":  # noqa: F821 — lazy import
     """Create and return a configured FastMCP server instance.
+
+    Args:
+        raw_root: Path to the raw intake directory.
+        wiki_root: Path to the compiled wiki directory.
+        search_backend: Search backend: ``"keyword"``, ``"fts5"``, or ``"vector"``.
+        cache_dir: Directory for search index files (fts5/vector backends).
 
     Requires ``fastmcp`` to be installed (``pip install athenaeum[mcp]``).
     """
@@ -223,7 +302,11 @@ def create_server(
         Returns:
             Matching wiki pages with relevance scores and content snippets.
         """
-        return recall_search(wiki_root, query, top_k)
+        return recall_search(
+            wiki_root, query, top_k,
+            search_backend=search_backend,
+            cache_dir=cache_dir,
+        )
 
     @mcp.tool()
     def remember(content: str, source: str = "claude-session") -> str:

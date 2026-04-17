@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# SessionStart hook: build a SQLite FTS5 index of wiki frontmatter.
+# SessionStart hook: read config and build the search index.
 #
-# Extracts name, tags, aliases, and description from every wiki page into
-# a full-text search index. The per-turn hook (user-prompt-recall.sh)
-# queries this index in <50ms instead of scanning thousands of files.
+# 1. Reads athenaeum.yaml for config (auto_recall, search_backend)
+# 2. Writes a shell-readable cache at ~/.cache/athenaeum/config.env
+# 3. Builds the appropriate search index (FTS5 or vector)
+#
+# The per-turn hook reads config.env (no Python needed at query time for FTS5).
 #
 # Configure in ~/.claude/settings.json:
 #   "hooks": {
@@ -17,13 +19,15 @@
 #   }
 #
 # Environment variables:
-#   KNOWLEDGE_WIKI_PATH  Path to wiki directory (default: ~/knowledge/wiki)
+#   KNOWLEDGE_ROOT       Path to knowledge directory (default: ~/knowledge)
+#   KNOWLEDGE_WIKI_PATH  Path to wiki directory (default: $KNOWLEDGE_ROOT/wiki)
 
 set -euo pipefail
 
-WIKI_ROOT="${KNOWLEDGE_WIKI_PATH:-$HOME/knowledge/wiki}"
+KNOWLEDGE_ROOT="${KNOWLEDGE_ROOT:-$HOME/knowledge}"
+WIKI_ROOT="${KNOWLEDGE_WIKI_PATH:-$KNOWLEDGE_ROOT/wiki}"
 CACHE_DIR="${HOME}/.cache/athenaeum"
-DB_FILE="${CACHE_DIR}/wiki-index.db"
+CONFIG_ENV="${CACHE_DIR}/config.env"
 
 if [ ! -d "$WIKI_ROOT" ]; then
   exit 0
@@ -31,55 +35,63 @@ fi
 
 mkdir -p "$CACHE_DIR"
 
-python3 -c "
-import os, sys, sqlite3
+# ── Read config ────────────────────────────────────────────────────────────
+# Try athenaeum Python module; fall back to pure-shell YAML parsing.
+_read_config_ok=false
 
-wiki_root = sys.argv[1]
-db_path = sys.argv[2]
+if python3 -c "
+import sys, os
+sys.path.insert(0, os.path.join(os.environ.get('ATHENAEUM_SRC', ''), 'src'))
+from athenaeum.config import load_config
+cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else None)
+env_path = sys.argv[2]
+with open(env_path, 'w') as f:
+    f.write(f'AUTO_RECALL={str(cfg.get(\"auto_recall\", True)).lower()}\n')
+    f.write(f'SEARCH_BACKEND={cfg.get(\"search_backend\", \"fts5\")}\n')
+    provider = 'chromadb'
+    if isinstance(cfg.get('vector'), dict):
+        provider = cfg['vector'].get('provider', 'chromadb')
+    f.write(f'VECTOR_PROVIDER={provider}\n')
+" "$KNOWLEDGE_ROOT" "$CONFIG_ENV" 2>/dev/null; then
+  _read_config_ok=true
+fi
 
-if os.path.exists(db_path):
-    os.remove(db_path)
+if [ "$_read_config_ok" = false ]; then
+  CONFIG_YAML="${KNOWLEDGE_ROOT}/athenaeum.yaml"
+  _auto_recall="true"
+  _search_backend="fts5"
+  _vector_provider="chromadb"
+  if [ -f "$CONFIG_YAML" ]; then
+    _in_vector=false
+    while IFS= read -r line; do
+      line="${line%%#*}"
+      case "$line" in
+        auto_recall:*)    _auto_recall="$(echo "${line#auto_recall:}" | tr -d ' ')"; _in_vector=false ;;
+        search_backend:*) _search_backend="$(echo "${line#search_backend:}" | tr -d ' ')"; _in_vector=false ;;
+        vector:*)         _in_vector=true ;;
+        "  provider:"*|"    provider:"*)
+          [ "$_in_vector" = true ] && _vector_provider="$(echo "${line#*provider:}" | tr -d ' ')" ;;
+        *) case "$line" in "  "*|"	"*) ;; ?*) _in_vector=false ;; esac ;;
+      esac
+    done < "$CONFIG_YAML"
+  fi
+  {
+    echo "AUTO_RECALL=${_auto_recall}"
+    echo "SEARCH_BACKEND=${_search_backend}"
+    echo "VECTOR_PROVIDER=${_vector_provider}"
+  } > "$CONFIG_ENV"
+fi
 
-conn = sqlite3.connect(db_path)
-conn.execute('''CREATE VIRTUAL TABLE wiki USING fts5(
-    filename, name, tags, aliases, description,
-    tokenize=\"porter unicode61\"
-)''')
+source "$CONFIG_ENV"
 
-rows = []
-for fname in os.listdir(wiki_root):
-    if not fname.endswith('.md') or fname.startswith('_'):
-        continue
-    path = os.path.join(wiki_root, fname)
-    try:
-        with open(path, 'r', encoding='utf-8', errors='replace') as f:
-            text = f.read(2000)
-    except OSError:
-        continue
-
-    name = tags = aliases = description = ''
-    if text.startswith('---'):
-        end = text.find('---', 4)
-        if end > 0:
-            fm = text[4:end]
-            for line in fm.splitlines():
-                line = line.strip()
-                if line.startswith('name:'):
-                    name = line[5:].strip().strip('\"').strip(\"'\")
-                elif line.startswith('tags:'):
-                    tags = line[5:].strip().strip('[]')
-                elif line.startswith('aliases:'):
-                    aliases = line[8:].strip().strip('[]')
-                elif line.startswith('description:'):
-                    description = line[12:].strip().strip('\"').strip(\"'\")
-
-    if not name:
-        name = fname.replace('.md', '')
-
-    rows.append((fname, name, tags, aliases, description))
-
-conn.executemany('INSERT INTO wiki VALUES (?,?,?,?,?)', rows)
-conn.commit()
-conn.close()
-print(f'[Knowledge] FTS5 index: {len(rows)} wiki pages', file=sys.stderr)
-" "$WIKI_ROOT" "$DB_FILE" 2>&1 || true
+# ── Build search index ─────────────────────────────────────────────────────
+if [ "$SEARCH_BACKEND" = "fts5" ]; then
+  # pip install athenaeum provides the search module
+  python3 -c "
+import sys, os
+sys.path.insert(0, os.path.join(os.environ.get('ATHENAEUM_SRC', ''), 'src'))
+from athenaeum.search import build_fts5_index
+count = build_fts5_index(sys.argv[1], sys.argv[2])
+print(f'[Knowledge] FTS5 index: {count} wiki pages', file=sys.stderr)
+" "$WIKI_ROOT" "$CACHE_DIR" 2>&1 || true
+fi
