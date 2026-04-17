@@ -39,7 +39,13 @@ CONFIG_ENV="${CACHE_DIR}/config.env"
 PYTHON="${ATHENAEUM_PYTHON:-python3}"
 
 [ -d "$WIKI_ROOT" ] || exit 0
+
+# Cache dir holds ANTHROPIC_API_KEY in config.env. Restrict to owner-only
+# before writing anything, and set umask so new files inherit mode 600.
+# Prevents a brief window where a freshly-written key is world-readable.
 mkdir -p "$CACHE_DIR"
+chmod 700 "$CACHE_DIR"
+umask 077
 
 # ── Read config ────────────────────────────────────────────────────────────
 _read_config_ok=false
@@ -106,11 +112,14 @@ source "$CONFIG_ENV"
 _KEY_PATH="${ATHENAEUM_OP_KEY_PATH:-op://Agent Tools/Anthropic API Key/credential}"
 if [ -z "${ANTHROPIC_API_KEY:-}" ] && command -v op >/dev/null 2>&1; then
   if _fetched_key="$(op read "$_KEY_PATH" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
-    tmp_env="${CONFIG_ENV}.tmp"
+    # mktemp inside the (already-restricted) cache dir — gives us an
+    # unpredictable path mode 600 atomically, closing the window where
+    # `${CONFIG_ENV}.tmp` could have been pre-created as a symlink or
+    # read in the gap between open() and chmod().
+    tmp_env=$(mktemp "${CACHE_DIR}/config.env.XXXXXX")
     grep -v '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" > "$tmp_env" 2>/dev/null || true
     printf 'ANTHROPIC_API_KEY=%s\n' "$_fetched_key" >> "$tmp_env"
     mv "$tmp_env" "$CONFIG_ENV"
-    chmod 600 "$CONFIG_ENV"
   fi
 fi
 

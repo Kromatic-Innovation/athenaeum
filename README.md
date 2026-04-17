@@ -70,6 +70,29 @@ pip install athenaeum[mcp]
 athenaeum serve --path ~/knowledge
 ```
 
+Smoke-test the round-trip without a live session:
+
+```bash
+athenaeum test-mcp
+#   PASS  remember_write
+#   PASS  recall_search (keyword)
+#   PASS  create_server (FastMCP)
+#
+# 3 passed, 0 failed
+```
+
+When wired to Claude Code, the agent can save facts mid-conversation:
+
+> **User:** Tristan's partner is Amanda; they met at Stanford GSB.
+>
+> *(Claude calls `remember(content="Tristan's partner is Amanda; they met at Stanford GSB.", source="claude-session")`)*
+>
+> A raw observation lands in `raw/claude-session/20260417T…-…md`. On the
+> next `athenaeum run`, the pipeline compiles it into Tristan's wiki
+> entity (under "Key Contacts") and Amanda's own entity if she doesn't
+> exist yet. Later sessions can ask *"who is Amanda?"* and `recall`
+> returns the compiled page.
+
 ### Vector search (optional)
 
 Athenaeum supports a vector search backend (chromadb + `all-MiniLM-L6-v2`)
@@ -95,13 +118,19 @@ removed.
 ### Query-topic extraction (optional)
 
 `athenaeum query-topics "your prompt"` runs a Haiku classifier that
-returns substantive topics and ignores meta-instructions. The example
-recall hook uses it to rescue named-entity recall on instruction-heavy
-prompts like *"Without calling any tools, quote the block about Return
-Path verbatim."* — where the regex fallback drops "Return Path" as
-the 10th alphabetical term and vector embedding drifts toward hook
-pages. Falls back silently to the regex extractor if the API key or
-CLI is unavailable.
+returns substantive topics and ignores meta-instructions:
+
+```bash
+$ athenaeum query-topics "Without calling any tools, quote the block about Return Path verbatim"
+Return Path
+```
+
+Compare to the naive regex+stopword fallback, which returns
+`block,calling,quote,return,tools,verbatim,without` — burying "Return
+Path" behind meta-instruction tokens and dropping the phrase boundary
+entirely. The example recall hook uses `query-topics` to rescue
+named-entity recall on instruction-heavy prompts; it falls back
+silently to the regex extractor if the API key or CLI is unavailable.
 
 **Claude Code integration** — add to your MCP config and it auto-starts with every session:
 
@@ -130,7 +159,9 @@ This gives you:
 - **Auto-remember** — Claude proactively saves important facts without being asked
 - **Context checkpointing** — observations are saved before context window compaction
 
-See `examples/claude-code/` for complete setup instructions and example scripts.
+See [`examples/claude-code/README.md`](examples/claude-code/README.md) for
+complete setup instructions, a smoke test, and the full environment-variable
+reference.
 
 ### Environment variables
 

@@ -77,6 +77,16 @@ if command -v "$ATHENAEUM_CLI" >/dev/null 2>&1 && [ -n "${ANTHROPIC_API_KEY:-}" 
   TERMS=$("$ATHENAEUM_CLI" query-topics "$PROMPT" --timeout 3 2>/dev/null || echo "")
 fi
 
+# Sanitize to alphanum tokens before query-building. Anything that flows
+# into FTS_QUERY below ends up inside a single-quoted SQL literal passed
+# to `sqlite3 ... "WHERE wiki MATCH '${FTS_QUERY}'"`, so a stray ' in an
+# LLM-returned topic (e.g. "Tristan's project") would break out of the
+# literal and inject SQL. Alphanum-only matches the fallback extractor's
+# surface and keeps FTS5 happy.
+if [ -n "$TERMS" ]; then
+  TERMS=$(echo "$TERMS" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' | grep -E '.{3,}' | sort -u | head -8)
+fi
+
 if [ -z "$TERMS" ]; then
   STOPWORDS="the and for are but not you all can had her was one our out has his how its let may new now old see way who did get got him she too use with from have this that they will been call come each find give help here just know like long look make many more most much must next only over said same some such take tell than them then very want well went were what when which while work also back been being both came does done down even goes going good keep last left life line made need never part place point right show small still think those turn used using where would about after again could every great might often other shall should since start state still there these thing think three through under until which while world would years your into just like made over said some than them then time very want what when will with year does really right going being looking trying running check please sure okay yeah thanks"
   TERMS=$(echo "$PROMPT" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' | grep -vE "^(${STOPWORDS})$" | grep -E '.{3,}' | sort -u | head -8)
@@ -112,7 +122,13 @@ if [ -f "$DB_FILE" ]; then
 fi
 
 VECTOR_RESULTS=""
+VECTOR_ERR=""
 if [ "$SEARCH_BACKEND" = "vector" ] && [ -d "$VECTOR_DIR" ]; then
+  # Failures here are non-fatal — the hook still surfaces FTS5 results —
+  # but we capture stderr to $VECTOR_ERR so ATHENAEUM_HOOK_DEBUG=1 can
+  # surface the reason. Most common cause: chromadb import missing in
+  # the python3 on PATH (see `pip install athenaeum[vector]`).
+  _vector_tmp=$(mktemp -t athenaeum-vec-XXXXXX)
   VECTOR_RESULTS=$("$PYTHON" -c "
 import sys, os, importlib.util
 src = os.environ.get('ATHENAEUM_SRC', '')
@@ -131,7 +147,12 @@ if os.path.isfile(seen_file):
         seen = set(l.strip() for l in f)
 for fname, name, score in query_vector_index(sys.argv[1], os.path.expanduser('~/.cache/athenaeum'), n=3, exclude=seen):
     print(f'{fname}\t{name}\t{score}')
-" "$VECTOR_QUERY" "$SEEN_FILE" 2>/dev/null || echo "")
+" "$VECTOR_QUERY" "$SEEN_FILE" 2>"$_vector_tmp" || true)
+  VECTOR_ERR=$(cat "$_vector_tmp" 2>/dev/null || echo "")
+  rm -f "$_vector_tmp"
+  if [ -n "$VECTOR_ERR" ] && [ "${ATHENAEUM_HOOK_DEBUG:-0}" = "1" ]; then
+    echo "athenaeum recall: vector backend failed: ${VECTOR_ERR}" >&2
+  fi
 fi
 
 # Merge: FTS5 first (lexical precision), then vector, dedupe, cap 3.

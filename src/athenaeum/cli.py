@@ -182,7 +182,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         return 1
 
     cfg = load_config(target)
-    backend = cfg.get("search_backend", "keyword")
+    backend = cfg.get("search_backend", "fts5")
     cache_dir = Path("~/.cache/athenaeum").expanduser()
 
     server = create_server(
