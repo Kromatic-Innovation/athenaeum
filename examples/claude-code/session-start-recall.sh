@@ -21,6 +21,11 @@
 # Environment variables:
 #   KNOWLEDGE_ROOT       Path to knowledge directory (default: ~/knowledge)
 #   KNOWLEDGE_WIKI_PATH  Path to wiki directory (default: $KNOWLEDGE_ROOT/wiki)
+#   ATHENAEUM_PYTHON     Python interpreter with athenaeum deps (default: python3)
+#   ATHENAEUM_SRC        Path to athenaeum source checkout (optional; enables
+#                        importlib-based loading that bypasses the package
+#                        __init__.py — useful when running from a checkout
+#                        where optional deps like anthropic aren't installed)
 
 set -euo pipefail
 
@@ -28,6 +33,7 @@ KNOWLEDGE_ROOT="${KNOWLEDGE_ROOT:-$HOME/knowledge}"
 WIKI_ROOT="${KNOWLEDGE_WIKI_PATH:-$KNOWLEDGE_ROOT/wiki}"
 CACHE_DIR="${HOME}/.cache/athenaeum"
 CONFIG_ENV="${CACHE_DIR}/config.env"
+PYTHON="${ATHENAEUM_PYTHON:-python3}"
 
 if [ ! -d "$WIKI_ROOT" ]; then
   exit 0
@@ -39,10 +45,19 @@ mkdir -p "$CACHE_DIR"
 # Try athenaeum Python module; fall back to pure-shell YAML parsing.
 _read_config_ok=false
 
-if python3 -c "
-import sys, os
-sys.path.insert(0, os.path.join(os.environ.get('ATHENAEUM_SRC', ''), 'src'))
-from athenaeum.config import load_config
+if "$PYTHON" -c "
+import sys, os, importlib.util
+src = os.environ.get('ATHENAEUM_SRC', '')
+# Prefer importlib loader from a source checkout (avoids package __init__.py
+# pulling in anthropic/librarian when only the config module is needed).
+cfg_path = os.path.join(src, 'src/athenaeum/config.py') if src else ''
+if cfg_path and os.path.isfile(cfg_path):
+    spec = importlib.util.spec_from_file_location('athenaeum_config_only', cfg_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    load_config = mod.load_config
+else:
+    from athenaeum.config import load_config
 cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else None)
 env_path = sys.argv[2]
 with open(env_path, 'w') as f:
@@ -86,11 +101,17 @@ source "$CONFIG_ENV"
 
 # ── Build search index ─────────────────────────────────────────────────────
 if [ "$SEARCH_BACKEND" = "fts5" ]; then
-  # pip install athenaeum provides the search module
-  python3 -c "
-import sys, os
-sys.path.insert(0, os.path.join(os.environ.get('ATHENAEUM_SRC', ''), 'src'))
-from athenaeum.search import build_fts5_index
+  "$PYTHON" -c "
+import sys, os, importlib.util
+src = os.environ.get('ATHENAEUM_SRC', '')
+search_path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
+if search_path and os.path.isfile(search_path):
+    spec = importlib.util.spec_from_file_location('athenaeum_search_only', search_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    build_fts5_index = mod.build_fts5_index
+else:
+    from athenaeum.search import build_fts5_index
 count = build_fts5_index(sys.argv[1], sys.argv[2])
 print(f'[Knowledge] FTS5 index: {count} wiki pages', file=sys.stderr)
 " "$WIKI_ROOT" "$CACHE_DIR" 2>&1 || true
