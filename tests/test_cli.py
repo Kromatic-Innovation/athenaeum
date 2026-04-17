@@ -106,6 +106,60 @@ class TestRebuildIndex:
         assert "Unknown search backend" in capsys.readouterr().err
 
 
+class TestServe:
+    """`athenaeum serve` must forward the configured search_backend + cache_dir
+    to create_server so the MCP `recall` tool uses the vector index when the
+    user has configured `search_backend: vector`. Regression guard against the
+    bug where serve hard-coded defaults (keyword) and silently ignored
+    athenaeum.yaml."""
+
+    def test_serve_reads_vector_backend_from_config(
+        self, knowledge_with_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (knowledge_with_wiki / "athenaeum.yaml").write_text(
+            "auto_recall: true\nsearch_backend: vector\n"
+        )
+        captured: dict[str, object] = {}
+
+        class _FakeServer:
+            def run(self) -> None:
+                raise KeyboardInterrupt
+
+        def _fake_create_server(**kwargs: object) -> _FakeServer:
+            captured.update(kwargs)
+            return _FakeServer()
+
+        import athenaeum.mcp_server as mcp_mod
+        monkeypatch.setattr(mcp_mod, "create_server", _fake_create_server)
+
+        rc = main(["serve", "--path", str(knowledge_with_wiki)])
+        assert rc == 0
+        assert captured["search_backend"] == "vector"
+        assert captured["wiki_root"] == knowledge_with_wiki / "wiki"
+        assert captured["raw_root"] == knowledge_with_wiki / "raw"
+        assert captured["cache_dir"] is not None
+
+    def test_serve_defaults_to_fts5_from_config_defaults(
+        self, knowledge_with_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        class _FakeServer:
+            def run(self) -> None:
+                raise KeyboardInterrupt
+
+        def _fake_create_server(**kwargs: object) -> _FakeServer:
+            captured.update(kwargs)
+            return _FakeServer()
+
+        import athenaeum.mcp_server as mcp_mod
+        monkeypatch.setattr(mcp_mod, "create_server", _fake_create_server)
+
+        rc = main(["serve", "--path", str(knowledge_with_wiki)])
+        assert rc == 0
+        assert captured["search_backend"] == "fts5"
+
+
 class TestTestMcp:
     def test_all_steps_pass_with_fastmcp_available(
         self, capsys: pytest.CaptureFixture[str]
