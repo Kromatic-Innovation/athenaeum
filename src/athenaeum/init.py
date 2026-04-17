@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Initialize a new knowledge directory with standard structure and schema files."""
 
 from __future__ import annotations

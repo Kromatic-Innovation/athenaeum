@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Athenaeum configuration loader.
 
 Reads ``athenaeum.yaml`` from the knowledge directory root to control

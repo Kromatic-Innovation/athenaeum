@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """LLM-based topic extraction for query rewriting.
 
 The UserPromptSubmit hook's recall quality degrades on instruction-heavy

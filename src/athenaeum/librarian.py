@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Knowledge librarian — tiered compilation pipeline.
 
 Processes raw intake files from a knowledge directory's raw/ folder into wiki

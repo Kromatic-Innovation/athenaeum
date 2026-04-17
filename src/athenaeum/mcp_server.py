@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """MCP memory server — read/write gate for an Athenaeum knowledge base.
 
 Tools:
