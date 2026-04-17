@@ -83,6 +83,22 @@ The server exposes two tools:
 Raw files written by `remember` are compiled into wiki entities on the next
 `athenaeum run`.
 
+#### Transparent sidecar (hooks)
+
+For a fully transparent experience where Claude automatically recalls context and
+saves observations without explicit commands, configure Claude Code hooks:
+
+1. **Copy the example hooks** from `examples/claude-code/` to your scripts directory
+2. **Add hook entries** to `~/.claude/settings.json` (see `examples/claude-code/settings-snippet.json`)
+3. **Add CLAUDE.md instructions** for proactive memory (see `examples/claude-code/CLAUDE.md.example`)
+
+This gives you:
+- **Auto-recall** — relevant wiki pages are injected at session start based on your working directory
+- **Auto-remember** — Claude proactively saves important facts without being asked
+- **Context checkpointing** — observations are saved before context window compaction
+
+See `examples/claude-code/` for complete setup instructions and example scripts.
+
 ### Environment variables
 
 | Variable | Required | Description |

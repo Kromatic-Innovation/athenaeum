@@ -1,0 +1,27 @@
+{
+  "_comment": "Add these hook entries to ~/.claude/settings.json to enable transparent athenaeum integration.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/session-start-recall.sh 2>/dev/null || true",
+            "timeout": 15,
+            "statusMessage": "Loading knowledge context..."
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/pre-compact-save.sh 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

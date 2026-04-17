@@ -1,0 +1,38 @@
+# Athenaeum Knowledge Integration
+
+## Persistent Knowledge (Athenaeum)
+
+This environment uses [athenaeum](https://github.com/Kromatic-Innovation/athenaeum)
+for persistent knowledge across sessions. The MCP server provides `remember` and
+`recall` tools connected to the knowledge base.
+
+### Auto-recall (session start)
+
+At the start of each session, relevant wiki context is injected automatically via
+the SessionStart hook. For deeper searches, call `recall` with specific keywords.
+
+### Auto-remember (proactive)
+
+When you encounter important facts during a session, proactively call `remember` to
+save them to the knowledge base. The user should **never need to say "remember this"**
+-- you should notice and save important information automatically.
+
+**What to remember:**
+- Key decisions and their rationale
+- People, relationships, and organizational roles
+- Project status changes, milestones, and deadlines
+- Technical architecture decisions
+- Meeting outcomes and action items
+- Company/product information learned from conversation
+
+**What NOT to remember:**
+- Code already in version control (the code is the source of truth)
+- Transient debugging state or error messages
+- Information already documented in CLAUDE.md, AGENTS.md, or README files
+- Your own analysis or opinions (save facts, not interpretations)
+
+### How it works
+
+1. Raw observations go to `~/knowledge/raw/claude-session/` via `remember`
+2. The librarian pipeline (`athenaeum run`) compiles raw files into wiki entities
+3. Future sessions search the wiki via `recall` or the SessionStart hook
