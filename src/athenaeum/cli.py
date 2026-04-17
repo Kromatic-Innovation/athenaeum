@@ -72,6 +72,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Enable debug logging",
     )
 
+    # test-mcp command — smoke-test the MCP memory setup without a session
+    test_mcp_parser = subparsers.add_parser(
+        "test-mcp",
+        help="Smoke-test MCP remember/recall against a synthetic knowledge dir",
+    )
+    test_mcp_parser.add_argument(
+        "--keep", action="store_true",
+        help="Don't delete the temp knowledge dir on exit (for debugging)",
+    )
+
     # rebuild-index command — rebuild the search index out-of-band
     rebuild_parser = subparsers.add_parser(
         "rebuild-index",
@@ -110,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "rebuild-index":
         return _cmd_rebuild_index(args)
+
+    if args.command == "test-mcp":
+        return _cmd_test_mcp(args)
 
     return 0
 
@@ -214,6 +227,88 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
 
     print(f"Unknown search backend: {backend}", file=sys.stderr)
     return 1
+
+
+def _cmd_test_mcp(args: argparse.Namespace) -> int:
+    """Smoke-test the MCP remember/recall round-trip without a live session.
+
+    MCP tools are only callable from within a running Claude Code session
+    (the tool list is established at session start). This command exercises
+    the underlying functions directly against a synthetic knowledge dir so
+    users can verify their athenaeum install works before relying on it.
+
+    Steps:
+      1. remember_write  — appends a test observation to raw/
+      2. recall_search   — keyword search against a seeded wiki page
+      3. create_server   — verifies FastMCP is importable and the server
+                           factory returns a configured instance
+    """
+    import shutil
+    import tempfile
+
+    from athenaeum.mcp_server import recall_search, remember_write
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="athenaeum-test-mcp-"))
+    raw_root = tmp_root / "raw"
+    wiki_root = tmp_root / "wiki"
+    raw_root.mkdir()
+    wiki_root.mkdir()
+
+    (wiki_root / "test-page.md").write_text(
+        "---\n"
+        "name: Athenaeum Test Page\n"
+        "tags: [smoke-test]\n"
+        "description: Seeded page used by `athenaeum test-mcp` to exercise recall.\n"
+        "---\n\n"
+        "This page contains the keyword ATHENAEUMSMOKETEST for recall verification.\n"
+    )
+
+    passed: list[str] = []
+    failed: list[tuple[str, str]] = []
+
+    def _record(name: str, ok: bool, detail: str = "") -> None:
+        if ok:
+            passed.append(name)
+            print(f"  PASS  {name}")
+        else:
+            failed.append((name, detail))
+            print(f"  FAIL  {name}: {detail}", file=sys.stderr)
+
+    print(f"Testing athenaeum MCP setup (temp dir: {tmp_root})")
+
+    try:
+        result = remember_write(
+            raw_root,
+            "Smoke test observation from `athenaeum test-mcp`.",
+            source="test-mcp",
+        )
+        written = list((raw_root / "test-mcp").glob("*.md"))
+        ok = result.startswith("Saved to ") and len(written) == 1
+        _record("remember_write", ok, f"unexpected result: {result!r}")
+
+        result = recall_search(wiki_root, "ATHENAEUMSMOKETEST", top_k=3)
+        ok = "Athenaeum Test Page" in result
+        _record("recall_search (keyword)", ok, f"no match in: {result[:200]!r}")
+
+        try:
+            from athenaeum.mcp_server import create_server
+
+            server = create_server(raw_root=raw_root, wiki_root=wiki_root)
+            ok = server is not None and hasattr(server, "run")
+            _record("create_server (FastMCP)", ok, "factory returned unusable object")
+        except ImportError as exc:
+            _record(
+                "create_server (FastMCP)", False,
+                f"FastMCP not installed: {exc}. Install with: pip install athenaeum[mcp]",
+            )
+    finally:
+        if args.keep:
+            print(f"\nTemp dir preserved at: {tmp_root}")
+        else:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    print(f"\n{len(passed)} passed, {len(failed)} failed")
+    return 0 if not failed else 1
 
 
 def _get_version() -> str:

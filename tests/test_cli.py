@@ -104,3 +104,55 @@ class TestRebuildIndex:
         ])
         assert rc == 1
         assert "Unknown search backend" in capsys.readouterr().err
+
+
+class TestTestMcp:
+    def test_all_steps_pass_with_fastmcp_available(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        pytest.importorskip("fastmcp")
+        rc = main(["test-mcp"])
+        captured = capsys.readouterr()
+        assert rc == 0, f"stdout: {captured.out}\nstderr: {captured.err}"
+        assert "PASS  remember_write" in captured.out
+        assert "PASS  recall_search (keyword)" in captured.out
+        assert "PASS  create_server (FastMCP)" in captured.out
+        assert "3 passed, 0 failed" in captured.out
+
+    def test_keep_flag_preserves_temp_dir(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        pytest.importorskip("fastmcp")
+        rc = main(["test-mcp", "--keep"])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "Temp dir preserved at:" in captured.out
+
+        marker = "Temp dir preserved at: "
+        line = next(
+            line for line in captured.out.splitlines() if line.startswith(marker)
+        )
+        kept_dir = Path(line[len(marker):].strip())
+        try:
+            assert kept_dir.is_dir()
+            assert (kept_dir / "wiki" / "test-page.md").is_file()
+            assert list((kept_dir / "raw" / "test-mcp").glob("*.md"))
+        finally:
+            import shutil
+            shutil.rmtree(kept_dir, ignore_errors=True)
+
+    def test_reports_fastmcp_missing(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import athenaeum.mcp_server as mcp_mod
+
+        def _raise(*_a: object, **_k: object) -> None:
+            raise ImportError("no module named 'fastmcp'")
+
+        monkeypatch.setattr(mcp_mod, "create_server", _raise)
+        rc = main(["test-mcp"])
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "FAIL  create_server" in captured.err
+        assert "pip install athenaeum[mcp]" in captured.err
+        assert "2 passed, 1 failed" in captured.out
