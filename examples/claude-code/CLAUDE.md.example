@@ -6,10 +6,15 @@ This environment uses [athenaeum](https://github.com/Kromatic-Innovation/athenae
 for persistent knowledge across sessions. The MCP server provides `remember` and
 `recall` tools connected to the knowledge base.
 
-### Auto-recall (session start)
+### Auto-recall (task-driven)
 
-At the start of each session, relevant wiki context is injected automatically via
-the SessionStart hook. For deeper searches, call `recall` with specific keywords.
+A lightweight SessionStart hook injects a few wiki page names based on the working
+directory, but it doesn't know what the session is about yet. **After understanding
+the user's first message**, call `recall` with keywords relevant to the actual task
+(people mentioned, project names, technical concepts). This is the real context load.
+
+Call `recall` again whenever a new topic, person, or project comes up that might have
+wiki context.
 
 ### Auto-remember (proactive)
 
