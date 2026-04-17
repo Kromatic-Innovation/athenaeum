@@ -148,6 +148,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
+    from athenaeum.config import load_config
     from athenaeum.mcp_server import create_server
 
     target = args.path.expanduser().resolve()
@@ -159,7 +160,16 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         print("Run 'athenaeum init --path {args.path}' first, then retry.")
         return 1
 
-    server = create_server(raw_root=raw_root, wiki_root=wiki_root)
+    cfg = load_config(target)
+    backend = cfg.get("search_backend", "keyword")
+    cache_dir = Path("~/.cache/athenaeum").expanduser()
+
+    server = create_server(
+        raw_root=raw_root,
+        wiki_root=wiki_root,
+        search_backend=backend,
+        cache_dir=cache_dir,
+    )
     try:
         server.run()
     except KeyboardInterrupt:
