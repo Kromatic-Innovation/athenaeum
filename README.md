@@ -119,11 +119,21 @@ search_backend: vector
 ```
 
 The recall hook runs a **hybrid FTS5 + vector merge** when vector is
-configured — FTS5 rescues short proper-noun queries that collide in
-vector space, vector discovers semantic neighbours with no lexical
-overlap. See [`docs/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/recall-architecture.md)
-for why the hybrid is load-bearing and what invariants must not be
-removed.
+configured. Each backend rescues a failure class the other one has:
+
+- **FTS5 rescues proper-noun collisions in embedding space.** Short queries
+  like `Return Path` embed closer to generic pages containing the word
+  "path" than to a sparse entity page about the company. FTS5 phrase
+  matching surfaces the entity. Vector-only recall misses it.
+- **Vector rescues semantic queries with no lexical overlap.** A query like
+  *"iterative feedback loops"* has no literal token overlap with
+  `Innovation Accounting`, but the vector index places them as neighbours.
+  FTS5-only recall misses it.
+
+Removing either backend collapses recall for its rescue class. See
+[`docs/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/recall-architecture.md)
+for the full walkthrough and the four invariants a future simplification
+must not remove.
 
 ### Query-topic extraction (optional)
 
@@ -235,6 +245,32 @@ Entity pages are indexed in `wiki/_index.md`, grouped by type.
 Conflicts requiring human review are appended to `wiki/_pending_questions.md`.
 
 At the end of each run, token usage and estimated costs are logged.
+
+## Known limitations (v0.2.x)
+
+Athenaeum is pre-1.0. The following trade-offs are intentional for this
+release and slated for revisit in v0.3:
+
+- **No retrieval benchmarks yet.** The hybrid-search claim rests on the
+  concrete failure modes above (proper-noun collision, no-overlap semantic
+  queries) and production use — not on a published eval against mem0 /
+  Letta / Zep / Cognee. If you need benchmarked recall@k on a closed
+  corpus, pick a tool that publishes numbers. If you want a knowledge base
+  that survives your tool choices, this is for you. PRs adding an eval
+  harness are very welcome.
+- **FTS5 index rebuilds are non-atomic and unlocked.** A shell hook and
+  the librarian run rebuilding simultaneously can race; the window is
+  small and single-user wikis do not hit it in practice, but multi-writer
+  safety is v0.3 work. Workaround: don't invoke `athenaeum rebuild-index`
+  and `athenaeum run` concurrently on the same `$KNOWLEDGE_ROOT`.
+- **The `keyword` search backend is a scan-on-query fallback.** It reads
+  every wiki page on every query; fine under ~1,000 entities, painful
+  past that. Use `search_backend: fts5` (default in the CLI and hooks)
+  for any non-trivial wiki. The keyword backend exists as a
+  zero-dependency baseline for tests and bootstrap.
+- **Tier 4 (human escalation) is a file, not a workflow.** Conflicts land
+  in `wiki/_pending_questions.md`; you read it and decide. No PR-opening,
+  no Slack integration, no UI — on purpose, for now.
 
 ## Development
 

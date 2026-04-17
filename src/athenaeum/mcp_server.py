@@ -167,12 +167,18 @@ def remember_write(
         return "Error: source must contain at least one alphanumeric character."
 
     target_dir = (raw_root / safe_source).resolve()
+    raw_root_resolved = raw_root.resolve()
 
-    # Guard: must stay inside raw_root, never touch wiki
-    if not str(target_dir).startswith(str(raw_root.resolve())):
+    # Guard: must stay inside raw_root, never touch wiki. Use Path.is_relative_to
+    # rather than string-prefix compare — str.startswith("/a/raw") matches
+    # "/a/raw-sibling" and would accept a traversal that the filesystem sees
+    # as a sibling directory, not a descendant.
+    if not (target_dir == raw_root_resolved or target_dir.is_relative_to(raw_root_resolved)):
         return "Error: path traversal detected \u2014 writes are restricted to raw/."
-    if wiki_root and str(target_dir).startswith(str(wiki_root.resolve())):
-        return "Error: writes to wiki/ are not allowed."
+    if wiki_root:
+        wiki_root_resolved = wiki_root.resolve()
+        if target_dir == wiki_root_resolved or target_dir.is_relative_to(wiki_root_resolved):
+            return "Error: writes to wiki/ are not allowed."
 
     target_dir.mkdir(parents=True, exist_ok=True)
 

@@ -173,6 +173,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     target = args.path.expanduser().resolve()
     if not target.exists():
         print(f"Knowledge directory not found: {target}")
+        print(f"Run 'athenaeum init --path {args.path}' first, then retry.")
         return 1
     info = status(target)
     print(format_status(info))

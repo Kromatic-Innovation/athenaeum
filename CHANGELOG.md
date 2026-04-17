@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-04-17
+
+Pre-blog-post review pass. Non-breaking fixes surfaced by a final
+persona-subagent audit (QA / Design / Developer / Operations / Strategy)
+before the public write-up. No behaviour changes for existing users; every
+item is hardening, doc clarity, or test-quality.
+
+### Fixed
+- **`remember_write` path-traversal guard** replaced string-prefix
+  comparison (`str.startswith`) with `Path.is_relative_to`. The old form
+  accepted `/a/raw` against `/a/raw-sibling` as a "descendant" — a
+  traversal the filesystem treats as a sibling directory. The new form
+  resolves both paths and uses the containment check.
+- **`athenaeum status` pre-init hint** now matches `serve`: prints the
+  remediation `Run 'athenaeum init --path ...' first, then retry.` instead
+  of bailing with a bare "not found" line.
+- **CI matrix installs `[dev,vector]`** so chromadb is in the test env.
+  `TestVectorBackend` and the new hybrid rescue-class tests would have
+  shown up as `importorskip` skips on GitHub Actions without this change.
+- **CI actions pinned by SHA** to match `release.yml` (supply-chain
+  hardening against tag retag attacks).
+
+### Added
+- **Hook README explains the two-phase pipeline** — new "How the sidecar
+  works (read this first)" section makes the raw→wiki compile step
+  explicit, plus a step-6 walk-through for scheduling periodic
+  `athenaeum run` via cron or launchd, plus a troubleshooting row for
+  "`remember` saves but `recall` finds nothing" (which is the expected
+  state until compilation runs).
+- **Main README "Known limitations (v0.2.x)" section** — no retrieval
+  benchmarks yet, FTS5 rebuild non-atomic+unlocked, keyword backend is
+  scan-on-query, Tier 4 is a file not a workflow. Sets adopter
+  expectations up front instead of surfacing them in issues.
+- **Main README vector-search section expanded** with the concrete
+  rescue-class evidence (proper-noun collision: `Return Path`; no-overlap
+  semantic query: `iterative feedback loops` → Innovation Accounting) and
+  a pointer to `docs/recall-architecture.md`.
+- **`tests/test_roundtrip.py`** — end-to-end integration pinning
+  init → remember → seed wiki → rebuild-index → recall with an explicit
+  `--cache-dir` (regression guard for the class of bugs where a path
+  default drifts and layers still pass their own unit tests but no
+  longer talk to each other). Also pins that the keyword backend works
+  without any cache on fresh installs.
+- **`TestHybridRescueClasses` in `tests/test_search.py`** — builds a
+  synthetic wiki that exposes each backend's blind spot (short proper
+  noun for vector; semantic no-overlap query for FTS5) and asserts each
+  backend rescues its class while the other misses it. Without this
+  pin, a future simplification that drops one backend still passes
+  `test_query_finds_match` on obvious lexical queries and quietly
+  regresses the rescue path.
+- **`TestWarnIfBackendCacheMissing` in `tests/test_cli.py`** — exercises
+  all four branches of the startup warning (keyword no-op, fts5 missing,
+  vector missing, unknown backend) so the silent-zero-hits failure mode
+  can't regress.
+- **`tests/test_query_topics.py::test_returns_empty_when_api_raises`**
+  extended with a `caplog` assertion pinning the WARNING-level log and
+  the exception class name on API failures.
+
+### Changed
+- **Test assertions tightened** — several tests used `or` / loose
+  containment where `and` / explicit-equality was meant. Most load-bearing
+  of these: `test_recall_skips_underscore_files` (was masked by the
+  trivial-pass shape `"score:" not in result or "_index" not in result`
+  when "No wiki pages matched" was returned); `test_tiers.py:558`
+  escalation description now asserts both `fintech` AND `pivot`;
+  `test_shell_hooks.py::test_exits_clean_with_no_index` now asserts
+  stderr is clean of `Traceback` / `syntax error` / `command not found`
+  so "crashed quietly" can't pass as "correctly bailed."
+- **`_snippet` offset math now pinned** by two new tests covering the
+  match-near-start (trailing ellipsis) and match-near-end (leading
+  ellipsis) branches.
+
 ## [0.2.1] - 2026-04-17
 
 Final pre-public-announce review pass. No user-visible behaviour changes;
