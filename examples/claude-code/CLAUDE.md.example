@@ -1,0 +1,60 @@
+# Athenaeum Knowledge Integration
+
+## Persistent Knowledge (Athenaeum)
+
+This environment uses [athenaeum](https://github.com/Kromatic-Innovation/athenaeum)
+for persistent knowledge across sessions. The MCP server provides `remember` and
+`recall` tools connected to the knowledge base.
+
+### Auto-recall (task-driven)
+
+A lightweight SessionStart hook injects a few wiki page names based on the working
+directory, but it doesn't know what the session is about yet. **After understanding
+the user's first message**, call `recall` with keywords relevant to the actual task
+(people mentioned, project names, technical concepts). This is the real context load.
+
+Call `recall` again whenever a new topic, person, or project comes up that might have
+wiki context.
+
+### Auto-remember (proactive)
+
+When you encounter important facts during a session, proactively call `remember` to
+save them to the knowledge base. The user should **never need to say "remember this"**
+-- you should notice and save important information automatically.
+
+The authoritative list of **what to capture and what to skip** lives in
+`~/knowledge/wiki/_schema/observation-filter.md`. Read that file at the start of a
+session (or when it's been edited). The sections you care about:
+
+- **Always Capture** — save these whenever encountered
+- **Capture When Reinforced** — save these once the user signals they matter
+- The file may also list user-specific exclusions under a **Never Capture** section
+
+A conservative default if the filter file is missing: save decisions, people,
+project status, architecture choices, meeting outcomes; skip code already in
+version control, transient debugging state, and your own interpretations.
+
+### Tuning the observation filter
+
+The filter file is designed to evolve based on user feedback. When the user gives
+you signal about what should or shouldn't be remembered, **update the filter file
+directly** using your Edit tool. Examples of signals:
+
+- "Stop saving X" / "you're being too noisy about Y" → add Y to a **Never Capture**
+  section (create the section if it doesn't exist)
+- "You should have remembered Z" / "make sure to save things like Z" → add Z under
+  **Always Capture** or, if tentative, **Capture When Reinforced**
+- "Remember more about my <hobby/topic>" → promote that topic into the filter
+
+After editing the filter, call `remember` to save a short meta-observation noting
+the change and its rationale (e.g., "Added 'Never Capture: error message snippets'
+per user feedback 2026-04-17"). This creates an audit trail in raw/ so the tuning
+is preserved if the filter file is ever lost.
+
+### How it works
+
+1. Raw observations go to `~/knowledge/raw/claude-session/` via `remember`
+2. The librarian pipeline (`athenaeum run`) compiles raw files into wiki entities
+3. Future sessions search the wiki via `recall` or the SessionStart hook
+4. User feedback about what to capture reshapes `observation-filter.md`, which
+   future sessions read as the authority
