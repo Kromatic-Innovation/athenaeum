@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **p95 search-latency benchmark harness** (#69) — new
+  `tests/benchmarks/test_search_bench.py` checks in the ad-hoc benchmark
+  used for the Session-2 recall budget as a pytest-benchmark fixture.
+  One bench per backend (keyword, fts5; vector opt-in via
+  `ATHENAEUM_BENCH_VECTOR=1`), asserts p95 stays within 20% of a locally
+  pinned baseline. Ignored by the default `pytest` run (so CI stays
+  fast); execute with `pytest tests/benchmarks/ --benchmark-only`.
+  `pytest-benchmark` is an optional `[bench]` extra, not a runtime dep.
 - **Auto-memory cluster pass (C2)** (#196) — new `athenaeum.clusters`
   module groups `AutoMemoryFile` records into near-duplicate clusters
   using the existing chromadb `VectorBackend` embedder (no parallel
