@@ -314,7 +314,10 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
     try:
         count = ingest_answers(pending_path, raw_root)
     except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
-        print(f"Fatal error ingesting answers: {exc}", file=sys.stderr)
+        print(
+            f"Fatal error ingesting answers ({type(exc).__name__}): {exc}",
+            file=sys.stderr,
+        )
         return 2
 
     print(f"Ingested {count} answered question(s).")
