@@ -349,7 +349,8 @@ class TestPendingQuestionMCPTools:
         pending_path = root / "wiki" / "_pending_questions.md"
         result = resolve_by_id(pending_path, "nope", "answer")
         assert result["ok"] is False
-        assert "not found" in result["error"]
+        assert result["error_code"] == "id_not_found"
+        assert "not found" in result["message"]
 
     def test_list_empty_when_file_missing(self, tmp_path: Path) -> None:
         from athenaeum.answers import list_unanswered
