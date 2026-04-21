@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Auto-memory cluster pass (C2)** (#196) — new `athenaeum.clusters`
+  module groups `AutoMemoryFile` records into near-duplicate clusters
+  using the existing chromadb `VectorBackend` embedder (no parallel
+  embedding pipeline). Single-linkage clustering with cosine cutoff
+  configurable via `librarian.cluster_threshold` (default 0.55, tuned
+  against the voltaire/nanoclaw regression fixture). Writes JSONL cluster
+  report to `raw/_librarian-clusters.jsonl` with rotated timestamped
+  siblings. New `--cluster-only` CLI flag skips the tier pipeline. C3
+  merge (#197) consumes the JSONL output.
 - **Auto-memory ingest path** (#195) — librarian now discovers files
   under `raw/auto-memory/<scope>/*.md` as a parallel intake channel
   alongside the entity-schema `discover_raw_files`. New
