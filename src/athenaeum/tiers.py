@@ -461,16 +461,40 @@ def tier3_write(
 # Tier 4 — Human escalation
 # ---------------------------------------------------------------------------
 
+def _question_from_description(description: str, entity_name: str, conflict_type: str) -> str:
+    """Derive a one-line question for the checkbox row.
+
+    Uses the first non-empty line of the description, trimmed to a single
+    line (no newlines, no leading markdown bullets). Falls back to a canned
+    prompt if the description is empty.
+    """
+    for raw_line in description.splitlines():
+        line = raw_line.strip().lstrip("-*").strip()
+        if line:
+            return line
+    return f"Resolve {conflict_type} conflict for {entity_name}"
+
+
 def tier4_escalate(items: list[EscalationItem], pending_path: Path) -> None:
-    """Append escalation items to _pending_questions.md."""
+    """Append escalation items to ``_pending_questions.md``.
+
+    Each block is rendered with a leading checkbox line directly under the
+    header so the user (or the ``resolve_question`` MCP tool) can flip
+    ``[ ]`` -> ``[x]`` to mark an answer; ``athenaeum ingest-answers`` then
+    converts the block to a raw intake file. See ``athenaeum.answers``.
+    """
     if not items:
         return
 
     today = date.today().isoformat()
     sections: list[str] = []
     for item in items:
+        question = _question_from_description(
+            item.description, item.entity_name, item.conflict_type
+        )
         sections.append(
-            f"## [{today}] Entity: \"{item.entity_name}\" (from {item.raw_ref})\n\n"
+            f"## [{today}] Entity: \"{item.entity_name}\" (from {item.raw_ref})\n"
+            f"- [ ] {question}\n\n"
             f"**Conflict type**: {item.conflict_type}\n"
             f"**Description**: {item.description}\n"
         )

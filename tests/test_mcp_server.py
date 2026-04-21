@@ -292,6 +292,98 @@ class TestCreateServer:
 
 
 # ---------------------------------------------------------------------------
+# Pending-questions tools (issue #61)
+# ---------------------------------------------------------------------------
+
+
+def _seed_pending_wiki(tmp_path: Path, *, answered: bool = False) -> Path:
+    """Build a tmp knowledge dir with a seeded `_pending_questions.md`."""
+    raw = tmp_path / "raw"
+    wiki = tmp_path / "wiki"
+    raw.mkdir()
+    wiki.mkdir()
+    checkbox = "[x]" if answered else "[ ]"
+    pending = wiki / "_pending_questions.md"
+    pending.write_text(
+        "# Pending Questions\n\n"
+        "## [2026-04-20] Entity: \"Acme Corp\" (from sessions/test.md)\n"
+        f"- {checkbox} Is Acme Series A or Series B after 2026?\n"
+        "**Conflict type**: principled\n"
+        "**Description**: Prior wiki says Series A; new raw implies Series B.\n"
+    )
+    return tmp_path
+
+
+class TestPendingQuestionMCPTools:
+    """The two tools registered in `create_server` for issue #61.
+
+    We exercise the underlying module helpers (same semantics as the tools)
+    and verify the tools themselves are registered on the FastMCP server.
+    """
+
+    def test_list_and_resolve_happy_path(self, tmp_path: Path) -> None:
+        from athenaeum.answers import list_unanswered, resolve_by_id
+
+        root = _seed_pending_wiki(tmp_path)
+        pending_path = root / "wiki" / "_pending_questions.md"
+
+        items = list_unanswered(pending_path)
+        assert len(items) == 1
+        item = items[0]
+        assert set(item.keys()) >= {
+            "id", "entity", "source", "question",
+            "conflict_type", "description", "created_at",
+        }
+        assert item["entity"] == "Acme Corp"
+
+        result = resolve_by_id(pending_path, item["id"], "Series B, closed March 2026.")
+        assert result["ok"] is True
+
+        # After resolve, list_unanswered no longer returns this item.
+        assert list_unanswered(pending_path) == []
+
+    def test_resolve_not_found(self, tmp_path: Path) -> None:
+        from athenaeum.answers import resolve_by_id
+
+        root = _seed_pending_wiki(tmp_path)
+        pending_path = root / "wiki" / "_pending_questions.md"
+        result = resolve_by_id(pending_path, "nope", "answer")
+        assert result["ok"] is False
+        assert "not found" in result["error"]
+
+    def test_list_empty_when_file_missing(self, tmp_path: Path) -> None:
+        from athenaeum.answers import list_unanswered
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        assert list_unanswered(wiki / "_pending_questions.md") == []
+
+    def test_tools_registered_on_server(self, tmp_path: Path) -> None:
+        """Both `list_pending_questions` + `resolve_question` must be exposed."""
+        pytest.importorskip("fastmcp")
+        import asyncio
+
+        from athenaeum.mcp_server import create_server
+
+        raw = tmp_path / "raw"
+        wiki = tmp_path / "wiki"
+        raw.mkdir()
+        wiki.mkdir()
+        server = create_server(raw_root=raw, wiki_root=wiki)
+
+        # FastMCP exposes tools via `get_tool(name)` (async). We only care
+        # that both names resolve without raising.
+        async def _lookup() -> tuple[object, object]:
+            lpq = await server.get_tool("list_pending_questions")
+            rq = await server.get_tool("resolve_question")
+            return lpq, rq
+
+        lpq, rq = asyncio.run(_lookup())
+        assert lpq is not None
+        assert rq is not None
+
+
+# ---------------------------------------------------------------------------
 # CLI integration
 # ---------------------------------------------------------------------------
 

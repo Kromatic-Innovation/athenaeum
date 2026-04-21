@@ -276,4 +276,49 @@ def create_server(
         """
         return remember_write(raw_root, content, source, wiki_root=wiki_root)
 
+    @mcp.tool()
+    def list_pending_questions() -> list[dict]:
+        """List unanswered pending questions.
+
+        Returns the unanswered blocks from ``wiki/_pending_questions.md`` in
+        a shape any agent can render — including containerized agents that
+        cannot touch the filesystem directly. Each item has ``id``,
+        ``entity``, ``source`` (the originating raw file), ``question``,
+        ``conflict_type``, ``description``, and ``created_at``.
+
+        The ``id`` is stable across runs as long as the block's header +
+        question text are unchanged, so an agent can call this tool,
+        present the list, and then call ``resolve_question`` with the id
+        of the chosen item.
+        """
+        from athenaeum.answers import list_unanswered
+
+        pending_path = wiki_root / "_pending_questions.md"
+        return list_unanswered(pending_path)
+
+    @mcp.tool()
+    def resolve_question(id: str, answer: str) -> dict:
+        """Flip a pending question to answered and write the answer body.
+
+        Locates the block by id, flips ``- [ ]`` -> ``- [x]``, and inserts
+        the answer text beneath the checkbox. This is a write to the
+        primary file only — archival to ``_pending_questions_archive.md``
+        and conversion to a raw intake file both happen on the next
+        ``athenaeum ingest-answers`` run (keeping this tool's write path
+        small and auditable).
+
+        Args:
+            id: The id returned by ``list_pending_questions``.
+            answer: The answer body (markdown; may be multi-line).
+
+        Returns:
+            ``{"ok": true, "block": "..."}`` on success, or
+            ``{"ok": false, "error": "..."}`` if the id is not found,
+            already answered, or the file is missing.
+        """
+        from athenaeum.answers import resolve_by_id
+
+        pending_path = wiki_root / "_pending_questions.md"
+        return resolve_by_id(pending_path, id, answer)
+
     return mcp

@@ -329,3 +329,45 @@ class TestTestMcp:
         assert "FAIL  create_server" in captured.err
         assert "pip install athenaeum[mcp]" in captured.err
         assert "2 passed, 1 failed" in captured.out
+
+
+class TestIngestAnswers:
+    """`athenaeum ingest-answers` subcommand (issue #61)."""
+
+    def test_missing_knowledge_dir_returns_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = main(["ingest-answers", "--path", str(tmp_path / "nope")])
+        assert rc == 1
+        assert "Knowledge directory not found" in capsys.readouterr().err
+
+    def test_noop_on_empty_pending_file(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tmp_path / "wiki").mkdir()
+        (tmp_path / "raw").mkdir()
+        rc = main(["ingest-answers", "--path", str(tmp_path)])
+        assert rc == 0
+        assert "Ingested 0" in capsys.readouterr().out
+
+    def test_ingests_answered_block(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        raw = tmp_path / "raw"
+        wiki.mkdir()
+        raw.mkdir()
+        (wiki / "_pending_questions.md").write_text(
+            "# Pending Questions\n\n"
+            "## [2026-04-20] Entity: \"Acme Corp\" (from sessions/test.md)\n"
+            "- [x] Question about Acme?\n"
+            "**Conflict type**: principled\n"
+            "**Description**: Conflicting Series info.\n"
+            "\n"
+            "Series B, closed March 2026.\n"
+        )
+        rc = main(["ingest-answers", "--path", str(tmp_path)])
+        assert rc == 0
+        assert "Ingested 1" in capsys.readouterr().out
+        assert list((raw / "answers").glob("*.md"))
+        assert (wiki / "_pending_questions_archive.md").exists()

@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-20
+
+Headline feature: **the Tier 4 escalation path is no longer write-only.**
+`_pending_questions.md` now supports a full answer loop — humans (or
+containerized agents via MCP) can resolve a pending question, and the
+librarian ingests the answer as raw intake on the next run. This closes
+the human-in-the-loop gap that shipped as a known limitation in 0.2.x.
+
+### Added
+- **`athenaeum ingest-answers` CLI** — scans `wiki/_pending_questions.md`,
+  converts each `[x]`-checked block into a raw intake file under
+  `raw/answers/{ISO-TS}-{entity-slug}.md` (with frontmatter linking back
+  to the original source), then moves the block into
+  `wiki/_pending_questions_archive.md`. Idempotent — re-running with no
+  new `[x]` blocks is a no-op. Malformed blocks are preserved in place
+  and logged to stderr, so a single corrupt entry cannot poison the
+  rest of the file.
+- **`athenaeum.answers` module** — new public surface exposing
+  `ingest_answers`, `parse_pending_questions`, `list_unanswered`, and
+  `resolve_by_id`. The parser tolerates both schema variants (blocks
+  split on `## ` headers or `---` dividers) and emits structured
+  `PendingQuestion` dataclasses.
+- **Two new MCP tools** — `list_pending_questions()` returns unanswered
+  blocks as JSON (id, entity, source, question, conflict_type,
+  description, created_at), and `resolve_question(id, answer)` flips
+  `- [ ]` -> `- [x]` and writes the answer body below the checkbox.
+  Archival is intentionally NOT done at resolve-time — it runs on the
+  next `ingest-answers` pass so the write path stays small and the
+  archive step is atomic.
+- **Checkbox render in `tier4_escalate`** — every new escalation now
+  renders a leading `- [ ] {question}` line directly under the header.
+  The question is derived from the first line of the LLM's description;
+  an empty description falls back to
+  `"Resolve {conflict_type} conflict for {entity}"`.
+- **`tests/test_answers.py`** — new file covering round-trip,
+  idempotency, mixed state, malformed-block tolerance, archive
+  newest-first ordering, and MCP-helper happy + error paths.
+
+### Changed
+- **`src/athenaeum/__init__.py`** `__version__` bumped `0.2.2 -> 0.3.0`
+  (was stale; pyproject was 0.2.3 on the prior release).
+- **`tier4_escalate` schema** gained the checkbox line. Existing consumers
+  that `.count("## [")` on the file for a pending-question total still
+  work unchanged (the header format is preserved verbatim).
+
 ## [0.2.3] - 2026-04-21
 
 Documentation and ops release accompanying the launch of
@@ -195,7 +240,10 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.2.3...v0.3.0
+[0.2.3]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Kromatic-Innovation/athenaeum/releases/tag/v0.1.0

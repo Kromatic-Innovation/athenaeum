@@ -102,6 +102,69 @@ Example round-trip:
 > exist yet. Later sessions can ask _"who is Amanda?"_ and `recall`
 > returns the compiled page.
 
+## Answering pending questions
+
+When Tier 3 can't resolve an ambiguity or a principled contradiction, the
+librarian escalates to `wiki/_pending_questions.md`. Each escalation lands
+as a block like:
+
+```markdown
+## [2026-04-20] Entity: "Acme Corp" (from sessions/20240406T120000Z-aabb0011.md)
+- [ ] Is Acme still Series A after the 2026 recapitalisation?
+**Conflict type**: principled
+**Description**: Prior wiki says Series A; the 2026-04 raw file implies Series B.
+```
+
+You resolve a question one of two ways — pick whichever fits your workflow:
+
+### Option 1 — Edit the file directly
+
+Flip `[ ]` to `[x]` on the checkbox line and type your answer below the
+checkbox (above or below the conflict-type / description lines — either
+works; the parser strips those metadata lines when extracting the answer):
+
+```markdown
+## [2026-04-20] Entity: "Acme Corp" (from sessions/20240406T120000Z-aabb0011.md)
+- [x] Is Acme still Series A after the 2026 recapitalisation?
+
+They closed Series B on 2026-03-12, led by Acme Growth Partners.
+The 2026-04 raw file is correct; the prior wiki entry is stale.
+
+**Conflict type**: principled
+**Description**: Prior wiki says Series A; the 2026-04 raw file implies Series B.
+```
+
+### Option 2 — Use the MCP tool
+
+For containerized agents that can't touch the filesystem, `athenaeum serve`
+exposes two tools:
+
+- `list_pending_questions()` returns unanswered blocks as JSON — each item
+  carries a stable `id` derived from the header + question text.
+- `resolve_question(id, answer)` flips the checkbox and writes the answer
+  body under it. It does **not** archive on its own — archival runs on the
+  next `ingest-answers` pass.
+
+### Step 2 — ingest the answers
+
+Either way, run:
+
+```bash
+athenaeum ingest-answers --path ~/knowledge
+```
+
+Each `[x]` block is rewritten as a raw intake file under
+`raw/answers/{timestamp}-{entity-slug}.md` with frontmatter linking back
+to the original source, then moved into
+`wiki/_pending_questions_archive.md` (newest-first, append-only — answered
+blocks are never deleted, only moved). The next `athenaeum run` picks the
+raw file up like any other intake and folds the answer into the wiki
+entity.
+
+Re-running with no new `[x]` blocks is a no-op. Malformed blocks are
+preserved in place and logged to stderr, so a corrupt single entry cannot
+poison the rest of the file.
+
 ## Transparent sidecar (Claude Code hooks)
 
 For a fully passive experience where Claude auto-recalls relevant context on
