@@ -200,7 +200,8 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
         return None
 
     cb_match = _CHECKBOX_RE.match(lines[checkbox_idx])
-    assert cb_match is not None  # guarded above
+    if cb_match is None:
+        return None
     answered = cb_match.group("state").lower() == "x"
     question = cb_match.group("question").strip()
 
