@@ -47,7 +47,7 @@ class TestRebuildIndex:
         ])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "FTS5 index rebuilt: 2 wiki pages" in out
+        assert "FTS5 index rebuilt: 2 pages" in out
         assert (cache / "wiki-index.db").exists()
 
     def test_reads_backend_from_config(
