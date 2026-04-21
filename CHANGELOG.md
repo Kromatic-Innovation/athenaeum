@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Auto-memory ingest path** (#195) — librarian now discovers files
+  under `raw/auto-memory/<scope>/*.md` as a parallel intake channel
+  alongside the entity-schema `discover_raw_files`. New
+  `AUTO_MEMORY_FILE_RE`, `discover_auto_memory_files()`, and
+  `AutoMemoryFile` record carry `origin_scope`, `origin_session_id`,
+  `origin_turn`, `memory_type`, and `sources` through to downstream
+  tiers. Discovery uses `resolve_extra_intake_roots()` so config is
+  single-sourced with recall; `MEMORY.md` and `_migration-log.jsonl`
+  are excluded; `_unscoped/` is ingested as a first-class scope.
+  Clustering (#196) and wiki merge (#197) ship in subsequent lanes.
 - **`athenaeum recall <query>` CLI** (#71) — shell-accessible wrapper around
   the MCP `recall` tool for validation harnesses and operator debugging.
   Prints one tab-separated hit per line (`<score>\t<filename>\t<preview>`).
