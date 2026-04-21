@@ -492,8 +492,14 @@ def tier4_escalate(items: list[EscalationItem], pending_path: Path) -> None:
         question = _question_from_description(
             item.description, item.entity_name, item.conflict_type
         )
+        # Escape backslashes first, then quotes — paired with the parser's
+        # unescape logic in athenaeum.answers so entity names containing
+        # double quotes round-trip cleanly. raw_ref is NOT escaped: paths
+        # should survive in storage untouched; the parser anchors to the
+        # final ")\n" to tolerate parens inside refs.
+        escaped_entity = item.entity_name.replace("\\", "\\\\").replace("\"", "\\\"")
         sections.append(
-            f"## [{today}] Entity: \"{item.entity_name}\" (from {item.raw_ref})\n"
+            f"## [{today}] Entity: \"{escaped_entity}\" (from {item.raw_ref})\n"
             f"- [ ] {question}\n\n"
             f"**Conflict type**: {item.conflict_type}\n"
             f"**Description**: {item.description}\n"
