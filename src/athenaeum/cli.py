@@ -120,6 +120,34 @@ def main(argv: list[str] | None = None) -> int:
         help="Knowledge directory (default: ~/knowledge)",
     )
 
+    # recall command — shell-accessible recall for validation harnesses
+    # and operator debugging. Wraps the MCP `recall` tool so scripts and
+    # `gh_wait_status.sh`-style tooling can exercise the same search path
+    # without spinning up a Claude Code session.
+    recall_parser = subparsers.add_parser(
+        "recall",
+        help="Search the wiki from the shell (one tab-separated hit per line)",
+    )
+    recall_parser.add_argument(
+        "query", type=str, help="Search query string",
+    )
+    recall_parser.add_argument(
+        "--top-k", type=int, default=5,
+        help="Maximum results to return (default: 5)",
+    )
+    recall_parser.add_argument(
+        "--path", type=Path, default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    recall_parser.add_argument(
+        "--cache-dir", type=Path, default=None,
+        help="Cache directory (default: ~/.cache/athenaeum)",
+    )
+    recall_parser.add_argument(
+        "--backend", choices=["keyword", "fts5", "vector"], default=None,
+        help="Override configured backend (default: read from athenaeum.yaml)",
+    )
+
     # rebuild-index command — rebuild the search index out-of-band
     rebuild_parser = subparsers.add_parser(
         "rebuild-index",
@@ -161,6 +189,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "rebuild-index":
         return _cmd_rebuild_index(args)
+
+    if args.command == "recall":
+        return _cmd_recall(args)
 
     if args.command == "query-topics":
         return _cmd_query_topics(args)
@@ -375,6 +406,64 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
 
     print(f"Unknown search backend: {backend}", file=sys.stderr)
     return 1
+
+
+def _cmd_recall(args: argparse.Namespace) -> int:
+    """Shell-accessible recall — prints one tab-separated hit per line.
+
+    Output format per line: ``<score>\\t<filename>\\t<preview>``, where
+    ``<preview>`` is the first 80 chars of the wiki page body (post
+    frontmatter), newlines collapsed to spaces. Used by validation
+    harnesses and operator debugging scripts that can't rely on an MCP
+    session. Reads ``search_backend`` + extra intake roots from
+    ``athenaeum.yaml`` the same way ``serve`` and ``rebuild-index`` do,
+    so results match what the MCP ``recall`` tool would return.
+    """
+    from athenaeum.config import load_config, resolve_extra_intake_roots
+    from athenaeum.models import parse_frontmatter
+    from athenaeum.search import get_backend
+
+    knowledge_root = args.path.expanduser().resolve()
+    wiki_root = knowledge_root / "wiki"
+
+    if not wiki_root.exists():
+        print(f"Wiki directory not found: {wiki_root}", file=sys.stderr)
+        return 1
+
+    cfg = load_config(knowledge_root)
+    backend_name = args.backend or cfg.get("search_backend", "fts5")
+    cache_dir = (args.cache_dir or Path("~/.cache/athenaeum")).expanduser().resolve()
+    extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
+
+    try:
+        backend = get_backend(backend_name)
+    except KeyError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        hits = backend.query(
+            args.query, cache_dir, n=args.top_k, wiki_root=wiki_root,
+        )
+    except NotImplementedError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    from athenaeum.mcp_server import _resolve_hit_path
+
+    for filename, _name, score in hits:
+        page_path, _display = _resolve_hit_path(filename, wiki_root, extra_roots)
+        preview = ""
+        if page_path is not None and page_path.is_file():
+            try:
+                text = page_path.read_text(encoding="utf-8")
+                _fm, body = parse_frontmatter(text)
+                preview = " ".join(body.split())[:80]
+            except (OSError, UnicodeDecodeError):
+                pass
+        print(f"{score:.2f}\t{filename}\t{preview}")
+
+    return 0
 
 
 def _cmd_stopwords(_args: argparse.Namespace) -> int:
