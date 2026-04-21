@@ -83,6 +83,45 @@ class RawFile:
 
 
 @dataclass
+class AutoMemoryFile:
+    """A raw intake file from ``raw/auto-memory/<scope>/<prefix>_<slug>.md``.
+
+    Parallel sibling to :class:`RawFile` — auto-memory uses a different
+    naming convention (``feedback_*.md``, ``project_*.md``, ``reference_*.md``,
+    ``user_*.md``, ``Recall_*.md``) and a different frontmatter schema
+    (``type`` / ``originSessionId`` / ``originTurn`` / ``sources`` instead
+    of the entity schema's ``uid`` / ``name``).
+
+    ``origin_scope`` is the scope directory name verbatim — the full
+    path-hash identifier (e.g. ``-Users-tristankromer-Code-voltaire``) or
+    the literal ``_unscoped``. Preserving this on the record is C2/C3's
+    routing key; the compile step downstream will carry it through to the
+    wiki entry metadata.
+    """
+
+    path: Path
+    origin_scope: str
+    memory_type: str  # feedback|project|reference|user|recall
+    name: str = ""
+    description: str = ""
+    origin_session_id: str | None = None
+    origin_turn: int | None = None
+    sources: list[str] = field(default_factory=list)
+    _content: str | None = field(default=None, repr=False)
+
+    @property
+    def content(self) -> str:
+        if self._content is None:
+            self._content = self.path.read_text(encoding="utf-8")
+        return self._content
+
+    @property
+    def ref(self) -> str:
+        """Short reference for footnotes — scope/filename."""
+        return f"{self.origin_scope}/{self.path.name}"
+
+
+@dataclass
 class WikiEntity:
     """An entity page in wiki/ using the full entity template format."""
     uid: str
