@@ -816,3 +816,54 @@ class TestTier4:
         content = pending.read_text()
         assert "Entity Alpha" in content
         assert "Entity Beta" in content
+
+    def test_renders_checkbox_line_under_header(self, tmp_path: Path) -> None:
+        """New schema (issue #61): leading `- [ ]` line under each header.
+
+        The checkbox is the anchor for `ingest_answers` + the MCP
+        `resolve_question` tool. Without it, an answered block cannot
+        round-trip back into raw intake.
+        """
+        pending = tmp_path / "_pending_questions.md"
+        items = [
+            EscalationItem(
+                raw_ref="sessions/test.md",
+                entity_name="Acme Corp",
+                conflict_type="principled",
+                description="Conflicting info about Acme's Series status.",
+            ),
+        ]
+        tier4_escalate(items, pending)
+        content = pending.read_text()
+        lines = content.splitlines()
+
+        # Find the header line and assert the next non-blank line is a `- [ ]`.
+        header_idx = next(
+            i for i, line in enumerate(lines) if line.startswith("## [")
+        )
+        # Checkbox may follow directly with no blank line between (per issue
+        # schema: `directly under the header`).
+        assert lines[header_idx + 1].startswith("- [ ]"), (
+            f"expected checkbox line directly after header; got {lines[header_idx + 1]!r}"
+        )
+        # Question text should be present on the checkbox line (derived
+        # from the description).
+        assert "Conflicting info about Acme" in lines[header_idx + 1]
+        # Conflict-type and description lines preserved below.
+        assert "**Conflict type**: principled" in content
+        assert "**Description**: Conflicting info about Acme" in content
+
+    def test_checkbox_fallback_for_empty_description(self, tmp_path: Path) -> None:
+        """If description is empty, the checkbox line still renders a prompt."""
+        pending = tmp_path / "_pending_questions.md"
+        items = [
+            EscalationItem(
+                raw_ref="sessions/test.md",
+                entity_name="Silent Co",
+                conflict_type="ambiguous",
+                description="",
+            ),
+        ]
+        tier4_escalate(items, pending)
+        content = pending.read_text()
+        assert "- [ ] Resolve ambiguous conflict for Silent Co" in content

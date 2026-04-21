@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "athenaeum"
-version = "0.2.3"
+version = "0.3.0"
 description = "Open source knowledge management pipeline — append-only intake, tiered compilation, configurable schemas"
 readme = "README.md"
 license = "Apache-2.0"
