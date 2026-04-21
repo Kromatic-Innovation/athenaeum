@@ -300,6 +300,202 @@ class TestVectorBackend:
         assert isinstance(score, float)
 
 
+@pytest.fixture
+def wiki_and_auto_memory(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a wiki + auto-memory intake tree for extra-roots tests.
+
+    Layout mirrors the real shape produced by the auto-memory Phase B
+    migration so the tests catch regressions in the actual path pattern
+    (``<knowledge>/raw/auto-memory/<scope>/feedback_*.md`` plus a
+    ``_unscoped/`` bucket and per-scope ``MEMORY.md`` index files).
+    """
+    knowledge = tmp_path / "knowledge"
+    wiki = knowledge / "wiki"
+    wiki.mkdir(parents=True)
+    (wiki / "lean-startup.md").write_text(
+        "---\nname: Lean Startup\ntags: [methodology]\n"
+        "description: Build-measure-learn methodology\n---\n\n"
+        "The Lean Startup methodology emphasizes validated learning.\n"
+    )
+
+    auto_memory = knowledge / "raw" / "auto-memory"
+    scope_a = auto_memory / "-Users-tristankromer-Code"
+    scope_a.mkdir(parents=True)
+    (scope_a / "feedback_develop_first_flow.md").write_text(
+        "---\nname: develop-first flow\ntags: [workflow, git]\n"
+        "description: Ship to develop first, promote to staging after CI.\n"
+        "---\n\n"
+        "When shipping changes, always merge to the develop branch first. "
+        "Promotion to staging happens via the ref API after CI is green.\n"
+    )
+    # Per-scope MEMORY.md index — must be excluded (filename pattern)
+    (scope_a / "MEMORY.md").write_text(
+        "# MEMORY INDEX\n\n- [develop-first flow](feedback_develop_first_flow.md)\n"
+    )
+
+    unscoped = auto_memory / "_unscoped"
+    unscoped.mkdir()
+    (unscoped / "feedback_bayesian_is_a_prompt.md").write_text(
+        "---\nname: bayesian prompt\ntags: [prompting]\n---\n\n"
+        "Framing prompts as bayesian prior updates tightens outputs.\n"
+    )
+
+    # Non-markdown file (migration log) — must be skipped
+    (auto_memory / "_migration-log.jsonl").write_text(
+        '{"ts": "2026-04-21T00:00:00Z", "action": "migrated"}\n'
+    )
+
+    return wiki, auto_memory
+
+
+class TestFTS5ExtraRoots:
+    """Extra-root intake coverage for the FTS5 backend."""
+
+    def test_indexes_auto_memory_files(
+        self, wiki_and_auto_memory: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wiki, auto_memory = wiki_and_auto_memory
+        cache = tmp_path / "cache"
+        count = FTS5Backend().build_index(
+            wiki, cache, extra_roots=[auto_memory],
+        )
+        # wiki: 1, scope_a feedback: 1, _unscoped: 1 = 3
+        assert count == 3
+
+    def test_recall_finds_auto_memory_topic(
+        self, wiki_and_auto_memory: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """Acceptance: a known auto-memory topic resolves via recall."""
+        wiki, auto_memory = wiki_and_auto_memory
+        cache = tmp_path / "cache"
+        backend = FTS5Backend()
+        backend.build_index(wiki, cache, extra_roots=[auto_memory])
+        results = backend.query("develop first flow", cache, n=5)
+        filenames = [r[0] for r in results]
+        # Indexed as <root_name>/<relpath_posix>
+        assert (
+            "auto-memory/-Users-tristankromer-Code/"
+            "feedback_develop_first_flow.md"
+        ) in filenames
+
+    def test_memory_index_excluded(
+        self, wiki_and_auto_memory: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """Acceptance: per-scope MEMORY.md is not a recall hit."""
+        wiki, auto_memory = wiki_and_auto_memory
+        cache = tmp_path / "cache"
+        backend = FTS5Backend()
+        backend.build_index(wiki, cache, extra_roots=[auto_memory])
+        # Even a targeted MEMORY-flavored query must not surface the index
+        results = backend.query("memory index develop", cache, n=10)
+        filenames = [r[0] for r in results]
+        assert not any(f.endswith("MEMORY.md") for f in filenames)
+
+    def test_unscoped_included(
+        self, wiki_and_auto_memory: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """Acceptance: files under ``_unscoped/`` are recall-hittable."""
+        wiki, auto_memory = wiki_and_auto_memory
+        cache = tmp_path / "cache"
+        backend = FTS5Backend()
+        backend.build_index(wiki, cache, extra_roots=[auto_memory])
+        results = backend.query("bayesian prompt prompting", cache, n=5)
+        filenames = [r[0] for r in results]
+        assert any(
+            "_unscoped/feedback_bayesian_is_a_prompt.md" in f
+            for f in filenames
+        )
+
+    def test_non_markdown_skipped(
+        self, wiki_and_auto_memory: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """JSONL migration log must not enter the markdown index."""
+        wiki, auto_memory = wiki_and_auto_memory
+        cache = tmp_path / "cache"
+        backend = FTS5Backend()
+        count = backend.build_index(wiki, cache, extra_roots=[auto_memory])
+        # Count is wiki(1) + scope_a feedback(1) + _unscoped(1) = 3
+        # If the JSONL slipped in, count would be 4
+        assert count == 3
+
+    def test_missing_extra_root_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        """A missing extra root is silently dropped, not fatal."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "p.md").write_text("---\nname: P\n---\ncontent\n")
+        cache = tmp_path / "cache"
+        missing = tmp_path / "does-not-exist"
+        count = FTS5Backend().build_index(
+            wiki, cache, extra_roots=[missing],
+        )
+        assert count == 1
+
+    def test_wiki_entries_still_bare_filename(
+        self, wiki_and_auto_memory: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """Wiki entries must keep the bare-filename convention so existing
+        recall consumers (and the kept-stable ``wiki/<name>.md`` path
+        display) don't regress."""
+        wiki, auto_memory = wiki_and_auto_memory
+        cache = tmp_path / "cache"
+        backend = FTS5Backend()
+        backend.build_index(wiki, cache, extra_roots=[auto_memory])
+        results = backend.query("lean startup methodology", cache, n=5)
+        filenames = [r[0] for r in results]
+        assert "lean-startup.md" in filenames
+
+
+class TestVectorExtraRoots:
+    """Extra-root intake coverage for the vector backend.
+
+    The vector backend must index auto-memory files under the same
+    ``<root_name>/<relpath>`` key scheme as FTS5 so the hybrid recall
+    merge in the MCP layer sees one id space. ``MEMORY.md`` is excluded
+    and ``_unscoped/`` is included on identical terms.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_chromadb(self) -> None:
+        pytest.importorskip("chromadb")
+
+    def test_indexes_auto_memory_files(
+        self, wiki_and_auto_memory: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wiki, auto_memory = wiki_and_auto_memory
+        cache = tmp_path / "cache"
+        count = VectorBackend().build_index(
+            wiki, cache, extra_roots=[auto_memory],
+        )
+        assert count == 3
+
+    def test_recall_finds_auto_memory_topic(
+        self, wiki_and_auto_memory: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wiki, auto_memory = wiki_and_auto_memory
+        cache = tmp_path / "cache"
+        backend = VectorBackend()
+        backend.build_index(wiki, cache, extra_roots=[auto_memory])
+        results = backend.query("develop first flow", cache, n=5)
+        filenames = [r[0] for r in results]
+        assert any(
+            f.endswith("feedback_develop_first_flow.md")
+            for f in filenames
+        )
+
+    def test_memory_index_excluded(
+        self, wiki_and_auto_memory: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        wiki, auto_memory = wiki_and_auto_memory
+        cache = tmp_path / "cache"
+        backend = VectorBackend()
+        backend.build_index(wiki, cache, extra_roots=[auto_memory])
+        results = backend.query("memory index develop", cache, n=10)
+        filenames = [r[0] for r in results]
+        assert not any(f.endswith("MEMORY.md") for f in filenames)
+
+
 class TestGetBackend:
     def test_fts5(self) -> None:
         assert isinstance(get_backend("fts5"), FTS5Backend)

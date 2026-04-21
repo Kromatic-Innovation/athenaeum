@@ -63,6 +63,7 @@ def recall_search(
     *,
     search_backend: str = "keyword",
     cache_dir: Path | None = None,
+    extra_roots: list[Path] | None = None,
 ) -> str:
     """Search the knowledge wiki for pages relevant to *query*.
 
@@ -75,6 +76,10 @@ def recall_search(
             results flow through one code path regardless of backend.
         cache_dir: Directory containing the search index (required for
             fts5/vector backends; ignored by keyword).
+        extra_roots: Additional intake roots that were fed into the index
+            at build time (e.g. ``raw/auto-memory``). Used here to resolve
+            hit filenames of the form ``<root_name>/<relpath>`` back to
+            on-disk paths when rendering snippets.
 
     Returns a formatted string of matching wiki pages with relevance scores
     and content snippets.
@@ -88,8 +93,44 @@ def recall_search(
         return "Query too short \u2014 provide at least one keyword (2+ characters)."
 
     return _recall_via_backend(
-        wiki_root, query, top_k, search_backend, cache_dir
+        wiki_root, query, top_k, search_backend, cache_dir,
+        extra_roots or [],
     )
+
+
+def _resolve_hit_path(
+    filename: str,
+    wiki_root: Path,
+    extra_roots: list[Path],
+) -> tuple[Path | None, str]:
+    """Resolve an indexed filename back to an on-disk path + display label.
+
+    Indexed filenames come in two shapes:
+
+    - Wiki entries: bare name (``lean-startup.md``). Resolved against
+      ``wiki_root`` with the ``wiki/`` display prefix.
+    - Extra-root entries: ``<root_name>/<relpath>``. The first path
+      segment is matched against an extra root's ``.name`` and the
+      remainder resolved against that root. Display prefix is
+      ``<root_name>/`` so the path a human sees matches the indexed
+      filename.
+
+    Returns ``(path, display_prefix)``. ``path`` is ``None`` when the
+    file cannot be located (stale index, renamed directory); callers
+    should render the hit with an empty body rather than crash.
+    """
+    if "/" not in filename:
+        # Wiki entry: flat, shallow.
+        return wiki_root / filename, f"wiki/{filename}"
+
+    root_name, _, rel = filename.partition("/")
+    for root in extra_roots:
+        if root.name == root_name:
+            return root / rel, filename
+    # Unknown root (index built against a different config). Return the
+    # indexed filename verbatim so callers still see what matched rather
+    # than a silent empty render.
+    return None, filename
 
 
 def _recall_via_backend(
@@ -98,6 +139,7 @@ def _recall_via_backend(
     top_k: int,
     backend_name: str,
     cache_dir: Path | None,
+    extra_roots: list[Path],
 ) -> str:
     """Delegate recall to a registered search backend, then format results."""
     from athenaeum.search import get_backend
@@ -123,10 +165,12 @@ def _recall_via_backend(
     parts: list[str] = [f"Found {len(hits)} matching pages:\n"]
 
     for rank, (filename, name, score) in enumerate(hits, 1):
-        page_path = wiki_root / filename
+        page_path, display_prefix = _resolve_hit_path(
+            filename, wiki_root, extra_roots,
+        )
         body = ""
         tags: str | list = "\u2014"
-        if page_path.is_file():
+        if page_path is not None and page_path.is_file():
             try:
                 text = page_path.read_text(encoding="utf-8")
                 fm, body = parse_frontmatter(text)
@@ -140,7 +184,7 @@ def _recall_via_backend(
         snip = _snippet(body, tokens) if body else ""
         parts.append(
             f"### {rank}. {name} (score: {score:.1f})\n"
-            f"**Path:** wiki/{filename}\n"
+            f"**Path:** {display_prefix}\n"
             f"**Tags:** {tags}\n\n"
             f"{snip}\n"
         )
@@ -205,6 +249,7 @@ def create_server(
     *,
     search_backend: str = "keyword",
     cache_dir: Path | None = None,
+    extra_roots: list[Path] | None = None,
 ) -> "FastMCP":  # noqa: F821 — lazy import
     """Create and return a configured FastMCP server instance.
 
@@ -213,6 +258,9 @@ def create_server(
         wiki_root: Path to the compiled wiki directory.
         search_backend: Search backend: ``"keyword"``, ``"fts5"``, or ``"vector"``.
         cache_dir: Directory for search index files (fts5/vector backends).
+        extra_roots: Additional intake roots that were indexed alongside
+            the wiki. Passed through to :func:`recall_search` so raw
+            intake hits resolve to their on-disk path.
 
     Requires ``fastmcp`` to be installed (``pip install athenaeum[mcp]``).
     """
@@ -258,6 +306,7 @@ def create_server(
             wiki_root, query, top_k,
             search_backend=search_backend,
             cache_dir=cache_dir,
+            extra_roots=extra_roots,
         )
 
     @mcp.tool()

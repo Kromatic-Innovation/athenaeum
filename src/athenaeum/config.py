@@ -21,6 +21,15 @@ _DEFAULTS: dict[str, Any] = {
         "provider": "chromadb",
         "collection": "wiki",
     },
+    "recall": {
+        # Extra intake roots scanned recursively alongside the wiki. Paths
+        # are resolved relative to ``knowledge_root``. The default points
+        # at the agent-auto-memory intake tree so that raw memories
+        # written via ``remember`` (and per-scope agent-written notes)
+        # show up in recall without separate plumbing. Set to an empty
+        # list to restrict recall to the compiled wiki only.
+        "extra_intake_roots": ["raw/auto-memory"],
+    },
 }
 
 
@@ -73,6 +82,15 @@ search_backend: fts5
 # vector:
 #   provider: chromadb
 #   collection: wiki
+
+# Recall configuration.
+# extra_intake_roots: additional directories (resolved relative to the
+# knowledge root) that the index build will scan recursively alongside
+# wiki/. Intended for agent-written raw memory trees. Set to [] to
+# disable and restrict recall to the compiled wiki only.
+# recall:
+#   extra_intake_roots:
+#     - raw/auto-memory
 """
 
 
@@ -82,3 +100,36 @@ def write_default_config(knowledge_root: Path) -> Path:
     if not config_path.exists():
         config_path.write_text(_DEFAULT_CONFIG_CONTENT, encoding="utf-8")
     return config_path
+
+
+def resolve_extra_intake_roots(
+    knowledge_root: Path,
+    config: dict[str, Any] | None = None,
+) -> list[Path]:
+    """Resolve configured extra intake roots to absolute :class:`Path` values.
+
+    Values under ``recall.extra_intake_roots`` that are relative are
+    resolved against ``knowledge_root``; absolute paths are passed through.
+    Missing directories are silently dropped — a half-initialized
+    knowledge base (no ``raw/auto-memory`` yet) should not break index
+    rebuild. Returns an empty list when no extras are configured.
+    """
+    if config is None:
+        config = load_config(knowledge_root)
+
+    recall_cfg = config.get("recall") or {}
+    raw_roots = recall_cfg.get("extra_intake_roots") or []
+    if not isinstance(raw_roots, list):
+        return []
+
+    resolved: list[Path] = []
+    for item in raw_roots:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        candidate = Path(item)
+        if not candidate.is_absolute():
+            candidate = knowledge_root / candidate
+        candidate = candidate.expanduser()
+        if candidate.is_dir():
+            resolved.append(candidate.resolve())
+    return resolved
