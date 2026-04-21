@@ -108,6 +108,18 @@ def main(argv: list[str] | None = None) -> int:
              "to stay in sync with the FTS5 query filter.",
     )
 
+    # ingest-answers command — convert resolved `[x]` blocks in
+    # _pending_questions.md into raw intake files and archive the answered
+    # blocks. Idempotent — safe to run from a scheduler.
+    ingest_answers_parser = subparsers.add_parser(
+        "ingest-answers",
+        help="Ingest answered pending questions from _pending_questions.md",
+    )
+    ingest_answers_parser.add_argument(
+        "--path", type=Path, default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+
     # rebuild-index command — rebuild the search index out-of-band
     rebuild_parser = subparsers.add_parser(
         "rebuild-index",
@@ -143,6 +155,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         return _cmd_run(args)
+
+    if args.command == "ingest-answers":
+        return _cmd_ingest_answers(args)
 
     if args.command == "rebuild-index":
         return _cmd_rebuild_index(args)
@@ -275,6 +290,35 @@ def _cmd_run(args: argparse.Namespace) -> int:
         max_files=args.max_files,
         max_api_calls=args.max_api_calls,
     )
+
+
+def _cmd_ingest_answers(args: argparse.Namespace) -> int:
+    """Ingest answered blocks from `_pending_questions.md` as raw intake.
+
+    See :func:`athenaeum.answers.ingest_answers` for the semantics.
+    """
+    from athenaeum.answers import ingest_answers
+
+    target = args.path.expanduser().resolve()
+    if not target.exists():
+        print(f"Knowledge directory not found: {target}", file=sys.stderr)
+        print(
+            f"Run 'athenaeum init --path {args.path}' first, then retry.",
+            file=sys.stderr,
+        )
+        return 1
+
+    pending_path = target / "wiki" / "_pending_questions.md"
+    raw_root = target / "raw"
+
+    try:
+        count = ingest_answers(pending_path, raw_root)
+    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+        print(f"Fatal error ingesting answers: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Ingested {count} answered question(s).")
+    return 0
 
 
 def _cmd_rebuild_index(args: argparse.Namespace) -> int:
