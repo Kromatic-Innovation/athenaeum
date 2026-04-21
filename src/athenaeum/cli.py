@@ -78,6 +78,12 @@ def main(argv: list[str] | None = None) -> int:
              "entity tier pipeline. Writes the cluster JSONL report and "
              "exits. Useful for validating the cluster output before C3.",
     )
+    run_parser.add_argument(
+        "--merge-only", action="store_true",
+        help="Only run C3 cluster merge — read the canonical cluster "
+             "JSONL from the last C2 run and emit wiki/auto-*.md entries. "
+             "Skips discovery, clustering, and the entity tier pipeline.",
+    )
 
     # test-mcp command — smoke-test the MCP memory setup without a session
     test_mcp_parser = subparsers.add_parser(
@@ -329,6 +335,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         max_files=args.max_files,
         max_api_calls=args.max_api_calls,
         cluster_only=getattr(args, "cluster_only", False),
+        merge_only=getattr(args, "merge_only", False),
     )
 
 
