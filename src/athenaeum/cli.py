@@ -72,6 +72,12 @@ def main(argv: list[str] | None = None) -> int:
         "--verbose", "-v", action="store_true",
         help="Enable debug logging",
     )
+    run_parser.add_argument(
+        "--cluster-only", action="store_true",
+        help="Only run C2 auto-memory discovery + clustering — skip the "
+             "entity tier pipeline. Writes the cluster JSONL report and "
+             "exits. Useful for validating the cluster output before C3.",
+    )
 
     # test-mcp command — smoke-test the MCP memory setup without a session
     test_mcp_parser = subparsers.add_parser(
@@ -322,6 +328,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         max_files=args.max_files,
         max_api_calls=args.max_api_calls,
+        cluster_only=getattr(args, "cluster_only", False),
     )
 
 

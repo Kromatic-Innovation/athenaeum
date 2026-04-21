@@ -461,6 +461,52 @@ class VectorBackend:
 
         return hits
 
+    def fetch_embeddings(
+        self,
+        ids: Iterable[str],
+        cache_dir: Path,
+    ) -> dict[str, list[float]]:
+        """Return ``{id: embedding_vector}`` for the given indexed filenames.
+
+        Narrow accessor for clustering (issue #196). Reuses the collection
+        built by :meth:`build_index` — does NOT invoke a second embedding
+        provider. Missing ids are silently omitted so callers can cluster
+        over the intersection of "requested" and "actually indexed".
+        Returns ``{}`` when the collection does not exist or is empty.
+        """
+        chromadb = self._get_chromadb()
+        vector_dir = cache_dir / _VECTOR_DIR
+        if not vector_dir.is_dir():
+            return {}
+
+        id_list = list(ids)
+        if not id_list:
+            return {}
+
+        client = chromadb.PersistentClient(path=str(vector_dir))
+        try:
+            collection = client.get_collection(_VECTOR_COLLECTION)
+        except Exception:
+            return {}
+
+        try:
+            result = collection.get(ids=id_list, include=["embeddings"])
+        except Exception:
+            return {}
+
+        out: dict[str, list[float]] = {}
+        result_ids = result.get("ids") or []
+        embeddings = result.get("embeddings") or []
+        for i, doc_id in enumerate(result_ids):
+            if i >= len(embeddings):
+                continue
+            vec = embeddings[i]
+            if vec is None:
+                continue
+            # chromadb returns numpy arrays in some versions — coerce to list
+            out[doc_id] = [float(x) for x in vec]
+        return out
+
 
 # ---------------------------------------------------------------------------
 # Keyword backend (in-memory, scan-on-query)

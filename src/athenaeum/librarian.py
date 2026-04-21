@@ -28,7 +28,13 @@ from pathlib import Path
 
 import anthropic
 
-from athenaeum.config import resolve_extra_intake_roots
+from athenaeum.clusters import (
+    cluster_auto_memory_files,
+    resolve_cluster_output_path,
+    resolve_cluster_threshold,
+    write_cluster_report,
+)
+from athenaeum.config import load_config, resolve_extra_intake_roots
 from athenaeum.models import (
     AutoMemoryFile,
     EntityAction,
@@ -361,6 +367,63 @@ def process_one(
     return result
 
 
+def _run_cluster_pass(
+    auto_memory_files: list[AutoMemoryFile],
+    knowledge_root: Path,
+    *,
+    config: dict[str, object] | None = None,
+    dry_run: bool = False,
+) -> int:
+    """Cluster discovered auto-memory files and write the JSONL report.
+
+    Reuses the recall-index chromadb collection via
+    :class:`athenaeum.search.VectorBackend`; falls back to a hashing-
+    trick vector if the index is unavailable. Returns the number of
+    clusters written (0 when there is nothing to cluster or on dry-run).
+    """
+    if not auto_memory_files:
+        return 0
+
+    resolved_config = config if config is not None else load_config(knowledge_root)
+    extra_roots = resolve_extra_intake_roots(knowledge_root, config=resolved_config)
+    if not extra_roots:
+        log.info("cluster pass: no extra intake roots configured — skipping")
+        return 0
+
+    threshold = resolve_cluster_threshold(knowledge_root, config=resolved_config)
+    cache_dir = Path(
+        os.environ.get("ATHENAEUM_CACHE_DIR")
+        or (Path.home() / ".cache" / "athenaeum")
+    )
+    clusters = cluster_auto_memory_files(
+        auto_memory_files,
+        extra_roots=extra_roots,
+        cache_dir=cache_dir,
+        threshold=threshold,
+    )
+
+    log.info(
+        "cluster pass: %d auto-memory file(s) → %d cluster(s) at cos>=%.2f",
+        len(auto_memory_files), len(clusters), threshold,
+    )
+
+    if dry_run:
+        for c in clusters:
+            log.info(
+                "  [DRY RUN] cluster %s: %d member(s) centroid=%.2f",
+                c.cluster_id, len(c.member_paths), c.centroid_score,
+            )
+        return 0
+
+    output_path = resolve_cluster_output_path(knowledge_root, config=resolved_config)
+    canonical, timestamped = write_cluster_report(clusters, output_path)
+    log.info(
+        "cluster report written: %s (rotated copy: %s)",
+        canonical, timestamped,
+    )
+    return len(clusters)
+
+
 def run(
     raw_root: Path = DEFAULT_RAW_ROOT,
     wiki_root: Path = DEFAULT_WIKI_ROOT,
@@ -368,18 +431,25 @@ def run(
     dry_run: bool = False,
     max_files: int = 50,
     max_api_calls: int = 200,
+    cluster_only: bool = False,
 ) -> int:
-    """Run the librarian pipeline. Returns 0 on success, 1 on error."""
+    """Run the librarian pipeline. Returns 0 on success, 1 on error.
+
+    When ``cluster_only`` is True, only the C2 auto-memory discovery +
+    clustering pass runs; the entity tier pipeline is skipped entirely.
+    This is the clustering-focused entrypoint for operators validating
+    the C2 output before shipping C3.
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key and not dry_run:
+    if not api_key and not dry_run and not cluster_only:
         log.error("ANTHROPIC_API_KEY not set (required unless dry_run=True)")
         return 1
 
-    if not wiki_root.exists():
+    if not wiki_root.exists() and not cluster_only:
         log.error("Wiki root does not exist: %s", wiki_root)
         return 1
 
-    if not dry_run and not (knowledge_root / ".git").exists():
+    if not dry_run and not cluster_only and not (knowledge_root / ".git").exists():
         log.error(
             "No .git in %s — refusing to run without a writable git repo. "
             "The librarian's pre-processing snapshot is load-bearing for raw-file "
@@ -389,11 +459,14 @@ def run(
         )
         return 1
 
-    # C1: parallel auto-memory discovery. Records are logged but not
-    # routed through the entity tier pipeline — clustering (C2) and
-    # merge (C3) ship in subsequent lanes. Scope identity is preserved
-    # on each record so downstream tiers have the routing key they need.
-    auto_memory_files = discover_auto_memory_files(knowledge_root)
+    config = load_config(knowledge_root)
+
+    # C1 + C2: auto-memory discovery followed by the C2 cluster pass.
+    # Clustering must run BEFORE any tier routing so that downstream C3
+    # merge has a fresh grouping to consume. Scope identity is preserved
+    # on each record so the tier pipeline and the cluster pass both see
+    # the same routing key.
+    auto_memory_files = discover_auto_memory_files(knowledge_root, config=config)
     if auto_memory_files:
         by_scope: dict[str, int] = {}
         for am in auto_memory_files:
@@ -405,6 +478,14 @@ def run(
         if dry_run:
             for scope, count in sorted(by_scope.items()):
                 log.info("  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count)
+
+        _run_cluster_pass(
+            auto_memory_files, knowledge_root,
+            config=config, dry_run=dry_run,
+        )
+
+    if cluster_only:
+        return 0
 
     raw_files = discover_raw_files(raw_root)
     if not raw_files:
