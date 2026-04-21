@@ -312,13 +312,35 @@ def create_server(
             answer: The answer body (markdown; may be multi-line).
 
         Returns:
-            ``{"ok": true, "block": "..."}`` on success, or
-            ``{"ok": false, "error": "..."}`` if the id is not found,
-            already answered, or the file is missing.
+            A dict with:
+
+            - ``ok`` (bool)
+            - ``error_code`` (str | None): one of ``id_not_found``,
+              ``already_answered``, ``file_missing``, ``invalid_answer``
+              on failure; ``None`` on success.
+            - ``message`` (str): human-readable status.
+            - ``resolved_block`` (str | None): the rewritten block on
+              success; ``None`` on failure.
+
+            For backward compatibility the dict also includes legacy
+            aliases ``block`` (= ``resolved_block``) and ``error``
+            (= ``message`` on failure). New callers should prefer
+            ``error_code`` + ``message`` + ``resolved_block``.
         """
         from athenaeum.answers import resolve_by_id
 
-        pending_path = wiki_root / "_pending_questions.md"
-        return resolve_by_id(pending_path, id, answer)
+        result = resolve_by_id(pending_path=wiki_root / "_pending_questions.md",
+                               question_id=id, answer=answer)
+        # Surface the structured keys explicitly so consumers see them at
+        # the top of the dict even when legacy aliases are also present.
+        return {
+            "ok": result["ok"],
+            "error_code": result.get("error_code"),
+            "message": result.get("message", ""),
+            "resolved_block": result.get("resolved_block"),
+            # legacy aliases:
+            "block": result.get("block"),
+            "error": result.get("error"),
+        }
 
     return mcp

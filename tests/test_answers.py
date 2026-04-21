@@ -343,12 +343,14 @@ class TestResolveById:
         pending_path.write_text("# Pending Questions\n\n" + _block())
         result = resolve_by_id(pending_path, "doesnotexist", "answer")
         assert result["ok"] is False
-        assert "not found" in result["error"]
+        assert result["error_code"] == "id_not_found"
+        assert "not found" in result["message"]
 
     def test_missing_file_returns_error(self, pending_path: Path) -> None:
         result = resolve_by_id(pending_path, "anyid", "answer")
         assert result["ok"] is False
-        assert "not found" in result["error"]
+        assert result["error_code"] == "file_missing"
+        assert "not found" in result["message"]
 
     def test_already_answered_returns_error(
         self, pending_path: Path
@@ -357,14 +359,15 @@ class TestResolveById:
         items = list_unanswered(pending_path)
         qid = items[0]["id"]
         assert resolve_by_id(pending_path, qid, "first")["ok"] is True
-        # Second call on the same id: checkbox already [x].
+        # Second call on the same id: checkbox already [x]. Because the id
+        # hash is over header + question text only (not checkbox state),
+        # the id is stable across the `[ ]` -> `[x]` flip and the error
+        # path we want is `already_answered` — this positively asserts the
+        # id invariant documented on `_make_id`.
         result = resolve_by_id(pending_path, qid, "second")
         assert result["ok"] is False
-        # Either "already answered" or "not found" (id may shift when
-        # checkbox line changes depending on hash inputs). We only hash
-        # header + question (not checkbox state), so the id is stable and
-        # the error path we want is "already answered".
-        assert "already answered" in result["error"]
+        assert result["error_code"] == "already_answered"
+        assert "already answered" in result["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -462,3 +465,131 @@ def test_pending_question_is_dataclass() -> None:
     )
     assert pq.id == "abc"
     assert pq.answered is False
+
+
+# ---------------------------------------------------------------------------
+# Q4: multi-line description capture
+# ---------------------------------------------------------------------------
+
+
+def test_description_captures_multiple_lines(pending_path: Path) -> None:
+    """A **Description**: that spans 3+ lines should survive the parse.
+
+    Prior implementation captured only the first line, silently dropping
+    continuation text. Guards Quine Q4.
+    """
+    content = (
+        "# Pending Questions\n\n"
+        "## [2026-04-20] Entity: \"Acme Corp\" (from sessions/x.md)\n"
+        "- [ ] Is Acme still Series A?\n"
+        "**Conflict type**: principled\n"
+        "**Description**: Line one of description.\n"
+        "Line two continues the description.\n"
+        "Line three wraps it up.\n"
+    )
+    pending_path.write_text(content)
+    parsed = parse_pending_questions(pending_path)
+    assert len(parsed) == 1
+    desc = parsed[0].description
+    assert "Line one of description." in desc
+    assert "Line two continues the description." in desc
+    assert "Line three wraps it up." in desc
+
+
+# ---------------------------------------------------------------------------
+# Q5: archive dedup guard
+# ---------------------------------------------------------------------------
+
+
+def test_archive_skips_duplicate_entry(
+    pending_path: Path, raw_root: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """If the exact raw_block of an answered item is already in the archive,
+    a second ingest must not duplicate it. Guards Quine Q5.
+    """
+    answered = _block(checkbox="[x]", answer="Confirmed.")
+    pending_path.write_text("# Pending Questions\n\n" + answered)
+
+    first = ingest_answers(pending_path, raw_root)
+    assert first == 1
+
+    archive_path = pending_path.parent / "_pending_questions_archive.md"
+    after_first = archive_path.read_text(encoding="utf-8")
+    first_count = after_first.count("Acme Corp")
+    assert first_count == 1
+
+    # Simulate the user re-pasting the already-answered block into the
+    # primary file (for example after restoring from a backup).
+    pending_path.write_text("# Pending Questions\n\n" + answered)
+    second = ingest_answers(pending_path, raw_root)
+    # The block is still "answered" so it is ingested once for the raw
+    # intake step, but the archive dedup guard should catch the duplicate.
+    assert second == 1
+
+    after_second = archive_path.read_text(encoding="utf-8")
+    second_count = after_second.count("Acme Corp")
+    assert second_count == 1, (
+        f"archive must not duplicate: before={first_count}, after={second_count}"
+    )
+    err = capsys.readouterr().err
+    assert "skipping duplicate archive entry" in err
+
+
+# ---------------------------------------------------------------------------
+# Q7: id stability invariant (locked on both sides)
+# ---------------------------------------------------------------------------
+
+
+def test_id_stable_across_checkbox_flip(pending_path: Path) -> None:
+    """Flipping ``- [ ]`` to ``- [x]`` must not change the question id.
+
+    This is the contract that lets an agent cache the id from
+    list_pending_questions and still call resolve_question against it —
+    without this invariant, resolve_question would be a race with id churn.
+    """
+    pending_path.write_text("# Pending Questions\n\n" + _block(checkbox="[ ]"))
+    id_before = parse_pending_questions(pending_path)[0].id
+
+    pending_path.write_text("# Pending Questions\n\n" + _block(checkbox="[x]"))
+    id_after = parse_pending_questions(pending_path)[0].id
+
+    assert id_before == id_after
+
+
+def test_id_changes_when_question_edited(pending_path: Path) -> None:
+    """Editing the question text itself MUST produce a new id.
+
+    The inverse of test_id_stable_across_checkbox_flip — locks the id
+    invariant on both sides so a future refactor can't silently break it.
+    """
+    pending_path.write_text(
+        "# Pending Questions\n\n" + _block(question="Original question?")
+    )
+    id_before = parse_pending_questions(pending_path)[0].id
+
+    pending_path.write_text(
+        "# Pending Questions\n\n" + _block(question="Rephrased question?")
+    )
+    id_after = parse_pending_questions(pending_path)[0].id
+
+    assert id_before != id_after
+
+
+# ---------------------------------------------------------------------------
+# Q6: structured error codes (happy path)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_by_id_success_returns_structured_fields(pending_path: Path) -> None:
+    pending_path.write_text("# Pending Questions\n\n" + _block())
+    items = list_unanswered(pending_path)
+    qid = items[0]["id"]
+    result = resolve_by_id(pending_path, qid, "Confirmed.")
+    assert result["ok"] is True
+    assert result["error_code"] is None
+    assert result["message"] == "ok"
+    assert result["resolved_block"] is not None
+    assert "[x]" in result["resolved_block"]
+    # Legacy aliases retained for backward compat.
+    assert result["block"] == result["resolved_block"]
