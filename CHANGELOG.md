@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`athenaeum recall <query>` CLI** (#71) — shell-accessible wrapper around
+  the MCP `recall` tool for validation harnesses and operator debugging.
+  Prints one tab-separated hit per line (`<score>\t<filename>\t<preview>`).
+  Respects configured `search_backend` and extra intake roots; `--top-k`,
+  `--path`, `--cache-dir`, and `--backend` flags supported.
+
 ## [0.3.1] - 2026-04-21
 
 Quine follow-ups from the 0.3.0 review. Two small hardening fixes on

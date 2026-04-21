@@ -331,6 +331,92 @@ class TestTestMcp:
         assert "2 passed, 1 failed" in captured.out
 
 
+class TestRecall:
+    """`athenaeum recall <query>` subcommand (issue #71). Shell-accessible
+    wrapper around the MCP recall tool — used by validation harnesses and
+    operator debugging. Output contract: one tab-separated hit per line,
+    ``<score>\\t<filename>\\t<preview>``."""
+
+    def test_keyword_backend_prints_tab_separated_hits(
+        self, knowledge_with_wiki: Path, tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        rc = main([
+            "recall", "lean startup",
+            "--path", str(knowledge_with_wiki),
+            "--cache-dir", str(tmp_path / "cache"),
+            "--backend", "keyword",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        lines = [line for line in out.splitlines() if line.strip()]
+        assert lines, "expected at least one hit"
+        # First hit should be the lean-startup page.
+        first = lines[0].split("\t")
+        assert len(first) == 3, f"expected 3 tab-separated fields, got: {first!r}"
+        score_str, filename, preview = first
+        float(score_str)  # parseable as float
+        assert filename == "lean-startup.md"
+        assert "Lean Startup" in preview
+
+    def test_top_k_limits_output(
+        self, knowledge_with_wiki: Path, tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        rc = main([
+            "recall", "methodology framework",
+            "--path", str(knowledge_with_wiki),
+            "--cache-dir", str(tmp_path / "cache"),
+            "--backend", "keyword",
+            "--top-k", "1",
+        ])
+        assert rc == 0
+        lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert len(lines) <= 1
+
+    def test_missing_wiki_returns_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        rc = main([
+            "recall", "anything",
+            "--path", str(tmp_path / "nope"),
+            "--cache-dir", str(tmp_path / "cache"),
+            "--backend", "keyword",
+        ])
+        assert rc == 1
+        assert "Wiki directory not found" in capsys.readouterr().err
+
+    def test_fts5_backend_uses_prebuilt_index(
+        self, knowledge_with_wiki: Path, tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Recall with fts5 must use the on-disk cache the user built with
+        ``athenaeum rebuild-index``. Regression guard: if the handler
+        silently falls back to keyword when the fts5 index is missing,
+        validation harnesses reading `athenaeum.yaml: vector` would see
+        wrong results."""
+        cache = tmp_path / "cache"
+        rc = main([
+            "rebuild-index",
+            "--path", str(knowledge_with_wiki),
+            "--cache-dir", str(cache),
+            "--backend", "fts5",
+        ])
+        assert rc == 0
+        capsys.readouterr()  # drain rebuild-index output
+
+        rc = main([
+            "recall", "lean",
+            "--path", str(knowledge_with_wiki),
+            "--cache-dir", str(cache),
+            "--backend", "fts5",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        lines = [line for line in out.splitlines() if line.strip()]
+        assert any("lean-startup.md" in line for line in lines)
+
+
 class TestIngestAnswers:
     """`athenaeum ingest-answers` subcommand (issue #61)."""
 
