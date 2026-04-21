@@ -9,10 +9,13 @@ Missing config or missing keys fall back to sensible defaults.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 _DEFAULTS: dict[str, Any] = {
     "auto_recall": True,
@@ -110,9 +113,11 @@ def resolve_extra_intake_roots(
 
     Values under ``recall.extra_intake_roots`` that are relative are
     resolved against ``knowledge_root``; absolute paths are passed through.
-    Missing directories are silently dropped — a half-initialized
+    Missing directories are dropped (with a warning) — a half-initialized
     knowledge base (no ``raw/auto-memory`` yet) should not break index
-    rebuild. Returns an empty list when no extras are configured.
+    rebuild, but operators should see a diagnostic when a configured
+    root is typo'd or unmounted. Returns an empty list when no extras
+    are configured.
     """
     if config is None:
         config = load_config(knowledge_root)
@@ -132,4 +137,6 @@ def resolve_extra_intake_roots(
         candidate = candidate.expanduser()
         if candidate.is_dir():
             resolved.append(candidate.resolve())
+        else:
+            logger.warning("extra_intake_root not found: %s", candidate)
     return resolved
