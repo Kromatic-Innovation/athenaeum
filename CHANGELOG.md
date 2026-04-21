@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-04-21
+
+Documentation and ops release accompanying the launch of
+["What We Learned Running Our Own Operations on Agentic Memory"](https://kromatic.com/blog/agentic-memory-in-production/).
+No library code changes — every existing install keeps working without
+modification.
+
+### Added
+- **`docs/why-athenaeum.md`** — evergreen design-rationale doc. Covers the
+  three problems that motivated Athenaeum, the four questions a production
+  memory system has to answer, and a full comparison against Claude's
+  built-in memory, Anthropic's memory tool, RAG, Karpathy's wiki gist, and
+  the mem0/Letta/Zep/Cognee category. The four design choices (sources as
+  first-class objects, the tiered librarian, passive recall, the editable
+  observation filter) are mapped to which failure mode each one fixes.
+- **`.github/workflows/promote-main.yml`** — fast-forward `develop → main`
+  promotion workflow (workflow_dispatch) matching the rest of the Kromatic
+  deploy-pipeline repos. Validates that `main` is a strict ancestor of
+  `develop` and that required CI checks passed on the `develop` SHA before
+  touching `main`. No merge commits are introduced on `main`, so history
+  stays linear.
+
+### Changed
+- **`README.md` restructured** around the four design choices. Leads with
+  "who this is for" and one-line pointers into `docs/why-athenaeum.md`;
+  preserves install / quickstart / MCP / hooks / vector / env vars / data
+  formats / known limitations below. The standalone Architecture bullet
+  list is gone (now covered in `docs/why-athenaeum.md`).
+- **`docs/assets/athena.png`** — replaced with the Athena illustration from
+  the launch blog post.
+- **`CONTRIBUTING.md`** — documents the develop-first branch flow
+  explicitly: feature → `develop`, `develop → main` via the promotion
+  workflow, no direct PRs to `main`. Explains why there is no staging
+  branch (library repo; releases via PyPI/`release.yml`).
+
+### Fixed
+- **`SECURITY.md`** supported-branch statement. The supported release lives
+  on `main`; fixes land on `develop` first and are promoted. The prior
+  wording had these inverted.
+
 ## [0.2.2] - 2026-04-17
 
 Pre-blog-post review pass. Non-breaking fixes surfaced by a final
