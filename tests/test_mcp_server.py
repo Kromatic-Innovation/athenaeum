@@ -385,6 +385,55 @@ class TestPendingQuestionMCPTools:
 
 
 # ---------------------------------------------------------------------------
+# recall_search extra-roots integration
+# ---------------------------------------------------------------------------
+
+
+class TestRecallSearchExtraRoots:
+    """End-to-end: recall must render auto-memory hits with their real
+    on-disk path, not a fabricated ``wiki/<auto-memory>/...`` label that
+    would 404 for a reader following the link.
+    """
+
+    def test_renders_auto_memory_hit_with_root_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.search import FTS5Backend
+
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "unrelated.md").write_text(
+            "---\nname: Unrelated\n---\n\nnothing relevant\n"
+        )
+        auto_memory = knowledge / "raw" / "auto-memory"
+        scope = auto_memory / "-Users-tristankromer-Code"
+        scope.mkdir(parents=True)
+        (scope / "feedback_develop_first_flow.md").write_text(
+            "---\nname: develop-first flow\ntags: [workflow]\n---\n\n"
+            "Ship to develop first, promote after CI is green.\n"
+        )
+
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki, cache, extra_roots=[auto_memory])
+
+        result = recall_search(
+            wiki, "develop first flow", top_k=3,
+            search_backend="fts5", cache_dir=cache,
+            extra_roots=[auto_memory],
+        )
+        assert "develop-first flow" in result
+        # The rendered path must match the indexed ``<root_name>/<relpath>``
+        # shape so a downstream agent can reopen the file.
+        assert (
+            "auto-memory/-Users-tristankromer-Code/"
+            "feedback_develop_first_flow.md"
+        ) in result
+        # And must NOT hallucinate a ``wiki/`` prefix for extra-root hits.
+        assert "wiki/auto-memory" not in result
+
+
+# ---------------------------------------------------------------------------
 # CLI integration
 # ---------------------------------------------------------------------------
 

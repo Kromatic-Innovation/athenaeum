@@ -196,7 +196,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
-    from athenaeum.config import load_config
+    from athenaeum.config import load_config, resolve_extra_intake_roots
     from athenaeum.mcp_server import create_server
 
     target = args.path.expanduser().resolve()
@@ -211,6 +211,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     cfg = load_config(target)
     backend = cfg.get("search_backend", "fts5")
     cache_dir = Path("~/.cache/athenaeum").expanduser()
+    extra_roots = resolve_extra_intake_roots(target, cfg)
 
     # Warn on config/cache mismatch. The recall tool silently returns zero
     # hits when the configured backend's index is missing, so users with
@@ -224,6 +225,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         wiki_root=wiki_root,
         search_backend=backend,
         cache_dir=cache_dir,
+        extra_roots=extra_roots,
     )
     try:
         server.run()
@@ -325,7 +327,7 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
 
 
 def _cmd_rebuild_index(args: argparse.Namespace) -> int:
-    from athenaeum.config import load_config
+    from athenaeum.config import load_config, resolve_extra_intake_roots
     from athenaeum.search import build_fts5_index, build_vector_index
 
     knowledge_root = args.path.expanduser().resolve()
@@ -336,27 +338,39 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
         print(f"Wiki directory not found: {wiki_root}", file=sys.stderr)
         return 1
 
+    cfg = load_config(knowledge_root)
     if args.backend is not None:
         backend = args.backend
     else:
-        cfg = load_config(knowledge_root)
         backend = cfg.get("search_backend", "fts5")
+
+    extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     if backend == "vector":
         try:
-            count = build_vector_index(wiki_root, cache_dir)
+            count = build_vector_index(
+                wiki_root, cache_dir, extra_roots=extra_roots,
+            )
         except ImportError as exc:
             print(f"Vector backend unavailable: {exc}", file=sys.stderr)
             print("Install with: pip install athenaeum[vector]", file=sys.stderr)
             return 1
-        print(f"Vector index rebuilt: {count} wiki pages")
+        print(
+            f"Vector index rebuilt: {count} pages "
+            f"(wiki + {len(extra_roots)} extra root(s))"
+        )
         return 0
 
     if backend == "fts5":
-        count = build_fts5_index(wiki_root, cache_dir)
-        print(f"FTS5 index rebuilt: {count} wiki pages")
+        count = build_fts5_index(
+            wiki_root, cache_dir, extra_roots=extra_roots,
+        )
+        print(
+            f"FTS5 index rebuilt: {count} pages "
+            f"(wiki + {len(extra_roots)} extra root(s))"
+        )
         return 0
 
     print(f"Unknown search backend: {backend}", file=sys.stderr)
