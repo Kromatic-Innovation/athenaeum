@@ -44,11 +44,43 @@ log = logging.getLogger(__name__)
 
 # Header grammar — matches `## [ISO-DATE] Entity: "{name}" (from {ref})`.
 # ISO-DATE is intentionally a loose match (``[^\]]+``) so a future shift to
-# datetime-with-time doesn't break the parser. The entity name is captured
-# between straight quotes; the raw ref is everything up to the closing paren.
+# datetime-with-time doesn't break the parser.
+#
+# Entity: between straight quotes, but tolerates backslash-escaped quotes
+# (``\\"``) written by the renderer so names containing `"` round-trip.
+# Unescape with :func:`_unescape_entity` after capture.
+#
+# Ref: greedy to the final ``)`` anchored at end-of-line. This lets raw paths
+# that happen to contain parens (e.g. ``sessions/foo (v2).md``) round-trip
+# without special-casing the renderer.
+#
+# The trailing ``$`` anchor + the outer grammar prevents greedy-runaway if a
+# line somehow contains multiple ``)`` sequences.
 _HEADER_RE = re.compile(
-    r"^## \[(?P<date>[^\]]+)\] Entity: \"(?P<entity>[^\"]+)\" \(from (?P<ref>[^)]+)\)$"
+    r"^## \[(?P<date>[^\]]+)\] Entity: \""
+    r"(?P<entity>(?:[^\"\\]|\\.)*)"
+    r"\" \(from (?P<ref>.+)\)$"
 )
+
+
+def _unescape_entity(raw: str) -> str:
+    """Unescape ``\\"`` and ``\\\\`` in a captured entity name.
+
+    Paired with the renderer in :mod:`athenaeum.tiers` which escapes
+    backslashes and then double quotes.
+    """
+    # Walk the string so we don't over-unescape adjacent sequences.
+    out: list[str] = []
+    i = 0
+    while i < len(raw):
+        ch = raw[i]
+        if ch == "\\" and i + 1 < len(raw):
+            out.append(raw[i + 1])
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 # Checkbox grammar — ``- [ ]`` or ``- [x]`` (case-insensitive on ``x``).
 _CHECKBOX_RE = re.compile(r"^- \[(?P<state>[ xX])\]\s*(?P<question>.*)$")
 # Lines we strip when extracting the user's answer body.
@@ -181,7 +213,7 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
 
     return PendingQuestion(
         id=_make_id(lines[0], question),
-        entity=header_match.group("entity"),
+        entity=_unescape_entity(header_match.group("entity")),
         source=header_match.group("ref"),
         question=question,
         conflict_type=conflict_type,

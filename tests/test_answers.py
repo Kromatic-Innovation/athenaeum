@@ -403,6 +403,50 @@ def test_tier4_render_round_trips_through_parser(tmp_path: Path) -> None:
     assert pq.question  # non-empty
 
 
+@pytest.mark.parametrize(
+    ("entity_name", "raw_ref"),
+    [
+        ('Acme Corp', 'sessions/foo.md'),  # clean baseline
+        ('Acme "The Great" Corp', 'sessions/foo.md'),  # embedded quotes
+        ('Acme Corp', 'sessions/foo (v2).md'),  # parens in ref
+        ('Acme "The Great" Corp', 'sessions/foo (v2).md'),  # both
+        ('Université "Étoile" Inc', 'sessions/straße.md'),  # unicode entity + ref
+        ('Globex', 'sessions/notes (rev 3) (final).md'),  # multiple parens in ref
+    ],
+)
+def test_tier4_round_trip_hostile_inputs(
+    tmp_path: Path, entity_name: str, raw_ref: str
+) -> None:
+    """tier4_escalate output must round-trip through parse_pending_questions
+    cleanly even when entity_name contains double quotes and raw_ref contains
+    parentheses. Guards the renderer/parser contract documented in #61.
+    """
+    from athenaeum.models import EscalationItem
+    from athenaeum.tiers import tier4_escalate
+
+    pending = tmp_path / "_pending_questions.md"
+    items = [
+        EscalationItem(
+            raw_ref=raw_ref,
+            entity_name=entity_name,
+            conflict_type="principled",
+            description="Conflict description; contract test.",
+        ),
+    ]
+    tier4_escalate(items, pending)
+
+    # Raw file frontmatter sanity: header uses the escaped form for quotes
+    # but the raw ref is written unmolested.
+    raw_text = pending.read_text(encoding="utf-8")
+    assert raw_ref in raw_text  # paths stored verbatim
+
+    parsed = parse_pending_questions(pending)
+    assert len(parsed) == 1, f"expected 1 block, got {len(parsed)}"
+    pq = parsed[0]
+    assert pq.entity == entity_name  # round-trips after unescape
+    assert pq.source == raw_ref  # paths preserved
+
+
 def test_pending_question_is_dataclass() -> None:
     pq = PendingQuestion(
         id="abc",
