@@ -648,3 +648,138 @@ class TestHybridRescueClasses:
         )
         filenames = [r[0] for r in results]
         assert "innovation-accounting.md" not in filenames
+
+
+class TestHybridRescueClassesExtraRoot:
+    """Hybrid rescue semantics also hold when the winning doc lives in an
+    extra intake root (``raw/auto-memory/<scope>/``) rather than wiki.
+
+    The MCP recall layer feeds both wiki/ and extra-root docs through the
+    same hybrid merge. If the rescue-class claim only held for wiki-rooted
+    docs, a scope-indexed memory would silently fall out of recall on the
+    exact failure-class queries that motivate the hybrid design. These
+    tests pin the invariant: same rescue outcome regardless of which root
+    the doc lives under.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_chromadb(self) -> None:
+        pytest.importorskip("chromadb")
+
+    @pytest.fixture
+    def rescue_wiki_and_auto_memory(
+        self, tmp_path: Path
+    ) -> tuple[Path, Path]:
+        """Mirror of ``TestHybridRescueClasses.rescue_wiki`` but with the
+        rescue targets relocated to ``raw/auto-memory/<scope>/``.
+
+        - wiki holds only a ``path``-heavy distractor so the vector query
+          for "Return Path" has a plausible-but-wrong nearest neighbour.
+        - scope dir holds ``feedback_return_path.md`` (short proper-noun,
+          FTS5 rescue class) and ``feedback_innovation_accounting.md``
+          (semantic no-overlap, vector rescue class).
+        """
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+
+        # Distractor in wiki — token "path" so vector for "Return Path"
+        # has a plausible-but-wrong nearest neighbour.
+        (wiki / "migration-path.md").write_text(
+            "---\n"
+            "name: Migration Path\n"
+            "tags: [infra]\n"
+            "description: Generic upgrade path documentation\n"
+            "---\n\n"
+            "A migration path is the sequence of steps to move a system "
+            "from one state to another.\n"
+        )
+
+        auto_memory = knowledge / "raw" / "auto-memory"
+        scope = auto_memory / "-Users-tristankromer-Code"
+        scope.mkdir(parents=True)
+
+        # FTS5 rescue class — short proper-noun entity in extra root.
+        (scope / "feedback_return_path.md").write_text(
+            "---\n"
+            "name: Return Path\n"
+            "tags: [company, past-client]\n"
+            "description: Email deliverability SaaS acquired by Validity\n"
+            "---\n\n"
+            "Brief stub.\n"
+        )
+
+        # Vector rescue class — semantically-rich page that never uses the
+        # query tokens "iterative feedback loops."
+        (scope / "feedback_innovation_accounting.md").write_text(
+            "---\n"
+            "name: Innovation Accounting\n"
+            "tags: [methodology, metrics]\n"
+            "description: Ries's measurement framework for startups\n"
+            "---\n\n"
+            "A way to measure progress when traditional accounting fails. "
+            "It emphasises learning milestones and validated experiments — "
+            "the cycle of building a small change, measuring the result, "
+            "and adjusting course based on what you learned. The core idea "
+            "is that improvement compounds through short cycles of "
+            "hypothesis, experiment, and adjustment rather than through "
+            "one big plan.\n"
+        )
+        return wiki, auto_memory
+
+    def test_fts5_rescues_short_proper_noun_in_extra_root(
+        self,
+        rescue_wiki_and_auto_memory: tuple[Path, Path],
+        tmp_path: Path,
+    ) -> None:
+        """FTS5 must surface ``feedback_return_path.md`` on "Return Path"
+        even though the doc lives in ``raw/auto-memory/<scope>/`` rather
+        than wiki/. Extra-root keys are ``<root_name>/<relpath>``.
+        """
+        wiki, auto_memory = rescue_wiki_and_auto_memory
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki, cache, extra_roots=[auto_memory])
+        results = FTS5Backend().query("Return Path", cache, n=3)
+        filenames = [r[0] for r in results]
+        expected = (
+            "auto-memory/-Users-tristankromer-Code/"
+            "feedback_return_path.md"
+        )
+        assert expected in filenames, (
+            "FTS5 must surface the proper-noun entity on a short query "
+            "when the doc lives in an extra intake root — same rescue "
+            "class as wiki-rooted docs."
+        )
+        # And must rank ahead of the wiki distractor.
+        if "migration-path.md" in filenames:
+            assert filenames.index(expected) < filenames.index(
+                "migration-path.md"
+            )
+
+    def test_vector_rescues_semantic_no_overlap_in_extra_root(
+        self,
+        rescue_wiki_and_auto_memory: tuple[Path, Path],
+        tmp_path: Path,
+    ) -> None:
+        """Vector must surface ``feedback_innovation_accounting.md`` on a
+        query with zero lexical overlap, even when the doc lives in
+        ``raw/auto-memory/<scope>/`` rather than wiki/.
+        """
+        wiki, auto_memory = rescue_wiki_and_auto_memory
+        cache = tmp_path / "cache"
+        VectorBackend().build_index(
+            wiki, cache, extra_roots=[auto_memory]
+        )
+        results = VectorBackend().query(
+            "iterative feedback loops", cache, n=3
+        )
+        filenames = [r[0] for r in results]
+        expected = (
+            "auto-memory/-Users-tristankromer-Code/"
+            "feedback_innovation_accounting.md"
+        )
+        assert expected in filenames, (
+            "Vector must surface the semantic neighbour on a zero-overlap "
+            "query when the doc lives in an extra intake root — same "
+            "rescue class as wiki-rooted docs."
+        )
