@@ -35,6 +35,7 @@ from athenaeum.clusters import (
     write_cluster_report,
 )
 from athenaeum.config import load_config, resolve_extra_intake_roots
+from athenaeum.merge import merge_clusters_to_wiki
 from athenaeum.models import (
     AutoMemoryFile,
     EntityAction,
@@ -432,6 +433,7 @@ def run(
     max_files: int = 50,
     max_api_calls: int = 200,
     cluster_only: bool = False,
+    merge_only: bool = False,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error.
 
@@ -439,17 +441,24 @@ def run(
     clustering pass runs; the entity tier pipeline is skipped entirely.
     This is the clustering-focused entrypoint for operators validating
     the C2 output before shipping C3.
+
+    When ``merge_only`` is True, only the C3 merge pass runs: it reads
+    the canonical cluster JSONL from a previous C2 run and writes
+    ``wiki/auto-<topic-slug>.md`` entries. Neither discovery, clustering,
+    nor the entity tier pipeline runs. Useful for iterating on the merge
+    output without re-embedding or re-clustering.
     """
+    skip_entity_tiers = cluster_only or merge_only
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key and not dry_run and not cluster_only:
+    if not api_key and not dry_run and not skip_entity_tiers:
         log.error("ANTHROPIC_API_KEY not set (required unless dry_run=True)")
         return 1
 
-    if not wiki_root.exists() and not cluster_only:
+    if not wiki_root.exists() and not skip_entity_tiers:
         log.error("Wiki root does not exist: %s", wiki_root)
         return 1
 
-    if not dry_run and not cluster_only and not (knowledge_root / ".git").exists():
+    if not dry_run and not skip_entity_tiers and not (knowledge_root / ".git").exists():
         log.error(
             "No .git in %s — refusing to run without a writable git repo. "
             "The librarian's pre-processing snapshot is load-bearing for raw-file "
@@ -460,6 +469,16 @@ def run(
         return 1
 
     config = load_config(knowledge_root)
+
+    if merge_only:
+        # Merge-only path skips discovery + clustering entirely; it reads
+        # the canonical cluster JSONL written by a prior C2 run and
+        # compiles ``wiki/auto-*.md`` entries from it. Discovery still
+        # happens inside merge_clusters_to_wiki() for source propagation.
+        merge_clusters_to_wiki(
+            knowledge_root, config=config, dry_run=dry_run,
+        )
+        return 0
 
     # C1 + C2: auto-memory discovery followed by the C2 cluster pass.
     # Clustering must run BEFORE any tier routing so that downstream C3
@@ -482,6 +501,16 @@ def run(
         _run_cluster_pass(
             auto_memory_files, knowledge_root,
             config=config, dry_run=dry_run,
+        )
+
+        # C3: merge clusters into canonical wiki/auto-*.md entries. Runs
+        # after C2 in the same pipeline so a full librarian run refreshes
+        # cluster + merge together. Uses the cluster JSONL written above.
+        merge_clusters_to_wiki(
+            knowledge_root,
+            auto_memory_files=auto_memory_files,
+            config=config,
+            dry_run=dry_run,
         )
 
     if cluster_only:

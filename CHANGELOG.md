@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Auto-memory cluster merge (C3)** (#197) — new `athenaeum.merge`
+  module consumes the C2 cluster JSONL and emits one consolidated wiki
+  entry per cluster at `wiki/auto-<topic-slug>.md` with a deduped
+  `sources[]` union (dedupe key: `(session, turn)`), propagated
+  `origin_scope` per source, and a `contradictions_detected` heuristic
+  flag (`centroid_score < 0.75`) for the C4 review queue. Size-1
+  clusters ARE emitted as wiki entries; raw intake files remain
+  untouched. New `--merge-only` CLI flag mirrors `--cluster-only` for
+  iterating on merge output without re-embedding.
 - **p95 search-latency benchmark harness** (#69) — new
   `tests/benchmarks/test_search_bench.py` checks in the ad-hoc benchmark
   used for the Session-2 recall budget as a pytest-benchmark fixture.
