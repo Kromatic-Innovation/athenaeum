@@ -33,6 +33,19 @@ _DEFAULTS: dict[str, Any] = {
         # list to restrict recall to the compiled wiki only.
         "extra_intake_roots": ["raw/auto-memory"],
     },
+    "librarian": {
+        # Cluster pass (issue #196, C2). ``cluster_threshold`` is the
+        # cosine-similarity cutoff used by single-linkage clustering over
+        # auto-memory files. Empirically tuned against the voltaire
+        # fixture (5 files sharing a nanoclaw/voltaire token and one typo
+        # clone land in a single cluster at 0.6 without dragging in
+        # unrelated singletons). ``cluster_output`` is the canonical
+        # JSONL report path (resolved relative to the knowledge root);
+        # every run rotates a timestamped sibling and atomically replaces
+        # the canonical file.
+        "cluster_threshold": 0.55,
+        "cluster_output": "raw/_librarian-clusters.jsonl",
+    },
 }
 
 
@@ -94,6 +107,17 @@ search_backend: fts5
 # recall:
 #   extra_intake_roots:
 #     - raw/auto-memory
+
+# Librarian pipeline configuration.
+# cluster_threshold: cosine cutoff for auto-memory clustering (C2,
+#   issue #196). Higher = tighter clusters; 0.6 is tuned against the
+#   voltaire/nanoclaw near-duplicate fixture.
+# cluster_output: canonical JSONL output path (relative to knowledge
+#   root). Each run also writes a timestamped sibling and atomically
+#   replaces this path.
+# librarian:
+#   cluster_threshold: 0.55
+#   cluster_output: raw/_librarian-clusters.jsonl
 """
 
 
