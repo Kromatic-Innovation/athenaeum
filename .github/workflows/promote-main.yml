@@ -101,9 +101,18 @@ jobs:
 
       - name: Push fast-forward promotion via refs API
         env:
-          GH_TOKEN: ${{ github.token }}
+          # PROMOTION_BOT_TOKEN is required because main's branch protection
+          # (required_pull_request_reviews) rejects direct ref writes by the
+          # default GITHUB_TOKEN with HTTP 422. The bot token has the App
+          # bypass for promotion refs.
+          GH_TOKEN: ${{ secrets.PROMOTION_BOT_TOKEN }}
         run: |
           set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::PROMOTION_BOT_TOKEN secret is not available to this workflow. Configure it at the org level or the repo secrets."
+            exit 1
+          fi
 
           update_payload=$(jq -nc --arg sha "$source_sha" '{sha:$sha,force:false}')
           update_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs/heads/${TARGET_BRANCH}"
