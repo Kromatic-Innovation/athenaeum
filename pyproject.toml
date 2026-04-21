@@ -45,6 +45,15 @@ dev = [
     "ruff>=0.4.0",
     "fastmcp>=2.0.0,<3.0",
 ]
+bench = [
+    # Optional: pytest-benchmark is only needed to run tests/benchmarks/
+    # (p95 search-latency harness, issue #69). The main `dev` extra does
+    # NOT include it so CI's default `pytest` invocation doesn't slow
+    # down — the benchmark module is ignored by default via
+    # `[tool.pytest.ini_options].addopts` below.
+    "pytest>=8.0",
+    "pytest-benchmark>=4.0,<6.0",
+]
 
 [project.scripts]
 athenaeum = "athenaeum.cli:main"
@@ -74,3 +83,8 @@ select = ["E", "F", "I", "W"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# tests/benchmarks/ is excluded from the default collection so CI's
+# vanilla `pytest` invocation doesn't pull in pytest-benchmark. Run them
+# explicitly with `pytest tests/benchmarks/ --benchmark-only` (cli paths
+# override `--ignore`). See tests/benchmarks/test_search_bench.py.
+addopts = "--ignore=tests/benchmarks"
