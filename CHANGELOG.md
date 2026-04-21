@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-04-21
+
+Quine follow-ups from the 0.3.0 review. Two small hardening fixes on
+error-path code; no behavior change under normal execution.
+
+### Fixed
+- **`answers._parse_block` no longer relies on `assert` for control flow**
+  (#64). Under `python -O` the assert is stripped and the subsequent
+  `cb_match.group(...)` would raise `AttributeError` on malformed blocks
+  instead of returning `None`. Replaced with an explicit `if cb_match is
+  None: return None` guard so `-O` behaves the same as default execution.
+- **CLI error output now includes the exception class name** (#65).
+  `Error: {msg}` → `Error ({ExceptionClass}): {msg}`. Makes operator
+  triage and Sentry correlation meaningfully easier without changing the
+  exit-code contract.
+
 ## [0.3.0] - 2026-04-20
 
 Headline feature: **the Tier 4 escalation path is no longer write-only.**
@@ -240,7 +256,8 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.2.1...v0.2.2
