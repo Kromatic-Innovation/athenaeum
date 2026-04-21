@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Athenaeum is pre-1.0. Only the latest release on the `develop` branch is supported with security patches.
+Athenaeum is pre-1.0. Only the latest release on `main` is supported with security patches. Fixes land on `develop` first and are promoted to `main` via the `Promote Main` workflow.
 
 ## Reporting a vulnerability
 

@@ -1,0 +1,133 @@
+name: Promote Main
+
+# Fast-forward promotion of develop -> main. Triggered manually.
+# Athenaeum has no staging branch, so the chain is develop -> main.
+#
+# Precondition: `main` is an ancestor of `develop` (fast-forward possible).
+# If it isn't, open a `chore: sync develop with main` PR first.
+# See CONTRIBUTING.md -> "Branch flow and promotion".
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: Source branch for promotion (must be develop)
+        required: true
+        default: develop
+      target_branch:
+        description: Target branch for promotion (must be main)
+        required: true
+        default: main
+      reason:
+        description: Promotion reason for audit trail
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+  statuses: read
+
+jobs:
+  promote:
+    name: Fast-forward Promote develop → main
+    runs-on: ubuntu-latest
+    outputs:
+      promoted_sha: ${{ steps.set_promoted_sha.outputs.promoted_sha }}
+    env:
+      SOURCE_BRANCH: ${{ github.event.inputs.source_branch }}
+      TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
+      PROMOTION_REASON: ${{ github.event.inputs.reason }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate promotion inputs and fast-forward precondition
+        run: |
+          set -euo pipefail
+
+          if [ "$SOURCE_BRANCH" != "develop" ]; then
+            echo "::error::source_branch must be 'develop'. Got '$SOURCE_BRANCH'."
+            exit 1
+          fi
+
+          if [ "$TARGET_BRANCH" != "main" ]; then
+            echo "::error::target_branch must be 'main'. Got '$TARGET_BRANCH'."
+            exit 1
+          fi
+
+          git fetch --no-tags --prune origin "$SOURCE_BRANCH" "$TARGET_BRANCH"
+
+          SOURCE_SHA="$(git rev-parse "origin/${SOURCE_BRANCH}")"
+          TARGET_SHA="$(git rev-parse "origin/${TARGET_BRANCH}")"
+
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_ENV"
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_ENV"
+
+          if [ "$SOURCE_SHA" = "$TARGET_SHA" ]; then
+            echo "::error::${SOURCE_BRANCH} and ${TARGET_BRANCH} are already at the same SHA. Nothing to promote."
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$TARGET_SHA" "$SOURCE_SHA"; then
+            echo "::error::Fast-forward precondition failed: ${TARGET_BRANCH} is not an ancestor of ${SOURCE_BRANCH}. Open a 'chore: sync ${SOURCE_BRANCH} with ${TARGET_BRANCH}' PR first."
+            exit 1
+          fi
+
+      - name: Verify CI passed on source SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Required contexts match branch protection on main: test (3.11|3.12|3.13).
+          required=(test\ \(3.11\) test\ \(3.12\) test\ \(3.13\))
+
+          for ctx in "${required[@]}"; do
+            # Look up the latest check-run for this context on source_sha.
+            conclusion=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${source_sha}/check-runs" \
+              --jq ".check_runs[] | select(.name == \"${ctx}\") | .conclusion" | head -n 1)
+            if [ "$conclusion" != "success" ]; then
+              echo "::error::Required check '${ctx}' is not passing on ${source_sha} (conclusion='${conclusion:-<missing>}'). Wait for develop CI or investigate failures."
+              exit 1
+            fi
+            echo "ok: ${ctx} = success"
+          done
+
+      - name: Set promoted SHA output
+        id: set_promoted_sha
+        run: echo "promoted_sha=${source_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Push fast-forward promotion via refs API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          update_payload=$(jq -nc --arg sha "$source_sha" '{sha:$sha,force:false}')
+          update_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs/heads/${TARGET_BRANCH}"
+          http_status=$(curl -sS -o /tmp/promote_main_ref_update.json -w "%{http_code}" -L -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$update_url" \
+            -d "$update_payload")
+          if [ "$http_status" != "200" ]; then
+            echo "::error::Failed to fast-forward ${TARGET_BRANCH} to ${source_sha} via refs API (HTTP ${http_status})."
+            cat /tmp/promote_main_ref_update.json
+            exit 1
+          fi
+
+      - name: Write promotion audit summary
+        run: |
+          {
+            echo "## Main Promotion"
+            echo "- repository: \`${GITHUB_REPOSITORY}\`"
+            echo "- initiated_by: \`${GITHUB_ACTOR}\`"
+            echo "- source_branch: \`${SOURCE_BRANCH}\`"
+            echo "- target_branch: \`${TARGET_BRANCH}\`"
+            echo "- promoted_sha: \`${source_sha}\`"
+            echo "- reason: ${PROMOTION_REASON}"
+            echo "- run_url: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } >> "$GITHUB_STEP_SUMMARY"
