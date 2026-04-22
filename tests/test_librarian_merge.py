@@ -447,22 +447,87 @@ class TestVoltaireFixture:
 
 
 class TestContradictionFixture:
-    def test_contradictions_detected_flag_fires(
+    """C4 (#198): contradictions are detector-driven now.
+
+    The old C3 behaviour keyed off ``centroid_score < 0.75``. With the
+    detector stubbed out (no ``ANTHROPIC_API_KEY``, no client passed),
+    the detector returns ``detected=False`` with
+    ``rationale="llm-unavailable"`` and the wiki entry must NOT carry the
+    ``contradictions_detected`` flag. Detector-positive behaviour is
+    exercised in ``test_contradictions.py`` and the integration test
+    below via a mocked client.
+    """
+
+    def test_no_client_means_no_flag(
         self, contradiction_merge_root: Path,
     ) -> None:
         entries = merge_clusters_to_wiki(contradiction_merge_root)
         assert len(entries) == 1
+        assert entries[0].contradictions_detected is False
+        wiki = contradiction_merge_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
+        assert meta["contradictions_detected"] is False
+        # When not flagged, status key is absent entirely.
+        assert "status" not in meta
+        # Both sources present regardless of detector outcome.
+        assert len(meta["sources"]) == 2
+        # No _pending_questions.md side-effect when the detector is a no-op.
+        assert not (wiki / "_pending_questions.md").exists()
+
+    def test_threshold_constant_retained_for_bc(self) -> None:
+        # C4 no longer reads this constant, but it stays exported at its
+        # historical value so any downstream import does not break.
+        assert CONTRADICTION_COHESION_THRESHOLD == 0.75
+
+    def test_detector_positive_flags_entry_and_writes_pending(
+        self, contradiction_merge_root: Path,
+    ) -> None:
+        """With a mocked detector returning detected=True, the wiki entry
+        carries ``status: contradiction-flagged`` AND a block is appended
+        to ``wiki/_pending_questions.md`` using the answers.py grammar.
+        """
+        from unittest.mock import MagicMock
+
+        fake_client = MagicMock()
+        payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park on WIP."}'
+        )
+        response = MagicMock()
+        response.content = [MagicMock(text=payload)]
+        fake_client.messages.create.return_value = response
+
+        entries = merge_clusters_to_wiki(
+            contradiction_merge_root, client=fake_client,
+        )
+        assert len(entries) == 1
         assert entries[0].contradictions_detected is True
+
         wiki = contradiction_merge_root / "wiki"
         entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
         meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
         assert meta["contradictions_detected"] is True
-        # Both sources present.
-        assert len(meta["sources"]) == 2
+        assert meta["status"] == "contradiction-flagged"
+        assert meta["contradiction_type"] == "prescriptive"
 
-    def test_threshold_is_the_documented_value(self) -> None:
-        # Lock in the heuristic threshold so a later silent drift is caught.
-        assert CONTRADICTION_COHESION_THRESHOLD == 0.75
+        pending = wiki / "_pending_questions.md"
+        assert pending.exists()
+        text = pending.read_text(encoding="utf-8")
+        assert "# Pending Questions" in text
+        # Header uses the tier4_escalate "Entity:" grammar so answers.py
+        # can round-trip the block through ingest-answers.
+        assert "Entity:" in text
+        # raw_ref points at the compiled wiki entry.
+        assert "from wiki/" in text
+        assert "**Conflict type**: prescriptive" in text
+        assert "Park prior-session debris on a WIP branch." in text
 
 
 class TestSessionTurnDedupe:
