@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ANTHROPIC_API_KEY` is unset, every cluster reports `detected=False`
   with `rationale="llm-unavailable"`. Includes
   `scripts/measure_contradiction_baseline.py` for local corpus baselining.
+- **Claude Code auto-memory integration guide** (#200) — new
+  `docs/integrations/claude-code.md` documents the generic symlink-bridge
+  pattern from `~/.claude/projects/<scope>/memory/` into
+  `raw/auto-memory/<scope>/`, a citation frontmatter policy, and an
+  end-to-end quick start. Adds `examples/claude-code/setup-symlinks.sh`
+  (idempotent bridge with `--dry-run`),
+  `examples/claude-code/stop-hook-validate.sh` (non-blocking citation
+  validator), and `examples/claude-code/auto-memory-frontmatter.example.md`
+  (reference memory file). `examples/claude-code/README.md` gains an
+  "Auto-memory integration" section linking the three.
 - **Auto-memory cluster merge (C3)** (#197) — new `athenaeum.merge`
   module consumes the C2 cluster JSONL and emits one consolidated wiki
   entry per cluster at `wiki/auto-<topic-slug>.md` with a deduped
