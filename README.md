@@ -184,6 +184,10 @@ This gives you:
 Full setup guide, smoke test, and environment-variable reference:
 [`examples/claude-code/README.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/examples/claude-code/README.md).
 
+## Integrations
+
+- **Claude Code auto-memory** — bridge `~/.claude/projects/<scope>/memory/` into Athenaeum's `raw/` intake so the librarian can cluster, merge, and contradiction-check Claude Code's durable memory alongside other sources. See [`docs/integrations/claude-code.md`](docs/integrations/claude-code.md).
+
 ## Vector search (optional)
 
 Athenaeum supports a vector search backend (chromadb + `all-MiniLM-L6-v2`)

@@ -146,6 +146,25 @@ signed in, `session-start-recall.sh` will `op read` the key at
 Without the key, the hook falls back to a regex+stopword extractor —
 still good, just less topic-aware.
 
+## Auto-memory integration
+
+In addition to the per-turn recall hooks above, Athenaeum can ingest Claude
+Code's first-party auto-memory files (`~/.claude/projects/<scope>/memory/`)
+as another raw intake source. The librarian then clusters, merges, and
+contradiction-checks them alongside anything else in `raw/`.
+
+Files in this directory supporting that integration:
+
+| File                                  | Purpose                                                            |
+|---------------------------------------|--------------------------------------------------------------------|
+| `setup-symlinks.sh`                   | Bridge `~/.claude/projects/*/memory` into `raw/auto-memory/<scope>/`. Idempotent; supports `--dry-run`. |
+| `stop-hook-validate.sh`               | Claude Code `Stop`-hook template that warns when auto-memory frontmatter is missing `originSessionId`/`originTurn`. Non-blocking by default. |
+| `auto-memory-frontmatter.example.md`  | Example memory file with a valid citation frontmatter block.        |
+
+Full walkthrough — directory layout, citation policy, how the librarian
+ingests and consolidates, and an end-to-end quick start — lives in
+[`docs/integrations/claude-code.md`](../../docs/integrations/claude-code.md).
+
 ## Troubleshooting
 
 | Symptom                                         | Check                                                                                           |
