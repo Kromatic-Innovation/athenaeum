@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Auto-memory contradiction detection (C4)** (#198) — new
+  `athenaeum.contradictions` module runs one claim-level Haiku call per
+  merged cluster to decide whether member bodies state or prescribe
+  contradictory things (factual or prescriptive). Wires into
+  `athenaeum.merge`: flagged clusters carry `status: contradiction-flagged`
+  in their wiki frontmatter and append a round-trippable block to
+  `wiki/_pending_questions.md` via the existing `tier4_escalate` helper.
+  The C3 centroid-cohesion heuristic (`CONTRADICTION_COHESION_THRESHOLD`)
+  is retired as the contradiction signal but kept exported for
+  backwards-compatibility. Deterministic fallback: when
+  `ANTHROPIC_API_KEY` is unset, every cluster reports `detected=False`
+  with `rationale="llm-unavailable"`. Includes
+  `scripts/measure_contradiction_baseline.py` for local corpus baselining.
 - **Auto-memory cluster merge (C3)** (#197) — new `athenaeum.merge`
   module consumes the C2 cluster JSONL and emits one consolidated wiki
   entry per cluster at `wiki/auto-<topic-slug>.md` with a deduped
