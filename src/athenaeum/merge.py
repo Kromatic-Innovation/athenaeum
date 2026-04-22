@@ -45,25 +45,37 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from athenaeum.clusters import resolve_cluster_output_path
 from athenaeum.config import load_config, resolve_extra_intake_roots
+from athenaeum.contradictions import ContradictionResult, detect_contradictions
 from athenaeum.models import (
     AutoMemoryFile,
+    EscalationItem,
     parse_frontmatter,
     render_frontmatter,
 )
+from athenaeum.tiers import tier4_escalate
+
+if TYPE_CHECKING:
+    import anthropic
 
 log = logging.getLogger(__name__)
 
-# Centroid score below which a cluster is flagged for C4 human review.
-# Cohesive clusters (identical/near-identical members) sit near 1.0;
-# members that share a topic but disagree drift below. 0.75 is the
-# documented first-pass heuristic for this PR — C4 replaces it with
-# real contradiction detection. Keeping it here (not in config) makes
-# the PR diff self-contained; C4 can promote to config when it lands.
+# Legacy centroid-cohesion constant from C3. C4 replaces this with real
+# claim-level contradiction detection via
+# :func:`athenaeum.contradictions.detect_contradictions`, but the constant
+# stays exported (at its historical value) so any downstream consumer that
+# imports it does not break. New code should NOT read it.
 CONTRADICTION_COHESION_THRESHOLD = 0.75
+
+# Frontmatter marker written when the detector finds a contradiction. When
+# the detector returns ``detected=False`` the key is OMITTED entirely (not
+# rendered as ``status: clean``) -- absence is the clean signal. This
+# mirrors C3's treatment of the old ``contradictions_detected`` flag on
+# cohesive clusters and keeps ``wiki/auto-*.md`` frontmatter minimal.
+CONTRADICTION_STATUS_FLAGGED = "contradiction-flagged"
 
 # Filesystem prefix that distinguishes auto-memory wiki entries from
 # entity-schema entries (``<uid>-<kebab>.md``). Callers reading the
@@ -83,7 +95,13 @@ _SLUG_BORING_TOKENS: frozenset[str] = frozenset({
 
 @dataclass
 class MergedWikiEntry:
-    """In-memory shape of one consolidated wiki entry."""
+    """In-memory shape of one consolidated wiki entry.
+
+    ``contradictions_detected`` is retained on the dataclass for backwards
+    compatibility with the C3 wire (tests + callers that read it); C4 now
+    sets it from the real :class:`ContradictionResult`. ``contradiction``
+    carries the structured detector output when one was run.
+    """
 
     topic_slug: str
     cluster_id: str
@@ -93,6 +111,13 @@ class MergedWikiEntry:
     sources: list[dict[str, Any]] = field(default_factory=list)
     body: str = ""
     member_paths: list[str] = field(default_factory=list)
+    contradiction: ContradictionResult | None = None
+    # Resolved :class:`AutoMemoryFile` records backing this cluster. Populated
+    # by :func:`merge_cluster_row` so the outer orchestrator does not need to
+    # re-resolve filesystem paths to run the C4 contradiction detector.
+    # Not rendered into wiki frontmatter; kept off the public docstring in
+    # render_merged_entry by only touching ``sources``/``origin_scopes``.
+    resolved_members: list[AutoMemoryFile] = field(default_factory=list)
 
     @property
     def filename(self) -> str:
@@ -371,6 +396,12 @@ def merge_cluster_row(
     file on disk — C2's rotated reports may reference files that have
     been removed between runs, and we prefer to skip such rows with a
     log line rather than crash the whole merge pass.
+
+    C4 (#198): contradiction detection is NOT performed here — the caller
+    (:func:`merge_clusters_to_wiki`) runs it against the resolved member
+    list and sets ``contradictions_detected`` + ``contradiction`` on the
+    return value before rendering. This keeps ``merge_cluster_row`` a pure
+    function over the JSONL row and member bodies.
     """
     cluster_id = str(row.get("cluster_id", ""))
     member_paths_raw: list[str] = [str(m) for m in row.get("member_paths", [])]
@@ -485,16 +516,28 @@ def merge_cluster_row(
         topic_slug=topic_slug,
         cluster_id=cluster_id,
         cluster_centroid_score=centroid_score,
-        contradictions_detected=centroid_score < CONTRADICTION_COHESION_THRESHOLD,
+        # Default False here; merge_clusters_to_wiki() overrides based on
+        # the C4 contradiction-detector result before rendering.
+        contradictions_detected=False,
         origin_scopes=origin_scopes_set,
         sources=deduped,
         body=body,
         member_paths=resolved_member_paths,
+        resolved_members=[am for _mp, am in members],
     )
 
 
 def render_merged_entry(entry: MergedWikiEntry) -> str:
-    """Render a :class:`MergedWikiEntry` as a full wiki markdown file."""
+    """Render a :class:`MergedWikiEntry` as a full wiki markdown file.
+
+    Frontmatter shape:
+    - Always present: ``name``, ``type``, ``cluster_id``,
+      ``cluster_centroid_score``, ``contradictions_detected``,
+      ``origin_scopes``, ``sources``.
+    - When ``contradictions_detected`` is true: ``status`` is set to
+      :data:`CONTRADICTION_STATUS_FLAGGED`. When false, the ``status`` key
+      is OMITTED entirely (absence = clean) — see module-level comment.
+    """
     meta: dict[str, Any] = {
         "name": entry.topic_slug,
         "type": "auto-memory",
@@ -504,6 +547,10 @@ def render_merged_entry(entry: MergedWikiEntry) -> str:
         "origin_scopes": list(entry.origin_scopes),
         "sources": list(entry.sources),
     }
+    if entry.contradictions_detected:
+        meta["status"] = CONTRADICTION_STATUS_FLAGGED
+        if entry.contradiction is not None and entry.contradiction.conflict_type:
+            meta["contradiction_type"] = entry.contradiction.conflict_type
     return render_frontmatter(meta) + "\n" + entry.body
 
 
@@ -513,6 +560,7 @@ def merge_clusters_to_wiki(
     auto_memory_files: Iterable[AutoMemoryFile] | None = None,
     config: dict[str, Any] | None = None,
     dry_run: bool = False,
+    client: "anthropic.Anthropic | None" = None,
 ) -> list[MergedWikiEntry]:
     """Read the canonical cluster JSONL and emit one wiki entry per cluster.
 
@@ -527,6 +575,11 @@ def merge_clusters_to_wiki(
         config: Optional resolved config dict.
         dry_run: If True, build the entries in memory but do NOT write
             to ``wiki/``. Returns the entries for caller inspection.
+        client: Optional live Anthropic client used for the C4
+            contradiction detector. When ``None`` (e.g. ``ANTHROPIC_API_KEY``
+            unset), the detector is skipped with a deterministic
+            ``detected=False`` fallback — see
+            :func:`athenaeum.contradictions.detect_contradictions`.
 
     Returns:
         The list of :class:`MergedWikiEntry` records in cluster-file order.
@@ -573,6 +626,38 @@ def merge_clusters_to_wiki(
         else:
             slug_counts[base] = 1
 
+    # C4 (#198): claim-level contradiction detection per cluster. Runs for
+    # every cluster including in dry-run (so operators can preview which
+    # entries would flag) but only writes the escalation file on non-dry
+    # runs. Detector failures and missing keys degrade to detected=False.
+    wiki_root = knowledge_root / "wiki"
+    escalations: list[EscalationItem] = []
+    for entry in entries:
+        result = detect_contradictions(entry.resolved_members, client)
+        entry.contradiction = result
+        entry.contradictions_detected = bool(result.detected)
+        if result.detected:
+            wiki_ref = f"wiki/{entry.filename}"
+            description_parts: list[str] = []
+            if result.rationale:
+                description_parts.append(result.rationale)
+            if result.conflicting_passages:
+                for i, passage in enumerate(result.conflicting_passages, start=1):
+                    description_parts.append(f"Passage {i}: {passage}")
+            if result.members_involved:
+                description_parts.append(
+                    "Members involved: " + ", ".join(result.members_involved)
+                )
+            description = "\n".join(description_parts) or (
+                f"Cluster {entry.cluster_id} flagged by contradiction detector."
+            )
+            escalations.append(EscalationItem(
+                raw_ref=wiki_ref,
+                entity_name=entry.topic_slug,
+                conflict_type=result.conflict_type or "factual",
+                description=description,
+            ))
+
     if dry_run:
         for entry in entries:
             log.info(
@@ -582,13 +667,17 @@ def merge_clusters_to_wiki(
             )
         return entries
 
-    wiki_root = knowledge_root / "wiki"
     wiki_root.mkdir(parents=True, exist_ok=True)
     for entry in entries:
         page_path = wiki_root / entry.filename
         page_path.write_text(render_merged_entry(entry), encoding="utf-8")
         log.info(
-            "merge: wrote %s (cluster %s, %d source(s))",
+            "merge: wrote %s (cluster %s, %d source(s), contradictions=%s)",
             page_path, entry.cluster_id, len(entry.sources),
+            entry.contradictions_detected,
         )
+
+    if escalations:
+        tier4_escalate(escalations, wiki_root / "_pending_questions.md")
+
     return entries

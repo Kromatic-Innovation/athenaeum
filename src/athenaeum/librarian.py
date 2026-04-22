@@ -470,6 +470,13 @@ def run(
 
     config = load_config(knowledge_root)
 
+    # Build the shared Anthropic client early so both the entity tiers and
+    # the C4 contradiction detector can share it. ``None`` when the key is
+    # unset; detector degrades deterministically in that case.
+    merge_client: anthropic.Anthropic | None = (
+        anthropic.Anthropic(api_key=api_key, max_retries=3) if api_key else None
+    )
+
     if merge_only:
         # Merge-only path skips discovery + clustering entirely; it reads
         # the canonical cluster JSONL written by a prior C2 run and
@@ -477,6 +484,7 @@ def run(
         # happens inside merge_clusters_to_wiki() for source propagation.
         merge_clusters_to_wiki(
             knowledge_root, config=config, dry_run=dry_run,
+            client=merge_client,
         )
         return 0
 
@@ -506,11 +514,14 @@ def run(
         # C3: merge clusters into canonical wiki/auto-*.md entries. Runs
         # after C2 in the same pipeline so a full librarian run refreshes
         # cluster + merge together. Uses the cluster JSONL written above.
+        # C4: contradiction detection runs inside merge_clusters_to_wiki
+        # and reuses the shared Anthropic client.
         merge_clusters_to_wiki(
             knowledge_root,
             auto_memory_files=auto_memory_files,
             config=config,
             dry_run=dry_run,
+            client=merge_client,
         )
 
     if cluster_only:
@@ -538,9 +549,7 @@ def run(
     index = EntityIndex(wiki_root)
     log.info("Loaded %d wiki entries into index", len(index))
 
-    client: anthropic.Anthropic | None = (
-        anthropic.Anthropic(api_key=api_key, max_retries=3) if api_key else None
-    )
+    client = merge_client  # shared with C4 contradiction detector
 
     if not dry_run:
         git_snapshot(knowledge_root, "librarian: pre-processing snapshot")
