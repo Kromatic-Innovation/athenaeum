@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from athenaeum.models import RawFile
+from athenaeum.models import EntityIndex, RawFile
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -125,6 +125,170 @@ class TestRawFileContent:
             uuid8="aabb0011",
         )
         assert raw.ref == "sessions/20240406T120000Z-aabb0011.md"
+
+
+# ---------------------------------------------------------------------------
+# tier0_passthrough
+# ---------------------------------------------------------------------------
+
+
+PASSTHROUGH_RAW = """---
+uid: 35297ed5
+type: person
+name: Nicole Segerer
+access: personal
+tags:
+  - relationship:dormant
+  - tier:warm-b
+  - account:kromatic
+  - apollo:enriched
+google_contact: people/c971065947330806669
+emails:
+  - nsegerer@revenera.com
+warm_score: 10.8
+current_title: SVP and General Manager
+current_company: Revenera
+linkedin_url: "http://www.linkedin.com/in/nicole-segerer-5209921b"
+apollo_employment_history:
+  - title: SVP and General Manager
+    organization_name: Revenera
+    current: true
+---
+
+# Nicole Segerer
+
+## Role / Background
+
+_(role / background pending)_
+"""
+
+
+class TestTier0Passthrough:
+    """tier0_passthrough must promote pre-structured raw-intake verbatim.
+
+    Custom frontmatter namespaces (relationship:, apollo:, current_title,
+    linkedin_url, apollo_employment_history) MUST round-trip unchanged —
+    the regression these tests guard against is the LLM-driven Tier 2/3
+    path silently dropping any field outside the WikiEntity allowlist.
+    """
+
+    def _make_wiki_root(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        return wiki
+
+    def _make_raw(self, tmp_path: Path, content: str) -> RawFile:
+        raw_dir = tmp_path / "raw" / "contact-wiki"
+        raw_dir.mkdir(parents=True)
+        path = raw_dir / "35297ed5-nicole.md"
+        path.write_text(content, encoding="utf-8")
+        return RawFile(
+            path=path, source="contact-wiki", timestamp="", uuid8="",
+        )
+
+    def test_promotes_prestructured_verbatim(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_passthrough
+
+        wiki = self._make_wiki_root(tmp_path)
+        raw = self._make_raw(tmp_path, PASSTHROUGH_RAW)
+        index = EntityIndex(wiki)
+
+        entity = tier0_passthrough(raw, index, wiki, ["person"])
+
+        assert entity is not None
+        assert entity.uid == "35297ed5"
+        assert entity.name == "Nicole Segerer"
+        out_path = wiki / "35297ed5-nicole-segerer.md"
+        assert out_path.exists()
+        written = out_path.read_text(encoding="utf-8")
+        # Custom frontmatter namespaces must survive
+        for needle in (
+            "relationship:dormant",
+            "apollo:enriched",
+            "current_title: SVP and General Manager",
+            "current_company: Revenera",
+            "linkedin_url: http://www.linkedin.com/in/nicole-segerer-5209921b",
+            "apollo_employment_history:",
+            "organization_name: Revenera",
+        ):
+            assert needle in written, f"missing custom field: {needle}"
+        # Body preserved
+        assert "# Nicole Segerer" in written
+
+    def test_registers_in_index(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_passthrough
+
+        wiki = self._make_wiki_root(tmp_path)
+        raw = self._make_raw(tmp_path, PASSTHROUGH_RAW)
+        index = EntityIndex(wiki)
+
+        tier0_passthrough(raw, index, wiki, ["person"])
+
+        # Subsequent lookups should find the new entity
+        hit = index.lookup("Nicole Segerer")
+        assert hit is not None
+        assert hit[0] == "35297ed5"
+
+    def test_idempotent_on_existing_uid(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_passthrough
+
+        wiki = self._make_wiki_root(tmp_path)
+        # Pre-seed wiki with the same uid
+        existing = wiki / "35297ed5-nicole-segerer.md"
+        existing.write_text(
+            "---\nuid: 35297ed5\ntype: person\nname: Nicole Segerer\n"
+            "access: personal\ntags: [active]\n---\n\n# Nicole\n",
+            encoding="utf-8",
+        )
+        raw = self._make_raw(tmp_path, PASSTHROUGH_RAW)
+        index = EntityIndex(wiki)
+
+        result = tier0_passthrough(raw, index, wiki, ["person"])
+
+        # Already in index — caller falls through to Tier 1/2/3.
+        assert result is None
+        # Existing wiki page untouched.
+        assert "Nicole" in existing.read_text()
+
+    def test_falls_through_when_unstructured(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_passthrough
+
+        wiki = self._make_wiki_root(tmp_path)
+        raw = self._make_raw(
+            tmp_path,
+            "Met with someone about something. No frontmatter at all.\n",
+        )
+        index = EntityIndex(wiki)
+
+        assert tier0_passthrough(raw, index, wiki, ["person"]) is None
+        # No wiki file written.
+        assert list(wiki.glob("*.md")) == []
+
+    def test_falls_through_when_type_not_in_schema(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_passthrough
+
+        wiki = self._make_wiki_root(tmp_path)
+        raw = self._make_raw(
+            tmp_path,
+            "---\nuid: deadbeef\ntype: alien\nname: E.T.\n---\n\nbody\n",
+        )
+        index = EntityIndex(wiki)
+
+        assert tier0_passthrough(raw, index, wiki, ["person"]) is None
+
+    def test_dry_run_does_not_write(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_passthrough
+
+        wiki = self._make_wiki_root(tmp_path)
+        raw = self._make_raw(tmp_path, PASSTHROUGH_RAW)
+        index = EntityIndex(wiki)
+
+        entity = tier0_passthrough(
+            raw, index, wiki, ["person"], dry_run=True,
+        )
+
+        assert entity is not None  # caller still gets the entity descriptor
+        assert list(wiki.glob("*.md")) == []  # but nothing on disk
 
 
 # ---------------------------------------------------------------------------
