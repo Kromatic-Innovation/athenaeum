@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import subprocess
+from datetime import date
 from pathlib import Path
 
 import anthropic
@@ -43,8 +44,11 @@ from athenaeum.models import (
     ProcessingResult,
     RawFile,
     TokenUsage,
+    WikiEntity,
     load_schema_list,
     parse_frontmatter,
+    render_frontmatter,
+    slugify,
 )
 from athenaeum.tiers import (
     tier1_programmatic_match,
@@ -276,6 +280,85 @@ def git_snapshot(knowledge_root: Path, message: str) -> bool:
     return True
 
 
+def tier0_passthrough(
+    raw: RawFile,
+    index: EntityIndex,
+    wiki_root: Path,
+    valid_types: list[str],
+    dry_run: bool = False,
+) -> WikiEntity | None:
+    """Promote a pre-structured raw-intake file to wiki/ verbatim.
+
+    Some upstream producers (e.g. ``generate_warm_wiki.py``, contact-sync
+    scripts) emit raw-intake markdown that is *already* in valid wiki
+    schema — has ``uid``, ``type``, ``name``, plus rich custom-namespace
+    frontmatter (``relationship:``, ``exclude:``, ``apollo_*``,
+    ``current_title``, ``linkedin_url``, etc.). Sending such files through
+    Tier 2/3 is wasteful (one Haiku + one Sonnet call per file) AND lossy:
+    the LLM-driven path rebuilds frontmatter from a fixed allowlist and
+    drops any field outside it.
+
+    This passthrough writes the raw frontmatter + body to ``wiki/``
+    byte-for-byte, only stamping ``created`` (if missing) and ``updated``
+    to today. No classification runs; the index is updated so later raw
+    files in the same pipeline can match against it.
+
+    Returns the new :class:`WikiEntity` on success, or ``None`` if the
+    raw is unstructured / ineligible (caller should fall through to
+    Tier 1/2/3). Eligibility gate: frontmatter parses, ``uid``/``type``/
+    ``name`` are non-empty, ``type`` is in the schema's allowlist, and the
+    uid is not already present in the index (idempotent re-runs).
+    """
+    meta, body = parse_frontmatter(raw.content)
+    if not meta:
+        return None
+    uid = str(meta.get("uid", "") or "").strip()
+    etype = str(meta.get("type", "") or "").strip()
+    name = str(meta.get("name", "") or "").strip()
+    if not uid or not etype or not name:
+        return None
+    if etype not in valid_types:
+        return None
+    if index.get_by_uid(uid) is not None:
+        return None
+
+    today = date.today().isoformat()
+    if not meta.get("created"):
+        meta["created"] = today
+    meta["updated"] = today
+
+    filename = f"{uid}-{slugify(name)}.md"
+    out_path = wiki_root / filename
+    if out_path.exists():
+        # Filename collision with a different uid would be a real bug,
+        # but a same-uid existing file is already covered by the index
+        # check above. Defer to Tier 1/2/3 rather than overwrite blindly.
+        return None
+
+    aliases_raw = meta.get("aliases") or []
+    tags_raw = meta.get("tags") or []
+    entity = WikiEntity(
+        uid=uid,
+        type=etype,
+        name=name,
+        aliases=[str(a) for a in aliases_raw if a],
+        access=str(meta.get("access", "internal")),
+        tags=[str(t) for t in tags_raw if t],
+        created=str(meta.get("created", today)),
+        updated=str(meta.get("updated", today)),
+        body=body,
+    )
+
+    if dry_run:
+        return entity
+
+    out_path.write_text(
+        render_frontmatter(meta) + "\n" + body, encoding="utf-8",
+    )
+    index.register(entity)
+    return entity
+
+
 def process_one(
     raw: RawFile,
     index: EntityIndex,
@@ -289,6 +372,21 @@ def process_one(
 ) -> ProcessingResult:
     """Process a single raw file through all tiers."""
     result = ProcessingResult(raw_file=raw)
+
+    # --- Tier 0: passthrough for pre-structured raw-intake ---
+    # When upstream producers already emit valid wiki-schema frontmatter,
+    # promote verbatim without LLM classification. Preserves custom
+    # namespaces the LLM tiers would otherwise drop.
+    passthrough = tier0_passthrough(
+        raw, index, wiki_root, valid_types, dry_run=dry_run,
+    )
+    if passthrough is not None:
+        log.info(
+            "  T0 passthrough: %s → %s",
+            passthrough.name, passthrough.filename,
+        )
+        result.created.append(passthrough)
+        return result
 
     # --- Tier 1: Programmatic matching ---
     matched = tier1_programmatic_match(raw, index)
