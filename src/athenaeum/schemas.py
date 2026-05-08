@@ -31,12 +31,21 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from athenaeum.provenance import validate_field_sources, validate_source_value
+
 
 class WikiBase(BaseModel):
     """Base model for any wiki frontmatter. Open by design.
 
     Required: uid, type, name. Everything else passes through via
     ``extra="allow"`` so custom-namespace fields survive round-trip.
+
+    Provenance (issue #90):
+    - ``source`` is the wiki-level default source for any frontmatter
+      field that does not have a ``field_sources`` override.
+    - ``field_sources`` is a per-claim map ``{<field>: <source>}``.
+    Both accept either a scalar ``"<type>:<ref>"`` or a structured
+    object ``{type, ref, ts?, confidence?, notes?}``.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -44,6 +53,21 @@ class WikiBase(BaseModel):
     uid: str
     type: str
     name: str
+
+    # Per-claim provenance (issue #90). Stored as the on-disk shape
+    # (str OR dict) — round-trip fidelity beats normalization here.
+    source: str | dict | None = None
+    field_sources: dict[str, str | dict] | None = None
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _validate_source(cls, v: Any) -> Any:
+        return validate_source_value(v)
+
+    @field_validator("field_sources", mode="before")
+    @classmethod
+    def _validate_field_sources(cls, v: Any) -> Any:
+        return validate_field_sources(v)
 
     @field_validator("uid", "type", "name", mode="before")
     @classmethod

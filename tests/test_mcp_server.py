@@ -53,9 +53,7 @@ class TestScorePage:
         assert score == 1.0
 
     def test_both_match(self) -> None:
-        score = _score_page(
-            ["acme"], {"name": "Acme Corp"}, "Acme is a company"
-        )
+        score = _score_page(["acme"], {"name": "Acme Corp"}, "Acme is a company")
         assert score == 4.0  # 3 (frontmatter) + 1 (body)
 
     def test_no_match(self) -> None:
@@ -66,9 +64,7 @@ class TestScorePage:
         assert _score_page([], {"name": "Acme"}, "body") == 0.0
 
     def test_list_tags_scored(self) -> None:
-        score = _score_page(
-            ["fintech"], {"tags": ["fintech", "client"]}, "body"
-        )
+        score = _score_page(["fintech"], {"tags": ["fintech", "client"]}, "body")
         assert score >= 3.0
 
 
@@ -175,10 +171,14 @@ class TestRemember:
         raw.mkdir()
         result = remember_write(raw, "Test observation about Acme")
         assert result.startswith("Saved to")
-        # Verify file exists and has content
+        # Verify file exists and has content. With no `sources` kwarg
+        # the server stamps a default-inferred-source frontmatter
+        # block (issue #90) and the original body lands underneath.
         files = list((raw / "claude-session").glob("*.md"))
         assert len(files) == 1
-        assert files[0].read_text() == "Test observation about Acme"
+        text = files[0].read_text()
+        assert "source: claude:inferred" in text
+        assert "Test observation about Acme" in text
 
     def test_custom_source(self, tmp_path: Path) -> None:
         raw = tmp_path / "raw"
@@ -194,6 +194,7 @@ class TestRemember:
         files = list((raw / "claude-session").glob("*.md"))
         # filename: 20260416T123456Z-abcd1234.md
         import re
+
         assert re.match(r"\d{8}T\d{6}Z-[0-9a-f]{8}\.md", files[0].name)
 
     def test_rejects_empty_source(self, tmp_path: Path) -> None:
@@ -218,9 +219,7 @@ class TestRemember:
         wiki.mkdir()
         # "../wiki" is sanitized to "wiki", writing to raw/wiki/ (not the
         # actual wiki root) — safely contained inside raw/
-        result = remember_write(
-            raw, "content", source="../wiki", wiki_root=wiki
-        )
+        result = remember_write(raw, "content", source="../wiki", wiki_root=wiki)
         assert "Saved" in result
         assert (raw / "wiki").is_dir()
 
@@ -247,6 +246,91 @@ class TestRemember:
         result = remember_write(raw, huge)
         assert "Error" in result
         assert "limit" in result.lower()
+
+
+class TestRememberSources:
+    """Per-claim provenance (issue #90) on ``remember_write``."""
+
+    def test_default_inferred_source_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        with caplog.at_level("WARNING", logger="athenaeum.mcp_server"):
+            result = remember_write(raw, "Some claim")
+        assert "Saved to" in result
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        assert "source: claude:inferred" in text
+        # Warning surfaces on the server logger, NOT on stdout / MCP wire.
+        assert any("no `sources` supplied" in r.getMessage() for r in caplog.records)
+
+    def test_scalar_sources_propagates(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        result = remember_write(
+            raw,
+            "Some claim",
+            sources="claude:session-2026-05-08",
+        )
+        assert "Saved to" in result
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        assert "source: claude:session-2026-05-08" in text
+        assert "claude:inferred" not in text
+
+    def test_field_sources_dict_propagates(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        result = remember_write(
+            raw,
+            "Some claim",
+            sources={"emails": "api:apollo:2026-05-07"},
+        )
+        assert "Saved to" in result
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        assert "field_sources:" in text
+        assert "emails: api:apollo:2026-05-07" in text
+
+    def test_structured_single_source_dict(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        result = remember_write(
+            raw,
+            "Some claim",
+            sources={"type": "api", "ref": "apollo", "confidence": 0.9},
+        )
+        assert "Saved to" in result
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        assert "source:" in text
+        assert "type: api" in text
+        assert "confidence: 0.9" in text
+
+    def test_malformed_scalar_rejected(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        # "Has-Uppercase" matches neither typed nor legacy form.
+        result = remember_write(raw, "Some claim", sources="Has-Uppercase")
+        assert "Error" in result
+        assert "invalid `sources`" in result
+
+    def test_merges_with_existing_frontmatter(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        body = (
+            "---\n"
+            "uid: deadbeef\n"
+            "type: person\n"
+            "name: Already Structured\n"
+            "---\n"
+            "\n"
+            "# Body\n"
+        )
+        result = remember_write(raw, body, sources="manual:vcard-import")
+        assert "Saved to" in result
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        # Existing keys preserved; source merged in.
+        assert "uid: deadbeef" in text
+        assert "name: Already Structured" in text
+        assert "source: manual:vcard-import" in text
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +362,7 @@ class TestCreateServer:
         try:
             # Re-import to trigger the ImportError path
             import athenaeum.mcp_server as mod
+
             importlib.reload(mod)  # force fresh import of the function
 
             with pytest.raises(ImportError, match="FastMCP is required"):
@@ -306,7 +391,7 @@ def _seed_pending_wiki(tmp_path: Path, *, answered: bool = False) -> Path:
     pending = wiki / "_pending_questions.md"
     pending.write_text(
         "# Pending Questions\n\n"
-        "## [2026-04-20] Entity: \"Acme Corp\" (from sessions/test.md)\n"
+        '## [2026-04-20] Entity: "Acme Corp" (from sessions/test.md)\n'
         f"- {checkbox} Is Acme Series A or Series B after 2026?\n"
         "**Conflict type**: principled\n"
         "**Description**: Prior wiki says Series A; new raw implies Series B.\n"
@@ -331,8 +416,13 @@ class TestPendingQuestionMCPTools:
         assert len(items) == 1
         item = items[0]
         assert set(item.keys()) >= {
-            "id", "entity", "source", "question",
-            "conflict_type", "description", "created_at",
+            "id",
+            "entity",
+            "source",
+            "question",
+            "conflict_type",
+            "description",
+            "created_at",
         }
         assert item["entity"] == "Acme Corp"
 
@@ -395,9 +485,7 @@ class TestRecallSearchExtraRoots:
     would 404 for a reader following the link.
     """
 
-    def test_renders_auto_memory_hit_with_root_prefix(
-        self, tmp_path: Path
-    ) -> None:
+    def test_renders_auto_memory_hit_with_root_prefix(self, tmp_path: Path) -> None:
         from athenaeum.search import FTS5Backend
 
         knowledge = tmp_path / "knowledge"
@@ -418,16 +506,18 @@ class TestRecallSearchExtraRoots:
         FTS5Backend().build_index(wiki, cache, extra_roots=[auto_memory])
 
         result = recall_search(
-            wiki, "develop first flow", top_k=3,
-            search_backend="fts5", cache_dir=cache,
+            wiki,
+            "develop first flow",
+            top_k=3,
+            search_backend="fts5",
+            cache_dir=cache,
             extra_roots=[auto_memory],
         )
         assert "develop-first flow" in result
         # The rendered path must match the indexed ``<root_name>/<relpath>``
         # shape so a downstream agent can reopen the file.
         assert (
-            "auto-memory/-Users-tristankromer-Code/"
-            "feedback_develop_first_flow.md"
+            "auto-memory/-Users-tristankromer-Code/" "feedback_develop_first_flow.md"
         ) in result
         # And must NOT hallucinate a ``wiki/`` prefix for extra-root hits.
         assert "wiki/auto-memory" not in result

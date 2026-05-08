@@ -251,3 +251,91 @@ def test_live_wiki_roundtrip():
         f"First 5: {failures[:5]}"
     )
     assert checked > 0, "Expected at least one wiki to validate"
+
+
+# --- Provenance (issue #90) ---
+
+
+class TestProvenanceFields:
+    """``source`` and ``field_sources`` validators on WikiBase."""
+
+    def test_scalar_source_accepted(self) -> None:
+        m = PersonWiki(
+            uid="abc12345",
+            type="person",
+            name="X",
+            source="api:apollo:2026-05-07",
+        )
+        # Round-trip fidelity — scalar must NOT be normalized to dict.
+        assert m.source == "api:apollo:2026-05-07"
+
+    def test_structured_source_accepted(self) -> None:
+        src = {"type": "api", "ref": "apollo", "confidence": 0.9}
+        m = PersonWiki(
+            uid="abc12345",
+            type="person",
+            name="X",
+            source=src,
+        )
+        assert m.source == src
+
+    def test_field_sources_map_accepted(self) -> None:
+        fs = {
+            "emails": "api:apollo:2026-05-07",
+            "current_title": "linkedin:nicole-segerer",
+        }
+        m = PersonWiki(uid="abc12345", type="person", name="X", field_sources=fs)
+        assert m.field_sources == fs
+
+    def test_both_fields_populated(self) -> None:
+        m = CompanyWiki(
+            uid="def67890",
+            type="company",
+            name="Acme",
+            source="manual:initial-import",
+            field_sources={"website": "scraped:homepage:2026-04-01"},
+        )
+        assert m.source == "manual:initial-import"
+        assert m.field_sources == {"website": "scraped:homepage:2026-04-01"}
+
+    def test_malformed_source_raises(self) -> None:
+        # "Has-Uppercase" matches neither typed nor legacy form.
+        with pytest.raises(ValidationError):
+            PersonWiki(uid="abc12345", type="person", name="X", source="Has-Uppercase")
+
+    def test_malformed_field_sources_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            PersonWiki(
+                uid="abc12345",
+                type="person",
+                name="X",
+                field_sources={"emails": "Has-Uppercase"},
+            )
+
+    def test_legacy_source_accepted(self) -> None:
+        # Pre-#90 wikis store ``source: extended-tier-build`` as a bare slug.
+        # ~15k live wikis use this shape; schema must accept them.
+        m = PersonWiki(
+            uid="abc12345",
+            type="person",
+            name="X",
+            source="extended-tier-build",
+        )
+        assert m.source == "extended-tier-build"
+
+    def test_none_passes(self) -> None:
+        m = PersonWiki(uid="abc12345", type="person", name="X")
+        assert m.source is None
+        assert m.field_sources is None
+
+    def test_validate_wiki_meta_with_provenance(self) -> None:
+        meta = {
+            "uid": "abc12345",
+            "type": "person",
+            "name": "X",
+            "source": "api:apollo:2026-05-07",
+            "field_sources": {"emails": "api:apollo:2026-05-07"},
+        }
+        m = validate_wiki_meta(meta)
+        assert m.source == "api:apollo:2026-05-07"
+        assert m.field_sources == {"emails": "api:apollo:2026-05-07"}
