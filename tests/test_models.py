@@ -178,6 +178,41 @@ class TestRenderFrontmatter:
         assert parsed["type"] == original["type"]
         assert parsed["name"] == original["name"]
 
+    def test_render_frontmatter_preserves_key_order(self) -> None:
+        """tier0 byte-for-byte round-trip requires sort_keys=False.
+
+        Quine regression: alphabetizing keys would break tier0_passthrough's
+        contract that custom frontmatter round-trips byte-for-byte.
+        """
+        # Non-alpha order — would re-sort to field_sources, name, source,
+        # type, uid if sort_keys=True crept in.
+        meta = {
+            "type": "person",
+            "name": "Zed",
+            "uid": "12345",
+            "source": "api:apollo",
+            "field_sources": {"emails": "api:apollo"},
+        }
+        rendered = render_frontmatter(meta)
+        # Strip leading/trailing fences; remaining lines are key: ... rows
+        # at top level (the field_sources nested block follows its key).
+        lines = rendered.splitlines()
+        top_keys = []
+        for line in lines:
+            if line in ("---",):
+                continue
+            if line.startswith(" ") or line.startswith("\t"):
+                continue
+            if ":" in line:
+                top_keys.append(line.split(":", 1)[0])
+        assert top_keys == [
+            "type",
+            "name",
+            "uid",
+            "source",
+            "field_sources",
+        ], f"Key order not preserved; got {top_keys}"
+
 
 # ---------------------------------------------------------------------------
 # slugify / generate_uid

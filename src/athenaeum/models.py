@@ -66,7 +66,12 @@ def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
 
 
 def render_frontmatter(meta: dict[str, object]) -> str:
-    """Render a dict as a YAML frontmatter block."""
+    """Render a dict as a YAML frontmatter block.
+
+    Contract: key order preserved (``sort_keys=False``) for tier0
+    byte-for-byte round-trip. Do not change without updating
+    ``test_render_frontmatter_preserves_key_order``.
+    """
     dumped = yaml.dump(
         meta, default_flow_style=False, sort_keys=False, allow_unicode=True
     )
