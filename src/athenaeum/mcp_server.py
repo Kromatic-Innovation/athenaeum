@@ -10,12 +10,22 @@ Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from athenaeum.models import parse_frontmatter
+from athenaeum.models import parse_frontmatter, render_frontmatter
+from athenaeum.provenance import validate_field_sources, validate_source_value
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
+
+log = logging.getLogger(__name__)
+
+# Default wiki-level source stamped onto remember() writes when the caller
+# does not supply ``sources``. ``claude:inferred`` is intentionally
+# distinct from any session-id format so downstream provenance audits
+# can surface "agent never declared a source" as a first-class signal.
+_DEFAULT_INFERRED_SOURCE = "claude:inferred"
 
 # ---------------------------------------------------------------------------
 # Recall helpers
@@ -93,7 +103,11 @@ def recall_search(
         return "Query too short \u2014 provide at least one keyword (2+ characters)."
 
     return _recall_via_backend(
-        wiki_root, query, top_k, search_backend, cache_dir,
+        wiki_root,
+        query,
+        top_k,
+        search_backend,
+        cache_dir,
         extra_roots or [],
     )
 
@@ -152,9 +166,7 @@ def _recall_via_backend(
     effective_cache = cache_dir or Path.home() / ".cache" / "athenaeum"
 
     try:
-        hits = backend.query(
-            query, effective_cache, n=top_k, wiki_root=wiki_root
-        )
+        hits = backend.query(query, effective_cache, n=top_k, wiki_root=wiki_root)
     except NotImplementedError as exc:
         return str(exc)
 
@@ -166,7 +178,9 @@ def _recall_via_backend(
 
     for rank, (filename, name, score) in enumerate(hits, 1):
         page_path, display_prefix = _resolve_hit_path(
-            filename, wiki_root, extra_roots,
+            filename,
+            wiki_root,
+            extra_roots,
         )
         body = ""
         tags: str | list = "\u2014"
@@ -198,13 +212,67 @@ def remember_write(
     source: str = "claude-session",
     *,
     wiki_root: Path | None = None,
+    sources: str | dict | None = None,
 ) -> str:
     """Save a piece of knowledge to the raw intake directory.
 
-    Returns a confirmation message with the file path, or an error string.
+    Args:
+        raw_root: Root of the raw intake tree.
+        content: Markdown body. May already contain a YAML frontmatter
+            block — in that case provenance keys merge into it. If no
+            frontmatter is present, one is prepended.
+        source: SESSION identifier (legacy parameter name). Used to pick
+            the ``raw/<session>/`` subdirectory the file lands in.
+            **Not** the per-claim provenance source — see ``sources``.
+        wiki_root: Optional wiki root for path-traversal guards.
+        sources: Per-claim provenance (issue #90). Either:
+
+            - ``str`` (scalar ``"<type>:<ref>"``) — written as the
+              wiki-level ``source`` default.
+            - ``dict`` — written as ``field_sources`` (a per-field
+              override map). Keys must be strings.
+            - ``None`` (default) — stamps ``source: claude:inferred``
+              and emits a server-side warning. Untracked-source writes
+              are accepted but visible to downstream provenance audits.
+
+    Returns:
+        Confirmation message with the file path, or an error string.
     """
     if len(content.encode("utf-8", errors="replace")) > _MAX_CONTENT_BYTES:
         return f"Error: content exceeds {_MAX_CONTENT_BYTES // (1024 * 1024)} MB limit."
+
+    # Validate the per-claim provenance shape early so a malformed
+    # ``sources`` argument is rejected before we touch the filesystem.
+    try:
+        if sources is None:
+            wiki_source: str | dict | None = _DEFAULT_INFERRED_SOURCE
+            field_sources_map: dict | None = None
+            log.warning(
+                "remember(): no `sources` supplied; defaulting "
+                "wiki-level source to %r. Caller should declare a "
+                "source on every write (issue #90).",
+                _DEFAULT_INFERRED_SOURCE,
+            )
+        elif isinstance(sources, str):
+            validate_source_value(sources)
+            wiki_source = sources
+            field_sources_map = None
+        elif isinstance(sources, dict):
+            # Two shapes accepted: a structured single-source dict
+            # ({type, ref, ...}), or a field_sources map ({field: src}).
+            # Disambiguate by checking for the SourceRef required keys.
+            if {"type", "ref"} <= set(sources.keys()):
+                validate_source_value(sources)
+                wiki_source = sources
+                field_sources_map = None
+            else:
+                validate_field_sources(sources)
+                wiki_source = None
+                field_sources_map = sources
+        else:
+            return f"Error: `sources` must be str, dict, or None; got {type(sources).__name__}"
+    except ValueError as exc:
+        return f"Error: invalid `sources`: {exc}"
 
     safe_source = "".join(c for c in source if c.isalnum() or c in "-_")
     if not safe_source:
@@ -217,11 +285,15 @@ def remember_write(
     # rather than string-prefix compare — str.startswith("/a/raw") matches
     # "/a/raw-sibling" and would accept a traversal that the filesystem sees
     # as a sibling directory, not a descendant.
-    if not (target_dir == raw_root_resolved or target_dir.is_relative_to(raw_root_resolved)):
+    if not (
+        target_dir == raw_root_resolved or target_dir.is_relative_to(raw_root_resolved)
+    ):
         return "Error: path traversal detected \u2014 writes are restricted to raw/."
     if wiki_root:
         wiki_root_resolved = wiki_root.resolve()
-        if target_dir == wiki_root_resolved or target_dir.is_relative_to(wiki_root_resolved):
+        if target_dir == wiki_root_resolved or target_dir.is_relative_to(
+            wiki_root_resolved
+        ):
             return "Error: writes to wiki/ are not allowed."
 
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -234,8 +306,45 @@ def remember_write(
     if filepath.exists():
         return f"Error: file already exists at {filepath}. This should not happen."
 
-    filepath.write_text(content, encoding="utf-8")
+    final_content = _inject_provenance_frontmatter(
+        content, wiki_source, field_sources_map
+    )
+    filepath.write_text(final_content, encoding="utf-8")
     return f"Saved to {filepath}"
+
+
+def _inject_provenance_frontmatter(
+    content: str,
+    wiki_source: str | dict | None,
+    field_sources_map: dict | None,
+) -> str:
+    """Stamp ``source`` / ``field_sources`` into the raw file's frontmatter.
+
+    If ``content`` already has a YAML frontmatter block, the provenance
+    keys are merged into it (caller-supplied values win on conflict). If
+    not, a new frontmatter block is prepended. Either way, the keys land
+    at the END of the block so existing key ordering is preserved.
+
+    No-op when both arguments are ``None`` — used for ``sources=None``
+    after the default-inferred-source path has supplied ``wiki_source``.
+    """
+    if wiki_source is None and field_sources_map is None:
+        return content
+
+    meta, body = parse_frontmatter(content)
+    has_frontmatter = bool(meta)
+
+    if wiki_source is not None:
+        meta["source"] = wiki_source
+    if field_sources_map is not None:
+        meta["field_sources"] = field_sources_map
+
+    if has_frontmatter:
+        return render_frontmatter(meta) + body
+    # No prior frontmatter — prepend a fresh block. Preserve a blank
+    # line between frontmatter and body for readability.
+    body_text = content if not content.startswith("\n") else content
+    return render_frontmatter(meta) + "\n" + body_text
 
 
 # ---------------------------------------------------------------------------
@@ -303,27 +412,50 @@ def create_server(
             Matching wiki pages with relevance scores and content snippets.
         """
         return recall_search(
-            wiki_root, query, top_k,
+            wiki_root,
+            query,
+            top_k,
             search_backend=search_backend,
             cache_dir=cache_dir,
             extra_roots=extra_roots,
         )
 
     @mcp.tool()
-    def remember(content: str, source: str = "claude-session") -> str:
+    def remember(
+        content: str,
+        source: str = "claude-session",
+        sources: str | dict | None = None,
+    ) -> str:
         """Save a piece of knowledge to the raw intake directory.
 
-        The content is written as an append-only raw file. It will be compiled
-        into the wiki on the next pipeline run.
+        The content is written as an append-only raw file. It will be
+        compiled into the wiki on the next pipeline run.
 
         Args:
             content: The knowledge to save (markdown string).
-            source: Origin label, e.g. "claude-session", "manual".
+            source: SESSION identifier — selects the ``raw/<session>/``
+                subdirectory the file lands in. Examples:
+                ``"claude-session"``, ``"manual"``. **Not** a per-claim
+                provenance source — pass ``sources`` for that.
+            sources: Per-claim provenance (issue #90). Either:
+
+                - scalar ``"<type>:<ref>"`` (e.g.
+                  ``"claude:session-2026-05-08"``) — applied as the
+                  wiki-level default source for all fields,
+                - structured dict ``{type, ref, ts?, confidence?, notes?}``
+                  with the same wiki-level effect, or
+                - per-field map ``{<field>: <scalar-or-structured>}`` —
+                  written as ``field_sources``.
+
+                Omitting ``sources`` defaults to ``source: claude:inferred``
+                and logs a server-side warning. Always declare a source.
 
         Returns:
             Confirmation message with the file path.
         """
-        return remember_write(raw_root, content, source, wiki_root=wiki_root)
+        return remember_write(
+            raw_root, content, source, wiki_root=wiki_root, sources=sources
+        )
 
     @mcp.tool()
     def list_pending_questions() -> list[dict]:
@@ -378,8 +510,11 @@ def create_server(
         """
         from athenaeum.answers import resolve_by_id
 
-        result = resolve_by_id(pending_path=wiki_root / "_pending_questions.md",
-                               question_id=id, answer=answer)
+        result = resolve_by_id(
+            pending_path=wiki_root / "_pending_questions.md",
+            question_id=id,
+            answer=answer,
+        )
         # Surface the structured keys explicitly so consumers see them at
         # the top of the dict even when legacy aliases are also present.
         return {

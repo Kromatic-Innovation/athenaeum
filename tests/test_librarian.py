@@ -183,7 +183,10 @@ class TestTier0Passthrough:
         path = raw_dir / "35297ed5-nicole.md"
         path.write_text(content, encoding="utf-8")
         return RawFile(
-            path=path, source="contact-wiki", timestamp="", uuid8="",
+            path=path,
+            source="contact-wiki",
+            timestamp="",
+            uuid8="",
         )
 
     def test_promotes_prestructured_verbatim(self, tmp_path: Path) -> None:
@@ -284,11 +287,51 @@ class TestTier0Passthrough:
         index = EntityIndex(wiki)
 
         entity = tier0_passthrough(
-            raw, index, wiki, ["person"], dry_run=True,
+            raw,
+            index,
+            wiki,
+            ["person"],
+            dry_run=True,
         )
 
         assert entity is not None  # caller still gets the entity descriptor
         assert list(wiki.glob("*.md")) == []  # but nothing on disk
+
+    def test_provenance_round_trips_byte_for_byte(self, tmp_path: Path) -> None:
+        """source + field_sources must round-trip raw → wiki unchanged."""
+        from athenaeum.librarian import tier0_passthrough
+
+        wiki = self._make_wiki_root(tmp_path)
+        sourced = (
+            "---\n"
+            "uid: 7a8b9c01\n"
+            "type: person\n"
+            "name: Sourced Sam\n"
+            "access: personal\n"
+            "tags:\n"
+            "  - relationship:active\n"
+            "current_title: VP Eng\n"
+            "source: api:apollo:2026-05-07\n"
+            "field_sources:\n"
+            "  emails: api:apollo:2026-05-07\n"
+            "  current_title: linkedin:sourced-sam-1234\n"
+            "---\n"
+            "\n"
+            "# Sourced Sam\n"
+        )
+        raw = self._make_raw(tmp_path, sourced)
+        index = EntityIndex(wiki)
+
+        entity = tier0_passthrough(raw, index, wiki, ["person"])
+        assert entity is not None
+
+        out = (wiki / "7a8b9c01-sourced-sam.md").read_text(encoding="utf-8")
+        # Exact lines preserved (yaml.dump default_flow_style=False emits
+        # the same form on round-trip for these scalar values).
+        assert "source: api:apollo:2026-05-07" in out
+        assert "field_sources:" in out
+        assert "  emails: api:apollo:2026-05-07" in out
+        assert "  current_title: linkedin:sourced-sam-1234" in out
 
 
 # ---------------------------------------------------------------------------
@@ -422,13 +465,21 @@ class TestRunIntegration:
 
         # Mock client that returns valid classification + creation responses
         classify_response = MagicMock()
-        classify_response.content = [MagicMock(text=json.dumps([{
-            "name": "Alice Zhang",
-            "entity_type": "person",
-            "tags": ["active"],
-            "access": "internal",
-            "observations": "Product leader.",
-        }]))]
+        classify_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    [
+                        {
+                            "name": "Alice Zhang",
+                            "entity_type": "person",
+                            "tags": ["active"],
+                            "access": "internal",
+                            "observations": "Product leader.",
+                        }
+                    ]
+                )
+            )
+        ]
         create_response = MagicMock()
         create_response.content = [MagicMock(text="# Alice Zhang\n\nProduct leader.")]
 
@@ -440,7 +491,9 @@ class TestRunIntegration:
             # and these would never be called
         ]
         monkeypatch.setattr(
-            anthropic_mod, "Anthropic", lambda **kwargs: mock_client,
+            anthropic_mod,
+            "Anthropic",
+            lambda **kwargs: mock_client,
         )
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
         caplog.set_level(logging.DEBUG, logger="athenaeum")
@@ -455,7 +508,8 @@ class TestRunIntegration:
         )
 
         assert any(
-            "budget exhausted" in rec.message.lower() or "API call budget" in rec.message
+            "budget exhausted" in rec.message.lower()
+            or "API call budget" in rec.message
             for rec in caplog.records
         ), "Expected budget exhaustion log message"
 
@@ -517,7 +571,9 @@ class TestRunIntegration:
             body=None,
         )
         monkeypatch.setattr(
-            anthropic_mod, "Anthropic", lambda **kwargs: failing_client,
+            anthropic_mod,
+            "Anthropic",
+            lambda **kwargs: failing_client,
         )
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
 
@@ -542,12 +598,13 @@ class TestRunIntegration:
 
         # Contract 3: no wiki entity pages created
         wiki_entities = [
-            p for p in (root / "wiki").rglob("*.md")
+            p
+            for p in (root / "wiki").rglob("*.md")
             if "_schema" not in p.parts and not p.name.startswith("_")
         ]
-        assert wiki_entities == [], (
-            f"Wiki pages were created despite LLM failure: {wiki_entities}"
-        )
+        assert (
+            wiki_entities == []
+        ), f"Wiki pages were created despite LLM failure: {wiki_entities}"
 
         # Contract 4: pre-processing git snapshot ran
         git_log = subprocess.run(
@@ -557,9 +614,9 @@ class TestRunIntegration:
             text=True,
             check=True,
         )
-        assert "librarian: pre-processing snapshot" in git_log.stdout, (
-            "pre-processing snapshot was not taken"
-        )
+        assert (
+            "librarian: pre-processing snapshot" in git_log.stdout
+        ), "pre-processing snapshot was not taken"
 
         # run() returns 1 when any files failed (partial failure)
         assert exit_code == 1
