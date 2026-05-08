@@ -307,7 +307,8 @@ class TestRememberSources:
     def test_malformed_scalar_rejected(self, tmp_path: Path) -> None:
         raw = tmp_path / "raw"
         raw.mkdir()
-        result = remember_write(raw, "Some claim", sources="no-colon")
+        # "Has-Uppercase" matches neither typed nor legacy form.
+        result = remember_write(raw, "Some claim", sources="Has-Uppercase")
         assert "Error" in result
         assert "invalid `sources`" in result
 

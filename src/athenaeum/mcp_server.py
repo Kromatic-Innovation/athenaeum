@@ -225,15 +225,31 @@ def remember_write(
             the ``raw/<session>/`` subdirectory the file lands in.
             **Not** the per-claim provenance source — see ``sources``.
         wiki_root: Optional wiki root for path-traversal guards.
-        sources: Per-claim provenance (issue #90). Either:
+        sources: Per-claim provenance (issue #90). Three accepted shapes:
 
-            - ``str`` (scalar ``"<type>:<ref>"``) — written as the
-              wiki-level ``source`` default.
-            - ``dict`` — written as ``field_sources`` (a per-field
-              override map). Keys must be strings.
-            - ``None`` (default) — stamps ``source: claude:inferred``
-              and emits a server-side warning. Untracked-source writes
-              are accepted but visible to downstream provenance audits.
+            1. Scalar ``str`` of form ``"<type>:<ref>"`` — written as the
+               wiki-level ``source`` default for every field.
+            2. Structured ``dict`` ``{type, ref, ts?, confidence?, notes?}``
+               — also written as the wiki-level ``source`` default, but
+               with optional timestamp / confidence / notes preserved.
+            3. Per-field map ``dict`` ``{<field>: <source>}`` where each
+               value is a scalar or structured form — written as
+               ``field_sources`` (per-claim overrides). Keys must be
+               non-empty strings.
+            4. ``None`` (default) — stamps ``source: claude:inferred``
+               and emits a server-side warning. Untracked-source writes
+               are accepted but visible to downstream provenance audits.
+
+            NOTE: this ``sources`` argument is DIFFERENT from the
+            ``sources:`` frontmatter list used by cluster-merge in
+            ``athenaeum.merge`` (which is a list of cluster-member uids
+            being merged). They share a name for historical reasons; do
+            not conflate them.
+
+            Known limitation: a per-field map whose field is literally
+            named ``type`` cannot be distinguished from a structured
+            single-source dict, since both have a top-level ``type`` key.
+            Tracked in issue #96.
 
     Returns:
         Confirmation message with the file path, or an error string.
