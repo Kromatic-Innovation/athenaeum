@@ -546,6 +546,7 @@ def _cmd_people(args: argparse.Namespace) -> int:
     recent-touch composite score and returns the top N.
     """
     import re
+
     from athenaeum.models import parse_frontmatter
 
     knowledge_root = args.path.expanduser().resolve()
