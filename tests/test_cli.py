@@ -554,5 +554,40 @@ class TestPeopleCommand:
         assert rc == 1
         assert "Wiki root not found" in capsys.readouterr().err
 
+    def test_title_regex_matches_role_pattern(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        knowledge = tmp_path / "k"
+        self._seed_wiki(knowledge / "wiki")
+        rc = main([
+            "people", "--path", str(knowledge),
+            "--title-regex", r"CEO|EVP",
+            "--format", "tsv",
+        ])
+        assert rc == 0
+        names = [line.split("\t", 1)[0] for line in capsys.readouterr().out.strip().splitlines()]
+        assert set(names) == {
+            "Lisa Contoyannis", "Andy Kurtzig", "Michael Gutkowski", "Olivier Pomel",
+        }
+        assert "No-Tag Ghost" not in names
+        assert "Pearl.com Holdings" not in names
+
+    def test_company_regex_intersects_with_title_regex(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Find CEOs at Pearl-family companies (excluding the Datadog CEO)."""
+        knowledge = tmp_path / "k"
+        self._seed_wiki(knowledge / "wiki")
+        rc = main([
+            "people", "--path", str(knowledge),
+            "--title-regex", r"CEO",
+            "--company-regex", r"Pearl",
+            "--format", "tsv",
+        ])
+        assert rc == 0
+        names = [line.split("\t", 1)[0] for line in capsys.readouterr().out.strip().splitlines()]
+        assert names == ["Andy Kurtzig"]
+        assert "Olivier Pomel" not in names
+
 
 

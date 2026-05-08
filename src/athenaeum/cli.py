@@ -121,6 +121,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Shorthand for --tag tier:<value> (warm-a / warm-b / warm-c / extended / active).",
     )
     people_parser.add_argument(
+        "--title-regex", action="append", default=[],
+        help=(
+            "Match current_title OR linkedin_position_at_connect against this "
+            "regex (case-insensitive). Repeat to AND multiple patterns."
+        ),
+    )
+    people_parser.add_argument(
+        "--company-regex", action="append", default=[],
+        help=(
+            "Match current_company OR linkedin_company_at_connect against this "
+            "regex (case-insensitive). Repeat to AND multiple patterns."
+        ),
+    )
+    people_parser.add_argument(
         "--top-touch", type=int, default=0,
         help="Sort by recent-touch signal (meeting+sent counts) and return top N. "
              "Default sort is by warm_score desc.",
@@ -531,6 +545,8 @@ def _cmd_people(args: argparse.Namespace) -> int:
     sort is by ``warm_score`` desc; ``--top-touch N`` switches to a
     recent-touch composite score and returns the top N.
     """
+    import re
+
     from athenaeum.models import parse_frontmatter
 
     knowledge_root = args.path.expanduser().resolve()
@@ -543,6 +559,9 @@ def _cmd_people(args: argparse.Namespace) -> int:
     required_tags = list(args.tag)
     if args.tier:
         required_tags.append(f"tier:{args.tier}")
+
+    title_regexes = [re.compile(p, re.IGNORECASE) for p in (args.title_regex or []) if p]
+    company_regexes = [re.compile(p, re.IGNORECASE) for p in (args.company_regex or []) if p]
 
     rows: list[dict] = []
     for path in sorted(wiki_root.glob("*.md")):
@@ -568,6 +587,19 @@ def _cmd_people(args: argparse.Namespace) -> int:
         if needle_companies:
             blob = " ".join(company_fields).lower()
             if not all(needle in blob for needle in needle_companies):
+                continue
+        if company_regexes:
+            company_blob = " ".join(company_fields)
+            if not all(rx.search(company_blob) for rx in company_regexes):
+                continue
+
+        title_fields = [
+            str(meta.get("current_title") or ""),
+            str(meta.get("linkedin_position_at_connect") or ""),
+        ]
+        if title_regexes:
+            title_blob = " ".join(title_fields)
+            if not all(rx.search(title_blob) for rx in title_regexes):
                 continue
 
         try:
