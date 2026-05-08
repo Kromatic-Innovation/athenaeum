@@ -29,7 +29,9 @@ def schema_dir(tmp_path: Path) -> Path:
     schema = tmp_path / "_schema"
     schema.mkdir()
 
-    (schema / "types.md").write_text(textwrap.dedent("""\
+    (schema / "types.md").write_text(
+        textwrap.dedent(
+            """\
         # Entity Types
 
         | Type | Description | Example |
@@ -38,9 +40,13 @@ def schema_dir(tmp_path: Path) -> Path:
         | company | An organization | Acme Corp |
         | concept | A framework or idea | Lean startup |
         | tool | Software or service | Code editor |
-    """))
+    """
+        )
+    )
 
-    (schema / "tags.md").write_text(textwrap.dedent("""\
+    (schema / "tags.md").write_text(
+        textwrap.dedent(
+            """\
         # Tags
 
         ## Status
@@ -55,9 +61,13 @@ def schema_dir(tmp_path: Path) -> Path:
         |-----|-------|
         | fintech | Industry vertical |
         | devops | Technical domain |
-    """))
+    """
+        )
+    )
 
-    (schema / "access-levels.md").write_text(textwrap.dedent("""\
+    (schema / "access-levels.md").write_text(
+        textwrap.dedent(
+            """\
         # Access Levels
 
         | Level | Who can see | Example |
@@ -66,7 +76,9 @@ def schema_dir(tmp_path: Path) -> Path:
         | internal | Team members | Workflow notes |
         | confidential | Specific context | Client details |
         | personal | Restricted | Home address |
-    """))
+    """
+        )
+    )
 
     return schema
 
@@ -96,7 +108,8 @@ class TestParseFrontmatter:
         assert body.strip() == "Body."
 
     def test_complex_frontmatter(self) -> None:
-        text = textwrap.dedent("""\
+        text = textwrap.dedent(
+            """\
             ---
             uid: abc12345
             type: company
@@ -110,7 +123,8 @@ class TestParseFrontmatter:
             ---
 
             # Acme Corp
-        """)
+        """
+        )
         meta, body = parse_frontmatter(text)
         assert meta["uid"] == "abc12345"
         assert meta["aliases"] == ["AC", "AcmeCo"]
@@ -127,6 +141,19 @@ class TestParseFrontmatter:
         meta, body = parse_frontmatter(text)
         # Should fall back gracefully
         assert meta == {}
+
+    def test_int_uid_coerced_to_str_at_boundary(self) -> None:
+        """PyYAML loads bare all-decimal uids as int (e.g. ``19052``).
+        ``parse_frontmatter`` must stringify uid/type/name at the YAML
+        boundary so downstream schema validation, index lookup, and
+        filename rendering can treat them as strings unconditionally."""
+        text = "---\nuid: 19052\ntype: person\nname: 42\n---\n\nBody."
+        meta, _ = parse_frontmatter(text)
+        assert meta["uid"] == "19052"
+        assert isinstance(meta["uid"], str)
+        assert meta["name"] == "42"
+        assert isinstance(meta["name"], str)
+        assert meta["type"] == "person"
 
 
 # ---------------------------------------------------------------------------

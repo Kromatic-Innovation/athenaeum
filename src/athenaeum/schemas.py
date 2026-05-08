@@ -47,14 +47,13 @@ class WikiBase(BaseModel):
 
     @field_validator("uid", "type", "name", mode="before")
     @classmethod
-    def _coerce_to_str(cls, v: Any) -> str:
-        # YAML unquoted hex uids that happen to be all-decimal load as int.
-        # Names like ``42`` likewise. Coerce to str at the boundary so
-        # downstream code never has to care.
-        if v is None:
-            raise ValueError("must be a non-empty string")
-        if isinstance(v, (int, float)):
-            v = str(v)
+    def _require_nonempty_str(cls, v: Any) -> str:
+        # Identity fields must be non-empty strings. YAML int-coercion
+        # (bare all-decimal hex uids loading as int) is handled at the
+        # YAML boundary in ``models.parse_frontmatter`` — by the time we
+        # see the dict here, those have been stringified. A ``float``
+        # arriving on uid/type/name is a corruption signal (mis-quoted
+        # YAML scalar), not something to silently coerce.
         if not isinstance(v, str) or not v.strip():
             raise ValueError("must be a non-empty string")
         return v

@@ -506,7 +506,11 @@ def process_one(
         rendered = entity.render()
         # Schema-gate the LLM-produced entity before write. Re-parse the
         # rendered frontmatter so the validator sees exactly the bytes
-        # that would land on disk.
+        # that would land on disk — this round-trip catches YAML-render
+        # quirks (numeric coercion, quoting drift, key reordering edge
+        # cases) that a direct dict-validate would miss. Deliberate; do
+        # NOT collapse to validating ``entity`` directly without first
+        # re-parsing ``rendered``.
         rendered_meta, _ = parse_frontmatter(rendered)
         validate_wiki_meta(rendered_meta)
         page_path.write_text(rendered, encoding="utf-8")
