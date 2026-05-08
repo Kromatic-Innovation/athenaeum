@@ -37,6 +37,7 @@ from athenaeum.clusters import (
 )
 from athenaeum.config import load_config, resolve_extra_intake_roots
 from athenaeum.merge import merge_clusters_to_wiki
+from athenaeum.schemas import validate_wiki_meta
 from athenaeum.models import (
     AutoMemoryFile,
     EntityAction,
@@ -66,12 +67,21 @@ DEFAULT_WIKI_ROOT = DEFAULT_KNOWLEDGE_ROOT / "wiki"
 
 # Fallback valid values if schema files are missing
 FALLBACK_TYPES = [
-    "person", "company", "project", "concept", "tool",
-    "reference", "source", "preference", "principle",
+    "person",
+    "company",
+    "project",
+    "concept",
+    "tool",
+    "reference",
+    "source",
+    "preference",
+    "principle",
 ]
 FALLBACK_ACCESS = ["open", "internal", "confidential", "personal"]
 FALLBACK_TAGS = [
-    "active", "archived", "blocked",
+    "active",
+    "archived",
+    "blocked",
 ]
 
 # Raw file naming: {timestamp}-{uuid8}.md
@@ -168,16 +178,18 @@ def discover_auto_memory_files(
                     sources = [str(s) for s in sources_raw]
                 else:
                     sources = []
-                files.append(AutoMemoryFile(
-                    path=fpath,
-                    origin_scope=scope,
-                    memory_type=memory_type,
-                    name=name,
-                    description=description,
-                    origin_session_id=origin_session_id,
-                    origin_turn=origin_turn,
-                    sources=sources,
-                ))
+                files.append(
+                    AutoMemoryFile(
+                        path=fpath,
+                        origin_scope=scope,
+                        memory_type=memory_type,
+                        name=name,
+                        description=description,
+                        origin_session_id=origin_session_id,
+                        origin_turn=origin_turn,
+                        sources=sources,
+                    )
+                )
     return files
 
 
@@ -196,19 +208,23 @@ def discover_raw_files(raw_root: Path) -> list[RawFile]:
                 continue
             m = RAW_FILE_RE.match(fpath.name)
             if m:
-                files.append(RawFile(
-                    path=fpath,
-                    source=source,
-                    timestamp=m.group(1),
-                    uuid8=m.group(2),
-                ))
+                files.append(
+                    RawFile(
+                        path=fpath,
+                        source=source,
+                        timestamp=m.group(1),
+                        uuid8=m.group(2),
+                    )
+                )
             else:
-                files.append(RawFile(
-                    path=fpath,
-                    source=source,
-                    timestamp="",
-                    uuid8="",
-                ))
+                files.append(
+                    RawFile(
+                        path=fpath,
+                        source=source,
+                        timestamp="",
+                        uuid8="",
+                    )
+                )
     return files
 
 
@@ -251,7 +267,9 @@ def rebuild_index(wiki_root: Path) -> None:
         lines.append("")
 
     (wiki_root / "_index.md").write_text("\n".join(lines), encoding="utf-8")
-    log.info("Rebuilt _index.md with %d entities", sum(len(v) for v in by_type.values()))
+    log.info(
+        "Rebuilt _index.md with %d entities", sum(len(v) for v in by_type.values())
+    )
 
 
 def git_snapshot(knowledge_root: Path, message: str) -> bool:
@@ -263,18 +281,21 @@ def git_snapshot(knowledge_root: Path, message: str) -> bool:
     result = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=str(knowledge_root),
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if not result.stdout.strip():
         return False
 
     subprocess.run(
         ["git", "add", "-A"],
-        cwd=str(knowledge_root), check=True,
+        cwd=str(knowledge_root),
+        check=True,
     )
     subprocess.run(
         ["git", "commit", "-m", message],
-        cwd=str(knowledge_root), check=True,
+        cwd=str(knowledge_root),
+        check=True,
     )
     log.info("Git commit: %s", message)
     return True
@@ -349,11 +370,19 @@ def tier0_passthrough(
         body=body,
     )
 
+    # Validate frontmatter against the Pydantic schema before write. This
+    # is the schema gate for the byte-for-byte passthrough — malformed
+    # custom-namespace fields are still accepted (extra="allow"), but the
+    # uid/type/name contract is enforced. Raises pydantic.ValidationError
+    # on failure; caller treats that as a real bug, not a fall-through.
+    validate_wiki_meta(meta)
+
     if dry_run:
         return entity
 
     out_path.write_text(
-        render_frontmatter(meta) + "\n" + body, encoding="utf-8",
+        render_frontmatter(meta) + "\n" + body,
+        encoding="utf-8",
     )
     index.register(entity)
     return entity
@@ -378,12 +407,17 @@ def process_one(
     # promote verbatim without LLM classification. Preserves custom
     # namespaces the LLM tiers would otherwise drop.
     passthrough = tier0_passthrough(
-        raw, index, wiki_root, valid_types, dry_run=dry_run,
+        raw,
+        index,
+        wiki_root,
+        valid_types,
+        dry_run=dry_run,
     )
     if passthrough is not None:
         log.info(
             "  T0 passthrough: %s → %s",
-            passthrough.name, passthrough.filename,
+            passthrough.name,
+            passthrough.filename,
         )
         result.created.append(passthrough)
         return result
@@ -402,42 +436,55 @@ def process_one(
     if dry_run:
         log.info(
             "  [DRY RUN] T1 matched %d, skipped %d — LLM tiers skipped",
-            len(matched), len(result.skipped),
+            len(matched),
+            len(result.skipped),
         )
-        log.info("  [DRY RUN] Raw content preview: %s", raw.content[:120].replace("\n", " "))
+        log.info(
+            "  [DRY RUN] Raw content preview: %s", raw.content[:120].replace("\n", " ")
+        )
         return result
 
     # --- Tier 2: Classification ---
     classified = tier2_classify(
-        raw, matched_names, valid_types, valid_tags, valid_access, client,
-        wiki_root=wiki_root, usage=usage,
+        raw,
+        matched_names,
+        valid_types,
+        valid_tags,
+        valid_access,
+        client,
+        wiki_root=wiki_root,
+        usage=usage,
     )
     log.info("  T2 classified %d new entities", len(classified))
 
     # Build actions
     actions: list[EntityAction] = []
     for c in classified:
-        actions.append(EntityAction(
-            kind="create",
-            name=c.name,
-            entity_type=c.entity_type,
-            tags=c.tags,
-            access=c.access,
-            existing_uid=c.existing_uid,
-            observations=c.observations or raw.content[:2000],
-        ))
+        actions.append(
+            EntityAction(
+                kind="create",
+                name=c.name,
+                entity_type=c.entity_type,
+                tags=c.tags,
+                access=c.access,
+                existing_uid=c.existing_uid,
+                observations=c.observations or raw.content[:2000],
+            )
+        )
 
     for name, uid_or_name, fpath in matched:
         if index.has_entity_format(fpath):
-            actions.append(EntityAction(
-                kind="update",
-                name=name,
-                entity_type="",
-                tags=[],
-                access="",
-                existing_uid=uid_or_name,
-                observations=raw.content[:2000],
-            ))
+            actions.append(
+                EntityAction(
+                    kind="update",
+                    name=name,
+                    entity_type="",
+                    tags=[],
+                    access="",
+                    existing_uid=uid_or_name,
+                    observations=raw.content[:2000],
+                )
+            )
 
     if not actions:
         log.info("  No actions needed for %s", raw.ref)
@@ -446,12 +493,23 @@ def process_one(
     # --- Tier 3: Content writing ---
     assert client is not None, "client required for non-dry-run"
     new_entities, updated_uids, escalations = tier3_write(
-        raw, actions, index, wiki_root, client, usage=usage,
+        raw,
+        actions,
+        index,
+        wiki_root,
+        client,
+        usage=usage,
     )
 
     for entity in new_entities:
         page_path = wiki_root / entity.filename
-        page_path.write_text(entity.render(), encoding="utf-8")
+        rendered = entity.render()
+        # Schema-gate the LLM-produced entity before write. Re-parse the
+        # rendered frontmatter so the validator sees exactly the bytes
+        # that would land on disk.
+        rendered_meta, _ = parse_frontmatter(rendered)
+        validate_wiki_meta(rendered_meta)
+        page_path.write_text(rendered, encoding="utf-8")
         index.register(entity)
         result.created.append(entity)
         log.info("  Created: %s → %s", entity.name, entity.filename)
@@ -491,8 +549,7 @@ def _run_cluster_pass(
 
     threshold = resolve_cluster_threshold(knowledge_root, config=resolved_config)
     cache_dir = Path(
-        os.environ.get("ATHENAEUM_CACHE_DIR")
-        or (Path.home() / ".cache" / "athenaeum")
+        os.environ.get("ATHENAEUM_CACHE_DIR") or (Path.home() / ".cache" / "athenaeum")
     )
     clusters = cluster_auto_memory_files(
         auto_memory_files,
@@ -503,14 +560,18 @@ def _run_cluster_pass(
 
     log.info(
         "cluster pass: %d auto-memory file(s) → %d cluster(s) at cos>=%.2f",
-        len(auto_memory_files), len(clusters), threshold,
+        len(auto_memory_files),
+        len(clusters),
+        threshold,
     )
 
     if dry_run:
         for c in clusters:
             log.info(
                 "  [DRY RUN] cluster %s: %d member(s) centroid=%.2f",
-                c.cluster_id, len(c.member_paths), c.centroid_score,
+                c.cluster_id,
+                len(c.member_paths),
+                c.centroid_score,
             )
         return 0
 
@@ -518,7 +579,8 @@ def _run_cluster_pass(
     canonical, timestamped = write_cluster_report(clusters, output_path)
     log.info(
         "cluster report written: %s (rotated copy: %s)",
-        canonical, timestamped,
+        canonical,
+        timestamped,
     )
     return len(clusters)
 
@@ -581,7 +643,9 @@ def run(
         # compiles ``wiki/auto-*.md`` entries from it. Discovery still
         # happens inside merge_clusters_to_wiki() for source propagation.
         merge_clusters_to_wiki(
-            knowledge_root, config=config, dry_run=dry_run,
+            knowledge_root,
+            config=config,
+            dry_run=dry_run,
             client=merge_client,
         )
         return 0
@@ -598,15 +662,18 @@ def run(
             by_scope[am.origin_scope] = by_scope.get(am.origin_scope, 0) + 1
         log.info(
             "Discovered %d auto-memory file(s) across %d scope(s)",
-            len(auto_memory_files), len(by_scope),
+            len(auto_memory_files),
+            len(by_scope),
         )
         if dry_run:
             for scope, count in sorted(by_scope.items()):
                 log.info("  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count)
 
         _run_cluster_pass(
-            auto_memory_files, knowledge_root,
-            config=config, dry_run=dry_run,
+            auto_memory_files,
+            knowledge_root,
+            config=config,
+            dry_run=dry_run,
         )
 
         # C3: merge clusters into canonical wiki/auto-*.md entries. Runs
@@ -635,7 +702,8 @@ def run(
     if len(raw_files) > max_files:
         log.info(
             "Budget cap: processing %d of %d files this run",
-            max_files, len(raw_files),
+            max_files,
+            len(raw_files),
         )
         raw_files = raw_files[:max_files]
 
@@ -663,15 +731,21 @@ def run(
         if not dry_run and usage.api_calls >= max_api_calls:
             log.warning(
                 "API call budget exhausted (%d/%d) — stopping early",
-                usage.api_calls, max_api_calls,
+                usage.api_calls,
+                max_api_calls,
             )
             break
 
         log.info("Processing: %s", raw.ref)
         try:
             result = process_one(
-                raw, index, wiki_root, client,
-                valid_types, valid_tags, valid_access,
+                raw,
+                index,
+                wiki_root,
+                client,
+                valid_types,
+                valid_tags,
+                valid_access,
                 dry_run=dry_run,
                 usage=usage,
             )
@@ -691,15 +765,21 @@ def run(
 
     log.info(
         "Done: %d created, %d updated, %d escalated, %d skipped, %d failed",
-        total_created, total_updated, total_escalated, total_skipped,
+        total_created,
+        total_updated,
+        total_escalated,
+        total_skipped,
         len(failed_files),
     )
     if usage.api_calls > 0:
         log.info(
             "Token usage: %d API calls, %d input + %d output = %d total"
             " (~$%.4f estimated)",
-            usage.api_calls, usage.input_tokens, usage.output_tokens,
-            usage.total_tokens, usage.estimated_cost_usd,
+            usage.api_calls,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.total_tokens,
+            usage.estimated_cost_usd,
         )
 
     if not dry_run and (total_created > 0 or total_updated > 0):
