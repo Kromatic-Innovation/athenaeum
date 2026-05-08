@@ -37,7 +37,6 @@ from athenaeum.clusters import (
 )
 from athenaeum.config import load_config, resolve_extra_intake_roots
 from athenaeum.merge import merge_clusters_to_wiki
-from athenaeum.schemas import validate_wiki_meta
 from athenaeum.models import (
     AutoMemoryFile,
     EntityAction,
@@ -51,6 +50,7 @@ from athenaeum.models import (
     render_frontmatter,
     slugify,
 )
+from athenaeum.schemas import validate_wiki_meta
 from athenaeum.tiers import (
     tier1_programmatic_match,
     tier2_classify,
