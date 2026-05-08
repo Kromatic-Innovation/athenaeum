@@ -107,7 +107,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     people_parser.add_argument(
         "--company", action="append", default=[],
-        help="Match current_company OR linkedin_company_at_connect (case-insensitive substring). Repeat to AND.",
+        help=(
+            "Match current_company OR linkedin_company_at_connect "
+            "(case-insensitive substring). Repeat to AND."
+        ),
     )
     people_parser.add_argument(
         "--tag", action="append", default=[],
@@ -580,10 +583,20 @@ def _cmd_people(args: argparse.Namespace) -> int:
         except (TypeError, ValueError):
             sent_count = 0
 
+        title = (
+            meta.get("current_title")
+            or meta.get("linkedin_position_at_connect")
+            or ""
+        )
+        company = (
+            meta.get("current_company")
+            or meta.get("linkedin_company_at_connect")
+            or ""
+        )
         rows.append({
             "name": str(meta.get("name") or ""),
-            "current_title": str(meta.get("current_title") or meta.get("linkedin_position_at_connect") or ""),
-            "current_company": str(meta.get("current_company") or meta.get("linkedin_company_at_connect") or ""),
+            "current_title": str(title),
+            "current_company": str(company),
             "warm_score": warm_score,
             "meeting_count_24mo": meeting_count,
             "sent_count_24mo": sent_count,
@@ -617,7 +630,10 @@ def _cmd_people(args: argparse.Namespace) -> int:
     name_w = max(len(r["name"]) for r in rows)
     title_w = max(len(r["current_title"][:40]) for r in rows) or 1
     company_w = max(len(r["current_company"][:30]) for r in rows) or 1
-    print(f"{'name':{name_w}}  {'title':{title_w}}  {'company':{company_w}}  score   touch  last_touch")
+    print(
+        f"{'name':{name_w}}  {'title':{title_w}}  "
+        f"{'company':{company_w}}  score   touch  last_touch"
+    )
     for r in rows:
         print(
             f"{r['name']:{name_w}}  "
