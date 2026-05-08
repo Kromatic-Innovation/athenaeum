@@ -16,6 +16,7 @@ import yaml
 
 # --- UID generation ---
 
+
 def generate_uid() -> str:
     """Generate an 8-character hex UID from uuid4."""
     return uuid.uuid4().hex[:8]
@@ -49,21 +50,36 @@ def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
         meta = yaml.safe_load(m.group(1)) or {}
     except yaml.YAMLError:
         return {}, text
-    body = text[m.end():]
+    # Coerce identity fields at the YAML boundary. PyYAML loads bare
+    # all-decimal hex uids (e.g. ``19052``) and unquoted numeric names
+    # as ``int`` — downstream code (schema validation, index lookup,
+    # filename rendering) expects ``str``. Fixing it here keeps the
+    # on-disk dict consistent with the model and removes the need for
+    # int-coercion shims further down.
+    if isinstance(meta, dict):
+        for _k in ("uid", "type", "name"):
+            _v = meta.get(_k)
+            if isinstance(_v, int) and not isinstance(_v, bool):
+                meta[_k] = str(_v)
+    body = text[m.end() :]
     return meta, body
 
 
 def render_frontmatter(meta: dict[str, object]) -> str:
     """Render a dict as a YAML frontmatter block."""
-    dumped = yaml.dump(meta, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    dumped = yaml.dump(
+        meta, default_flow_style=False, sort_keys=False, allow_unicode=True
+    )
     return f"---\n{dumped}---\n"
 
 
 # --- Data classes ---
 
+
 @dataclass
 class RawFile:
     """A raw intake file from raw/{source}/{timestamp}-{uuid8}.md."""
+
     path: Path
     source: str
     timestamp: str
@@ -124,6 +140,7 @@ class AutoMemoryFile:
 @dataclass
 class WikiEntity:
     """An entity page in wiki/ using the full entity template format."""
+
     uid: str
     type: str
     name: str
@@ -163,6 +180,7 @@ class WikiEntity:
 @dataclass
 class ClassifiedEntity:
     """Output of Tier 2 classification."""
+
     name: str
     entity_type: str
     tags: list[str]
@@ -175,6 +193,7 @@ class ClassifiedEntity:
 @dataclass
 class EntityAction:
     """A create or update action for Tier 3."""
+
     kind: Literal["create", "update"]
     name: str
     entity_type: str
@@ -187,6 +206,7 @@ class EntityAction:
 @dataclass
 class EscalationItem:
     """An item to escalate to _pending_questions.md."""
+
     raw_ref: str
     entity_name: str
     conflict_type: str  # "principled" | "ambiguous" | "classification_failed"
@@ -196,6 +216,7 @@ class EscalationItem:
 @dataclass
 class TokenUsage:
     """Accumulated API token usage for a pipeline run."""
+
     input_tokens: int = 0
     output_tokens: int = 0
     api_calls: int = 0
@@ -217,14 +238,14 @@ class TokenUsage:
         Uses a conservative blended rate: $1.50/M input, $7.50/M output.
         """
         return (
-            self.input_tokens * 1.50 / 1_000_000
-            + self.output_tokens * 7.50 / 1_000_000
+            self.input_tokens * 1.50 / 1_000_000 + self.output_tokens * 7.50 / 1_000_000
         )
 
 
 @dataclass
 class ProcessingResult:
     """Result of processing one raw file."""
+
     raw_file: RawFile
     created: list[WikiEntity] = field(default_factory=list)
     updated: list[str] = field(default_factory=list)
@@ -233,6 +254,7 @@ class ProcessingResult:
 
 
 # --- Schema loading ---
+
 
 def load_schema_list(schema_path: Path, filename: str) -> list[str]:
     """Load a list of valid values from a schema markdown table.
@@ -250,9 +272,7 @@ def load_schema_list(schema_path: Path, filename: str) -> list[str]:
     separator_indices: set[int] = set()
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith("|") and all(
-            c in "-| " for c in stripped
-        ):
+        if stripped.startswith("|") and all(c in "-| " for c in stripped):
             separator_indices.add(i)
 
     for i, line in enumerate(lines):
@@ -274,6 +294,7 @@ def load_schema_list(schema_path: Path, filename: str) -> list[str]:
 
 
 # --- Entity Index ---
+
 
 class EntityIndex:
     """In-memory index of all wiki entities for name/alias lookup."""

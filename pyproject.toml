@@ -30,6 +30,7 @@ dependencies = [
     # at the next-major boundary (1.0 / 3.0) so a surprise release can't
     # silently break a released athenaeum wheel — bumps are explicit PRs.
     "anthropic>=0.30.0,<1.0",
+    "pydantic>=2.0,<3.0",
 ]
 
 [project.optional-dependencies]
