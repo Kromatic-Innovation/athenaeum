@@ -299,8 +299,9 @@ class TestProvenanceFields:
         assert m.field_sources == {"website": "scraped:homepage:2026-04-01"}
 
     def test_malformed_source_raises(self) -> None:
+        # "Has-Uppercase" matches neither typed nor legacy form.
         with pytest.raises(ValidationError):
-            PersonWiki(uid="abc12345", type="person", name="X", source="no-colon")
+            PersonWiki(uid="abc12345", type="person", name="X", source="Has-Uppercase")
 
     def test_malformed_field_sources_raises(self) -> None:
         with pytest.raises(ValidationError):
@@ -308,8 +309,19 @@ class TestProvenanceFields:
                 uid="abc12345",
                 type="person",
                 name="X",
-                field_sources={"emails": "no-colon"},
+                field_sources={"emails": "Has-Uppercase"},
             )
+
+    def test_legacy_source_accepted(self) -> None:
+        # Pre-#90 wikis store ``source: extended-tier-build`` as a bare slug.
+        # ~15k live wikis use this shape; schema must accept them.
+        m = PersonWiki(
+            uid="abc12345",
+            type="person",
+            name="X",
+            source="extended-tier-build",
+        )
+        assert m.source == "extended-tier-build"
 
     def test_none_passes(self) -> None:
         m = PersonWiki(uid="abc12345", type="person", name="X")

@@ -33,17 +33,37 @@ class TestParseSourceScalar:
     @pytest.mark.parametrize(
         "bad",
         [
-            "no-colon",
             ":missing-type",
             "type:",
             "Type:has-uppercase",
             "1numeric:start",
             "type:has\nnewline",
+            "Has-Uppercase",  # legacy form must also be lowercase-only
+            "has spaces",
+            "",  # empty
+            "type:   ",  # whitespace-only ref
+            "api:apollo ",  # trailing whitespace on typed form
+            " api:apollo",  # leading whitespace
         ],
     )
     def test_malformed_scalar_raises(self, bad: str) -> None:
         with pytest.raises(ValueError):
             parse_source(bad)
+
+    def test_legacy_single_token_accepted(self) -> None:
+        # Pre-#90 wikis store ``source:`` as a bare slug (no colon).
+        # ~15k live wikis use this form; the validator must accept them.
+        ref = parse_source("extended-tier-build")
+        assert ref.type == "legacy"
+        assert ref.ref == "extended-tier-build"
+
+        ref2 = parse_source("warm-network-detect")
+        assert ref2.ref == "warm-network-detect"
+
+        # And the typed form still works on the same call site.
+        typed = parse_source("script:extended-tier-build")
+        assert typed.type == "script"
+        assert typed.ref == "extended-tier-build"
 
 
 class TestParseSourceStructured:
@@ -70,6 +90,12 @@ class TestParseSourceStructured:
     def test_unknown_extra_keys_rejected(self) -> None:
         with pytest.raises(ValueError):
             parse_source({"type": "api", "ref": "x", "ssource": "typo"})
+
+    def test_extra_keys_forbid_explicit(self) -> None:
+        # Explicit Quine-flagged case: extra="forbid" must reject any
+        # unknown key on the structured form, not just typos.
+        with pytest.raises(ValueError):
+            parse_source({"type": "api", "ref": "x", "extra_key": "y"})
 
     def test_missing_required_raises(self) -> None:
         with pytest.raises(ValueError):
@@ -103,7 +129,11 @@ class TestValidateSourceValue:
 
     def test_malformed_raises(self) -> None:
         with pytest.raises(ValueError):
-            validate_source_value("no-colon")
+            validate_source_value("Has-Uppercase")  # neither typed nor legacy
+
+    def test_legacy_passes(self) -> None:
+        # Legacy single-token form must round-trip unchanged.
+        assert validate_source_value("extended-tier-build") == "extended-tier-build"
 
 
 class TestValidateFieldSources:
@@ -127,7 +157,7 @@ class TestValidateFieldSources:
 
     def test_bad_inner_value_raises(self) -> None:
         with pytest.raises(ValueError):
-            validate_field_sources({"emails": "no-colon"})
+            validate_field_sources({"emails": "Has-Uppercase"})
 
     def test_empty_key_raises(self) -> None:
         with pytest.raises(ValueError):

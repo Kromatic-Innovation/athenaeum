@@ -42,6 +42,14 @@ from pydantic import BaseModel, ConfigDict, field_validator
 # be empty. We anchor with ``\Z`` so a trailing newline doesn't sneak in.
 _SCALAR_RE = re.compile(r"^([a-z][a-z0-9_-]*):([^\n]+)\Z")
 
+# Legacy single-token form (no colon) — for pre-#90 wikis whose ``source:``
+# is a bare slug like ``extended-tier-build`` or ``warm-network-detect``.
+# ~15k live wikis use this shape; the validator MUST accept them so the
+# schema doesn't break the live tree. New wikis SHOULD use the typed
+# ``<type>:<ref>`` form above. Migration of legacy → typed is tracked
+# separately in issue #97; once complete, this regex + branch can go.
+_LEGACY_SCALAR_RE = re.compile(r"^[a-z][a-z0-9_-]*\Z")
+
 
 class SourceRef(BaseModel):
     """Structured source descriptor for a CLAIM.
@@ -112,10 +120,30 @@ def parse_source(value: Any) -> SourceRef | None:
     if isinstance(value, SourceRef):
         return value
     if isinstance(value, str):
+        if value == "" or value != value.strip():
+            # Empty / leading / trailing whitespace = corruption signal,
+            # not normal input. Reject loudly.
+            raise ValueError(
+                f"source scalar must be non-empty and trimmed, got {value!r}"
+            )
         m = _SCALAR_RE.match(value)
-        if not m:
-            raise ValueError(f"source scalar must match '<type>:<ref>', got {value!r}")
-        return SourceRef(type=m.group(1), ref=m.group(2))
+        if m:
+            ref_part = m.group(2)
+            if ref_part != ref_part.strip():
+                raise ValueError(
+                    f"source ref must not have leading/trailing whitespace, got {value!r}"
+                )
+            return SourceRef(type=m.group(1), ref=ref_part)
+        # Legacy single-token form (pre-#90 wikis). Accept but don't
+        # synthesize a structured SourceRef — the on-disk shape stays the
+        # bare slug; we model it as type="legacy", ref=<slug> for callers
+        # that need a SourceRef object. Validator preserves on-disk shape
+        # via validate_source_value (returns value unchanged).
+        if _LEGACY_SCALAR_RE.match(value):
+            return SourceRef(type="legacy", ref=value)
+        raise ValueError(
+            f"source scalar must match '<type>:<ref>' or legacy '[a-z][a-z0-9_-]*', got {value!r}"
+        )
     if isinstance(value, dict):
         return SourceRef.model_validate(value)
     raise ValueError(f"source must be str, dict, or None; got {type(value).__name__}")
