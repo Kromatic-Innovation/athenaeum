@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 
 import pytest
-import yaml
 
 from athenaeum.models import parse_frontmatter
 from athenaeum.schemas import (
@@ -25,7 +24,6 @@ from athenaeum.schemas import (
     WikiBase,
     validate_wiki_meta,
 )
-
 
 # --- Required-field enforcement ---
 
