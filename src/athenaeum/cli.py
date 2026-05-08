@@ -95,6 +95,45 @@ def main(argv: list[str] | None = None) -> int:
         help="Don't delete the temp knowledge dir on exit (for debugging)",
     )
 
+    # people command — frontmatter-only filter over type:person wikis
+    people_parser = subparsers.add_parser(
+        "people",
+        help="List type:person wikis filtered by frontmatter (company / tag / tier / score). "
+             "No LLM, no embeddings — deterministic over the wiki tree.",
+    )
+    people_parser.add_argument(
+        "--path", type=Path, default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    people_parser.add_argument(
+        "--company", action="append", default=[],
+        help=(
+            "Match current_company OR linkedin_company_at_connect "
+            "(case-insensitive substring). Repeat to AND."
+        ),
+    )
+    people_parser.add_argument(
+        "--tag", action="append", default=[],
+        help="Require this exact tag (repeat to AND).",
+    )
+    people_parser.add_argument(
+        "--tier", default="",
+        help="Shorthand for --tag tier:<value> (warm-a / warm-b / warm-c / extended / active).",
+    )
+    people_parser.add_argument(
+        "--top-touch", type=int, default=0,
+        help="Sort by recent-touch signal (meeting+sent counts) and return top N. "
+             "Default sort is by warm_score desc.",
+    )
+    people_parser.add_argument(
+        "--limit", type=int, default=50,
+        help="Max rows to print (default: 50; 0 = unlimited)",
+    )
+    people_parser.add_argument(
+        "--format", choices=["table", "tsv"], default="table",
+        help="Output shape (default: table).",
+    )
+
     # query-topics command — LLM-based topic extraction for hook query rewriting
     query_topics_parser = subparsers.add_parser(
         "query-topics",
@@ -204,6 +243,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "recall":
         return _cmd_recall(args)
+
+    if args.command == "people":
+        return _cmd_people(args)
 
     if args.command == "query-topics":
         return _cmd_query_topics(args)
@@ -477,6 +519,131 @@ def _cmd_recall(args: argparse.Namespace) -> int:
                 pass
         print(f"{score:.2f}\t{filename}\t{preview}")
 
+    return 0
+
+
+def _cmd_people(args: argparse.Namespace) -> int:
+    """List type:person wikis filtered by frontmatter — frontmatter-only, no LLM.
+
+    Filters AND together. Companies match current_company OR
+    linkedin_company_at_connect (case-insensitive substring). Tags must
+    match exactly. Tier is shorthand for ``tag tier:<value>``. Default
+    sort is by ``warm_score`` desc; ``--top-touch N`` switches to a
+    recent-touch composite score and returns the top N.
+    """
+    from athenaeum.models import parse_frontmatter
+
+    knowledge_root = args.path.expanduser().resolve()
+    wiki_root = knowledge_root / "wiki"
+    if not wiki_root.is_dir():
+        print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
+        return 1
+
+    needle_companies = [c.lower() for c in args.company if c]
+    required_tags = list(args.tag)
+    if args.tier:
+        required_tags.append(f"tier:{args.tier}")
+
+    rows: list[dict] = []
+    for path in sorted(wiki_root.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, _ = parse_frontmatter(text)
+        if not meta or meta.get("type") != "person":
+            continue
+
+        tags_raw = meta.get("tags") or []
+        tags = [str(t) for t in tags_raw] if isinstance(tags_raw, list) else []
+        if required_tags and not all(t in tags for t in required_tags):
+            continue
+
+        company_fields = [
+            str(meta.get("current_company") or ""),
+            str(meta.get("linkedin_company_at_connect") or ""),
+        ]
+        if needle_companies:
+            blob = " ".join(company_fields).lower()
+            if not all(needle in blob for needle in needle_companies):
+                continue
+
+        try:
+            warm_score = float(meta.get("warm_score") or 0)
+        except (TypeError, ValueError):
+            warm_score = 0.0
+        try:
+            meeting_count = int(meta.get("meeting_count_24mo") or 0)
+        except (TypeError, ValueError):
+            meeting_count = 0
+        try:
+            sent_count = int(meta.get("sent_count_24mo") or 0)
+        except (TypeError, ValueError):
+            sent_count = 0
+
+        title = (
+            meta.get("current_title")
+            or meta.get("linkedin_position_at_connect")
+            or ""
+        )
+        company = (
+            meta.get("current_company")
+            or meta.get("linkedin_company_at_connect")
+            or ""
+        )
+        rows.append({
+            "name": str(meta.get("name") or ""),
+            "current_title": str(title),
+            "current_company": str(company),
+            "warm_score": warm_score,
+            "meeting_count_24mo": meeting_count,
+            "sent_count_24mo": sent_count,
+            "touch_score": meeting_count * 3 + sent_count,
+            "last_touch": str(meta.get("last_touch") or ""),
+            "uid": str(meta.get("uid") or ""),
+            "path": path.name,
+        })
+
+    if args.top_touch:
+        rows.sort(key=lambda r: -r["touch_score"])
+        rows = rows[: args.top_touch]
+    else:
+        rows.sort(key=lambda r: -r["warm_score"])
+        if args.limit > 0:
+            rows = rows[: args.limit]
+
+    if args.format == "tsv":
+        for r in rows:
+            print("\t".join(str(r[k]) for k in (
+                "name", "current_title", "current_company",
+                "warm_score", "meeting_count_24mo", "sent_count_24mo",
+                "last_touch", "uid", "path",
+            )))
+        return 0
+
+    if not rows:
+        print("(no matches)")
+        return 0
+
+    name_w = max(len(r["name"]) for r in rows)
+    title_w = max(len(r["current_title"][:40]) for r in rows) or 1
+    company_w = max(len(r["current_company"][:30]) for r in rows) or 1
+    print(
+        f"{'name':{name_w}}  {'title':{title_w}}  "
+        f"{'company':{company_w}}  score   touch  last_touch"
+    )
+    for r in rows:
+        print(
+            f"{r['name']:{name_w}}  "
+            f"{r['current_title'][:40]:{title_w}}  "
+            f"{r['current_company'][:30]:{company_w}}  "
+            f"{r['warm_score']:>6.1f}  "
+            f"{r['touch_score']:>5}  "
+            f"{r['last_touch']}"
+        )
+    print(f"\n{len(rows)} match(es)")
     return 0
 
 
