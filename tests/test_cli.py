@@ -457,3 +457,102 @@ class TestIngestAnswers:
         assert "Ingested 1" in capsys.readouterr().out
         assert list((raw / "answers").glob("*.md"))
         assert (wiki / "_pending_questions_archive.md").exists()
+
+
+class TestPeopleCommand:
+    """Frontmatter-only person filter — deterministic, no LLM, no embeddings."""
+
+    @staticmethod
+    def _seed_wiki(wiki: Path) -> None:
+        """Three Pearl employees, one Datadog person, one tagless ghost."""
+        wiki.mkdir(parents=True, exist_ok=True)
+        (wiki / "01-lisa.md").write_text(
+            "---\nuid: 01\ntype: person\nname: Lisa Contoyannis\n"
+            "tags: [tier:warm-a, role:exec]\ncurrent_company: Pearl\n"
+            "current_title: EVP Product\nwarm_score: 286.0\n"
+            "meeting_count_24mo: 60\nsent_count_24mo: 100\n"
+            "last_touch: '2026-05-29'\n---\n\n# Lisa\n"
+        )
+        (wiki / "02-andy.md").write_text(
+            "---\nuid: 02\ntype: person\nname: Andy Kurtzig\n"
+            "tags: [tier:warm-a, role:founder]\ncurrent_company: Pearl.com\n"
+            "current_title: CEO\nwarm_score: 150.5\n"
+            "meeting_count_24mo: 50\nsent_count_24mo: 65\n"
+            "last_touch: '2025-08-26'\n---\n\n# Andy\n"
+        )
+        (wiki / "03-michael.md").write_text(
+            "---\nuid: 03\ntype: person\nname: Michael Gutkowski\n"
+            "tags: [tier:warm-b, role:exec]\ncurrent_company: Pearl.com\n"
+            "current_title: EVP BD\nwarm_score: 45.2\n"
+            "meeting_count_24mo: 30\nsent_count_24mo: 23\n"
+            "last_touch: '2025-02-27'\n---\n\n# Michael\n"
+        )
+        (wiki / "04-datadog.md").write_text(
+            "---\nuid: 04\ntype: person\nname: Olivier Pomel\n"
+            "tags: [tier:extended]\ncurrent_company: Datadog\n"
+            "current_title: CEO\n---\n\n# Olivier\n"
+        )
+        (wiki / "05-ghost.md").write_text(
+            "---\nuid: 05\ntype: person\nname: No-Tag Ghost\n"
+            "---\n\n# Ghost\n"
+        )
+        (wiki / "06-company.md").write_text(
+            "---\nuid: 06\ntype: company\nname: Pearl.com Holdings\n"
+            "---\n\n# Pearl\n"
+        )
+
+    def test_company_filter_returns_pearl_employees(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        knowledge = tmp_path / "k"
+        self._seed_wiki(knowledge / "wiki")
+        rc = main(["people", "--path", str(knowledge), "--company", "Pearl", "--format", "tsv"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        names = [line.split("\t", 1)[0] for line in out.strip().splitlines()]
+        assert names[:3] == ["Lisa Contoyannis", "Andy Kurtzig", "Michael Gutkowski"]
+        assert "Olivier Pomel" not in names
+
+    def test_tier_shorthand_filters_to_warm_a(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        knowledge = tmp_path / "k"
+        self._seed_wiki(knowledge / "wiki")
+        rc = main(["people", "--path", str(knowledge), "--tier", "warm-a", "--format", "tsv"])
+        assert rc == 0
+        names = [line.split("\t", 1)[0] for line in capsys.readouterr().out.strip().splitlines()]
+        assert set(names) == {"Lisa Contoyannis", "Andy Kurtzig"}
+        assert "Michael Gutkowski" not in names
+
+    def test_top_touch_sorts_by_meeting_plus_email(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        knowledge = tmp_path / "k"
+        self._seed_wiki(knowledge / "wiki")
+        rc = main([
+            "people", "--path", str(knowledge),
+            "--company", "Pearl", "--top-touch", "2", "--format", "tsv",
+        ])
+        assert rc == 0
+        names = [line.split("\t", 1)[0] for line in capsys.readouterr().out.strip().splitlines()]
+        assert names == ["Lisa Contoyannis", "Andy Kurtzig"]
+
+    def test_company_excludes_non_person_types(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        knowledge = tmp_path / "k"
+        self._seed_wiki(knowledge / "wiki")
+        rc = main(["people", "--path", str(knowledge), "--company", "Pearl", "--format", "tsv"])
+        assert rc == 0
+        names = [line.split("\t", 1)[0] for line in capsys.readouterr().out.strip().splitlines()]
+        assert "Pearl.com Holdings" not in names
+
+    def test_missing_wiki_returns_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        rc = main(["people", "--path", str(tmp_path / "nope")])
+        assert rc == 1
+        assert "Wiki root not found" in capsys.readouterr().err
+
+
+
