@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from athenaeum.models import parse_frontmatter, render_frontmatter
-from athenaeum.provenance import validate_field_sources, validate_source_value
+from athenaeum.provenance import resolve_remember_sources
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
 
 log = logging.getLogger(__name__)
@@ -225,31 +225,41 @@ def remember_write(
             the ``raw/<session>/`` subdirectory the file lands in.
             **Not** the per-claim provenance source — see ``sources``.
         wiki_root: Optional wiki root for path-traversal guards.
-        sources: Per-claim provenance (issue #90). Three accepted shapes:
+        sources: Per-claim provenance (issue #90, design-lock §4 in
+            ``docs/provenance-shape.md``). Three accepted shapes:
 
-            1. Scalar ``str`` of form ``"<type>:<ref>"`` — written as the
-               wiki-level ``source`` default for every field.
-            2. Structured ``dict`` ``{type, ref, ts?, confidence?, notes?}``
-               — also written as the wiki-level ``source`` default, but
-               with optional timestamp / confidence / notes preserved.
-            3. Per-field map ``dict`` ``{<field>: <source>}`` where each
-               value is a scalar or structured form — written as
-               ``field_sources`` (per-claim overrides). Keys must be
-               non-empty strings.
-            4. ``None`` (default) — stamps ``source: claude:inferred``
-               and emits a server-side warning. Untracked-source writes
-               are accepted but visible to downstream provenance audits.
+            1. Scalar ``str`` of form ``"<type>:<ref>"`` (e.g.
+               ``"api:apollo:2026-05-09"``) — applied as the wiki-level
+               ``source`` default for every field.
+            2. ``{"_source": <scalar-or-structured>}`` — wiki-level
+               default, structured form preserves
+               ``ts``/``confidence``/``notes``. Example::
+
+                   {"_source": {"type": "api", "ref": "apollo:2026-05-09",
+                                "confidence": 0.9}}
+
+            3. ``{"_field_sources": {<field>: <source>, ...}}`` — per-field
+               attribution. Each value is a scalar or structured source.
+               Example::
+
+                   {"_field_sources": {"current_title": "api:apollo:2026-05-09",
+                                       "linkedin_url":  "linkedin:tristankromer"}}
+
+            ``None`` (default) — stamps ``source: claude:inferred`` and
+            emits a server-side warning.
+
+            BREAKING (issue #96): the previous bare-dict heuristic that
+            inspected ``{type, ref}`` keys is REMOVED. Bare dicts without
+            the ``_source`` / ``_field_sources`` wrapper raise
+            ``ValueError``. The pathological case (fields literally named
+            ``type`` / ``ref``) is now safe via
+            ``{"_field_sources": {"type": ..., "ref": ...}}``.
 
             NOTE: this ``sources`` argument is DIFFERENT from the
             ``sources:`` frontmatter list used by cluster-merge in
             ``athenaeum.merge`` (which is a list of cluster-member uids
             being merged). They share a name for historical reasons; do
             not conflate them.
-
-            Known limitation: a per-field map whose field is literally
-            named ``type`` cannot be distinguished from a structured
-            single-source dict, since both have a top-level ``type`` key.
-            Tracked in issue #96.
 
     Returns:
         Confirmation message with the file path, or an error string.
@@ -269,25 +279,11 @@ def remember_write(
                 "source on every write (issue #90).",
                 _DEFAULT_INFERRED_SOURCE,
             )
-        elif isinstance(sources, str):
-            validate_source_value(sources)
-            wiki_source = sources
-            field_sources_map = None
-        elif isinstance(sources, dict):
-            # Two shapes accepted: a structured single-source dict
-            # ({type, ref, ...}), or a field_sources map ({field: src}).
-            # Disambiguate by checking for the SourceRef required keys.
-            if {"type", "ref"} <= set(sources.keys()):
-                validate_source_value(sources)
-                wiki_source = sources
-                field_sources_map = None
-            else:
-                validate_field_sources(sources)
-                wiki_source = None
-                field_sources_map = sources
         else:
-            return f"Error: `sources` must be str, dict, or None; got {type(sources).__name__}"
+            wiki_source, field_sources_map = resolve_remember_sources(sources)
     except ValueError as exc:
+        return f"Error: invalid `sources`: {exc}"
+    except TypeError as exc:
         return f"Error: invalid `sources`: {exc}"
 
     safe_source = "".join(c for c in source if c.isalnum() or c in "-_")
@@ -453,18 +449,22 @@ def create_server(
                 subdirectory the file lands in. Examples:
                 ``"claude-session"``, ``"manual"``. **Not** a per-claim
                 provenance source — pass ``sources`` for that.
-            sources: Per-claim provenance (issue #90). Either:
+            sources: Per-claim provenance (issue #90, design-lock §4 in
+                ``docs/provenance-shape.md``). Three accepted shapes:
 
                 - scalar ``"<type>:<ref>"`` (e.g.
-                  ``"claude:session-2026-05-08"``) — applied as the
-                  wiki-level default source for all fields,
-                - structured dict ``{type, ref, ts?, confidence?, notes?}``
-                  with the same wiki-level effect, or
-                - per-field map ``{<field>: <scalar-or-structured>}`` —
-                  written as ``field_sources``.
+                  ``"api:apollo:2026-05-09"``) — wiki-level default,
+                - ``{"_source": <scalar-or-structured>}`` — wiki-level
+                  default, structured form preserves
+                  ``ts``/``confidence``/``notes``,
+                - ``{"_field_sources": {<field>: <source>, ...}}`` —
+                  per-field attribution.
 
                 Omitting ``sources`` defaults to ``source: claude:inferred``
                 and logs a server-side warning. Always declare a source.
+
+                BREAKING (issue #96): bare dicts without the wrapper keys
+                are rejected — see ``remember_write`` for the rationale.
 
         Returns:
             Confirmation message with the file path.
