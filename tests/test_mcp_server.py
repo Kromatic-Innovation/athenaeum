@@ -277,32 +277,77 @@ class TestRememberSources:
         assert "source: claude:session-2026-05-08" in text
         assert "claude:inferred" not in text
 
-    def test_field_sources_dict_propagates(self, tmp_path: Path) -> None:
+    def test_field_sources_wrapper_propagates(self, tmp_path: Path) -> None:
         raw = tmp_path / "raw"
         raw.mkdir()
         result = remember_write(
             raw,
             "Some claim",
-            sources={"emails": "api:apollo:2026-05-07"},
+            sources={"_field_sources": {"emails": "api:apollo:2026-05-07"}},
         )
         assert "Saved to" in result
         text = list((raw / "claude-session").glob("*.md"))[0].read_text()
         assert "field_sources:" in text
         assert "emails: api:apollo:2026-05-07" in text
 
-    def test_structured_single_source_dict(self, tmp_path: Path) -> None:
+    def test_source_wrapper_structured(self, tmp_path: Path) -> None:
         raw = tmp_path / "raw"
         raw.mkdir()
         result = remember_write(
             raw,
             "Some claim",
-            sources={"type": "api", "ref": "apollo", "confidence": 0.9},
+            sources={"_source": {"type": "api", "ref": "apollo", "confidence": 0.9}},
         )
         assert "Saved to" in result
         text = list((raw / "claude-session").glob("*.md"))[0].read_text()
         assert "source:" in text
         assert "type: api" in text
         assert "confidence: 0.9" in text
+
+    def test_bare_dict_without_wrappers_rejected(self, tmp_path: Path) -> None:
+        # Per design-lock §4: bare dict (no wrapper keys) is no longer
+        # accepted. Caller must use _source / _field_sources.
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        result = remember_write(
+            raw, "Some claim", sources={"emails": "api:apollo:2026-05-07"}
+        )
+        assert "Error" in result
+        assert "_field_sources" in result
+
+    def test_pathological_type_ref_fields(self, tmp_path: Path) -> None:
+        # The locked pathological case: a wiki with frontmatter fields
+        # literally named ``type`` and ``ref``. Pre-#96 this was
+        # misclassified as a structured single-source dict; now it must
+        # be passed via ``_field_sources`` and round-trip intact.
+        raw = tmp_path / "raw"
+        raw.mkdir()
+
+        # Bare form is rejected with a wrapper hint.
+        bad = remember_write(
+            raw,
+            "Some claim",
+            sources={"type": "api:x", "ref": "linkedin:y"},
+        )
+        assert "Error" in bad
+        assert "_field_sources" in bad
+
+        # Wrapped form succeeds and writes the per-field map intact.
+        good = remember_write(
+            raw,
+            "Some claim",
+            sources={
+                "_field_sources": {
+                    "type": "api:x",
+                    "ref": "linkedin:y",
+                }
+            },
+        )
+        assert "Saved to" in good
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        assert "field_sources:" in text
+        assert "type: api:x" in text
+        assert "ref: linkedin:y" in text
 
     def test_malformed_scalar_rejected(self, tmp_path: Path) -> None:
         raw = tmp_path / "raw"
