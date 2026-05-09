@@ -8,6 +8,7 @@ from athenaeum.provenance import (
     SourceRef,
     parse_per_value_field_sources,
     parse_source,
+    resolve_remember_sources,
     validate_field_sources,
     validate_source_value,
 )
@@ -250,3 +251,77 @@ class TestSourceRefToScalar:
     def test_round_trip(self) -> None:
         ref = parse_source("api:apollo")
         assert ref.to_scalar() == "api:apollo"
+
+
+class TestResolveRememberSources:
+    """Disambiguation helper for MCP ``remember(sources=...)`` (issue #96).
+
+    Locks design-lock §4 in ``docs/provenance-shape.md``: explicit
+    ``_source`` / ``_field_sources`` wrappers; the bare-dict heuristic
+    is removed; bare scalar shorthand stays.
+    """
+
+    def test_none_returns_both_none(self) -> None:
+        assert resolve_remember_sources(None) == (None, None)
+
+    def test_bare_scalar(self) -> None:
+        ws, fs = resolve_remember_sources("api:apollo:2026-04-29")
+        assert ws == "api:apollo:2026-04-29"
+        assert fs is None
+
+    def test_source_wrapper_structured(self) -> None:
+        payload = {"_source": {"type": "api", "ref": "apollo"}}
+        ws, fs = resolve_remember_sources(payload)
+        assert ws == {"type": "api", "ref": "apollo"}
+        assert fs is None
+
+    def test_field_sources_wrapper(self) -> None:
+        payload = {"_field_sources": {"emails": "api:apollo:2026-04-29"}}
+        ws, fs = resolve_remember_sources(payload)
+        assert ws is None
+        assert fs == {"emails": "api:apollo:2026-04-29"}
+
+    def test_both_wrappers(self) -> None:
+        payload = {
+            "_source": "api:apollo:2026-04-29",
+            "_field_sources": {"linkedin_url": "linkedin:tristankromer"},
+        }
+        ws, fs = resolve_remember_sources(payload)
+        assert ws == "api:apollo:2026-04-29"
+        assert fs == {"linkedin_url": "linkedin:tristankromer"}
+
+    def test_pathological_bare_type_ref_rejected(self) -> None:
+        # Locked pathological case from issue #96: bare dict whose user
+        # fields happen to be named ``type`` / ``ref``.
+        with pytest.raises(ValueError, match="_field_sources"):
+            resolve_remember_sources({"type": "api:x", "ref": "linkedin:y"})
+
+    def test_pathological_via_field_sources_wrapper_works(self) -> None:
+        payload = {"_field_sources": {"type": "api:x", "ref": "linkedin:y"}}
+        ws, fs = resolve_remember_sources(payload)
+        assert ws is None
+        assert fs == {"type": "api:x", "ref": "linkedin:y"}
+
+    def test_bare_dict_without_wrappers_rejected(self) -> None:
+        with pytest.raises(ValueError, match="_field_sources"):
+            resolve_remember_sources({"emails": "api:apollo:2026-04-29"})
+
+    def test_wrong_type_rejected(self) -> None:
+        with pytest.raises(TypeError):
+            resolve_remember_sources(42)
+
+    def test_empty_dict_rejected(self) -> None:
+        with pytest.raises(ValueError, match="_field_sources"):
+            resolve_remember_sources({})
+
+    def test_mixed_unknown_key_rejected(self) -> None:
+        with pytest.raises(ValueError, match="_field_sources"):
+            resolve_remember_sources({"_source": "api:x:y", "stray": "junk"})
+
+    def test_field_sources_value_not_dict_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            resolve_remember_sources({"_field_sources": "not-a-dict"})
+
+    def test_invalid_inner_source_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            resolve_remember_sources({"_source": "Has-Uppercase"})
