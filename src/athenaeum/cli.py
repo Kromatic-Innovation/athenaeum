@@ -284,6 +284,42 @@ def main(argv: list[str] | None = None) -> int:
         help="Override configured backend (default: read from athenaeum.yaml)",
     )
 
+    # repair command — frontmatter YAML repair tools (tag-indent, value-quoting)
+    repair_parser = subparsers.add_parser(
+        "repair",
+        help="Repair YAML-frontmatter corruption in wiki files. "
+        "Default is dry-run; pass --apply to write fixes.",
+    )
+    repair_mode = repair_parser.add_mutually_exclusive_group(required=True)
+    repair_mode.add_argument(
+        "--tag-indent",
+        action="store_true",
+        help="Normalize block-list indentation under top-level keys "
+        "(tags:, emails:, aliases:, ...).",
+    )
+    repair_mode.add_argument(
+        "--value-quoting",
+        action="store_true",
+        help="Quote unquoted YAML values that break safe_load "
+        "(values starting with '-' or '[').",
+    )
+    repair_mode.add_argument(
+        "--all",
+        action="store_true",
+        help="Run all repair passes in sequence (tag-indent then value-quoting).",
+    )
+    repair_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write fixes. Without this flag, the command is a dry-run.",
+    )
+    repair_parser.add_argument(
+        "--wiki-root",
+        type=Path,
+        default=None,
+        help="Wiki directory (default: ~/knowledge/wiki)",
+    )
+
     # rebuild-index command — rebuild the search index out-of-band
     rebuild_parser = subparsers.add_parser(
         "rebuild-index",
@@ -346,6 +382,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "stopwords":
         return _cmd_stopwords(args)
+
+    if args.command == "repair":
+        return _cmd_repair(args)
 
     return 0
 
@@ -884,6 +923,60 @@ def _cmd_test_mcp(args: argparse.Namespace) -> int:
 
     print(f"\n{len(passed)} passed, {len(failed)} failed")
     return 0 if not failed else 1
+
+
+def _cmd_repair(args: argparse.Namespace) -> int:
+    """Run frontmatter repair pass(es).
+
+    Exit codes:
+        0 — clean run (zero changes needed, OR ``--apply`` succeeded
+            with no errors).
+        1 — errors encountered (read/write/parse failures).
+        2 — dry-run found fixes (CI gate signal).
+    """
+    from athenaeum.repair import RepairReport, repair_tag_indent, repair_value_quoting
+
+    wiki_root = (args.wiki_root or Path("~/knowledge/wiki")).expanduser().resolve()
+    if not wiki_root.is_dir():
+        print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
+        return 1
+
+    passes: list[tuple[str, callable]] = []
+    if args.tag_indent:
+        passes.append(("tag-indent", repair_tag_indent))
+    if args.value_quoting:
+        passes.append(("value-quoting", repair_value_quoting))
+    if args.all:
+        passes = [
+            ("tag-indent", repair_tag_indent),
+            ("value-quoting", repair_value_quoting),
+        ]
+
+    total_changed = 0
+    total_errors = 0
+    mode = "APPLY" if args.apply else "DRY RUN"
+
+    for name, func in passes:
+        report: RepairReport = func(wiki_root, apply=args.apply)
+        total_changed += report.files_changed
+        total_errors += len(report.errors)
+        print(f"=== repair {name} ({mode}) ===")
+        print(f"  files_scanned: {report.files_scanned}")
+        print(f"  files_changed: {report.files_changed}")
+        print(f"  errors:        {len(report.errors)}")
+        if report.changes and not args.apply:
+            for path, summary in report.changes[:20]:
+                print(f"    {path.name}: {summary}")
+            if len(report.changes) > 20:
+                print(f"    ... and {len(report.changes) - 20} more")
+        for path, err in report.errors[:20]:
+            print(f"  ERR {path.name}: {err}", file=sys.stderr)
+
+    if total_errors > 0:
+        return 1
+    if not args.apply and total_changed > 0:
+        return 2
+    return 0
 
 
 def _get_version() -> str:
