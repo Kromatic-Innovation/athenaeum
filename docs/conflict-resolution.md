@@ -4,8 +4,7 @@ This document is the LOCK for athenaeum's conflict-resolution behavior as of
 merge SHA `b0ee25c` on `develop` (post-Lane-E). It catalogs every code path
 that resolves disagreements between two pieces of data — between raw intake
 and the wiki, between two cluster members, between a canonical wiki and an
-absorbed duplicate, between an Apollo response and an existing wiki record —
-and pins the exact rule each one applies.
+absorbed duplicate — and pins the exact rule each one applies.
 
 The companion test suite at `tests/test_conflict_resolution.py` asserts each
 documented rule. **Any future PR that changes a documented rule MUST update
