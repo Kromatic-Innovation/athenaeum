@@ -552,6 +552,89 @@ class TestDedupeMergePrimitives:
         out = _merge_field_sources(cmeta, ameta, merged)
         assert out is None  # pruned everything → None
 
+    def test_merge_field_sources_per_value_survives_list_reorder(self) -> None:
+        """Per docs/provenance-shape.md §2.1: per-value attribution is
+        co-indexed BY VALUE, not by position. Reordering the underlying
+        list must carry attributions with the values."""
+        cmeta = {
+            "emails": ["a@x.com", "b@y.com"],
+            "field_sources": {
+                "emails": [
+                    {"value": "a@x.com", "source": "api:apollo:2026-04-29"},
+                    {"value": "b@y.com", "source": "linkedin:bhandle"},
+                ]
+            },
+        }
+        ameta: dict[str, object] = {"field_sources": {}}
+        # Merged list reordered relative to canonical's field_sources order.
+        merged = {"emails": ["b@y.com", "a@x.com"]}
+        out = _merge_field_sources(cmeta, ameta, merged)
+        assert out is not None
+        assert out["emails"] == [
+            {"value": "b@y.com", "source": "linkedin:bhandle"},
+            {"value": "a@x.com", "source": "api:apollo:2026-04-29"},
+        ]
+
+    def test_merge_field_sources_list_of_dicts_employment_history(self) -> None:
+        """Per docs/provenance-shape.md §2.2: per-value attribution
+        attaches to the WHOLE dict for list-of-dicts fields like
+        ``apollo_employment_history``. After merge both dicts present
+        with their respective sources."""
+        c_emp = [{"company": "Kromatic", "title": "Founder"}]
+        a_emp = [{"company": "SECUDE", "title": "Director"}]
+        cmeta = {
+            "apollo_employment_history": c_emp,
+            "field_sources": {
+                "apollo_employment_history": [
+                    {"value": c_emp[0], "source": "api:apollo:2026-04-29"},
+                ]
+            },
+        }
+        ameta = {
+            "apollo_employment_history": a_emp,
+            "field_sources": {
+                "apollo_employment_history": [
+                    {"value": a_emp[0], "source": "linkedin:tristankromer"},
+                ]
+            },
+        }
+        # Merged list = canonical first, absorbed second (list-union).
+        merged = {"apollo_employment_history": c_emp + a_emp}
+        out = _merge_field_sources(cmeta, ameta, merged)
+        assert out is not None
+        assert out["apollo_employment_history"] == [
+            {
+                "value": {"company": "Kromatic", "title": "Founder"},
+                "source": "api:apollo:2026-04-29",
+            },
+            {
+                "value": {"company": "SECUDE", "title": "Director"},
+                "source": "linkedin:tristankromer",
+            },
+        ]
+
+    def test_merge_field_sources_prunes_stale_per_value_entry(self) -> None:
+        """Per docs/provenance-shape.md §2.4: a per-value attribution
+        entry whose ``value`` no longer appears in the merged list is
+        dropped at write time, mirroring the prune-dangling rule."""
+        cmeta = {
+            "emails": ["a@x.com"],
+            "field_sources": {
+                "emails": [
+                    {"value": "a@x.com", "source": "api:apollo:2026-04-29"},
+                    # Stale — ``b@y.com`` is not in the merged list.
+                    {"value": "b@y.com", "source": "linkedin:bhandle"},
+                ]
+            },
+        }
+        ameta: dict[str, object] = {"field_sources": {}}
+        merged = {"emails": ["a@x.com"]}
+        out = _merge_field_sources(cmeta, ameta, merged)
+        assert out is not None
+        assert out["emails"] == [
+            {"value": "a@x.com", "source": "api:apollo:2026-04-29"},
+        ]
+
 
 class TestDedupePerformMerge:
     """End-to-end merge of a duplicate pair — locks every field-class rule."""
