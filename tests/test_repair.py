@@ -10,7 +10,12 @@ from pathlib import Path
 import yaml
 
 from athenaeum import cli
-from athenaeum.repair import repair_tag_indent, repair_value_quoting
+from athenaeum.repair import (
+    LEGACY_SLUG_MAP,
+    migrate_legacy_source_slugs,
+    repair_tag_indent,
+    repair_value_quoting,
+)
 
 # ---------------------------------------------------------------------------
 # Fixture builders
@@ -342,8 +347,6 @@ def test_atomic_write_no_tmp_left_behind(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------------------
 # 3. Legacy bare-slug source: migration  (issue #97 / design-lock §5)
-
-from athenaeum.repair import LEGACY_SLUG_MAP, migrate_legacy_source_slugs
 
 LEGACY_EXTENDED = """\
 ---
