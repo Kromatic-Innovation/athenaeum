@@ -4,6 +4,7 @@ process_one, and the run() pipeline with mocked LLM."""
 from __future__ import annotations
 
 import subprocess
+from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -367,16 +368,22 @@ class TestTier0Passthrough:
 
         out_path = wiki / "9b8c7d61-per-value-pat.md"
         out = out_path.read_text(encoding="utf-8")
-        # Per-value list shape preserved verbatim — tier0 must NOT
-        # auto-upgrade or rewrite.
-        assert "field_sources:" in out
-        assert "- value: pat@one.com" in out
-        assert "source: api:apollo:2026-04-29" in out
-        assert "- value: pat@two.com" in out
-        assert "source: linkedin:patshandle" in out
-        # And the validator accepted it (file exists / no parse error).
-        from athenaeum.models import parse_frontmatter
 
+        # Byte-for-byte contract from docs/provenance-shape.md §3:
+        # tier0 stamps ``created`` (when missing) + ``updated``, then
+        # renders the meta verbatim. Reconstruct the expected bytes
+        # rather than relying on substring checks.
+        from athenaeum.models import parse_frontmatter, render_frontmatter
+
+        expected_meta, expected_body = parse_frontmatter(sourced)
+        today = date.today().isoformat()
+        expected_meta["created"] = today
+        expected_meta["updated"] = today
+        expected = render_frontmatter(expected_meta) + "\n" + expected_body
+        assert out == expected
+
+        # And the per-value list shape parses back as a list of
+        # ``{value, source}`` records.
         meta, _ = parse_frontmatter(out)
         emails_fs = meta["field_sources"]["emails"]
         assert isinstance(emails_fs, list)
