@@ -6,6 +6,7 @@ import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -345,6 +346,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Quote unquoted YAML values that break safe_load "
         "(values starting with '-' or '[').",
+    )
+    repair_mode.add_argument(
+        "--legacy-source-slugs",
+        action="store_true",
+        help="Migrate legacy bare-slug `source:` values to typed "
+        "`script:<slug>` form (issue #97 / design-lock §5).",
     )
     repair_mode.add_argument(
         "--all",
@@ -1043,12 +1050,24 @@ def _cmd_repair(args: argparse.Namespace) -> int:
         1 — errors encountered (read/write/parse failures).
         2 — dry-run found fixes (CI gate signal).
     """
-    from athenaeum.repair import RepairReport, repair_tag_indent, repair_value_quoting
+    from athenaeum.repair import (
+        RepairReport,
+        migrate_legacy_source_slugs,
+        repair_tag_indent,
+        repair_value_quoting,
+    )
 
     wiki_root = (args.wiki_root or Path("~/knowledge/wiki")).expanduser().resolve()
     if not wiki_root.is_dir():
         print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
         return 1
+
+    # The legacy-source-slugs pass uses a different report shape, so it
+    # runs through a dedicated branch instead of the RepairReport pipeline.
+    if args.legacy_source_slugs:
+        return _cmd_repair_legacy_slugs(
+            wiki_root, apply=args.apply, runner=migrate_legacy_source_slugs
+        )
 
     RepairFn = Callable[[Path, bool], RepairReport]
     passes: list[tuple[str, RepairFn]]
@@ -1059,7 +1078,7 @@ def _cmd_repair(args: argparse.Namespace) -> int:
         ]
     elif args.tag_indent:
         passes = [("tag-indent", repair_tag_indent)]
-    else:  # args.value_quoting (mutex group guarantees one of the three)
+    else:  # args.value_quoting (mutex group guarantees one of the four)
         passes = [("value-quoting", repair_value_quoting)]
 
     total_changed = 0
@@ -1087,6 +1106,71 @@ def _cmd_repair(args: argparse.Namespace) -> int:
     if not args.apply and total_changed > 0:
         return 2
     return 0
+
+
+def _cmd_repair_legacy_slugs(
+    wiki_root: Path,
+    *,
+    apply: bool,
+    runner: Callable[..., Any],
+) -> int:
+    """Run the legacy bare-slug ``source:`` migration (issue #97).
+
+    Exit codes:
+        0 — clean run (zero candidates found, OR ``--apply`` succeeded
+            with no validation failures and no errors).
+        1 — errors encountered (read/write/validation failures), OR
+            unknown bare-slug values seen (migration ABORTED per
+            design-lock §5.2).
+        2 — dry-run found candidates that WOULD be migrated.
+    """
+    report = runner(wiki_root, apply=apply)
+    mode = "APPLY" if apply else "DRY RUN"
+    print(f"=== repair legacy-source-slugs ({mode}) ===")
+    print(f"  files_scanned: {report.files_scanned}")
+
+    if report.unknown_slugs:
+        # ABORT path. No rewrites were attempted. Report all unknown
+        # slugs and the first 10 file paths so a human can decide whether
+        # to update LEGACY_SLUG_MAP (a design-doc revision, not an
+        # in-script change).
+        print("  ABORTED: unknown bare-slug values found", file=sys.stderr)
+        for slug, count in sorted(report.unknown_slugs.items()):
+            print(f"    {slug}: {count} wikis", file=sys.stderr)
+        print("  first 10 affected files:", file=sys.stderr)
+        for path, slug in report.unknown_slug_files:
+            print(f"    {path.name} ({slug})", file=sys.stderr)
+        return 1
+
+    if apply:
+        print(f"  rewrites_applied:        {report.rewrites_applied}")
+        print(f"  skipped_validation_fail: {report.skipped_validation_fail}")
+    else:
+        print(f"  would_rewrite:           {report.would_rewrite}")
+    for slug, count in sorted(report.per_slug_counts.items()):
+        typed = LEGACY_SLUG_MAP_LOOKUP(slug)
+        print(f"    {slug} -> {typed}: {count} wikis")
+
+    for path, err in report.errors[:20]:
+        print(f"  ERR {path.name}: {err}", file=sys.stderr)
+
+    if report.errors:
+        return 1
+    if not apply and report.would_rewrite > 0:
+        return 2
+    return 0
+
+
+def LEGACY_SLUG_MAP_LOOKUP(slug: str) -> str:
+    """Look up a slug in :data:`athenaeum.repair.LEGACY_SLUG_MAP` for output.
+
+    Helper to keep the import surface inside ``_cmd_repair_legacy_slugs``
+    minimal. Returns the raw slug if not present (defensive — should never
+    happen because the runner already filtered unknowns).
+    """
+    from athenaeum.repair import LEGACY_SLUG_MAP
+
+    return LEGACY_SLUG_MAP.get(slug, slug)
 
 
 def _get_version() -> str:
