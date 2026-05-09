@@ -83,6 +83,10 @@ _GOOGLE_KEYS = {
     "google_contact_kromatic",
     "google_contact_tristankromer",
 }
+_SOCIAL_KEYS = {
+    "twitter_url",
+    "github_url",
+}
 
 # Fields where "list union with canonical-first order" is the merge rule.
 _LIST_UNION_KEYS = {"emails", "tags", "aliases"}
@@ -389,8 +393,8 @@ def _merge_meta(
             if absorbed.get(kspec) and not canonical.get(kspec):
                 out[kspec] = absorbed[kspec]
 
-    # Apollo + LinkedIn coalesce
-    for k in _APOLLO_KEYS | _LINKEDIN_KEYS:
+    # Apollo + LinkedIn + social URL coalesce
+    for k in _APOLLO_KEYS | _LINKEDIN_KEYS | _SOCIAL_KEYS:
         merged_v = _coalesce(canonical.get(k), absorbed.get(k))
         if merged_v is not None:
             out[k] = merged_v
