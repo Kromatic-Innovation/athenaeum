@@ -27,6 +27,7 @@ Out of scope here (Lane B / #90, Lane G / #91):
 """
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -141,6 +142,28 @@ _BY_TYPE: dict[str, type[WikiBase]] = {
     "source": SourceWiki,
 }
 
+# Types that are not in ``_BY_TYPE`` but are present in the live wiki
+# tree as of 2026-05-09 (issue #93 audit). These fall through to
+# :class:`WikiBase` for validation; the allowlist exists so unknown
+# types (typos, drift) emit a warning instead of being silently
+# accepted. See issue #93.
+FALLBACK_TYPES: frozenset[str] = frozenset(
+    {
+        "auto-memory",
+        "tool",
+        "reference",
+        "principle",
+        "feedback",
+        "preference",
+        "user",
+    }
+)
+
+#: All wiki ``type`` values currently recognized — concrete schemas
+#: plus the live-tree fallback set. Anything outside this set triggers
+#: a :class:`UserWarning` from :func:`validate_wiki_meta`.
+KNOWN_TYPES: frozenset[str] = frozenset(_BY_TYPE) | FALLBACK_TYPES
+
 
 def validate_wiki_meta(meta: dict[str, Any]) -> WikiBase:
     """Validate a frontmatter dict against the appropriate schema.
@@ -148,8 +171,18 @@ def validate_wiki_meta(meta: dict[str, Any]) -> WikiBase:
     Dispatches by ``meta["type"]``. Unknown types fall through to
     :class:`WikiBase` (still enforces uid/type/name). Raises
     :class:`pydantic.ValidationError` on malformed input.
+
+    Issue #93: emits a :class:`UserWarning` (NOT an exception) when
+    ``meta["type"]`` is outside :data:`KNOWN_TYPES`. Recoverable —
+    strict mode is out of scope.
     """
     etype = meta.get("type", "")
+    if etype and etype not in KNOWN_TYPES:
+        warnings.warn(
+            f"unknown wiki type: {etype!r} (not in KNOWN_TYPES)",
+            UserWarning,
+            stacklevel=2,
+        )
     model_cls = _BY_TYPE.get(etype, WikiBase)
     return model_cls.model_validate(meta)
 
@@ -161,5 +194,7 @@ __all__ = [
     "ProjectWiki",
     "ConceptWiki",
     "SourceWiki",
+    "FALLBACK_TYPES",
+    "KNOWN_TYPES",
     "validate_wiki_meta",
 ]

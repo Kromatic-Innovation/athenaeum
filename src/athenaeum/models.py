@@ -156,6 +156,11 @@ class WikiEntity:
     created: str = ""
     updated: str = ""
     body: str = ""
+    # Per-claim provenance (issue #90 / #95). Optional so old wikis
+    # without provenance still round-trip cleanly. ``source`` is the
+    # wiki-level default; ``field_sources`` overrides per field.
+    source: str | dict | None = None
+    field_sources: dict[str, str | dict] | None = None
 
     @property
     def filename(self) -> str:
@@ -179,6 +184,10 @@ class WikiEntity:
             meta["created"] = self.created
         if self.updated:
             meta["updated"] = self.updated
+        if self.source is not None:
+            meta["source"] = self.source
+        if self.field_sources:
+            meta["field_sources"] = self.field_sources
         return render_frontmatter(meta) + "\n" + self.body
 
 
