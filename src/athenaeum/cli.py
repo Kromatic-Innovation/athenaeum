@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -363,6 +364,43 @@ def main(argv: list[str] | None = None) -> int:
         help="Wiki directory (default: ~/knowledge/wiki)",
     )
 
+    # enrich command — call external connectors against wiki entities (#87)
+    enrich_parser = subparsers.add_parser(
+        "enrich",
+        help=(
+            "Enrich wiki entities via external connectors. "
+            "Currently supports --persons (Apollo people-match)."
+        ),
+    )
+    enrich_parser.add_argument(
+        "--persons",
+        action="store_true",
+        help="Enrich type:person wikis via the Apollo connector.",
+    )
+    enrich_parser.add_argument(
+        "--wiki-root",
+        type=Path,
+        default=None,
+        help="Wiki directory (default: ~/knowledge/wiki).",
+    )
+    enrich_parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Cap to first N candidates (default: no cap).",
+    )
+    enrich_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write changes. Default is dry-run (no writes).",
+    )
+    enrich_parser.add_argument(
+        "--skip-recent-days",
+        type=int,
+        default=30,
+        help="Skip wikis with apollo_enriched_on within N days (default 30; 0=no skip).",
+    )
+
     # rebuild-index command — rebuild the search index out-of-band
     rebuild_parser = subparsers.add_parser(
         "rebuild-index",
@@ -431,6 +469,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "repair":
         return _cmd_repair(args)
+
+    if args.command == "enrich":
+        return _cmd_enrich(args)
 
     return 0
 
@@ -1079,6 +1120,116 @@ def _cmd_repair(args: argparse.Namespace) -> int:
         return 1
     if not args.apply and total_changed > 0:
         return 2
+    return 0
+
+
+def _cmd_enrich(args: argparse.Namespace) -> int:
+    """Enrich wiki entities via external connectors.
+
+    Currently supports ``--persons`` only — calls the Apollo connector
+    against ``type:person`` wikis under ``--wiki-root`` (default
+    ``~/knowledge/wiki``). Filters to wikis that need enrichment
+    (missing ``apollo_id`` AND have at least one of ``emails`` or
+    ``linkedin_url``). Calls :func:`athenaeum.connectors.apollo.enrich_person`
+    and merges the result into frontmatter via
+    :func:`athenaeum.models.render_frontmatter` — this is the
+    YAML-corruption-safe write path.
+
+    Default is dry-run; ``--apply`` writes.
+    """
+    from datetime import date
+
+    from athenaeum.connectors.apollo import ApolloClient, enrich_person
+    from athenaeum.models import parse_frontmatter, render_frontmatter
+
+    if not args.persons:
+        print("enrich: pass --persons (no other connectors yet)", file=sys.stderr)
+        return 1
+
+    wiki_root = (args.wiki_root or Path("~/knowledge/wiki")).expanduser().resolve()
+    if not wiki_root.is_dir():
+        print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
+        return 1
+
+    today = date.today()
+
+    candidates: list[tuple[Path, dict, str]] = []
+    for path in sorted(wiki_root.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, body = parse_frontmatter(text)
+        if not meta or meta.get("type") != "person":
+            continue
+        if meta.get("apollo_id"):
+            # Skip-recent guard for already-enriched wikis.
+            if args.skip_recent_days > 0:
+                last = str(meta.get("apollo_enriched_on") or "")
+                if last:
+                    try:
+                        d = date.fromisoformat(last[:10])
+                        if (today - d).days < args.skip_recent_days:
+                            continue
+                    except ValueError:
+                        pass
+            else:
+                continue
+        emails = meta.get("emails") or []
+        linkedin = str(meta.get("linkedin_url") or "").strip()
+        if not (emails or linkedin):
+            continue
+        candidates.append((path, meta, body))
+
+    if args.limit > 0:
+        candidates = candidates[: args.limit]
+
+    print(
+        f"enrich --persons: {len(candidates)} candidate(s) "
+        f"({'APPLY' if args.apply else 'DRY-RUN'})"
+    )
+
+    client = ApolloClient() if args.apply or os.environ.get("APOLLO_API_KEY") else None
+    if client is None:
+        # Dry-run without an API key — show candidate list and exit.
+        for path, meta, _body in candidates[:20]:
+            print(f"  would enrich: {meta.get('name')!r}  ({path.name})")
+        if len(candidates) > 20:
+            print(f"  ... and {len(candidates) - 20} more")
+        return 0
+
+    matched = 0
+    no_match = 0
+    written = 0
+    for path, meta, body in candidates:
+        result = enrich_person(meta, client)
+        if not result.matched:
+            no_match += 1
+            continue
+        matched += 1
+        if not args.apply:
+            print(
+                f"  would update: {meta.get('name')!r}  "
+                f"+{len(result.fields)} field(s)"
+            )
+            continue
+
+        new_meta = dict(meta)
+        new_meta.update(result.fields)
+        # Merge field_sources without clobbering existing entries.
+        existing_fs = dict(new_meta.get("field_sources") or {})
+        existing_fs.update(result.field_sources)
+        new_meta["field_sources"] = existing_fs
+        new_text = render_frontmatter(new_meta) + body
+        path.write_text(new_text, encoding="utf-8")
+        written += 1
+
+    print(
+        f"enrich --persons summary: matched={matched} no_match={no_match} "
+        f"written={written}"
+    )
     return 0
 
 
