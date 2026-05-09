@@ -47,7 +47,8 @@ def _get_write_model() -> str:
 
 
 def _record_usage(
-    response: anthropic.types.Message, usage: TokenUsage | None,
+    response: anthropic.types.Message,
+    usage: TokenUsage | None,
 ) -> None:
     """Record token usage from an API response if tracking is enabled."""
     if usage is not None and hasattr(response, "usage"):
@@ -71,6 +72,7 @@ def _load_schema_text(wiki_root: Path, filename: str) -> str:
 # ---------------------------------------------------------------------------
 # Tier 1 — Programmatic matching
 # ---------------------------------------------------------------------------
+
 
 def tier1_programmatic_match(
     raw: RawFile,
@@ -179,10 +181,7 @@ def tier2_classify(
     if wiki_root:
         obs_text = _load_schema_text(wiki_root, "observation-filter.md")
         if obs_text:
-            obs_filter = (
-                "\n## Observation filter (what to capture)\n"
-                f"{obs_text}\n"
-            )
+            obs_filter = "\n## Observation filter (what to capture)\n" f"{obs_text}\n"
 
     user_msg = CLASSIFY_USER_TEMPLATE.format(
         content=raw.content[:4000],
@@ -211,7 +210,9 @@ def tier2_classify(
     try:
         items = json.loads(json_match.group())
     except json.JSONDecodeError:
-        log.warning("Classification returned invalid JSON for %s: %s", raw.ref, text[:200])
+        log.warning(
+            "Classification returned invalid JSON for %s: %s", raw.ref, text[:200]
+        )
         return []
 
     results: list[ClassifiedEntity] = []
@@ -226,14 +227,16 @@ def tier2_classify(
             access = "internal"
         tags = [t for t in item.get("tags", []) if t in valid_tags]
 
-        results.append(ClassifiedEntity(
-            name=item["name"],
-            entity_type=entity_type,
-            tags=tags,
-            access=access,
-            is_new=True,
-            observations=item.get("observations", ""),
-        ))
+        results.append(
+            ClassifiedEntity(
+                name=item["name"],
+                entity_type=entity_type,
+                tags=tags,
+                access=access,
+                is_new=True,
+                observations=item.get("observations", ""),
+            )
+        )
 
     return results
 
@@ -315,8 +318,7 @@ def tier3_create(
         tmpl_text = _load_schema_text(wiki_root, "_entity-template.md")
         if tmpl_text:
             tmpl_section = (
-                "\n## Entity template (follow this structure)\n"
-                f"{tmpl_text}\n"
+                "\n## Entity template (follow this structure)\n" f"{tmpl_text}\n"
             )
 
     user_msg = CREATE_TEMPLATE.format(
@@ -340,6 +342,13 @@ def tier3_create(
     body = response.content[0].text.strip()
     today = date.today().isoformat()
 
+    # Issue #95: stamp authoritative provenance at construction time.
+    # Format: ``claude:tier3-create:<model>:<YYYY-MM-DD>``. The model
+    # name is read live from the same env-driven setting used for the
+    # API call so the source matches the model that actually wrote.
+    model = _get_write_model() or "unknown"
+    source = f"claude:tier3-create:{model}:{today}"
+
     return WikiEntity(
         uid=generate_uid(),
         type=action.entity_type,
@@ -350,6 +359,7 @@ def tier3_create(
         created=today,
         updated=today,
         body=body,
+        source=source,
     )
 
 
@@ -422,8 +432,11 @@ def tier3_write(
         if action.kind == "create":
             new_entities.append(
                 tier3_create(
-                    action, raw.ref, client,
-                    wiki_root=wiki_root, usage=usage,
+                    action,
+                    raw.ref,
+                    client,
+                    wiki_root=wiki_root,
+                    usage=usage,
                 )
             )
 
@@ -431,23 +444,50 @@ def tier3_write(
             existing_path = index.get_by_uid(action.existing_uid)
 
             if not existing_path or not existing_path.exists():
-                log.warning("Could not find existing page for uid %s", action.existing_uid)
+                log.warning(
+                    "Could not find existing page for uid %s", action.existing_uid
+                )
                 continue
 
             text = existing_path.read_text(encoding="utf-8")
             meta, existing_body = parse_frontmatter(text)
 
             updated_body, esc = tier3_merge(
-                action, existing_body, raw.ref, client, usage=usage,
+                action,
+                existing_body,
+                raw.ref,
+                client,
+                usage=usage,
             )
             if esc:
                 escalations.append(esc)
             if updated_body:
-                meta["updated"] = date.today().isoformat()
-                pending_updates.append((
-                    existing_path,
-                    render_frontmatter(meta) + "\n" + updated_body,
-                ))
+                today_iso = date.today().isoformat()
+                meta["updated"] = today_iso
+
+                # Issue #95: per-claim provenance on merge. The
+                # incoming source wins for fields the merge actually
+                # overwrote (Wikipedia rule: incoming wins for that
+                # field, so its source wins for that field). Preserve
+                # canonical's existing field_sources for non-touched
+                # fields.
+                model = _get_write_model() or "unknown"
+                merge_source = f"claude:tier3-merge:{model}:{today_iso}"
+                fs = meta.get("field_sources")
+                if not isinstance(fs, dict):
+                    fs = {}
+                # tier3_merge currently overwrites only ``body`` and
+                # ``updated`` from the LLM call; attribute both to the
+                # merge source. Other fields keep their prior source.
+                fs["body"] = merge_source
+                fs["updated"] = merge_source
+                meta["field_sources"] = fs
+                pending_updates.append(
+                    (
+                        existing_path,
+                        render_frontmatter(meta) + "\n" + updated_body,
+                    )
+                )
                 updated_uids.append(action.existing_uid)
 
     # All LLM calls succeeded — apply updates atomically
@@ -461,7 +501,10 @@ def tier3_write(
 # Tier 4 — Human escalation
 # ---------------------------------------------------------------------------
 
-def _question_from_description(description: str, entity_name: str, conflict_type: str) -> str:
+
+def _question_from_description(
+    description: str, entity_name: str, conflict_type: str
+) -> str:
     """Derive a one-line question for the checkbox row.
 
     Uses the first non-empty line of the description, trimmed to a single
@@ -497,9 +540,9 @@ def tier4_escalate(items: list[EscalationItem], pending_path: Path) -> None:
         # double quotes round-trip cleanly. raw_ref is NOT escaped: paths
         # should survive in storage untouched; the parser anchors to the
         # final ")\n" to tolerate parens inside refs.
-        escaped_entity = item.entity_name.replace("\\", "\\\\").replace("\"", "\\\"")
+        escaped_entity = item.entity_name.replace("\\", "\\\\").replace('"', '\\"')
         sections.append(
-            f"## [{today}] Entity: \"{escaped_entity}\" (from {item.raw_ref})\n"
+            f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'
             f"- [ ] {question}\n\n"
             f"**Conflict type**: {item.conflict_type}\n"
             f"**Description**: {item.description}\n"

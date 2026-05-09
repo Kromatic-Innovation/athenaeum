@@ -116,7 +116,8 @@ class TestTier2:
         assert "untrusted user data" in system_msg
 
     def test_classify_includes_observation_filter(
-        self, wiki_dir: Path,
+        self,
+        wiki_dir: Path,
     ) -> None:
         """Issue #17: observation-filter.md should be injected into classify prompt."""
         from athenaeum.tiers import tier2_classify
@@ -131,7 +132,12 @@ class TestTier2:
         client = _mock_client("[]")
 
         tier2_classify(
-            raw, [], ["person"], [], ["internal"], client,
+            raw,
+            [],
+            ["person"],
+            [],
+            ["internal"],
+            client,
             wiki_root=wiki_dir,
         )
         call_args = client.messages.create.call_args
@@ -149,13 +155,19 @@ class TestTier2:
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text="[]")]
         mock_response.usage = MagicMock(
-            input_tokens=150, output_tokens=20,
+            input_tokens=150,
+            output_tokens=20,
         )
         client.messages.create.return_value = mock_response
 
         usage = TokenUsage()
         tier2_classify(
-            raw, [], ["person"], [], ["internal"], client,
+            raw,
+            [],
+            ["person"],
+            [],
+            ["internal"],
+            client,
             usage=usage,
         )
         assert usage.input_tokens == 150
@@ -166,13 +178,17 @@ class TestTier2:
         from athenaeum.tiers import tier2_classify
 
         raw = _make_raw("Had coffee with Alice Zhang, she runs product at Acme.")
-        response_json = json.dumps([{
-            "name": "Alice Zhang",
-            "entity_type": "person",
-            "tags": ["active", "client"],
-            "access": "internal",
-            "observations": "Runs product at Acme.",
-        }])
+        response_json = json.dumps(
+            [
+                {
+                    "name": "Alice Zhang",
+                    "entity_type": "person",
+                    "tags": ["active", "client"],
+                    "access": "internal",
+                    "observations": "Runs product at Acme.",
+                }
+            ]
+        )
         client = _mock_client(response_json)
 
         result = tier2_classify(
@@ -203,17 +219,26 @@ class TestTier2:
         from athenaeum.tiers import tier2_classify
 
         raw = _make_raw("Some content about a widget.")
-        response_json = json.dumps([{
-            "name": "Widget",
-            "entity_type": "gadget",  # not in valid_types
-            "tags": [],
-            "access": "internal",
-            "observations": "A widget thing.",
-        }])
+        response_json = json.dumps(
+            [
+                {
+                    "name": "Widget",
+                    "entity_type": "gadget",  # not in valid_types
+                    "tags": [],
+                    "access": "internal",
+                    "observations": "A widget thing.",
+                }
+            ]
+        )
         client = _mock_client(response_json)
 
         result = tier2_classify(
-            raw, [], ["person", "company", "reference"], [], ["internal"], client,
+            raw,
+            [],
+            ["person", "company", "reference"],
+            [],
+            ["internal"],
+            client,
         )
         assert len(result) == 1
         assert result[0].entity_type == "reference"
@@ -222,12 +247,16 @@ class TestTier2:
         from athenaeum.tiers import tier2_classify
 
         raw = _make_raw("Some content.")
-        response_json = json.dumps([{
-            "name": "Test Entity",
-            "entity_type": "person",
-            "tags": [],
-            "access": "top-secret",  # not in valid_access
-        }])
+        response_json = json.dumps(
+            [
+                {
+                    "name": "Test Entity",
+                    "entity_type": "person",
+                    "tags": [],
+                    "access": "top-secret",  # not in valid_access
+                }
+            ]
+        )
         client = _mock_client(response_json)
 
         result = tier2_classify(
@@ -245,16 +274,25 @@ class TestTier2:
         from athenaeum.tiers import tier2_classify
 
         raw = _make_raw("Some content.")
-        response_json = json.dumps([{
-            "name": "Test",
-            "entity_type": "person",
-            "tags": ["active", "bogus-tag", "client"],
-            "access": "internal",
-        }])
+        response_json = json.dumps(
+            [
+                {
+                    "name": "Test",
+                    "entity_type": "person",
+                    "tags": ["active", "bogus-tag", "client"],
+                    "access": "internal",
+                }
+            ]
+        )
         client = _mock_client(response_json)
 
         result = tier2_classify(
-            raw, [], ["person"], ["active", "client"], ["internal"], client,
+            raw,
+            [],
+            ["person"],
+            ["active", "client"],
+            ["internal"],
+            client,
         )
         assert result[0].tags == ["active", "client"]
 
@@ -263,9 +301,9 @@ class TestTier2:
 
         raw = _make_raw("Met Bob at the conference.")
         fenced = (
-            '```json\n'
+            "```json\n"
             '[{"name": "Bob", "entity_type": "person", "tags": [], "access": "internal"}]\n'
-            '```'
+            "```"
         )
         client = _mock_client(fenced)
 
@@ -295,10 +333,17 @@ class TestTier2:
         from athenaeum.tiers import tier2_classify
 
         raw = _make_raw("Some content.")
-        response_json = json.dumps([
-            {"entity_type": "person", "tags": [], "access": "internal"},  # no name
-            {"name": "Valid", "entity_type": "person", "tags": [], "access": "internal"},
-        ])
+        response_json = json.dumps(
+            [
+                {"entity_type": "person", "tags": [], "access": "internal"},  # no name
+                {
+                    "name": "Valid",
+                    "entity_type": "person",
+                    "tags": [],
+                    "access": "internal",
+                },
+            ]
+        )
         client = _mock_client(response_json)
 
         result = tier2_classify(raw, [], ["person"], [], ["internal"], client)
@@ -383,7 +428,8 @@ class TestTier3Create:
         assert "data only" in user_msg
 
     def test_create_includes_entity_template(
-        self, wiki_dir: Path,
+        self,
+        wiki_dir: Path,
     ) -> None:
         """Issue #17: _entity-template.md should be fed to Tier 3 create."""
         schema_dir = wiki_dir / "_schema"
@@ -404,7 +450,10 @@ class TestTier3Create:
         client = _mock_client("# Test\n\nContent.")
 
         tier3_create(
-            action, "ref.md", client, wiki_root=wiki_dir,
+            action,
+            "ref.md",
+            client,
+            wiki_root=wiki_dir,
         )
         call_args = client.messages.create.call_args
         user_msg = call_args.kwargs["messages"][0]["content"]
@@ -637,7 +686,9 @@ class TestTier3Write:
         ]
 
         create_response = MagicMock()
-        create_response.content = [MagicMock(text="# Alice Zhang\n\nProduct lead at Acme.")]
+        create_response.content = [
+            MagicMock(text="# Alice Zhang\n\nProduct lead at Acme.")
+        ]
         merge_response = MagicMock()
         merge_response.content = [
             MagicMock(
@@ -649,7 +700,11 @@ class TestTier3Write:
         client.messages.create.side_effect = [create_response, merge_response]
 
         new_entities, updated_uids, escalations = tier3_write(
-            raw, actions, index, wiki_dir, client,
+            raw,
+            actions,
+            index,
+            wiki_dir,
+            client,
         )
 
         assert len(new_entities) == 1
@@ -731,7 +786,9 @@ class TestTier3Write:
             tier3_write(raw, actions, index, wiki_dir, client)
 
         acme_after = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
-        assert acme_after == acme_before, "update was written despite subsequent failure"
+        assert (
+            acme_after == acme_before
+        ), "update was written despite subsequent failure"
 
     def test_uid_lookup_instead_of_glob(self, wiki_dir: Path) -> None:
         """tier3_write uses EntityIndex UID lookup, not filesystem glob."""
@@ -752,12 +809,118 @@ class TestTier3Write:
 
         client = _mock_client("# Acme Corp\n\nUpdated content.")
         new_entities, updated_uids, escalations = tier3_write(
-            raw, actions, index, wiki_dir, client,
+            raw,
+            actions,
+            index,
+            wiki_dir,
+            client,
         )
 
         assert updated_uids == ["a1b2c3d4"]
         acme_content = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
         assert "Updated content" in acme_content
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 — Provenance (issue #95)
+# ---------------------------------------------------------------------------
+
+
+class TestTier3Provenance:
+    """Issue #95: tier3 write paths must emit source / field_sources."""
+
+    def test_create_stamps_source_on_entity(self) -> None:
+        action = EntityAction(
+            kind="create",
+            name="Bob Test",
+            entity_type="person",
+            tags=[],
+            access="internal",
+            existing_uid=None,
+            observations="A new person.",
+        )
+        client = _mock_client("# Bob Test\n\nbody.")
+        entity = tier3_create(action, "sessions/raw.md", client)
+        assert entity.source is not None
+        assert isinstance(entity.source, str)
+        assert entity.source.startswith("claude:tier3-create:")
+
+    def test_create_render_emits_source_in_frontmatter(self) -> None:
+        action = EntityAction(
+            kind="create",
+            name="Carol",
+            entity_type="person",
+            tags=[],
+            access="internal",
+            existing_uid=None,
+            observations="text",
+        )
+        client = _mock_client("# Carol\n\nbody.")
+        entity = tier3_create(action, "sessions/raw.md", client)
+        rendered = entity.render()
+        assert "source: claude:tier3-create:" in rendered
+
+    def test_merge_sets_field_sources_for_overwritten_fields(
+        self,
+        wiki_dir: Path,
+    ) -> None:
+        """tier3_write merge attributes overwritten fields to the
+        merge source and preserves prior field_sources entries."""
+        import textwrap as _tw
+
+        (wiki_dir / "a1b2c3d4-acme-corp.md").write_text(
+            _tw.dedent(
+                """\
+            ---
+            uid: a1b2c3d4
+            type: company
+            name: Acme Corp
+            access: confidential
+            tags:
+              - client
+            created: '2024-03-15'
+            updated: '2024-04-06'
+            source: api:apollo
+            field_sources:
+              name: api:apollo
+              tags: manual:tristan
+            ---
+
+            # Acme Corp
+
+            Fintech startup.
+        """
+            )
+        )
+        raw = _make_raw("New info about Acme.")
+        index = EntityIndex(wiki_dir)
+
+        actions = [
+            EntityAction(
+                kind="update",
+                name="Acme Corp",
+                entity_type="company",
+                tags=[],
+                access="",
+                existing_uid="a1b2c3d4",
+                observations="Acme expanded ops.",
+            ),
+        ]
+        client = _mock_client("# Acme Corp\n\nFintech startup. Expanded ops.")
+        tier3_write(raw, actions, index, wiki_dir, client)
+
+        from athenaeum.models import parse_frontmatter
+
+        text = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
+        meta, _body = parse_frontmatter(text)
+        fs = meta.get("field_sources")
+        assert isinstance(fs, dict)
+        # Overwritten fields attributed to merge source
+        assert fs["body"].startswith("claude:tier3-merge:")
+        assert fs["updated"].startswith("claude:tier3-merge:")
+        # Non-overwritten fields preserved
+        assert fs["name"] == "api:apollo"
+        assert fs["tags"] == "manual:tristan"
 
 
 # ---------------------------------------------------------------------------
@@ -838,14 +1001,12 @@ class TestTier4:
         lines = content.splitlines()
 
         # Find the header line and assert the next non-blank line is a `- [ ]`.
-        header_idx = next(
-            i for i, line in enumerate(lines) if line.startswith("## [")
-        )
+        header_idx = next(i for i, line in enumerate(lines) if line.startswith("## ["))
         # Checkbox may follow directly with no blank line between (per issue
         # schema: `directly under the header`).
-        assert lines[header_idx + 1].startswith("- [ ]"), (
-            f"expected checkbox line directly after header; got {lines[header_idx + 1]!r}"
-        )
+        assert lines[header_idx + 1].startswith(
+            "- [ ]"
+        ), f"expected checkbox line directly after header; got {lines[header_idx + 1]!r}"
         # Question text should be present on the checkbox line (derived
         # from the description).
         assert "Conflicting info about Acme" in lines[header_idx + 1]
