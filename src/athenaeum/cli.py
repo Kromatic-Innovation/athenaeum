@@ -12,16 +12,39 @@ def main(argv: list[str] | None = None) -> int:
         prog="athenaeum",
         description="Knowledge management pipeline — append-only intake, tiered compilation",
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {_get_version()}"
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     # init command
-    init_parser = subparsers.add_parser("init", help="Initialize a new knowledge directory")
+    init_parser = subparsers.add_parser(
+        "init", help="Initialize a new knowledge directory"
+    )
     init_parser.add_argument(
         "--path",
         type=Path,
         default=Path("~/knowledge"),
         help="Target directory (default: ~/knowledge)",
+    )
+    init_parser.add_argument(
+        "--with-templates",
+        action="store_true",
+        help="Also copy bundled entity-author templates "
+        "(person/company/project/concept/source) into <path>/templates/.",
+    )
+    init_parser.add_argument(
+        "--templates-dest",
+        type=Path,
+        default=None,
+        help="Override the templates destination directory "
+        "(default: <path>/templates).",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing template files at the destination "
+        "(only applies with --with-templates).",
     )
 
     # status command
@@ -45,44 +68,59 @@ def main(argv: list[str] | None = None) -> int:
     # run command — execute the librarian pipeline
     run_parser = subparsers.add_parser("run", help="Run the librarian pipeline")
     run_parser.add_argument(
-        "--raw-root", type=Path, default=None,
+        "--raw-root",
+        type=Path,
+        default=None,
         help="Raw intake directory (default: ~/knowledge/raw)",
     )
     run_parser.add_argument(
-        "--wiki-root", type=Path, default=None,
+        "--wiki-root",
+        type=Path,
+        default=None,
         help="Wiki output directory (default: ~/knowledge/wiki)",
     )
     run_parser.add_argument(
-        "--knowledge-root", type=Path, default=None,
+        "--knowledge-root",
+        type=Path,
+        default=None,
         help="Knowledge git repo root (default: ~/knowledge)",
     )
     run_parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Run pipeline without writing files or committing",
     )
     run_parser.add_argument(
-        "--max-files", type=int, default=50,
+        "--max-files",
+        type=int,
+        default=50,
         help="Stop after processing this many raw files (default: 50)",
     )
     run_parser.add_argument(
-        "--max-api-calls", type=int, default=200,
+        "--max-api-calls",
+        type=int,
+        default=200,
         help="Maximum estimated API calls per run (default: 200)",
     )
     run_parser.add_argument(
-        "--verbose", "-v", action="store_true",
+        "--verbose",
+        "-v",
+        action="store_true",
         help="Enable debug logging",
     )
     run_parser.add_argument(
-        "--cluster-only", action="store_true",
+        "--cluster-only",
+        action="store_true",
         help="Only run C2 auto-memory discovery + clustering — skip the "
-             "entity tier pipeline. Writes the cluster JSONL report and "
-             "exits. Useful for validating the cluster output before C3.",
+        "entity tier pipeline. Writes the cluster JSONL report and "
+        "exits. Useful for validating the cluster output before C3.",
     )
     run_parser.add_argument(
-        "--merge-only", action="store_true",
+        "--merge-only",
+        action="store_true",
         help="Only run C3 cluster merge — read the canonical cluster "
-             "JSONL from the last C2 run and emit wiki/auto-*.md entries. "
-             "Skips discovery, clustering, and the entity tier pipeline.",
+        "JSONL from the last C2 run and emit wiki/auto-*.md entries. "
+        "Skips discovery, clustering, and the entity tier pipeline.",
     )
 
     # test-mcp command — smoke-test the MCP memory setup without a session
@@ -91,7 +129,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Smoke-test MCP remember/recall against a synthetic knowledge dir",
     )
     test_mcp_parser.add_argument(
-        "--keep", action="store_true",
+        "--keep",
+        action="store_true",
         help="Don't delete the temp knowledge dir on exit (for debugging)",
     )
 
@@ -99,52 +138,69 @@ def main(argv: list[str] | None = None) -> int:
     people_parser = subparsers.add_parser(
         "people",
         help="List type:person wikis filtered by frontmatter (company / tag / tier / score). "
-             "No LLM, no embeddings — deterministic over the wiki tree.",
+        "No LLM, no embeddings — deterministic over the wiki tree.",
     )
     people_parser.add_argument(
-        "--path", type=Path, default=Path("~/knowledge"),
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
         help="Knowledge directory (default: ~/knowledge)",
     )
     people_parser.add_argument(
-        "--company", action="append", default=[],
+        "--company",
+        action="append",
+        default=[],
         help=(
             "Match current_company OR linkedin_company_at_connect "
             "(case-insensitive substring). Repeat to AND."
         ),
     )
     people_parser.add_argument(
-        "--tag", action="append", default=[],
+        "--tag",
+        action="append",
+        default=[],
         help="Require this exact tag (repeat to AND).",
     )
     people_parser.add_argument(
-        "--tier", default="",
+        "--tier",
+        default="",
         help="Shorthand for --tag tier:<value> (warm-a / warm-b / warm-c / extended / active).",
     )
     people_parser.add_argument(
-        "--title-regex", action="append", default=[],
+        "--title-regex",
+        action="append",
+        default=[],
         help=(
             "Match current_title OR linkedin_position_at_connect against this "
             "regex (case-insensitive). Repeat to AND multiple patterns."
         ),
     )
     people_parser.add_argument(
-        "--company-regex", action="append", default=[],
+        "--company-regex",
+        action="append",
+        default=[],
         help=(
             "Match current_company OR linkedin_company_at_connect against this "
             "regex (case-insensitive). Repeat to AND multiple patterns."
         ),
     )
     people_parser.add_argument(
-        "--top-touch", type=int, default=0,
+        "--top-touch",
+        type=int,
+        default=0,
         help="Sort by recent-touch signal (meeting+sent counts) and return top N. "
-             "Default sort is by warm_score desc.",
+        "Default sort is by warm_score desc.",
     )
     people_parser.add_argument(
-        "--limit", type=int, default=50,
+        "--limit",
+        type=int,
+        default=50,
         help="Max rows to print (default: 50; 0 = unlimited)",
     )
     people_parser.add_argument(
-        "--format", choices=["table", "tsv"], default="table",
+        "--format",
+        choices=["table", "tsv"],
+        default="table",
         help="Output shape (default: table).",
     )
 
@@ -152,16 +208,19 @@ def main(argv: list[str] | None = None) -> int:
     query_topics_parser = subparsers.add_parser(
         "query-topics",
         help="Extract substantive search topics from a prompt (Haiku). "
-             "Used by the UserPromptSubmit hook to rewrite queries before "
-             "FTS5/vector search. Prints one topic per line to stdout; "
-             "empty output means fall back to the caller's built-in extractor.",
+        "Used by the UserPromptSubmit hook to rewrite queries before "
+        "FTS5/vector search. Prints one topic per line to stdout; "
+        "empty output means fall back to the caller's built-in extractor.",
     )
     query_topics_parser.add_argument(
-        "prompt", type=str,
+        "prompt",
+        type=str,
         help="The user's raw message.",
     )
     query_topics_parser.add_argument(
-        "--timeout", type=float, default=3.0,
+        "--timeout",
+        type=float,
+        default=3.0,
         help="Seconds to wait for the LLM before giving up (default: 3.0)",
     )
 
@@ -169,8 +228,8 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser(
         "stopwords",
         help="Print the stopword list (one word per line). "
-             "Used by the example UserPromptSubmit hook's regex fallback "
-             "to stay in sync with the FTS5 query filter.",
+        "Used by the example UserPromptSubmit hook's regex fallback "
+        "to stay in sync with the FTS5 query filter.",
     )
 
     # ingest-answers command — convert resolved `[x]` blocks in
@@ -181,7 +240,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Ingest answered pending questions from _pending_questions.md",
     )
     ingest_answers_parser.add_argument(
-        "--path", type=Path, default=Path("~/knowledge"),
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
         help="Knowledge directory (default: ~/knowledge)",
     )
 
@@ -194,22 +255,32 @@ def main(argv: list[str] | None = None) -> int:
         help="Search the wiki from the shell (one tab-separated hit per line)",
     )
     recall_parser.add_argument(
-        "query", type=str, help="Search query string",
+        "query",
+        type=str,
+        help="Search query string",
     )
     recall_parser.add_argument(
-        "--top-k", type=int, default=5,
+        "--top-k",
+        type=int,
+        default=5,
         help="Maximum results to return (default: 5)",
     )
     recall_parser.add_argument(
-        "--path", type=Path, default=Path("~/knowledge"),
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
         help="Knowledge directory (default: ~/knowledge)",
     )
     recall_parser.add_argument(
-        "--cache-dir", type=Path, default=None,
+        "--cache-dir",
+        type=Path,
+        default=None,
         help="Cache directory (default: ~/.cache/athenaeum)",
     )
     recall_parser.add_argument(
-        "--backend", choices=["keyword", "fts5", "vector"], default=None,
+        "--backend",
+        choices=["keyword", "fts5", "vector"],
+        default=None,
         help="Override configured backend (default: read from athenaeum.yaml)",
     )
 
@@ -219,15 +290,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Rebuild the search index (FTS5 or vector, per config)",
     )
     rebuild_parser.add_argument(
-        "--path", type=Path, default=Path("~/knowledge"),
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
         help="Knowledge directory (default: ~/knowledge)",
     )
     rebuild_parser.add_argument(
-        "--cache-dir", type=Path, default=None,
+        "--cache-dir",
+        type=Path,
+        default=None,
         help="Cache directory (default: ~/.cache/athenaeum)",
     )
     rebuild_parser.add_argument(
-        "--backend", choices=["fts5", "vector"], default=None,
+        "--backend",
+        choices=["fts5", "vector"],
+        default=None,
         help="Override configured backend (default: read from athenaeum.yaml)",
     )
 
@@ -274,10 +351,19 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    from athenaeum.init import init_knowledge_dir
+    from athenaeum.init import copy_templates, init_knowledge_dir
 
     target = init_knowledge_dir(args.path)
     print(f"Initialized knowledge directory at {target}")
+
+    if getattr(args, "with_templates", False):
+        dest = args.templates_dest if args.templates_dest else target / "templates"
+        dest = dest.expanduser().resolve()
+        written, skipped = copy_templates(dest, force=args.force)
+        for fname in written:
+            print(f"  wrote   {dest / fname}")
+        for fname in skipped:
+            print(f"  skipped {dest / fname} (exists; pass --force to overwrite)")
     return 0
 
 
@@ -452,7 +538,9 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
     if backend == "vector":
         try:
             count = build_vector_index(
-                wiki_root, cache_dir, extra_roots=extra_roots,
+                wiki_root,
+                cache_dir,
+                extra_roots=extra_roots,
             )
         except ImportError as exc:
             print(f"Vector backend unavailable: {exc}", file=sys.stderr)
@@ -466,7 +554,9 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
 
     if backend == "fts5":
         count = build_fts5_index(
-            wiki_root, cache_dir, extra_roots=extra_roots,
+            wiki_root,
+            cache_dir,
+            extra_roots=extra_roots,
         )
         print(
             f"FTS5 index rebuilt: {count} pages "
@@ -513,7 +603,10 @@ def _cmd_recall(args: argparse.Namespace) -> int:
 
     try:
         hits = backend.query(
-            args.query, cache_dir, n=args.top_k, wiki_root=wiki_root,
+            args.query,
+            cache_dir,
+            n=args.top_k,
+            wiki_root=wiki_root,
         )
     except NotImplementedError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -560,8 +653,12 @@ def _cmd_people(args: argparse.Namespace) -> int:
     if args.tier:
         required_tags.append(f"tier:{args.tier}")
 
-    title_regexes = [re.compile(p, re.IGNORECASE) for p in (args.title_regex or []) if p]
-    company_regexes = [re.compile(p, re.IGNORECASE) for p in (args.company_regex or []) if p]
+    title_regexes = [
+        re.compile(p, re.IGNORECASE) for p in (args.title_regex or []) if p
+    ]
+    company_regexes = [
+        re.compile(p, re.IGNORECASE) for p in (args.company_regex or []) if p
+    ]
 
     rows: list[dict] = []
     for path in sorted(wiki_root.glob("*.md")):
@@ -616,27 +713,25 @@ def _cmd_people(args: argparse.Namespace) -> int:
             sent_count = 0
 
         title = (
-            meta.get("current_title")
-            or meta.get("linkedin_position_at_connect")
-            or ""
+            meta.get("current_title") or meta.get("linkedin_position_at_connect") or ""
         )
         company = (
-            meta.get("current_company")
-            or meta.get("linkedin_company_at_connect")
-            or ""
+            meta.get("current_company") or meta.get("linkedin_company_at_connect") or ""
         )
-        rows.append({
-            "name": str(meta.get("name") or ""),
-            "current_title": str(title),
-            "current_company": str(company),
-            "warm_score": warm_score,
-            "meeting_count_24mo": meeting_count,
-            "sent_count_24mo": sent_count,
-            "touch_score": meeting_count * 3 + sent_count,
-            "last_touch": str(meta.get("last_touch") or ""),
-            "uid": str(meta.get("uid") or ""),
-            "path": path.name,
-        })
+        rows.append(
+            {
+                "name": str(meta.get("name") or ""),
+                "current_title": str(title),
+                "current_company": str(company),
+                "warm_score": warm_score,
+                "meeting_count_24mo": meeting_count,
+                "sent_count_24mo": sent_count,
+                "touch_score": meeting_count * 3 + sent_count,
+                "last_touch": str(meta.get("last_touch") or ""),
+                "uid": str(meta.get("uid") or ""),
+                "path": path.name,
+            }
+        )
 
     if args.top_touch:
         rows.sort(key=lambda r: -r["touch_score"])
@@ -648,11 +743,22 @@ def _cmd_people(args: argparse.Namespace) -> int:
 
     if args.format == "tsv":
         for r in rows:
-            print("\t".join(str(r[k]) for k in (
-                "name", "current_title", "current_company",
-                "warm_score", "meeting_count_24mo", "sent_count_24mo",
-                "last_touch", "uid", "path",
-            )))
+            print(
+                "\t".join(
+                    str(r[k])
+                    for k in (
+                        "name",
+                        "current_title",
+                        "current_company",
+                        "warm_score",
+                        "meeting_count_24mo",
+                        "sent_count_24mo",
+                        "last_touch",
+                        "uid",
+                        "path",
+                    )
+                )
+            )
         return 0
 
     if not rows:
@@ -766,7 +872,8 @@ def _cmd_test_mcp(args: argparse.Namespace) -> int:
             _record("create_server (FastMCP)", ok, "factory returned unusable object")
         except ImportError as exc:
             _record(
-                "create_server (FastMCP)", False,
+                "create_server (FastMCP)",
+                False,
                 f"FastMCP not installed: {exc}. Install with: pip install athenaeum[mcp]",
             )
     finally:

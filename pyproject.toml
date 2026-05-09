@@ -73,6 +73,7 @@ packages = ["src/athenaeum"]
 include = [
     "src/athenaeum/py.typed",
     "src/athenaeum/schema/**/*.md",
+    "src/athenaeum/templates/**/*.md",
 ]
 
 [tool.ruff]
