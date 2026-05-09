@@ -331,6 +331,62 @@ def _max_date(a: Any, b: Any) -> Any:
     return a if str(a) >= str(b) else b
 
 
+def _value_to_source_map(
+    side_fs_entry: Any,
+    side_field_value: Any,
+) -> dict[str, Any]:
+    """Project one side's ``field_sources.<k>`` entry to ``{repr(value): source}``.
+
+    - Per-value list shape → walk records, key by ``repr(record["value"])``.
+    - Legacy str/dict shape → applies to every value in that side's
+      underlying field list (``side_field_value`` if list, else single
+      value); each gets the same source.
+    - Anything else → empty map.
+    """
+    out: dict[str, Any] = {}
+    if isinstance(side_fs_entry, list):
+        for entry in side_fs_entry:
+            if isinstance(entry, dict) and "value" in entry and "source" in entry:
+                out[repr(entry["value"])] = entry["source"]
+        return out
+    if side_fs_entry is None:
+        return out
+    # Legacy: one source for the whole field. Broadcast across the side's
+    # actual list values (if any) so per-value union can absorb them.
+    if isinstance(side_field_value, list):
+        for v in side_field_value:
+            out[repr(v)] = side_fs_entry
+    elif side_field_value is not None:
+        out[repr(side_field_value)] = side_fs_entry
+    return out
+
+
+def _build_per_value_field_sources(
+    merged_list: list,
+    canonical_fs_entry: Any,
+    canonical_field_value: Any,
+    absorbed_fs_entry: Any,
+    absorbed_field_value: Any,
+) -> list[dict[str, Any]]:
+    """Build the per-value list shape for one list-typed field.
+
+    Canonical-wins-per-value: for each value in the merged list (post-
+    union), use canonical's source if known, else absorbed's. Values
+    with no attribution on either side are omitted (no dangling stale
+    entries — the field's value is still present, just unattributed).
+    """
+    canon_map = _value_to_source_map(canonical_fs_entry, canonical_field_value)
+    absorb_map = _value_to_source_map(absorbed_fs_entry, absorbed_field_value)
+    out: list[dict[str, Any]] = []
+    for v in merged_list:
+        key = repr(v)
+        if key in canon_map:
+            out.append({"value": v, "source": canon_map[key]})
+        elif key in absorb_map:
+            out.append({"value": v, "source": absorb_map[key]})
+    return out
+
+
 def _merge_field_sources(
     canonical_meta: dict[str, Any],
     absorbed_meta: dict[str, Any],
@@ -338,13 +394,15 @@ def _merge_field_sources(
 ) -> dict[str, Any] | None:
     """Build the merged ``field_sources`` map.
 
-    Rules (per #90):
+    Rules (per #90 + #102):
 
-    - Canonical's ``field_sources.<key>`` always wins.
-    - For keys that exist on absorbed's ``field_sources`` but not
-      canonical's, the absorbed entry is carried forward — this is how
-      per-value attribution survives for list fields whose values came
-      from the absorbed wiki only.
+    - For SCALAR fields: canonical's ``field_sources.<key>`` wins;
+      absorbed-only entries carry forward.
+    - For LIST fields: emit the per-value list-of-records shape (issue
+      #102 design lock §2). Canonical wins per value; absorbed-only
+      values bring their own attribution. Legacy single-source entries
+      on either side broadcast across that side's underlying values
+      before merging.
     - Keys whose merged value is absent from the merged frontmatter are
       pruned (don't keep dangling attributions).
     """
@@ -357,12 +415,28 @@ def _merge_field_sources(
     if not cfs and not afs:
         return None
     merged: dict[str, Any] = {}
-    for k, v in afs.items():
-        if k in merged_meta:
-            merged[k] = v
-    for k, v in cfs.items():
-        if k in merged_meta:
-            merged[k] = v  # canonical overrides
+    all_keys: set[str] = set(cfs) | set(afs)
+    for k in all_keys:
+        if k not in merged_meta:
+            continue  # prune dangling
+        merged_val = merged_meta[k]
+        if isinstance(merged_val, list):
+            # Per-value shape for list fields (#102).
+            per_value = _build_per_value_field_sources(
+                merged_val,
+                cfs.get(k),
+                canonical_meta.get(k),
+                afs.get(k),
+                absorbed_meta.get(k),
+            )
+            if per_value:
+                merged[k] = per_value
+        else:
+            # Scalar field: canonical wins; absorbed-only carries forward.
+            if k in cfs:
+                merged[k] = cfs[k]
+            elif k in afs:
+                merged[k] = afs[k]
     return merged or None
 
 

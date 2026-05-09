@@ -164,10 +164,77 @@ def validate_source_value(value: Any) -> Any:
     return value
 
 
+def _is_per_value_list(value: Any) -> bool:
+    """Return True if ``value`` is the per-value list-of-records shape.
+
+    Per-value shape (issue #102, design lock §2.1):
+
+        [{"value": <any>, "source": <str|dict>}, ...]
+
+    A non-list, or a list that doesn't look like records of that shape,
+    is legacy. Empty list counts as per-value (vacuously valid — and
+    distinguishes intent from an absent value).
+    """
+    if not isinstance(value, list):
+        return False
+    if not value:
+        return True
+    for entry in value:
+        if not isinstance(entry, dict):
+            return False
+        if "value" not in entry or "source" not in entry:
+            return False
+    return True
+
+
+def parse_per_value_field_sources(value: Any) -> list[dict[str, Any]]:
+    """Parse a per-value ``field_sources.<list_field>`` entry.
+
+    Accepts a list of ``{"value": <any>, "source": <str|dict>}`` records.
+    Each record's ``source`` must validate via :func:`parse_source`;
+    ``value`` is type-unconstrained (matches the underlying list field's
+    element type). Extra keys on a record are rejected.
+
+    Returns the original list unchanged. Raises :class:`ValueError` on
+    malformed input.
+
+    Co-indexing alignment between this list and the underlying field's
+    list is NOT enforced here (per design-lock §2.4 — stale entries are
+    pruned at write time, not at validation).
+    """
+    if not isinstance(value, list):
+        raise ValueError(
+            f"per-value field_sources must be a list, got {type(value).__name__}"
+        )
+    for i, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"per-value field_sources[{i}] must be a dict, got {type(entry).__name__}"
+            )
+        if "value" not in entry:
+            raise ValueError(f"per-value field_sources[{i}] missing 'value' key")
+        if "source" not in entry:
+            raise ValueError(f"per-value field_sources[{i}] missing 'source' key")
+        extra = set(entry) - {"value", "source"}
+        if extra:
+            raise ValueError(
+                f"per-value field_sources[{i}] has unknown keys: {sorted(extra)!r}"
+            )
+        parse_source(entry["source"])  # raises on malformed
+    return value
+
+
 def validate_field_sources(value: Any) -> Any:
     """Validate a frontmatter ``field_sources`` value.
 
-    Must be a dict with string keys; each value validates as a source.
+    Must be a dict with string keys. Each value is one of:
+
+    - ``str`` or ``dict`` → legacy single-source-for-the-whole-field,
+      validated via :func:`parse_source`.
+    - ``list`` of ``{"value", "source"}`` records → per-value
+      attribution (issue #102), validated via
+      :func:`parse_per_value_field_sources`.
+
     Returns the original shape unchanged on success.
     """
     if value is None:
@@ -177,13 +244,17 @@ def validate_field_sources(value: Any) -> Any:
     for k, v in value.items():
         if not isinstance(k, str) or not k:
             raise ValueError(f"field_sources keys must be non-empty strings, got {k!r}")
-        parse_source(v)  # raises on malformed
+        if isinstance(v, list):
+            parse_per_value_field_sources(v)
+        else:
+            parse_source(v)  # raises on malformed
     return value
 
 
 __all__ = [
     "SourceRef",
     "parse_source",
+    "parse_per_value_field_sources",
     "validate_source_value",
     "validate_field_sources",
 ]

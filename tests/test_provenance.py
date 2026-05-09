@@ -6,6 +6,7 @@ import pytest
 
 from athenaeum.provenance import (
     SourceRef,
+    parse_per_value_field_sources,
     parse_source,
     validate_field_sources,
     validate_source_value,
@@ -162,6 +163,87 @@ class TestValidateFieldSources:
     def test_empty_key_raises(self) -> None:
         with pytest.raises(ValueError):
             validate_field_sources({"": "api:apollo"})
+
+
+class TestPerValueFieldSources:
+    """Per-value list-of-records shape for list fields (issue #102)."""
+
+    def test_parse_basic_per_value_list(self) -> None:
+        v = [
+            {"value": "a@x.com", "source": "api:apollo:2026-04-29"},
+            {"value": "b@y.com", "source": "linkedin:tristankromer"},
+        ]
+        assert parse_per_value_field_sources(v) is v
+
+    def test_parse_per_value_with_dict_source(self) -> None:
+        v = [
+            {
+                "value": "a@x.com",
+                "source": {"type": "api", "ref": "apollo", "confidence": 0.9},
+            },
+        ]
+        assert parse_per_value_field_sources(v) is v
+
+    def test_parse_per_value_dict_value(self) -> None:
+        # value can be a dict (employment_history shape, §2.2)
+        v = [
+            {
+                "value": {"company": "Kromatic", "title": "Founder"},
+                "source": "api:apollo:2026-04-29",
+            },
+        ]
+        assert parse_per_value_field_sources(v) is v
+
+    def test_empty_list_accepted(self) -> None:
+        assert parse_per_value_field_sources([]) == []
+
+    def test_missing_value_key_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_per_value_field_sources([{"source": "api:apollo"}])
+
+    def test_missing_source_key_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_per_value_field_sources([{"value": "a@x.com"}])
+
+    def test_extra_keys_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            parse_per_value_field_sources(
+                [{"value": "a@x.com", "source": "api:apollo", "ts": "2026"}]
+            )
+
+    def test_bad_source_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_per_value_field_sources(
+                [{"value": "a@x.com", "source": "Has-Uppercase"}]
+            )
+
+    def test_non_list_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_per_value_field_sources({"value": "a@x.com", "source": "api:apollo"})
+
+    def test_validate_field_sources_accepts_per_value(self) -> None:
+        v = {
+            "emails": [
+                {"value": "a@x.com", "source": "api:apollo:2026"},
+                {"value": "b@y.com", "source": "linkedin:foo"},
+            ]
+        }
+        assert validate_field_sources(v) is v
+
+    def test_validate_field_sources_mixed_legacy_and_per_value(self) -> None:
+        # Same map can carry legacy scalar (current_title) and per-value
+        # list (emails) entries — readers must accept both.
+        v = {
+            "current_title": "linkedin:foo",
+            "emails": [
+                {"value": "a@x.com", "source": "api:apollo:2026"},
+            ],
+        }
+        assert validate_field_sources(v) is v
+
+    def test_validate_field_sources_per_value_invalid_record(self) -> None:
+        with pytest.raises(ValueError):
+            validate_field_sources({"emails": [{"value": "a@x.com"}]})  # missing source
 
 
 class TestSourceRefToScalar:

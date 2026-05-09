@@ -160,7 +160,10 @@ class WikiEntity:
     # without provenance still round-trip cleanly. ``source`` is the
     # wiki-level default; ``field_sources`` overrides per field.
     source: str | dict | None = None
-    field_sources: dict[str, str | dict] | None = None
+    # ``field_sources`` per-field value is ``str``/``dict`` (legacy)
+    # OR ``list[dict]`` of ``{"value", "source"}`` records (per-value
+    # attribution for list fields, issue #102).
+    field_sources: dict[str, str | dict | list] | None = None
 
     @property
     def filename(self) -> str:
