@@ -619,10 +619,9 @@ class TestDedupePerformMerge:
         # Apollo namespace + current_title: canonical wins (both truthy).
         assert meta["apollo_id"] == "apollo-123"
         assert meta["current_title"] == "VP"
-        # NOTE: twitter_url is NOT in dedupe.py's coalesce sets (_LINKEDIN_KEYS
-        # covers linkedin_* only). The absorbed-only twitter_url is therefore
-        # DROPPED on merge. Documented bug — see PR body for the filed issue.
-        assert "twitter_url" not in meta
+        # twitter_url is now in _SOCIAL_KEYS coalesce set (#106) — absorbed-only
+        # value carries forward to the canonical merged wiki.
+        assert meta["twitter_url"] == "https://twitter.com/alice"
 
     def test_perform_merge_max_numeric_higher_wins(self, tmp_path: Path) -> None:
         cpath, apath = self._setup_pair(tmp_path)
