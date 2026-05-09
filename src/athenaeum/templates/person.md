@@ -1,4 +1,5 @@
 ---
+# Scaffold template — copied by `athenaeum init --with-templates` for users to edit (not an LLM-tier schema).
 uid: person-REPLACE-ME
 type: person
 name: REPLACE ME
