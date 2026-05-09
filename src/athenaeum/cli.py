@@ -44,8 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     init_parser.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite existing template files at the destination "
-        "(only applies with --with-templates).",
+        help="Overwrite existing template files at the destination; "
+        "no backup is created (only applies with --with-templates).",
     )
 
     # status command
@@ -505,6 +505,12 @@ def _cmd_init(args: argparse.Namespace) -> int:
             print(f"  wrote   {dest / fname}")
         for fname in skipped:
             print(f"  skipped {dest / fname} (exists; pass --force to overwrite)")
+    elif args.templates_dest is not None:
+        print(
+            "warning: --templates-dest is ignored without --with-templates; "
+            "no templates were copied.",
+            file=sys.stderr,
+        )
     return 0
 
 
