@@ -16,6 +16,19 @@ _SCHEMA_FILES = [
     "types.md",
 ]
 
+# Entity-author templates shipped with the wheel. Copied into
+# `<knowledge_root>/templates/` only when the user passes
+# `athenaeum init --with-templates`. These are user-facing scaffolds
+# (one per common entity type) — distinct from the LLM-tier `schema/`
+# files above, which describe the wiki contract for compilation.
+_TEMPLATE_FILES = [
+    "person.md",
+    "company.md",
+    "project.md",
+    "concept.md",
+    "source.md",
+]
+
 # Standard subdirectories created during init
 _SUBDIRS = [
     "raw",
@@ -64,6 +77,7 @@ def init_knowledge_dir(path: Path) -> Path:
 
     # 4. Create default config (skip if already present)
     from athenaeum.config import write_default_config
+
     write_default_config(path)
 
     # 5. Initialize git repo and create initial commit
@@ -79,7 +93,11 @@ def init_knowledge_dir(path: Path) -> Path:
                 capture_output=True,
             )
         except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            stderr = (
+                exc.stderr.decode()
+                if isinstance(exc.stderr, bytes)
+                else (exc.stderr or "")
+            )
             if "user.name" in stderr or "user.email" in stderr or exc.returncode == 128:
                 raise SystemExit(
                     "Git identity not configured. Please run:\n"
@@ -90,3 +108,26 @@ def init_knowledge_dir(path: Path) -> Path:
             raise
 
     return path
+
+
+def copy_templates(dest: Path, *, force: bool = False) -> tuple[list[str], list[str]]:
+    """Copy bundled entity templates into *dest*.
+
+    Returns ``(written, skipped)`` lists of filenames. Without ``force``,
+    pre-existing destination files are skipped (not overwritten). With
+    ``force``, existing files are overwritten.
+    """
+    dest = dest.expanduser().resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    template_pkg = importlib.resources.files("athenaeum.templates")
+    written: list[str] = []
+    skipped: list[str] = []
+    for fname in _TEMPLATE_FILES:
+        target = dest / fname
+        if target.exists() and not force:
+            skipped.append(fname)
+            continue
+        source = template_pkg / fname
+        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        written.append(fname)
+    return written, skipped
