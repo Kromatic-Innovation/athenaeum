@@ -19,6 +19,7 @@ from athenaeum.dedupe import (
     merge_duplicate_persons,
     pairs_from_yaml,
     pairs_to_yaml,
+    rewrite_references,
 )
 from athenaeum.models import parse_frontmatter
 
@@ -737,3 +738,145 @@ class TestDryRun:
         assert report.merged == 1  # counted as would-merge
         assert cpath.read_text() == before_c
         assert apath.read_text() == before_a
+
+
+class TestRewriteReferences:
+    """Cross-uid reference rewrites on persons --apply (#103).
+
+    Restores parity with the cwc-side merge_duplicate_persons.py
+    rewrite_references helper.
+    """
+
+    def _scenario(self, wiki_root: Path) -> tuple[Path, Path, Path, Path]:
+        canonical = _write_person(
+            wiki_root,
+            uid="aaaa1111",
+            name="Alice",
+            apollo_id="apo-shared",
+        )
+        absorbed = _write_person(
+            wiki_root,
+            uid="bbbb2222",
+            name="Alice",
+            apollo_id="apo-shared",
+        )
+        # Sibling C — body link to absorbed uid.
+        sibling_c = wiki_root / "cccc3333-charlie.md"
+        sibling_c.write_text(
+            "---\nuid: cccc3333\ntype: person\nname: Charlie\n---\n\n"
+            "Charlie met [[bbbb2222]] last week.\n",
+            encoding="utf-8",
+        )
+        # Sibling D — frontmatter list mention.
+        sibling_d = wiki_root / "dddd4444-dana.md"
+        sibling_d.write_text(
+            "---\nuid: dddd4444\ntype: person\nname: Dana\n"
+            "mentioned_persons:\n  - bbbb2222\n  - xxxx9999\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        return canonical, absorbed, sibling_c, sibling_d
+
+    def test_apply_rewrites_body_and_frontmatter(self, wiki_root: Path) -> None:
+        canonical, absorbed, sibling_c, sibling_d = self._scenario(wiki_root)
+        pair = DuplicatePair(
+            canonical_uid="aaaa1111",
+            absorbed_uid="bbbb2222",
+            match_signal="apollo_id",
+            canonical_path=str(canonical),
+            absorbed_path=str(absorbed),
+        )
+        report = merge_duplicate_persons([pair], apply=True, wiki_root=wiki_root)
+        assert report.merged == 1
+        assert report.references_rewritten == 2
+        assert "[[aaaa1111]]" in sibling_c.read_text()
+        assert "[[bbbb2222]]" not in sibling_c.read_text()
+        d_meta, _ = parse_frontmatter(sibling_d.read_text())
+        assert d_meta["mentioned_persons"] == ["aaaa1111", "xxxx9999"]
+        # Absorbed file deleted (existing dedupe contract).
+        assert not absorbed.exists()
+        # Canonical's merged_from audit trail intact.
+        c_meta, _ = parse_frontmatter(canonical.read_text())
+        assert c_meta["merged_from"] == ["bbbb2222"]
+
+    def test_idempotent_second_apply(self, wiki_root: Path) -> None:
+        canonical, absorbed, sibling_c, sibling_d = self._scenario(wiki_root)
+        pair = DuplicatePair(
+            canonical_uid="aaaa1111",
+            absorbed_uid="bbbb2222",
+            match_signal="apollo_id",
+            canonical_path=str(canonical),
+            absorbed_path=str(absorbed),
+        )
+        merge_duplicate_persons([pair], apply=True, wiki_root=wiki_root)
+        # Re-run: absorbed file is gone (already_merged); references are
+        # already rewritten so the sweep should also be a no-op.
+        report2 = merge_duplicate_persons([pair], apply=True, wiki_root=wiki_root)
+        assert report2.already_merged == 1
+        assert report2.merged == 0
+        assert report2.references_rewritten == 0
+        # Direct rewrite_references re-run is also a no-op.
+        n = rewrite_references(
+            absorbed_uid="bbbb2222",
+            canonical_uid="aaaa1111",
+            canonical_path=canonical,
+            wiki_dir=wiki_root,
+        )
+        assert n == 0
+
+    def test_skip_canonical_preserves_audit_trail(self, wiki_root: Path) -> None:
+        # Canonical body deliberately mentions the absorbed uid (defensive
+        # — would normally only appear via the merged_from header).
+        canonical = wiki_root / "aaaa1111-alice.md"
+        canonical.write_text(
+            "---\nuid: aaaa1111\ntype: person\nname: Alice\n"
+            "merged_from:\n  - bbbb2222\n---\n\n"
+            "## Merged from bbbb2222\n\nbody snippet\n",
+            encoding="utf-8",
+        )
+        before = canonical.read_text()
+        n = rewrite_references(
+            absorbed_uid="bbbb2222",
+            canonical_uid="aaaa1111",
+            canonical_path=canonical,
+            wiki_dir=wiki_root,
+        )
+        assert n == 0
+        assert canonical.read_text() == before
+
+    def test_skip_underscore_files(self, wiki_root: Path) -> None:
+        canonical = _write_person(
+            wiki_root, uid="aaaa1111", name="Alice", apollo_id="apo-shared"
+        )
+        archive = wiki_root / "_archive.md"
+        archive.write_text("Old reference to bbbb2222 lives here.\n", encoding="utf-8")
+        before = archive.read_text()
+        n = rewrite_references(
+            absorbed_uid="bbbb2222",
+            canonical_uid="aaaa1111",
+            canonical_path=canonical,
+            wiki_dir=wiki_root,
+        )
+        assert n == 0
+        assert archive.read_text() == before
+
+    def test_dry_run_counts_without_writing(self, wiki_root: Path) -> None:
+        canonical, absorbed, sibling_c, sibling_d = self._scenario(wiki_root)
+        before_c = sibling_c.read_text()
+        before_d = sibling_d.read_text()
+        pair = DuplicatePair(
+            canonical_uid="aaaa1111",
+            absorbed_uid="bbbb2222",
+            match_signal="apollo_id",
+            canonical_path=str(canonical),
+            absorbed_path=str(absorbed),
+        )
+        report = merge_duplicate_persons([pair], apply=False, wiki_root=wiki_root)
+        assert report.dry_run is True
+        assert report.merged == 1
+        # Dry-run leaves absorbed file in place, so the sweep sees its
+        # self-reference too: siblings C + D + the absorbed wiki = 3.
+        assert report.references_rewritten == 3
+        # Files unchanged.
+        assert sibling_c.read_text() == before_c
+        assert sibling_d.read_text() == before_d
+        assert absorbed.exists()

@@ -484,6 +484,7 @@ def _cmd_dedupe(args: argparse.Namespace) -> int:
         f"already_merged={merge_report.already_merged} "
         f"missing_canonical={merge_report.missing_canonical} "
         f"skipped_parse={merge_report.skipped_parse} "
+        f"references_rewritten={merge_report.references_rewritten} "
         f"errors={len(merge_report.errors)}"
     )
     for err in merge_report.errors:
