@@ -4,6 +4,7 @@
 import argparse
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -941,16 +942,17 @@ def _cmd_repair(args: argparse.Namespace) -> int:
         print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
         return 1
 
-    passes: list[tuple[str, callable]] = []
-    if args.tag_indent:
-        passes.append(("tag-indent", repair_tag_indent))
-    if args.value_quoting:
-        passes.append(("value-quoting", repair_value_quoting))
+    RepairFn = Callable[[Path, bool], RepairReport]
+    passes: list[tuple[str, RepairFn]]
     if args.all:
         passes = [
             ("tag-indent", repair_tag_indent),
             ("value-quoting", repair_value_quoting),
         ]
+    elif args.tag_indent:
+        passes = [("tag-indent", repair_tag_indent)]
+    else:  # args.value_quoting (mutex group guarantees one of the three)
+        passes = [("value-quoting", repair_value_quoting)]
 
     total_changed = 0
     total_errors = 0
