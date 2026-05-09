@@ -15,11 +15,18 @@ versions of cwc-side enricher scripts:
 Both functions default to dry-run (``apply=False``); idempotent on clean
 trees. Ported from ``cwc/scripts/knowledge-librarian/repair_tag_indent.py``
 and ``repair_yaml_value_quoting.py``.
+
+Repair runs **before** schema validation by design: these passes work on
+raw text via regex/line-walks because the corruption shapes prevent
+``yaml.safe_load`` from producing a document at all; pydantic validators
+are downstream consumers of already-parseable frontmatter.
 """
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,6 +75,18 @@ def _iter_wiki_files(wiki_root: Path):
         if path.name.startswith("_"):
             continue
         yield path
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` atomically via temp-file + ``os.replace``.
+
+    Avoids leaving a partial file on disk if the process is interrupted
+    mid-write — readers see either the old content or the complete new
+    content, never a truncated mix.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +182,7 @@ def repair_tag_indent(wiki_root: Path, apply: bool = False) -> RepairReport:
         report.changes.append((path, "tag-indent normalized to 2-space"))
         if apply:
             try:
-                path.write_text("---\n" + new_fm + "\n---\n" + body, encoding="utf-8")
+                _atomic_write(path, "---\n" + new_fm + "\n---\n" + body)
             except OSError as exc:
                 report.errors.append((path, f"write_error: {exc}"))
 
@@ -233,7 +252,7 @@ def repair_value_quoting(wiki_root: Path, apply: bool = False) -> RepairReport:
         report.changes.append((path, "value-quoting repaired"))
         if apply:
             try:
-                path.write_text("---\n" + new_fm + "\n---\n" + body, encoding="utf-8")
+                _atomic_write(path, "---\n" + new_fm + "\n---\n" + body)
             except OSError as exc:
                 report.errors.append((path, f"write_error: {exc}"))
 
