@@ -21,6 +21,8 @@ from pydantic import ValidationError
 
 from athenaeum.models import parse_frontmatter
 from athenaeum.schemas import (
+    FALLBACK_TYPES,
+    KNOWN_TYPES,
     CompanyWiki,
     ConceptWiki,
     PersonWiki,
@@ -339,3 +341,48 @@ class TestProvenanceFields:
         m = validate_wiki_meta(meta)
         assert m.source == "api:apollo:2026-05-07"
         assert m.field_sources == {"emails": "api:apollo:2026-05-07"}
+
+
+# --- KNOWN_TYPES allowlist (issue #93) ---
+
+
+class TestKnownTypes:
+    """Issue #93: validate_wiki_meta warns on unknown types but does not raise."""
+
+    def test_known_types_includes_concrete_schemas(self) -> None:
+        for t in ("person", "company", "project", "concept", "source"):
+            assert t in KNOWN_TYPES
+
+    def test_known_types_includes_fallback_set(self) -> None:
+        for t in (
+            "auto-memory",
+            "tool",
+            "reference",
+            "principle",
+            "feedback",
+            "preference",
+            "user",
+        ):
+            assert t in KNOWN_TYPES
+            assert t in FALLBACK_TYPES
+
+    def test_unknown_type_emits_warning(self) -> None:
+        meta = {"uid": "abc12345", "type": "persn", "name": "X"}
+        with pytest.warns(UserWarning, match="unknown wiki type"):
+            validate_wiki_meta(meta)
+
+    def test_unknown_type_does_not_raise(self) -> None:
+        # Falls through to WikiBase — uid/type/name still validated.
+        meta = {"uid": "abc12345", "type": "novel-type", "name": "X"}
+        with pytest.warns(UserWarning):
+            m = validate_wiki_meta(meta)
+        assert m.type == "novel-type"
+
+    def test_known_type_emits_no_warning(self) -> None:
+        import warnings as _w
+
+        meta = {"uid": "abc12345", "type": "auto-memory", "name": "X"}
+        with _w.catch_warnings():
+            _w.simplefilter("error", UserWarning)
+            # Should not raise — no warning expected for KNOWN_TYPES.
+            validate_wiki_meta(meta)
