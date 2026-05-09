@@ -27,16 +27,12 @@ Naming convention: ``test_<resolver>_<scenario>_<expected_winner>``.
 
 from __future__ import annotations
 
-import textwrap
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
-from athenaeum.connectors.apollo import EnrichResult, enrich_person
+from athenaeum.connectors.apollo import enrich_person
 from athenaeum.contradictions import (
-    ContradictionResult,
     detect_contradictions,
 )
 from athenaeum.dedupe import (
@@ -45,14 +41,12 @@ from athenaeum.dedupe import (
     _max_date,
     _max_numeric,
     _merge_field_sources,
-    _merge_meta,
     _perform_merge,
     _union_list,
     merge_duplicate_persons,
 )
 from athenaeum.librarian import tier0_passthrough
 from athenaeum.merge import (
-    MergedWikiEntry,
     dedupe_sources,
     merge_cluster_row,
     synthesize_body,
@@ -66,7 +60,6 @@ from athenaeum.models import (
     render_frontmatter,
 )
 from athenaeum.tiers import tier3_create, tier3_merge, tier3_write
-
 
 # ---------------------------------------------------------------------------
 # Helpers
