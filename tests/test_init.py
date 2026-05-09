@@ -69,7 +69,9 @@ def test_idempotent_preserves_content(tmp_path: Path) -> None:
     (target / "wiki" / "_index.md").write_text(custom_index, encoding="utf-8")
 
     custom_schema = "# Custom types\n"
-    (target / "wiki" / "_schema" / "types.md").write_text(custom_schema, encoding="utf-8")
+    (target / "wiki" / "_schema" / "types.md").write_text(
+        custom_schema, encoding="utf-8"
+    )
 
     # Add a user file in raw/
     (target / "raw" / "my-notes.md").write_text("my notes\n", encoding="utf-8")
@@ -79,7 +81,9 @@ def test_idempotent_preserves_content(tmp_path: Path) -> None:
 
     # Verify nothing was overwritten
     assert (target / "wiki" / "_index.md").read_text(encoding="utf-8") == custom_index
-    assert (target / "wiki" / "_schema" / "types.md").read_text(encoding="utf-8") == custom_schema
+    assert (target / "wiki" / "_schema" / "types.md").read_text(
+        encoding="utf-8"
+    ) == custom_schema
     assert (target / "raw" / "my-notes.md").read_text(encoding="utf-8") == "my notes\n"
 
 
@@ -105,7 +109,8 @@ def test_cli_init_default(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_git_identity_error_gives_helpful_message(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Issue #10: When git identity is not configured, init should raise
     SystemExit with a helpful message instead of a raw CalledProcessError."""
@@ -120,7 +125,8 @@ def test_git_identity_error_gives_helpful_message(
         # Let git init and git add succeed; fail on git commit (3rd call)
         if call_count == 3:
             raise subprocess.CalledProcessError(
-                128, cmd,
+                128,
+                cmd,
                 stderr=b"Author identity unknown\n"
                 b"*** Please tell me who you are.\n"
                 b"  git config --global user.name ...\n"
@@ -134,6 +140,45 @@ def test_git_identity_error_gives_helpful_message(
 
     with pytest.raises(SystemExit, match="Git identity not configured"):
         init_knowledge_dir(target)
+
+
+def test_force_help_mentions_no_backup(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--force` help text should warn that no backup is created (#105)."""
+    from athenaeum.cli import main
+
+    with pytest.raises(SystemExit):
+        main(["init", "--help"])
+    captured = capsys.readouterr()
+    assert "backup" in captured.out.lower()
+
+
+def test_templates_dest_without_with_templates_warns(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--templates-dest` without `--with-templates` must emit a stderr
+    warning so the user notices the flag was silently ignored (#105)."""
+    from athenaeum.cli import main
+
+    target = tmp_path / "knowledge"
+    custom_dest = tmp_path / "elsewhere"
+    exit_code = main(
+        [
+            "init",
+            "--path",
+            str(target),
+            "--templates-dest",
+            str(custom_dest),
+        ]
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "warning" in captured.err.lower()
+    assert "--templates-dest" in captured.err
+    assert "--with-templates" in captured.err
+    # Templates were not actually copied.
+    assert not custom_dest.exists()
 
 
 def test_schema_files_match_bundled(tmp_path: Path) -> None:
