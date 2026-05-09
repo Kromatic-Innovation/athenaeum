@@ -285,6 +285,48 @@ def main(argv: list[str] | None = None) -> int:
         help="Override configured backend (default: read from athenaeum.yaml)",
     )
 
+    # dedupe command — find / merge duplicate person wikis
+    dedupe_parser = subparsers.add_parser(
+        "dedupe",
+        help="Find or merge duplicate wiki entries.",
+    )
+    dedupe_sub = dedupe_parser.add_subparsers(dest="dedupe_target")
+    dedupe_persons = dedupe_sub.add_parser(
+        "persons",
+        help="Person-wiki dedupe (HIGH-confidence apollo_id / linkedin / "
+        "exact-name match). Default --find prints a YAML report; "
+        "--apply consumes the report and merges.",
+    )
+    dedupe_persons.add_argument(
+        "--find",
+        action="store_true",
+        help="Discover duplicate pairs and write a YAML report.",
+    )
+    dedupe_persons.add_argument(
+        "--apply",
+        action="store_true",
+        help="Read a report and perform the merge (idempotent).",
+    )
+    dedupe_persons.add_argument(
+        "--wiki-root",
+        type=Path,
+        default=None,
+        help="Wiki directory (default: ~/knowledge/wiki).",
+    )
+    dedupe_persons.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Path to write the YAML report (default: stdout). --find only.",
+    )
+    dedupe_persons.add_argument(
+        "--from",
+        dest="from_path",
+        type=Path,
+        default=None,
+        help="Path to the YAML report to apply (default: stdin). --apply only.",
+    )
+
     # repair command — frontmatter YAML repair tools (tag-indent, value-quoting)
     repair_parser = subparsers.add_parser(
         "repair",
@@ -384,10 +426,69 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "stopwords":
         return _cmd_stopwords(args)
 
+    if args.command == "dedupe":
+        return _cmd_dedupe(args)
+
     if args.command == "repair":
         return _cmd_repair(args)
 
     return 0
+
+
+def _cmd_dedupe(args: argparse.Namespace) -> int:
+    """Dispatch ``athenaeum dedupe persons --find|--apply``."""
+    from athenaeum.dedupe import (
+        find_duplicate_persons,
+        merge_duplicate_persons,
+        pairs_from_yaml,
+        pairs_to_yaml,
+    )
+
+    target = getattr(args, "dedupe_target", None)
+    if target != "persons":
+        print("usage: athenaeum dedupe persons [--find | --apply] ...", file=sys.stderr)
+        return 2
+
+    wiki_root = (args.wiki_root or Path("~/knowledge/wiki")).expanduser().resolve()
+
+    if args.find and args.apply:
+        print("error: pass either --find or --apply, not both", file=sys.stderr)
+        return 2
+    if not args.find and not args.apply:
+        print("error: pass --find or --apply", file=sys.stderr)
+        return 2
+
+    if args.find:
+        if not wiki_root.is_dir():
+            print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
+            return 1
+        pairs = find_duplicate_persons(wiki_root)
+        report = pairs_to_yaml(pairs)
+        if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(report, encoding="utf-8")
+            print(f"Wrote {len(pairs)} pair(s) → {args.out}", file=sys.stderr)
+        else:
+            sys.stdout.write(report)
+        return 0
+
+    # --apply
+    if args.from_path:
+        text = args.from_path.read_text(encoding="utf-8")
+    else:
+        text = sys.stdin.read()
+    pairs = pairs_from_yaml(text)
+    merge_report = merge_duplicate_persons(pairs, apply=True, wiki_root=wiki_root)
+    print(
+        f"merged={merge_report.merged} "
+        f"already_merged={merge_report.already_merged} "
+        f"missing_canonical={merge_report.missing_canonical} "
+        f"skipped_parse={merge_report.skipped_parse} "
+        f"errors={len(merge_report.errors)}"
+    )
+    for err in merge_report.errors:
+        print(f"  ERROR: {err}", file=sys.stderr)
+    return 0 if not merge_report.errors else 1
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
