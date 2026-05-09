@@ -14,6 +14,7 @@ import pytest
 
 from athenaeum.dedupe import (
     DuplicatePair,
+    _union_list,
     find_duplicate_persons,
     merge_duplicate_persons,
     pairs_from_yaml,
@@ -235,6 +236,244 @@ class TestReportRoundtrip:
         assert roundtripped[0].canonical_uid == pairs[0].canonical_uid
         assert roundtripped[0].absorbed_uid == pairs[0].absorbed_uid
         assert roundtripped[0].match_signal == pairs[0].match_signal
+
+
+class TestMaxMerge:
+    def test_warm_score_takes_max(self, wiki_root: Path) -> None:
+        cpath = _write_person(
+            wiki_root,
+            uid="m1111111",
+            name="Max Canon",
+            apollo_id="apo-m",
+            extra={
+                "warm_score": 0.4,
+                "last_touch": "2026-01-01",
+                "updated": "2026-01-01",
+            },
+        )
+        apath = _write_person(
+            wiki_root,
+            uid="m2222222",
+            name="Max Absorb",
+            apollo_id="apo-m",
+            extra={
+                "warm_score": 0.9,
+                "last_touch": "2026-04-15",
+                "updated": "2026-04-15",
+            },
+        )
+        pair = DuplicatePair(
+            canonical_uid="m1111111",
+            absorbed_uid="m2222222",
+            match_signal="apollo_id",
+            canonical_path=str(cpath),
+            absorbed_path=str(apath),
+        )
+        merge_duplicate_persons([pair], apply=True)
+        meta, _ = parse_frontmatter(cpath.read_text(encoding="utf-8"))
+        assert float(meta["warm_score"]) == 0.9
+        assert str(meta["last_touch"]) == "2026-04-15"
+        # `updated` is stamped to today on merge — must be >= absorbed's
+        assert str(meta["updated"]) >= "2026-04-15"
+
+    def test_max_keeps_canonical_when_larger(self, wiki_root: Path) -> None:
+        cpath = _write_person(
+            wiki_root,
+            uid="m3333333",
+            name="Max2 Canon",
+            apollo_id="apo-m2",
+            extra={"warm_score": 0.95, "last_touch": "2026-05-01"},
+        )
+        apath = _write_person(
+            wiki_root,
+            uid="m4444444",
+            name="Max2 Absorb",
+            apollo_id="apo-m2",
+            extra={"warm_score": 0.1, "last_touch": "2025-01-01"},
+        )
+        pair = DuplicatePair(
+            canonical_uid="m3333333",
+            absorbed_uid="m4444444",
+            match_signal="apollo_id",
+            canonical_path=str(cpath),
+            absorbed_path=str(apath),
+        )
+        merge_duplicate_persons([pair], apply=True)
+        meta, _ = parse_frontmatter(cpath.read_text(encoding="utf-8"))
+        assert float(meta["warm_score"]) == 0.95
+        assert str(meta["last_touch"]) == "2026-05-01"
+
+
+class TestCoalesceOnGap:
+    def test_apollo_id_filled_from_absorbed(self, wiki_root: Path) -> None:
+        cpath = _write_person(
+            wiki_root,
+            uid="g1111111",
+            name="Gap Canon",
+            linkedin_url="https://linkedin.com/in/gap",
+        )
+        apath = _write_person(
+            wiki_root,
+            uid="g2222222",
+            name="Gap Absorb",
+            apollo_id="apo-gap",
+            linkedin_url="https://linkedin.com/in/gap",
+        )
+        pair = DuplicatePair(
+            canonical_uid="g1111111",
+            absorbed_uid="g2222222",
+            match_signal="linkedin_url",
+            canonical_path=str(cpath),
+            absorbed_path=str(apath),
+        )
+        merge_duplicate_persons([pair], apply=True)
+        meta, _ = parse_frontmatter(cpath.read_text(encoding="utf-8"))
+        assert meta["apollo_id"] == "apo-gap"
+
+    def test_linkedin_url_filled_from_absorbed(self, wiki_root: Path) -> None:
+        cpath = _write_person(
+            wiki_root,
+            uid="g3333333",
+            name="Gap2 Canon",
+            apollo_id="apo-shared",
+        )
+        apath = _write_person(
+            wiki_root,
+            uid="g4444444",
+            name="Gap2 Absorb",
+            apollo_id="apo-shared",
+            linkedin_url="https://linkedin.com/in/gap2",
+        )
+        pair = DuplicatePair(
+            canonical_uid="g3333333",
+            absorbed_uid="g4444444",
+            match_signal="apollo_id",
+            canonical_path=str(cpath),
+            absorbed_path=str(apath),
+        )
+        merge_duplicate_persons([pair], apply=True)
+        meta, _ = parse_frontmatter(cpath.read_text(encoding="utf-8"))
+        assert meta["linkedin_url"] == "https://linkedin.com/in/gap2"
+
+
+class TestBodyMerge:
+    def test_body_concatenated_under_merged_from_heading(self, wiki_root: Path) -> None:
+        cpath = _write_person(
+            wiki_root,
+            uid="b1111111",
+            name="Body Canon",
+            apollo_id="apo-b",
+        )
+        apath = _write_person(
+            wiki_root,
+            uid="b2222222",
+            name="Body Absorb",
+            apollo_id="apo-b",
+        )
+        pair = DuplicatePair(
+            canonical_uid="b1111111",
+            absorbed_uid="b2222222",
+            match_signal="apollo_id",
+            canonical_path=str(cpath),
+            absorbed_path=str(apath),
+        )
+        merge_duplicate_persons([pair], apply=True)
+        _meta, body = parse_frontmatter(cpath.read_text(encoding="utf-8"))
+        # Canonical body preserved
+        assert "Body for Body Canon." in body
+        # Absorbed body appended under heading with absorbed uid
+        assert "## Merged from b2222222" in body
+        assert "Body for Body Absorb." in body
+        # Heading appears AFTER canonical body
+        assert body.index("Body for Body Canon.") < body.index(
+            "## Merged from b2222222"
+        )
+
+
+class TestUnionList:
+    def test_dedup_strings(self) -> None:
+        assert _union_list(["a", "b"], ["b", "c"]) == ["a", "b", "c"]
+
+    def test_canonical_first_order(self) -> None:
+        assert _union_list(["x", "y"], ["a", "y"]) == ["x", "y", "a"]
+
+    def test_dedup_dicts_by_repr(self) -> None:
+        d1 = {"k": 1}
+        d2 = {"k": 2}
+        d1_dup = {"k": 1}
+        out = _union_list([d1, d2], [d1_dup, {"k": 3}])
+        assert len(out) == 3
+        assert {"k": 1} in out
+        assert {"k": 2} in out
+        assert {"k": 3} in out
+
+    def test_handles_none(self) -> None:
+        assert _union_list(None, ["a"]) == ["a"]
+        assert _union_list(["a"], None) == ["a"]
+        assert _union_list(None, None) == []
+
+
+class TestPairsFromYamlMalformed:
+    def test_missing_canonical_uid_raises(self) -> None:
+        bad = "- absorbed_uid: x\n  match_signal: apollo_id\n"
+        with pytest.raises((ValueError, KeyError)):
+            pairs_from_yaml(bad)
+
+    def test_wrong_top_level_type_raises(self) -> None:
+        with pytest.raises(ValueError, match="YAML list"):
+            pairs_from_yaml("canonical_uid: foo\nabsorbed_uid: bar\n")
+
+    def test_entry_not_dict_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be a dict"):
+            pairs_from_yaml("- just_a_string\n- another\n")
+
+    def test_malformed_yaml_raises(self) -> None:
+        import yaml as _yaml
+
+        with pytest.raises(_yaml.YAMLError):
+            pairs_from_yaml("- canonical_uid: [unclosed\n")
+
+
+class TestNonPersonFilter:
+    def test_only_person_pairs_surface(self, wiki_root: Path) -> None:
+        # Two real person duplicates
+        _write_person(wiki_root, uid="p1111111", name="Person Dup", apollo_id="apo-p")
+        _write_person(wiki_root, uid="p2222222", name="Person Dup", apollo_id="apo-p")
+        # Company wikis sharing a "name" — must NOT be returned
+        (wiki_root / "co1.md").write_text(
+            "---\nuid: co111111\ntype: company\nname: Acme Corp\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        (wiki_root / "co2.md").write_text(
+            "---\nuid: co222222\ntype: company\nname: Acme Corp\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        # Concept wikis sharing a name — must NOT be returned
+        (wiki_root / "concept1.md").write_text(
+            "---\nuid: cn111111\ntype: concept\nname: Lean Startup\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        (wiki_root / "concept2.md").write_text(
+            "---\nuid: cn222222\ntype: concept\nname: Lean Startup\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        # Person row with empty name — must be skipped
+        (wiki_root / "blank-name.md").write_text(
+            '---\nuid: pblnk111\ntype: person\nname: ""\n---\n\nbody\n',
+            encoding="utf-8",
+        )
+        # Person row with empty uid — must be skipped
+        (wiki_root / "blank-uid.md").write_text(
+            '---\nuid: ""\ntype: person\nname: Ghost Person\n---\n\nbody\n',
+            encoding="utf-8",
+        )
+
+        pairs = find_duplicate_persons(wiki_root)
+        assert len(pairs) == 1
+        assert {pairs[0].canonical_uid, pairs[0].absorbed_uid} == {
+            "p1111111",
+            "p2222222",
+        }
 
 
 class TestDryRun:
