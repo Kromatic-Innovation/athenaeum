@@ -19,9 +19,6 @@ Coverage targets the seven in-tree resolvers listed in #91:
 7. ``dedupe._perform_merge`` (+ ``_merge_meta``, ``_merge_field_sources``) —
    canonical-wins / max / union per field class with provenance carry.
 
-(The Apollo enrich_person resolver was extracted to the cwc personal
-toolkit in cwc#235; its conflict-resolution tests live there.)
-
 Naming convention: ``test_<resolver>_<scenario>_<expected_winner>``.
 """
 
@@ -694,4 +691,3 @@ class TestDedupePerformMerge:
         report2 = merge_duplicate_persons([pair], apply=True)
         assert report2.already_merged == 1
         assert report2.merged == 0
-
