@@ -195,6 +195,72 @@ class TestMergePreservesFieldSources:
         assert "44444444" in meta["merged_from"]
 
 
+class TestSocialUrlCoalesce:
+    """Regression for #106 — twitter_url / github_url were silently dropped."""
+
+    def test_absorbed_only_social_urls_carry_forward(self, wiki_root: Path) -> None:
+        cpath = _write_person(
+            wiki_root,
+            uid="s1111111",
+            name="Social Canon",
+            apollo_id="apo-soc",
+        )
+        apath = _write_person(
+            wiki_root,
+            uid="s2222222",
+            name="Social Absorb",
+            apollo_id="apo-soc",
+            extra={
+                "twitter_url": "https://twitter.com/socialabsorb",
+                "github_url": "https://github.com/socialabsorb",
+            },
+        )
+        pair = DuplicatePair(
+            canonical_uid="s1111111",
+            absorbed_uid="s2222222",
+            match_signal="apollo_id",
+            canonical_path=str(cpath),
+            absorbed_path=str(apath),
+        )
+        merge_duplicate_persons([pair], apply=True)
+        meta, _ = parse_frontmatter(cpath.read_text(encoding="utf-8"))
+        assert meta["twitter_url"] == "https://twitter.com/socialabsorb"
+        assert meta["github_url"] == "https://github.com/socialabsorb"
+
+    def test_canonical_social_urls_win(self, wiki_root: Path) -> None:
+        cpath = _write_person(
+            wiki_root,
+            uid="s3333333",
+            name="Social Canon2",
+            apollo_id="apo-soc2",
+            extra={
+                "twitter_url": "https://twitter.com/canonical",
+                "github_url": "https://github.com/canonical",
+            },
+        )
+        apath = _write_person(
+            wiki_root,
+            uid="s4444444",
+            name="Social Absorb2",
+            apollo_id="apo-soc2",
+            extra={
+                "twitter_url": "https://twitter.com/absorbed",
+                "github_url": "https://github.com/absorbed",
+            },
+        )
+        pair = DuplicatePair(
+            canonical_uid="s3333333",
+            absorbed_uid="s4444444",
+            match_signal="apollo_id",
+            canonical_path=str(cpath),
+            absorbed_path=str(apath),
+        )
+        merge_duplicate_persons([pair], apply=True)
+        meta, _ = parse_frontmatter(cpath.read_text(encoding="utf-8"))
+        assert meta["twitter_url"] == "https://twitter.com/canonical"
+        assert meta["github_url"] == "https://github.com/canonical"
+
+
 class TestIdempotency:
     def test_apply_twice_is_noop(self, wiki_root: Path) -> None:
         cpath = _write_person(
