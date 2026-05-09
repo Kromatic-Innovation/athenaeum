@@ -4,6 +4,7 @@ process_one, and the run() pipeline with mocked LLM."""
 from __future__ import annotations
 
 import subprocess
+from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -332,6 +333,61 @@ class TestTier0Passthrough:
         assert "field_sources:" in out
         assert "  emails: api:apollo:2026-05-07" in out
         assert "  current_title: linkedin:sourced-sam-1234" in out
+
+    def test_per_value_field_sources_round_trip(self, tmp_path: Path) -> None:
+        """Per-value field_sources list shape (#102) must round-trip
+        byte-for-byte through tier0_passthrough — the shape contract in
+        docs/provenance-shape.md §3."""
+        from athenaeum.librarian import tier0_passthrough
+
+        wiki = self._make_wiki_root(tmp_path)
+        sourced = (
+            "---\n"
+            "uid: 9b8c7d61\n"
+            "type: person\n"
+            "name: Per Value Pat\n"
+            "access: personal\n"
+            "emails:\n"
+            "  - pat@one.com\n"
+            "  - pat@two.com\n"
+            "field_sources:\n"
+            "  emails:\n"
+            "    - value: pat@one.com\n"
+            "      source: api:apollo:2026-04-29\n"
+            "    - value: pat@two.com\n"
+            "      source: linkedin:patshandle\n"
+            "---\n"
+            "\n"
+            "# Per Value Pat\n"
+        )
+        raw = self._make_raw(tmp_path, sourced)
+        index = EntityIndex(wiki)
+
+        entity = tier0_passthrough(raw, index, wiki, ["person"])
+        assert entity is not None
+
+        out_path = wiki / "9b8c7d61-per-value-pat.md"
+        out = out_path.read_text(encoding="utf-8")
+
+        # Byte-for-byte contract from docs/provenance-shape.md §3:
+        # tier0 stamps ``created`` (when missing) + ``updated``, then
+        # renders the meta verbatim. Reconstruct the expected bytes
+        # rather than relying on substring checks.
+        from athenaeum.models import parse_frontmatter, render_frontmatter
+
+        expected_meta, expected_body = parse_frontmatter(sourced)
+        today = date.today().isoformat()
+        expected_meta["created"] = today
+        expected_meta["updated"] = today
+        expected = render_frontmatter(expected_meta) + "\n" + expected_body
+        assert out == expected
+
+        # And the per-value list shape parses back as a list of
+        # ``{value, source}`` records.
+        meta, _ = parse_frontmatter(out)
+        emails_fs = meta["field_sources"]["emails"]
+        assert isinstance(emails_fs, list)
+        assert {e["value"] for e in emails_fs} == {"pat@one.com", "pat@two.com"}
 
 
 # ---------------------------------------------------------------------------
