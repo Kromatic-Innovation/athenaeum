@@ -3,7 +3,6 @@
 
 import argparse
 import logging
-import os
 import sys
 from collections.abc import Callable
 from pathlib import Path

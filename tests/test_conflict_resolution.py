@@ -30,6 +30,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
+
 from athenaeum.contradictions import (
     detect_contradictions,
 )
