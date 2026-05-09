@@ -10,7 +10,12 @@ from pathlib import Path
 import yaml
 
 from athenaeum import cli
-from athenaeum.repair import repair_tag_indent, repair_value_quoting
+from athenaeum.repair import (
+    LEGACY_SLUG_MAP,
+    migrate_legacy_source_slugs,
+    repair_tag_indent,
+    repair_value_quoting,
+)
 
 # ---------------------------------------------------------------------------
 # Fixture builders
@@ -338,3 +343,256 @@ def test_atomic_write_no_tmp_left_behind(tmp_path: Path) -> None:
     repair_tag_indent(wiki, apply=True)
     leftovers = list(wiki.glob("*.tmp")) + list(wiki.glob("*.md.tmp"))
     assert leftovers == []
+
+
+# ---------------------------------------------------------------------------
+# 3. Legacy bare-slug source: migration  (issue #97 / design-lock §5)
+
+LEGACY_EXTENDED = """\
+---
+uid: person:gail
+type: person
+name: Gail Test
+source: extended-tier-build
+---
+
+Body referencing extended-tier-build literally in prose.
+"""
+
+LEGACY_WARM = """\
+---
+uid: person:hank
+type: person
+name: Hank Test
+source: warm-network-detect
+---
+
+Body.
+"""
+
+ALREADY_TYPED = """\
+---
+uid: person:ivy
+type: person
+name: Ivy Test
+source: api:apollo:2026-04-29
+---
+
+Body.
+"""
+
+UNKNOWN_SLUG = """\
+---
+uid: person:jay
+type: person
+name: Jay Test
+source: unknown-slug-xyz
+---
+
+Body.
+"""
+
+
+def test_legacy_slugs_dry_run_does_not_write(tmp_path: Path) -> None:
+    wiki = _make_wiki(
+        tmp_path,
+        {
+            "gail.md": LEGACY_EXTENDED,
+            "hank.md": LEGACY_WARM,
+            "ivy.md": ALREADY_TYPED,
+        },
+    )
+    before = {p.name: p.read_text() for p in wiki.glob("*.md")}
+
+    report = migrate_legacy_source_slugs(wiki, apply=False)
+
+    assert report.files_scanned == 3
+    assert report.would_rewrite == 2
+    assert report.rewrites_applied == 0
+    assert report.unknown_slugs == {}
+    assert report.per_slug_counts == {
+        "extended-tier-build": 1,
+        "warm-network-detect": 1,
+    }
+    # No file mutated on disk.
+    for p in wiki.glob("*.md"):
+        assert p.read_text() == before[p.name]
+
+
+def test_legacy_slugs_apply_rewrites_to_typed_form(tmp_path: Path) -> None:
+    wiki = _make_wiki(
+        tmp_path,
+        {
+            "gail.md": LEGACY_EXTENDED,
+            "hank.md": LEGACY_WARM,
+            "ivy.md": ALREADY_TYPED,
+        },
+    )
+
+    report = migrate_legacy_source_slugs(wiki, apply=True)
+
+    assert report.rewrites_applied == 2
+    assert report.skipped_validation_fail == 0
+    assert "source: script:extended-tier-build" in (wiki / "gail.md").read_text()
+    assert "source: script:warm-network-detect" in (wiki / "hank.md").read_text()
+    # Already-typed wiki untouched.
+    assert (wiki / "ivy.md").read_text() == ALREADY_TYPED
+
+
+def test_legacy_slugs_idempotent(tmp_path: Path) -> None:
+    wiki = _make_wiki(tmp_path, {"gail.md": LEGACY_EXTENDED})
+    migrate_legacy_source_slugs(wiki, apply=True)
+    after_first = (wiki / "gail.md").read_text()
+
+    report2 = migrate_legacy_source_slugs(wiki, apply=True)
+
+    assert report2.would_rewrite == 0
+    assert report2.rewrites_applied == 0
+    assert (wiki / "gail.md").read_text() == after_first
+
+
+def test_legacy_slugs_unknown_slug_aborts(tmp_path: Path) -> None:
+    wiki = _make_wiki(
+        tmp_path,
+        {
+            "gail.md": LEGACY_EXTENDED,
+            "jay.md": UNKNOWN_SLUG,
+        },
+    )
+    before = {p.name: p.read_text() for p in wiki.glob("*.md")}
+
+    report = migrate_legacy_source_slugs(wiki, apply=True)
+
+    assert report.unknown_slugs == {"unknown-slug-xyz": 1}
+    # Neither legacy nor typed wikis are written.
+    assert report.rewrites_applied == 0
+    for p in wiki.glob("*.md"):
+        assert p.read_text() == before[p.name]
+
+
+def test_legacy_slugs_byte_for_byte_body_preservation(tmp_path: Path) -> None:
+    """Body containing the literal slug string is not touched — only the
+    frontmatter ``source:`` line is rewritten."""
+    wiki = _make_wiki(tmp_path, {"gail.md": LEGACY_EXTENDED})
+    migrate_legacy_source_slugs(wiki, apply=True)
+
+    new = (wiki / "gail.md").read_text()
+    # Body retained verbatim.
+    assert "Body referencing extended-tier-build literally in prose." in new
+    # Frontmatter source line rewritten to typed form.
+    assert "source: script:extended-tier-build\n" in new
+    # The bare legacy slug no longer appears as a `source:` value.
+    assert "source: extended-tier-build\n" not in new
+    # Difference between old and new is ONLY the source line — the rest
+    # of the file is byte-identical.
+    old_lines = LEGACY_EXTENDED.splitlines()
+    new_lines = new.splitlines()
+    assert len(old_lines) == len(new_lines)
+    diffs = [(i, o, n) for i, (o, n) in enumerate(zip(old_lines, new_lines)) if o != n]
+    assert len(diffs) == 1
+    assert diffs[0][1].startswith("source: ")
+    assert diffs[0][2] == "source: script:extended-tier-build"
+
+
+def test_legacy_slugs_validation_failure_skips_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If ``validate_wiki_meta`` rejects the rewritten frontmatter, that
+    file is skipped (recorded in ``skipped_validation_fail``) and the
+    other files still proceed."""
+    wiki = _make_wiki(
+        tmp_path,
+        {"gail.md": LEGACY_EXTENDED, "hank.md": LEGACY_WARM},
+    )
+
+    from athenaeum import schemas as schemas_mod
+
+    real_validate = schemas_mod.validate_wiki_meta
+    fail_target = "person:gail"
+
+    def fake_validate(meta):
+        if meta.get("uid") == fail_target:
+            raise ValueError("synthetic validation failure")
+        return real_validate(meta)
+
+    monkeypatch.setattr(schemas_mod, "validate_wiki_meta", fake_validate)
+
+    report = migrate_legacy_source_slugs(wiki, apply=True)
+
+    assert report.skipped_validation_fail == 1
+    assert report.rewrites_applied == 1
+    # gail.md untouched (validation failed).
+    assert (wiki / "gail.md").read_text() == LEGACY_EXTENDED
+    # hank.md migrated.
+    assert "source: script:warm-network-detect" in (wiki / "hank.md").read_text()
+
+
+def test_legacy_slug_map_is_exactly_the_design_locked_two() -> None:
+    """Guard against accidental expansion of the mapping in PRs other
+    than a deliberate design-doc revision."""
+    assert LEGACY_SLUG_MAP == {
+        "extended-tier-build": "script:extended-tier-build",
+        "warm-network-detect": "script:warm-network-detect",
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI integration for legacy-source-slugs
+
+
+def test_cli_legacy_slugs_dry_run_returns_2(tmp_path: Path) -> None:
+    wiki = _make_wiki(tmp_path, {"gail.md": LEGACY_EXTENDED})
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cli.main(["repair", "--legacy-source-slugs", "--wiki-root", str(wiki)])
+    assert rc == 2
+    out = buf.getvalue()
+    assert "legacy-source-slugs" in out
+    assert "DRY RUN" in out
+    assert "would_rewrite:           1" in out
+    # Untouched on dry-run.
+    assert (wiki / "gail.md").read_text() == LEGACY_EXTENDED
+
+
+def test_cli_legacy_slugs_apply_returns_0(tmp_path: Path) -> None:
+    wiki = _make_wiki(tmp_path, {"gail.md": LEGACY_EXTENDED})
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cli.main(
+            [
+                "repair",
+                "--legacy-source-slugs",
+                "--apply",
+                "--wiki-root",
+                str(wiki),
+            ]
+        )
+    assert rc == 0
+    assert "APPLY" in buf.getvalue()
+    assert "source: script:extended-tier-build" in (wiki / "gail.md").read_text()
+
+
+def test_cli_legacy_slugs_unknown_slug_returns_1(tmp_path: Path, capsys) -> None:
+    wiki = _make_wiki(tmp_path, {"jay.md": UNKNOWN_SLUG})
+    rc = cli.main(
+        [
+            "repair",
+            "--legacy-source-slugs",
+            "--apply",
+            "--wiki-root",
+            str(wiki),
+        ]
+    )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "unknown-slug-xyz" in captured.err
+    assert "ABORTED" in captured.err
+
+
+def test_legacy_scalar_re_still_present_in_provenance() -> None:
+    """Quine gate: the legacy bare-slug regex MUST still be present in
+    ``provenance.py``. This PR ships the migration tool ONLY; the regex
+    retires in a separate follow-up after the live tree is migrated."""
+    from athenaeum import provenance
+
+    assert hasattr(provenance, "_LEGACY_SCALAR_RE")
