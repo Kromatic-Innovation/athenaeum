@@ -251,10 +251,74 @@ def validate_field_sources(value: Any) -> Any:
     return value
 
 
+def resolve_remember_sources(
+    sources: Any,
+) -> tuple[Any, dict | None]:
+    """Disambiguate the ``remember(sources=...)`` argument shape.
+
+    Settles design-lock §4 (``docs/provenance-shape.md``): the bare-dict
+    heuristic that previously inspected ``{type, ref}`` keys to guess
+    "structured single-source" vs "per-field map" is REMOVED. Callers
+    must use explicit wrapper keys for structured input.
+
+    Three accepted shapes:
+
+    - ``None`` → ``(None, None)``.
+    - ``str`` (e.g. ``"api:apollo:2026-05-09"``) → wiki-level scalar;
+      returns ``(<scalar>, None)``.
+    - ``dict`` containing only ``_source`` and/or ``_field_sources`` →
+      returns ``(<wiki_source>, <field_sources_map>)``.
+
+    Any bare dict (no wrapper keys) raises :class:`ValueError` directing
+    the caller to wrap. Any other type raises :class:`TypeError`.
+
+    Returns:
+        ``(wiki_source, field_sources_map)`` — either entry may be
+        ``None``. ``wiki_source`` is the validated scalar/structured
+        source; ``field_sources_map`` is the validated per-field dict.
+    """
+    if sources is None:
+        return None, None
+    if isinstance(sources, str):
+        validate_source_value(sources)
+        return sources, None
+    if isinstance(sources, dict):
+        allowed = {"_source", "_field_sources"}
+        keys = set(sources.keys())
+        unknown = keys - allowed
+        if unknown or not keys:
+            raise ValueError(
+                "MCP remember(sources=...) bare-dict shape removed. "
+                'Use {"_source": ...} for wiki-level or '
+                '{"_field_sources": {<field>: <source>}} for per-field. '
+                "See docs/provenance-shape.md §4."
+            )
+        wiki_source: Any = None
+        field_sources_map: dict | None = None
+        if "_source" in sources:
+            wiki_source = sources["_source"]
+            validate_source_value(wiki_source)
+        if "_field_sources" in sources:
+            fs = sources["_field_sources"]
+            if not isinstance(fs, dict):
+                raise ValueError(
+                    f"_field_sources must be a dict, got {type(fs).__name__}"
+                )
+            validate_field_sources(fs)
+            field_sources_map = fs
+        return wiki_source, field_sources_map
+    raise TypeError(
+        f"`sources` must be str, dict, or None; got {type(sources).__name__}. "
+        'Use {"_source": ...} or {"_field_sources": {...}} for structured input. '
+        "See docs/provenance-shape.md §4."
+    )
+
+
 __all__ = [
     "SourceRef",
     "parse_source",
     "parse_per_value_field_sources",
     "validate_source_value",
     "validate_field_sources",
+    "resolve_remember_sources",
 ]
