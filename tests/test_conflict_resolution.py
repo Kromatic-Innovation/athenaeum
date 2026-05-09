@@ -7,7 +7,7 @@ tests are intentionally behavioral — when an audit found surprising or
 buggy behavior, the test still asserts what the code DOES today, and the
 surprise is filed as a separate issue (linked in the PR body).
 
-Coverage targets the eight resolvers listed in #91:
+Coverage targets the seven in-tree resolvers listed in #91:
 
 1. ``librarian.tier0_passthrough`` — skip-on-conflict eligibility gate.
 2. ``tiers.tier3_create`` — no-conflict-by-construction.
@@ -18,9 +18,6 @@ Coverage targets the eight resolvers listed in #91:
 6. ``contradictions.detect_contradictions`` — DETECT-ONLY, never resolves.
 7. ``dedupe._perform_merge`` (+ ``_merge_meta``, ``_merge_field_sources``) —
    canonical-wins / max / union per field class with provenance carry.
-8. ``connectors.apollo.enrich_person`` + CLI write path — Apollo-wins on
-   Apollo namespace, existing-wins on linkedin/twitter/github, dict-update
-   on `field_sources`.
 
 Naming convention: ``test_<resolver>_<scenario>_<expected_winner>``.
 """
@@ -31,7 +28,6 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from athenaeum.connectors.apollo import enrich_person
 from athenaeum.contradictions import (
     detect_contradictions,
 )
@@ -695,111 +691,3 @@ class TestDedupePerformMerge:
         report2 = merge_duplicate_persons([pair], apply=True)
         assert report2.already_merged == 1
         assert report2.merged == 0
-
-
-# ---------------------------------------------------------------------------
-# 8. enrich_person + CLI write path
-# ---------------------------------------------------------------------------
-
-
-def _person_payload(**overrides) -> dict:
-    base = {
-        "id": "apollo-xyz",
-        "title": "VP Eng",
-        "headline": "Builder",
-        "linkedin_url": "https://linkedin.com/in/jane",
-        "twitter_url": "",
-        "github_url": "",
-        "city": "SF",
-        "state": "CA",
-        "country": "US",
-        "employment_history": [
-            {
-                "title": "VP Eng",
-                "organization_name": "Acme",
-                "current": True,
-            },
-        ],
-    }
-    base.update(overrides)
-    return base
-
-
-class _FakeApolloClient:
-    def __init__(self, payload: dict | None) -> None:
-        self._payload = payload
-
-    def people_match(self, **_kwargs) -> dict | None:  # noqa: ANN003
-        return self._payload
-
-
-class TestEnrichPersonResolution:
-    def test_enrich_person_apollo_wins_for_apollo_namespace(self) -> None:
-        existing = {
-            "name": "Jane Doe",
-            "emails": ["jane@example.com"],
-            "current_title": "Old Title",  # will be overwritten by Apollo
-        }
-        client = _FakeApolloClient(_person_payload())
-        result = enrich_person(existing, client, today="2025-05-09")
-        assert result.matched is True
-        # Apollo wins on apollo namespace + current_title.
-        assert result.fields["current_title"] == "VP Eng"
-        assert result.fields["apollo_id"] == "apollo-xyz"
-        assert result.field_sources["current_title"] == "api:apollo:2025-05-09"
-
-    def test_enrich_person_existing_wins_for_linkedin_twitter_github(
-        self,
-    ) -> None:
-        existing = {
-            "name": "Jane Doe",
-            "emails": ["jane@example.com"],
-            "linkedin_url": "https://linkedin.com/in/jane-curated",
-            "twitter_url": "https://twitter.com/jane-curated",
-            "github_url": "https://github.com/jane-curated",
-        }
-        client = _FakeApolloClient(
-            _person_payload(
-                linkedin_url="https://linkedin.com/in/apollo-version",
-                twitter_url="https://twitter.com/apollo-version",
-                github_url="https://github.com/apollo-version",
-            )
-        )
-        result = enrich_person(existing, client, today="2025-05-09")
-        # Apollo's linkedin/twitter/github SHOULD NOT appear in fields when
-        # existing has values.
-        assert "linkedin_url" not in result.fields
-        assert "twitter_url" not in result.fields
-        assert "github_url" not in result.fields
-        # And no spurious provenance entry for the protected keys.
-        assert "linkedin_url" not in result.field_sources
-
-    def test_enrich_person_no_match_returns_empty(self) -> None:
-        client = _FakeApolloClient(None)
-        result = enrich_person({"name": "Jane Doe"}, client)
-        assert result.matched is False
-        assert result.fields == {}
-        assert result.field_sources == {}
-
-
-class TestCliEnrichWriteFieldSourcesMerge:
-    """The CLI write path merges Apollo `field_sources` into existing via
-    `dict.update` — Apollo's per-key provenance overwrites pre-existing
-    provenance for the same key, BUT pre-existing provenance for unrelated
-    keys survives untouched."""
-
-    def test_enrich_cli_dict_update_merge_preserves_unrelated_keys(self) -> None:
-        existing_meta_fs = {
-            "manual_note": "operator:2024-01-01",  # unrelated key — survives
-            "current_title": "manual:2024-01-01",  # SAME key — Apollo overwrites
-        }
-        apollo_fs = {
-            "current_title": "api:apollo:2025-05-09",
-            "apollo_id": "api:apollo:2025-05-09",
-        }
-        # Mirror the cli.py write-path logic verbatim:
-        merged = dict(existing_meta_fs)
-        merged.update(apollo_fs)
-        assert merged["manual_note"] == "operator:2024-01-01"  # unrelated kept
-        assert merged["current_title"] == "api:apollo:2025-05-09"  # Apollo won
-        assert merged["apollo_id"] == "api:apollo:2025-05-09"  # added
