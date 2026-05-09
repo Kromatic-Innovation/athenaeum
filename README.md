@@ -6,9 +6,11 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/athenaeum.svg)](https://pypi.org/project/athenaeum/)
 [![Python versions](https://img.shields.io/pypi/pyversions/athenaeum.svg)](https://pypi.org/project/athenaeum/)
-[![License](https://img.shields.io/pypi/l/athenaeum.svg)](https://github.com/Kromatic-Innovation/athenaeum/blob/main/LICENSE)
+[![License](https://img.shields.io/pypi/l/athenaeum.svg)](https://github.com/Kromatic-Innovation/athenaeum/blob/develop/LICENSE)
 
 **Production-grade agentic memory for teams deploying multiple AI agents.**
+Athenaeum follows trunk-style development with `develop` as the active branch
+and `main` as the released-revision pointer.
 Append-only intake, a tiered librarian that compiles raw observations into a
 trustworthy wiki, and a sidecar that makes recall happen passively on every
 turn.
@@ -182,7 +184,7 @@ This gives you:
 - **Context checkpointing** — observations are saved before context-window compaction.
 
 Full setup guide, smoke test, and environment-variable reference:
-[`examples/claude-code/README.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/examples/claude-code/README.md).
+[`examples/claude-code/README.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/develop/examples/claude-code/README.md).
 
 ## Integrations
 
@@ -315,6 +317,27 @@ pytest tests/ -v
 ruff check src/ tests/
 ```
 
+## Branch flow
+
+Athenaeum uses a trunk-style branch model:
+
+- **`develop`** is the active development branch and the GitHub default. All
+  pull requests target `develop`.
+- **`main`** carries the most recent released revision. Release tags
+  (`vX.Y.Z`) live on `main` and trigger the PyPI release workflow.
+
+Most users should install via `pip install athenaeum` (above). To work from
+source against the latest released revision instead of the active branch,
+clone and check out the latest tag:
+
+```bash
+git clone https://github.com/Kromatic-Innovation/athenaeum.git
+cd athenaeum
+git checkout "$(git describe --tags --abbrev=0)"
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full promotion flow.
+
 ## Getting help
 
 Rolling this out on a team? Open an
@@ -324,4 +347,4 @@ agent-memory rollouts often and are happy to point at whatever's useful.
 
 ## License
 
-Apache 2.0 — see [LICENSE](https://github.com/Kromatic-Innovation/athenaeum/blob/main/LICENSE).
+Apache 2.0 — see [LICENSE](https://github.com/Kromatic-Innovation/athenaeum/blob/develop/LICENSE).
