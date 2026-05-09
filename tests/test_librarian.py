@@ -333,6 +333,55 @@ class TestTier0Passthrough:
         assert "  emails: api:apollo:2026-05-07" in out
         assert "  current_title: linkedin:sourced-sam-1234" in out
 
+    def test_per_value_field_sources_round_trip(self, tmp_path: Path) -> None:
+        """Per-value field_sources list shape (#102) must round-trip
+        byte-for-byte through tier0_passthrough — the shape contract in
+        docs/provenance-shape.md §3."""
+        from athenaeum.librarian import tier0_passthrough
+
+        wiki = self._make_wiki_root(tmp_path)
+        sourced = (
+            "---\n"
+            "uid: 9b8c7d61\n"
+            "type: person\n"
+            "name: Per Value Pat\n"
+            "access: personal\n"
+            "emails:\n"
+            "  - pat@one.com\n"
+            "  - pat@two.com\n"
+            "field_sources:\n"
+            "  emails:\n"
+            "    - value: pat@one.com\n"
+            "      source: api:apollo:2026-04-29\n"
+            "    - value: pat@two.com\n"
+            "      source: linkedin:patshandle\n"
+            "---\n"
+            "\n"
+            "# Per Value Pat\n"
+        )
+        raw = self._make_raw(tmp_path, sourced)
+        index = EntityIndex(wiki)
+
+        entity = tier0_passthrough(raw, index, wiki, ["person"])
+        assert entity is not None
+
+        out_path = wiki / "9b8c7d61-per-value-pat.md"
+        out = out_path.read_text(encoding="utf-8")
+        # Per-value list shape preserved verbatim — tier0 must NOT
+        # auto-upgrade or rewrite.
+        assert "field_sources:" in out
+        assert "- value: pat@one.com" in out
+        assert "source: api:apollo:2026-04-29" in out
+        assert "- value: pat@two.com" in out
+        assert "source: linkedin:patshandle" in out
+        # And the validator accepted it (file exists / no parse error).
+        from athenaeum.models import parse_frontmatter
+
+        meta, _ = parse_frontmatter(out)
+        emails_fs = meta["field_sources"]["emails"]
+        assert isinstance(emails_fs, list)
+        assert {e["value"] for e in emails_fs} == {"pat@one.com", "pat@two.com"}
+
 
 # ---------------------------------------------------------------------------
 # rebuild_index

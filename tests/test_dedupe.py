@@ -153,10 +153,15 @@ class TestMergePreservesFieldSources:
         # Union of emails preserved
         assert "alice@canonical.com" in meta["emails"]
         assert "alice@absorbed.com" in meta["emails"]
-        # Canonical's field_sources entry wins on the key (canonical-first
-        # ordering matches scalar-source semantics; per-value attribution
-        # is documented as the canonical-first list rule).
-        assert meta["field_sources"]["emails"] == "google:contact-1"
+        # Per-value attribution (#102): emails is a list field, so the
+        # writer emits the new per-value list-of-records shape.
+        # Canonical-wins-per-value: alice@canonical.com → google,
+        # alice@absorbed.com → linkedin (carried over from absorbed).
+        emails_fs = meta["field_sources"]["emails"]
+        assert isinstance(emails_fs, list)
+        by_value = {entry["value"]: entry["source"] for entry in emails_fs}
+        assert by_value["alice@canonical.com"] == "google:contact-1"
+        assert by_value["alice@absorbed.com"] == "linkedin:profile-2"
 
     def test_absorbed_only_field_sources_carries_forward(self, wiki_root: Path) -> None:
         cpath = _write_person(
@@ -185,14 +190,176 @@ class TestMergePreservesFieldSources:
         )
         merge_duplicate_persons([pair], apply=True)
         meta, _ = parse_frontmatter(cpath.read_text(encoding="utf-8"))
-        # Absorbed-only emails attribution carried forward
-        assert meta["field_sources"]["emails"] == "apollo:export-2026"
+        # Absorbed-only emails attribution carried forward in the
+        # per-value list shape (#102). Canonical's emails value
+        # (bob@canonical.com) has no source on either side, so it's
+        # omitted; absorbed's value carries its source forward.
+        emails_fs = meta["field_sources"]["emails"]
+        assert isinstance(emails_fs, list)
+        by_value = {entry["value"]: entry["source"] for entry in emails_fs}
+        assert by_value["bob@absorbed.com"] == "apollo:export-2026"
         # Wiki-level source: canonical wins
         assert meta["source"] == "claude:session-canon"
         # Absorbed source archived in audit trail
         assert meta["merged_from_sources"]["44444444"] == "apollo:export-2026"
         # Audit trail uid recorded
         assert "44444444" in meta["merged_from"]
+
+
+class TestPerValueFieldSourcesMerge:
+    """Per-value ``field_sources`` for list fields — issue #102."""
+
+    @staticmethod
+    def _write_person_with_per_value(
+        wiki_root: Path,
+        *,
+        uid: str,
+        name: str,
+        apollo_id: str,
+        emails: list[str],
+        per_value_emails: list[dict],
+    ) -> Path:
+        import yaml as _yaml
+
+        fs_yaml = _yaml.safe_dump(
+            {"emails": per_value_emails}, default_flow_style=False, sort_keys=False
+        )
+        fs_indented = "\n".join("  " + ln for ln in fs_yaml.rstrip().splitlines())
+        emails_block = "\n".join(f"  - {e}" for e in emails)
+        text = (
+            "---\n"
+            f"uid: {uid}\n"
+            "type: person\n"
+            f"name: {name}\n"
+            f"apollo_id: {apollo_id}\n"
+            "emails:\n"
+            f"{emails_block}\n"
+            "field_sources:\n"
+            f"{fs_indented}\n"
+            "---\n"
+            "\n"
+            f"Body for {name}.\n"
+        )
+        path = wiki_root / f"{uid}-{name.lower().replace(' ', '-')}.md"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_disjoint_per_value_sources_both_preserved(self, wiki_root: Path) -> None:
+        cpath = self._write_person_with_per_value(
+            wiki_root,
+            uid="pv111111",
+            name="Pat Canon",
+            apollo_id="apo-pv",
+            emails=["pat@one.com"],
+            per_value_emails=[
+                {"value": "pat@one.com", "source": "google:contact-pat"},
+            ],
+        )
+        apath = self._write_person_with_per_value(
+            wiki_root,
+            uid="pv222222",
+            name="Pat Absorb",
+            apollo_id="apo-pv",
+            emails=["pat@two.com"],
+            per_value_emails=[
+                {"value": "pat@two.com", "source": "linkedin:pat-handle"},
+            ],
+        )
+        pair = DuplicatePair(
+            canonical_uid="pv111111",
+            absorbed_uid="pv222222",
+            match_signal="apollo_id",
+            canonical_path=str(cpath),
+            absorbed_path=str(apath),
+        )
+        merge_duplicate_persons([pair], apply=True)
+        meta, _ = parse_frontmatter(cpath.read_text(encoding="utf-8"))
+        emails_fs = meta["field_sources"]["emails"]
+        assert isinstance(emails_fs, list)
+        by_value = {e["value"]: e["source"] for e in emails_fs}
+        assert by_value == {
+            "pat@one.com": "google:contact-pat",
+            "pat@two.com": "linkedin:pat-handle",
+        }
+
+    def test_overlapping_per_value_canonical_wins(self, wiki_root: Path) -> None:
+        cpath = self._write_person_with_per_value(
+            wiki_root,
+            uid="pv333333",
+            name="Pat Canon",
+            apollo_id="apo-ov",
+            emails=["shared@x.com", "canon-only@x.com"],
+            per_value_emails=[
+                {"value": "shared@x.com", "source": "google:canon"},
+                {"value": "canon-only@x.com", "source": "google:canon-only"},
+            ],
+        )
+        apath = self._write_person_with_per_value(
+            wiki_root,
+            uid="pv444444",
+            name="Pat Absorb",
+            apollo_id="apo-ov",
+            emails=["shared@x.com", "absorb-only@x.com"],
+            per_value_emails=[
+                {"value": "shared@x.com", "source": "linkedin:absorb"},
+                {"value": "absorb-only@x.com", "source": "linkedin:absorb-only"},
+            ],
+        )
+        pair = DuplicatePair(
+            canonical_uid="pv333333",
+            absorbed_uid="pv444444",
+            match_signal="apollo_id",
+            canonical_path=str(cpath),
+            absorbed_path=str(apath),
+        )
+        merge_duplicate_persons([pair], apply=True)
+        meta, _ = parse_frontmatter(cpath.read_text(encoding="utf-8"))
+        by_value = {e["value"]: e["source"] for e in meta["field_sources"]["emails"]}
+        # Canonical wins for shared values
+        assert by_value["shared@x.com"] == "google:canon"
+        assert by_value["canon-only@x.com"] == "google:canon-only"
+        assert by_value["absorb-only@x.com"] == "linkedin:absorb-only"
+
+    def test_legacy_canonical_plus_new_incoming_emits_new_shape(
+        self, wiki_root: Path
+    ) -> None:
+        # Canonical has legacy single-source; absorbed has per-value.
+        cpath = _write_person(
+            wiki_root,
+            uid="pv555555",
+            name="Pat Legacy",
+            apollo_id="apo-mix",
+            emails=["legacy@x.com"],
+            field_sources={"emails": "google:legacy-source"},
+        )
+        apath = self._write_person_with_per_value(
+            wiki_root,
+            uid="pv666666",
+            name="Pat New",
+            apollo_id="apo-mix",
+            emails=["new@x.com"],
+            per_value_emails=[
+                {"value": "new@x.com", "source": "linkedin:new-source"},
+            ],
+        )
+        pair = DuplicatePair(
+            canonical_uid="pv555555",
+            absorbed_uid="pv666666",
+            match_signal="apollo_id",
+            canonical_path=str(cpath),
+            absorbed_path=str(apath),
+        )
+        merge_duplicate_persons([pair], apply=True)
+        meta, _ = parse_frontmatter(cpath.read_text(encoding="utf-8"))
+        emails_fs = meta["field_sources"]["emails"]
+        # Writer emits new per-value shape regardless of canonical's
+        # legacy input shape.
+        assert isinstance(emails_fs, list)
+        by_value = {e["value"]: e["source"] for e in emails_fs}
+        # Canonical legacy broadcasts across canonical's values.
+        assert by_value["legacy@x.com"] == "google:legacy-source"
+        # Absorbed's per-value entry carries forward.
+        assert by_value["new@x.com"] == "linkedin:new-source"
 
 
 class TestSocialUrlCoalesce:

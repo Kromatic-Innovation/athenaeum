@@ -58,7 +58,11 @@ class WikiBase(BaseModel):
     # Per-claim provenance (issue #90). Stored as the on-disk shape
     # (str OR dict) — round-trip fidelity beats normalization here.
     source: str | dict | None = None
-    field_sources: dict[str, str | dict] | None = None
+    # ``field_sources`` per-field value is one of:
+    # - ``str``/``dict`` (legacy single source for the whole field), or
+    # - ``list[dict]`` of ``{"value", "source"}`` records (per-value
+    #   attribution for list-typed fields, issue #102).
+    field_sources: dict[str, str | dict | list] | None = None
 
     @field_validator("source", mode="before")
     @classmethod
