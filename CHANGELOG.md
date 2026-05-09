@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **BREAKING: extracted `enrich` subcommand and `connectors/apollo` module**
+  (#112) — the Apollo people-match connector and the `athenaeum enrich
+  --persons` CLI subcommand have been removed from the OSS package. Both
+  were Kromatic-specific (operator-curated wiki + Apollo API key) and now
+  live in the `code-workspace-config` (cwc) personal toolkit alongside the
+  rest of the Apollo enrichment scripts. See cwc#235 (merged at sha
+  8fbe5183) for the self-contained replacement. The conflict-resolution
+  lock document (`docs/conflict-resolution.md`) drops its former section 8
+  (`enrich_person` + CLI write path); the conflict-resolution audit suite
+  drops `TestEnrichPersonResolution` and `TestCliEnrichWriteFieldSourcesMerge`.
+  No other resolver or schema is affected.
+
 ### Added
 - **Auto-memory contradiction detection (C4)** (#198) — new
   `athenaeum.contradictions` module runs one claim-level Haiku call per

@@ -217,59 +217,11 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   - Idempotence guard lives in `merge_duplicate_persons` (`already_merged`
     counter when absorbed file is gone), NOT `_perform_merge` itself.
 
-## 8. `connectors/apollo.py:enrich_person` + CLI `enrich --persons` write path
-
-### 8a. `enrich_person`
-
-- **File:** [`src/athenaeum/connectors/apollo.py` lines 399–471](https://github.com/Kromatic-Innovation/athenaeum/blob/b0ee25c/src/athenaeum/connectors/apollo.py#L399-L471)
-- **Trigger:** Per person wiki — caller passes the existing meta dict + an
-  `ApolloClient`. Pure aside from the Apollo API call.
-- **Resolution rule (per field):**
-
-| Field | Rule |
-|-------|------|
-| `apollo_id`, `current_title`, `current_company`, `apollo_headline`, `apollo_location`, `apollo_employment_history`, `apollo_enriched_on` | **Apollo wins (always emitted)** when truthy in the response. Falsy values (`None`/`""`/`[]`/`{}`) are skipped via `set_field`. |
-| `linkedin_url`, `twitter_url`, `github_url` | **Existing wins.** Apollo's value is emitted ONLY if the existing meta's value is empty/missing. Operator-curated curated URLs are protected. |
-
-- **Provenance behavior (post-#90):** Every field set in `fields` gets a paired
-  entry in `field_sources` with value `api:apollo:<YYYY-MM-DD>` (UTC date). The
-  `field_sources` map is returned to the caller for merging — `enrich_person`
-  itself does not touch the wiki.
-- **Known edge cases:**
-  - `today=None` defaults to UTC today via `datetime.now(tz=timezone.utc)`.
-  - When Apollo returns no match, `EnrichResult(matched=False)` with empty
-    fields/field_sources.
-
-### 8b. CLI `enrich --persons` write path
-
-- **File:** [`src/athenaeum/cli.py` lines 1219–1226](https://github.com/Kromatic-Innovation/athenaeum/blob/b0ee25c/src/athenaeum/cli.py#L1219-L1226)
-- **Trigger:** `athenaeum enrich --persons --apply` per matched candidate.
-- **Resolution rule:**
-  - **Scalar fields:** `new_meta = dict(meta); new_meta.update(result.fields)` —
-    Apollo's `fields` overwrite the existing wiki's values for any key Apollo
-    returned. (Recall `enrich_person` already filtered linkedin/twitter/github
-    to only emit when missing on input — so those three are NOT clobbered. The
-    Apollo-namespace and `current_title`/`current_company` fields ARE clobbered
-    on every successful match.)
-  - **`field_sources`:** `existing_fs = dict(meta.get("field_sources") or {});
-    existing_fs.update(result.field_sources)` — Apollo's per-key provenance
-    overwrites the existing wiki's per-key provenance for any key Apollo touched.
-    This is correct *iff* Apollo's value also overwrote the field; for
-    linkedin/twitter/github (which Apollo skipped writing to `fields`), the
-    `field_sources` entry is also absent so existing provenance survives.
-- **Provenance behavior (post-#90):** Records `api:apollo:<date>` for every
-  Apollo-touched field. Pre-existing non-Apollo provenance for unrelated keys
-  survives untouched. The case where the existing wiki already carried an
-  `api:apollo:<earlier-date>` for a field — and a re-enrich produces a newer
-  date — results in the newer date overwriting (this is desired: it tracks
-  freshness).
-- **Known edge cases:**
-  - There is no "skip if Apollo's value matches existing" guard — even when
-    Apollo's `current_title` equals the wiki's existing `current_title`, the
-    write still updates `apollo_enriched_on` and bumps `field_sources`. **Bug
-    finding filed as separate issue** — see PR body.
-  - The `--skip-recent` CLI flag (default 30 days) gates the candidate set
-    BEFORE this write path; it is an upstream filter, not a conflict rule.
+> **Note (2026-05-09):** A previous "section 8" documented the
+> `connectors/apollo.py:enrich_person` resolver and the CLI
+> `enrich --persons` write path. Both were extracted from the OSS package
+> in cwc#235 / athenaeum#112 and now live in the cwc personal toolkit.
+> See cwc/scripts/knowledge-librarian/ for their current home.
 
 ---
 
@@ -284,8 +236,6 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 | `merge.py` cluster merge | n/a | n/a | sources: `(session,turn)`-dedupe; origin_scopes: union | n/a | n/a | concat with paragraph-dedupe | n/a |
 | `contradictions.py` | DETECT-ONLY — never resolves | — | — | — | — | — | — |
 | `dedupe._perform_merge` | canonical wins if truthy | canonical wins | union (canonical first) | max | max (lex ISO) | canonical + appended absorbed | canonical wins per key; absorbed-only keys carried forward |
-| `enrich_person` | existing wins for linkedin/twitter/github; Apollo wins for all other Apollo fields | Apollo when matched | Apollo (employment history) | n/a | `apollo_enriched_on`: today | n/a | Apollo emits `api:apollo:<date>` per key |
-| CLI `enrich --persons` write | — | dict-update: Apollo wins for any key it returned | (none — Apollo doesn't return list-merge keys) | — | — | — | dict-update: Apollo wins for any key it returned |
 
 **Lock semantics:** every cell above MUST stay accurate. A future PR that
 changes any cell must update both this matrix AND the corresponding
@@ -296,9 +246,9 @@ changes any cell must update both this matrix AND the corresponding
 ## Coverage notes
 
 `tests/test_conflict_resolution.py` exercises every documented rule above. The
-combined whole-module line coverage on the eight target files
-(`merge.py`, `contradictions.py`, `dedupe.py`, `librarian.py`, `tiers.py`,
-`connectors/apollo.py` — `tier3_*` and `tier0_passthrough` are within
+combined whole-module line coverage on the in-tree target files
+(`merge.py`, `contradictions.py`, `dedupe.py`, `librarian.py`, `tiers.py` —
+`tier3_*` and `tier0_passthrough` are within
 `tiers.py`/`librarian.py`) is **~48% line coverage** when measured against the
 whole modules. This is below the issue's 80% target, but the residual lines
 are NOT in the resolvers themselves — they live in:
@@ -307,8 +257,6 @@ are NOT in the resolvers themselves — they live in:
   pipeline plumbing outside `tier0_passthrough`).
 - `tiers.py`: `tier1_programmatic_match` (covered separately by
   `test_tiers.py`) and `tier2_classify` (covered by `test_tiers.py`).
-- `connectors/apollo.py`: HTTP transport (`ApolloClient.people_match`,
-  `_request`, retries) — covered by `test_apollo_connector.py`.
 - `dedupe.py`: name normalization, wiki loading, YAML round-trip — covered
   by integration tests in `test_dedupe.py`.
 - `merge.py`: top-level `merge_clusters_to_wiki` orchestration — covered by
@@ -319,7 +267,7 @@ are NOT in the resolvers themselves — they live in:
 The resolver functions themselves (`tier0_passthrough`, `tier3_create`,
 `tier3_merge`, `tier3_write`, `merge_cluster_row`, `_perform_merge`,
 `_merge_meta`, `_merge_field_sources`, `dedupe_sources`, `synthesize_body`,
-`detect_contradictions`, `enrich_person`) all have at least one passing test
+`detect_contradictions`) all have at least one passing test
 asserting their documented rule.
 
 When future PRs change resolver behavior, the rule of thumb is: every NEW
