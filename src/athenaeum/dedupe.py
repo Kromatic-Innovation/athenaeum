@@ -128,6 +128,7 @@ class MergeReport:
     missing_canonical: int = 0
     missing_absorbed: int = 0
     skipped_parse: int = 0
+    references_rewritten: int = 0
     errors: list[str] = field(default_factory=list)
     dry_run: bool = False
 
@@ -549,6 +550,60 @@ def _perform_merge(canonical_path: Path, absorbed_path: Path, dry_run: bool) -> 
     return f"MERGED:{absorbed_uid}->{canonical_uid}"
 
 
+def rewrite_references(
+    absorbed_uid: str,
+    canonical_uid: str,
+    canonical_path: Path,
+    wiki_dir: Path,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """Repoint cross-references to ``absorbed_uid`` at ``canonical_uid``.
+
+    Walks every ``*.md`` in ``wiki_dir`` and substitutes any occurrence of
+    ``absorbed_uid`` with ``canonical_uid`` (flat string replace — catches
+    ``[[uid]]`` body links, frontmatter list entries, and prose mentions
+    alike). Idempotent: when no sibling still mentions ``absorbed_uid``,
+    returns 0.
+
+    Skips:
+
+    - The canonical wiki itself (preserves the ``merged_from`` audit
+      trail and any ``## Merged from <absorbed_uid>`` body header).
+    - Files whose name starts with ``_`` (archives, indexes).
+
+    Ports the cwc-side ``merge_duplicate_persons.py::rewrite_references``
+    behavior (issue #103). Returns the count of files rewritten; with
+    ``dry_run=True``, returns the count that *would* be rewritten.
+    """
+    n = 0
+    try:
+        canonical_resolved = canonical_path.resolve()
+    except OSError:
+        canonical_resolved = canonical_path
+    for path in wiki_dir.glob("*.md"):
+        if path.name.startswith("_"):
+            continue
+        try:
+            if path.resolve() == canonical_resolved:
+                continue
+        except OSError:
+            if path == canonical_path:
+                continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if absorbed_uid not in text:
+            continue
+        new_text = text.replace(absorbed_uid, canonical_uid)
+        if new_text != text:
+            if not dry_run:
+                path.write_text(new_text, encoding="utf-8")
+            n += 1
+    return n
+
+
 def merge_duplicate_persons(
     pairs: Iterable[DuplicatePair],
     apply: bool = False,
@@ -586,6 +641,24 @@ def merge_duplicate_persons(
             report.skipped_parse += 1
         elif outcome.startswith("MERGED") or outcome.startswith("WOULD_MERGE"):
             report.merged += 1
+            # Sweep cross-uid references so siblings repoint at canonical.
+            # Use the directory the canonical lives in as the wiki dir
+            # (matches the existing absolute-path-first contract on
+            # DuplicatePair).
+            sweep_dir = cpath.parent if cpath.parent.exists() else wiki_root
+            if sweep_dir is not None:
+                try:
+                    report.references_rewritten += rewrite_references(
+                        absorbed_uid=pair.absorbed_uid,
+                        canonical_uid=pair.canonical_uid,
+                        canonical_path=cpath,
+                        wiki_dir=sweep_dir,
+                        dry_run=not apply,
+                    )
+                except OSError as exc:
+                    report.errors.append(
+                        f"rewrite_references {pair.absorbed_uid}: {exc}"
+                    )
     return report
 
 
@@ -631,4 +704,5 @@ __all__ = [
     "merge_duplicate_persons",
     "pairs_to_yaml",
     "pairs_from_yaml",
+    "rewrite_references",
 ]
