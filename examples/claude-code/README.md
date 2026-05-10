@@ -10,6 +10,7 @@ agent runtime.
 | `session-start-recall.sh`| Start of each session| Builds the FTS5 (and optional vector) index, caches config       |
 | `user-prompt-recall.sh`  | Each user turn       | Hybrid FTS5+vector search, injects top-3 wiki page names         |
 | `pre-compact-save.sh`    | Before compaction    | Reminds the model to call `remember` on anything load-bearing    |
+| `pending-questions-surface.sh` | Start of each session | Surfaces unresolved `_pending_questions.md` entries with a snooze cache |
 
 ## How the sidecar works (read this first)
 
@@ -116,6 +117,8 @@ pages or the index hasn't been built — check `~/.cache/athenaeum/`.
 | `ATHENAEUM_SRC`          | —                                 | Source checkout path (skips `pip install`, runs from source)   |
 | `ATHENAEUM_OP_KEY_PATH`  | `op://Agent Tools/Anthropic API Key/credential` | 1Password secret reference for `ANTHROPIC_API_KEY` |
 | `ATHENAEUM_HOOK_DEBUG`   | `0`                               | Set to `1` to log vector-backend errors to stderr              |
+| `ATHENAEUM_PQ_SNOOZE_HOURS` | `24`                          | Snooze TTL for `pending-questions-surface.sh` (consumed by the `resolve-questions` skill when writing the snooze file) |
+| `ATHENAEUM_PQ_HOOK_DEBUG` | `0`                              | Set to `1` to log `pending-questions-surface.sh` diagnostics to stderr |
 | `SEARCH_BACKEND`         | from `athenaeum.yaml` (`fts5`)    | `fts5` (default) or `vector`                                   |
 | `AUTO_RECALL`            | from `athenaeum.yaml` (`true`)    | Set to `false` to disable per-turn recall                      |
 
@@ -164,6 +167,33 @@ Files in this directory supporting that integration:
 Full walkthrough — directory layout, citation policy, how the librarian
 ingests and consolidates, and an end-to-end quick start — lives in
 [`docs/integrations/claude-code.md`](../../docs/integrations/claude-code.md).
+
+## Pending-questions surface
+
+When the librarian flags a contradiction or ambiguity, it lands in
+`~/knowledge/wiki/_pending_questions.md` as a `- [ ]` checkbox block.
+The `pending-questions-surface.sh` SessionStart hook calls
+`athenaeum questions count --json` and prints a one-block prompt like:
+
+```
+[Pending memory questions] 3 unresolved (oldest: 2026-04-20).
+Resolve interactively now, defer to tomorrow, or skip?
+Available via: `athenaeum questions next --with-proposal` or the resolve-questions skill.
+```
+
+To resolve interactively, invoke the `resolve-questions` skill (shipped in
+the athenaeum repo at `.claude/skills/resolve-questions/SKILL.md`). It walks
+each entry and calls the `resolve_question` MCP tool with your decision.
+"Defer" writes `~/.cache/athenaeum/pending-questions-snoozed-until`; the
+hook stays silent until that ISO-8601 timestamp passes.
+
+CLI reference:
+
+```bash
+athenaeum questions count --json                    # {"count": N, "oldest": "..."}
+athenaeum questions next --with-proposal            # show oldest entry + proposal
+athenaeum questions list --with-proposal --limit 5  # all unresolved (capped)
+```
 
 ## Troubleshooting
 
