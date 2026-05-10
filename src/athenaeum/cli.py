@@ -370,6 +370,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Wiki directory (default: ~/knowledge/wiki)",
     )
 
+    # questions command — surface unresolved pending-question blocks
+    from athenaeum._cmd_questions import add_questions_subparser
+
+    add_questions_subparser(subparsers)
+
     # rebuild-index command — rebuild the search index out-of-band
     rebuild_parser = subparsers.add_parser(
         "rebuild-index",
@@ -438,6 +443,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "repair":
         return _cmd_repair(args)
+
+    if args.command == "questions":
+        from athenaeum._cmd_questions import cmd_questions
+
+        return cmd_questions(args)
 
     return 0
 
