@@ -46,6 +46,22 @@ _DEFAULTS: dict[str, Any] = {
         "cluster_threshold": 0.55,
         "cluster_output": "raw/_librarian-clusters.jsonl",
     },
+    "contradiction": {
+        # Cross-scope contradiction detection (issue #125, #81-A).
+        # Modes: off | ancestor | similarity | both. Default ``ancestor``
+        # pools each per-scope cluster with members from any ancestor scope
+        # (e.g. ``-Users-tristankromer-Code-foo``'s pool also includes
+        # ``-Users-tristankromer-Code``). ``similarity`` runs a cosine
+        # cross-product over the recall index (raw + wiki). ``both`` runs
+        # ancestor pooling AND the similarity sweep. Env override:
+        # ``ATHENAEUM_CROSS_SCOPE_MODE``.
+        "cross_scope_mode": "ancestor",
+        # Hard cap on pooled-cluster size before splitting into newest-first
+        # chunks for the detector.
+        "cluster_size_cap": 25,
+        # Cosine similarity threshold for the cross-scope sweep.
+        "similarity_threshold": 0.85,
+    },
 }
 
 
@@ -118,6 +134,22 @@ search_backend: fts5
 # librarian:
 #   cluster_threshold: 0.55
 #   cluster_output: raw/_librarian-clusters.jsonl
+
+# Cross-scope contradiction detection (issue #125).
+# cross_scope_mode: off | ancestor (default) | similarity | both.
+#   - off: per-scope cluster only.
+#   - ancestor: pool each cluster with ancestor scopes (-Users-foo-bar
+#     also includes -Users-foo, -Users) before running the detector.
+#   - similarity: per-scope pass + cosine sweep over raw + wiki.
+#   - both: ancestor pooling THEN similarity sweep.
+# cluster_size_cap: pooled-cluster size cap; oversized pools are split
+#   into newest-first chunks before detection.
+# similarity_threshold: cosine cutoff for the cross-scope sweep.
+# Env override: ATHENAEUM_CROSS_SCOPE_MODE.
+# contradiction:
+#   cross_scope_mode: ancestor
+#   cluster_size_cap: 25
+#   similarity_threshold: 0.85
 """
 
 
