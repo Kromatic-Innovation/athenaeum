@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Removed
+- **BREAKING: retired `provenance._LEGACY_SCALAR_RE` and the legacy
+  bare-slug `source:` parser branch.** Pre-#90 wikis stored `source:` as
+  a bare slug (`extended-tier-build`, `warm-network-detect`); the live
+  tree was migrated on 2026-05-09 via
+  `athenaeum repair --legacy-source-slugs --apply` (15,403 wikis rewritten
+  to `script:<slug>`). The parser branch and matching schema/test fixtures
+  retired in this PR. `provenance.parse_source` now raises `ValueError`
+  on bare-slug input with a pointer to the typed `<type>:<ref>` form.
+  External callers that still emit bare slugs must switch to the typed
+  form. The migration tool (`repair.migrate_legacy_source_slugs`) keeps
+  its own internal slug regex and ships unchanged for any future tree
+  that needs it. Completes athenaeum#97 acceptance criterion "Remove
+  legacy regex branch + its tests" which was deferred from #120 pending
+  live-tree migration. The field-keyed `field_sources` legacy reader
+  (per `docs/provenance-shape.md` §2.3) is a different legacy form and
+  remains accepted on read.
 - **BREAKING: extracted `enrich` subcommand and `connectors/apollo` module**
   (#112) — the Apollo people-match connector and the `athenaeum enrich
   --persons` CLI subcommand have been removed from the OSS package. Both
