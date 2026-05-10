@@ -50,6 +50,12 @@ from typing import TYPE_CHECKING, Any
 from athenaeum.clusters import resolve_cluster_output_path
 from athenaeum.config import load_config, resolve_extra_intake_roots
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
+from athenaeum.resolutions import (
+    ResolutionProposal,
+    propose_resolution,
+    render_proposal_block,
+    resolve_max_per_run,
+)
 from athenaeum.cross_scope import (
     candidate_to_auto_memory_files,
     chunk_by_cap,
@@ -687,7 +693,11 @@ def merge_clusters_to_wiki(
                     tuple(sorted((str(members[i].path), str(members[j].path))))
                 )
 
-    def _emit_escalation(entry: MergedWikiEntry, result: ContradictionResult) -> None:
+    def _emit_escalation(
+        entry: MergedWikiEntry,
+        result: ContradictionResult,
+        proposal: ResolutionProposal | None = None,
+    ) -> None:
         if not result.detected:
             return
         wiki_ref = f"wiki/{entry.filename}"
@@ -704,6 +714,14 @@ def merge_clusters_to_wiki(
         description = "\n".join(description_parts) or (
             f"Cluster {entry.cluster_id} flagged by contradiction detector."
         )
+        # Append the OPTIONAL Opus-resolver proposal block (issue #126).
+        # render_proposal_block returns "" for the deterministic fallback,
+        # so entries without a real proposal stay byte-identical to the
+        # pre-#126 escalation format.
+        if proposal is not None:
+            block = render_proposal_block(proposal)
+            if block:
+                description = description + "\n" + block
         escalations.append(
             EscalationItem(
                 raw_ref=wiki_ref,
@@ -715,6 +733,40 @@ def merge_clusters_to_wiki(
 
     auto_memory_list = list(auto_memory_files)
     use_ancestor = mode in ("ancestor", "both")
+
+    # Issue #126: Opus-backed resolver budget. The resolver is opt-in
+    # via ANTHROPIC_API_KEY (no client → fallback path); the per-run cap
+    # caps Opus calls even when a key is present, so a noisy detector
+    # cannot run away with cost. When the budget is exhausted, the
+    # remaining contradictions are escalated WITHOUT a proposal —
+    # `render_proposal_block` is a no-op on the fallback proposal so the
+    # block stays byte-identical to the pre-#126 format.
+    resolve_budget = resolve_max_per_run(resolved_config)
+    resolve_calls = 0
+    resolve_budget_exhausted_logged = False
+
+    def _maybe_propose(
+        result: ContradictionResult,
+        members: list[AutoMemoryFile],
+    ) -> ResolutionProposal | None:
+        nonlocal resolve_calls, resolve_budget_exhausted_logged
+        if not result.detected:
+            return None
+        if resolve_calls >= resolve_budget:
+            if not resolve_budget_exhausted_logged:
+                log.warning(
+                    "resolutions: per-run cap of %d Opus calls reached; "
+                    "escalating remaining contradictions without proposal",
+                    resolve_budget,
+                )
+                resolve_budget_exhausted_logged = True
+            else:
+                log.warning(
+                    "resolutions: budget-exhausted; escalating without proposal"
+                )
+            return None
+        resolve_calls += 1
+        return propose_resolution(result, members, client)
 
     for entry in entries:
         if use_ancestor:
@@ -738,7 +790,8 @@ def merge_clusters_to_wiki(
             _record_pair_keys(chunk)
             if result.detected and aggregate is None:
                 aggregate = result
-                _emit_escalation(entry, result)
+                proposal = _maybe_propose(result, chunk)
+                _emit_escalation(entry, result, proposal)
         if aggregate is None:
             # Use the last result so rationale (e.g. "singleton" /
             # "llm-unavailable") is preserved on the entry.
@@ -778,7 +831,8 @@ def merge_clusters_to_wiki(
                     contradictions_detected=True,
                     contradiction=result,
                 )
-                _emit_escalation(synthetic, result)
+                proposal = _maybe_propose(result, list(pair))
+                _emit_escalation(synthetic, result, proposal)
 
     log.info(
         "contradictions: mode=%s; haiku_calls=%d; chunks_run=%d; "
