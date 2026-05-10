@@ -34,7 +34,6 @@ from athenaeum.cross_scope import (
 from athenaeum.merge import merge_clusters_to_wiki
 from athenaeum.models import AutoMemoryFile
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -300,8 +299,8 @@ class TestSimilaritySweep:
             "B body",
             origin_scope="-Users-trk-Code-bar",
         )
-        a_id = f"auto-memory/-Users-trk-Code-foo/feedback_a.md"
-        b_id = f"auto-memory/-Users-trk-Code-bar/feedback_b.md"
+        a_id = "auto-memory/-Users-trk-Code-foo/feedback_a.md"
+        b_id = "auto-memory/-Users-trk-Code-bar/feedback_b.md"
         embedder = _StubEmbedder(
             {
                 a_id: [1.0, 0.0],
