@@ -61,6 +61,15 @@ _DEFAULTS: dict[str, Any] = {
         "cluster_size_cap": 25,
         # Cosine similarity threshold for the cross-scope sweep.
         "similarity_threshold": 0.85,
+        # Issue #126: Opus-backed resolver between Haiku detection and
+        # tier4_escalate. ``resolve_model`` overrides the default Opus
+        # model so users can pick a cheaper resolver. Env var
+        # ``ATHENAEUM_RESOLVE_MODEL`` wins over this setting.
+        "resolve_model": "claude-opus-4-7",
+        # Per-run cap on Opus calls. Surplus contradictions get escalated
+        # without a proposal (degraded mode). Env var
+        # ``ATHENAEUM_RESOLVE_MAX_PER_RUN`` wins over this setting.
+        "resolve_max_per_run": 50,
     },
 }
 
@@ -146,10 +155,18 @@ search_backend: fts5
 #   into newest-first chunks before detection.
 # similarity_threshold: cosine cutoff for the cross-scope sweep.
 # Env override: ATHENAEUM_CROSS_SCOPE_MODE.
+# Opus-backed resolver (issue #126).
+# resolve_model: model used to propose a winner once Haiku flags a contradiction.
+#   Defaults to claude-opus-4-7. Env override: ATHENAEUM_RESOLVE_MODEL.
+# resolve_max_per_run: cap on resolver calls per ingest. Surplus contradictions
+#   are escalated without a proposal (degraded mode).
+#   Env override: ATHENAEUM_RESOLVE_MAX_PER_RUN.
 # contradiction:
 #   cross_scope_mode: ancestor
 #   cluster_size_cap: 25
 #   similarity_threshold: 0.85
+#   resolve_model: claude-opus-4-7
+#   resolve_max_per_run: 50
 """
 
 
