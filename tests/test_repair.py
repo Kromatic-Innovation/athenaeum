@@ -628,10 +628,12 @@ def test_cli_legacy_slugs_unknown_slug_returns_1(tmp_path: Path, capsys) -> None
     assert "ABORTED" in captured.err
 
 
-def test_legacy_scalar_re_still_present_in_provenance() -> None:
-    """Quine gate: the legacy bare-slug regex MUST still be present in
-    ``provenance.py``. This PR ships the migration tool ONLY; the regex
-    retires in a separate follow-up after the live tree is migrated."""
+def test_legacy_scalar_re_retired_from_provenance() -> None:
+    """Quine gate: the legacy bare-slug regex is RETIRED from
+    ``provenance.py``. Live tree migrated 2026-05-09 (15,403 wikis to
+    `script:<slug>` via ``athenaeum repair --legacy-source-slugs --apply``),
+    and the parser branch retired in the follow-up PR. The migration tool
+    keeps its own internal slug regex in ``repair.py``."""
     from athenaeum import provenance
 
-    assert hasattr(provenance, "_LEGACY_SCALAR_RE")
+    assert not hasattr(provenance, "_LEGACY_SCALAR_RE")
