@@ -31,3 +31,6 @@ htmlcov/
 
 # Distribution
 *.tar.gz
+
+# Workspace agent overrides
+.codex/
