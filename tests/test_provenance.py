@@ -40,7 +40,9 @@ class TestParseSourceScalar:
             "Type:has-uppercase",
             "1numeric:start",
             "type:has\nnewline",
-            "Has-Uppercase",  # legacy form must also be lowercase-only
+            "Has-Uppercase",  # uppercase rejected
+            "extended-tier-build",  # legacy bare-slug form retired in #97
+            "warm-network-detect",  # legacy bare-slug form retired in #97
             "has spaces",
             "",  # empty
             "type:   ",  # whitespace-only ref
@@ -52,17 +54,16 @@ class TestParseSourceScalar:
         with pytest.raises(ValueError):
             parse_source(bad)
 
-    def test_legacy_single_token_accepted(self) -> None:
-        # Pre-#90 wikis store ``source:`` as a bare slug (no colon).
-        # ~15k live wikis use this form; the validator must accept them.
-        ref = parse_source("extended-tier-build")
-        assert ref.type == "legacy"
-        assert ref.ref == "extended-tier-build"
+    def test_legacy_bare_slug_retired(self) -> None:
+        # Legacy bare-slug form retired post-#97 (live tree migrated
+        # 15,403 wikis to `script:<slug>` on 2026-05-09). The parser now
+        # rejects bare slugs with a helpful pointer to the typed form.
+        with pytest.raises(ValueError, match="typed"):
+            parse_source("extended-tier-build")
 
-        ref2 = parse_source("warm-network-detect")
-        assert ref2.ref == "warm-network-detect"
-
-        # And the typed form still works on the same call site.
+    def test_typed_form_post_migration(self) -> None:
+        # Idempotency check: the typed form that #97 migrates to must
+        # round-trip cleanly through parse_source.
         typed = parse_source("script:extended-tier-build")
         assert typed.type == "script"
         assert typed.ref == "extended-tier-build"
@@ -131,11 +132,12 @@ class TestValidateSourceValue:
 
     def test_malformed_raises(self) -> None:
         with pytest.raises(ValueError):
-            validate_source_value("Has-Uppercase")  # neither typed nor legacy
+            validate_source_value("Has-Uppercase")  # malformed
 
-    def test_legacy_passes(self) -> None:
-        # Legacy single-token form must round-trip unchanged.
-        assert validate_source_value("extended-tier-build") == "extended-tier-build"
+    def test_legacy_bare_slug_rejected(self) -> None:
+        # Post-#97: legacy bare-slug form no longer validates.
+        with pytest.raises(ValueError):
+            validate_source_value("extended-tier-build")
 
 
 class TestValidateFieldSources:
