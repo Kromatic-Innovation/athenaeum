@@ -494,34 +494,73 @@ def test_legacy_slugs_byte_for_byte_body_preservation(tmp_path: Path) -> None:
     assert diffs[0][2] == "source: script:extended-tier-build"
 
 
-def test_legacy_slugs_validation_failure_skips_file(
-    tmp_path: Path, monkeypatch
+def test_legacy_slugs_unrelated_frontmatter_issue_does_not_block(
+    tmp_path: Path,
 ) -> None:
-    """If ``validate_wiki_meta`` rejects the rewritten frontmatter, that
-    file is skipped (recorded in ``skipped_validation_fail``) and the
-    other files still proceed."""
+    """Unrelated pre-existing frontmatter issues must NOT block the
+    source-line rewrite. The migration's safeguard is scoped to the
+    rewritten ``source:`` value only — full-wiki validation is out of
+    scope (would over-reach and skip wikis with unrelated issues, as
+    happened to 350 integer-uid wikis on the live tree pre-fix).
+    """
+    # Integer uid is invalid per PersonWiki schema, but it is unrelated
+    # to the source-line rewrite. Migration should still proceed.
+    integer_uid_wiki = """\
+---
+uid: 15193201
+type: person
+name: Greg Test
+source: extended-tier-build
+---
+
+Body.
+"""
+    wiki = _make_wiki(
+        tmp_path,
+        {"greg.md": integer_uid_wiki, "hank.md": LEGACY_WARM},
+    )
+
+    report = migrate_legacy_source_slugs(wiki, apply=True)
+
+    assert report.skipped_validation_fail == 0
+    assert report.rewrites_applied == 2
+    assert "source: script:extended-tier-build" in (wiki / "greg.md").read_text()
+    assert "source: script:warm-network-detect" in (wiki / "hank.md").read_text()
+
+
+def test_legacy_slugs_invalid_source_skips_file(tmp_path: Path, monkeypatch) -> None:
+    """If the new typed source value fails to parse via parse_source,
+    that file is skipped (recorded in ``skipped_validation_fail``) and
+    the other files still proceed.
+    """
     wiki = _make_wiki(
         tmp_path,
         {"gail.md": LEGACY_EXTENDED, "hank.md": LEGACY_WARM},
     )
 
-    from athenaeum import schemas as schemas_mod
+    from athenaeum import provenance as provenance_mod
+    from athenaeum import repair as repair_mod
 
-    real_validate = schemas_mod.validate_wiki_meta
-    fail_target = "person:gail"
+    real_parse = provenance_mod.parse_source
 
-    def fake_validate(meta):
-        if meta.get("uid") == fail_target:
-            raise ValueError("synthetic validation failure")
-        return real_validate(meta)
+    def fake_parse(value):
+        if value == "script:extended-tier-build":
+            raise ValueError("synthetic parse_source failure")
+        return real_parse(value)
 
-    monkeypatch.setattr(schemas_mod, "validate_wiki_meta", fake_validate)
+    # Patch the binding inside repair.py's local import.
+    monkeypatch.setattr(
+        repair_mod,
+        "migrate_legacy_source_slugs",
+        repair_mod.migrate_legacy_source_slugs,
+    )
+    monkeypatch.setattr(provenance_mod, "parse_source", fake_parse)
 
     report = migrate_legacy_source_slugs(wiki, apply=True)
 
     assert report.skipped_validation_fail == 1
     assert report.rewrites_applied == 1
-    # gail.md untouched (validation failed).
+    # gail.md untouched (parse_source failed).
     assert (wiki / "gail.md").read_text() == LEGACY_EXTENDED
     # hank.md migrated.
     assert "source: script:warm-network-detect" in (wiki / "hank.md").read_text()
