@@ -247,8 +247,11 @@ class LegacySlugReport:
         files_scanned: total ``.md`` files inspected.
         would_rewrite: dry-run count of wikis that WOULD be migrated.
         rewrites_applied: apply-mode count of wikis ACTUALLY migrated.
-        skipped_validation_fail: rewrites whose post-rewrite frontmatter
-            failed :func:`validate_wiki_meta` and were skipped.
+        skipped_validation_fail: rewrites whose new typed ``source:``
+            value failed :func:`provenance.parse_source` and were
+            skipped. NOTE: name retained for CLI output stability; the
+            check now validates ONLY the rewritten source line, not the
+            full wiki frontmatter (see PR fix/migration-relax-safeguard).
         unknown_slugs: per-slug count of bare-slug values not present in
             :data:`LEGACY_SLUG_MAP`. Non-empty → migration ABORTED.
         unknown_slug_files: first 10 ``(path, slug)`` pairs for unknown
@@ -285,17 +288,20 @@ def migrate_legacy_source_slugs(
       is ABORTED before any rewrite is written. Per design-lock §5.2,
       this is deliberate — no guess, no partial apply.
 
-    In ``apply`` mode, every rewrite is validated via
-    :func:`athenaeum.schemas.validate_wiki_meta` BEFORE the file is
-    written; validation failures are recorded under
-    ``skipped_validation_fail`` and the original file is left intact.
+    In ``apply`` mode, every rewrite's NEW typed source value is parsed
+    via :func:`athenaeum.provenance.parse_source` BEFORE the file is
+    written. Failures are recorded under ``skipped_validation_fail``
+    and the original file is left intact. The check is intentionally
+    narrow: only the source line changes, so only the source line is
+    validated. Pre-existing frontmatter issues (e.g. unrelated invalid
+    fields) do NOT block the trivial source rewrite.
 
     Idempotent: a typed ``source: script:extended-tier-build`` does NOT
     match :data:`_SOURCE_LINE_RE` (the regex rejects values containing a
     colon), so a re-run on a fully migrated tree finds zero candidates.
     """
-    # Local import — avoids a top-level cycle between repair and schemas.
-    from athenaeum.schemas import validate_wiki_meta
+    # Local import — avoids a top-level cycle between repair and provenance.
+    from athenaeum.provenance import parse_source
 
     report = LegacySlugReport()
     if not wiki_root.is_dir():
@@ -350,24 +356,20 @@ def migrate_legacy_source_slugs(
             report.changes.append((path, f"{slug} -> {typed}"))
         return report
 
-    # Phase 4: apply. Validate each rewrite via validate_wiki_meta;
-    # skip (don't abort) on per-file validation failure — defensive guard.
+    # Phase 4: apply. Validate ONLY the new typed source value via
+    # parse_source — the source line is the only thing this migration
+    # changes, so it is the only thing we should gate on. Pre-existing
+    # frontmatter issues (e.g. integer uid, malformed unrelated fields)
+    # are out of scope for this migration and must NOT block the
+    # trivial source rewrite. Skip (don't abort) on per-file failure.
     for path, _orig, new_text, slug, typed in candidates:
-        # Parse the new frontmatter for validation.
-        parts = _split_frontmatter(new_text)
-        if parts is None:
-            report.skipped_validation_fail += 1
-            report.errors.append((path, "post_rewrite_frontmatter_missing"))
-            continue
-        new_fm, _ = parts
         try:
-            meta = yaml.safe_load(new_fm)
-            if not isinstance(meta, dict):
-                raise ValueError("frontmatter is not a mapping")
-            validate_wiki_meta(meta)
+            parsed = parse_source(typed)
+            if parsed is None:
+                raise ValueError("parse_source returned None")
         except Exception as exc:  # noqa: BLE001 — defensive guard
             report.skipped_validation_fail += 1
-            report.errors.append((path, f"validation_failed: {str(exc)[:120]}"))
+            report.errors.append((path, f"invalid_source: {str(exc)[:120]}"))
             continue
         try:
             _atomic_write(path, new_text)
