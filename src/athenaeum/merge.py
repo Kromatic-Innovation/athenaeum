@@ -50,12 +50,6 @@ from typing import TYPE_CHECKING, Any
 from athenaeum.clusters import resolve_cluster_output_path
 from athenaeum.config import load_config, resolve_extra_intake_roots
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
-from athenaeum.resolutions import (
-    ResolutionProposal,
-    propose_resolution,
-    render_proposal_block,
-    resolve_max_per_run,
-)
 from athenaeum.cross_scope import (
     candidate_to_auto_memory_files,
     chunk_by_cap,
@@ -70,6 +64,12 @@ from athenaeum.models import (
     EscalationItem,
     parse_frontmatter,
     render_frontmatter,
+)
+from athenaeum.resolutions import (
+    ResolutionProposal,
+    propose_resolution,
+    render_proposal_block,
+    resolve_max_per_run,
 )
 from athenaeum.tiers import tier4_escalate
 
