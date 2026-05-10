@@ -21,10 +21,10 @@ contract.
 
 - **#90 — per-claim provenance primitives** (PR #94): `WikiBase.source`
   and `WikiBase.field_sources` round-trip on disk. `provenance.py` parses
-  the scalar `<type>:<ref>` form, the structured `{type, ref, ts?,
-  confidence?, notes?}` dict form, and a legacy single-token form
-  (`extended-tier-build`, `warm-network-detect`) so the live tree of
-  ~19k wikis doesn't break.
+  the scalar `<type>:<ref>` form and the structured `{type, ref, ts?,
+  confidence?, notes?}` dict form. (A legacy single-token form
+  — `extended-tier-build`, `warm-network-detect` — was accepted on read
+  until #97 migrated the live tree on 2026-05-09; see §5.)
 - **#95 — Tier 3 emits `field_sources`**: when Tier 3 creates or merges
   a person/company wiki, the relevant Apollo-namespace fields are
   attributed via `field_sources.<key> = "api:apollo:<date>"`.
@@ -42,9 +42,10 @@ contract.
   came from a LinkedIn export, the second source is lost.
 - **MCP `remember(sources=...)` shape** (#96). Three on-the-wire shapes
   collide today and the type-based disambiguation has a pathological case.
-- **Legacy slug → typed migration** (#97). 15,403 wikis still carry
-  `source: <bare-slug>`. They need a typed equivalent so the legacy
-  branch in `_LEGACY_SCALAR_RE` can retire.
+- ~~**Legacy slug → typed migration** (#97).~~ Resolved 2026-05-09:
+  `athenaeum repair --legacy-source-slugs --apply` migrated 15,403 wikis
+  from `<bare-slug>` to `script:<slug>`. The `_LEGACY_SCALAR_RE` branch
+  in `provenance.parse_source` retired in the follow-up PR.
 
 ---
 
@@ -334,8 +335,14 @@ After a successful migration of the live tree:
 
 - `_LEGACY_SCALAR_RE` and its branch in `provenance.parse_source` retire.
 - Tests that exercise the legacy branch retire with it.
-- This doc gets a note: "legacy bare-slug shape removed in
-  athenaeum#NNN, <date>."
+
+**Status (2026-05-09):** the live-tree migration ran and rewrote 15,403
+wikis to the `script:<slug>` typed form. The `_LEGACY_SCALAR_RE` constant
+and the legacy branch in `provenance.parse_source` were retired in the
+follow-up PR; `parse_source` now raises `ValueError` on bare-slug input
+with a pointer to the typed form. The migration tool itself
+(`repair.migrate_legacy_source_slugs`) keeps its own internal slug regex
+and ships unchanged for any future tree that needs it.
 
 ---
 

@@ -42,13 +42,13 @@ from pydantic import BaseModel, ConfigDict, field_validator
 # be empty. We anchor with ``\Z`` so a trailing newline doesn't sneak in.
 _SCALAR_RE = re.compile(r"^([a-z][a-z0-9_-]*):([^\n]+)\Z")
 
-# Legacy single-token form (no colon) — for pre-#90 wikis whose ``source:``
-# is a bare slug like ``extended-tier-build`` or ``warm-network-detect``.
-# ~15k live wikis use this shape; the validator MUST accept them so the
-# schema doesn't break the live tree. New wikis SHOULD use the typed
-# ``<type>:<ref>`` form above. Migration of legacy → typed is tracked
-# separately in issue #97; once complete, this regex + branch can go.
-_LEGACY_SCALAR_RE = re.compile(r"^[a-z][a-z0-9_-]*\Z")
+# Note: the legacy single-token (bare-slug) ``source:`` form was retired
+# after issue #97 migrated 15,403 live-tree wikis from `<slug>` to
+# `script:<slug>` on 2026-05-09 via
+# ``athenaeum repair --legacy-source-slugs --apply``. New wikis MUST use
+# the typed ``<type>:<ref>`` form. The migration tool itself
+# (`repair.migrate_legacy_source_slugs`) keeps its own internal slug
+# regex and ships unchanged for any future tree that needs it.
 
 
 class SourceRef(BaseModel):
@@ -134,15 +134,13 @@ def parse_source(value: Any) -> SourceRef | None:
                     f"source ref must not have leading/trailing whitespace, got {value!r}"
                 )
             return SourceRef(type=m.group(1), ref=ref_part)
-        # Legacy single-token form (pre-#90 wikis). Accept but don't
-        # synthesize a structured SourceRef — the on-disk shape stays the
-        # bare slug; we model it as type="legacy", ref=<slug> for callers
-        # that need a SourceRef object. Validator preserves on-disk shape
-        # via validate_source_value (returns value unchanged).
-        if _LEGACY_SCALAR_RE.match(value):
-            return SourceRef(type="legacy", ref=value)
+        # Legacy bare-slug form retired post-#97 migration. Callers that
+        # still emit `source: <slug>` must switch to the typed
+        # `<type>:<ref>` form (e.g. `script:<slug>`).
         raise ValueError(
-            f"source scalar must match '<type>:<ref>' or legacy '[a-z][a-z0-9_-]*', got {value!r}"
+            f"source scalar must be typed '<type>:<ref>' (e.g. "
+            f"'script:extended-tier-build'); legacy bare-slug form retired "
+            f"in #97, got {value!r}"
         )
     if isinstance(value, dict):
         return SourceRef.model_validate(value)

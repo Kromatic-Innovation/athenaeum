@@ -314,16 +314,27 @@ class TestProvenanceFields:
                 field_sources={"emails": "Has-Uppercase"},
             )
 
-    def test_legacy_source_accepted(self) -> None:
-        # Pre-#90 wikis store ``source: extended-tier-build`` as a bare slug.
-        # ~15k live wikis use this shape; schema must accept them.
+    def test_legacy_bare_slug_source_rejected(self) -> None:
+        # Post-#97: legacy bare-slug `source:` form is retired. The live
+        # tree was migrated to `script:<slug>` on 2026-05-09; the schema
+        # now rejects bare slugs and requires the typed `<type>:<ref>` form.
+        with pytest.raises(ValueError):
+            PersonWiki(
+                uid="abc12345",
+                type="person",
+                name="X",
+                source="extended-tier-build",
+            )
+
+    def test_typed_script_source_accepted(self) -> None:
+        # Post-migration shape — `script:<slug>` is the typed equivalent.
         m = PersonWiki(
             uid="abc12345",
             type="person",
             name="X",
-            source="extended-tier-build",
+            source="script:extended-tier-build",
         )
-        assert m.source == "extended-tier-build"
+        assert m.source == "script:extended-tier-build"
 
     def test_none_passes(self) -> None:
         m = PersonWiki(uid="abc12345", type="person", name="X")
