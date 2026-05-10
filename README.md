@@ -189,6 +189,7 @@ Full setup guide, smoke test, and environment-variable reference:
 ## Integrations
 
 - **Claude Code auto-memory** — bridge `~/.claude/projects/<scope>/memory/` into Athenaeum's `raw/` intake so the librarian can cluster, merge, and contradiction-check Claude Code's durable memory alongside other sources. See [`docs/integrations/claude-code.md`](docs/integrations/claude-code.md).
+- **Contradiction detection** — pipeline overview, cross-scope modes, source-precedence taxonomy, configuration reference, and cost model for the auto-memory contradiction path. See [`docs/contradiction-detection.md`](docs/contradiction-detection.md).
 
 ## Vector search (optional)
 
