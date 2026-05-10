@@ -10,6 +10,11 @@
             "command": "/path/to/session-start-recall.sh 2>/dev/null || true",
             "timeout": 15,
             "statusMessage": "Building knowledge index..."
+          },
+          {
+            "type": "command",
+            "command": "/path/to/pending-questions-surface.sh 2>/dev/null || true",
+            "timeout": 5
           }
         ]
       }

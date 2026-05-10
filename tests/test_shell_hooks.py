@@ -26,6 +26,7 @@ HOOKS_DIR = Path(__file__).parent.parent / "examples" / "claude-code"
 SESSION_START = HOOKS_DIR / "session-start-recall.sh"
 USER_PROMPT = HOOKS_DIR / "user-prompt-recall.sh"
 PRE_COMPACT = HOOKS_DIR / "pre-compact-save.sh"
+PENDING_QUESTIONS = HOOKS_DIR / "pending-questions-surface.sh"
 
 
 def _require(tool: str) -> None:
@@ -83,7 +84,10 @@ class TestSessionStartRecall:
         _require("bash")
         result = subprocess.run(
             ["bash", str(SESSION_START)],
-            env=hook_env, capture_output=True, text=True, timeout=30,
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
 
@@ -105,7 +109,10 @@ class TestSessionStartRecall:
         }
         result = subprocess.run(
             ["bash", str(SESSION_START)],
-            env=env, capture_output=True, text=True, timeout=10,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0
 
@@ -114,7 +121,11 @@ class TestUserPromptRecall:
     def _seed_index(self, hook_env: dict[str, str]) -> None:
         subprocess.run(
             ["bash", str(SESSION_START)],
-            env=hook_env, capture_output=True, text=True, timeout=30, check=True,
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
         )
 
     def test_returns_wiki_match_as_additional_context(
@@ -125,14 +136,19 @@ class TestUserPromptRecall:
         _require("sqlite3")
         self._seed_index(hook_env)
 
-        stdin_payload = json.dumps({
-            "prompt": "Tell me about customer development frameworks",
-            "session_id": f"test-{uuid.uuid4().hex}",
-        })
+        stdin_payload = json.dumps(
+            {
+                "prompt": "Tell me about customer development frameworks",
+                "session_id": f"test-{uuid.uuid4().hex}",
+            }
+        )
         result = subprocess.run(
             ["bash", str(USER_PROMPT)],
-            input=stdin_payload, env=hook_env,
-            capture_output=True, text=True, timeout=10,
+            input=stdin_payload,
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
         assert result.stdout, "expected hookSpecificOutput JSON on stdout"
@@ -153,14 +169,19 @@ class TestUserPromptRecall:
         _require("sqlite3")
         self._seed_index(hook_env)
 
-        stdin_payload = json.dumps({
-            "prompt": "hi",
-            "session_id": f"test-{uuid.uuid4().hex}",
-        })
+        stdin_payload = json.dumps(
+            {
+                "prompt": "hi",
+                "session_id": f"test-{uuid.uuid4().hex}",
+            }
+        )
         result = subprocess.run(
             ["bash", str(USER_PROMPT)],
-            input=stdin_payload, env=hook_env,
-            capture_output=True, text=True, timeout=10,
+            input=stdin_payload,
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0
         assert result.stdout == ""
@@ -168,14 +189,19 @@ class TestUserPromptRecall:
     def test_exits_clean_with_no_index(self, hook_env: dict[str, str]) -> None:
         _require("bash")
         _require("jq")
-        stdin_payload = json.dumps({
-            "prompt": "anything at all with enough characters",
-            "session_id": f"test-{uuid.uuid4().hex}",
-        })
+        stdin_payload = json.dumps(
+            {
+                "prompt": "anything at all with enough characters",
+                "session_id": f"test-{uuid.uuid4().hex}",
+            }
+        )
         result = subprocess.run(
             ["bash", str(USER_PROMPT)],
-            input=stdin_payload, env=hook_env,
-            capture_output=True, text=True, timeout=10,
+            input=stdin_payload,
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0
         assert result.stdout == ""
@@ -195,9 +221,122 @@ class TestPreCompactSave:
         env = {"HOME": str(tmp_path), "PATH": os.environ.get("PATH", "")}
         result = subprocess.run(
             ["bash", str(PRE_COMPACT)],
-            env=env, capture_output=True, text=True, timeout=5,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         assert result.returncode == 0
         payload = json.loads(result.stdout)
         assert "systemMessage" in payload
         assert "Knowledge checkpoint" in payload["systemMessage"]
+
+
+class TestPendingQuestionsSurface:
+    """`pending-questions-surface.sh` — SessionStart hook that surfaces
+    unresolved `_pending_questions.md` blocks with a snooze cache.
+
+    Contract: never blocks startup. Empty / missing pending file → silent.
+    Populated → prints `[Pending memory questions] N unresolved (oldest: ...)`.
+    Snooze file with future date → silent. Past date → re-surfaces.
+    """
+
+    def _seed_pending(self, knowledge: Path, count: int = 2) -> None:
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True, exist_ok=True)
+        body = ["# Pending Questions", ""]
+        for i in range(count):
+            body.append(
+                f'## [2026-04-{10 + i:02d}] Entity: "Acme {i}" '
+                f"(from sessions/x-{i}.md)"
+            )
+            body.append(f"- [ ] Question {i}?")
+            body.append("**Conflict type**: principled")
+            body.append("**Description**: synthetic")
+            body.append("")
+            body.append("---")
+            body.append("")
+        (wiki / "_pending_questions.md").write_text("\n".join(body))
+
+    def test_silent_when_no_pending_file(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        _require("bash")
+        # hook_env's wiki has wiki pages but no _pending_questions.md.
+        result = subprocess.run(
+            ["bash", str(PENDING_QUESTIONS)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+    def test_surfaces_count_when_populated(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        self._seed_pending(knowledge, count=3)
+
+        result = subprocess.run(
+            ["bash", str(PENDING_QUESTIONS)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "[Pending memory questions]" in result.stdout
+        assert "3 unresolved" in result.stdout
+        assert "2026-04-10" in result.stdout  # oldest
+
+    def test_silent_when_snoozed_until_future(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        self._seed_pending(knowledge, count=2)
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        # Far-future ISO instant — must compare > now lexicographically.
+        (cache_dir / "pending-questions-snoozed-until").write_text(
+            "2999-01-01T00:00:00Z"
+        )
+
+        result = subprocess.run(
+            ["bash", str(PENDING_QUESTIONS)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+    def test_resurfaces_after_snooze_expires(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        self._seed_pending(knowledge, count=1)
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        # Past instant — should be ignored, count surfaces.
+        (cache_dir / "pending-questions-snoozed-until").write_text(
+            "2000-01-01T00:00:00Z"
+        )
+
+        result = subprocess.run(
+            ["bash", str(PENDING_QUESTIONS)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        assert "[Pending memory questions]" in result.stdout
+        assert "1 unresolved" in result.stdout
