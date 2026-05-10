@@ -8,9 +8,11 @@ agent runtime.
 | Hook                     | When it fires        | What it does                                                    |
 |--------------------------|----------------------|------------------------------------------------------------------|
 | `session-start-recall.sh`| Start of each session| Builds the FTS5 (and optional vector) index, caches config       |
+| `wiki-context-inject.sh` | Start of each session| Cheap cwd-keyword grep — surfaces wiki pages relevant to the project being opened, before any prompt is submitted |
 | `user-prompt-recall.sh`  | Each user turn       | Hybrid FTS5+vector search, injects top-3 wiki page names         |
 | `pre-compact-save.sh`    | Before compaction    | Reminds the model to call `remember` on anything load-bearing    |
 | `pending-questions-surface.sh` | Start of each session | Surfaces unresolved `_pending_questions.md` entries with a snooze cache |
+| `rebuild-index.sh`       | SessionEnd (optional)| Out-of-band index rebuild with atomic dir lock — wire when synchronous SessionStart rebuild becomes painful (large wikis, vector backend) |
 
 ## How the sidecar works (read this first)
 
@@ -117,6 +119,9 @@ pages or the index hasn't been built — check `~/.cache/athenaeum/`.
 | `ATHENAEUM_SRC`          | —                                 | Source checkout path (skips `pip install`, runs from source)   |
 | `ATHENAEUM_OP_KEY_PATH`  | `op://Agent Tools/Anthropic API Key/credential` | 1Password secret reference for `ANTHROPIC_API_KEY` |
 | `ATHENAEUM_HOOK_DEBUG`   | `0`                               | Set to `1` to log vector-backend errors to stderr              |
+| `ATHENAEUM_FORCE_REBUILD` | `0`                              | Set to `1` to force a vector-index rebuild even if the existing one is fresher than the wiki |
+| `ATHENAEUM_INJECT_SKIP_WORDS` | `Code|Users|home|workspace|src|lib|app|var|tmp|usr` | Pipe-separated cwd path segments to ignore in `wiki-context-inject.sh` |
+| `ATHENAEUM_INJECT_MAX_RESULTS` | `3`                          | Max wiki pages to surface from `wiki-context-inject.sh`         |
 | `ATHENAEUM_PQ_SNOOZE_HOURS` | `24`                          | Snooze TTL for `pending-questions-surface.sh` (consumed by the `resolve-questions` skill when writing the snooze file) |
 | `ATHENAEUM_PQ_HOOK_DEBUG` | `0`                              | Set to `1` to log `pending-questions-surface.sh` diagnostics to stderr |
 | `SEARCH_BACKEND`         | from `athenaeum.yaml` (`fts5`)    | `fts5` (default) or `vector`                                   |
