@@ -50,6 +50,15 @@ from typing import TYPE_CHECKING, Any
 from athenaeum.clusters import resolve_cluster_output_path
 from athenaeum.config import load_config, resolve_extra_intake_roots
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
+from athenaeum.cross_scope import (
+    candidate_to_auto_memory_files,
+    chunk_by_cap,
+    cross_scope_similarity_pairs,
+    pool_cluster_with_ancestors,
+    resolve_cluster_size_cap,
+    resolve_cross_scope_mode,
+    resolve_similarity_threshold,
+)
 from athenaeum.models import (
     AutoMemoryFile,
     EscalationItem,
@@ -86,11 +95,25 @@ AUTO_WIKI_PREFIX = "auto-"
 # filenames — these carry no semantic weight and would otherwise win
 # the frequency contest on naturally-clustered files (``feedback_`` is
 # the dominant prefix across memories, for example).
-_SLUG_BORING_TOKENS: frozenset[str] = frozenset({
-    "feedback", "project", "reference", "user", "recall", "auto",
-    "memory", "note", "the", "and", "for", "with", "file", "files",
-    "md",
-})
+_SLUG_BORING_TOKENS: frozenset[str] = frozenset(
+    {
+        "feedback",
+        "project",
+        "reference",
+        "user",
+        "recall",
+        "auto",
+        "memory",
+        "note",
+        "the",
+        "and",
+        "for",
+        "with",
+        "file",
+        "files",
+        "md",
+    }
+)
 
 
 @dataclass
@@ -149,7 +172,8 @@ def read_cluster_rows(jsonl_path: Path) -> list[dict[str, Any]]:
             except json.JSONDecodeError as exc:
                 log.warning(
                     "skipping malformed cluster row in %s: %s",
-                    jsonl_path, exc,
+                    jsonl_path,
+                    exc,
                 )
     return rows
 
@@ -160,7 +184,8 @@ def read_cluster_rows(jsonl_path: Path) -> list[dict[str, Any]]:
 
 
 def resolve_member_path(
-    member_ref: str, extra_roots: list[Path],
+    member_ref: str,
+    extra_roots: list[Path],
 ) -> Path | None:
     """Resolve a cluster row's ``member_paths`` entry to an absolute file.
 
@@ -197,7 +222,8 @@ def _slug_tokens_from_filename(filename: str) -> list[str]:
 
 
 def derive_topic_slug(
-    member_paths: list[str], cluster_id: str,
+    member_paths: list[str],
+    cluster_id: str,
 ) -> str:
     """Derive a filesystem-safe topic slug from cluster member filenames.
 
@@ -418,7 +444,8 @@ def merge_cluster_row(
         if resolved is None:
             log.warning(
                 "cluster %s: member %s did not resolve; skipping that member",
-                cluster_id, mp,
+                cluster_id,
+                mp,
             )
             continue
         key = str(resolved)
@@ -433,7 +460,8 @@ def merge_cluster_row(
             except (OSError, UnicodeDecodeError):
                 log.warning(
                     "cluster %s: %s unreadable; skipping that member",
-                    cluster_id, resolved,
+                    cluster_id,
+                    resolved,
                 )
                 continue
             meta, _ = parse_frontmatter(text)
@@ -458,8 +486,7 @@ def merge_cluster_row(
                 name=str(meta.get("name", "")) if meta else "",
                 description=str(meta.get("description", "")) if meta else "",
                 origin_session_id=(
-                    str(origin_session_id)
-                    if origin_session_id is not None else None
+                    str(origin_session_id) if origin_session_id is not None else None
                 ),
                 origin_turn=origin_turn,
                 sources=sources,
@@ -599,7 +626,8 @@ def merge_clusters_to_wiki(
         from athenaeum.librarian import discover_auto_memory_files
 
         auto_memory_files = discover_auto_memory_files(
-            knowledge_root, config=resolved_config,
+            knowledge_root,
+            config=resolved_config,
         )
 
     am_by_path = _collect_am_by_path(auto_memory_files)
@@ -607,7 +635,9 @@ def merge_clusters_to_wiki(
     entries: list[MergedWikiEntry] = []
     for row in rows:
         entry = merge_cluster_row(
-            row, extra_roots=extra_roots, am_by_path=am_by_path,
+            row,
+            extra_roots=extra_roots,
+            am_by_path=am_by_path,
         )
         if entry is None:
             continue
@@ -622,48 +652,151 @@ def merge_clusters_to_wiki(
         if base in slug_counts:
             slug_counts[base] += 1
             suffix = re.sub(r"[^a-z0-9]+", "-", entry.cluster_id.lower()).strip("-")
-            entry.topic_slug = f"{base}-{suffix}" if suffix else f"{base}-{slug_counts[base]}"
+            entry.topic_slug = (
+                f"{base}-{suffix}" if suffix else f"{base}-{slug_counts[base]}"
+            )
         else:
             slug_counts[base] = 1
 
-    # C4 (#198): claim-level contradiction detection per cluster. Runs for
-    # every cluster including in dry-run (so operators can preview which
-    # entries would flag) but only writes the escalation file on non-dry
-    # runs. Detector failures and missing keys degrade to detected=False.
+    # C4 (#198 + #125): claim-level contradiction detection.
+    #
+    # Mode toggle (issue #125, ATHENAEUM_CROSS_SCOPE_MODE):
+    # - off: per-cluster only (legacy behavior).
+    # - ancestor (default): pool each cluster with ancestor-scope members
+    #   then chunk by cap before running the detector.
+    # - similarity: per-cluster pass + cosine sweep over raw + wiki.
+    # - both: ancestor pooling THEN similarity sweep over remaining pairs.
     wiki_root = knowledge_root / "wiki"
     escalations: list[EscalationItem] = []
-    for entry in entries:
-        result = detect_contradictions(entry.resolved_members, client)
-        entry.contradiction = result
-        entry.contradictions_detected = bool(result.detected)
-        if result.detected:
-            wiki_ref = f"wiki/{entry.filename}"
-            description_parts: list[str] = []
-            if result.rationale:
-                description_parts.append(result.rationale)
-            if result.conflicting_passages:
-                for i, passage in enumerate(result.conflicting_passages, start=1):
-                    description_parts.append(f"Passage {i}: {passage}")
-            if result.members_involved:
-                description_parts.append(
-                    "Members involved: " + ", ".join(result.members_involved)
+    mode = resolve_cross_scope_mode(resolved_config)
+    cluster_size_cap = resolve_cluster_size_cap(resolved_config)
+    similarity_threshold = resolve_similarity_threshold(resolved_config)
+
+    haiku_calls = 0
+    pairs_added_via_similarity = 0
+    chunks_run = 0
+
+    # Track which (path_a, path_b) pairs are already covered by a single
+    # detector call so the similarity sweep can skip them.
+    covered_pair_keys: set[tuple[str, str]] = set()
+
+    def _record_pair_keys(members: list[AutoMemoryFile]) -> None:
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                covered_pair_keys.add(
+                    tuple(sorted((str(members[i].path), str(members[j].path))))
                 )
-            description = "\n".join(description_parts) or (
-                f"Cluster {entry.cluster_id} flagged by contradiction detector."
+
+    def _emit_escalation(entry: MergedWikiEntry, result: ContradictionResult) -> None:
+        if not result.detected:
+            return
+        wiki_ref = f"wiki/{entry.filename}"
+        description_parts: list[str] = []
+        if result.rationale:
+            description_parts.append(result.rationale)
+        if result.conflicting_passages:
+            for i, passage in enumerate(result.conflicting_passages, start=1):
+                description_parts.append(f"Passage {i}: {passage}")
+        if result.members_involved:
+            description_parts.append(
+                "Members involved: " + ", ".join(result.members_involved)
             )
-            escalations.append(EscalationItem(
+        description = "\n".join(description_parts) or (
+            f"Cluster {entry.cluster_id} flagged by contradiction detector."
+        )
+        escalations.append(
+            EscalationItem(
                 raw_ref=wiki_ref,
                 entity_name=entry.topic_slug,
                 conflict_type=result.conflict_type or "factual",
                 description=description,
-            ))
+            )
+        )
+
+    auto_memory_list = list(auto_memory_files)
+    use_ancestor = mode in ("ancestor", "both")
+
+    for entry in entries:
+        if use_ancestor:
+            pooled = pool_cluster_with_ancestors(
+                entry.resolved_members,
+                auto_memory_list,
+            )
+            chunks = chunk_by_cap(pooled, cluster_size_cap)
+        else:
+            chunks = [list(entry.resolved_members)]
+
+        # Track aggregate result across chunks: any chunk that detects
+        # wins. The first detected result is the canonical one for the
+        # entry's frontmatter.
+        aggregate: ContradictionResult | None = None
+        for chunk in chunks:
+            chunks_run += 1
+            if len(chunk) >= 2:
+                haiku_calls += 1
+            result = detect_contradictions(chunk, client)
+            _record_pair_keys(chunk)
+            if result.detected and aggregate is None:
+                aggregate = result
+                _emit_escalation(entry, result)
+        if aggregate is None:
+            # Use the last result so rationale (e.g. "singleton" /
+            # "llm-unavailable") is preserved on the entry.
+            aggregate = result if chunks else ContradictionResult(detected=False)
+        entry.contradiction = aggregate
+        entry.contradictions_detected = bool(aggregate.detected)
+
+    # Similarity sweep (mode in {similarity, both}).
+    if mode in ("similarity", "both"):
+        from athenaeum.clusters import DEFAULT_CACHE_DIR
+
+        wiki_files: list[Path] = []
+        if wiki_root.is_dir():
+            wiki_files = sorted(wiki_root.glob("auto-*.md"))
+        candidates = cross_scope_similarity_pairs(
+            auto_memory_list,
+            wiki_files=wiki_files,
+            wiki_root=wiki_root,
+            extra_roots=extra_roots,
+            cache_dir=DEFAULT_CACHE_DIR,
+            threshold=similarity_threshold,
+            excluded_pair_keys=covered_pair_keys,
+        )
+        for cand in candidates:
+            pair = candidate_to_auto_memory_files(cand)
+            haiku_calls += 1
+            result = detect_contradictions(pair, client)
+            if result.detected:
+                pairs_added_via_similarity += 1
+                # Synthesize a thin escalation entry; we don't have a
+                # MergedWikiEntry for cross-pair similarity hits, so
+                # build a minimal one tied to the first member's name.
+                synthetic = MergedWikiEntry(
+                    topic_slug=cand.a_path.stem,
+                    cluster_id=f"similarity-{cand.a_path.stem}-{cand.b_path.stem}",
+                    cluster_centroid_score=cand.similarity,
+                    contradictions_detected=True,
+                    contradiction=result,
+                )
+                _emit_escalation(synthetic, result)
+
+    log.info(
+        "contradictions: mode=%s; haiku_calls=%d; chunks_run=%d; "
+        "pairs_added_via_similarity=%d",
+        mode,
+        haiku_calls,
+        chunks_run,
+        pairs_added_via_similarity,
+    )
 
     if dry_run:
         for entry in entries:
             log.info(
                 "  [DRY RUN] merge %s → wiki/%s (%d source(s), contradictions=%s)",
-                entry.cluster_id, entry.filename,
-                len(entry.sources), entry.contradictions_detected,
+                entry.cluster_id,
+                entry.filename,
+                len(entry.sources),
+                entry.contradictions_detected,
             )
         return entries
 
@@ -673,7 +806,9 @@ def merge_clusters_to_wiki(
         page_path.write_text(render_merged_entry(entry), encoding="utf-8")
         log.info(
             "merge: wrote %s (cluster %s, %d source(s), contradictions=%s)",
-            page_path, entry.cluster_id, len(entry.sources),
+            page_path,
+            entry.cluster_id,
+            len(entry.sources),
             entry.contradictions_detected,
         )
 
