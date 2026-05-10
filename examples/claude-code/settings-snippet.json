@@ -13,6 +13,11 @@
           },
           {
             "type": "command",
+            "command": "/path/to/wiki-context-inject.sh 2>/dev/null || true",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "/path/to/pending-questions-surface.sh 2>/dev/null || true",
             "timeout": 5
           }
@@ -36,6 +41,17 @@
           {
             "type": "command",
             "command": "/path/to/pre-compact-save.sh 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "_SessionEnd_optional": "Wire rebuild-index.sh as a SessionEnd hook for large wikis where the synchronous SessionStart rebuild becomes painful. Detach with nohup so session exit is instant.",
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "nohup /path/to/rebuild-index.sh >/dev/null 2>&1 &"
           }
         ]
       }

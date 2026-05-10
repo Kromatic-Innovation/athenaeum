@@ -27,6 +27,8 @@ SESSION_START = HOOKS_DIR / "session-start-recall.sh"
 USER_PROMPT = HOOKS_DIR / "user-prompt-recall.sh"
 PRE_COMPACT = HOOKS_DIR / "pre-compact-save.sh"
 PENDING_QUESTIONS = HOOKS_DIR / "pending-questions-surface.sh"
+WIKI_INJECT = HOOKS_DIR / "wiki-context-inject.sh"
+REBUILD_INDEX = HOOKS_DIR / "rebuild-index.sh"
 
 
 def _require(tool: str) -> None:
@@ -232,6 +234,167 @@ class TestPreCompactSave:
         assert "Knowledge checkpoint" in payload["systemMessage"]
 
 
+class TestWikiContextInject:
+    """`wiki-context-inject.sh` — SessionStart hook that surfaces wiki pages
+    matching cwd path keywords, before any prompt is submitted.
+
+    Contract: silent when wiki missing, no keywords match, or cwd is
+    generic; emits `[Knowledge context for <project>]` block when at least
+    one wiki page matches the cwd-derived keyword set.
+    """
+
+    def test_silent_when_wiki_missing(self, tmp_path: Path) -> None:
+        _require("bash")
+        env = {
+            "HOME": str(tmp_path),
+            "PATH": os.environ.get("PATH", ""),
+            "KNOWLEDGE_ROOT": str(tmp_path / "does-not-exist"),
+        }
+        result = subprocess.run(
+            ["bash", str(WIKI_INJECT)],
+            env=env,
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+    def test_surfaces_match_when_cwd_keyword_hits_wiki(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        # Add a wiki page whose name/body contains a recognisable token,
+        # then run the hook from a directory whose path contains that
+        # token. The cwd-keyword grep should pick it up.
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "innovation-accounting.md").write_text(
+            "---\n"
+            "name: Innovation Accounting\n"
+            "tags: [methodology]\n"
+            "---\n\n"
+            "Innovation Accounting is a Lean Startup-era measurement framework.\n"
+        )
+        project_dir = tmp_path / "projects" / "innovation-accounting-toolkit"
+        project_dir.mkdir(parents=True)
+
+        result = subprocess.run(
+            ["bash", str(WIKI_INJECT)],
+            env=hook_env,
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "[Knowledge context for innovation-accounting-toolkit]" in result.stdout
+        assert "Innovation Accounting" in result.stdout
+
+    def test_silent_when_no_keyword_matches(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        # cwd is a unique nonsense string; no wiki page contains it.
+        project_dir = tmp_path / "projects" / "qzqzqzqz-no-match-here"
+        project_dir.mkdir(parents=True)
+        result = subprocess.run(
+            ["bash", str(WIKI_INJECT)],
+            env=hook_env,
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+    def test_skips_underscore_index_pages(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "_pending_questions.md").write_text(
+            "---\nname: pending\n---\n\nzzunique-token-zz\n"
+        )
+        project_dir = tmp_path / "projects" / "zzunique-token-zz"
+        project_dir.mkdir(parents=True)
+        result = subprocess.run(
+            ["bash", str(WIKI_INJECT)],
+            env=hook_env,
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        # Should not surface the underscore-prefixed page.
+        assert result.stdout == ""
+
+
+class TestRebuildIndex:
+    """`rebuild-index.sh` — out-of-band SessionEnd rebuild with atomic lock."""
+
+    def test_builds_fts5_index_into_cache(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        result = subprocess.run(
+            ["bash", str(REBUILD_INDEX)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        index_db = tmp_path / ".cache" / "athenaeum" / "wiki-index.db"
+        assert index_db.is_file()
+        log_file = tmp_path / ".cache" / "athenaeum" / "rebuild.log"
+        assert log_file.is_file()
+        log = log_file.read_text()
+        assert "rebuild: start" in log
+        assert "rebuild: done" in log
+
+    def test_skips_when_lock_held(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        # Pre-create the lock dir to simulate concurrent rebuild.
+        (cache_dir / "rebuild.lock").mkdir()
+
+        result = subprocess.run(
+            ["bash", str(REBUILD_INDEX)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        # Should exit cleanly without crashing into the locked region.
+        assert result.returncode == 0
+        # Lock dir should still exist (we did not own it, so not removed).
+        assert (cache_dir / "rebuild.lock").is_dir()
+        log = (cache_dir / "rebuild.log").read_text()
+        assert "another rebuild in progress" in log
+
+    def test_exits_clean_when_wiki_missing(self, tmp_path: Path) -> None:
+        _require("bash")
+        env = {
+            "HOME": str(tmp_path),
+            "PATH": os.environ.get("PATH", ""),
+            "KNOWLEDGE_ROOT": str(tmp_path / "does-not-exist"),
+        }
+        result = subprocess.run(
+            ["bash", str(REBUILD_INDEX)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+
+
 class TestPendingQuestionsSurface:
     """`pending-questions-surface.sh` — SessionStart hook that surfaces
     unresolved `_pending_questions.md` blocks with a snooze cache.
@@ -258,9 +421,7 @@ class TestPendingQuestionsSurface:
             body.append("")
         (wiki / "_pending_questions.md").write_text("\n".join(body))
 
-    def test_silent_when_no_pending_file(
-        self, hook_env: dict[str, str]
-    ) -> None:
+    def test_silent_when_no_pending_file(self, hook_env: dict[str, str]) -> None:
         _require("bash")
         # hook_env's wiki has wiki pages but no _pending_questions.md.
         result = subprocess.run(

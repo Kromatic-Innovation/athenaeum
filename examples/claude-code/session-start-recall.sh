@@ -166,7 +166,28 @@ else
 fi
 
 if [ "${SEARCH_BACKEND:-fts5}" = "vector" ]; then
-  "$PYTHON" -c "
+  # Vector rebuild is expensive (~45s on a ~3k-page wiki) so skip when the
+  # existing index is newer than the newest wiki page. FTS5 above is cheap
+  # enough to always rebuild. Override with ATHENAEUM_FORCE_REBUILD=1.
+  VECTOR_DIR="${CACHE_DIR}/wiki-vectors"
+  _vector_fresh=false
+  if [ -d "$VECTOR_DIR" ] && [ "${ATHENAEUM_FORCE_REBUILD:-0}" != "1" ]; then
+    _idx_mtime=$(find "$VECTOR_DIR" -type f -print0 2>/dev/null \
+      | xargs -0 stat -f %m 2>/dev/null \
+      | sort -n | tail -1 || echo 0)
+    _wiki_mtime=$(find "$WIKI_ROOT" -type f -name '*.md' -print0 2>/dev/null \
+      | xargs -0 stat -f %m 2>/dev/null \
+      | sort -n | tail -1 || echo 0)
+    _idx_mtime="${_idx_mtime:-0}"
+    _wiki_mtime="${_wiki_mtime:-0}"
+    if [ "$_idx_mtime" -gt "$_wiki_mtime" ] && [ "$_idx_mtime" -gt 0 ]; then
+      _vector_fresh=true
+      echo "[Knowledge] Vector index fresh — skipping rebuild." >&2
+    fi
+  fi
+
+  if [ "$_vector_fresh" = false ]; then
+    "$PYTHON" -c "
 import sys, os, importlib.util
 src = os.environ.get('ATHENAEUM_SRC', '')
 path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
@@ -183,4 +204,5 @@ try:
 except ImportError as e:
     print(f'[Knowledge] Vector backend unavailable: {e}', file=sys.stderr)
 " "$WIKI_ROOT" "$CACHE_DIR" 2>&1 || true
+  fi
 fi
