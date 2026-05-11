@@ -7,6 +7,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-11
+
+This release ships three coherent streams of work: (a) the auto-memory
+intake → cluster → merge → contradiction-detection pipeline (#195, #196,
+#197, #198), which lets the librarian fold per-scope Claude Code memory
+and other auto-captured turns into the wiki without manual triage;
+(b) per-claim provenance, per-value `field_sources`, cross-uid dedupe,
+legacy-slug repair tooling, and an Opus-backed contradiction resolver
+(#90, #102, #103, #97, #126, #128); and (c) the Apollo connector
+extraction and `athenaeum people` filter CLI (#82, #112). Includes **two
+BREAKING changes**; see Removed.
+
+### Added
+
+#### Auto-memory pipeline
+- **Auto-memory contradiction detection (C4)** (#198) — see details below.
+- **Auto-memory cluster merge (C3)** (#197) — see details below.
+- **Auto-memory cluster pass (C2)** (#196) — see details below.
+- **Auto-memory ingest path** (#195) — see details below.
+- **Claude Code auto-memory integration guide** (#200) — see details below.
+- **`raw/auto-memory` indexed as first-class recall source** (#192) — the
+  FTS5/vector index now ingests `raw/auto-memory/<scope>/*.md` alongside
+  wiki pages so recall surfaces auto-captured turns before they’re merged.
+
+#### Provenance, dedupe, and contradiction tooling
+- **Per-claim `source:` on every CLAIM** (#90) — every emitted claim now
+  carries a typed `<type>:<ref>` provenance pointer.
+- **Per-value `field_sources` for list fields** (#102) — list-valued
+  frontmatter (tags, aliases, etc.) carries per-value provenance instead
+  of a single field-level source.
+- **Tier 3 emits `source`/`field_sources` + `KNOWN_TYPES` allowlist** —
+  the Sonnet writer now produces provenance-shaped output natively.
+- **Cross-uid reference rewriter for dedupe** (#103) — `athenaeum dedupe
+  persons --apply` rewrites every cross-uid reference to the survivor uid
+  in one pass; idempotent.
+- **Opus-backed contradiction resolver with provenance precedence** (#126)
+  — `athenaeum contradictions resolve` calls Opus on flagged clusters and
+  applies a deterministic source-precedence tie-breaker.
+- **Cross-scope contradiction-detection mode toggle** (#125) — per-scope
+  / cross-scope contradiction detection is now configurable.
+- **Pending-questions installable sidecar** (#128) — `athenaeum questions`
+  CLI (list / next / count) replaces ad-hoc grep against
+  `_pending_questions.md`; consumed by the example SessionStart hook and
+  the `resolve-questions` skill.
+- **Legacy bare-slug repair migration** (#97) — `athenaeum repair
+  --legacy-source-slugs` rewrites pre-#90 `source:` slugs to typed
+  `script:<slug>` form; the live tree was migrated 2026-05-09 before the
+  parser branch was retired (see Removed).
+- **`athenaeum repair` CLI** — dry-run-by-default YAML-frontmatter repair
+  for tag-indent corruption, missing fields, and legacy slug migration.
+
+#### Tooling and ingest
+- **`athenaeum people` CLI** (#82) — frontmatter-only `type:person` filter
+  (company / tag / tier / score, plus `--title-regex` / `--company-regex`).
+  No LLM, no embeddings — deterministic over the wiki tree.
+- **`athenaeum recall <query>` CLI** (#71) — shell-accessible wrapper
+  around the MCP recall tool; see details below.
+- **MCP `remember(sources=…)` wrappers** (#96) — the MCP `remember` tool
+  now accepts an optional list of typed source pointers; the server
+  routes them into the same provenance pipeline the librarian uses.
+- **Init templates for entity-author markdown** (#89) — `athenaeum init`
+  scaffolds example entity templates so first-time authors have a working
+  shape to copy.
+- **`tier0_passthrough` preserves pre-structured raw-intake** — raw files
+  that already carry `uid` + `type` + `name` round-trip byte-for-byte
+  through the librarian without LLM tier costs.
+- **Pydantic models + write-time validation** (#88) — wiki frontmatter is
+  validated against typed schemas at write time.
+- **`extra_intake_root` config warns when missing** — stale config paths
+  no longer fail silently at discovery time.
+- **p95 search-latency benchmark harness** (#69) — see details below.
+- **Auto-memory contradiction detection (C4) (#198) [details]** — new
+  `athenaeum.contradictions` module runs one claim-level Haiku call per
+  merged cluster to decide whether member bodies state or prescribe
+  contradictory things (factual or prescriptive). Wires into
+  `athenaeum.merge`: flagged clusters carry `status: contradiction-flagged`
+  in their wiki frontmatter and append a round-trippable block to
+  `wiki/_pending_questions.md` via the existing `tier4_escalate` helper.
+  The C3 centroid-cohesion heuristic (`CONTRADICTION_COHESION_THRESHOLD`)
+  is retired as the contradiction signal but kept exported for
+  backwards-compatibility. Deterministic fallback: when
+  `ANTHROPIC_API_KEY` is unset, every cluster reports `detected=False`
+  with `rationale="llm-unavailable"`. Includes
+  `scripts/measure_contradiction_baseline.py` for local corpus baselining.
+- **Claude Code auto-memory integration guide (#200) [details]** — new
+  `docs/integrations/claude-code.md` documents the generic symlink-bridge
+  pattern from `~/.claude/projects/<scope>/memory/` into
+  `raw/auto-memory/<scope>/`, a citation frontmatter policy, and an
+  end-to-end quick start. Adds `examples/claude-code/setup-symlinks.sh`
+  (idempotent bridge with `--dry-run`),
+  `examples/claude-code/stop-hook-validate.sh` (non-blocking citation
+  validator), and `examples/claude-code/auto-memory-frontmatter.example.md`
+  (reference memory file). `examples/claude-code/README.md` gains an
+  "Auto-memory integration" section linking the three.
+- **Auto-memory cluster merge (C3) (#197) [details]** — new
+  `athenaeum.merge` module consumes the C2 cluster JSONL and emits one
+  consolidated wiki entry per cluster at `wiki/auto-<topic-slug>.md` with
+  a deduped `sources[]` union (dedupe key: `(session, turn)`), propagated
+  `origin_scope` per source, and a `contradictions_detected` heuristic
+  flag (`centroid_score < 0.75`) for the C4 review queue. Size-1
+  clusters ARE emitted as wiki entries; raw intake files remain
+  untouched. New `--merge-only` CLI flag mirrors `--cluster-only` for
+  iterating on merge output without re-embedding.
+- **p95 search-latency benchmark harness (#69) [details]** — new
+  `tests/benchmarks/test_search_bench.py` checks in the ad-hoc benchmark
+  used for the Session-2 recall budget as a pytest-benchmark fixture.
+  One bench per backend (keyword, fts5; vector opt-in via
+  `ATHENAEUM_BENCH_VECTOR=1`), asserts p95 stays within 20% of a locally
+  pinned baseline. Ignored by the default `pytest` run (so CI stays
+  fast); execute with `pytest tests/benchmarks/ --benchmark-only`.
+  `pytest-benchmark` is an optional `[bench]` extra, not a runtime dep.
+- **Auto-memory cluster pass (C2) (#196) [details]** — new
+  `athenaeum.clusters` module groups `AutoMemoryFile` records into
+  near-duplicate clusters using the existing chromadb `VectorBackend`
+  embedder (no parallel embedding pipeline). Single-linkage clustering
+  with cosine cutoff configurable via `librarian.cluster_threshold`
+  (default 0.55, tuned against the voltaire/nanoclaw regression fixture).
+  Writes JSONL cluster report to `raw/_librarian-clusters.jsonl` with
+  rotated timestamped siblings. New `--cluster-only` CLI flag skips the
+  tier pipeline. C3 merge (#197) consumes the JSONL output.
+- **Auto-memory ingest path (#195) [details]** — librarian now discovers
+  files under `raw/auto-memory/<scope>/*.md` as a parallel intake channel
+  alongside the entity-schema `discover_raw_files`. New
+  `AUTO_MEMORY_FILE_RE`, `discover_auto_memory_files()`, and
+  `AutoMemoryFile` record carry `origin_scope`, `origin_session_id`,
+  `origin_turn`, `memory_type`, and `sources` through to downstream
+  tiers. Discovery uses `resolve_extra_intake_roots()` so config is
+  single-sourced with recall; `MEMORY.md` and `_migration-log.jsonl`
+  are excluded; `_unscoped/` is ingested as a first-class scope.
+  Clustering (#196) and wiki merge (#197) ship in subsequent lanes.
+- **`athenaeum recall <query>` CLI (#71) [details]** — shell-accessible
+  wrapper around the MCP `recall` tool for validation harnesses and
+  operator debugging. Prints one tab-separated hit per line
+  (`<score>\t<filename>\t<preview>`). Respects configured `search_backend`
+  and extra intake roots; `--top-k`, `--path`, `--cache-dir`, and
+  `--backend` flags supported.
+
 ### Removed
 - **BREAKING: retired `provenance._LEGACY_SCALAR_RE` and the legacy
   bare-slug `source:` parser branch.** Pre-#90 wikis stored `source:` as
@@ -36,72 +173,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`enrich_person` + CLI write path); the conflict-resolution audit suite
   drops `TestEnrichPersonResolution` and `TestCliEnrichWriteFieldSourcesMerge`.
   No other resolver or schema is affected.
-
-### Added
-- **Auto-memory contradiction detection (C4)** (#198) — new
-  `athenaeum.contradictions` module runs one claim-level Haiku call per
-  merged cluster to decide whether member bodies state or prescribe
-  contradictory things (factual or prescriptive). Wires into
-  `athenaeum.merge`: flagged clusters carry `status: contradiction-flagged`
-  in their wiki frontmatter and append a round-trippable block to
-  `wiki/_pending_questions.md` via the existing `tier4_escalate` helper.
-  The C3 centroid-cohesion heuristic (`CONTRADICTION_COHESION_THRESHOLD`)
-  is retired as the contradiction signal but kept exported for
-  backwards-compatibility. Deterministic fallback: when
-  `ANTHROPIC_API_KEY` is unset, every cluster reports `detected=False`
-  with `rationale="llm-unavailable"`. Includes
-  `scripts/measure_contradiction_baseline.py` for local corpus baselining.
-- **Claude Code auto-memory integration guide** (#200) — new
-  `docs/integrations/claude-code.md` documents the generic symlink-bridge
-  pattern from `~/.claude/projects/<scope>/memory/` into
-  `raw/auto-memory/<scope>/`, a citation frontmatter policy, and an
-  end-to-end quick start. Adds `examples/claude-code/setup-symlinks.sh`
-  (idempotent bridge with `--dry-run`),
-  `examples/claude-code/stop-hook-validate.sh` (non-blocking citation
-  validator), and `examples/claude-code/auto-memory-frontmatter.example.md`
-  (reference memory file). `examples/claude-code/README.md` gains an
-  "Auto-memory integration" section linking the three.
-- **Auto-memory cluster merge (C3)** (#197) — new `athenaeum.merge`
-  module consumes the C2 cluster JSONL and emits one consolidated wiki
-  entry per cluster at `wiki/auto-<topic-slug>.md` with a deduped
-  `sources[]` union (dedupe key: `(session, turn)`), propagated
-  `origin_scope` per source, and a `contradictions_detected` heuristic
-  flag (`centroid_score < 0.75`) for the C4 review queue. Size-1
-  clusters ARE emitted as wiki entries; raw intake files remain
-  untouched. New `--merge-only` CLI flag mirrors `--cluster-only` for
-  iterating on merge output without re-embedding.
-- **p95 search-latency benchmark harness** (#69) — new
-  `tests/benchmarks/test_search_bench.py` checks in the ad-hoc benchmark
-  used for the Session-2 recall budget as a pytest-benchmark fixture.
-  One bench per backend (keyword, fts5; vector opt-in via
-  `ATHENAEUM_BENCH_VECTOR=1`), asserts p95 stays within 20% of a locally
-  pinned baseline. Ignored by the default `pytest` run (so CI stays
-  fast); execute with `pytest tests/benchmarks/ --benchmark-only`.
-  `pytest-benchmark` is an optional `[bench]` extra, not a runtime dep.
-- **Auto-memory cluster pass (C2)** (#196) — new `athenaeum.clusters`
-  module groups `AutoMemoryFile` records into near-duplicate clusters
-  using the existing chromadb `VectorBackend` embedder (no parallel
-  embedding pipeline). Single-linkage clustering with cosine cutoff
-  configurable via `librarian.cluster_threshold` (default 0.55, tuned
-  against the voltaire/nanoclaw regression fixture). Writes JSONL cluster
-  report to `raw/_librarian-clusters.jsonl` with rotated timestamped
-  siblings. New `--cluster-only` CLI flag skips the tier pipeline. C3
-  merge (#197) consumes the JSONL output.
-- **Auto-memory ingest path** (#195) — librarian now discovers files
-  under `raw/auto-memory/<scope>/*.md` as a parallel intake channel
-  alongside the entity-schema `discover_raw_files`. New
-  `AUTO_MEMORY_FILE_RE`, `discover_auto_memory_files()`, and
-  `AutoMemoryFile` record carry `origin_scope`, `origin_session_id`,
-  `origin_turn`, `memory_type`, and `sources` through to downstream
-  tiers. Discovery uses `resolve_extra_intake_roots()` so config is
-  single-sourced with recall; `MEMORY.md` and `_migration-log.jsonl`
-  are excluded; `_unscoped/` is ingested as a first-class scope.
-  Clustering (#196) and wiki merge (#197) ship in subsequent lanes.
-- **`athenaeum recall <query>` CLI** (#71) — shell-accessible wrapper around
-  the MCP `recall` tool for validation harnesses and operator debugging.
-  Prints one tab-separated hit per line (`<score>\t<filename>\t<preview>`).
-  Respects configured `search_backend` and extra intake roots; `--top-k`,
-  `--path`, `--cache-dir`, and `--backend` flags supported.
 
 ## [0.3.1] - 2026-04-21
 
@@ -352,7 +423,8 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.2.2...v0.2.3

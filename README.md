@@ -281,10 +281,10 @@ Entities are indexed in `wiki/_index.md` grouped by type. Conflicts requiring
 human review are appended to `wiki/_pending_questions.md`. Each run logs
 token usage and estimated costs at the end.
 
-## Known limitations (v0.2.x)
+## Known limitations
 
-Athenaeum is pre-1.0. These trade-offs are intentional for this release and
-slated for revisit in v0.3:
+Athenaeum is pre-1.0. These trade-offs are intentional for the current
+release line:
 
 - **No retrieval benchmarks yet.** The hybrid-search claim rests on concrete
   failure modes (proper-noun collision, no-overlap semantic queries) and
