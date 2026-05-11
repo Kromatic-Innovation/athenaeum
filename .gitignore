@@ -34,3 +34,4 @@ htmlcov/
 
 # Workspace agent overrides
 .codex/
+.zenodotus/
