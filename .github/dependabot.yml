@@ -1,0 +1,63 @@
+# Maintenance-posture playbook (see docs/security-posture.md).
+# Patches and minors auto-merge via .github/workflows/dependabot-auto-merge.yml;
+# majors stay closed pending §3.2 review.
+#
+# This is a published Python library with explicit upper-bound version caps
+# on its critical deps (see pyproject.toml comments). The auto-merge policy
+# RESPECTS those caps — Dependabot can only propose bumps within the caps
+# the package author allows.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "monthly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 6
+    groups:
+      pip-patch:
+        update-types:
+          - "patch"
+      pip-minor:
+        update-types:
+          - "minor"
+      anthropic-stack:
+        patterns:
+          - "anthropic"
+        update-types:
+          - "major"
+      mcp-stack:
+        patterns:
+          - "fastmcp"
+        update-types:
+          - "major"
+      vector-stack:
+        patterns:
+          - "chromadb"
+        update-types:
+          - "major"
+      pydantic-stack:
+        patterns:
+          - "pydantic"
+        update-types:
+          - "major"
+      test-stack:
+        patterns:
+          - "pytest"
+          - "pytest-*"
+        update-types:
+          - "major"
+      lint-stack:
+        patterns:
+          - "ruff"
+        update-types:
+          - "major"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "monthly"

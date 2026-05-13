@@ -1,0 +1,93 @@
+name: Dependabot auto-merge
+
+on:
+  pull_request:
+    branches:
+      - develop
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Auto-merge eligible Dependabot PRs
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decide eligibility
+        id: gate
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          DEPS: ${{ steps.meta.outputs.dependency-names }}
+        run: |
+          # Policy (see docs/security-posture.md §3.1):
+          #   - Auto-merge all patch updates.
+          #   - Auto-merge minor updates EXCEPT for deps where pyproject.toml
+          #     explicitly comments "bumps are explicit PRs":
+          #     * anthropic — pre-1.0, breaking changes ship freely
+          #     * fastmcp — pre-1.0, MCP protocol shifts
+          #     * chromadb — minor bumps have migrated SQLite schemas
+          #   - Do NOT auto-merge major updates — those follow §3.2 (and would
+          #     exceed the package-author-set upper bounds in pyproject.toml).
+          HOLD_LIST="anthropic fastmcp chromadb"
+
+          echo "update-type: $UPDATE_TYPE"
+          echo "deps: $DEPS"
+
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch)
+              echo "eligible=true" >> "$GITHUB_OUTPUT"
+              echo "reason=patch update" >> "$GITHUB_OUTPUT"
+              ;;
+            version-update:semver-minor)
+              IFS=',' read -ra DEP_ARR <<< "$DEPS"
+              HOLD_HIT=""
+              for d in "${DEP_ARR[@]}"; do
+                dep="$(echo "$d" | xargs)"
+                for h in $HOLD_LIST; do
+                  if [ "$dep" = "$h" ]; then
+                    HOLD_HIT="$dep"
+                    break 2
+                  fi
+                done
+              done
+              if [ -n "$HOLD_HIT" ]; then
+                echo "eligible=false" >> "$GITHUB_OUTPUT"
+                echo "reason=minor update touches hold-list package: $HOLD_HIT" >> "$GITHUB_OUTPUT"
+              else
+                echo "eligible=true" >> "$GITHUB_OUTPUT"
+                echo "reason=minor update (no hold-list package)" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            version-update:semver-major)
+              echo "eligible=false" >> "$GITHUB_OUTPUT"
+              echo "reason=major update — see docs/security-posture.md §3.2" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "eligible=false" >> "$GITHUB_OUTPUT"
+              echo "reason=unknown update-type: $UPDATE_TYPE" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Enable auto-merge (squash)
+        if: steps.gate.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REASON: ${{ steps.gate.outputs.reason }}
+        run: |
+          echo "Enabling auto-merge: $REASON"
+          gh pr merge --auto --squash "$PR_URL"
+
+      - name: Record skip reason
+        if: steps.gate.outputs.eligible != 'true'
+        env:
+          REASON: ${{ steps.gate.outputs.reason }}
+        run: echo "Auto-merge skipped — $REASON"
