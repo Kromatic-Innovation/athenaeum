@@ -25,10 +25,12 @@ classifiers = [
 ]
 dependencies = [
     "pyyaml>=6.0,<7",
-    # anthropic and fastmcp are pre-1.0 and ship breaking changes freely.
-    # chromadb has shipped sqlite schema migrations in minor bumps. We cap
-    # at the next-major boundary (1.0 / 3.0) so a surprise release can't
-    # silently break a released athenaeum wheel — bumps are explicit PRs.
+    # anthropic is pre-1.0 and ships breaking changes freely; fastmcp is
+    # post-1.0 (3.x as of 2026-05) but still iterating on its MCP protocol
+    # surface; chromadb has shipped sqlite schema migrations in minor bumps.
+    # We cap each at an explicit upper bound (next-major boundary or wider)
+    # so a surprise release can't silently break a released athenaeum
+    # wheel — bumps are explicit PRs.
     "anthropic>=0.30.0,<1.0",
     "pydantic>=2.0,<3.0",
 ]

@@ -32,7 +32,7 @@ jobs:
           #   - Auto-merge minor updates EXCEPT for deps where pyproject.toml
           #     explicitly comments "bumps are explicit PRs":
           #     * anthropic — pre-1.0, breaking changes ship freely
-          #     * fastmcp — pre-1.0, MCP protocol shifts
+          #     * fastmcp — post-1.0, still iterating on MCP protocol surface
           #     * chromadb — minor bumps have migrated SQLite schemas
           #   - Do NOT auto-merge major updates — those follow §3.2 (and would
           #     exceed the package-author-set upper bounds in pyproject.toml).
