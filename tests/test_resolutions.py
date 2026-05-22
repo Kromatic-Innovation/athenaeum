@@ -35,6 +35,7 @@ from athenaeum.models import AutoMemoryFile, EscalationItem
 from athenaeum.resolutions import (
     DEFAULT_RESOLVE_MAX_PER_RUN,
     DEFAULT_RESOLVE_MODEL,
+    SUPPRESS_ACTION,
     ResolutionProposal,
     propose_resolution,
     render_proposal_block,
@@ -430,3 +431,40 @@ class TestPendingQuestionsBackwardCompat:
             confidence=0.0,
         )
         assert render_proposal_block(fallback) == ""
+
+
+# ---------------------------------------------------------------------------
+# Confirmation-pass suppress verdict (issue #145)
+# ---------------------------------------------------------------------------
+
+
+class TestSuppressVerdict:
+    """The resolver doubles as a confirmation pass: it may judge a
+    detected cluster to be a non-conflict and return ``not_a_conflict``.
+    """
+
+    def test_not_a_conflict_verdict_parses(self, tmp_path: Path) -> None:
+        """A resolver response with ``action=not_a_conflict`` round-trips
+        through ``_parse_response`` instead of falling back."""
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "open review files with subl")
+        b = _write_am(scope, "b.md", "but CSVs go to Numbers")
+        payload = (
+            '{"recommended_winner": "neither", "action": "not_a_conflict", '
+            '"confidence": 0.9, '
+            '"rationale": "Member b refines member a (a narrowing '
+            'exception); the two compose rather than contradict.", '
+            '"source_precedence_used": []}'
+        )
+        client = _fake_client(payload)
+        proposal = propose_resolution(_detected([a, b]), [a, b], client)
+        assert proposal.action == "not_a_conflict"
+        assert proposal.recommended_winner == "neither"
+        assert proposal.confidence == pytest.approx(0.9)
+
+    def test_suppress_action_constant_matches_literal(self) -> None:
+        """``SUPPRESS_ACTION`` must equal the literal merge.py branches on."""
+        from athenaeum.resolutions import _VALID_ACTIONS
+
+        assert SUPPRESS_ACTION == "not_a_conflict"
+        assert SUPPRESS_ACTION in _VALID_ACTIONS
