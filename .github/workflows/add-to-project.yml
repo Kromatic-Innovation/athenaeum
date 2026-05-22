@@ -11,7 +11,23 @@ jobs:
     name: Add to Internal Platform project
     runs-on: ubuntu-latest
     steps:
+      - name: Load workflow-bot App credentials from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          KROMATIC_WORKFLOW_BOT_APP_ID: op://Infrastructure/kromatic-workflow-bot/app-id
+          KROMATIC_WORKFLOW_BOT_PRIVATE_KEY: op://Infrastructure/kromatic-workflow-bot/private-key
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ env.KROMATIC_WORKFLOW_BOT_APP_ID }}
+          private-key: ${{ env.KROMATIC_WORKFLOW_BOT_PRIVATE_KEY }}
+
       - uses: actions/add-to-project@v1.0.2
         with:
           project-url: https://github.com/orgs/Kromatic-Innovation/projects/4
-          github-token: ${{ secrets.PROMOTION_BOT_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
