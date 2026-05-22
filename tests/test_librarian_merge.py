@@ -388,6 +388,80 @@ def distinct_conflicts_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def suppress_then_detect_root(tmp_path: Path) -> Path:
+    """Same source-file PAIR in two clusters (issue #146 / #145 interaction).
+
+    Cluster 1 flags the pair but the resolver confirmation pass suppresses
+    it (``not_a_conflict``). Cluster 2 flags the SAME pair and the resolver
+    does NOT suppress. Because the dedup check sits AFTER the suppress
+    early-return in ``_emit_escalation``, the suppressed cluster never
+    records the member key — so cluster 2 still escalates. Exactly one
+    pending question is expected.
+    """
+    knowledge_root = tmp_path / "knowledge"
+    scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+
+    _write_am_file(
+        scope,
+        "feedback_open_files_in_sublime.md",
+        frontmatter_name="Open files in Sublime",
+        description="use sublime",
+        origin_session_id="s-sub",
+        origin_turn=1,
+        sources=[
+            {
+                "session": "s-sub",
+                "turn": 1,
+                "date": "2026-04-10",
+                "excerpt": "open files in sublime",
+            }
+        ],
+        body="Open files in Sublime Text. It is the default editor.",
+    )
+    _write_am_file(
+        scope,
+        "feedback_open_csv_in_numbers.md",
+        frontmatter_name="Open CSVs in Numbers",
+        description="use numbers",
+        origin_session_id="s-num",
+        origin_turn=2,
+        sources=[
+            {
+                "session": "s-num",
+                "turn": 2,
+                "date": "2026-04-11",
+                "excerpt": "open csv files in numbers",
+            }
+        ],
+        body="Open CSV files in Numbers, never in Sublime Text.",
+    )
+
+    members = [
+        "-Users-tristankromer-Code/feedback_open_files_in_sublime.md",
+        "-Users-tristankromer-Code/feedback_open_csv_in_numbers.md",
+    ]
+    _write_cluster_jsonl(
+        knowledge_root,
+        [
+            {
+                "cluster_id": "suppress-first",
+                "member_paths": members,
+                "centroid_score": 0.61,
+                "rationale": "cosine >= 0.55; overlapping cluster (suppressed)",
+            },
+            {
+                "cluster_id": "detect-second",
+                "member_paths": members,
+                "centroid_score": 0.60,
+                "rationale": "cosine >= 0.55; overlapping cluster (detected)",
+            },
+        ],
+    )
+    _write_config(knowledge_root)
+    return knowledge_root
+
+
+@pytest.fixture
 def session_turn_dedupe_root(tmp_path: Path) -> Path:
     """One file whose sources[] stresses the (session, turn) dedupe key."""
     knowledge_root = tmp_path / "knowledge"
@@ -952,6 +1026,145 @@ class TestEscalationDedupe:
         assert pending.exists()
         # Distinct conflicts → distinct entries; dedup must NOT collapse them.
         assert self._count_escalations(pending) == 2
+
+    def test_single_member_result_escalates_without_poisoning_dedup_set(
+        self,
+        distinct_conflicts_root: Path,
+    ) -> None:
+        """A detected result with fewer than 2 flagged ``members_involved``
+        escalates but is NOT recorded in the run-scoped dedup set — the
+        detector docstring warns callers must not assume 2 entries. A later
+        DISTINCT conflict must still escalate normally.
+        """
+        from unittest.mock import MagicMock
+
+        # Cluster 1 (editor): detector echoes only ONE flagged member, so
+        # `members_involved` is length 1 after `_clean_detector_payload`.
+        # This exercises the `len(member_key) >= 2` fall-through.
+        editor_one_member_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_open_files_in_sublime.md"], '
+            '"conflicting_passages": ["Sublime.", "Numbers."], '
+            '"rationale": "Editor conflict; detector echoed one member."}'
+        )
+        # Cluster 2 (venv): a genuine, DISTINCT 2-member conflict.
+        venv_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/reference_voltaire_pytest_venv.md", '
+            '"-Users-tristankromer-Code/reference_workspace_pytest_venv.md"], '
+            '"conflicting_passages": ["voltaire venv.", "workspace venv."], '
+            '"rationale": "Venv conflict."}'
+        )
+        # Both clusters are genuinely detected: the resolver confirmation
+        # pass keeps them (non-suppress action).
+        keep_payload = (
+            '{"recommended_winner": "a", "action": "keep_a", '
+            '"confidence": 0.88, "rationale": "Real conflict; keep a.", '
+            '"source_precedence_used": []}'
+        )
+
+        def _make_response(text: str) -> MagicMock:
+            resp = MagicMock()
+            resp.content = [MagicMock(text=text)]
+            return resp
+
+        def _route(*args: object, **kwargs: object) -> MagicMock:
+            """Detector vs resolver is distinguished by payload shape; the
+            editor vs venv cluster by the member paths in the messages."""
+            messages = kwargs.get("messages") or []
+            blob = json.dumps(messages)
+            if "recommended_winner" in blob or "not_a_conflict" in blob:
+                # Resolver confirmation pass.
+                return _make_response(keep_payload)
+            # Detector call.
+            text = venv_payload if "pytest_venv" in blob else editor_one_member_payload
+            return _make_response(text)
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = _route
+
+        entries = merge_clusters_to_wiki(
+            distinct_conflicts_root,
+            client=fake_client,
+        )
+        assert len(entries) == 2
+
+        pending = distinct_conflicts_root / "wiki" / "_pending_questions.md"
+        assert pending.exists()
+        # The 1-member editor result escalates (not recorded in the dedup
+        # set); the distinct venv conflict escalates too. A poisoned set
+        # would have collapsed one of them.
+        assert self._count_escalations(pending) == 2
+
+    def test_suppressed_pair_does_not_block_later_genuine_detection(
+        self,
+        suppress_then_detect_root: Path,
+    ) -> None:
+        """Cluster 1 flags source-file pair P but the resolver returns the
+        suppress verdict (``not_a_conflict``) — no escalation, no key
+        recorded. Cluster 2 flags the SAME pair P and is genuinely detected.
+        Exactly ONE escalation (cluster 2's) must result.
+
+        This pins the ordering: the #146 dedup check sits AFTER the #145
+        suppress early-return in ``_emit_escalation``. A future refactor
+        moving the dedup check above the suppress return would record P on
+        the suppressed cluster and silently drop cluster 2's real
+        escalation — this test catches that regression.
+        """
+        from unittest.mock import MagicMock
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_open_files_in_sublime.md", '
+            '"-Users-tristankromer-Code/feedback_open_csv_in_numbers.md"], '
+            '"conflicting_passages": ['
+            '"Open files in Sublime Text.", '
+            '"Open CSV files in Numbers, never in Sublime Text."], '
+            '"rationale": "One says Sublime; the other says Numbers."}'
+        )
+        # Cluster 1's resolver suppresses; cluster 2's resolver keeps.
+        suppress_payload = (
+            '{"recommended_winner": "neither", "action": "not_a_conflict", '
+            '"confidence": 0.91, '
+            '"rationale": "Different-scenario rules; they never both apply.", '
+            '"source_precedence_used": []}'
+        )
+        keep_payload = (
+            '{"recommended_winner": "a", "action": "keep_a", '
+            '"confidence": 0.88, "rationale": "Real conflict; keep a.", '
+            '"source_precedence_used": []}'
+        )
+
+        def _make_response(text: str) -> MagicMock:
+            resp = MagicMock()
+            resp.content = [MagicMock(text=text)]
+            return resp
+
+        # Call order across both clusters:
+        #   cluster 1 → detector, resolver (suppress)
+        #   cluster 2 → detector, resolver (keep)
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            _make_response(detector_payload),
+            _make_response(suppress_payload),
+            _make_response(detector_payload),
+            _make_response(keep_payload),
+        ]
+
+        entries = merge_clusters_to_wiki(
+            suppress_then_detect_root,
+            client=fake_client,
+        )
+        assert len(entries) == 2
+
+        pending = suppress_then_detect_root / "wiki" / "_pending_questions.md"
+        assert pending.exists()
+        # Cluster 1 suppressed → no key recorded → cluster 2's genuine
+        # detection of the SAME pair still escalates. Exactly one question.
+        assert self._count_escalations(pending) == 1
 
 
 class TestSessionTurnDedupe:
