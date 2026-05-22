@@ -66,6 +66,7 @@ from athenaeum.models import (
     render_frontmatter,
 )
 from athenaeum.resolutions import (
+    SUPPRESS_ACTION,
     ResolutionProposal,
     propose_resolution,
     render_proposal_block,
@@ -700,6 +701,23 @@ def merge_clusters_to_wiki(
     ) -> None:
         if not result.detected:
             return
+        # Confirmation pass (issue #145): the stronger resolver model
+        # gets a second opinion on every detected=True cluster. When it
+        # returns the suppress verdict, the cheap detector over-fired —
+        # this is a refinement / restatement / supersession /
+        # different-scenario pair, not a real contradiction — so drop
+        # the escalation instead of writing a pending question. The
+        # budget-exhausted path (proposal is None) and the deterministic
+        # fallback (action="retain_both_with_context") both fall through
+        # and escalate as before, so cost stays bounded and an offline
+        # run still escalates.
+        if proposal is not None and proposal.action == SUPPRESS_ACTION:
+            log.info(
+                "contradictions: confirmation pass cleared cluster %s "
+                "(resolver verdict not_a_conflict); escalation dropped",
+                entry.cluster_id,
+            )
+            return
         wiki_ref = f"wiki/{entry.filename}"
         description_parts: list[str] = []
         if result.rationale:
@@ -782,6 +800,9 @@ def merge_clusters_to_wiki(
         # wins. The first detected result is the canonical one for the
         # entry's frontmatter.
         aggregate: ContradictionResult | None = None
+        # Set when the confirmation pass cleared a detected cluster — the
+        # entry must NOT be flagged even though the detector fired.
+        suppressed = False
         for chunk in chunks:
             chunks_run += 1
             if len(chunk) >= 2:
@@ -789,13 +810,33 @@ def merge_clusters_to_wiki(
             result = detect_contradictions(chunk, client)
             _record_pair_keys(chunk)
             if result.detected and aggregate is None:
-                aggregate = result
                 proposal = _maybe_propose(result, chunk)
+                # When the confirmation pass suppresses the cluster, the
+                # detector over-fired: leave `aggregate` unset so the
+                # wiki entry frontmatter is NOT tagged
+                # contradiction-flagged. Otherwise a suppressed cluster
+                # would carry a "contradiction-flagged" status with no
+                # pending question to point at (issue #145).
+                # `_emit_escalation` independently drops the escalation
+                # for the suppress verdict.
+                if proposal is not None and proposal.action == SUPPRESS_ACTION:
+                    suppressed = True
+                else:
+                    aggregate = result
                 _emit_escalation(entry, result, proposal)
         if aggregate is None:
-            # Use the last result so rationale (e.g. "singleton" /
-            # "llm-unavailable") is preserved on the entry.
-            aggregate = result if chunks else ContradictionResult(detected=False)
+            if suppressed:
+                # Detector fired but the confirmation pass cleared it —
+                # record a clean not-detected verdict so the wiki entry
+                # frontmatter is coherent (issue #145).
+                aggregate = ContradictionResult(
+                    detected=False,
+                    rationale="confirmation-pass-cleared",
+                )
+            else:
+                # Use the last result so rationale (e.g. "singleton" /
+                # "llm-unavailable") is preserved on the entry.
+                aggregate = result if chunks else ContradictionResult(detected=False)
         entry.contradiction = aggregate
         entry.contradictions_detected = bool(aggregate.detected)
 
