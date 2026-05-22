@@ -84,6 +84,12 @@ ResolverAction = Literal[
     "merge",
     "deprecate_both",
     "retain_both_with_context",
+    # Confirmation-pass verdict (issue #145): the detector over-fired —
+    # the two snippets are not actually in conflict (a refinement,
+    # restatement, supersession, or different-scenario pair). When the
+    # resolver returns this, merge.py drops the escalation entirely
+    # instead of writing a pending question.
+    "not_a_conflict",
 ]
 
 _VALID_WINNERS: frozenset[str] = frozenset(("a", "b", "merge", "neither"))
@@ -94,8 +100,13 @@ _VALID_ACTIONS: frozenset[str] = frozenset(
         "merge",
         "deprecate_both",
         "retain_both_with_context",
+        "not_a_conflict",
     )
 )
+
+# The suppress verdict — exported so :mod:`athenaeum.merge` can branch on
+# it without re-typing the literal.
+SUPPRESS_ACTION = "not_a_conflict"
 
 
 @dataclass
@@ -119,9 +130,28 @@ class ResolutionProposal:
 
 _RESOLVE_SYSTEM = """You are a resolver for an AI agent's long-term memory system.
 
-A cheap detector has flagged two memory snippets as contradictory. Your job
-is to propose which one should win, applying a SOURCE-PRECEDENCE TAXONOMY
-that weighs WHO said it, not just what was said.
+A cheap detector has flagged two memory snippets as contradictory. The
+detector is known to over-fire, so your FIRST job is a confirmation pass:
+decide whether the two snippets are GENUINELY in conflict at all.
+
+NOT a conflict — return action "not_a_conflict" for any of these:
+- Refinement / narrowing: one snippet is the general rule, the other a
+  narrowing exception (e.g. "open review files with subl" + "but CSVs go
+  to Numbers"). These compose; they do not contradict.
+- Restatement: the two snippets differ in wording but say the same thing.
+- Supersession: one snippet explicitly marks the other obsolete (e.g.
+  "X is superseded; Y is now canonical"). The resolution is already in
+  the text — no human review needed.
+- Different-scenario rules: two prescriptions that govern distinct
+  situations (e.g. prior-session debris vs. sandboxed-agent
+  self-improvement). They never both apply at once.
+
+When you return "not_a_conflict", set recommended_winner to "neither".
+The detector over-fired; do not escalate.
+
+If the snippets ARE genuinely contradictory, propose which one should
+win, applying a SOURCE-PRECEDENCE TAXONOMY that weighs WHO said it, not
+just what was said.
 
 PRECEDENCE TAXONOMY (highest to lowest):
 
@@ -144,8 +174,12 @@ economy matters.
 Return STRICT JSON. No markdown fence, no prose outside the object:
 {
   "recommended_winner": "a" | "b" | "merge" | "neither",
-  "action": "keep_a" | "keep_b" | "merge" | "deprecate_both" | "retain_both_with_context",
-  "rationale": "<one sentence citing the precedence tiers compared>",
+  "action":
+      "keep_a" | "keep_b" | "merge" | "deprecate_both"
+      | "retain_both_with_context" | "not_a_conflict",
+  "rationale":
+      "<one sentence: for not_a_conflict, name which exclusion applies;
+       otherwise cite the precedence tiers compared>",
   "confidence": <float between 0 and 1>,
   "source_precedence_used": ["a:<source-or-unsourced> > b:<source-or-unsourced>"]
 }
