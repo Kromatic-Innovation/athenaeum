@@ -687,6 +687,17 @@ def merge_clusters_to_wiki(
     # detector call so the similarity sweep can skip them.
     covered_pair_keys: set[tuple[str, str]] = set()
 
+    # Issue #146: dedup escalations by the SET OF FLAGGED SOURCE MEMBER FILES
+    # across the whole run. The same source-file pair is pulled into many
+    # overlapping clusters; detection runs per cluster, so without this set
+    # one real conflict escalates once per cluster (28 questions → 9 distinct
+    # conflicts on 2026-05-22). The key is the sorted flagged members from
+    # the detector result (`members_involved`, i.e. source-file identity),
+    # NOT the cluster `topic_slug`. Both the primary cluster pass and the
+    # similarity sweep route through `_emit_escalation`, so a single set
+    # there dedupes both passes.
+    escalated_member_keys: set[tuple[str, ...]] = set()
+
     def _record_pair_keys(members: list[AutoMemoryFile]) -> None:
         for i in range(len(members)):
             for j in range(i + 1, len(members)):
@@ -718,6 +729,27 @@ def merge_clusters_to_wiki(
                 entry.cluster_id,
             )
             return
+        # Issue #146: run-scoped dedup by the flagged source-file set. The
+        # check sits AFTER the suppress-verdict return on purpose: a
+        # suppressed cluster never reaches here, so it does not consume a
+        # member key — a later, genuinely-detected cluster covering the same
+        # pair can still escalate. Recording on suppression would let one
+        # false-positive suppression silently hide a real later conflict.
+        # A result with fewer than 2 flagged members cannot form a stable
+        # pair key (the detector occasionally echoes only one member); such
+        # results escalate without being recorded, preserving prior
+        # behavior and never suppressing a distinct conflict.
+        member_key = tuple(sorted(result.members_involved))
+        if len(member_key) >= 2:
+            if member_key in escalated_member_keys:
+                log.info(
+                    "contradictions: source-file pair %s already escalated "
+                    "this run; skipping duplicate escalation for cluster %s",
+                    member_key,
+                    entry.cluster_id,
+                )
+                return
+            escalated_member_keys.add(member_key)
         wiki_ref = f"wiki/{entry.filename}"
         description_parts: list[str] = []
         if result.rationale:
