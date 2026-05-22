@@ -90,7 +90,8 @@ def _write_config(knowledge_root: Path) -> None:
 
 
 def _write_cluster_jsonl(
-    knowledge_root: Path, rows: list[dict[str, object]],
+    knowledge_root: Path,
+    rows: list[dict[str, object]],
 ) -> Path:
     out = knowledge_root / "raw" / "_librarian-clusters.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -110,52 +111,63 @@ def _write_cluster_jsonl(
 def voltaire_merge_root(tmp_path: Path) -> Path:
     """5 voltaire/nanoclaw files + matching cluster JSONL (one cluster, 5 members)."""
     knowledge_root = tmp_path / "knowledge"
-    scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-voltaire"
+    scope = (
+        knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-voltaire"
+    )
 
     specs = [
         ("project_voltaire_nanoclaw.md", "s-aaa", 1, "Voltaire+nanoclaw"),
         (
             "project_voltaire_iMessage_channel.md",
-            "s-bbb", 2,
+            "s-bbb",
+            2,
             "Voltaire iMessage channel via NanoClaw",
         ),
         (
             "project_nanoclaw_voltaire_tickle.md",
-            "s-ccc", 3,
+            "s-ccc",
+            3,
             "Nanoclaw ticklestick voltaire",
         ),
         (
             "project_voltaire_sessions.md",
-            "s-ddd", 4,
+            "s-ddd",
+            4,
             "Voltaire sessions via box-claude",
         ),
         ("project_voltair_nanoclaw.md", "s-eee", 5, "Voltair typo clone"),
     ]
     for filename, session, turn, body in specs:
         _write_am_file(
-            scope, filename,
+            scope,
+            filename,
             frontmatter_name=filename.replace("_", " ").replace(".md", ""),
             description="voltaire toolchain note",
             origin_session_id=session,
             origin_turn=turn,
-            sources=[{
-                "session": session,
-                "turn": turn,
-                "date": f"2026-04-{10 + turn:02d}",
-                "excerpt": body,
-            }],
+            sources=[
+                {
+                    "session": session,
+                    "turn": turn,
+                    "date": f"2026-04-{10 + turn:02d}",
+                    "excerpt": body,
+                }
+            ],
             body=body,
         )
 
     member_paths = [f"-Users-tristankromer-Code-voltaire/{s[0]}" for s in specs]
-    _write_cluster_jsonl(knowledge_root, [
-        {
-            "cluster_id": "voltaire-0001",
-            "member_paths": member_paths,
-            "centroid_score": 0.88,
-            "rationale": "cosine >= 0.55; shares tokens: voltaire, nanoclaw",
-        },
-    ])
+    _write_cluster_jsonl(
+        knowledge_root,
+        [
+            {
+                "cluster_id": "voltaire-0001",
+                "member_paths": member_paths,
+                "centroid_score": 0.88,
+                "rationale": "cosine >= 0.55; shares tokens: voltaire, nanoclaw",
+            },
+        ],
+    )
     _write_config(knowledge_root)
     return knowledge_root
 
@@ -167,36 +179,55 @@ def contradiction_merge_root(tmp_path: Path) -> Path:
     scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
 
     _write_am_file(
-        scope, "feedback_prior_session_debris_v1.md",
+        scope,
+        "feedback_prior_session_debris_v1.md",
         frontmatter_name="Prior session debris v1",
         description="commit directly",
-        origin_session_id="s-111", origin_turn=1,
-        sources=[{"session": "s-111", "turn": 1, "date": "2026-04-10",
-                  "excerpt": "commit to develop, do not park"}],
+        origin_session_id="s-111",
+        origin_turn=1,
+        sources=[
+            {
+                "session": "s-111",
+                "turn": 1,
+                "date": "2026-04-10",
+                "excerpt": "commit to develop, do not park",
+            }
+        ],
         body="Commit prior-session debris directly to develop. Do not park on WIP.",
     )
     _write_am_file(
-        scope, "feedback_prior_session_debris_v2.md",
+        scope,
+        "feedback_prior_session_debris_v2.md",
         frontmatter_name="Prior session debris v2",
         description="park on WIP",
-        origin_session_id="s-222", origin_turn=2,
-        sources=[{"session": "s-222", "turn": 2, "date": "2026-04-11",
-                  "excerpt": "park on WIP, do not commit"}],
+        origin_session_id="s-222",
+        origin_turn=2,
+        sources=[
+            {
+                "session": "s-222",
+                "turn": 2,
+                "date": "2026-04-11",
+                "excerpt": "park on WIP, do not commit",
+            }
+        ],
         body="Park prior-session debris on a WIP branch. Do not commit directly.",
     )
 
-    _write_cluster_jsonl(knowledge_root, [
-        {
-            "cluster_id": "code-0001",
-            "member_paths": [
-                "-Users-tristankromer-Code/feedback_prior_session_debris_v1.md",
-                "-Users-tristankromer-Code/feedback_prior_session_debris_v2.md",
-            ],
-            # Below the 0.75 cohesion threshold → contradictions flag fires.
-            "centroid_score": 0.62,
-            "rationale": "cosine >= 0.55; shares tokens: prior, session, debris",
-        },
-    ])
+    _write_cluster_jsonl(
+        knowledge_root,
+        [
+            {
+                "cluster_id": "code-0001",
+                "member_paths": [
+                    "-Users-tristankromer-Code/feedback_prior_session_debris_v1.md",
+                    "-Users-tristankromer-Code/feedback_prior_session_debris_v2.md",
+                ],
+                # Below the 0.75 cohesion threshold → contradictions flag fires.
+                "centroid_score": 0.62,
+                "rationale": "cosine >= 0.55; shares tokens: prior, session, debris",
+            },
+        ],
+    )
     _write_config(knowledge_root)
     return knowledge_root
 
@@ -208,31 +239,48 @@ def session_turn_dedupe_root(tmp_path: Path) -> Path:
     scope = knowledge_root / "raw" / "auto-memory" / "scope-x"
 
     _write_am_file(
-        scope, "feedback_dedupe_probe.md",
+        scope,
+        "feedback_dedupe_probe.md",
         frontmatter_name="Dedupe probe",
         description="probe",
-        origin_session_id="s-shared", origin_turn=1,
+        origin_session_id="s-shared",
+        origin_turn=1,
         sources=[
-            {"session": "s-shared", "turn": 1, "date": "2026-04-10",
-             "excerpt": "turn 1"},
+            {
+                "session": "s-shared",
+                "turn": 1,
+                "date": "2026-04-10",
+                "excerpt": "turn 1",
+            },
             # Same session, different turn — MUST NOT collapse.
-            {"session": "s-shared", "turn": 2, "date": "2026-04-10",
-             "excerpt": "turn 2"},
+            {
+                "session": "s-shared",
+                "turn": 2,
+                "date": "2026-04-10",
+                "excerpt": "turn 2",
+            },
             # Same session+turn, different date — MUST collapse into turn-1.
-            {"session": "s-shared", "turn": 1, "date": "2026-04-11",
-             "excerpt": "turn 1 duplicate"},
+            {
+                "session": "s-shared",
+                "turn": 1,
+                "date": "2026-04-11",
+                "excerpt": "turn 1 duplicate",
+            },
         ],
         body="Dedupe probe body.",
     )
 
-    _write_cluster_jsonl(knowledge_root, [
-        {
-            "cluster_id": "scope-x-0001",
-            "member_paths": ["scope-x/feedback_dedupe_probe.md"],
-            "centroid_score": 1.0,
-            "rationale": "singleton",
-        },
-    ])
+    _write_cluster_jsonl(
+        knowledge_root,
+        [
+            {
+                "cluster_id": "scope-x-0001",
+                "member_paths": ["scope-x/feedback_dedupe_probe.md"],
+                "centroid_score": 1.0,
+                "rationale": "singleton",
+            },
+        ],
+    )
     _write_config(knowledge_root)
     return knowledge_root
 
@@ -244,32 +292,47 @@ def singleton_merge_root(tmp_path: Path) -> Path:
     scope = knowledge_root / "raw" / "auto-memory" / "scope-x"
 
     _write_am_file(
-        scope, "reference_dns_flakiness.md",
+        scope,
+        "reference_dns_flakiness.md",
         frontmatter_name="DNS flakiness",
         description="macOS dns",
-        origin_session_id="s-dns", origin_turn=1,
-        sources=[{"session": "s-dns", "turn": 1, "date": "2026-04-10",
-                  "excerpt": "dns"}],
+        origin_session_id="s-dns",
+        origin_turn=1,
+        sources=[
+            {"session": "s-dns", "turn": 1, "date": "2026-04-10", "excerpt": "dns"}
+        ],
         body="mDNSResponder flakes.",
     )
     _write_am_file(
-        scope, "user_tristan_profile.md",
+        scope,
+        "user_tristan_profile.md",
         frontmatter_name="Tristan profile",
         description="profile",
-        origin_session_id="s-prof", origin_turn=1,
-        sources=[{"session": "s-prof", "turn": 1, "date": "2026-04-10",
-                  "excerpt": "profile"}],
+        origin_session_id="s-prof",
+        origin_turn=1,
+        sources=[
+            {"session": "s-prof", "turn": 1, "date": "2026-04-10", "excerpt": "profile"}
+        ],
         body="Consultant.",
     )
 
-    _write_cluster_jsonl(knowledge_root, [
-        {"cluster_id": "scope-x-0001",
-         "member_paths": ["scope-x/reference_dns_flakiness.md"],
-         "centroid_score": 1.0, "rationale": "singleton"},
-        {"cluster_id": "scope-x-0002",
-         "member_paths": ["scope-x/user_tristan_profile.md"],
-         "centroid_score": 1.0, "rationale": "singleton"},
-    ])
+    _write_cluster_jsonl(
+        knowledge_root,
+        [
+            {
+                "cluster_id": "scope-x-0001",
+                "member_paths": ["scope-x/reference_dns_flakiness.md"],
+                "centroid_score": 1.0,
+                "rationale": "singleton",
+            },
+            {
+                "cluster_id": "scope-x-0002",
+                "member_paths": ["scope-x/user_tristan_profile.md"],
+                "centroid_score": 1.0,
+                "rationale": "singleton",
+            },
+        ],
+    )
     _write_config(knowledge_root)
     return knowledge_root
 
@@ -295,7 +358,8 @@ class TestDeriveTopicSlug:
 
     def test_singleton_falls_back_on_useful_tokens(self) -> None:
         slug = derive_topic_slug(
-            ["scope-x/reference_dns_flakiness.md"], "scope-x-0001",
+            ["scope-x/reference_dns_flakiness.md"],
+            "scope-x-0001",
         )
         assert "dns" in slug or "flakiness" in slug
 
@@ -360,7 +424,7 @@ class TestReadClusterRows:
         path = tmp_path / "clusters.jsonl"
         path.write_text(
             '{"cluster_id":"a","member_paths":["p"]}\n'
-            'NOT JSON\n'
+            "NOT JSON\n"
             '{"cluster_id":"c","member_paths":["r"]}\n',
             encoding="utf-8",
         )
@@ -370,10 +434,12 @@ class TestReadClusterRows:
 
 class TestSynthesizeBody:
     def test_dedupes_identical_paragraphs(self) -> None:
-        body = synthesize_body([
-            ("scope-a", "file1.md", "Shared paragraph.\n\nUnique A."),
-            ("scope-b", "file2.md", "Shared paragraph.\n\nUnique B."),
-        ])
+        body = synthesize_body(
+            [
+                ("scope-a", "file1.md", "Shared paragraph.\n\nUnique A."),
+                ("scope-b", "file2.md", "Shared paragraph.\n\nUnique B."),
+            ]
+        )
         # Shared paragraph appears once (under file1's header); unique
         # paragraphs survive.
         assert body.count("Shared paragraph.") == 1
@@ -394,7 +460,8 @@ class TestVoltaireFixture:
     """The load-bearing regression fixture from the issue."""
 
     def test_exactly_one_voltaire_entry_with_five_sources(
-        self, voltaire_merge_root: Path,
+        self,
+        voltaire_merge_root: Path,
     ) -> None:
         entries = merge_clusters_to_wiki(voltaire_merge_root)
         assert len(entries) == 1
@@ -420,7 +487,8 @@ class TestVoltaireFixture:
             assert s["origin_scope"] == "-Users-tristankromer-Code-voltaire"
 
     def test_body_retains_loadbearing_tokens(
-        self, voltaire_merge_root: Path,
+        self,
+        voltaire_merge_root: Path,
     ) -> None:
         merge_clusters_to_wiki(voltaire_merge_root)
         wiki = voltaire_merge_root / "wiki"
@@ -459,7 +527,8 @@ class TestContradictionFixture:
     """
 
     def test_no_client_means_no_flag(
-        self, contradiction_merge_root: Path,
+        self,
+        contradiction_merge_root: Path,
     ) -> None:
         entries = merge_clusters_to_wiki(contradiction_merge_root)
         assert len(entries) == 1
@@ -481,7 +550,8 @@ class TestContradictionFixture:
         assert CONTRADICTION_COHESION_THRESHOLD == 0.75
 
     def test_detector_positive_flags_entry_and_writes_pending(
-        self, contradiction_merge_root: Path,
+        self,
+        contradiction_merge_root: Path,
     ) -> None:
         """With a mocked detector returning detected=True, the wiki entry
         carries ``status: contradiction-flagged`` AND a block is appended
@@ -505,7 +575,8 @@ class TestContradictionFixture:
         fake_client.messages.create.return_value = response
 
         entries = merge_clusters_to_wiki(
-            contradiction_merge_root, client=fake_client,
+            contradiction_merge_root,
+            client=fake_client,
         )
         assert len(entries) == 1
         assert entries[0].contradictions_detected is True
@@ -529,10 +600,110 @@ class TestContradictionFixture:
         assert "**Conflict type**: prescriptive" in text
         assert "Park prior-session debris on a WIP branch." in text
 
+    def test_confirmation_pass_suppresses_false_positive(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """Issue #145: when the Haiku detector flags a cluster but the
+        resolver confirmation pass returns ``not_a_conflict``, NO pending
+        question is written and the wiki entry is NOT flagged.
+        """
+        from unittest.mock import MagicMock
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        resolver_payload = (
+            '{"recommended_winner": "neither", "action": "not_a_conflict", '
+            '"confidence": 0.91, '
+            '"rationale": "Different-scenario rules; they never both apply.", '
+            '"source_precedence_used": []}'
+        )
+
+        def _make_response(text: str) -> MagicMock:
+            resp = MagicMock()
+            resp.content = [MagicMock(text=text)]
+            return resp
+
+        fake_client = MagicMock()
+        # First call = detector (Haiku), second = resolver confirmation
+        # pass (Opus). The resolver clears the false positive.
+        fake_client.messages.create.side_effect = [
+            _make_response(detector_payload),
+            _make_response(resolver_payload),
+        ]
+
+        entries = merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+        )
+        assert len(entries) == 1
+        # Confirmation pass cleared it — entry frontmatter is not flagged.
+        assert entries[0].contradictions_detected is False
+
+        wiki = contradiction_merge_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
+        assert meta["contradictions_detected"] is False
+        assert "status" not in meta
+        # The whole point of #145: no human-queue entry for a false positive.
+        assert not (wiki / "_pending_questions.md").exists()
+
+    def test_budget_exhausted_falls_back_to_escalate(
+        self,
+        contradiction_merge_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue #145: with the resolver budget at 0, the confirmation
+        pass cannot run — the cluster escalates WITHOUT a proposal block,
+        exactly as before #145.
+        """
+        from unittest.mock import MagicMock
+
+        monkeypatch.setenv("ATHENAEUM_RESOLVE_MAX_PER_RUN", "0")
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        response = MagicMock()
+        response.content = [MagicMock(text=detector_payload)]
+        fake_client = MagicMock()
+        fake_client.messages.create.return_value = response
+
+        entries = merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+        )
+        assert len(entries) == 1
+        assert entries[0].contradictions_detected is True
+
+        wiki = contradiction_merge_root / "wiki"
+        pending = wiki / "_pending_questions.md"
+        assert pending.exists()
+        text = pending.read_text(encoding="utf-8")
+        assert "Park prior-session debris on a WIP branch." in text
+        # Budget exhausted → no resolver call → no proposal block.
+        assert "**Proposed resolution**" not in text
+
 
 class TestSessionTurnDedupe:
     def test_same_session_different_turns_not_collapsed(
-        self, session_turn_dedupe_root: Path,
+        self,
+        session_turn_dedupe_root: Path,
     ) -> None:
         entries = merge_clusters_to_wiki(session_turn_dedupe_root)
         assert len(entries) == 1
@@ -546,7 +717,8 @@ class TestSessionTurnDedupe:
 
 class TestSingletonsEmitted:
     def test_every_singleton_becomes_a_wiki_entry(
-        self, singleton_merge_root: Path,
+        self,
+        singleton_merge_root: Path,
     ) -> None:
         entries = merge_clusters_to_wiki(singleton_merge_root)
         # Both singletons become wiki entries — no min-size filter.
@@ -556,7 +728,8 @@ class TestSingletonsEmitted:
         assert len(outputs) == 2
 
     def test_no_memory_md_is_emitted(
-        self, singleton_merge_root: Path,
+        self,
+        singleton_merge_root: Path,
     ) -> None:
         merge_clusters_to_wiki(singleton_merge_root)
         wiki = singleton_merge_root / "wiki"
@@ -567,7 +740,8 @@ class TestSingletonsEmitted:
 
 class TestDryRun:
     def test_dry_run_builds_entries_without_writing(
-        self, voltaire_merge_root: Path,
+        self,
+        voltaire_merge_root: Path,
     ) -> None:
         entries = merge_clusters_to_wiki(voltaire_merge_root, dry_run=True)
         assert len(entries) == 1
@@ -579,10 +753,13 @@ class TestDryRun:
 
 class TestRawFilesUntouched:
     def test_raw_files_remain_after_merge(
-        self, voltaire_merge_root: Path,
+        self,
+        voltaire_merge_root: Path,
     ) -> None:
         raw_root = (
-            voltaire_merge_root / "raw" / "auto-memory"
+            voltaire_merge_root
+            / "raw"
+            / "auto-memory"
             / "-Users-tristankromer-Code-voltaire"
         )
         before = sorted(p.name for p in raw_root.glob("*.md"))
@@ -613,5 +790,3 @@ class TestMergeOnlyCLI:
         wiki = voltaire_merge_root / "wiki"
         outputs = sorted(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
         assert len(outputs) == 1
-
-
