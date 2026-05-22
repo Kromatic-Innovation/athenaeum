@@ -928,6 +928,200 @@ class TestContradictionFixture:
         # Budget exhausted → no resolver call → no proposal block.
         assert "**Proposed resolution**" not in text
 
+    def test_genuine_verdict_attaches_proposal_block(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """Issue #148: when the resolver confirmation pass returns a
+        genuine verdict (a real ``keep_a`` / ``keep_b`` / ``merge``
+        action, NOT ``not_a_conflict``), the cluster still escalates AND
+        the pending question carries a ``**Proposed resolution**`` block.
+
+        This is the inverse of ``test_budget_exhausted_falls_back_to_escalate``
+        — there the block is absent because no resolver call ran; here a
+        non-zero-confidence verdict makes ``render_proposal_block`` emit it.
+        """
+        from unittest.mock import MagicMock
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        # A genuine resolver verdict: keep_a, non-zero confidence so
+        # render_proposal_block emits the block.
+        valid_resolver_payload = (
+            '{"recommended_winner": "a", "action": "keep_a", '
+            '"confidence": 0.92, '
+            '"rationale": "Member a is user-direct (precedence 1); '
+            'member b is unsourced.", '
+            '"source_precedence_used": ["a:user:session-1 > b:unsourced"]}'
+        )
+
+        def _make_response(text: str) -> MagicMock:
+            resp = MagicMock()
+            resp.content = [MagicMock(text=text)]
+            return resp
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            _make_response(detector_payload),
+            _make_response(valid_resolver_payload),
+        ]
+
+        entries = merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+        )
+        assert len(entries) == 1
+        # Genuine verdict → cluster still escalates and entry is flagged.
+        assert entries[0].contradictions_detected is True
+
+        wiki = contradiction_merge_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
+        assert meta["contradictions_detected"] is True
+        assert meta["status"] == "contradiction-flagged"
+
+        pending = wiki / "_pending_questions.md"
+        assert pending.exists()
+        text = pending.read_text(encoding="utf-8")
+        assert "Park prior-session debris on a WIP branch." in text
+        # The genuine-verdict branch: the proposal block IS rendered.
+        assert "**Proposed resolution**" in text
+
+    def test_malformed_resolver_response_still_escalates(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """Issue #148 (fail-safe): a resolver that *replies* but with no
+        parseable JSON must NOT silently suppress a real conflict. The
+        mock returns a well-formed response object whose ``.content[0].text``
+        is plain prose, so execution flows through ``_parse_response``,
+        ``_JSON_OBJECT_RE`` finds no JSON object, and the path taken is
+        ``_fallback("resolver-returned-no-json")``. That fallback returns
+        ``retain_both_with_context`` — not ``SUPPRESS_ACTION`` — so the
+        cluster still escalates to ``_pending_questions.md``.
+        """
+        from unittest.mock import MagicMock
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        # Garbled, non-JSON resolver output — _parse_response cannot
+        # extract a JSON object, so the fallback proposal is used.
+        malformed_resolver_response = (
+            "I'm sorry, I cannot resolve this contradiction right now."
+        )
+
+        def _make_response(text: str) -> MagicMock:
+            resp = MagicMock()
+            resp.content = [MagicMock(text=text)]
+            return resp
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            _make_response(detector_payload),
+            _make_response(malformed_resolver_response),
+        ]
+
+        entries = merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+        )
+        assert len(entries) == 1
+        # A garbled resolver response is the fail-safe direction: escalate.
+        assert entries[0].contradictions_detected is True
+
+        wiki = contradiction_merge_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
+        assert meta["contradictions_detected"] is True
+        assert meta["status"] == "contradiction-flagged"
+
+        pending = wiki / "_pending_questions.md"
+        assert pending.exists()
+        text = pending.read_text(encoding="utf-8")
+        assert "Park prior-session debris on a WIP branch." in text
+        # Deterministic fallback (confidence 0.0) → no proposal block.
+        assert "**Proposed resolution**" not in text
+
+    def test_resolver_malformed_response_object_still_escalates(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """Issue #148 (fail-safe): a malformed resolver *response object*
+        — one where accessing ``response.content[0].text`` raises — must
+        NOT silently suppress a real conflict. With ``content == []`` the
+        ``[0]`` index raises ``IndexError``, so ``propose_resolution``
+        takes the ``_fallback("resolver-malformed-response")`` branch.
+        That fallback returns ``retain_both_with_context`` — not
+        ``SUPPRESS_ACTION`` — so the cluster still escalates to
+        ``_pending_questions.md``.
+        """
+        from unittest.mock import MagicMock
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+
+        def _make_response(text: str) -> MagicMock:
+            resp = MagicMock()
+            resp.content = [MagicMock(text=text)]
+            return resp
+
+        # The detector response is well-formed; the resolver response is a
+        # malformed object — empty content list → IndexError on [0].
+        malformed_resolver_response = MagicMock()
+        malformed_resolver_response.content = []
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            _make_response(detector_payload),
+            malformed_resolver_response,
+        ]
+
+        entries = merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+        )
+        assert len(entries) == 1
+        # A malformed resolver response object is the fail-safe direction:
+        # escalate.
+        assert entries[0].contradictions_detected is True
+
+        wiki = contradiction_merge_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
+        assert meta["contradictions_detected"] is True
+        assert meta["status"] == "contradiction-flagged"
+
+        pending = wiki / "_pending_questions.md"
+        assert pending.exists()
+        text = pending.read_text(encoding="utf-8")
+        assert "Park prior-session debris on a WIP branch." in text
+        # Deterministic fallback (confidence 0.0) → no proposal block.
+        assert "**Proposed resolution**" not in text
+
 
 class TestEscalationDedupe:
     """Issue #146: dedup escalations by the flagged source-file SET, not
