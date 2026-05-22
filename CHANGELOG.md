@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-05-22
+
+A patch release hardening the auto-memory contradiction pipeline shipped
+in 0.4.0.
+
+### Fixed
+
+- **Contradiction confirmation pass** (#145) — the Opus resolver now runs a
+  confirmation pass over Haiku-detector hits and suppresses detector false
+  positives before they reach the pending-questions queue. Genuine
+  contradictions still escalate, now with the resolver's proposed
+  resolution attached.
+- **Escalation dedup keyed on source-file set** (#146) — escalations are
+  deduplicated by the set of flagged source files rather than the cluster
+  slug, so the same conflict surfaced by different clusters escalates once
+  per run.
+- **`add-to-project` CI workflow** — pinned to `actions/add-to-project@v1.0.2`.
+  The previous `@v1` ref was never published by the action (only exact
+  `v1.0.x` tags exist), so the workflow errored on every issue and PR.
+
+### Internal
+
+- Test coverage for the confirmation-pass resolver-verdict and
+  malformed-response escalation paths (#148), and the contradiction-merge
+  `<2`-member fallthrough (#146 review).
+
 ## [0.4.0] - 2026-05-11
 
 This release ships three coherent streams of work: (a) the auto-memory
@@ -423,7 +449,8 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.2.3...v0.3.0
