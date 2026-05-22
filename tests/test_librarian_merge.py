@@ -233,6 +233,161 @@ def contradiction_merge_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def escalation_dedupe_root(tmp_path: Path) -> Path:
+    """Same source-file PAIR pulled into 3 overlapping clusters (issue #146).
+
+    The two opposing-guidance feedback files appear in three distinct
+    cluster rows (different ``cluster_id``s, different centroid scores).
+    Detection runs per cluster, so the detector fires 3 times on the same
+    source-file pair — but escalation must dedup to ONE pending question.
+    """
+    knowledge_root = tmp_path / "knowledge"
+    scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+
+    _write_am_file(
+        scope,
+        "feedback_open_files_in_sublime.md",
+        frontmatter_name="Open files in Sublime",
+        description="use sublime",
+        origin_session_id="s-sub",
+        origin_turn=1,
+        sources=[
+            {
+                "session": "s-sub",
+                "turn": 1,
+                "date": "2026-04-10",
+                "excerpt": "open files in sublime",
+            }
+        ],
+        body="Open files in Sublime Text. It is the default editor.",
+    )
+    _write_am_file(
+        scope,
+        "feedback_open_csv_in_numbers.md",
+        frontmatter_name="Open CSVs in Numbers",
+        description="use numbers",
+        origin_session_id="s-num",
+        origin_turn=2,
+        sources=[
+            {
+                "session": "s-num",
+                "turn": 2,
+                "date": "2026-04-11",
+                "excerpt": "open csv files in numbers",
+            }
+        ],
+        body="Open CSV files in Numbers, never in Sublime Text.",
+    )
+
+    members = [
+        "-Users-tristankromer-Code/feedback_open_files_in_sublime.md",
+        "-Users-tristankromer-Code/feedback_open_csv_in_numbers.md",
+    ]
+    _write_cluster_jsonl(
+        knowledge_root,
+        [
+            {
+                "cluster_id": "auth-git-closes",
+                "member_paths": members,
+                "centroid_score": 0.61,
+                "rationale": "cosine >= 0.55; overlapping cluster A",
+            },
+            {
+                "cluster_id": "auth-staging-voltaire",
+                "member_paths": members,
+                "centroid_score": 0.60,
+                "rationale": "cosine >= 0.55; overlapping cluster B",
+            },
+            {
+                "cluster_id": "auth-voltaire-closes",
+                "member_paths": members,
+                "centroid_score": 0.59,
+                "rationale": "cosine >= 0.55; overlapping cluster C",
+            },
+        ],
+    )
+    _write_config(knowledge_root)
+    return knowledge_root
+
+
+@pytest.fixture
+def distinct_conflicts_root(tmp_path: Path) -> Path:
+    """Two DIFFERENT source-file pairs in two clusters (issue #146).
+
+    Each cluster flags a distinct conflict — dedup must NOT collapse them;
+    both must produce their own pending question.
+    """
+    knowledge_root = tmp_path / "knowledge"
+    scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+
+    for fname, name, body in (
+        (
+            "feedback_open_files_in_sublime.md",
+            "Open files in Sublime",
+            "Open files in Sublime Text.",
+        ),
+        (
+            "feedback_open_csv_in_numbers.md",
+            "Open CSVs in Numbers",
+            "Open CSV files in Numbers, never in Sublime.",
+        ),
+        (
+            "reference_voltaire_pytest_venv.md",
+            "Voltaire pytest venv",
+            "Run pytest from the voltaire-local venv.",
+        ),
+        (
+            "reference_workspace_pytest_venv.md",
+            "Workspace pytest venv",
+            "Run pytest from the shared workspace venv, not a local one.",
+        ),
+    ):
+        _write_am_file(
+            scope,
+            fname,
+            frontmatter_name=name,
+            description=name,
+            origin_session_id=f"s-{fname[:6]}",
+            origin_turn=1,
+            sources=[
+                {
+                    "session": f"s-{fname[:6]}",
+                    "turn": 1,
+                    "date": "2026-04-10",
+                    "excerpt": body,
+                }
+            ],
+            body=body,
+        )
+
+    _write_cluster_jsonl(
+        knowledge_root,
+        [
+            {
+                "cluster_id": "editor-conflict",
+                "member_paths": [
+                    "-Users-tristankromer-Code/feedback_open_files_in_sublime.md",
+                    "-Users-tristankromer-Code/feedback_open_csv_in_numbers.md",
+                ],
+                "centroid_score": 0.61,
+                "rationale": "cosine >= 0.55; editor conflict",
+            },
+            {
+                "cluster_id": "venv-conflict",
+                "member_paths": [
+                    "-Users-tristankromer-Code/reference_voltaire_pytest_venv.md",
+                    "-Users-tristankromer-Code/reference_workspace_pytest_venv.md",
+                ],
+                "centroid_score": 0.60,
+                "rationale": "cosine >= 0.55; venv conflict",
+            },
+        ],
+    )
+    _write_config(knowledge_root)
+    return knowledge_root
+
+
+@pytest.fixture
 def session_turn_dedupe_root(tmp_path: Path) -> Path:
     """One file whose sources[] stresses the (session, turn) dedupe key."""
     knowledge_root = tmp_path / "knowledge"
@@ -698,6 +853,105 @@ class TestContradictionFixture:
         assert "Park prior-session debris on a WIP branch." in text
         # Budget exhausted → no resolver call → no proposal block.
         assert "**Proposed resolution**" not in text
+
+
+class TestEscalationDedupe:
+    """Issue #146: dedup escalations by the flagged source-file SET, not
+    by cluster slug, across the whole run."""
+
+    @staticmethod
+    def _count_escalations(pending_path: Path) -> int:
+        """Each escalation writes exactly one '(from wiki/...)' header."""
+        if not pending_path.exists():
+            return 0
+        text = pending_path.read_text(encoding="utf-8")
+        return text.count("(from wiki/")
+
+    def test_same_pair_in_three_clusters_yields_one_escalation(
+        self,
+        escalation_dedupe_root: Path,
+    ) -> None:
+        """Three overlapping clusters all flag the same two source files.
+        The run must produce EXACTLY ONE pending question, not three."""
+        from unittest.mock import MagicMock
+
+        # Detector flags the same source-file pair every call. members_involved
+        # is the dedup key — identical across all three clusters.
+        payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_open_files_in_sublime.md", '
+            '"-Users-tristankromer-Code/feedback_open_csv_in_numbers.md"], '
+            '"conflicting_passages": ['
+            '"Open files in Sublime Text.", '
+            '"Open CSV files in Numbers, never in Sublime Text."], '
+            '"rationale": "One says Sublime; the other says Numbers."}'
+        )
+        response = MagicMock()
+        response.content = [MagicMock(text=payload)]
+        fake_client = MagicMock()
+        fake_client.messages.create.return_value = response
+
+        entries = merge_clusters_to_wiki(
+            escalation_dedupe_root,
+            client=fake_client,
+        )
+        # Three cluster rows → three wiki entries.
+        assert len(entries) == 3
+
+        pending = escalation_dedupe_root / "wiki" / "_pending_questions.md"
+        assert pending.exists()
+        # The whole point of #146: one conflict, one pending question.
+        assert self._count_escalations(pending) == 1
+
+    def test_distinct_pairs_each_produce_their_own_escalation(
+        self,
+        distinct_conflicts_root: Path,
+    ) -> None:
+        """Two clusters flagging two DIFFERENT source-file pairs must not
+        be collapsed — each distinct conflict keeps its own entry."""
+        from unittest.mock import MagicMock
+
+        editor_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_open_files_in_sublime.md", '
+            '"-Users-tristankromer-Code/feedback_open_csv_in_numbers.md"], '
+            '"conflicting_passages": ["Sublime.", "Numbers."], '
+            '"rationale": "Editor conflict."}'
+        )
+        venv_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/reference_voltaire_pytest_venv.md", '
+            '"-Users-tristankromer-Code/reference_workspace_pytest_venv.md"], '
+            '"conflicting_passages": ["voltaire venv.", "workspace venv."], '
+            '"rationale": "Venv conflict."}'
+        )
+
+        def _route(*args: object, **kwargs: object) -> MagicMock:
+            """Return the payload whose members match the cluster under test
+            so each detector call reports its own flagged pair."""
+            messages = kwargs.get("messages") or []
+            blob = json.dumps(messages)
+            text = venv_payload if "pytest_venv" in blob else editor_payload
+            resp = MagicMock()
+            resp.content = [MagicMock(text=text)]
+            return resp
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = _route
+
+        entries = merge_clusters_to_wiki(
+            distinct_conflicts_root,
+            client=fake_client,
+        )
+        assert len(entries) == 2
+
+        pending = distinct_conflicts_root / "wiki" / "_pending_questions.md"
+        assert pending.exists()
+        # Distinct conflicts → distinct entries; dedup must NOT collapse them.
+        assert self._count_escalations(pending) == 2
 
 
 class TestSessionTurnDedupe:
