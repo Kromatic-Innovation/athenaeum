@@ -696,9 +696,27 @@ def tier4_escalate(
     batch_index: dict[tuple[str, ...], int] = {}
     # File-merge plan: original raw_block -> list of entity names to append.
     file_merges: dict[str, list[str]] = {}
+    # Per-key best proposal accumulator. auto-apply uses the
+    # highest-confidence proposal seen for this source-pair key in this batch
+    # (regression fix: previously a low-conf primary item could swallow a
+    # later high-conf collapsing item's proposal and leave the block [ ]).
+    best_proposal: dict[tuple[str, ...], Any] = {}
+
+    def _consider_proposal(k: tuple[str, ...] | None, item_obj: Any) -> None:
+        if k is None:
+            return
+        prop = getattr(item_obj, "proposal", None)
+        if prop is None:
+            return
+        current = best_proposal.get(k)
+        if current is None or getattr(prop, "confidence", 0.0) > getattr(
+            current, "confidence", 0.0
+        ):
+            best_proposal[k] = prop
 
     for item in items:
         key = _pair_key_from_description(item.description) if dedup_enabled else None
+        _consider_proposal(key, item)
 
         # Path A: pair already lives in the file as an open block.
         if key is not None and key in open_index:
@@ -739,6 +757,31 @@ def tier4_escalate(
             batch_index[key] = len(sections)
         sections.append(block)
 
+    # Path B post-pass: any in-batch section that collapsed siblings needs an
+    # auto-apply consideration using the best proposal for its key (the
+    # primary item's proposal may have been below threshold while a later
+    # collapsing item's was above). apply_auto_resolution is idempotent via
+    # its _AUTO_RESOLVED_MARKER check, so already-applied blocks are no-ops.
+    if auto_apply_enabled:
+        for key, slot in batch_index.items():
+            best = best_proposal.get(key)
+            if best is None:
+                continue
+            if getattr(best, "confidence", 0.0) < threshold:
+                continue
+            updated = apply_auto_resolution(
+                sections[slot], best, model=resolver_model_id
+            )
+            if updated != sections[slot]:
+                log.info(
+                    "Auto-resolved batched escalation key=%s "
+                    "(best confidence=%.2f >= %.2f)",
+                    key,
+                    best.confidence,
+                    threshold,
+                )
+            sections[slot] = updated
+
     # Apply file-merges to the existing pending text (if any).
     if pending_path.exists():
         existing_text = pending_path.read_text(encoding="utf-8")
@@ -746,10 +789,34 @@ def tier4_escalate(
         existing_text = ""
 
     if file_merges:
+        # Build a reverse map: raw_block -> key, so we can look up the
+        # best proposal for each block being merged into.
+        block_to_key: dict[str, tuple[str, ...]] = {
+            raw_block: k for k, raw_block in open_index.items()
+        }
         for original_block, new_entities in file_merges.items():
             updated_block = original_block
             for ent in new_entities:
                 updated_block = _append_also_affects(updated_block, ent)
+            # Path A auto-apply: if the open block is still [ ] and this
+            # batch carries a best proposal that meets the threshold,
+            # rewrite it as [x]. Cross-batch case.
+            if auto_apply_enabled:
+                key_for_block = block_to_key.get(original_block)
+                best = best_proposal.get(key_for_block) if key_for_block else None
+                if best is not None and getattr(best, "confidence", 0.0) >= threshold:
+                    rewritten = apply_auto_resolution(
+                        updated_block, best, model=resolver_model_id
+                    )
+                    if rewritten != updated_block:
+                        log.info(
+                            "Auto-resolved cross-batch escalation key=%s "
+                            "(best confidence=%.2f >= %.2f)",
+                            key_for_block,
+                            best.confidence,
+                            threshold,
+                        )
+                    updated_block = rewritten
             # Replace verbatim — raw_block came from parse, so it lives
             # inside existing_text byte-for-byte. Guard with `count=1` to
             # avoid clobbering text that happens to repeat.
