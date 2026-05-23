@@ -7,7 +7,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from collections.abc import ItemsView, Iterator
@@ -228,6 +228,14 @@ class EscalationItem:
     entity_name: str
     conflict_type: str  # "principled" | "ambiguous" | "classification_failed"
     description: str
+    # Optional resolver proposal threaded through from
+    # :func:`athenaeum.resolutions.propose_resolution`. When present and
+    # confidence >= the configured threshold, :func:`tier4_escalate`
+    # auto-applies the resolution to the rendered block. Typed as
+    # ``Any`` to avoid a circular import (resolutions.py imports
+    # AutoMemoryFile from this module). The runtime type is
+    # ``athenaeum.resolutions.ResolutionProposal | None``.
+    proposal: Any = None
 
 
 @dataclass
