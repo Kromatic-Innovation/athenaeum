@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-23
+
+Closes the daily-backlog problem in the pending-questions queue. The Opus
+resolver shipped in 0.4.x drafted proposals but never applied them; the
+detector wrote one block per destination entity even when the underlying
+source-memory pair was the same. On a 2026-05-23 sweep the queue carried
+323 unanswered questions, 92% of which were duplicate firings of three
+source-pair conflicts. This release adds the structural fix: auto-apply
+high-confidence resolutions and dedupe escalations by source pair.
+
+### Added
+
+- **Auto-apply lane for high-confidence resolutions** (#156, PR #158) —
+  when `auto_apply` is enabled and a `ResolutionProposal` reaches the
+  threshold, `tier4_escalate` writes the question block as already
+  answered (`- [x]`) with an `**Answer:** <rationale>` paragraph and an
+  `**Auto-resolved**: true` audit tag. The annotation is additive — the
+  resolver's `**Proposed resolution**` / `**Confidence**` /
+  `**Rationale**` / `**Source precedence**` block is preserved. The
+  rewrite is idempotent and round-trips through `ingest-answers` into
+  both `raw/answers/` and `_pending_questions_archive.md`.
+- **Configurable model and threshold** (#156) — all three config
+  surfaces are honored with precedence env > yaml > defaults:
+  - Env: `ATHENAEUM_RESOLVE_MODEL`, `ATHENAEUM_RESOLVE_AUTO_APPLY`,
+    `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD`.
+  - YAML: `resolve.model`, `resolve.auto_apply`,
+    `resolve.auto_apply_threshold`.
+  - Defaults: `claude-opus-4-7`, `auto_apply: true`,
+    `auto_apply_threshold: 0.90`. Out-of-range threshold raises with
+    the source named (`env` vs `yaml`).
+- **Source-pair dedup at escalation time** (#157, PRs #159 and #160) —
+  before appending a new question block, `tier4_escalate` checks whether
+  the same source-memory pair already has an open block in the file (or
+  another item in the current batch). If so, the destination entity is
+  appended to a `**Also affects**: a, b, c` line instead of creating a
+  duplicate block. Falls back to a normalized passage-hash key when
+  `Members involved:` is unsourced. Auto-resolved (`[x]`) blocks are
+  excluded from the open-pair index so a resurrected conflict still
+  produces a fresh question.
+- **Highest-confidence-wins auto-apply on merge** (PR #160) — when items
+  collapse into an existing block, auto-apply is evaluated against the
+  highest-confidence proposal seen for the source-pair key in the
+  current batch, not just the first. Prevents a low-confidence primary
+  item from suppressing a high-confidence sibling that would have
+  triggered auto-apply on its own. Cross-batch case is also covered:
+  an existing open block can be auto-resolved when a fresh batch brings
+  a high-confidence proposal for the same pair.
+- **Dedup escape hatch** (#157) — `ATHENAEUM_TIER4_DEDUP=false` reverts
+  to pre-#157 always-append behavior. Default is ON.
+- **`docs/auto-resolve.md`** — explains the audit trail, how to disable
+  auto-apply (env or yaml), how to tune the threshold, and how to
+  reverse an auto-resolution.
+- **`README.md` Configuration section** — documents the three precedence
+  layers and lists all three new keys with defaults.
+
+### Changed
+
+- `tier4_escalate` signature accepts a `config: dict | None = None`
+  argument so the auto-apply gate can read the resolved model and
+  threshold. Pre-#156 callers passing `config=None` retain the prior
+  always-append behavior — no auto-apply, no dedup.
+- `EscalationItem.proposal` is a new optional attribute carrying the
+  resolver's verdict through to `tier4_escalate`. Legacy callers that
+  do not populate it are unaffected.
+- `PendingQuestion.also_affects: list[str]` exposes the merged-entity
+  list to `answers.parse_pending_questions` consumers.
+
+### Internal
+
+- 50 new tests across `tests/test_auto_resolve.py` (25) and
+  `tests/test_tier4_dedup.py` (25), including real-`ResolutionProposal`
+  integration tests for the highest-confidence-wins rule on both
+  in-batch (Path B) and cross-batch (Path A) merge paths. Round-trip
+  preservation of `**Also affects**:` through `apply_auto_resolution`
+  and `ingest_answers` is asserted explicitly.
+
 ## [0.4.1] - 2026-05-22
 
 A patch release hardening the auto-memory contradiction pipeline shipped
