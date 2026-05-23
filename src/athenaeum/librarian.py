@@ -523,7 +523,14 @@ def process_one(
 
     # --- Tier 4: Escalation ---
     if escalations:
-        tier4_escalate(escalations, wiki_root / "_pending_questions.md")
+        # wiki_root is <knowledge_root>/wiki; the config sits at the
+        # knowledge_root level. Resolve config here so the auto-apply
+        # lane (issue #156) sees the operator's yaml settings.
+        tier4_escalate(
+            escalations,
+            wiki_root / "_pending_questions.md",
+            config=load_config(wiki_root.parent),
+        )
 
     return result
 

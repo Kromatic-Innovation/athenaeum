@@ -43,6 +43,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Load workflow-bot App credentials from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          KROMATIC_WORKFLOW_BOT_APP_ID: op://Infrastructure/kromatic-workflow-bot/app-id
+          KROMATIC_WORKFLOW_BOT_PRIVATE_KEY: op://Infrastructure/kromatic-workflow-bot/private-key
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ env.KROMATIC_WORKFLOW_BOT_APP_ID }}
+          private-key: ${{ env.KROMATIC_WORKFLOW_BOT_PRIVATE_KEY }}
+
       - name: Validate promotion inputs and fast-forward precondition
         run: |
           set -euo pipefail
@@ -101,16 +117,15 @@ jobs:
 
       - name: Push fast-forward promotion via refs API
         env:
-          # PROMOTION_BOT_TOKEN is required because main's branch protection
-          # (required_pull_request_reviews) rejects direct ref writes by the
-          # default GITHUB_TOKEN with HTTP 422. The bot token has the App
-          # bypass for promotion refs.
-          GH_TOKEN: ${{ secrets.PROMOTION_BOT_TOKEN }}
+          # App-minted token required because main's branch protection
+          # rejects direct ref writes by the default GITHUB_TOKEN with HTTP 422.
+          # The kromatic-workflow-bot App has the bypass for promotion refs.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
 
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::PROMOTION_BOT_TOKEN secret is not available to this workflow. Configure it at the org level or the repo secrets."
+            echo "::error::App-minted promotion token is empty; GitHub App token minting likely failed."
             exit 1
           fi
 
