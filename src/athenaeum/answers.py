@@ -36,7 +36,7 @@ import hashlib
 import logging
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -81,6 +81,8 @@ def _unescape_entity(raw: str) -> str:
             out.append(ch)
             i += 1
     return "".join(out)
+
+
 # Checkbox grammar — ``- [ ]`` or ``- [x]`` (case-insensitive on ``x``).
 _CHECKBOX_RE = re.compile(r"^- \[(?P<state>[ xX])\]\s*(?P<question>.*)$")
 # Lines we strip when extracting the user's answer body.
@@ -107,6 +109,11 @@ class PendingQuestion:
     answered: bool
     answer_lines: list[str]
     raw_block: str
+    # Issue #157: entities sharing the same source-memory pair that
+    # got merged into this block instead of getting their own. The
+    # primary entity (header) is NOT included here. Empty by default
+    # — only populated when the dedup path in tier4_escalate fires.
+    also_affects: list[str] = field(default_factory=list)
 
 
 def _make_id(header_line: str, question_text: str) -> str:
@@ -189,9 +196,7 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
         break
 
     if checkbox_idx is None:
-        log.warning(
-            "Skipping block without checkbox line: %r", lines[0][:80]
-        )
+        log.warning("Skipping block without checkbox line: %r", lines[0][:80])
         print(
             f"[warn] skipping pending-question block without `- [ ]` line: "
             f"{lines[0][:80]!r}",
@@ -208,6 +213,7 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
     conflict_type = ""
     description = ""
     answer_lines: list[str] = []
+    also_affects: list[str] = []
 
     # Tracks whether we're still accumulating continuation lines into the
     # description field. A **Description**: line opens the window; the next
@@ -227,6 +233,15 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
             in_description = True
             description = stripped.removeprefix("**Description**:").strip()
             continue
+        if stripped.startswith("**Also affects**:"):
+            # Issue #157: dedup-merge tag. Comma-separated entity names
+            # that share the source-memory pair with this block's primary
+            # entity. Recognized as metadata so it does NOT leak into
+            # answer_lines (which would forge a phantom user answer).
+            in_description = False
+            payload = stripped.removeprefix("**Also affects**:").strip()
+            also_affects = [name.strip() for name in payload.split(",") if name.strip()]
+            continue
         if in_description:
             # Continuation: consume into description until we hit a terminator.
             # Blank line or another ``**Key**:`` tag closes the window.
@@ -240,9 +255,13 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
                 # **Conflict type**, already handled). For unknown keys, treat
                 # the line as answer body.
                 if stripped.startswith("**Conflict type**:"):
-                    conflict_type = stripped.removeprefix(
-                        "**Conflict type**:"
-                    ).strip()
+                    conflict_type = stripped.removeprefix("**Conflict type**:").strip()
+                    continue
+                if stripped.startswith("**Also affects**:"):
+                    payload = stripped.removeprefix("**Also affects**:").strip()
+                    also_affects = [
+                        name.strip() for name in payload.split(",") if name.strip()
+                    ]
                     continue
                 # Unknown **Key**: — treat as answer body.
                 answer_lines.append(raw_line)
@@ -270,6 +289,7 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
         answered=answered,
         answer_lines=answer_lines,
         raw_block=block_text,
+        also_affects=also_affects,
     )
 
 
@@ -302,10 +322,7 @@ def _render_archive_block(pq: PendingQuestion, archived_at: str) -> str:
     Includes the original raw block verbatim plus a trailer noting when the
     answer was ingested. Newest-first is handled by the caller.
     """
-    return (
-        f"{pq.raw_block}\n\n"
-        f"**Archived**: {archived_at}\n"
-    )
+    return f"{pq.raw_block}\n\n" f"**Archived**: {archived_at}\n"
 
 
 def _render_answer_raw_file(pq: PendingQuestion, resolved_at: str) -> str:
@@ -436,9 +453,7 @@ def ingest_answers(pending_path: Path, raw_root: Path) -> int:
                 f"[warn] skipping duplicate archive entry for entity={entity}",
                 file=sys.stderr,
             )
-            log.info(
-                "Skipping duplicate archive entry for entity=%s", entity
-            )
+            log.info("Skipping duplicate archive entry for entity=%s", entity)
             continue
         filtered_archived.append(rendered)
 
@@ -458,10 +473,7 @@ def ingest_answers(pending_path: Path, raw_root: Path) -> int:
             # Split off the header so we can prepend under it.
             _, _, rest = existing_archive.partition("\n")
             combined = (
-                "# Answered Questions\n\n"
-                + new_section
-                + "\n\n---\n\n"
-                + rest.lstrip()
+                "# Answered Questions\n\n" + new_section + "\n\n---\n\n" + rest.lstrip()
             )
         else:
             combined = (
@@ -475,9 +487,7 @@ def ingest_answers(pending_path: Path, raw_root: Path) -> int:
 
     archive_path.write_text(combined, encoding="utf-8")
 
-    log.info(
-        "Ingested %d pending-question answer(s) from %s", ingested, pending_path
-    )
+    log.info("Ingested %d pending-question answer(s) from %s", ingested, pending_path)
     return ingested
 
 

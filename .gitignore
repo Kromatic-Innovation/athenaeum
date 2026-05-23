@@ -35,3 +35,7 @@ htmlcov/
 # Workspace agent overrides
 .codex/
 .zenodotus/
+
+# Derived from ~/Code/docs/project-registry.yaml by
+# scripts/derive_repo_configs.py — local artifacts, never committed.
+.agents/

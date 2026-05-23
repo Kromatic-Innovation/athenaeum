@@ -235,6 +235,10 @@ silently to the regex extractor if the API key or CLI is unavailable.
 | `ANTHROPIC_API_KEY` | Yes (unless `--dry-run`) | API key for Tier 2/3 LLM calls |
 | `ATHENAEUM_CLASSIFY_MODEL` | No | Override Tier 2 model (default: `claude-haiku-4-5-20251001`) |
 | `ATHENAEUM_WRITE_MODEL` | No | Override Tier 3 model (default: `claude-sonnet-4-6`) |
+| `ATHENAEUM_RESOLVE_MODEL` | No | Override the contradiction-resolver model (default: `claude-opus-4-7`) |
+| `ATHENAEUM_RESOLVE_MAX_PER_RUN` | No | Cap resolver calls per ingest run (default: `50`) |
+| `ATHENAEUM_RESOLVE_AUTO_APPLY` | No | Auto-apply high-confidence resolutions (default: `true`). See [`docs/auto-resolve.md`](docs/auto-resolve.md) |
+| `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | No | Confidence floor for auto-apply, in `[0.0, 1.0]` (default: `0.90`) |
 | `ATHENAEUM_TOPIC_MODEL` | No | Override query-topic model (default: `claude-haiku-4-5-20251001`) |
 | `ATHENAEUM_OP_KEY_PATH` | No | 1Password path for the session-start `ANTHROPIC_API_KEY` bootstrap (default: `op://Agent Tools/Anthropic API Key/credential`) |
 | `AUTO_RECALL` | No | Per-turn recall on/off (hook shell env; overrides `athenaeum.yaml`'s `auto_recall`). Default: `true` |
@@ -253,6 +257,19 @@ with `401 OAuth authentication is currently not supported`. The pipeline and
 example hooks need a separate console API key — see
 [`docs/recall-architecture.md`](docs/recall-architecture.md#anthropic_api_key-bootstrap-sessionstart)
 for the 1Password bootstrap pattern.
+
+## Configuration
+
+Settings are resolved in the order **env var > `<knowledge_root>/athenaeum.yaml` > built-in default**, so a one-off shell export beats the yaml without requiring an edit. The contradiction-resolver knobs live under a top-level `resolve:` block:
+
+```yaml
+resolve:
+  model: claude-opus-4-7          # ATHENAEUM_RESOLVE_MODEL
+  auto_apply: true                # ATHENAEUM_RESOLVE_AUTO_APPLY (default: true)
+  auto_apply_threshold: 0.90      # ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD, [0.0, 1.0]
+```
+
+When `auto_apply` is on and a proposal's confidence meets or exceeds `auto_apply_threshold`, the pending-question block is auto-flipped to answered with an `Auto-resolved: true` audit-trail tag. See [`docs/auto-resolve.md`](docs/auto-resolve.md) for the full lane, including how to disable, lower the threshold, or reverse an auto-resolution.
 
 ## Data formats
 

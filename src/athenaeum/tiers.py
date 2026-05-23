@@ -9,12 +9,14 @@ Tier 4: Human escalation
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import anthropic
 
@@ -518,46 +520,335 @@ def _question_from_description(
     return f"Resolve {conflict_type} conflict for {entity_name}"
 
 
-def tier4_escalate(items: list[EscalationItem], pending_path: Path) -> None:
+def _pair_key_from_description(description: str) -> tuple[str, ...] | None:
+    """Compute the dedup key for an escalation description (issue #157).
+
+    Primary key: sorted tuple of members from a ``Members involved:`` line
+    (works for ``contradictions`` runs over sourced auto-memory passages).
+
+    Fallback key: SHA-1 prefix over the two ``Passage N:`` blobs from the
+    description (works for runs where the detector lacked source attribution).
+
+    Returns ``None`` when neither key can be derived — caller should always
+    append in that case (no dedup possible without a stable key).
+    """
+    members: list[str] | None = None
+    passages: list[str] = []
+    for raw in description.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("Members involved:"):
+            payload = stripped.removeprefix("Members involved:").strip()
+            members = [m.strip() for m in payload.split(",") if m.strip()]
+        elif stripped.startswith("Passage ") and ":" in stripped:
+            # Capture body after the first colon, regardless of digit.
+            _, _, body = stripped.partition(":")
+            body = body.strip()
+            if body:
+                passages.append(body)
+    if members and len(members) >= 2:
+        return tuple(sorted(set(members)))
+    if len(passages) >= 2:
+        # Use the first two passages (typical contradiction shape); join
+        # with a stable separator so passage order does NOT change the key
+        # — sort to make (P1,P2) and (P2,P1) collapse.
+        norm = sorted(p.strip() for p in passages[:2])
+        h = hashlib.sha1((norm[0] + "\n---\n" + norm[1]).encode("utf-8")).hexdigest()[
+            :16
+        ]
+        return ("__passage_hash__", h)
+    return None
+
+
+def _append_also_affects(block: str, entity_name: str) -> str:
+    """Merge ``entity_name`` into a block's ``**Also affects**:`` line.
+
+    Creates the line immediately AFTER the ``**Description**:`` block (or
+    after ``**Conflict type**:`` if no description) when missing. Idempotent
+    — never lists the same entity twice and never lists the primary entity.
+    Preserves all other content (proposal block, auto-resolved checkbox,
+    answer body) verbatim.
+    """
+    # Extract primary entity from the header to avoid self-listing.
+    lines = block.splitlines()
+    primary_entity = ""
+    if lines and lines[0].startswith("## "):
+        m = re.search(r'Entity:\s*"((?:[^"\\]|\\.)*)"', lines[0])
+        if m:
+            primary_entity = m.group(1).replace("\\\\", "\\").replace('\\"', '"')
+    if entity_name == primary_entity:
+        return block
+
+    # Find existing **Also affects** line.
+    for idx, line in enumerate(lines):
+        if line.strip().startswith("**Also affects**:"):
+            payload = line.split(":", 1)[1].strip()
+            existing = [n.strip() for n in payload.split(",") if n.strip()]
+            if entity_name in existing or entity_name == primary_entity:
+                return block
+            existing.append(entity_name)
+            lines[idx] = "**Also affects**: " + ", ".join(existing)
+            return "\n".join(lines) + ("\n" if block.endswith("\n") else "")
+
+    # No existing line — insert after the description block. The description
+    # may span multiple lines; we insert right before the FIRST blank line
+    # that follows **Description**:, OR before the proposal block / answer
+    # body if there is no blank gap. Falling back: append at end-of-block.
+    desc_idx: int | None = None
+    for idx, line in enumerate(lines):
+        if line.strip().startswith("**Description**:"):
+            desc_idx = idx
+            break
+    insert_at = len(lines)
+    if desc_idx is not None:
+        # Walk forward through continuation lines until blank or **Key**.
+        i = desc_idx + 1
+        while i < len(lines):
+            s = lines[i].strip()
+            if s == "" or s.startswith("**"):
+                insert_at = i
+                break
+            i += 1
+        else:
+            insert_at = i
+    else:
+        # No description — insert after conflict type if present, else end.
+        for idx, line in enumerate(lines):
+            if line.strip().startswith("**Conflict type**:"):
+                insert_at = idx + 1
+                break
+
+    new_line = f"**Also affects**: {entity_name}"
+    lines.insert(insert_at, new_line)
+    return "\n".join(lines) + ("\n" if block.endswith("\n") else "")
+
+
+def tier4_escalate(
+    items: list[EscalationItem],
+    pending_path: Path,
+    *,
+    config: dict[str, Any] | None = None,
+) -> None:
     """Append escalation items to ``_pending_questions.md``.
 
     Each block is rendered with a leading checkbox line directly under the
     header so the user (or the ``resolve_question`` MCP tool) can flip
     ``[ ]`` -> ``[x]`` to mark an answer; ``athenaeum ingest-answers`` then
     converts the block to a raw intake file. See ``athenaeum.answers``.
+
+    Issue #156 — auto-apply lane: when ``config`` enables auto-apply and
+    an item carries a :class:`~athenaeum.resolutions.ResolutionProposal`
+    whose confidence meets the threshold, the rendered block is flipped
+    to ``- [x]`` with an answer paragraph attributing the resolver. The
+    deterministic-fallback proposal has ``confidence == 0.0`` so the
+    threshold gate naturally excludes it — no extra guard needed.
+    Callers that pass ``config=None`` (test fixtures, legacy callers)
+    get the pre-#156 behavior: every block is written as ``- [ ]``.
     """
     if not items:
         return
 
+    # Late-import to avoid a hard module-load cycle with resolutions.py
+    # (resolutions imports AutoMemoryFile from models, models is imported
+    # here at module load via the top-of-file import block).
+    from athenaeum.resolutions import _get_model as _resolver_model
+    from athenaeum.resolutions import (
+        apply_auto_resolution,
+        resolve_auto_apply,
+        resolve_auto_apply_threshold,
+    )
+
+    auto_apply_enabled = resolve_auto_apply(config) if config is not None else False
+    threshold = (
+        resolve_auto_apply_threshold(config)
+        if config is not None
+        else 1.1  # unreachable when config is None — disables auto-apply
+    )
+    resolver_model_id = _resolver_model(config) if config is not None else None
+
+    # Issue #157: dedup escalations by source-memory pair (Members involved
+    # tuple, or sha1(passages) fallback). Default ON; escape hatch via the
+    # ATHENAEUM_TIER4_DEDUP env var so a downstream user can force the
+    # legacy always-append behavior.
+    dedup_enabled = os.environ.get(
+        "ATHENAEUM_TIER4_DEDUP", "true"
+    ).strip().lower() not in ("false", "0", "no", "off")
+
+    # Build the open-pair index from the file's currently-open ([ ]) blocks.
+    # Archived/[x] blocks are deliberately excluded — a previously-answered
+    # pair that re-fires deserves a fresh block (resurrection case).
+    from athenaeum.answers import parse_pending_questions
+
+    open_index: dict[tuple[str, ...], str] = {}
+    if dedup_enabled and pending_path.exists():
+        for pq in parse_pending_questions(pending_path):
+            if pq.answered:
+                continue
+            key = _pair_key_from_description(pq.description)
+            if key is not None and key not in open_index:
+                # First-seen wins — if the file already has duplicates from a
+                # pre-#157 run, only the first is merged into.
+                open_index[key] = pq.raw_block
+
     today = date.today().isoformat()
     sections: list[str] = []
+    # In-batch pair index: key -> position in `sections`. Items in the same
+    # batch sharing a key collapse before the file write happens.
+    batch_index: dict[tuple[str, ...], int] = {}
+    # File-merge plan: original raw_block -> list of entity names to append.
+    file_merges: dict[str, list[str]] = {}
+    # Per-key best proposal accumulator. auto-apply uses the
+    # highest-confidence proposal seen for this source-pair key in this batch
+    # (regression fix: previously a low-conf primary item could swallow a
+    # later high-conf collapsing item's proposal and leave the block [ ]).
+    best_proposal: dict[tuple[str, ...], Any] = {}
+
+    def _consider_proposal(k: tuple[str, ...] | None, item_obj: Any) -> None:
+        if k is None:
+            return
+        prop = getattr(item_obj, "proposal", None)
+        if prop is None:
+            return
+        current = best_proposal.get(k)
+        if current is None or getattr(prop, "confidence", 0.0) > getattr(
+            current, "confidence", 0.0
+        ):
+            best_proposal[k] = prop
+
     for item in items:
+        key = _pair_key_from_description(item.description) if dedup_enabled else None
+        _consider_proposal(key, item)
+
+        # Path A: pair already lives in the file as an open block.
+        if key is not None and key in open_index:
+            file_merges.setdefault(open_index[key], []).append(item.entity_name)
+            continue
+
+        # Path B: pair already rendered earlier in THIS batch.
+        if key is not None and key in batch_index:
+            slot = batch_index[key]
+            sections[slot] = _append_also_affects(sections[slot], item.entity_name)
+            continue
+
+        # Path C: brand new — render and append.
         question = _question_from_description(
             item.description, item.entity_name, item.conflict_type
         )
-        # Escape backslashes first, then quotes — paired with the parser's
-        # unescape logic in athenaeum.answers so entity names containing
-        # double quotes round-trip cleanly. raw_ref is NOT escaped: paths
-        # should survive in storage untouched; the parser anchors to the
-        # final ")\n" to tolerate parens inside refs.
         escaped_entity = item.entity_name.replace("\\", "\\\\").replace('"', '\\"')
-        sections.append(
+        block = (
             f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'
             f"- [ ] {question}\n\n"
             f"**Conflict type**: {item.conflict_type}\n"
             f"**Description**: {item.description}\n"
         )
+        proposal = getattr(item, "proposal", None)
+        if (
+            auto_apply_enabled
+            and proposal is not None
+            and getattr(proposal, "confidence", 0.0) >= threshold
+        ):
+            block = apply_auto_resolution(block, proposal, model=resolver_model_id)
+            log.info(
+                "Auto-resolved escalation for entity=%s (confidence=%.2f >= %.2f)",
+                item.entity_name,
+                proposal.confidence,
+                threshold,
+            )
+        if key is not None:
+            batch_index[key] = len(sections)
+        sections.append(block)
 
-    new_content = "\n---\n\n".join(sections)
+    # Path B post-pass: any in-batch section that collapsed siblings needs an
+    # auto-apply consideration using the best proposal for its key (the
+    # primary item's proposal may have been below threshold while a later
+    # collapsing item's was above). apply_auto_resolution is idempotent via
+    # its _AUTO_RESOLVED_MARKER check, so already-applied blocks are no-ops.
+    if auto_apply_enabled:
+        for key, slot in batch_index.items():
+            best = best_proposal.get(key)
+            if best is None:
+                continue
+            if getattr(best, "confidence", 0.0) < threshold:
+                continue
+            updated = apply_auto_resolution(
+                sections[slot], best, model=resolver_model_id
+            )
+            if updated != sections[slot]:
+                log.info(
+                    "Auto-resolved batched escalation key=%s "
+                    "(best confidence=%.2f >= %.2f)",
+                    key,
+                    best.confidence,
+                    threshold,
+                )
+            sections[slot] = updated
 
+    # Apply file-merges to the existing pending text (if any).
     if pending_path.exists():
-        existing = pending_path.read_text(encoding="utf-8")
-        if existing.strip():
-            new_content = existing.rstrip() + "\n\n---\n\n" + new_content
-        else:
-            new_content = "# Pending Questions\n\n" + new_content
+        existing_text = pending_path.read_text(encoding="utf-8")
     else:
-        new_content = "# Pending Questions\n\n" + new_content
+        existing_text = ""
 
-    pending_path.write_text(new_content + "\n", encoding="utf-8")
-    log.info("Escalated %d items to %s", len(items), pending_path)
+    if file_merges:
+        # Build a reverse map: raw_block -> key, so we can look up the
+        # best proposal for each block being merged into.
+        block_to_key: dict[str, tuple[str, ...]] = {
+            raw_block: k for k, raw_block in open_index.items()
+        }
+        for original_block, new_entities in file_merges.items():
+            updated_block = original_block
+            for ent in new_entities:
+                updated_block = _append_also_affects(updated_block, ent)
+            # Path A auto-apply: if the open block is still [ ] and this
+            # batch carries a best proposal that meets the threshold,
+            # rewrite it as [x]. Cross-batch case.
+            if auto_apply_enabled:
+                key_for_block = block_to_key.get(original_block)
+                best = best_proposal.get(key_for_block) if key_for_block else None
+                if best is not None and getattr(best, "confidence", 0.0) >= threshold:
+                    rewritten = apply_auto_resolution(
+                        updated_block, best, model=resolver_model_id
+                    )
+                    if rewritten != updated_block:
+                        log.info(
+                            "Auto-resolved cross-batch escalation key=%s "
+                            "(best confidence=%.2f >= %.2f)",
+                            key_for_block,
+                            best.confidence,
+                            threshold,
+                        )
+                    updated_block = rewritten
+            # Replace verbatim — raw_block came from parse, so it lives
+            # inside existing_text byte-for-byte. Guard with `count=1` to
+            # avoid clobbering text that happens to repeat.
+            if original_block in existing_text:
+                existing_text = existing_text.replace(original_block, updated_block, 1)
+            else:
+                # Should not happen — log and skip the merge for this pair.
+                log.warning(
+                    "tier4 dedup: open block disappeared between parse and "
+                    "rewrite; dropping merge for entities=%s",
+                    new_entities,
+                )
+
+    # Assemble the final file content.
+    if sections:
+        new_section_text = "\n---\n\n".join(sections)
+        if existing_text.strip():
+            new_content = existing_text.rstrip() + "\n\n---\n\n" + new_section_text
+        else:
+            new_content = "# Pending Questions\n\n" + new_section_text
+        pending_path.write_text(new_content + "\n", encoding="utf-8")
+    elif file_merges:
+        # Only file-merges happened — rewrite existing text in place.
+        pending_path.write_text(
+            existing_text if existing_text.endswith("\n") else existing_text + "\n",
+            encoding="utf-8",
+        )
+
+    log.info(
+        "Escalated %d item(s) to %s (new_blocks=%d, file_merges=%d)",
+        len(items),
+        pending_path,
+        len(sections),
+        sum(len(v) for v in file_merges.values()),
+    )

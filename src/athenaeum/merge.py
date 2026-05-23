@@ -778,6 +778,7 @@ def merge_clusters_to_wiki(
                 entity_name=entry.topic_slug,
                 conflict_type=result.conflict_type or "factual",
                 description=description,
+                proposal=proposal,
             )
         )
 
@@ -940,6 +941,10 @@ def merge_clusters_to_wiki(
         )
 
     if escalations:
-        tier4_escalate(escalations, wiki_root / "_pending_questions.md")
+        tier4_escalate(
+            escalations,
+            wiki_root / "_pending_questions.md",
+            config=resolved_config,
+        )
 
     return entries
