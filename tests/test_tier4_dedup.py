@@ -15,6 +15,7 @@ import pytest
 
 from athenaeum.answers import ingest_answers, parse_pending_questions
 from athenaeum.models import EscalationItem
+from athenaeum.resolutions import ResolutionProposal
 from athenaeum.tiers import (
     _append_also_affects,
     _pair_key_from_description,
@@ -307,48 +308,131 @@ class TestTier4Dedup:
 # ---------------------------------------------------------------------------
 
 
-class _StubProposal:
-    """Minimal proposal stand-in for the auto-apply gate."""
-
-    def __init__(self, confidence: float = 0.95) -> None:
-        self.confidence = confidence
-        self.action = "prefer_left"
-        self.rationale = "stub rationale"
-        self.winning_uid = "uid_alpha"
+def _make_proposal(
+    confidence: float, rationale: str = "user > unsourced"
+) -> ResolutionProposal:
+    return ResolutionProposal(
+        recommended_winner="a",
+        action="keep_a",
+        rationale=rationale,
+        confidence=confidence,
+        source_precedence_used=["a:user > b:unsourced"],
+    )
 
 
 class TestTier4DedupAutoApply:
-    def test_also_affects_survives_auto_apply(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_dedup_picks_highest_confidence_proposal_for_auto_apply(
+        self, tmp_path: Path
     ) -> None:
-        # Stub out apply_auto_resolution to keep the test independent of
-        # the resolutions module's exact rendering — we only care that
-        # the **Also affects** line survives the rewrite pass.
-        from athenaeum import resolutions
-
-        def fake_apply(block: str, proposal, model=None):  # noqa: ANN001
-            # Flip checkbox + tack on a marker line — that's what the
-            # real auto-apply does in spirit, and it's enough to exercise
-            # the interaction with _append_also_affects.
-            block = block.replace("- [ ]", "- [x]", 1)
-            return block + "\n_auto-resolved_\n"
-
-        monkeypatch.setattr(resolutions, "apply_auto_resolution", fake_apply)
-        monkeypatch.setattr(resolutions, "resolve_auto_apply", lambda c: True)
-        monkeypatch.setattr(resolutions, "resolve_auto_apply_threshold", lambda c: 0.5)
-
+        """A low-confidence first item + a high-confidence second item with the
+        same source pair should produce a single block that is auto-applied
+        using the second item's proposal."""
         pending = tmp_path / "_pending_questions.md"
-        proposal = _StubProposal(confidence=0.95)
-        a = _item("Alpha", _desc_with_members("a.md", "b.md"))
-        a.proposal = proposal
-        b = _item("Beta", _desc_with_members("a.md", "b.md"))
-        b.proposal = proposal
-        tier4_escalate([a, b], pending, config={})
+        cfg = {"resolve": {"auto_apply": True, "auto_apply_threshold": 0.90}}
 
+        low = _item("Alpha", _desc_with_members("a.md", "b.md"))
+        low.proposal = _make_proposal(0.50, rationale="LOW-CONF rationale")
+        high = _item("Beta", _desc_with_members("a.md", "b.md"))
+        high.proposal = _make_proposal(0.95, rationale="HIGH-CONF rationale")
+
+        tier4_escalate([low, high], pending, config=cfg)
         content = pending.read_text()
-        assert "_auto-resolved_" in content
+
+        # One block — collapsed.
+        assert content.count("## [") == 1
+        # Auto-applied via HIGH-conf proposal.
+        assert "- [x]" in content
         assert "**Also affects**: Beta" in content
-        # Survives parser.
+        assert "**Auto-resolved**: true" in content
+        # HIGH-conf rationale won — LOW-conf rationale must not appear.
+        assert "HIGH-CONF rationale" in content
+        assert "LOW-CONF rationale" not in content
+        # Confidence reflects the winning proposal.
+        assert "**Resolver confidence**: 0.95" in content
+
+        # Parser sees one block, answered, with Beta in also_affects.
         pqs = parse_pending_questions(pending)
         assert len(pqs) == 1
-        assert pqs[0].also_affects == ["Beta"]
+        pq = pqs[0]
+        assert pq.answered is True
+        assert pq.also_affects == ["Beta"]
+
+    def test_cross_batch_existing_open_block_gets_auto_applied(
+        self, tmp_path: Path
+    ) -> None:
+        """An existing [ ] block in the file with a low-confidence/no-op
+        proposal gets rewritten to [x] when a fresh batch arrives with a
+        high-confidence proposal for the same source pair (Path A)."""
+        pending = tmp_path / "_pending_questions.md"
+        cfg = {"resolve": {"auto_apply": True, "auto_apply_threshold": 0.90}}
+
+        # Batch 1: no proposal → block written as [ ].
+        first = _item("Alpha", _desc_with_members("a.md", "b.md"))
+        tier4_escalate([first], pending, config=cfg)
+        first_text = pending.read_text()
+        assert "- [ ]" in first_text
+        assert "**Auto-resolved**" not in first_text
+
+        # Batch 2: high-conf proposal for the SAME source pair.
+        second = _item("Beta", _desc_with_members("a.md", "b.md"))
+        second.proposal = _make_proposal(0.97, rationale="HIGH-CONF cross-batch")
+        tier4_escalate([second], pending, config=cfg)
+        content = pending.read_text()
+
+        # Still one block, now auto-applied with Beta in also_affects.
+        assert content.count("## [") == 1
+        assert "- [x]" in content
+        assert "**Also affects**: Beta" in content
+        assert "**Auto-resolved**: true" in content
+        assert "HIGH-CONF cross-batch" in content
+        assert "**Resolver confidence**: 0.97" in content
+
+    def test_cross_batch_already_applied_is_idempotent(self, tmp_path: Path) -> None:
+        """If the file block is already [x] (auto-resolved), a new
+        high-confidence proposal for the same pair must NOT clobber the
+        existing answer. It just merges the entity name in."""
+        pending = tmp_path / "_pending_questions.md"
+        cfg = {"resolve": {"auto_apply": True, "auto_apply_threshold": 0.90}}
+
+        first = _item("Alpha", _desc_with_members("a.md", "b.md"))
+        first.proposal = _make_proposal(0.93, rationale="FIRST rationale")
+        tier4_escalate([first], pending, config=cfg)
+
+        second = _item("Beta", _desc_with_members("a.md", "b.md"))
+        second.proposal = _make_proposal(0.99, rationale="SECOND rationale")
+        tier4_escalate([second], pending, config=cfg)
+        content = pending.read_text()
+
+        # Second batch only collapses (block is already [x]; merge into open
+        # blocks would not see it — Path A only indexes pq.answered=False).
+        # So Beta arrives as a fresh block. Acceptable behavior: the spec
+        # says re-apply is a no-op via marker; cross-batch resurrection of
+        # an already-answered pair gets its own block.
+        # The key invariant: first block's [x] + FIRST rationale survive.
+        assert "- [x]" in content
+        assert "FIRST rationale" in content
+        assert "**Resolver confidence**: 0.93" in content
+
+    def test_also_affects_round_trips_through_ingest(self, tmp_path: Path) -> None:
+        """The **Also affects** line must survive ingest_answers into the
+        ``_pending_questions_archive.md`` file (the durable audit trail).
+        Raw answer files under ``raw/answers/`` only carry the user-facing
+        answer body by design — the audit-trail home for ``Also affects``
+        is the archive, which preserves the original block verbatim."""
+        pending = tmp_path / "_pending_questions.md"
+        raw_root = tmp_path / "raw"
+        cfg = {"resolve": {"auto_apply": True, "auto_apply_threshold": 0.90}}
+
+        low = _item("Alpha", _desc_with_members("a.md", "b.md"))
+        low.proposal = _make_proposal(0.50)
+        high = _item("Beta", _desc_with_members("a.md", "b.md"))
+        high.proposal = _make_proposal(0.95)
+        tier4_escalate([low, high], pending, config=cfg)
+
+        ingested = ingest_answers(pending, raw_root)
+        assert ingested == 1
+
+        # Archive carries the also-affects line verbatim.
+        archive = pending.parent / "_pending_questions_archive.md"
+        assert archive.exists()
+        assert "**Also affects**: Beta" in archive.read_text()
