@@ -15,6 +15,7 @@ import os
 import re
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import anthropic
 
@@ -518,16 +519,48 @@ def _question_from_description(
     return f"Resolve {conflict_type} conflict for {entity_name}"
 
 
-def tier4_escalate(items: list[EscalationItem], pending_path: Path) -> None:
+def tier4_escalate(
+    items: list[EscalationItem],
+    pending_path: Path,
+    *,
+    config: dict[str, Any] | None = None,
+) -> None:
     """Append escalation items to ``_pending_questions.md``.
 
     Each block is rendered with a leading checkbox line directly under the
     header so the user (or the ``resolve_question`` MCP tool) can flip
     ``[ ]`` -> ``[x]`` to mark an answer; ``athenaeum ingest-answers`` then
     converts the block to a raw intake file. See ``athenaeum.answers``.
+
+    Issue #156 — auto-apply lane: when ``config`` enables auto-apply and
+    an item carries a :class:`~athenaeum.resolutions.ResolutionProposal`
+    whose confidence meets the threshold, the rendered block is flipped
+    to ``- [x]`` with an answer paragraph attributing the resolver. The
+    deterministic-fallback proposal has ``confidence == 0.0`` so the
+    threshold gate naturally excludes it — no extra guard needed.
+    Callers that pass ``config=None`` (test fixtures, legacy callers)
+    get the pre-#156 behavior: every block is written as ``- [ ]``.
     """
     if not items:
         return
+
+    # Late-import to avoid a hard module-load cycle with resolutions.py
+    # (resolutions imports AutoMemoryFile from models, models is imported
+    # here at module load via the top-of-file import block).
+    from athenaeum.resolutions import _get_model as _resolver_model
+    from athenaeum.resolutions import (
+        apply_auto_resolution,
+        resolve_auto_apply,
+        resolve_auto_apply_threshold,
+    )
+
+    auto_apply_enabled = resolve_auto_apply(config) if config is not None else False
+    threshold = (
+        resolve_auto_apply_threshold(config)
+        if config is not None
+        else 1.1  # unreachable when config is None — disables auto-apply
+    )
+    resolver_model_id = _resolver_model(config) if config is not None else None
 
     today = date.today().isoformat()
     sections: list[str] = []
@@ -541,12 +574,26 @@ def tier4_escalate(items: list[EscalationItem], pending_path: Path) -> None:
         # should survive in storage untouched; the parser anchors to the
         # final ")\n" to tolerate parens inside refs.
         escaped_entity = item.entity_name.replace("\\", "\\\\").replace('"', '\\"')
-        sections.append(
+        block = (
             f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'
             f"- [ ] {question}\n\n"
             f"**Conflict type**: {item.conflict_type}\n"
             f"**Description**: {item.description}\n"
         )
+        proposal = getattr(item, "proposal", None)
+        if (
+            auto_apply_enabled
+            and proposal is not None
+            and getattr(proposal, "confidence", 0.0) >= threshold
+        ):
+            block = apply_auto_resolution(block, proposal, model=resolver_model_id)
+            log.info(
+                "Auto-resolved escalation for entity=%s (confidence=%.2f >= %.2f)",
+                item.entity_name,
+                proposal.confidence,
+                threshold,
+            )
+        sections.append(block)
 
     new_content = "\n---\n\n".join(sections)
 

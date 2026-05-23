@@ -75,6 +75,16 @@ DEFAULT_RESOLVE_MODEL = "claude-opus-4-7"
 # proposal (degraded mode). Keeps cost predictable on a noisy run.
 DEFAULT_RESOLVE_MAX_PER_RUN = 50
 
+# Auto-apply lane (issue #156): when the resolver returns a high-confidence
+# proposal, mark the pending-question block as resolved in-place so the
+# user doesn't have to act. Default ON — the whole point of the lane —
+# with a conservative 0.90 confidence floor.
+DEFAULT_AUTO_APPLY = True
+DEFAULT_AUTO_APPLY_THRESHOLD = 0.90
+
+_TRUTHY = frozenset(("true", "1", "yes"))
+_FALSY = frozenset(("false", "0", "no"))
+
 # Action taxonomy locked here — :mod:`athenaeum.merge` and the renderer
 # both branch on these literals.
 ResolverWinner = Literal["a", "b", "merge", "neither"]
@@ -196,8 +206,88 @@ _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 # ---------------------------------------------------------------------------
 
 
-def _get_model() -> str:
-    return os.environ.get("ATHENAEUM_RESOLVE_MODEL", DEFAULT_RESOLVE_MODEL)
+def _get_model(config: dict[str, Any] | None = None) -> str:
+    """Resolve the resolver model from env > config > default.
+
+    Mirrors the env > yaml > default precedence used elsewhere. Env wins
+    so an operator can swap models for a single run without editing the
+    yaml.
+    """
+    env = os.environ.get("ATHENAEUM_RESOLVE_MODEL")
+    if env:
+        return env
+    if isinstance(config, dict):
+        resolve_cfg = config.get("resolve")
+        if isinstance(resolve_cfg, dict):
+            raw = resolve_cfg.get("model")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    return DEFAULT_RESOLVE_MODEL
+
+
+def resolve_auto_apply(config: dict[str, Any] | None = None) -> bool:
+    """Resolve the auto-apply toggle from env > config > default.
+
+    Env values accepted (case-insensitive): ``true``/``false``,
+    ``1``/``0``, ``yes``/``no``. Invalid env values fall through to the
+    yaml/default layers rather than raising — auto-apply is a behavior
+    knob, not a hard validation surface.
+    """
+    env = os.environ.get("ATHENAEUM_RESOLVE_AUTO_APPLY")
+    if env is not None:
+        norm = env.strip().lower()
+        if norm in _TRUTHY:
+            return True
+        if norm in _FALSY:
+            return False
+    if isinstance(config, dict):
+        resolve_cfg = config.get("resolve")
+        if isinstance(resolve_cfg, dict):
+            raw = resolve_cfg.get("auto_apply")
+            if isinstance(raw, bool):
+                return raw
+    return DEFAULT_AUTO_APPLY
+
+
+def resolve_auto_apply_threshold(config: dict[str, Any] | None = None) -> float:
+    """Resolve the auto-apply confidence threshold from env > config > default.
+
+    Must land in ``[0.0, 1.0]``. An out-of-range env or yaml value raises
+    :class:`ValueError` so operators get a loud signal — silently clamping
+    a typo (e.g. ``9.0`` meant as ``0.9``) would auto-apply nothing for the
+    rest of the run with no obvious cause.
+    """
+    env = os.environ.get("ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD")
+    if env is not None:
+        try:
+            value = float(env)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD={env!r} "
+                f"out of range [0.0, 1.0]"
+            ) from exc
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(
+                f"ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD={env!r} "
+                f"out of range [0.0, 1.0]"
+            )
+        return value
+    if isinstance(config, dict):
+        resolve_cfg = config.get("resolve")
+        if isinstance(resolve_cfg, dict) and "auto_apply_threshold" in resolve_cfg:
+            raw = resolve_cfg.get("auto_apply_threshold")
+            try:
+                value = float(raw)  # type: ignore[arg-type]
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"resolve.auto_apply_threshold={raw!r} " f"out of range [0.0, 1.0]"
+                ) from exc
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"resolve.auto_apply_threshold={raw!r} " f"out of range [0.0, 1.0]"
+                )
+            return value
+    return DEFAULT_AUTO_APPLY_THRESHOLD
 
 
 def resolve_max_per_run(config: dict[str, Any] | None = None) -> int:
@@ -388,6 +478,7 @@ def propose_resolution(
     detector_result: ContradictionResult,
     members: list[AutoMemoryFile],
     client: "anthropic.Anthropic | None",
+    config: dict[str, Any] | None = None,
 ) -> ResolutionProposal:
     """Run one resolver call against a detected contradiction.
 
@@ -421,7 +512,7 @@ def propose_resolution(
 
     try:
         response = client.messages.create(
-            model=_get_model(),
+            model=_get_model(config),
             max_tokens=1024,
             system=_RESOLVE_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
@@ -473,3 +564,93 @@ def render_proposal_block(proposal: ResolutionProposal) -> str:
         f"**Rationale**: {proposal.rationale or '(none provided)'}\n"
         f"**Source precedence**: {precedence}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Auto-apply lane (issue #156)
+# ---------------------------------------------------------------------------
+
+
+# Matches an unchecked checkbox line written by ``tier4_escalate``.
+_UNCHECKED_RE = re.compile(r"^(?P<prefix>- \[) \](?P<rest>.*)$", re.MULTILINE)
+
+# Detects an already-auto-resolved block so re-applying is a no-op.
+_AUTO_RESOLVED_MARKER = "**Auto-resolved**: true"
+
+
+def apply_auto_resolution(
+    block_text: str,
+    proposal: ResolutionProposal,
+    *,
+    model: str | None = None,
+) -> str:
+    """Mark a pending-question block as auto-resolved in place.
+
+    Flips the leading ``- [ ]`` to ``- [x]`` and inserts an answer
+    paragraph between the checkbox and the ``**Conflict type**:`` line
+    so the existing :mod:`athenaeum.answers` parser sees it as a real
+    user answer body. The four ``**Proposed resolution**`` /
+    ``**Confidence**`` / ``**Rationale**`` / ``**Source precedence**``
+    keys already in the block are left untouched — this annotation is
+    additive.
+
+    Idempotent: if ``block_text`` already carries the auto-resolved
+    marker, the input is returned unchanged.
+
+    Args:
+        block_text: One pending-question block as written by
+            :func:`athenaeum.tiers.tier4_escalate`.
+        proposal: The :class:`ResolutionProposal` to attribute. Confidence
+            and rationale are surfaced verbatim.
+        model: Resolver model id used for the proposal. Defaults to the
+            currently configured model — callers in :mod:`athenaeum.tiers`
+            thread their resolved id through so the audit trail names
+            the actual model that was called, not a fresh ``_get_model``
+            lookup (which can differ when env state has changed).
+
+    Returns:
+        The rewritten block text.
+    """
+    if _AUTO_RESOLVED_MARKER in block_text:
+        return block_text
+
+    model_id = model or _get_model()
+    answer_block = (
+        f"**Answer:** {proposal.rationale or '(none provided)'}\n"
+        f"**Auto-resolved**: true\n"
+        f"**Resolver model**: {model_id}\n"
+        f"**Resolver confidence**: {proposal.confidence:.2f}"
+    )
+
+    lines = block_text.splitlines()
+    out: list[str] = []
+    inserted = False
+    flipped = False
+    for line in lines:
+        if not flipped:
+            m = _UNCHECKED_RE.match(line)
+            if m:
+                out.append(f"- [x]{m.group('rest')}")
+                flipped = True
+                continue
+        if not inserted and line.startswith("**Conflict type**:"):
+            out.append(answer_block)
+            out.append("")
+            out.append(line)
+            inserted = True
+            continue
+        out.append(line)
+
+    if not flipped:
+        # No `- [ ]` to flip — block was already answered or malformed.
+        # Return unchanged rather than corrupting it.
+        return block_text
+
+    if not inserted:
+        # No `**Conflict type**:` line — append the answer block at the
+        # end so the marker still lands in the file (the round-trip test
+        # exercises the standard case where Conflict type IS present).
+        out.append("")
+        out.append(answer_block)
+
+    return "\n".join(out)
