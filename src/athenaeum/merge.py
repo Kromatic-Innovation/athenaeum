@@ -149,34 +149,57 @@ def _declared_relationship(a: "AutoMemoryFile", b: "AutoMemoryFile") -> str | No
 def _filter_declared_pairs(
     members: list["AutoMemoryFile"],
 ) -> tuple[list["AutoMemoryFile"], str | None]:
-    """Drop members whose only conflict partners are declared relationships.
+    """Prune declared pairs from a chunk before the detector sees it.
 
-    Walks every pair: if EVERY pair in the chunk has a declaration, the
-    chunk cannot contradict and the caller should short-circuit the
-    detector. Returns ``(members, rationale)`` unchanged when at least
-    one undeclared pair remains. Returns ``([], rationale)`` when the
-    chunk is fully covered by declarations — the rationale records WHICH
-    declaration class (supersession beats refinement when both apply in
-    the same chunk, since supersession is the stronger statement).
+    Issue #172: previously this was all-or-nothing — one undeclared pair
+    sent the WHOLE chunk (including already-declared pairs) to Haiku.
+    Now we prune: drop any member whose every partner in the chunk has
+    a declaration. The remaining members still form ≥1 undeclared pair
+    and are exactly what Haiku should see.
+
+    Returns ``(pruned_members, rationale)``:
+
+    * Fully declared chunk → ``([], rationale)``. Caller short-circuits.
+      Rationale records the strongest declaration class observed
+      (supersession beats refinement when both appear).
+    * Partially declared chunk → ``(pruned_members, None)``. Members
+      involved only in declared pairs are removed. Rationale is
+      ``None`` because the caller still runs the detector on the
+      remainder. If only one undeclared pair survives, ``pruned_members``
+      contains exactly those two members.
+    * No declarations → ``(members, None)`` unchanged.
+    * Singletons → ``(members, None)`` unchanged (no pairs to evaluate).
     """
     if len(members) < 2:
         return members, None
+    n = len(members)
+    # Bookkeep per-member: does this member participate in ANY undeclared
+    # pair? If yes, keep it. If every one of its partners is declared,
+    # the member can be dropped from the Haiku batch.
+    has_undeclared_partner = [False] * n
     saw_supersession = False
     saw_refinement = False
-    for i in range(len(members)):
-        for j in range(i + 1, len(members)):
+    saw_undeclared = False
+    for i in range(n):
+        for j in range(i + 1, n):
             verdict = _declared_relationship(members[i], members[j])
             if verdict is None:
-                return members, None
-            if verdict == "declared-supersession":
+                saw_undeclared = True
+                has_undeclared_partner[i] = True
+                has_undeclared_partner[j] = True
+            elif verdict == "declared-supersession":
                 saw_supersession = True
             else:
                 saw_refinement = True
-    if saw_supersession:
-        return [], "declared-supersession"
-    if saw_refinement:
-        return [], "declared-refinement"
-    return members, None
+    if not saw_undeclared:
+        # Fully declared — short-circuit the detector entirely.
+        if saw_supersession:
+            return [], "declared-supersession"
+        if saw_refinement:
+            return [], "declared-refinement"
+        return [], None
+    pruned = [m for m, keep in zip(members, has_undeclared_partner) if keep]
+    return pruned, None
 
 
 # Filesystem prefix that distinguishes auto-memory wiki entries from
@@ -980,15 +1003,26 @@ def merge_clusters_to_wiki(
             # already-resolved pairs.
             filtered, declared = _filter_declared_pairs(chunk)
             if declared is not None and not filtered:
+                # Fully-declared chunk — no Haiku call at all.
                 _record_pair_keys(chunk)
                 result = ContradictionResult(detected=False, rationale=declared)
                 continue
-            if len(chunk) >= 2:
-                haiku_calls += 1
-            result = detect_contradictions(chunk, client)
+            # Issue #172: partial prune — Haiku only sees members that
+            # have at least one undeclared partner. _record_pair_keys
+            # still uses the original chunk so declared pairs are
+            # marked covered for the similarity sweep.
+            if len(filtered) < 2:
+                _record_pair_keys(chunk)
+                result = ContradictionResult(
+                    detected=False,
+                    rationale="declared-pruned-to-singleton",
+                )
+                continue
+            haiku_calls += 1
+            result = detect_contradictions(filtered, client)
             _record_pair_keys(chunk)
             if result.detected and aggregate is None:
-                proposal = _maybe_propose(result, chunk)
+                proposal = _maybe_propose(result, filtered)
                 # When the confirmation pass suppresses the cluster, the
                 # detector over-fired: leave `aggregate` unset so the
                 # wiki entry frontmatter is NOT tagged
@@ -1004,7 +1038,7 @@ def merge_clusters_to_wiki(
                     suppressed = True
                 else:
                     aggregate = result
-                _emit_escalation(entry, result, proposal, members=chunk)
+                _emit_escalation(entry, result, proposal, members=filtered)
         if aggregate is None:
             if suppressed:
                 # Detector fired but the confirmation pass cleared it —
