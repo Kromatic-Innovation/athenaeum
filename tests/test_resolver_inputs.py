@@ -19,9 +19,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from athenaeum.contradictions import ContradictionResult
 from athenaeum.models import AutoMemoryFile
 from athenaeum.resolutions import (
+    _RESOLVE_SYSTEM,
     DEFAULT_FULL_BODY_TOKEN_CAP,
     _build_user_message,
     resolve_full_body_token_cap,
@@ -315,3 +318,109 @@ def test_build_user_message_without_config_argument(tmp_path: Path) -> None:
     )
     assert "Member a:" in msg
     assert "Member b:" in msg
+
+
+# ---------------------------------------------------------------------------
+# Quine review #1 — passage always emitted alongside body
+# ---------------------------------------------------------------------------
+
+
+def test_passage_always_present_with_small_body(tmp_path: Path) -> None:
+    """Quine #1 — passage line must appear even when body fits the cap."""
+    scope = tmp_path / "scope"
+    a = _write_member(scope, "a.md", "Full body of A here.")
+    b = _write_member(scope, "b.md", "Full body of B here.")
+    msg = _build_user_message(
+        _detected([a, b], ["pinpoint A", "pinpoint B"]),
+        [a, b],
+    )
+    # Both the passage AND the body are present on each side.
+    assert "passage: pinpoint A" in msg
+    assert "passage: pinpoint B" in msg
+    assert "Full body of A here." in msg
+    assert "Full body of B here." in msg
+    # No truncation note on the small-body path.
+    assert "truncated" not in msg
+
+
+def test_truncation_note_wording_on_asymmetric_path(tmp_path: Path) -> None:
+    """Quine #1 — truncation note reads 'passage above is the conflict region'."""
+    scope = tmp_path / "scope"
+    a = _write_member(scope, "a.md", "small body")
+    big_body = "Y" * 5000
+    b = _write_member(scope, "b.md", big_body)
+    cfg = {"resolve": {"full_body_token_cap": 20}}
+    msg = _build_user_message(
+        _detected([a, b], ["passage a", "passage b"]),
+        [a, b],
+        cfg,
+    )
+    assert "passage above is the conflict region" in msg
+    assert "showing passage only" not in msg
+    # Passage still emitted on truncated side.
+    assert "passage: passage b" in msg
+
+
+def test_system_prompt_describes_passage_and_body_contract() -> None:
+    """Quine #1 — prompt accurately describes the payload shape."""
+    assert "passage" in _RESOLVE_SYSTEM
+    assert "body" in _RESOLVE_SYSTEM
+    # Pin the specific contract sentence so any drift surfaces.
+    assert "always provided" in _RESOLVE_SYSTEM
+    assert "full body is also included" in _RESOLVE_SYSTEM
+
+
+# ---------------------------------------------------------------------------
+# Quine review #2 — link search space unions body + passage
+# ---------------------------------------------------------------------------
+
+
+def test_link_search_space_unions_body_and_passage(tmp_path: Path) -> None:
+    """Quine #2 — link in passage must resolve even when body has none."""
+    scope = tmp_path / "scope"
+    _write_member(
+        scope,
+        "target.md",
+        "Target body.",
+        name="passage-linked",
+        description="Passage-linked description string.",
+    )
+    # Body has no wikilink; the detector's passage has one.
+    a = _write_member(scope, "a.md", "Body of A without any links inside.")
+    b = _write_member(scope, "b.md", "Body of B.")
+    msg = _build_user_message(
+        _detected(
+            [a, b],
+            ["See [[passage-linked]] in this passage.", "passage b"],
+        ),
+        [a, b],
+    )
+    assert "link[passage-linked]" in msg
+    assert "Passage-linked description string." in msg
+
+
+# ---------------------------------------------------------------------------
+# Quine review #4 — cap=0 and negative values are rejected
+# ---------------------------------------------------------------------------
+
+
+def test_token_cap_zero_rejected() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        resolve_full_body_token_cap({"resolve": {"full_body_token_cap": 0}})
+
+
+def test_token_cap_negative_rejected() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        resolve_full_body_token_cap({"resolve": {"full_body_token_cap": -5}})
+
+
+def test_token_cap_zero_rejected_via_env(monkeypatch) -> None:
+    monkeypatch.setenv("ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP", "0")
+    with pytest.raises(ValueError, match="positive integer"):
+        resolve_full_body_token_cap({})
+
+
+def test_token_cap_negative_rejected_via_env(monkeypatch) -> None:
+    monkeypatch.setenv("ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP", "-10")
+    with pytest.raises(ValueError, match="positive integer"):
+        resolve_full_body_token_cap({})

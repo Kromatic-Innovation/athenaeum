@@ -187,9 +187,10 @@ TIE-BREAK: when two claims sit at the same precedence tier, prefer the NEWER
 source date.
 
 You will be shown each member's `source:` value (or "unsourced" when empty),
-the relevant `field_sources.<key>` slice when one was provided, and the
-exact conflicting passages. You will receive each memory's full body when it
-fits the token budget, plus frontmatter timestamps (`created_at`,
+the relevant `field_sources.<key>` slice when one was provided. Each member's
+exact conflicting passage is always provided. When the body fits the
+configured token budget, the full body is also included. You will also see
+frontmatter timestamps (`created_at`,
 `updated_at`, `originSessionId`), one-hop `[[link]]` resolution to other
 memories' descriptions, and any declared `refines:` / `supersedes:`
 relationships.
@@ -333,22 +334,32 @@ def resolve_full_body_token_cap(config: dict[str, Any] | None = None) -> int:
     Lane 2 / issue #168. The cap is measured in tokens (char-heuristic:
     ~4 chars/token for English markdown). When a member's body length
     exceeds ``cap * 4`` characters, the body is omitted and a truncation
-    note is appended to the passage. Negative or non-numeric values fall
-    back to :data:`DEFAULT_FULL_BODY_TOKEN_CAP`.
+    note is appended to the passage. Non-numeric values fall back to
+    :data:`DEFAULT_FULL_BODY_TOKEN_CAP`. Zero and negative values are
+    rejected with ``ValueError`` — set a large value to effectively
+    disable truncation rather than passing ``0``.
     """
+    msg = (
+        "full_body_token_cap must be a positive integer; "
+        "set a large value to disable truncation"
+    )
     env = os.environ.get("ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP")
     if env is not None:
         try:
             value = int(env)
-            if value >= 0:
-                return value
         except (TypeError, ValueError):
-            pass
+            value = None
+        if value is not None:
+            if value <= 0:
+                raise ValueError(msg)
+            return value
     if isinstance(config, dict):
         resolve_cfg = config.get("resolve")
         if isinstance(resolve_cfg, dict):
             raw = resolve_cfg.get("full_body_token_cap")
-            if isinstance(raw, int) and raw >= 0:
+            if isinstance(raw, int):
+                if raw <= 0:
+                    raise ValueError(msg)
                 return raw
     return DEFAULT_FULL_BODY_TOKEN_CAP
 
@@ -550,11 +561,12 @@ def _build_user_message(
                 slim[str(key)] = val
             if slim:
                 lines.append("field_sources: " + json.dumps(slim, default=str))
-        # One-hop ``[[link]]`` resolution. Search the wider of body or
-        # passage so the resolver sees referenced descriptions even when
-        # the body is truncated.
-        link_search_space = body if body else passage
-        if link_search_space:
+        # One-hop ``[[link]]`` resolution. Search the union of body and
+        # passage so links in either surface are resolved (passage may
+        # contain a wikilink absent from the body when truncated, and
+        # vice versa). ``_resolve_wikilinks`` dedupes.
+        link_search_space = (body or "") + "\n" + (passage or "")
+        if link_search_space.strip():
             link_targets = _resolve_wikilinks(
                 link_search_space, am.path.parent, am.path
             )
@@ -568,15 +580,18 @@ def _build_user_message(
         body_stripped = body.strip()
         truncated = bool(body_stripped) and len(body_stripped) > char_cap
         lines.append("<member>")
+        # Always emit the pinpointed conflict region first, regardless of
+        # whether the body also fits — the resolver needs the exact
+        # passage even when the full body is included for context.
+        lines.append(f"passage: {passage}")
         if body_stripped and not truncated:
+            lines.append("body:")
             lines.append(body_stripped)
-        else:
-            lines.append(passage)
-            if truncated:
-                lines.append(
-                    f"[truncated — body exceeded {token_cap}-token budget; "
-                    "showing passage only]"
-                )
+        elif truncated:
+            lines.append(
+                f"[truncated — body exceeded {token_cap}-token budget; "
+                "passage above is the conflict region]"
+            )
         lines.append("</member>")
         lines.append("")
 
