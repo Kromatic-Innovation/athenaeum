@@ -34,7 +34,6 @@ from athenaeum.models import (
 )
 from athenaeum.resolutions import propose_resolution
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
