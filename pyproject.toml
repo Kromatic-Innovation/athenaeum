@@ -92,3 +92,6 @@ testpaths = ["tests"]
 # explicitly with `pytest tests/benchmarks/ --benchmark-only` (cli paths
 # override `--ignore`). See tests/benchmarks/test_search_bench.py.
 addopts = "--ignore=tests/benchmarks"
+markers = [
+    "regression: contract regression tests pinning resolver outputs against canonical fixtures",
+]

@@ -68,8 +68,11 @@ from athenaeum.models import (
     render_frontmatter,
     slugify,
 )
+from athenaeum.pending_merges import write_pending_merge
 from athenaeum.resolutions import (
+    PROPOSE_MERGE_ACTION,
     SUPPRESS_ACTION,
+    MergeProposal,
     ResolutionProposal,
     propose_resolution,
     render_proposal_block,
@@ -806,10 +809,45 @@ def merge_clusters_to_wiki(
     def _emit_escalation(
         entry: MergedWikiEntry,
         result: ContradictionResult,
-        proposal: ResolutionProposal | None = None,
+        proposal: "ResolutionProposal | MergeProposal | None" = None,
+        members: list[AutoMemoryFile] | None = None,
     ) -> None:
         if not result.detected:
             return
+        # Lane 3 / issue #169: resolver proposes the two snippets should
+        # merge into a single canonical memory. Route the proposal to
+        # ``wiki/_pending_merges.md`` for human approval (NOT auto-applied)
+        # and DROP the would-be pending-question escalation — the same
+        # conflict should not appear in both sidecars.
+        if proposal is not None and proposal.action == PROPOSE_MERGE_ACTION:
+            assert isinstance(proposal, MergeProposal)
+            member_paths = [str(m.path) for m in (members or [])]
+            try:
+                write_pending_merge(
+                    wiki_root / "_pending_merges.md",
+                    merge_target_name=proposal.merge_target_name,
+                    sources=member_paths,
+                    rationale=proposal.rationale,
+                    draft_merged_body=proposal.draft_merged_body,
+                    confidence=proposal.confidence,
+                )
+                log.info(
+                    "resolutions: propose_merge written to _pending_merges.md "
+                    "(target=%s, confidence=%.2f); dropping pending-question "
+                    "escalation for cluster %s",
+                    proposal.merge_target_name,
+                    proposal.confidence,
+                    entry.cluster_id,
+                )
+            except OSError as exc:
+                log.warning(
+                    "resolutions: failed to write propose_merge for cluster %s "
+                    "(%s); falling through to pending-question escalation",
+                    entry.cluster_id,
+                    exc,
+                )
+            else:
+                return
         # Confirmation pass (issue #145): the stronger resolver model
         # gets a second opinion on every detected=True cluster. When it
         # returns the suppress verdict, the cheap detector over-fired —
@@ -866,7 +904,7 @@ def merge_clusters_to_wiki(
         # render_proposal_block returns "" for the deterministic fallback,
         # so entries without a real proposal stay byte-identical to the
         # pre-#126 escalation format.
-        if proposal is not None:
+        if proposal is not None and isinstance(proposal, ResolutionProposal):
             block = render_proposal_block(proposal)
             if block:
                 description = description + "\n" + block
@@ -961,9 +999,12 @@ def merge_clusters_to_wiki(
                 # for the suppress verdict.
                 if proposal is not None and proposal.action == SUPPRESS_ACTION:
                     suppressed = True
+                elif proposal is not None and proposal.action == PROPOSE_MERGE_ACTION:
+                    # Lane 3: routed to _pending_merges.md, not a contradiction.
+                    suppressed = True
                 else:
                     aggregate = result
-                _emit_escalation(entry, result, proposal)
+                _emit_escalation(entry, result, proposal, members=chunk)
         if aggregate is None:
             if suppressed:
                 # Detector fired but the confirmation pass cleared it —
@@ -1019,7 +1060,7 @@ def merge_clusters_to_wiki(
                     contradiction=result,
                 )
                 proposal = _maybe_propose(result, list(pair))
-                _emit_escalation(synthetic, result, proposal)
+                _emit_escalation(synthetic, result, proposal, members=list(pair))
 
     log.info(
         "contradictions: mode=%s; haiku_calls=%d; chunks_run=%d; "
