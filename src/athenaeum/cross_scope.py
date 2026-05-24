@@ -463,6 +463,10 @@ def candidate_to_auto_memory_files(
             )
             refines = []
             supersedes = []
+        # Issue #181: same self-reference lint as discover_auto_memory_files.
+        from athenaeum.librarian import _strip_self_reference
+
+        refines, supersedes = _strip_self_reference(name, refines, supersedes, path)
         out.append(
             AutoMemoryFile(
                 path=path,
