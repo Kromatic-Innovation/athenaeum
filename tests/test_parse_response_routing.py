@@ -1,29 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Regression fixture for resolver-output contract (issue #169, Lane 3).
+"""Routing tests for ``_parse_response`` + action dispatch (issue #169, Lane 3).
 
-Pins the resolver's classification contract against twelve representative
-pending-question blocks resolved manually by Tristan in the
-2026-05-22/23 archive sweep (the canonical training set for the
-preference / decision / fact taxonomy). Plus one canonical
-``propose_merge`` case — the Sublime + Numbers general+exception pair
-that should consolidate into a single file-opener preference memory.
+These tests pin the action-routing behavior of
+:func:`athenaeum.resolutions.propose_resolution` against a stubbed LLM
+response. They verify that when the model returns a given JSON shape,
+``_parse_response`` constructs the right proposal class and the action
+dispatch branches on the right literal.
 
-The fixtures are SYNTHETIC — they reproduce the SHAPE of real archive
-entries (paths, passages, members_involved) so the regression locks the
-resolver's CONTRACT, not the exact wording of any single past answer. If
-a future prompt change makes the resolver return a different action for
-any of these inputs, the test fails.
+They do NOT exercise the prompt itself — every call to
+``client.messages.create`` is replaced by a ``MagicMock`` that yields a
+literal expected JSON payload, so a future prompt edit that drifts the
+classification will NOT fail these tests. Prompt drift is caught by:
 
-All LLM calls are stubbed via ``MagicMock``; no network in CI.
-
-Run with::
-
-    pytest tests/regression/ -v
-    pytest -m regression -v
-
-Exclude with::
-
-    pytest -m "not regression"
+- :mod:`tests.test_resolve_system_snapshot` — fails on any unintentional
+  edit to the ``_RESOLVE_SYSTEM`` prompt string.
+- :mod:`tests.regression.test_live_prompt_regression` — opt-in (set
+  ``ATHENAEUM_LIVE_TESTS=1``) live-LLM check that the real prompt still
+  classifies the canonical training cases correctly.
 """
 
 from __future__ import annotations
@@ -41,9 +34,6 @@ from athenaeum.resolutions import (
     ResolutionProposal,
     propose_resolution,
 )
-
-pytestmark = pytest.mark.regression
-
 
 # ---------------------------------------------------------------------------
 # Fixture data — synthetic shapes mirroring the 2026-05-22/23 archive sweep
@@ -476,15 +466,14 @@ def test_resolved_case_returns_not_a_conflict(
     case: ResolvedCase,
     tmp_path: Path,
 ) -> None:
-    """All twelve canonical archive cases must resolve to not_a_conflict.
+    """``_parse_response`` routes stubbed not_a_conflict JSON to ResolutionProposal.
 
-    The resolver receives the input shape (passages, sources, frontmatter)
-    that the new taxonomy is supposed to recognize. The stubbed response
-    represents what we EXPECT a correctly-prompted resolver to return.
-
-    If a future prompt change causes the action to drift to anything
-    other than ``not_a_conflict`` with confidence >= 0.85, the test
-    fails — the resolver is no longer honoring the taxonomy contract.
+    The stubbed client returns the literal JSON we expect a correctly-
+    prompted resolver to emit. This test does NOT exercise the prompt —
+    it verifies that for each canonical input shape the parser routes
+    to the right proposal class and preserves the action + confidence.
+    Prompt drift is caught by ``test_resolve_system_snapshot`` and the
+    opt-in live regression in ``tests/regression/``.
     """
     ams = _write_case_files(case, tmp_path)
     detector = _detector_result(case, ams)
@@ -505,12 +494,12 @@ def test_resolved_case_returns_not_a_conflict(
 
 
 def test_sublime_numbers_yields_propose_merge(tmp_path: Path) -> None:
-    """The canonical general+exception preference pair should propose a merge.
+    """``_parse_response`` routes stubbed propose_merge JSON to MergeProposal.
 
-    Represents the Sublime/Numbers cluster that has re-fired through the
-    archive multiple times. Under the new taxonomy this should land as
-    ``propose_merge`` so the human can consolidate the rules into a
-    single canonical file-opener preference memory.
+    Pins the parser side of the propose_merge action — given the literal
+    JSON payload the prompt is supposed to emit for a general+exception
+    preference pair, the proposal class, slug, and draft body round-trip
+    correctly. Does NOT exercise the prompt's classification of the input.
     """
     ams = _write_case_files(MERGE_CASE, tmp_path)
     detector = _detector_result(MERGE_CASE, ams)

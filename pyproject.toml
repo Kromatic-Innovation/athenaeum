@@ -94,4 +94,5 @@ testpaths = ["tests"]
 addopts = "--ignore=tests/benchmarks"
 markers = [
     "regression: contract regression tests pinning resolver outputs against canonical fixtures",
+    "live: opt-in live-LLM tests; require ATHENAEUM_LIVE_TESTS=1 and ANTHROPIC_API_KEY",
 ]

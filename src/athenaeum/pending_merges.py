@@ -444,6 +444,7 @@ def resolve_merge(
         }
 
     target_pm: PendingMerge | None = None
+    resolved_text: str | None = None
     rewritten: list[str] = []
     for block_text in blocks:
         pm = _parse_block(block_text)
@@ -458,7 +459,8 @@ def resolve_merge(
                 "resolved_block": None,
             }
         target_pm = pm
-        rewritten.append(_rewrite_block_resolved(block_text, decision, note))
+        resolved_text = _rewrite_block_resolved(block_text, decision, note)
+        rewritten.append(resolved_text)
 
     if target_pm is None:
         return {
@@ -468,43 +470,86 @@ def resolve_merge(
             "resolved_block": None,
         }
 
+    warning: str | None = None
+
     # Apply the side-effect tied to the decision BEFORE flushing the file.
     if decision == "approve":
         root = wiki_root or merges_path.parent
         root.mkdir(parents=True, exist_ok=True)
         target_path = root / f"{slugify(target_pm.merge_target_name)}.md"
+        if target_path.exists():
+            # Fail closed: do NOT flip the checkbox; the human must rename
+            # the merge_target_name or resolve the existing wiki entry.
+            return {
+                "ok": False,
+                "error_code": "target_exists",
+                "message": (
+                    f"{target_path} already exists; rename merge_target_name "
+                    "or resolve the existing memory first"
+                ),
+                "resolved_block": None,
+            }
         target_path.write_text(target_pm.draft_merged_body, encoding="utf-8")
     elif decision == "reject" and len(target_pm.sources) >= 2:
         # Write a `refines:` declaration into the first source memory
         # naming the second one. Lane 1 / #167's declared-refinement
         # short-circuit then suppresses the pair on future detector runs.
         src_a = Path(target_pm.sources[0])
-        # Derive other_name from path stem stripped of conventional prefix.
-        other_stem = Path(target_pm.sources[1]).stem
-        for prefix in ("feedback_", "project_", "reference_", "user_", "recall_"):
-            if other_stem.startswith(prefix):
-                other_stem = other_stem[len(prefix) :]
-                break
-        _add_refines_declaration(src_a, other_stem)
+        src_b = Path(target_pm.sources[1])
+        # Prefer source B's frontmatter `name:` so renames / custom slugs
+        # round-trip; fall back to the filename stem (minus conventional
+        # prefix) only when the frontmatter is missing/unreadable.
+        other_name: str | None = None
+        if src_b.is_file():
+            try:
+                b_text = src_b.read_text(encoding="utf-8")
+                b_meta, _ = parse_frontmatter(b_text)
+                if isinstance(b_meta, dict):
+                    raw_name = b_meta.get("name")
+                    if isinstance(raw_name, str) and raw_name.strip():
+                        other_name = raw_name.strip()
+            except (OSError, UnicodeDecodeError):
+                other_name = None
+        if other_name is None:
+            other_stem = src_b.stem
+            for prefix in (
+                "feedback_",
+                "project_",
+                "reference_",
+                "user_",
+                "recall_",
+            ):
+                if other_stem.startswith(prefix):
+                    other_stem = other_stem[len(prefix) :]
+                    break
+            other_name = other_stem
+        if not src_a.is_file():
+            warning = (
+                "refines_write_failed: source A unavailable or unwritable; "
+                "merge will re-propose on next run"
+            )
+        else:
+            try:
+                _add_refines_declaration(src_a, other_name)
+            except OSError:
+                warning = (
+                    "refines_write_failed: source A unavailable or "
+                    "unwritable; merge will re-propose on next run"
+                )
 
     primary_parts = ["# Pending Merges", *rewritten]
     primary_body = "\n\n---\n\n".join(primary_parts) + "\n"
     merges_path.write_text(primary_body, encoding="utf-8")
 
-    return {
+    response: dict = {
         "ok": True,
         "error_code": None,
         "message": "ok",
-        "resolved_block": next(
-            (
-                b
-                for b in rewritten
-                if b.lstrip().startswith("## ")
-                and merge_id in _make_id(target_pm.sources, target_pm.merge_target_name)
-            ),
-            None,
-        ),
+        "resolved_block": resolved_text,
     }
+    if warning is not None:
+        response["warning"] = warning
+    return response
 
 
 def ingest_resolved_merges(merges_path: Path) -> int:

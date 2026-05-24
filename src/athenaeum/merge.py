@@ -935,7 +935,7 @@ def merge_clusters_to_wiki(
     def _maybe_propose(
         result: ContradictionResult,
         members: list[AutoMemoryFile],
-    ) -> ResolutionProposal | None:
+    ) -> ResolutionProposal | MergeProposal | None:
         nonlocal resolve_calls, resolve_budget_exhausted_logged
         if not result.detected:
             return None
