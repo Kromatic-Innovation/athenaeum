@@ -185,6 +185,51 @@ class TestPerActionOverride:
         with pytest.raises(ValueError, match="keep_a"):
             resolve_auto_apply_threshold_for(cfg, "keep_a")
 
+    def test_non_numeric_error_wording_not_out_of_range(self) -> None:
+        """A non-numeric value should say "not a numeric value", not
+        "out of range" — the latter implies a numeric typo (issue #179).
+        """
+        cfg = {
+            "resolve": {
+                "auto_apply_threshold_per_action": {"keep_a": "high"},
+            }
+        }
+        with pytest.raises(ValueError, match="not a numeric value"):
+            resolve_auto_apply_threshold_for(cfg, "keep_a")
+
+    def test_per_action_override_isolates_from_invalid_legacy_scalar(self) -> None:
+        """Per-action override should win without consulting the legacy
+        scalar. An invalid legacy scalar must NOT raise when a per-action
+        override is set for the queried action (issue #179, Quine).
+        """
+        cfg = {
+            "resolve": {
+                # Legacy scalar is invalid — would raise if consulted.
+                "auto_apply_threshold": "bogus",
+                "auto_apply_threshold_per_action": {"keep_a": 0.95},
+            }
+        }
+        # Per-action lookup short-circuits before legacy scalar validation.
+        assert resolve_auto_apply_threshold_for(cfg, "keep_a") == 0.95
+
+
+class TestLegacyScalarErrorWording:
+    def test_legacy_scalar_non_numeric_says_not_a_numeric_value(self) -> None:
+        cfg = {"resolve": {"auto_apply_threshold": "bogus"}}
+        with pytest.raises(ValueError, match="not a numeric value"):
+            from athenaeum.resolutions import resolve_auto_apply_threshold
+
+            resolve_auto_apply_threshold(cfg)
+
+    def test_legacy_env_non_numeric_says_not_a_numeric_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD", "bogus")
+        with pytest.raises(ValueError, match="not a numeric value"):
+            from athenaeum.resolutions import resolve_auto_apply_threshold
+
+            resolve_auto_apply_threshold(None)
+
 
 class TestMixedLegacyAndPerAction:
     def test_per_action_wins_where_set_legacy_fills_rest(self) -> None:

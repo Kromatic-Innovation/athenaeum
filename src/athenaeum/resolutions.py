@@ -405,7 +405,7 @@ def resolve_auto_apply_threshold(config: dict[str, Any] | None = None) -> float:
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 f"ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD={env!r} "
-                f"out of range [0.0, 1.0]"
+                f"is not a numeric value"
             ) from exc
         if not 0.0 <= value <= 1.0:
             raise ValueError(
@@ -421,7 +421,7 @@ def resolve_auto_apply_threshold(config: dict[str, Any] | None = None) -> float:
                 value = float(raw)  # type: ignore[arg-type]
             except (TypeError, ValueError) as exc:
                 raise ValueError(
-                    f"resolve.auto_apply_threshold={raw!r} " f"out of range [0.0, 1.0]"
+                    f"resolve.auto_apply_threshold={raw!r} is not a numeric value"
                 ) from exc
             if not 0.0 <= value <= 1.0:
                 raise ValueError(
@@ -478,7 +478,7 @@ def resolve_auto_apply_threshold_for(
                 except (TypeError, ValueError) as exc:
                     raise ValueError(
                         f"resolve.auto_apply_threshold_per_action.{action}={raw!r} "
-                        f"out of range [0.0, 1.0]"
+                        f"is not a numeric value"
                     ) from exc
                 if not 0.0 <= value <= 1.0:
                     raise ValueError(
@@ -589,18 +589,79 @@ def _read_member_meta(am: AutoMemoryFile) -> tuple[dict[str, Any] | None, str]:
     return (meta or None), body
 
 
+def _build_sibling_index(
+    scope_dir: Path, exclude: Path | None = None
+) -> dict[str, str]:
+    """Parse every ``*.md`` in ``scope_dir`` once → ``slug → description`` map.
+
+    Issue #175: extracted from :func:`_resolve_wikilinks` so the same
+    index can serve every conflict in a single resolver invocation.
+    Previously the scope dir was re-globbed and every sibling's
+    frontmatter re-parsed per-member-per-conflict — O(N·M·K). Now
+    built once per (scope_dir, exclude) and threaded through.
+
+    ``exclude``, when supplied, identifies a sibling to skip (used by
+    the resolver to avoid echoing a member's own description back when
+    its body links to itself). Filename-slug fallback covers wiki
+    entries whose ``name:`` is set but the wikilink target uses the
+    filename slug.
+    """
+    sibling_index: dict[str, str] = {}
+    try:
+        siblings = list(scope_dir.glob("*.md"))
+    except OSError:
+        return sibling_index
+    try:
+        exclude_resolved = exclude.resolve() if exclude is not None else None
+    except OSError:
+        exclude_resolved = exclude
+    for sib in siblings:
+        if exclude is not None:
+            try:
+                if sib.resolve() == exclude_resolved:
+                    continue
+            except OSError:
+                if sib == exclude:
+                    continue
+        try:
+            text = sib.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, _ = parse_frontmatter(text)
+        if not meta:
+            continue
+        name_raw = meta.get("name")
+        desc_raw = meta.get("description")
+        desc = str(desc_raw).strip() if isinstance(desc_raw, str) else ""
+        if isinstance(name_raw, str) and name_raw.strip():
+            sibling_index.setdefault(slugify(name_raw), desc)
+        # Filename-slug fallback.
+        stem = sib.stem
+        for prefix in ("feedback_", "project_", "reference_", "user_", "recall_"):
+            if stem.startswith(prefix):
+                stem = stem[len(prefix) :]
+                break
+        sibling_index.setdefault(slugify(stem), desc)
+    return sibling_index
+
+
 def _resolve_wikilinks(
     body: str,
     scope_dir: Path,
     self_path: Path,
+    sibling_index: dict[str, str] | None = None,
 ) -> list[tuple[str, str]]:
     """Resolve one-hop ``[[slug]]`` links in ``body`` to ``(slug, description)``.
 
-    One hop only — no recursion. Targets are looked up by scanning
-    ``scope_dir`` for sibling ``*.md`` whose frontmatter ``name:`` (or
-    filename slug) matches the wikilink slug. Missing targets are
-    omitted silently. ``self_path`` is excluded so a memory linking to
-    itself doesn't echo its own description back.
+    One hop only — no recursion. Targets are looked up against
+    ``sibling_index`` when supplied, otherwise a fresh index is built
+    by scanning ``scope_dir`` for sibling ``*.md`` (legacy path; kept
+    so direct callers without the per-call cache still work). Missing
+    targets are omitted silently. ``self_path`` is excluded so a memory
+    linking to itself doesn't echo its own description back. Wikilinks
+    that point at a memory in a different scope dir (i.e. not present
+    in ``sibling_index``) are dropped — cross-scope link resolution is
+    deliberately out of scope; the resolver runs per-scope.
     """
     slugs: list[str] = []
     seen: set[str] = set()
@@ -615,46 +676,9 @@ def _resolve_wikilinks(
         slugs.append(slug)
     if not slugs:
         return []
+    if sibling_index is None:
+        sibling_index = _build_sibling_index(scope_dir, exclude=self_path)
     out: list[tuple[str, str]] = []
-    try:
-        siblings = list(scope_dir.glob("*.md"))
-    except OSError:
-        return []
-    try:
-        self_resolved = self_path.resolve()
-    except OSError:
-        self_resolved = self_path
-    # Pre-build slug → (description, path) by parsing each sibling's
-    # frontmatter once. Filename-slug fallback covers wiki entries whose
-    # ``name:`` is set but the wikilink target uses the filename slug.
-    sibling_index: dict[str, str] = {}
-    for sib in siblings:
-        try:
-            if sib.resolve() == self_resolved:
-                continue
-        except OSError:
-            if sib == self_path:
-                continue
-        try:
-            text = sib.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        meta, _ = parse_frontmatter(text)
-        if not meta:
-            continue
-        name_raw = meta.get("name")
-        desc_raw = meta.get("description")
-        desc = str(desc_raw).strip() if isinstance(desc_raw, str) else ""
-        if isinstance(name_raw, str) and name_raw.strip():
-            sibling_index.setdefault(slugify(name_raw), desc)
-        # Filename-slug fallback (strip extension, drop leading
-        # ``feedback_`` / ``project_`` / etc. prefix if present).
-        stem = sib.stem
-        for prefix in ("feedback_", "project_", "reference_", "user_", "recall_"):
-            if stem.startswith(prefix):
-                stem = stem[len(prefix) :]
-                break
-        sibling_index.setdefault(slugify(stem), desc)
     for slug in slugs:
         if slug in sibling_index:
             out.append((slug, sibling_index[slug]))
@@ -742,6 +766,10 @@ def _build_user_message(
     token_cap = resolve_full_body_token_cap(config)
     char_cap = token_cap * _CHARS_PER_TOKEN
     labels = ("a", "b")
+    # Per-call sibling-index cache (issue #175). Keyed by (scope_dir,
+    # self_path) so two members sharing a scope share work, but each
+    # one still excludes its OWN file from its index.
+    sibling_index_cache: dict[tuple[Path, Path], dict[str, str]] = {}
     for label, am, passage in zip(labels, flagged, passages):
         source_str, field_sources = _read_member_sources(am)
         meta, body = _read_member_meta(am)
@@ -762,9 +790,15 @@ def _build_user_message(
         if super_names:
             lines.append("supersedes: " + json.dumps(super_names))
         if field_sources:
-            # Pass only field_sources keys whose value text appears in the
-            # flagged passage — keeps the prompt small. If we can't pick
-            # a slice, drop the section entirely.
+            # Issue #175: pass ALL field_sources keys. Earlier comment
+            # claimed we filter to keys whose value text appears in the
+            # passage, but no filter was ever wired up — and shipping
+            # all keys is the right call: field_sources is small (one
+            # short string per field), the resolver may need to reason
+            # about a field whose value sits outside the flagged
+            # passage (e.g. passage is the conclusion, provenance is on
+            # an earlier paragraph), and dropping a key on a faulty
+            # substring heuristic would silently weaken the prompt.
             slim: dict[str, Any] = {}
             for key, val in field_sources.items():
                 slim[str(key)] = val
@@ -776,8 +810,16 @@ def _build_user_message(
         # vice versa). ``_resolve_wikilinks`` dedupes.
         link_search_space = (body or "") + "\n" + (passage or "")
         if link_search_space.strip():
+            cache_key = (am.path.parent, am.path)
+            cached_index = sibling_index_cache.get(cache_key)
+            if cached_index is None:
+                cached_index = _build_sibling_index(am.path.parent, exclude=am.path)
+                sibling_index_cache[cache_key] = cached_index
             link_targets = _resolve_wikilinks(
-                link_search_space, am.path.parent, am.path
+                link_search_space,
+                am.path.parent,
+                am.path,
+                sibling_index=cached_index,
             )
             for slug, desc in link_targets:
                 if desc:

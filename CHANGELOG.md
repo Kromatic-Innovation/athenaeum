@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-24
+
+The librarian-reasoner epic (#166) lands as a single backward-compatible
+minor bump. The 0.5.x auto-apply + dedupe foundation now stands on a
+richer reasoning surface: declared refines/supersedes relationships
+short-circuit the detector, the resolver sees full-body context and
+field-level provenance, the prompt taxonomy adds a `propose_merge`
+action with a `_pending_merges.md` sidecar, and the auto-apply gate is
+asymmetric per action so cheap suppressions auto-apply while wiki-body
+mutations stay behind a higher bar. This release also bundles five
+follow-up polish items (#172, #173, #175, #177, #179).
+
+### Added
+
+- **Declared refines / supersedes in frontmatter** (#167) — memories
+  can now declare a relationship to a sibling memory via
+  `refines: [name]` or `supersedes: [{name, as_of, reason}]` in YAML
+  frontmatter. The detector short-circuits any pair (or fully-declared
+  chunk) covered by a declaration, and the resolver surfaces both lists
+  in the prompt so the LLM has the audit context even when the
+  short-circuit did not fire.
+- **Full-body resolver context with token budget** (#168) — the Opus
+  resolver now sees each member's full body (default 1500-token cap
+  per side, char-heuristic) plus `created_at` / `updated_at` /
+  `originSessionId` frontmatter and one-hop `[[wikilink]]`
+  descriptions. Asymmetric truncation is normal; the conflict passage
+  is always emitted regardless of body inclusion.
+- **`propose_merge` action + `_pending_merges.md` sidecar** (#169) —
+  the resolver can propose a merged body for human review rather than
+  picking a winner. Proposals land in `wiki/_pending_merges.md`;
+  `list_pending_merges` / `resolve_merge` MCP tools triage them.
+  Approval writes the draft merged body to wiki; rejection writes a
+  `refines:` declaration into the first source so the detector's
+  declared-refinement short-circuit suppresses the pair on future runs.
+- **Asymmetric per-action auto-apply thresholds** (#170) —
+  `not_a_conflict` defaults to 0.75 (false-suppress is cheap; detector
+  re-fires next run), `keep_a` / `keep_b` to 0.90 (mutates wiki bodies;
+  higher bar), `propose_merge` NEVER auto-applies (the draft body must
+  go through human review regardless of confidence). Configurable via
+  `resolve.auto_apply_threshold_per_action.<action>`; the legacy scalar
+  still applies to `keep_a` / `keep_b` only.
+
+### Changed
+
+- **`_filter_declared_pairs` prunes declared pairs from multi-member
+  chunks** (#172) — previously all-or-nothing: one undeclared pair
+  sent the whole chunk (including already-declared pairs) to Haiku.
+  Now members whose every partner in the chunk is declared are
+  dropped before the detector sees the chunk.
+- **Self-reference in `refines:` / `supersedes:` is dropped + warned**
+  (#173) — a post-load lint pass in `discover_auto_memory_files`
+  silently strips entries that name the file's own memory and emits a
+  `WARNING` log so the YAML authoring mistake surfaces without
+  blocking ingest.
+- **Per-call sibling-index cache + clarified `field_sources` semantics**
+  (#175) — the resolver now caches `slug → description` per scope dir
+  per `_build_user_message` call instead of re-globbing + re-parsing
+  per member per conflict (O(N·M·K) → O(N·M+K)). The prompt ships ALL
+  `field_sources` keys (the earlier "filter to passage-substring"
+  comment was aspirational, never wired up; full shipping is the right
+  call for provenance-aware resolution).
+- **Threshold error wording + gate-decision threshold returned to
+  caller** (#179) — non-numeric threshold values now say "not a numeric
+  value" instead of "out of range" (latter implies a numeric typo).
+  `_should_auto_apply` returns `(should_apply, threshold)` so the
+  caller logs the resolved threshold from the gate decision rather
+  than re-resolving via a second lookup.
+- **MCP `resolve_merge` emits legacy aliases for symmetry with
+  `resolve_question`** (#177) — `block` (= `resolved_block`) and
+  `error` (= `message` on failure) are now present on `resolve_merge`'s
+  return shape. New callers should still prefer `error_code` +
+  `message` + `resolved_block`.
+
+### Backward compatibility
+
+All changes are additive. Configs targeting 0.5.x continue to load
+unchanged; the legacy scalar `resolve.auto_apply_threshold` still
+applies to `keep_a` / `keep_b` so a pre-#170 deployment behaves the
+same after upgrading. Frontmatter without `refines:` / `supersedes:`
+keys round-trips byte-for-byte.
+
 ## [0.5.0] - 2026-05-23
 
 Closes the daily-backlog problem in the pending-questions queue. The Opus
