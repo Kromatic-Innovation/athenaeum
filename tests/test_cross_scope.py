@@ -727,3 +727,61 @@ class TestCandidateUnwrap:
         assert len(ams) == 2
         assert ams[0].name == "a"
         assert ams[1].origin_scope == "-Y"
+
+
+# ---------------------------------------------------------------------------
+# Issue #181: self-reference lint applies to candidate_to_auto_memory_files
+# ---------------------------------------------------------------------------
+
+
+class TestCandidateSelfReferenceLint:
+    def test_refines_self_dropped(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from athenaeum.cross_scope import SimilarityCandidate, candidate_to_auto_memory_files
+
+        a = tmp_path / "a.md"
+        b = tmp_path / "b.md"
+        a.write_text(
+            "---\nname: A Mem\ntype: feedback\n"
+            "refines:\n  - A Mem\n  - Other\n---\nbody\n",
+            encoding="utf-8",
+        )
+        b.write_text(
+            "---\nname: B Mem\ntype: feedback\n---\nbody\n",
+            encoding="utf-8",
+        )
+        cand = SimilarityCandidate(
+            a_path=a, b_path=b, similarity=0.9, a_scope="-X", b_scope="-Y"
+        )
+        with caplog.at_level("WARNING"):
+            ams = candidate_to_auto_memory_files(cand)
+        assert ams[0].refines == ["Other"]
+        assert any("refines self" in r.message for r in caplog.records)
+
+    def test_supersedes_self_dropped(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from athenaeum.cross_scope import SimilarityCandidate, candidate_to_auto_memory_files
+
+        a = tmp_path / "a.md"
+        b = tmp_path / "b.md"
+        a.write_text(
+            "---\nname: A Mem\ntype: feedback\n"
+            "supersedes:\n"
+            "  - name: A Mem\n    as_of: 2026-01-01\n    reason: typo\n"
+            "  - name: Other\n    as_of: 2026-01-02\n    reason: real\n"
+            "---\nbody\n",
+            encoding="utf-8",
+        )
+        b.write_text(
+            "---\nname: B Mem\ntype: feedback\n---\nbody\n",
+            encoding="utf-8",
+        )
+        cand = SimilarityCandidate(
+            a_path=a, b_path=b, similarity=0.9, a_scope="-X", b_scope="-Y"
+        )
+        with caplog.at_level("WARNING"):
+            ams = candidate_to_auto_memory_files(cand)
+        assert [s["name"] for s in ams[0].supersedes] == ["Other"]
+        assert any("supersedes self" in r.message for r in caplog.records)

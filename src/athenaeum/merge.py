@@ -608,11 +608,18 @@ def merge_cluster_row(
                 )
                 shim_refines = []
                 shim_supersedes = []
+            # Issue #181: same self-reference lint as discover_auto_memory_files.
+            from athenaeum.librarian import _strip_self_reference
+
+            shim_name = str(meta.get("name", "")) if meta else ""
+            shim_refines, shim_supersedes = _strip_self_reference(
+                shim_name, shim_refines, shim_supersedes, resolved
+            )
             am = AutoMemoryFile(
                 path=resolved,
                 origin_scope=scope_guess,
                 memory_type="unknown",
-                name=str(meta.get("name", "")) if meta else "",
+                name=shim_name,
                 description=str(meta.get("description", "")) if meta else "",
                 origin_session_id=(
                     str(origin_session_id) if origin_session_id is not None else None
