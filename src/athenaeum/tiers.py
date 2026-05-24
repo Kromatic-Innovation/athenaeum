@@ -654,16 +654,33 @@ def tier4_escalate(
     from athenaeum.resolutions import (
         apply_auto_resolution,
         resolve_auto_apply,
-        resolve_auto_apply_threshold,
+        resolve_auto_apply_threshold_for,
     )
 
     auto_apply_enabled = resolve_auto_apply(config) if config is not None else False
-    threshold = (
-        resolve_auto_apply_threshold(config)
-        if config is not None
-        else 1.1  # unreachable when config is None — disables auto-apply
-    )
     resolver_model_id = _resolver_model(config) if config is not None else None
+
+    def _threshold_for(action: str) -> float | None:
+        """Per-action threshold gate (issue #170). ``None`` = never auto-apply.
+
+        When ``config is None`` (legacy / test callers) we also return ``None``
+        to preserve the pre-#170 "no config → no auto-apply" behavior.
+        """
+        if config is None:
+            return None
+        return resolve_auto_apply_threshold_for(config, action)
+
+    def _should_auto_apply(prop: Any) -> bool:
+        """Single source of truth for the per-action auto-apply gate."""
+        if prop is None:
+            return False
+        action = getattr(prop, "action", None)
+        if not isinstance(action, str):
+            return False
+        thr = _threshold_for(action)
+        if thr is None:
+            return False
+        return getattr(prop, "confidence", 0.0) >= thr
 
     # Issue #157: dedup escalations by source-memory pair (Members involved
     # tuple, or sha1(passages) fallback). Default ON; escape hatch via the
@@ -741,17 +758,15 @@ def tier4_escalate(
             f"**Description**: {item.description}\n"
         )
         proposal = getattr(item, "proposal", None)
-        if (
-            auto_apply_enabled
-            and proposal is not None
-            and getattr(proposal, "confidence", 0.0) >= threshold
-        ):
+        if auto_apply_enabled and _should_auto_apply(proposal):
             block = apply_auto_resolution(block, proposal, model=resolver_model_id)
             log.info(
-                "Auto-resolved escalation for entity=%s (confidence=%.2f >= %.2f)",
+                "Auto-resolved escalation for entity=%s action=%s "
+                "(confidence=%.2f >= threshold=%.2f)",
                 item.entity_name,
+                proposal.action,
                 proposal.confidence,
-                threshold,
+                _threshold_for(proposal.action),
             )
         if key is not None:
             batch_index[key] = len(sections)
@@ -765,20 +780,19 @@ def tier4_escalate(
     if auto_apply_enabled:
         for key, slot in batch_index.items():
             best = best_proposal.get(key)
-            if best is None:
-                continue
-            if getattr(best, "confidence", 0.0) < threshold:
+            if not _should_auto_apply(best):
                 continue
             updated = apply_auto_resolution(
                 sections[slot], best, model=resolver_model_id
             )
             if updated != sections[slot]:
                 log.info(
-                    "Auto-resolved batched escalation key=%s "
-                    "(best confidence=%.2f >= %.2f)",
+                    "Auto-resolved batched escalation key=%s action=%s "
+                    "(best confidence=%.2f >= threshold=%.2f)",
                     key,
+                    best.action,
                     best.confidence,
-                    threshold,
+                    _threshold_for(best.action),
                 )
             sections[slot] = updated
 
@@ -804,17 +818,18 @@ def tier4_escalate(
             if auto_apply_enabled:
                 key_for_block = block_to_key.get(original_block)
                 best = best_proposal.get(key_for_block) if key_for_block else None
-                if best is not None and getattr(best, "confidence", 0.0) >= threshold:
+                if _should_auto_apply(best):
                     rewritten = apply_auto_resolution(
                         updated_block, best, model=resolver_model_id
                     )
                     if rewritten != updated_block:
                         log.info(
-                            "Auto-resolved cross-batch escalation key=%s "
-                            "(best confidence=%.2f >= %.2f)",
+                            "Auto-resolved cross-batch escalation key=%s action=%s "
+                            "(best confidence=%.2f >= threshold=%.2f)",
                             key_for_block,
+                            best.action,
                             best.confidence,
-                            threshold,
+                            _threshold_for(best.action),
                         )
                     updated_block = rewritten
             # Replace verbatim — raw_block came from parse, so it lives
