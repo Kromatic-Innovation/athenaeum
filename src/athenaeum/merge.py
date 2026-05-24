@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from athenaeum._lint import _strip_self_reference
 from athenaeum.clusters import resolve_cluster_output_path
 from athenaeum.config import load_config, resolve_extra_intake_roots
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
@@ -609,8 +610,6 @@ def merge_cluster_row(
                 shim_refines = []
                 shim_supersedes = []
             # Issue #181: same self-reference lint as discover_auto_memory_files.
-            from athenaeum.librarian import _strip_self_reference
-
             shim_name = str(meta.get("name", "")) if meta else ""
             shim_refines, shim_supersedes = _strip_self_reference(
                 shim_name, shim_refines, shim_supersedes, resolved

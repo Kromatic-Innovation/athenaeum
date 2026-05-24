@@ -738,7 +738,10 @@ class TestCandidateSelfReferenceLint:
     def test_refines_self_dropped(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        from athenaeum.cross_scope import SimilarityCandidate, candidate_to_auto_memory_files
+        from athenaeum.cross_scope import (
+            SimilarityCandidate,
+            candidate_to_auto_memory_files,
+        )
 
         a = tmp_path / "a.md"
         b = tmp_path / "b.md"
@@ -756,13 +759,22 @@ class TestCandidateSelfReferenceLint:
         )
         with caplog.at_level("WARNING"):
             ams = candidate_to_auto_memory_files(cand)
-        assert ams[0].refines == ["Other"]
-        assert any("refines self" in r.message for r in caplog.records)
+        am_a = next(am for am in ams if am.path == a)
+        assert am_a.refines == ["Other"]
+        assert any(
+            "refines self" in r.getMessage()
+            and "A Mem" in r.getMessage()
+            and str(a) in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_supersedes_self_dropped(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        from athenaeum.cross_scope import SimilarityCandidate, candidate_to_auto_memory_files
+        from athenaeum.cross_scope import (
+            SimilarityCandidate,
+            candidate_to_auto_memory_files,
+        )
 
         a = tmp_path / "a.md"
         b = tmp_path / "b.md"
@@ -783,5 +795,11 @@ class TestCandidateSelfReferenceLint:
         )
         with caplog.at_level("WARNING"):
             ams = candidate_to_auto_memory_files(cand)
-        assert [s["name"] for s in ams[0].supersedes] == ["Other"]
-        assert any("supersedes self" in r.message for r in caplog.records)
+        am_a = next(am for am in ams if am.path == a)
+        assert [s["name"] for s in am_a.supersedes] == ["Other"]
+        assert any(
+            "supersedes self" in r.getMessage()
+            and "A Mem" in r.getMessage()
+            and str(a) in r.getMessage()
+            for r in caplog.records
+        )
