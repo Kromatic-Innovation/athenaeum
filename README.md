@@ -267,6 +267,7 @@ resolve:
   model: claude-opus-4-7          # ATHENAEUM_RESOLVE_MODEL
   auto_apply: true                # ATHENAEUM_RESOLVE_AUTO_APPLY (default: true)
   auto_apply_threshold: 0.90      # ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD, [0.0, 1.0]
+  full_body_token_cap: 1500       # ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP, per-side body cap (~4 chars/token)
 ```
 
 When `auto_apply` is on and a proposal's confidence meets or exceeds `auto_apply_threshold`, the pending-question block is auto-flipped to answered with an `Auto-resolved: true` audit-trail tag. See [`docs/auto-resolve.md`](docs/auto-resolve.md) for the full lane, including how to disable, lower the threshold, or reverse an auto-resolution.

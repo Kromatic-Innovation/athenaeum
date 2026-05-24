@@ -56,6 +56,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from athenaeum.contradictions import ContradictionResult
@@ -81,6 +82,15 @@ DEFAULT_RESOLVE_MAX_PER_RUN = 50
 # with a conservative 0.90 confidence floor.
 DEFAULT_AUTO_APPLY = True
 DEFAULT_AUTO_APPLY_THRESHOLD = 0.90
+
+# Lane 2 / issue #168: token-budget cap for the per-side full body the
+# resolver sees. Measured as a character-count heuristic — roughly 4
+# chars/token for English markdown. When a member's body length exceeds
+# ``cap * 4`` characters, the body is omitted and a truncation note is
+# appended to the rendered passage instead. Asymmetric truncation is
+# expected: one small + one large member is a normal case.
+DEFAULT_FULL_BODY_TOKEN_CAP = 1500
+_CHARS_PER_TOKEN = 4
 
 _TRUTHY = frozenset(("true", "1", "yes"))
 _FALSY = frozenset(("false", "0", "no"))
@@ -177,9 +187,13 @@ TIE-BREAK: when two claims sit at the same precedence tier, prefer the NEWER
 source date.
 
 You will be shown each member's `source:` value (or "unsourced" when empty),
-the relevant `field_sources.<key>` slice when one was provided, and the
-exact conflicting passages. You will NOT be shown the full body — token
-economy matters.
+the relevant `field_sources.<key>` slice when one was provided. Each member's
+exact conflicting passage is always provided. When the body fits the
+configured token budget, the full body is also included. You will also see
+frontmatter timestamps (`created_at`,
+`updated_at`, `originSessionId`), one-hop `[[link]]` resolution to other
+memories' descriptions, and any declared `refines:` / `supersedes:`
+relationships.
 
 Return STRICT JSON. No markdown fence, no prose outside the object:
 {
@@ -314,6 +328,130 @@ def resolve_max_per_run(config: dict[str, Any] | None = None) -> int:
     return DEFAULT_RESOLVE_MAX_PER_RUN
 
 
+def resolve_full_body_token_cap(config: dict[str, Any] | None = None) -> int:
+    """Resolve the per-side full-body token cap from env > config > default.
+
+    Lane 2 / issue #168. The cap is measured in tokens (char-heuristic:
+    ~4 chars/token for English markdown). When a member's body length
+    exceeds ``cap * 4`` characters, the body is omitted and a truncation
+    note is appended to the passage. Non-numeric values fall back to
+    :data:`DEFAULT_FULL_BODY_TOKEN_CAP`. Zero and negative values are
+    rejected with ``ValueError`` — set a large value to effectively
+    disable truncation rather than passing ``0``.
+    """
+    msg = (
+        "full_body_token_cap must be a positive integer; "
+        "set a large value to disable truncation"
+    )
+    env = os.environ.get("ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP")
+    if env is not None:
+        try:
+            value = int(env)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None:
+            if value <= 0:
+                raise ValueError(msg)
+            return value
+    if isinstance(config, dict):
+        resolve_cfg = config.get("resolve")
+        if isinstance(resolve_cfg, dict):
+            raw = resolve_cfg.get("full_body_token_cap")
+            if isinstance(raw, int):
+                if raw <= 0:
+                    raise ValueError(msg)
+                return raw
+    return DEFAULT_FULL_BODY_TOKEN_CAP
+
+
+# Match Obsidian-style ``[[slug]]`` and ``[[slug|alias]]`` wikilinks.
+# Captures the slug portion only — the alias is rendered text, not the
+# link target.
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]|\n]+?)(?:\|[^\[\]\n]*)?\]\]")
+
+
+def _read_member_meta(am: AutoMemoryFile) -> tuple[dict[str, Any] | None, str]:
+    """Return ``(frontmatter_dict, body)`` for a member; tolerate read errors."""
+    try:
+        text = am.path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None, ""
+    meta, body = parse_frontmatter(text)
+    return (meta or None), body
+
+
+def _resolve_wikilinks(
+    body: str,
+    scope_dir: Path,
+    self_path: Path,
+) -> list[tuple[str, str]]:
+    """Resolve one-hop ``[[slug]]`` links in ``body`` to ``(slug, description)``.
+
+    One hop only — no recursion. Targets are looked up by scanning
+    ``scope_dir`` for sibling ``*.md`` whose frontmatter ``name:`` (or
+    filename slug) matches the wikilink slug. Missing targets are
+    omitted silently. ``self_path`` is excluded so a memory linking to
+    itself doesn't echo its own description back.
+    """
+    slugs: list[str] = []
+    seen: set[str] = set()
+    for m in _WIKILINK_RE.finditer(body):
+        raw = m.group(1).strip()
+        if not raw:
+            continue
+        slug = slugify(raw)
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        slugs.append(slug)
+    if not slugs:
+        return []
+    out: list[tuple[str, str]] = []
+    try:
+        siblings = list(scope_dir.glob("*.md"))
+    except OSError:
+        return []
+    try:
+        self_resolved = self_path.resolve()
+    except OSError:
+        self_resolved = self_path
+    # Pre-build slug → (description, path) by parsing each sibling's
+    # frontmatter once. Filename-slug fallback covers wiki entries whose
+    # ``name:`` is set but the wikilink target uses the filename slug.
+    sibling_index: dict[str, str] = {}
+    for sib in siblings:
+        try:
+            if sib.resolve() == self_resolved:
+                continue
+        except OSError:
+            if sib == self_path:
+                continue
+        try:
+            text = sib.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, _ = parse_frontmatter(text)
+        if not meta:
+            continue
+        name_raw = meta.get("name")
+        desc_raw = meta.get("description")
+        desc = str(desc_raw).strip() if isinstance(desc_raw, str) else ""
+        if isinstance(name_raw, str) and name_raw.strip():
+            sibling_index.setdefault(slugify(name_raw), desc)
+        # Filename-slug fallback (strip extension, drop leading
+        # ``feedback_`` / ``project_`` / etc. prefix if present).
+        stem = sib.stem
+        for prefix in ("feedback_", "project_", "reference_", "user_", "recall_"):
+            if stem.startswith(prefix):
+                stem = stem[len(prefix) :]
+                break
+        sibling_index.setdefault(slugify(stem), desc)
+    for slug in slugs:
+        if slug in sibling_index:
+            out.append((slug, sibling_index[slug]))
+    return out
+
+
 def _read_member_sources(am: AutoMemoryFile) -> tuple[str, dict[str, Any] | None]:
     """Extract ``source:`` (scalar) + ``field_sources`` (dict) from a member.
 
@@ -342,12 +480,25 @@ def _read_member_sources(am: AutoMemoryFile) -> tuple[str, dict[str, Any] | None
 def _build_user_message(
     detector_result: ContradictionResult,
     members: list[AutoMemoryFile],
+    config: dict[str, Any] | None = None,
 ) -> str:
     """Render the per-conflict user message for the resolver prompt.
 
-    Token-economy contract: passages + sources + (optional) field_sources
-    slice. NOT the full body. The detector already extracted the
-    relevant passages; we reuse them here.
+    Includes (Lane 2 / issue #168):
+
+    - Each member's source + (optional) field_sources slice (Lane 0).
+    - The exact conflicting passage(s) from the detector.
+    - Full body of each member when under ``resolve.full_body_token_cap``
+      (default 1500 tokens, char-heuristic ~4 chars/token). Asymmetric
+      truncation is normal — one small + one large member is fine.
+    - Frontmatter timestamps ``created_at`` / ``updated_at`` /
+      ``originSessionId`` when present; omitted cleanly when absent.
+    - One-hop ``[[link]]`` resolution: a wikilink in the body or passage
+      contributes the target memory's ``description:`` frontmatter (NOT
+      its body). One hop only; missing targets are omitted silently.
+    - Declared ``refines:`` / ``supersedes:`` lists (Lane 1) on each
+      side so the LLM sees the historical record even when the
+      declared-winner short-circuit did not fire.
     """
     # Pick the (up to) two members the detector flagged; fall back to
     # the first two cluster members when the detector echoed garbage.
@@ -379,11 +530,28 @@ def _build_user_message(
         f"Conflict type: {detector_result.conflict_type or 'unknown'}",
         "",
     ]
+    token_cap = resolve_full_body_token_cap(config)
+    char_cap = token_cap * _CHARS_PER_TOKEN
     labels = ("a", "b")
     for label, am, passage in zip(labels, flagged, passages):
         source_str, field_sources = _read_member_sources(am)
+        meta, body = _read_member_meta(am)
         lines.append(f"## Member {label}: {am.origin_scope}/{am.path.name}")
         lines.append(f"source: {source_str}")
+        # Timestamps + originSessionId — omit cleanly when absent.
+        if meta:
+            for key in ("created_at", "updated_at", "originSessionId"):
+                raw = meta.get(key)
+                if raw is None or raw == "":
+                    continue
+                lines.append(f"{key}: {raw}")
+        # Declared relationships (Lane 1) — surface even when the
+        # short-circuit did not fire so the LLM has the audit context.
+        if am.refines:
+            lines.append("refines: " + json.dumps(list(am.refines)))
+        super_names = am.supersedes_names()
+        if super_names:
+            lines.append("supersedes: " + json.dumps(super_names))
         if field_sources:
             # Pass only field_sources keys whose value text appears in the
             # flagged passage — keeps the prompt small. If we can't pick
@@ -393,8 +561,37 @@ def _build_user_message(
                 slim[str(key)] = val
             if slim:
                 lines.append("field_sources: " + json.dumps(slim, default=str))
+        # One-hop ``[[link]]`` resolution. Search the union of body and
+        # passage so links in either surface are resolved (passage may
+        # contain a wikilink absent from the body when truncated, and
+        # vice versa). ``_resolve_wikilinks`` dedupes.
+        link_search_space = (body or "") + "\n" + (passage or "")
+        if link_search_space.strip():
+            link_targets = _resolve_wikilinks(
+                link_search_space, am.path.parent, am.path
+            )
+            for slug, desc in link_targets:
+                if desc:
+                    lines.append(f"link[{slug}]: {desc}")
+                else:
+                    lines.append(f"link[{slug}]: (no description)")
+        # Body — included when under the token-budget cap; otherwise the
+        # passage-only path with a truncation note.
+        body_stripped = body.strip()
+        truncated = bool(body_stripped) and len(body_stripped) > char_cap
         lines.append("<member>")
-        lines.append(passage)
+        # Always emit the pinpointed conflict region first, regardless of
+        # whether the body also fits — the resolver needs the exact
+        # passage even when the full body is included for context.
+        lines.append(f"passage: {passage}")
+        if body_stripped and not truncated:
+            lines.append("body:")
+            lines.append(body_stripped)
+        elif truncated:
+            lines.append(
+                f"[truncated — body exceeded {token_cap}-token budget; "
+                "passage above is the conflict region]"
+            )
         lines.append("</member>")
         lines.append("")
 
@@ -614,7 +811,7 @@ def propose_resolution(
         )
         return _fallback("resolver-unavailable")
 
-    user_msg = _build_user_message(detector_result, members)
+    user_msg = _build_user_message(detector_result, members, config)
 
     try:
         response = client.messages.create(
