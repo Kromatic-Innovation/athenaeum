@@ -96,6 +96,67 @@ resolve:
 Anything below the threshold continues to land as an unchecked block for
 human review.
 
+## Per-action thresholds (issue #170)
+
+The single scalar `auto_apply_threshold` treats every resolver action the
+same, but the cost of an incorrect auto-apply is not symmetric:
+
+- `not_a_conflict` — false-suppress is cheap. If the resolver is wrong,
+  the detector re-fires the next run and the conflict re-enters the queue.
+  Default threshold: **0.75**.
+- `keep_a` / `keep_b` — mutates wiki bodies. A wrong auto-apply requires
+  a human to chase down which memory was overwritten. Default
+  threshold: **0.90**.
+- `propose_merge` — **never auto-applies regardless of confidence**. The
+  proposal carries an LLM-drafted merged body that must go through human
+  review before it can land in a wiki page. This is a hard rule, not a
+  threshold knob.
+
+Configure per action via the new optional map:
+
+```yaml
+resolve:
+  auto_apply: true
+  auto_apply_threshold_per_action:
+    not_a_conflict: 0.75
+    keep_a: 0.90
+    keep_b: 0.90
+```
+
+### Backward compatibility
+
+Pre-#170 configs that set only the legacy scalar continue to work:
+
+```yaml
+resolve:
+  auto_apply_threshold: 0.85
+```
+
+is interpreted as:
+
+- `keep_a` / `keep_b` → 0.85 (legacy scalar honored).
+- `not_a_conflict` → 0.75 (new per-action default; the legacy scalar is
+  explicitly NOT applied here — that would defeat the cheaper-threshold
+  rationale).
+- `propose_merge` → never auto-applies.
+
+When both fields are present, the per-action map wins for the actions it
+explicitly lists, and the legacy scalar fills the rest for `keep_a` /
+`keep_b` only:
+
+```yaml
+resolve:
+  auto_apply_threshold: 0.85           # legacy fallback for keep_b
+  auto_apply_threshold_per_action:
+    keep_a: 0.99                       # explicit override wins for keep_a
+    not_a_conflict: 0.60               # explicit override wins
+# Resolved thresholds: keep_a=0.99, keep_b=0.85, not_a_conflict=0.60,
+# propose_merge=never.
+```
+
+Out-of-range values (`< 0.0` or `> 1.0`) and non-numeric entries raise
+`ValueError` on read — same loud-fail discipline as the legacy scalar.
+
 ## Reversing an auto-resolution
 
 The auto-resolved block flows through the same `ingest-answers` lane as a

@@ -82,6 +82,21 @@ DEFAULT_RESOLVE_MAX_PER_RUN = 50
 # with a conservative 0.90 confidence floor.
 DEFAULT_AUTO_APPLY = True
 DEFAULT_AUTO_APPLY_THRESHOLD = 0.90
+# Issue #170: asymmetric per-action defaults. False-suppress (not_a_conflict)
+# is cheap — if wrong, the next run re-detects the conflict. Mutating actions
+# (keep_a / keep_b) edit wiki bodies, so the bar is higher. propose_merge is
+# a hard-coded sentinel ("never auto-apply") regardless of confidence — human
+# approval is always required because the merge body is LLM-drafted prose.
+DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION: dict[str, float] = {
+    "not_a_conflict": 0.75,
+    "keep_a": 0.90,
+    "keep_b": 0.90,
+}
+# Sentinel set of actions that never auto-apply regardless of threshold.
+_NEVER_AUTO_APPLY_ACTIONS: frozenset[str] = frozenset(("propose_merge",))
+# Actions that still honor the legacy scalar `resolve.auto_apply_threshold`
+# as a backward-compat fallback when no per-action override is set.
+_LEGACY_SCALAR_FALLBACK_ACTIONS: frozenset[str] = frozenset(("keep_a", "keep_b"))
 
 # Lane 2 / issue #168: token-budget cap for the per-side full body the
 # resolver sees. Measured as a character-count heuristic — roughly 4
@@ -408,6 +423,78 @@ def resolve_auto_apply_threshold(config: dict[str, Any] | None = None) -> float:
                 )
             return value
     return DEFAULT_AUTO_APPLY_THRESHOLD
+
+
+def resolve_auto_apply_threshold_for(
+    config: dict[str, Any] | None,
+    action: str,
+) -> float | None:
+    """Resolve the auto-apply threshold for a SPECIFIC resolver action.
+
+    Issue #170 (Lane 4 of #166): per-action thresholds replace the legacy
+    single-scalar threshold. The cost of an incorrect auto-apply is not
+    symmetric across actions:
+
+    * ``not_a_conflict`` — false-suppress is cheap. The detector re-fires
+      on the next run if we were wrong. Default 0.75.
+    * ``keep_a`` / ``keep_b`` — mutates wiki bodies. Higher bar. Default 0.90.
+    * ``propose_merge`` — NEVER auto-applies. The proposal carries an
+      LLM-drafted merged body that must go through human review regardless
+      of confidence. Returns ``None`` so callers can branch on it cleanly.
+
+    Resolution order for a given action:
+
+    1. If the action is in :data:`_NEVER_AUTO_APPLY_ACTIONS` → return ``None``.
+    2. Per-action explicit override (``resolve.auto_apply_threshold_per_action.<action>``).
+    3. Legacy scalar (``resolve.auto_apply_threshold``) — only honored for
+       ``keep_a`` / ``keep_b``. Lets pre-#170 configs keep working.
+    4. Per-action default from :data:`DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION`.
+    5. ``None`` for any unknown / non-auto-applicable action (the auto-apply
+       gate treats ``None`` the same as the propose_merge sentinel —
+       skip auto-apply, escalate to human).
+
+    Values are validated against ``[0.0, 1.0]`` with :class:`ValueError`
+    raised on out-of-range — same loud-fail discipline as
+    :func:`resolve_auto_apply_threshold`.
+    """
+    if action in _NEVER_AUTO_APPLY_ACTIONS:
+        return None
+
+    # Layer 2: explicit per-action override from config.
+    if isinstance(config, dict):
+        resolve_cfg = config.get("resolve")
+        if isinstance(resolve_cfg, dict):
+            per_action = resolve_cfg.get("auto_apply_threshold_per_action")
+            if isinstance(per_action, dict) and action in per_action:
+                raw = per_action[action]
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"resolve.auto_apply_threshold_per_action.{action}={raw!r} "
+                        f"out of range [0.0, 1.0]"
+                    ) from exc
+                if not 0.0 <= value <= 1.0:
+                    raise ValueError(
+                        f"resolve.auto_apply_threshold_per_action.{action}={raw!r} "
+                        f"out of range [0.0, 1.0]"
+                    )
+                return value
+
+    # Layer 3: legacy scalar fallback — only for keep_a / keep_b.
+    if action in _LEGACY_SCALAR_FALLBACK_ACTIONS and isinstance(config, dict):
+        resolve_cfg = config.get("resolve")
+        if isinstance(resolve_cfg, dict) and "auto_apply_threshold" in resolve_cfg:
+            # Reuse the validating loader so a typo in the legacy scalar
+            # still raises loudly.
+            return resolve_auto_apply_threshold(config)
+
+    # Layer 4: per-action default.
+    if action in DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION:
+        return DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION[action]
+
+    # Layer 5: unknown action → no auto-apply.
+    return None
 
 
 def resolve_max_per_run(config: dict[str, Any] | None = None) -> int:
