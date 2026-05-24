@@ -93,6 +93,12 @@ DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION: dict[str, float] = {
     "keep_b": 0.90,
 }
 # Sentinel set of actions that never auto-apply regardless of threshold.
+# Belt-and-suspenders: Lane 3's ``_emit_escalation`` already routes
+# :class:`MergeProposal` to ``_pending_merges.md`` before ``tier4_escalate``
+# sees it, so a ``propose_merge`` proposal never reaches the auto-apply gate
+# in the current pipeline. This sentinel guards against a future refactor
+# that removes the sidecar early-return — losing it would silently let a
+# merge proposal slip past on confidence alone.
 _NEVER_AUTO_APPLY_ACTIONS: frozenset[str] = frozenset(("propose_merge",))
 # Actions that still honor the legacy scalar `resolve.auto_apply_threshold`
 # as a backward-compat fallback when no per-action override is set.
@@ -481,12 +487,22 @@ def resolve_auto_apply_threshold_for(
                     )
                 return value
 
-    # Layer 3: legacy scalar fallback — only for keep_a / keep_b.
-    if action in _LEGACY_SCALAR_FALLBACK_ACTIONS and isinstance(config, dict):
-        resolve_cfg = config.get("resolve")
-        if isinstance(resolve_cfg, dict) and "auto_apply_threshold" in resolve_cfg:
-            # Reuse the validating loader so a typo in the legacy scalar
-            # still raises loudly.
+    # Layer 3: legacy scalar fallback — only for keep_a / keep_b. Honors
+    # both the yaml key (`resolve.auto_apply_threshold`) AND the legacy env
+    # var (`ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD`). The env-only path
+    # matters for operators who set the override at the shell without
+    # touching the yaml — pre-#170 this Just Worked, and silently dropping
+    # it post-#170 would be a regression.
+    if action in _LEGACY_SCALAR_FALLBACK_ACTIONS:
+        env_override = os.environ.get("ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD")
+        yaml_override = (
+            isinstance(config, dict)
+            and isinstance(config.get("resolve"), dict)
+            and "auto_apply_threshold" in config["resolve"]
+        )
+        if env_override is not None or yaml_override:
+            # Reuse the validating loader so a typo in either layer still
+            # raises loudly and env > yaml precedence is preserved.
             return resolve_auto_apply_threshold(config)
 
     # Layer 4: per-action default.

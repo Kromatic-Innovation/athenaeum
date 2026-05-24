@@ -95,6 +95,53 @@ class TestLegacyScalarBackwardCompat:
         assert resolve_auto_apply_threshold_for(cfg, "propose_merge") is None
 
 
+class TestLegacyEnvVarBackwardCompat:
+    """The legacy ``ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD`` env var must
+    still gate ``keep_a`` / ``keep_b`` post-#170. Pre-#170 the env-only path
+    Just Worked; silently dropping it would be a regression for operators
+    who set the override at the shell without touching the yaml."""
+
+    def test_env_var_alone_gates_keep_a(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD", "0.80")
+        assert resolve_auto_apply_threshold_for({"resolve": {}}, "keep_a") == 0.80
+
+    def test_env_var_alone_gates_keep_b(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD", "0.80")
+        assert resolve_auto_apply_threshold_for({"resolve": {}}, "keep_b") == 0.80
+
+    def test_env_var_does_not_apply_to_not_a_conflict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The legacy env var was a keep_a/keep_b knob. The new 0.75 default
+        # for not_a_conflict deliberately replaces it for that action.
+        monkeypatch.setenv("ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD", "0.80")
+        assert (
+            resolve_auto_apply_threshold_for({"resolve": {}}, "not_a_conflict") == 0.75
+        )
+
+    def test_env_var_does_not_unlock_propose_merge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD", "0.80")
+        assert (
+            resolve_auto_apply_threshold_for({"resolve": {}}, "propose_merge") is None
+        )
+
+    def test_per_action_override_wins_over_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Env-driven legacy still gates keep_b, but explicit per-action
+        # override wins for keep_a.
+        monkeypatch.setenv("ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD", "0.80")
+        cfg = {
+            "resolve": {
+                "auto_apply_threshold_per_action": {"keep_a": 0.95},
+            }
+        }
+        assert resolve_auto_apply_threshold_for(cfg, "keep_a") == 0.95
+        assert resolve_auto_apply_threshold_for(cfg, "keep_b") == 0.80
+
+
 class TestPerActionOverride:
     def test_explicit_per_action_map(self) -> None:
         cfg = {
