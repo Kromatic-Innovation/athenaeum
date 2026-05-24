@@ -427,6 +427,34 @@ as empty strings when missing.
   - `supersedes` → `keep_<superseder>` at `confidence=1.0`.
   - `refines` → `not_a_conflict` at `confidence=1.0`; `merge.py` then
     drops the escalation entirely.
+- **Name matching uses `slugify()`** on both sides at compare time, so
+  case- or punctuation-mismatched declarations (`Memory-A` vs
+  `memory-a`) still match. Trailing/leading whitespace was already
+  stripped by the parsers — slugification is the stronger contract.
+- **Precedence when both sides declare conflicting relationships:**
+  - **Mutual `supersedes`** (A says supersedes B AND B says supersedes
+    A) is itself a declared contradiction. Neither side wins
+    deterministically — `merge._declared_relationship` returns `None`
+    (the pair falls through to the detector/resolver), and
+    `resolutions._declared_winner` returns `None` (the pair falls
+    through to the LLM). Both sites emit a `WARNING` log so the
+    contradiction is auditable.
+  - **Mixed `refines` + `supersedes`** (A `refines` B, B `supersedes`
+    A) resolves to `keep_b` / `declared-supersession`. Supersession is
+    the stronger statement and wins over the weaker refinement claim
+    from the other side. No warning — the resolution is well-defined.
+  - **Mutual `refines`** (A `refines` B AND B `refines` A) resolves to
+    `not_a_conflict`. Both memories asserting "I narrow the other" is
+    treated as a benign declaration of co-membership in a refinement
+    cluster; the cluster simply stays active.
+- **Detector short-circuit refuses on underspecified detector output:**
+  when `ContradictionResult.members_involved` has fewer than two
+  entries, `resolutions._declared_winner` returns `None` (falls through
+  to the LLM). The earlier draft filled the missing slots from the
+  start of the supplied member list, which silently evaluated
+  declarations against a pair the detector never flagged. The
+  resolver now only short-circuits when both detector-named members
+  resolve to entries in the supplied member list.
 
 ### 7.4 Parser contract
 

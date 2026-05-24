@@ -365,3 +365,227 @@ class TestResolverAutoPrefer:
         client.messages.create.assert_called_once()
         assert proposal.action == "keep_a"
         assert proposal.confidence == 0.7
+
+
+# ---------------------------------------------------------------------------
+# Quine review #171 follow-ups
+# ---------------------------------------------------------------------------
+
+
+class TestDeclaredWinnerEdgeCases:
+    """Quine review of PR #171 — short-circuit refusal + mutual cases."""
+
+    def _llm_reply(self) -> MagicMock:
+        client = MagicMock()
+        client.messages.create.return_value.content = [
+            MagicMock(
+                text='{"recommended_winner":"neither","action":'
+                '"retain_both_with_context","rationale":"r","confidence":0.5,'
+                '"source_precedence_used":[]}'
+            )
+        ]
+        return client
+
+    def test_member_echo_below_two_refuses_short_circuit(self, tmp_path: Path) -> None:
+        """MUST #1: detector echo <2 → resolver must NOT short-circuit."""
+        a = _write_am(
+            tmp_path / "s",
+            "feedback_a.md",
+            "new",
+            name="memory-a",
+            supersedes=[{"name": "memory-b"}],
+        )
+        b = _write_am(tmp_path / "s", "feedback_b.md", "old", name="memory-b")
+        client = self._llm_reply()
+        # members_involved length 0 — detector underspecified the pair.
+        result = ContradictionResult(
+            detected=True,
+            conflict_type="prescriptive",
+            members_involved=[],
+            conflicting_passages=["new", "old"],
+        )
+        propose_resolution(result, [a, b], client)
+        # Fell through to LLM rather than short-circuiting against the
+        # wrong pair.
+        client.messages.create.assert_called_once()
+
+    def test_member_echo_one_refuses_short_circuit(self, tmp_path: Path) -> None:
+        a = _write_am(
+            tmp_path / "s",
+            "feedback_a.md",
+            "new",
+            name="memory-a",
+            supersedes=[{"name": "memory-b"}],
+        )
+        b = _write_am(tmp_path / "s", "feedback_b.md", "old", name="memory-b")
+        client = self._llm_reply()
+        result = ContradictionResult(
+            detected=True,
+            conflict_type="prescriptive",
+            members_involved=[f"{a.origin_scope}/{a.path.name}"],
+            conflicting_passages=["new", "old"],
+        )
+        propose_resolution(result, [a, b], client)
+        client.messages.create.assert_called_once()
+
+    def test_mutual_supersedes_escalates_with_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """MUST #3: A↔B mutual supersedes → fall to LLM + WARNING log."""
+        a = _write_am(
+            tmp_path / "s",
+            "feedback_a.md",
+            "side a",
+            name="memory-a",
+            supersedes=[{"name": "memory-b"}],
+        )
+        b = _write_am(
+            tmp_path / "s",
+            "feedback_b.md",
+            "side b",
+            name="memory-b",
+            supersedes=[{"name": "memory-a"}],
+        )
+        client = self._llm_reply()
+        result = ContradictionResult(
+            detected=True,
+            conflict_type="prescriptive",
+            members_involved=[
+                f"{a.origin_scope}/{a.path.name}",
+                f"{b.origin_scope}/{b.path.name}",
+            ],
+            conflicting_passages=["side a", "side b"],
+        )
+        with caplog.at_level("WARNING", logger="athenaeum.resolutions"):
+            propose_resolution(result, [a, b], client)
+        # Did NOT pick a silent winner.
+        client.messages.create.assert_called_once()
+        assert any(
+            "mutual supersedes" in rec.getMessage().lower() for rec in caplog.records
+        )
+
+    def test_mutual_supersedes_in_merge_returns_none(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """MUST #3 merge.py side: mutual supersedes → no declared verdict."""
+        a = _write_am(
+            tmp_path / "s",
+            "feedback_a.md",
+            "side a",
+            name="memory-a",
+            supersedes=[{"name": "memory-b"}],
+        )
+        b = _write_am(
+            tmp_path / "s",
+            "feedback_b.md",
+            "side b",
+            name="memory-b",
+            supersedes=[{"name": "memory-a"}],
+        )
+        with caplog.at_level("WARNING", logger="athenaeum.merge"):
+            verdict = _declared_relationship(a, b)
+        assert verdict is None
+        assert any(
+            "mutual supersedes" in rec.getMessage().lower() for rec in caplog.records
+        )
+
+    def test_mixed_refine_plus_supersede_keeps_superseder(self, tmp_path: Path) -> None:
+        """MUST #3 doc: A refines B, B supersedes A → keep_b wins."""
+        a = _write_am(
+            tmp_path / "s",
+            "feedback_a.md",
+            "narrow",
+            name="memory-a",
+            refines=["memory-b"],
+        )
+        b = _write_am(
+            tmp_path / "s",
+            "feedback_b.md",
+            "replacement",
+            name="memory-b",
+            supersedes=[{"name": "memory-a"}],
+        )
+        client = MagicMock()
+        result = ContradictionResult(
+            detected=True,
+            conflict_type="prescriptive",
+            members_involved=[
+                f"{a.origin_scope}/{a.path.name}",
+                f"{b.origin_scope}/{b.path.name}",
+            ],
+            conflicting_passages=["narrow", "replacement"],
+        )
+        proposal = propose_resolution(result, [a, b], client)
+        client.messages.create.assert_not_called()
+        assert proposal.action == "keep_b"
+        assert proposal.recommended_winner == "b"
+        assert "supersession" in proposal.rationale.lower()
+
+    def test_slugify_normalizes_case_mismatch(self, tmp_path: Path) -> None:
+        """SHOULD #4: A.name 'memory-a' matches B.refines ['Memory-A']."""
+        a = _write_am(tmp_path / "s", "feedback_a.md", "general", name="memory-a")
+        b = _write_am(
+            tmp_path / "s",
+            "feedback_b.md",
+            "narrow",
+            name="memory-b",
+            refines=["Memory-A"],
+        )
+        # merge.py side
+        assert _declared_relationship(a, b) == "declared-refinement"
+        # resolutions.py side
+        client = MagicMock()
+        result = ContradictionResult(
+            detected=True,
+            conflict_type="prescriptive",
+            members_involved=[
+                f"{a.origin_scope}/{a.path.name}",
+                f"{b.origin_scope}/{b.path.name}",
+            ],
+            conflicting_passages=["general", "narrow"],
+        )
+        proposal = propose_resolution(result, [a, b], client)
+        client.messages.create.assert_not_called()
+        assert proposal.action == "not_a_conflict"
+
+
+class TestCrossScopeMalformedLogs:
+    """SHOULD #5: cross_scope.py logs WARNING on malformed frontmatter."""
+
+    def test_malformed_supersedes_logs_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from athenaeum.cross_scope import (
+            SimilarityCandidate,
+            candidate_to_auto_memory_files,
+        )
+
+        scope_dir = tmp_path / "scope-x"
+        scope_dir.mkdir()
+        bad = scope_dir / "feedback_bad.md"
+        # supersedes must be a list; pass a scalar to trigger ValueError.
+        bad.write_text(
+            "---\nname: bad\ntype: feedback\nsupersedes: not-a-list\n---\nbody\n",
+            encoding="utf-8",
+        )
+        good = scope_dir / "feedback_good.md"
+        good.write_text(
+            "---\nname: good\ntype: feedback\n---\nbody\n", encoding="utf-8"
+        )
+        candidate = SimilarityCandidate(
+            a_path=bad,
+            b_path=good,
+            a_scope="scope-x",
+            b_scope="scope-x",
+            similarity=0.9,
+        )
+        with caplog.at_level("WARNING", logger="athenaeum.cross_scope"):
+            ams = candidate_to_auto_memory_files(candidate)
+        assert len(ams) == 2
+        # bad file loaded with empty declared-relationship lists.
+        bad_am = next(am for am in ams if am.path == bad)
+        assert bad_am.supersedes == []
+        assert bad_am.refines == []
+        msgs = [rec.getMessage() for rec in caplog.records]
+        assert any(str(bad) in m for m in msgs)
+        assert any("invalid refines/supersedes" in m for m in msgs)

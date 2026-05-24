@@ -66,6 +66,7 @@ from athenaeum.models import (
     parse_refines,
     parse_supersedes,
     render_frontmatter,
+    slugify,
 )
 from athenaeum.resolutions import (
     SUPPRESS_ACTION,
@@ -114,11 +115,30 @@ def _declared_relationship(a: "AutoMemoryFile", b: "AutoMemoryFile") -> str | No
     b_name = (b.name or "").strip()
     if not a_name or not b_name:
         return None
-    a_super = set(a.supersedes_names())
-    b_super = set(b.supersedes_names())
-    if b_name in a_super or a_name in b_super:
+    # Quine review #171 / SHOULD #4: compare via slugify so a case- or
+    # punctuation-mismatched declaration still matches.
+    a_slug = slugify(a_name)
+    b_slug = slugify(b_name)
+    a_super = {slugify(n) for n in a.supersedes_names()}
+    b_super = {slugify(n) for n in b.supersedes_names()}
+    a_refines = {slugify(n) for n in (a.refines or [])}
+    b_refines = {slugify(n) for n in (b.refines or [])}
+    a_supersedes_b = b_slug in a_super
+    b_supersedes_a = a_slug in b_super
+    # MUST #3: mutual supersedes is itself a declared contradiction —
+    # neither side wins deterministically. Log and refuse to declare;
+    # the pair falls through to the detector/resolver path.
+    if a_supersedes_b and b_supersedes_a:
+        log.warning(
+            "merge: mutual supersedes between %r and %r — not a "
+            "declarable relationship",
+            a_name,
+            b_name,
+        )
+        return None
+    if a_supersedes_b or b_supersedes_a:
         return "declared-supersession"
-    if b_name in set(a.refines or []) or a_name in set(b.refines or []):
+    if b_slug in a_refines or a_slug in b_refines:
         return "declared-refinement"
     return None
 

@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from athenaeum.contradictions import ContradictionResult
-from athenaeum.models import AutoMemoryFile, parse_frontmatter
+from athenaeum.models import AutoMemoryFile, parse_frontmatter, slugify
 
 if TYPE_CHECKING:
     import anthropic
@@ -427,7 +427,14 @@ def _declared_winner(
     """
     if not members:
         return None
-    # Resolve flagged labels exactly like the prompt builder does.
+    # Resolve flagged labels exactly like the prompt builder does. Quine
+    # review #171: refuse to short-circuit unless the detector actually
+    # named >=2 members AND both resolved to entries in ``members``. The
+    # old fallback (fill from members[0..1] when echo<2) silently
+    # evaluated declarations against a DIFFERENT pair than the detector
+    # flagged — masking real conflicts.
+    if len(detector_result.members_involved) < 2:
+        return None
     flagged: list[AutoMemoryFile] = []
     for ref in detector_result.members_involved:
         for am in members:
@@ -437,12 +444,6 @@ def _declared_winner(
                     flagged.append(am)
                 break
     if len(flagged) < 2:
-        for am in members:
-            if am not in flagged:
-                flagged.append(am)
-            if len(flagged) == 2:
-                break
-    if len(flagged) < 2:
         return None
     a, b = flagged[0], flagged[1]
     a_name = (a.name or "").strip()
@@ -450,9 +451,29 @@ def _declared_winner(
     if not a_name or not b_name:
         return None
 
-    a_super = set(a.supersedes_names())
-    b_super = set(b.supersedes_names())
-    if b_name in a_super:
+    # Quine review #171 / SHOULD #4: compare via slugify on both sides so
+    # case-/punctuation-mismatched declarations still match.
+    a_slug = slugify(a_name)
+    b_slug = slugify(b_name)
+    a_super = {slugify(n) for n in a.supersedes_names()}
+    b_super = {slugify(n) for n in b.supersedes_names()}
+    a_refines = {slugify(n) for n in (a.refines or [])}
+    b_refines = {slugify(n) for n in (b.refines or [])}
+
+    a_supersedes_b = b_slug in a_super
+    b_supersedes_a = a_slug in b_super
+    # MUST #3: mutual supersedes is a declared contradiction — both
+    # memories claim the other is the stale one. Refuse to pick a winner;
+    # escalate to the LLM with a WARNING breadcrumb.
+    if a_supersedes_b and b_supersedes_a:
+        log.warning(
+            "resolutions: mutual supersedes between %r and %r — refusing "
+            "deterministic winner, falling through to LLM",
+            a_name,
+            b_name,
+        )
+        return None
+    if a_supersedes_b:
         return ResolutionProposal(
             recommended_winner="a",
             action="keep_a",
@@ -460,7 +481,7 @@ def _declared_winner(
             confidence=1.0,
             source_precedence_used=[f"a:declared-supersedes > b:{b_name}"],
         )
-    if a_name in b_super:
+    if b_supersedes_a:
         return ResolutionProposal(
             recommended_winner="b",
             action="keep_b",
@@ -468,7 +489,7 @@ def _declared_winner(
             confidence=1.0,
             source_precedence_used=[f"b:declared-supersedes > a:{a_name}"],
         )
-    if b_name in set(a.refines or []) or a_name in set(b.refines or []):
+    if b_slug in a_refines or a_slug in b_refines:
         return ResolutionProposal(
             recommended_winner="neither",
             action="not_a_conflict",

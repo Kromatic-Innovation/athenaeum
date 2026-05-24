@@ -455,7 +455,12 @@ def candidate_to_auto_memory_files(
         try:
             refines = parse_refines(meta if isinstance(meta, dict) else None)
             supersedes = parse_supersedes(meta if isinstance(meta, dict) else None)
-        except ValueError:
+        except ValueError as exc:
+            log.warning(
+                "auto-memory %s: invalid refines/supersedes (%s); " "treating as empty",
+                path,
+                exc,
+            )
             refines = []
             supersedes = []
         out.append(
