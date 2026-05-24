@@ -1481,13 +1481,16 @@ class TestClusterShimSelfReferenceLint:
             "centroid_score": 1.0,
         }
         with caplog.at_level("WARNING"):
-            entry = merge_cluster_row(
-                row, extra_roots=[tmp_path], am_by_path={}
-            )
+            entry = merge_cluster_row(row, extra_roots=[tmp_path], am_by_path={})
         assert entry is not None
         assert len(entry.resolved_members) == 1
         assert entry.resolved_members[0].refines == ["Other"]
-        assert any("refines self" in r.message for r in caplog.records)
+        assert any(
+            "refines self" in r.getMessage()
+            and "Shim Mem" in r.getMessage()
+            and str(member) in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_supersedes_self_dropped_on_shim(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -1509,9 +1512,12 @@ class TestClusterShimSelfReferenceLint:
             "centroid_score": 1.0,
         }
         with caplog.at_level("WARNING"):
-            entry = merge_cluster_row(
-                row, extra_roots=[tmp_path], am_by_path={}
-            )
+            entry = merge_cluster_row(row, extra_roots=[tmp_path], am_by_path={})
         assert entry is not None
         assert [s["name"] for s in entry.resolved_members[0].supersedes] == ["Other"]
-        assert any("supersedes self" in r.message for r in caplog.records)
+        assert any(
+            "supersedes self" in r.getMessage()
+            and "Shim Mem" in r.getMessage()
+            and str(member) in r.getMessage()
+            for r in caplog.records
+        )
