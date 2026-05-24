@@ -47,6 +47,8 @@ from athenaeum.models import (
     WikiEntity,
     load_schema_list,
     parse_frontmatter,
+    parse_refines,
+    parse_supersedes,
     render_frontmatter,
     slugify,
 )
@@ -178,6 +180,21 @@ def discover_auto_memory_files(
                     sources = [str(s) for s in sources_raw]
                 else:
                     sources = []
+                # Lane 1 / #167: declared refines/supersedes relationships.
+                # Malformed entries raise — surfacing the bad file rather
+                # than silently dropping the declaration.
+                try:
+                    refines = parse_refines(meta if meta else None)
+                    supersedes = parse_supersedes(meta if meta else None)
+                except ValueError as exc:
+                    log.warning(
+                        "auto-memory %s: invalid refines/supersedes (%s); "
+                        "treating as empty",
+                        fpath,
+                        exc,
+                    )
+                    refines = []
+                    supersedes = []
                 files.append(
                     AutoMemoryFile(
                         path=fpath,
@@ -188,6 +205,8 @@ def discover_auto_memory_files(
                         origin_session_id=origin_session_id,
                         origin_turn=origin_turn,
                         sources=sources,
+                        refines=refines,
+                        supersedes=supersedes,
                     )
                 )
     return files
