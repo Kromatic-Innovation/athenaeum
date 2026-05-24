@@ -254,7 +254,32 @@ class TestDetectorSkip:
         c = _write_am(tmp_path / "s", "feedback_c.md", "other", name="memory-c")
         filtered, declared = _filter_declared_pairs([a, b, c])
         assert declared is None
+        # `a` participates in an undeclared pair (a,c) so it survives.
         assert filtered == [a, b, c]
+
+    def test_two_declared_one_undeclared_prunes_fully_declared_member(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue #172: a 3-member chunk with 2 declared pairs + 1 undeclared
+        pair should prune the fully-covered member before the detector
+        sees it. ``a`` declares both ``b`` and ``c``; only the (b, c)
+        pair is undeclared. The Haiku detector should NEVER see ``a``.
+        """
+        a = _write_am(
+            tmp_path / "s",
+            "feedback_a.md",
+            "new",
+            name="memory-a",
+            supersedes=[{"name": "memory-b"}, {"name": "memory-c"}],
+        )
+        b = _write_am(tmp_path / "s", "feedback_b.md", "old", name="memory-b")
+        c = _write_am(tmp_path / "s", "feedback_c.md", "other", name="memory-c")
+        filtered, declared = _filter_declared_pairs([a, b, c])
+        # Not fully declared → no short-circuit rationale.
+        assert declared is None
+        # `a` had no undeclared partners → pruned. Only (b, c) remains.
+        assert filtered == [b, c]
+        assert a not in filtered
 
 
 # ---------------------------------------------------------------------------

@@ -195,6 +195,29 @@ def discover_auto_memory_files(
                     )
                     refines = []
                     supersedes = []
+                # Issue #173: self-reference in refines/supersedes is a
+                # YAML authoring mistake — silently drop with a loud warn
+                # so the resolver / merge planner never sees a memory
+                # claiming to refine or supersede itself.
+                if name:
+                    self_refines = [r for r in refines if r == name]
+                    if self_refines:
+                        log.warning(
+                            "auto-memory %s: refines self (%r); dropping "
+                            "self-reference",
+                            fpath,
+                            name,
+                        )
+                        refines = [r for r in refines if r != name]
+                    self_supersedes = [s for s in supersedes if s.get("name") == name]
+                    if self_supersedes:
+                        log.warning(
+                            "auto-memory %s: supersedes self (%r); dropping "
+                            "self-reference",
+                            fpath,
+                            name,
+                        )
+                        supersedes = [s for s in supersedes if s.get("name") != name]
                 files.append(
                     AutoMemoryFile(
                         path=fpath,

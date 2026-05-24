@@ -588,6 +588,12 @@ def create_server(
         Returns:
             A dict with ``ok``, ``error_code``, ``message``,
             ``resolved_block``.
+
+            For backward compatibility the dict also includes legacy
+            aliases ``block`` (= ``resolved_block``) and ``error``
+            (= ``message`` on failure), mirroring ``resolve_question``.
+            New callers should prefer ``error_code`` + ``message`` +
+            ``resolved_block``.
         """
         from athenaeum.pending_merges import resolve_merge as _resolve_merge
 
@@ -599,13 +605,25 @@ def create_server(
                     f"decision must be 'approve' or 'reject', got {decision!r}"
                 ),
                 "resolved_block": None,
+                # legacy aliases:
+                "block": None,
+                "error": (f"decision must be 'approve' or 'reject', got {decision!r}"),
             }
-        return _resolve_merge(
+        result = _resolve_merge(
             wiki_root / "_pending_merges.md",
             merge_id=id,
             decision=decision,  # type: ignore[arg-type]
             note=note,
             wiki_root=wiki_root,
         )
+        return {
+            "ok": result["ok"],
+            "error_code": result.get("error_code"),
+            "message": result.get("message", ""),
+            "resolved_block": result.get("resolved_block"),
+            # legacy aliases:
+            "block": result.get("resolved_block"),
+            "error": (result.get("message", "") if not result.get("ok") else None),
+        }
 
     return mcp

@@ -670,17 +670,24 @@ def tier4_escalate(
             return None
         return resolve_auto_apply_threshold_for(config, action)
 
-    def _should_auto_apply(prop: Any) -> bool:
-        """Single source of truth for the per-action auto-apply gate."""
+    def _should_auto_apply(prop: Any) -> tuple[bool, float | None]:
+        """Single source of truth for the per-action auto-apply gate.
+
+        Returns ``(should_apply, threshold)``. ``threshold`` is the
+        resolved per-action threshold used by the gate decision so callers
+        can log it without a second lookup; it is ``None`` when the gate
+        rejected before threshold lookup (no proposal, no action, or the
+        action is on the never-auto-apply list).
+        """
         if prop is None:
-            return False
+            return (False, None)
         action = getattr(prop, "action", None)
         if not isinstance(action, str):
-            return False
+            return (False, None)
         thr = _threshold_for(action)
         if thr is None:
-            return False
-        return getattr(prop, "confidence", 0.0) >= thr
+            return (False, None)
+        return (getattr(prop, "confidence", 0.0) >= thr, thr)
 
     # Issue #157: dedup escalations by source-memory pair (Members involved
     # tuple, or sha1(passages) fallback). Default ON; escape hatch via the
@@ -758,16 +765,18 @@ def tier4_escalate(
             f"**Description**: {item.description}\n"
         )
         proposal = getattr(item, "proposal", None)
-        if auto_apply_enabled and _should_auto_apply(proposal):
-            block = apply_auto_resolution(block, proposal, model=resolver_model_id)
-            log.info(
-                "Auto-resolved escalation for entity=%s action=%s "
-                "(confidence=%.2f >= threshold=%.2f)",
-                item.entity_name,
-                proposal.action,
-                proposal.confidence,
-                _threshold_for(proposal.action),
-            )
+        if auto_apply_enabled:
+            should_apply, gate_threshold = _should_auto_apply(proposal)
+            if should_apply:
+                block = apply_auto_resolution(block, proposal, model=resolver_model_id)
+                log.info(
+                    "Auto-resolved escalation for entity=%s action=%s "
+                    "(confidence=%.2f >= threshold=%.2f)",
+                    item.entity_name,
+                    proposal.action,
+                    proposal.confidence,
+                    gate_threshold,
+                )
         if key is not None:
             batch_index[key] = len(sections)
         sections.append(block)
@@ -780,7 +789,8 @@ def tier4_escalate(
     if auto_apply_enabled:
         for key, slot in batch_index.items():
             best = best_proposal.get(key)
-            if not _should_auto_apply(best):
+            should_apply, gate_threshold = _should_auto_apply(best)
+            if not should_apply:
                 continue
             updated = apply_auto_resolution(
                 sections[slot], best, model=resolver_model_id
@@ -792,7 +802,7 @@ def tier4_escalate(
                     key,
                     best.action,
                     best.confidence,
-                    _threshold_for(best.action),
+                    gate_threshold,
                 )
             sections[slot] = updated
 
@@ -818,7 +828,8 @@ def tier4_escalate(
             if auto_apply_enabled:
                 key_for_block = block_to_key.get(original_block)
                 best = best_proposal.get(key_for_block) if key_for_block else None
-                if _should_auto_apply(best):
+                should_apply, gate_threshold = _should_auto_apply(best)
+                if should_apply:
                     rewritten = apply_auto_resolution(
                         updated_block, best, model=resolver_model_id
                     )
@@ -829,7 +840,7 @@ def tier4_escalate(
                             key_for_block,
                             best.action,
                             best.confidence,
-                            _threshold_for(best.action),
+                            gate_threshold,
                         )
                     updated_block = rewritten
             # Replace verbatim — raw_block came from parse, so it lives

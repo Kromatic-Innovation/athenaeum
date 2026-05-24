@@ -181,7 +181,8 @@ class TestDiscoverAutoMemoryFiles:
         assert len(files) == 11
 
     def test_typo_clone_ingested_as_distinct_record(
-        self, auto_memory_root: Path,
+        self,
+        auto_memory_root: Path,
     ) -> None:
         from athenaeum.librarian import discover_auto_memory_files
 
@@ -214,14 +215,13 @@ class TestDiscoverAutoMemoryFiles:
         assert len(unscoped) == 2
 
     def test_unscoped_preserves_origin_session_id(
-        self, auto_memory_root: Path,
+        self,
+        auto_memory_root: Path,
     ) -> None:
         from athenaeum.librarian import discover_auto_memory_files
 
         files = discover_auto_memory_files(auto_memory_root)
-        unscoped = {
-            f.path.name: f for f in files if f.origin_scope == "_unscoped"
-        }
+        unscoped = {f.path.name: f for f in files if f.origin_scope == "_unscoped"}
         # _unscoped files have originSessionId populated even though the
         # scope itself is _unscoped — the AC from the issue body
         # explicitly calls this out.
@@ -240,7 +240,8 @@ class TestDiscoverAutoMemoryFiles:
         assert "some-scope" in scopes
 
     def test_memory_type_extracted_from_prefix(
-        self, auto_memory_root: Path,
+        self,
+        auto_memory_root: Path,
     ) -> None:
         from athenaeum.librarian import discover_auto_memory_files
 
@@ -269,9 +270,7 @@ class TestDiscoverAutoMemoryFiles:
         # The planted 20260422T120000Z-a1b2c3d4.md must NOT appear —
         # it doesn't match AUTO_MEMORY_FILE_RE. The entity-intake path
         # owns those files; auto-memory must not poach them.
-        assert not any(
-            f.path.name.startswith("20260422T120000Z") for f in files
-        )
+        assert not any(f.path.name.startswith("20260422T120000Z") for f in files)
 
     def test_missing_knowledge_root_returns_empty(self, tmp_path: Path) -> None:
         from athenaeum.librarian import discover_auto_memory_files
@@ -302,7 +301,71 @@ class TestAutoMemoryRecord:
         from athenaeum.librarian import discover_auto_memory_files
 
         files = discover_auto_memory_files(auto_memory_root)
-        target = next(
-            f for f in files if f.path.name == "project_voltaire_part0.md"
-        )
+        target = next(f for f in files if f.path.name == "project_voltaire_part0.md")
         assert "Body for part 0." in target.content
+
+
+# ---------------------------------------------------------------------------
+# Issue #173: self-reference in refines / supersedes is dropped + warned
+# ---------------------------------------------------------------------------
+
+
+class TestSelfReferenceLint:
+    def _make_root(self, tmp_path: Path, frontmatter: str) -> Path:
+        knowledge_root = tmp_path / "knowledge"
+        auto = knowledge_root / "raw" / "auto-memory"
+        scope = auto / "_unscoped"
+        scope.mkdir(parents=True)
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
+            encoding="utf-8",
+        )
+        (scope / "project_self.md").write_text(
+            f"---\n{frontmatter}---\nBody.\n",
+            encoding="utf-8",
+        )
+        return knowledge_root
+
+    def test_refines_self_dropped(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from athenaeum.librarian import discover_auto_memory_files
+
+        root = self._make_root(
+            tmp_path,
+            "name: Self Memory\n"
+            "description: d\n"
+            "type: project\n"
+            "refines:\n"
+            "  - Self Memory\n"
+            "  - Other Memory\n",
+        )
+        with caplog.at_level("WARNING"):
+            files = discover_auto_memory_files(root)
+        assert len(files) == 1
+        assert files[0].refines == ["Other Memory"]
+        assert any("refines self" in r.message for r in caplog.records)
+
+    def test_supersedes_self_dropped(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from athenaeum.librarian import discover_auto_memory_files
+
+        root = self._make_root(
+            tmp_path,
+            "name: Self Memory\n"
+            "description: d\n"
+            "type: project\n"
+            "supersedes:\n"
+            "  - name: Self Memory\n"
+            "    as_of: 2026-01-01\n"
+            "    reason: typo\n"
+            "  - name: Other Memory\n"
+            "    as_of: 2026-01-02\n"
+            "    reason: real\n",
+        )
+        with caplog.at_level("WARNING"):
+            files = discover_auto_memory_files(root)
+        assert len(files) == 1
+        assert [s["name"] for s in files[0].supersedes] == ["Other Memory"]
+        assert any("supersedes self" in r.message for r in caplog.records)
