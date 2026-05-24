@@ -398,7 +398,11 @@ def create_server(
         instructions=(
             "Knowledge memory server powered by Athenaeum. "
             "Use `remember` to save information to raw intake for later compilation. "
-            "Use `recall` to search the compiled wiki for relevant knowledge."
+            "Use `recall` to search the compiled wiki for relevant knowledge. "
+            "Use `list_pending_questions` / `resolve_question` to triage "
+            "detector-flagged contradictions, and "
+            "`list_pending_merges` / `resolve_merge` to triage resolver-proposed "
+            "memory merges (issue #169)."
         ),
     )
 
@@ -542,5 +546,66 @@ def create_server(
             "block": result.get("block"),
             "error": result.get("error"),
         }
+
+    @mcp.tool()
+    def list_pending_merges() -> list[dict]:
+        """List unresolved merge proposals (issue #169).
+
+        Returns the unresolved blocks from ``wiki/_pending_merges.md`` —
+        resolver-proposed memory merges awaiting human approval. Each
+        item has ``id``, ``merge_target_name``, ``sources`` (paths to the
+        source memories), ``rationale``, ``draft_merged_body``,
+        ``confidence``, and ``created_at``.
+
+        The ``id`` is stable across rationale / draft edits and changes
+        only when the source set or target name changes, so an agent can
+        call this tool, present the list, and then call ``resolve_merge``
+        with the id of the chosen item.
+        """
+        from athenaeum.pending_merges import (
+            list_pending_merges as _list_pending_merges,
+        )
+
+        merges_path = wiki_root / "_pending_merges.md"
+        return _list_pending_merges(merges_path)
+
+    @mcp.tool()
+    def resolve_merge(id: str, decision: str, note: str = "") -> dict:
+        """Approve or reject a pending merge proposal (issue #169).
+
+        Args:
+            id: The id returned by ``list_pending_merges``.
+            decision: ``"approve"`` writes the draft merged body to
+                ``wiki/<target-slug>.md`` and flips the checkbox. The
+                source memories are NOT archived here — the human reviews
+                the wiki write before any source deletion. ``"reject"``
+                flips the checkbox and writes a ``refines:`` declaration
+                into the first source memory so the detector's
+                declared-refinement short-circuit suppresses the pair on
+                future runs.
+            note: Optional human note attached to the decision block.
+
+        Returns:
+            A dict with ``ok``, ``error_code``, ``message``,
+            ``resolved_block``.
+        """
+        from athenaeum.pending_merges import resolve_merge as _resolve_merge
+
+        if decision not in ("approve", "reject"):
+            return {
+                "ok": False,
+                "error_code": "invalid_decision",
+                "message": (
+                    f"decision must be 'approve' or 'reject', got {decision!r}"
+                ),
+                "resolved_block": None,
+            }
+        return _resolve_merge(
+            wiki_root / "_pending_merges.md",
+            merge_id=id,
+            decision=decision,  # type: ignore[arg-type]
+            note=note,
+            wiki_root=wiki_root,
+        )
 
     return mcp

@@ -92,3 +92,7 @@ testpaths = ["tests"]
 # explicitly with `pytest tests/benchmarks/ --benchmark-only` (cli paths
 # override `--ignore`). See tests/benchmarks/test_search_bench.py.
 addopts = "--ignore=tests/benchmarks"
+markers = [
+    "regression: contract regression tests pinning resolver outputs against canonical fixtures",
+    "live: opt-in live-LLM tests; require ATHENAEUM_LIVE_TESTS=1 and ANTHROPIC_API_KEY",
+]
