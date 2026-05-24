@@ -405,6 +405,80 @@ def _build_user_message(
     return "\n".join(lines)
 
 
+def _declared_winner(
+    detector_result: ContradictionResult,
+    members: list[AutoMemoryFile],
+) -> ResolutionProposal | None:
+    """Return a synthetic proposal when the flagged pair declares its relationship.
+
+    Lane 1 / #167. Matching uses :attr:`AutoMemoryFile.name` slugs against
+    each member's ``refines`` and ``supersedes`` lists.
+
+    - Supersession: one side names the other in ``supersedes``. Returns a
+      ``keep_<superseder>`` proposal with confidence 1.0 — the resolution
+      is already in the text, no human review needed.
+    - Refinement: one side names the other in ``refines``. Returns
+      ``not_a_conflict`` so :mod:`athenaeum.merge` drops the escalation.
+    - No declaration → returns ``None`` and the LLM path runs.
+
+    The flagged pair is identified by re-walking the detector's
+    ``members_involved`` against the supplied member list — matches
+    behaviour in :func:`_build_user_message` so labels ``a``/``b`` align.
+    """
+    if not members:
+        return None
+    # Resolve flagged labels exactly like the prompt builder does.
+    flagged: list[AutoMemoryFile] = []
+    for ref in detector_result.members_involved:
+        for am in members:
+            tag = f"{am.origin_scope}/{am.path.name}"
+            if tag == ref or tag.endswith("/" + ref.rsplit("/", 1)[-1]):
+                if am not in flagged:
+                    flagged.append(am)
+                break
+    if len(flagged) < 2:
+        for am in members:
+            if am not in flagged:
+                flagged.append(am)
+            if len(flagged) == 2:
+                break
+    if len(flagged) < 2:
+        return None
+    a, b = flagged[0], flagged[1]
+    a_name = (a.name or "").strip()
+    b_name = (b.name or "").strip()
+    if not a_name or not b_name:
+        return None
+
+    a_super = set(a.supersedes_names())
+    b_super = set(b.supersedes_names())
+    if b_name in a_super:
+        return ResolutionProposal(
+            recommended_winner="a",
+            action="keep_a",
+            rationale=f"a declares supersession of {b_name!r}",
+            confidence=1.0,
+            source_precedence_used=[f"a:declared-supersedes > b:{b_name}"],
+        )
+    if a_name in b_super:
+        return ResolutionProposal(
+            recommended_winner="b",
+            action="keep_b",
+            rationale=f"b declares supersession of {a_name!r}",
+            confidence=1.0,
+            source_precedence_used=[f"b:declared-supersedes > a:{a_name}"],
+        )
+    if b_name in set(a.refines or []) or a_name in set(b.refines or []):
+        return ResolutionProposal(
+            recommended_winner="neither",
+            action="not_a_conflict",
+            rationale="declared refinement (general + exception)",
+            confidence=1.0,
+            source_precedence_used=[],
+        )
+    return None
+
+
 def _fallback(rationale: str) -> ResolutionProposal:
     """Build the deterministic-fallback proposal for offline / error paths."""
     return ResolutionProposal(
@@ -501,6 +575,17 @@ def propose_resolution(
         return _fallback("detector-not-detected")
     if not members:
         return _fallback("no-members")
+
+    # Lane 1 / #167: declared supersession short-circuits the LLM call.
+    # If one flagged member's ``supersedes`` names the other, the
+    # resolution is already in the text — return a high-confidence
+    # ``keep_<superseder>`` proposal directly. Same rule for refines,
+    # except refines means BOTH stay active, so we surface
+    # ``not_a_conflict`` (the detector over-fired on a refinement).
+    declared = _declared_winner(detector_result, members)
+    if declared is not None:
+        return declared
+
     if client is None:
         log.warning(
             "resolutions: no Anthropic client (ANTHROPIC_API_KEY unset?); "

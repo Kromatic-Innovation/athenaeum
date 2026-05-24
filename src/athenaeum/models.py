@@ -65,6 +65,82 @@ def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
     return meta, body
 
 
+def parse_refines(meta: dict[str, object] | None) -> list[str]:
+    """Coerce a frontmatter ``refines:`` value into a clean list of slugs.
+
+    Accepts:
+    - ``None`` / missing key → ``[]``.
+    - ``list[str]`` of memory ``name:`` slugs (the documented shape).
+
+    Raises:
+        ValueError: when ``refines`` is present but not a list, or any
+            entry is not a non-empty string. The frontmatter is a
+            durable contract — a typo (``refines: name-x`` rendered as a
+            scalar) should be loud, not silent.
+    """
+    if not meta:
+        return []
+    raw = meta.get("refines")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"refines must be a list of memory name slugs, got {type(raw).__name__}"
+        )
+    out: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(
+                f"refines entries must be non-empty strings, got {entry!r}"
+            )
+        out.append(entry.strip())
+    return out
+
+
+def parse_supersedes(meta: dict[str, object] | None) -> list[dict[str, str]]:
+    """Coerce a frontmatter ``supersedes:`` value into a list of records.
+
+    Accepts:
+    - ``None`` / missing key → ``[]``.
+    - ``list[dict]`` of ``{name, as_of, reason}`` records. ``name`` is
+      required and must be a non-empty string. ``as_of`` and ``reason``
+      are optional; missing values are stored as empty strings so
+      downstream consumers can rely on the keys existing.
+
+    Raises:
+        ValueError: when ``supersedes`` is not a list, an entry is not a
+            mapping, or an entry lacks a non-empty ``name`` key.
+    """
+    if not meta:
+        return []
+    raw = meta.get("supersedes")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"supersedes must be a list of records, got {type(raw).__name__}"
+        )
+    out: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"supersedes entries must be mappings, got {type(entry).__name__}"
+            )
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("supersedes entries require a non-empty 'name' key")
+        as_of = entry.get("as_of", "")
+        reason = entry.get("reason", "")
+        out.append(
+            {
+                "name": name.strip(),
+                "as_of": str(as_of) if as_of is not None else "",
+                "reason": str(reason) if reason is not None else "",
+            }
+        )
+    return out
+
+
 def render_frontmatter(meta: dict[str, object]) -> str:
     """Render a dict as a YAML frontmatter block.
 
@@ -128,6 +204,15 @@ class AutoMemoryFile:
     origin_session_id: str | None = None
     origin_turn: int | None = None
     sources: list[str] = field(default_factory=list)
+    # Lane 1 / #167: declared relationships to other memories. Both
+    # default to empty list. ``refines`` lists ``name:`` slugs of
+    # memories this one narrows (general + exception — BOTH stay
+    # active). ``supersedes`` lists ``{name, as_of, reason}`` records
+    # declaring this memory replaces another (the superseded memory
+    # stays for audit but is no longer active guidance). Matching is
+    # by ``name:`` slug, not path.
+    refines: list[str] = field(default_factory=list)
+    supersedes: list[dict[str, str]] = field(default_factory=list)
     _content: str | None = field(default=None, repr=False)
 
     @property
@@ -140,6 +225,16 @@ class AutoMemoryFile:
     def ref(self) -> str:
         """Short reference for footnotes — scope/filename."""
         return f"{self.origin_scope}/{self.path.name}"
+
+    def supersedes_names(self) -> list[str]:
+        """Return just the ``name`` keys from :attr:`supersedes` records."""
+        out: list[str] = []
+        for rec in self.supersedes:
+            if isinstance(rec, dict):
+                n = rec.get("name")
+                if isinstance(n, str) and n:
+                    out.append(n)
+        return out
 
 
 @dataclass

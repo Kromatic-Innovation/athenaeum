@@ -48,7 +48,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from athenaeum.models import AutoMemoryFile, parse_frontmatter
+from athenaeum.models import (
+    AutoMemoryFile,
+    parse_frontmatter,
+    parse_refines,
+    parse_supersedes,
+)
 
 log = logging.getLogger(__name__)
 
@@ -444,6 +449,15 @@ def candidate_to_auto_memory_files(
             name = str(meta.get("name", "") or "")
             description = str(meta.get("description", "") or "")
             memory_type = str(meta.get("type", "unknown") or "unknown")
+        # Lane 1 / #167: thread declared refines/supersedes so the
+        # similarity sweep honors declarations identically to the
+        # primary cluster pass.
+        try:
+            refines = parse_refines(meta if isinstance(meta, dict) else None)
+            supersedes = parse_supersedes(meta if isinstance(meta, dict) else None)
+        except ValueError:
+            refines = []
+            supersedes = []
         out.append(
             AutoMemoryFile(
                 path=path,
@@ -451,6 +465,8 @@ def candidate_to_auto_memory_files(
                 memory_type=memory_type,
                 name=name,
                 description=description,
+                refines=refines,
+                supersedes=supersedes,
             )
         )
     return out

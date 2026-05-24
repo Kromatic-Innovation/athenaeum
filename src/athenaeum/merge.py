@@ -63,6 +63,8 @@ from athenaeum.models import (
     AutoMemoryFile,
     EscalationItem,
     parse_frontmatter,
+    parse_refines,
+    parse_supersedes,
     render_frontmatter,
 )
 from athenaeum.resolutions import (
@@ -92,6 +94,67 @@ CONTRADICTION_COHESION_THRESHOLD = 0.75
 # mirrors C3's treatment of the old ``contradictions_detected`` flag on
 # cohesive clusters and keeps ``wiki/auto-*.md`` frontmatter minimal.
 CONTRADICTION_STATUS_FLAGGED = "contradiction-flagged"
+
+
+def _declared_relationship(a: "AutoMemoryFile", b: "AutoMemoryFile") -> str | None:
+    """Return a rationale slug when ``a`` and ``b`` declare each other.
+
+    Lane 1 / #167. Matches by ``AutoMemoryFile.name`` (the documented
+    frontmatter slug). A declaration on EITHER side suppresses the pair.
+
+    Returns:
+        ``"declared-supersession"`` when one side names the other in its
+        ``supersedes`` list (the resolution is in the text — no human
+        review needed). ``"declared-refinement"`` when one side names the
+        other in its ``refines`` list (general + exception; both stay
+        active and never count as a conflict). ``None`` when no
+        declaration applies.
+    """
+    a_name = (a.name or "").strip()
+    b_name = (b.name or "").strip()
+    if not a_name or not b_name:
+        return None
+    a_super = set(a.supersedes_names())
+    b_super = set(b.supersedes_names())
+    if b_name in a_super or a_name in b_super:
+        return "declared-supersession"
+    if b_name in set(a.refines or []) or a_name in set(b.refines or []):
+        return "declared-refinement"
+    return None
+
+
+def _filter_declared_pairs(
+    members: list["AutoMemoryFile"],
+) -> tuple[list["AutoMemoryFile"], str | None]:
+    """Drop members whose only conflict partners are declared relationships.
+
+    Walks every pair: if EVERY pair in the chunk has a declaration, the
+    chunk cannot contradict and the caller should short-circuit the
+    detector. Returns ``(members, rationale)`` unchanged when at least
+    one undeclared pair remains. Returns ``([], rationale)`` when the
+    chunk is fully covered by declarations — the rationale records WHICH
+    declaration class (supersession beats refinement when both apply in
+    the same chunk, since supersession is the stronger statement).
+    """
+    if len(members) < 2:
+        return members, None
+    saw_supersession = False
+    saw_refinement = False
+    for i in range(len(members)):
+        for j in range(i + 1, len(members)):
+            verdict = _declared_relationship(members[i], members[j])
+            if verdict is None:
+                return members, None
+            if verdict == "declared-supersession":
+                saw_supersession = True
+            else:
+                saw_refinement = True
+    if saw_supersession:
+        return [], "declared-supersession"
+    if saw_refinement:
+        return [], "declared-refinement"
+    return members, None
+
 
 # Filesystem prefix that distinguishes auto-memory wiki entries from
 # entity-schema entries (``<uid>-<kebab>.md``). Callers reading the
@@ -486,6 +549,19 @@ def merge_cluster_row(
                 sources = [str(s) for s in sources_raw if isinstance(s, str)]
             else:
                 sources = []
+            try:
+                shim_refines = parse_refines(meta if meta else None)
+                shim_supersedes = parse_supersedes(meta if meta else None)
+            except ValueError as exc:
+                log.warning(
+                    "cluster %s shim: invalid refines/supersedes on %s (%s); "
+                    "treating as empty",
+                    cluster_id,
+                    resolved,
+                    exc,
+                )
+                shim_refines = []
+                shim_supersedes = []
             am = AutoMemoryFile(
                 path=resolved,
                 origin_scope=scope_guess,
@@ -497,6 +573,8 @@ def merge_cluster_row(
                 ),
                 origin_turn=origin_turn,
                 sources=sources,
+                refines=shim_refines,
+                supersedes=shim_supersedes,
             )
         members.append((mp, am))
         resolved_member_paths.append(mp)
@@ -838,6 +916,15 @@ def merge_clusters_to_wiki(
         suppressed = False
         for chunk in chunks:
             chunks_run += 1
+            # Lane 1 / #167: short-circuit when every pair in the chunk
+            # declares the other via refines/supersedes. Saves a Haiku
+            # call and prevents the over-fire path from flagging
+            # already-resolved pairs.
+            filtered, declared = _filter_declared_pairs(chunk)
+            if declared is not None and not filtered:
+                _record_pair_keys(chunk)
+                result = ContradictionResult(detected=False, rationale=declared)
+                continue
             if len(chunk) >= 2:
                 haiku_calls += 1
             result = detect_contradictions(chunk, client)
@@ -891,6 +978,12 @@ def merge_clusters_to_wiki(
         )
         for cand in candidates:
             pair = candidate_to_auto_memory_files(cand)
+            # Lane 1 / #167: skip similarity-sweep pairs that declare
+            # each other. Mirrors the primary-pass short-circuit so a
+            # declared-supersession pair never reaches the detector.
+            _filtered, declared = _filter_declared_pairs(list(pair))
+            if declared is not None and not _filtered:
+                continue
             haiku_calls += 1
             result = detect_contradictions(pair, client)
             if result.detected:
