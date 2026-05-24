@@ -46,10 +46,15 @@ Three precedence layers, resolved as **env > yaml > default**:
 | Enable auto-apply | `ATHENAEUM_RESOLVE_AUTO_APPLY` | `resolve.auto_apply` | `true` |
 | Confidence threshold | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | `resolve.auto_apply_threshold` | `0.90` |
 | Resolver model | `ATHENAEUM_RESOLVE_MODEL` | `resolve.model` | `claude-opus-4-7` |
+| Full-body token cap (per side) | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | `resolve.full_body_token_cap` | `1500` |
 
 Env-var boolean values accept `true`/`false`, `1`/`0`, `yes`/`no` (case-insensitive). An invalid env value falls through to the yaml/default layers — auto-apply is a behavior knob, not a hard validation surface.
 
 Threshold values outside `[0.0, 1.0]` raise on read so a typo (e.g. `9.0` meant as `0.9`) surfaces immediately instead of silently turning auto-apply off for the rest of the run.
+
+The `full_body_token_cap` gates the resolver's per-side full-body context (issue #168). Tokens are measured with a simple character-count heuristic — roughly 4 characters per token for English markdown — so the practical character ceiling is `cap * 4`. Each member's `<member>` block always opens with a `passage:` line containing the detector's exact conflicting region; when the body also fits the cap, a `body:` block follows. When the body exceeds the cap, the body is omitted and a `[truncated — body exceeded {cap}-token budget; passage above is the conflict region]` note is appended below the passage. Asymmetric truncation is expected: a small + large member pair is a normal case, and the small side still gets the full body.
+
+`full_body_token_cap` must be a positive integer. Zero and negative values raise `ValueError` on read — to effectively disable truncation, set a large value (e.g. `1000000`) rather than `0`.
 
 A sample `athenaeum.yaml`:
 
@@ -58,6 +63,7 @@ resolve:
   model: claude-opus-4-7
   auto_apply: true
   auto_apply_threshold: 0.90
+  full_body_token_cap: 1500
 ```
 
 ## Disabling
