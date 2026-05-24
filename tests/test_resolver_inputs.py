@@ -424,3 +424,120 @@ def test_token_cap_negative_rejected_via_env(monkeypatch) -> None:
     monkeypatch.setenv("ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP", "-10")
     with pytest.raises(ValueError, match="positive integer"):
         resolve_full_body_token_cap({})
+
+
+# ---------------------------------------------------------------------------
+# Issue #175 — boundary and tolerance tests
+# ---------------------------------------------------------------------------
+
+
+def test_body_exactly_at_char_cap_is_included(tmp_path: Path) -> None:
+    """Body length == cap*4 chars → included with NO truncation note.
+
+    Boundary is ``> char_cap`` (strict), so equal-length bodies stay in.
+    """
+    scope = tmp_path / "scope"
+    # cap = 5 tokens × 4 chars/token = 20 chars exactly.
+    body = "X" * 20
+    a = _write_member(scope, "a.md", body)
+    b = _write_member(scope, "b.md", "small")
+    cfg = {"resolve": {"full_body_token_cap": 5}}
+    msg = _build_user_message(
+        _detected([a, b], ["pa", "pb"]),
+        [a, b],
+        cfg,
+    )
+    assert body in msg
+    # Truncation note must NOT fire for member a at the exact boundary.
+    # (member b is fine — body is shorter than the cap.)
+    assert msg.count("truncated") == 0
+
+
+def test_body_one_char_over_cap_is_truncated(tmp_path: Path) -> None:
+    """Body length == cap*4 + 1 chars → truncated, passage only."""
+    scope = tmp_path / "scope"
+    body = "X" * 21  # 5 tokens × 4 chars = 20, +1 → truncate.
+    a = _write_member(scope, "a.md", body)
+    b = _write_member(scope, "b.md", "small")
+    cfg = {"resolve": {"full_body_token_cap": 5}}
+    msg = _build_user_message(
+        _detected([a, b], ["pa", "pb"]),
+        [a, b],
+        cfg,
+    )
+    assert body not in msg
+    assert "truncated" in msg
+    assert "5-token budget" in msg
+
+
+def test_cross_scope_wikilink_silently_dropped(tmp_path: Path) -> None:
+    """A wikilink whose target lives in a different scope dir is omitted.
+
+    Cross-scope link resolution is deliberately out of scope — the
+    resolver runs per-scope and only the same-scope sibling index is
+    consulted.
+    """
+    scope_a = tmp_path / "scope-a"
+    scope_b = tmp_path / "scope-b"
+    # Target lives in scope-b…
+    _write_member(
+        scope_b,
+        "target.md",
+        "target body",
+        name="cross-scope-target",
+        description="cross-scope description",
+    )
+    # …but the linking member lives in scope-a.
+    a = _write_member(
+        scope_a,
+        "a.md",
+        "Refers to [[cross-scope-target]] for context.",
+    )
+    b = _write_member(scope_a, "b.md", "another member")
+    msg = _build_user_message(
+        _detected([a, b], ["pa", "pb"]),
+        [a, b],
+    )
+    # Link should be silently dropped — no link[...] line, no description echo.
+    assert "link[cross-scope-target]" not in msg
+    assert "cross-scope description" not in msg
+
+
+def test_body_read_failure_falls_back_to_passage_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the body read raises OSError the resolver still emits a prompt.
+
+    The member section should fall through to the passage-only path:
+    no body, no crash, passage still present.
+    """
+    scope = tmp_path / "scope"
+    a = _write_member(scope, "a.md", "secret body content")
+    b = _write_member(scope, "b.md", "other side")
+
+    # Patch Path.read_text on the SPECIFIC files so reading them raises.
+    # Other reads (e.g. system prompt fixture loads) must still work.
+    target_paths = {a.path.resolve(), b.path.resolve()}
+    real_read_text = Path.read_text
+
+    def flaky_read_text(self: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        try:
+            resolved = self.resolve()
+        except OSError:
+            resolved = self
+        if resolved in target_paths:
+            raise OSError("simulated read failure")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    msg = _build_user_message(
+        _detected([a, b], ["passage a", "passage b"]),
+        [a, b],
+    )
+    # Passages are still rendered…
+    assert "passage a" in msg
+    assert "passage b" in msg
+    # …and the body content is NOT (read raised).
+    assert "secret body content" not in msg
+    assert "other side" not in msg
