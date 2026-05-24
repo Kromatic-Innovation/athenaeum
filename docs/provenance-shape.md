@@ -369,7 +369,115 @@ Out of scope, by design:
 
 ---
 
-## 7. Implementation issue mapping
+## 7. Declared memory relationships (`refines` / `supersedes`)
+
+Issue #167 (Lane 1 of #166). Two optional frontmatter fields on
+auto-memory files declare an explicit relationship to another memory.
+They sit alongside `source:` / `field_sources:` and round-trip through
+tier0 passthrough byte-for-byte.
+
+### 7.1 `refines:`
+
+Shape: a list of memory `name:` slugs this memory narrows.
+
+```yaml
+---
+type: feedback
+name: open-csv-in-numbers
+refines:
+  - open-files-in-sublime
+---
+```
+
+Semantics: general + exception. BOTH memories remain active. The pair
+is NOT a contradiction — the second memory is a documented refinement
+of the first.
+
+### 7.2 `supersedes:`
+
+Shape: a list of `{name, as_of, reason}` records declaring this memory
+replaces another. The superseded memory stays on disk for audit but is
+no longer active guidance.
+
+```yaml
+---
+type: project
+name: voltaire-inbox-ea-umbrella
+supersedes:
+  - name: voltaire-old-nanoclaw-ea
+    as_of: 2026-04-23
+    reason: "Voltaire renamed; old nanoclaw EA dead."
+---
+```
+
+The `name` key is required. `as_of` and `reason` are optional and stored
+as empty strings when missing.
+
+### 7.3 Conflict-detector + resolver behavior
+
+- **Detector short-circuit** (`merge.py`): when every pair in a cluster
+  declares the other via `refines` or `supersedes`, the cluster
+  short-circuits to `detected=False` with a rationale of
+  `declared-refinement` or `declared-supersession`. The Haiku call is
+  skipped entirely.
+- **Resolver auto-prefer** (`resolutions.py`): on the rare path where a
+  declared pair reaches the resolver (e.g. via the similarity sweep on a
+  pair that wasn't fully covered by the primary-pass filter), the
+  resolver returns a synthetic proposal WITHOUT an LLM call:
+  - `supersedes` → `keep_<superseder>` at `confidence=1.0`.
+  - `refines` → `not_a_conflict` at `confidence=1.0`; `merge.py` then
+    drops the escalation entirely.
+- **Name matching uses `slugify()`** on both sides at compare time, so
+  case- or punctuation-mismatched declarations (`Memory-A` vs
+  `memory-a`) still match. Trailing/leading whitespace was already
+  stripped by the parsers — slugification is the stronger contract.
+- **Precedence when both sides declare conflicting relationships:**
+  - **Mutual `supersedes`** (A says supersedes B AND B says supersedes
+    A) is itself a declared contradiction. Neither side wins
+    deterministically — `merge._declared_relationship` returns `None`
+    (the pair falls through to the detector/resolver), and
+    `resolutions._declared_winner` returns `None` (the pair falls
+    through to the LLM). Both sites emit a `WARNING` log so the
+    contradiction is auditable.
+  - **Mixed `refines` + `supersedes`** (A `refines` B, B `supersedes`
+    A) resolves to `keep_b` / `declared-supersession`. Supersession is
+    the stronger statement and wins over the weaker refinement claim
+    from the other side. No warning — the resolution is well-defined.
+  - **Mutual `refines`** (A `refines` B AND B `refines` A) resolves to
+    `not_a_conflict`. Both memories asserting "I narrow the other" is
+    treated as a benign declaration of co-membership in a refinement
+    cluster; the cluster simply stays active.
+- **Detector short-circuit refuses on underspecified detector output:**
+  when `ContradictionResult.members_involved` has fewer than two
+  entries, `resolutions._declared_winner` returns `None` (falls through
+  to the LLM). The earlier draft filled the missing slots from the
+  start of the supplied member list, which silently evaluated
+  declarations against a pair the detector never flagged. The
+  resolver now only short-circuits when both detector-named members
+  resolve to entries in the supplied member list.
+
+### 7.4 Parser contract
+
+Both fields are parsed by `models.parse_refines` and
+`models.parse_supersedes`. Missing or `None` → empty list. Any shape
+violation (scalar instead of list, missing `name` on a `supersedes`
+entry, empty-string entry on `refines`) raises `ValueError`. The
+auto-memory loader and the merge-pass shim catch and log the error and
+default to empty lists so one malformed file does not crash the whole
+ingest; downstream tooling (a future lint pass) can surface them.
+
+### 7.5 Out of scope (deferred lanes)
+
+- Migrating existing memories to declare relationships — a one-off
+  script lane.
+- MCP / agent-facing tooling to declare from the agent side — separate
+  lane.
+- Resolver input expansion (Lane 2, #168), prompt rewrite (Lane 3,
+  #169), threshold tuning (Lane 4, #170).
+
+---
+
+## 8. Implementation issue mapping
 
 | Section | Issue | What the issue implements |
 |---------|-------|---------------------------|
