@@ -1451,3 +1451,73 @@ class TestMergeOnlyCLI:
         wiki = voltaire_merge_root / "wiki"
         outputs = sorted(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
         assert len(outputs) == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #181: self-reference lint applies to cluster-shim path
+# ---------------------------------------------------------------------------
+
+
+class TestClusterShimSelfReferenceLint:
+    """The shim branch in :func:`merge_cluster_row` builds an
+    :class:`AutoMemoryFile` on the fly when a cluster row references a
+    file that C1 didn't discover. That branch must apply the same
+    self-reference lint as the discovery path (issue #181)."""
+
+    def test_refines_self_dropped_on_shim(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from athenaeum.merge import merge_cluster_row
+
+        member = tmp_path / "shim_self.md"
+        member.write_text(
+            "---\nname: Shim Mem\ntype: feedback\n"
+            "refines:\n  - Shim Mem\n  - Other\n---\nbody\n",
+            encoding="utf-8",
+        )
+        row = {
+            "cluster_id": "c-shim",
+            "member_paths": [str(member)],
+            "centroid_score": 1.0,
+        }
+        with caplog.at_level("WARNING"):
+            entry = merge_cluster_row(row, extra_roots=[tmp_path], am_by_path={})
+        assert entry is not None
+        assert len(entry.resolved_members) == 1
+        assert entry.resolved_members[0].refines == ["Other"]
+        assert any(
+            "refines self" in r.getMessage()
+            and "Shim Mem" in r.getMessage()
+            and str(member) in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_supersedes_self_dropped_on_shim(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from athenaeum.merge import merge_cluster_row
+
+        member = tmp_path / "shim_self.md"
+        member.write_text(
+            "---\nname: Shim Mem\ntype: feedback\n"
+            "supersedes:\n"
+            "  - name: Shim Mem\n    as_of: 2026-01-01\n    reason: typo\n"
+            "  - name: Other\n    as_of: 2026-01-02\n    reason: real\n"
+            "---\nbody\n",
+            encoding="utf-8",
+        )
+        row = {
+            "cluster_id": "c-shim",
+            "member_paths": [str(member)],
+            "centroid_score": 1.0,
+        }
+        with caplog.at_level("WARNING"):
+            entry = merge_cluster_row(row, extra_roots=[tmp_path], am_by_path={})
+        assert entry is not None
+        assert [s["name"] for s in entry.resolved_members[0].supersedes] == ["Other"]
+        assert any(
+            "supersedes self" in r.getMessage()
+            and "Shim Mem" in r.getMessage()
+            and str(member) in r.getMessage()
+            for r in caplog.records
+        )

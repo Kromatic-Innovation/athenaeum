@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-05-24
+
+Patch bundle: the self-reference lint added in #173 now runs on every
+`AutoMemoryFile` construction site, not just `discover_auto_memory_files`.
+
+### Changed
+
+- **Self-reference lint applied to all `AutoMemoryFile` construction sites**
+  (#181, #183) — the lint that strips a memory's own name from its
+  `refines` / `supersedes` lists (originally added in #173) now also runs
+  in the similarity-sweep path (`cross_scope.candidate_to_auto_memory_files`)
+  and the cluster-shim path (`merge.merge_cluster_row`). Extracted to
+  `athenaeum._lint._strip_self_reference` so all three sites share one
+  implementation. Tests tightened to assert against rendered log messages.
+
 ## [0.6.0] - 2026-05-24
 
 The librarian-reasoner epic (#166) lands as a single backward-compatible

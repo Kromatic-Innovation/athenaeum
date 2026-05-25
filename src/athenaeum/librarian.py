@@ -29,6 +29,7 @@ from pathlib import Path
 
 import anthropic
 
+from athenaeum._lint import _strip_self_reference
 from athenaeum.clusters import (
     cluster_auto_memory_files,
     resolve_cluster_output_path,
@@ -61,6 +62,7 @@ from athenaeum.tiers import (
 )
 
 log = logging.getLogger("athenaeum")
+
 
 # Defaults — can be overridden via CLI args or the run() API
 DEFAULT_KNOWLEDGE_ROOT = Path.home() / "knowledge"
@@ -195,29 +197,10 @@ def discover_auto_memory_files(
                     )
                     refines = []
                     supersedes = []
-                # Issue #173: self-reference in refines/supersedes is a
-                # YAML authoring mistake — silently drop with a loud warn
-                # so the resolver / merge planner never sees a memory
-                # claiming to refine or supersede itself.
-                if name:
-                    self_refines = [r for r in refines if r == name]
-                    if self_refines:
-                        log.warning(
-                            "auto-memory %s: refines self (%r); dropping "
-                            "self-reference",
-                            fpath,
-                            name,
-                        )
-                        refines = [r for r in refines if r != name]
-                    self_supersedes = [s for s in supersedes if s.get("name") == name]
-                    if self_supersedes:
-                        log.warning(
-                            "auto-memory %s: supersedes self (%r); dropping "
-                            "self-reference",
-                            fpath,
-                            name,
-                        )
-                        supersedes = [s for s in supersedes if s.get("name") != name]
+                # Issue #173 / #181: drop refines/supersedes self-references.
+                refines, supersedes = _strip_self_reference(
+                    name, refines, supersedes, fpath
+                )
                 files.append(
                     AutoMemoryFile(
                         path=fpath,
