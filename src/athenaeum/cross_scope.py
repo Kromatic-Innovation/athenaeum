@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from athenaeum._lint import _strip_self_reference
 from athenaeum.models import (
     AutoMemoryFile,
     parse_frontmatter,
@@ -463,6 +464,8 @@ def candidate_to_auto_memory_files(
             )
             refines = []
             supersedes = []
+        # Issue #181: same self-reference lint as discover_auto_memory_files.
+        refines, supersedes = _strip_self_reference(name, refines, supersedes, path)
         out.append(
             AutoMemoryFile(
                 path=path,
