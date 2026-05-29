@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Resolver per-run Opus call cap (`DEFAULT_RESOLVE_MAX_PER_RUN`) raised
+  50 → 250 (#187). On a full-knowledge-base ingest the detector can flag
+  well over 50 contradictions; at the old default the confirmation pass
+  ran out of budget partway through and the surplus escalated raw into
+  `_pending_questions.md` instead of being suppressed as `not_a_conflict`.
+  The cap is a ceiling, not a target — small bases never approach it.
+  Override via `contradiction.resolve_max_per_run` (yaml) or
+  `ATHENAEUM_RESOLVE_MAX_PER_RUN` (env).
+
 ## [0.6.1] - 2026-05-24
 
 Patch bundle: the self-reference lint added in #173 now runs on every

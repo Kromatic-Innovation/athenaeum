@@ -290,6 +290,9 @@ class TestPerRunCap:
     ) -> None:
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MAX_PER_RUN", raising=False)
         assert resolve_max_per_run(None) == DEFAULT_RESOLVE_MAX_PER_RUN
+        # Lock the concrete default (#187): raised 50 -> 250 so a full-KB
+        # ingest's contradiction volume fits under the resolver budget.
+        assert DEFAULT_RESOLVE_MAX_PER_RUN == 250
 
     def test_cap_honored_60_detections_50_cap(
         self,
