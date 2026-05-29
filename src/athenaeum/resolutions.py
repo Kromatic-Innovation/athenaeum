@@ -74,7 +74,20 @@ DEFAULT_RESOLVE_MODEL = "claude-opus-4-7"
 # Per-run cap on Opus calls. When the detector flags more contradictions
 # than this in a single ingest, the surplus is escalated WITHOUT a
 # proposal (degraded mode). Keeps cost predictable on a noisy run.
-DEFAULT_RESOLVE_MAX_PER_RUN = 50
+#
+# Raised 50 -> 250 (issue #187): a full-knowledge-base ingest can detect
+# well over 50 contradictions in one run (one observed run detected ~130).
+# At 50 the confirmation pass exhausts its budget partway through and the
+# surplus escalates raw into _pending_questions.md — even though the
+# resolver would have suppressed most as `not_a_conflict` (the cheap
+# detector over-fires; the Opus pass, given full bodies + one-hop wikilink
+# context, clears the false-positives). The cap is a ceiling, not a target:
+# small knowledge bases never approach it and pay nothing extra. Operators
+# can override via `contradiction.resolve_max_per_run` (yaml) or
+# `ATHENAEUM_RESOLVE_MAX_PER_RUN` (env). NOTE: a fixed default only moves
+# the cliff — sizing the cap to detected volume (or a token budget) is
+# tracked as follow-up to #187.
+DEFAULT_RESOLVE_MAX_PER_RUN = 250
 
 # Auto-apply lane (issue #156): when the resolver returns a high-confidence
 # proposal, mark the pending-question block as resolved in-place so the
