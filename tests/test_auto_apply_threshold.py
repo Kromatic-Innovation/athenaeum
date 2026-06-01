@@ -77,8 +77,12 @@ class TestPerActionDefaults:
     def test_unknown_action_returns_none(self) -> None:
         # Unknown / non-auto-applicable actions fall through to None.
         assert resolve_auto_apply_threshold_for({}, "merge") is None
-        assert resolve_auto_apply_threshold_for({}, "deprecate_both") is None
         assert resolve_auto_apply_threshold_for({}, "retain_both_with_context") is None
+
+    def test_deprecate_both_default_threshold(self) -> None:
+        # Issue #191: deprecate_both is now a known marking action with a
+        # 0.90 default (was None / unknown before).
+        assert resolve_auto_apply_threshold_for({}, "deprecate_both") == 0.90
 
     def test_none_config_uses_per_action_defaults(self) -> None:
         # config=None still resolves to per-action defaults — this is the
@@ -496,6 +500,9 @@ class TestModuleConstants:
             "not_a_conflict": 0.75,
             "keep_a": 0.90,
             "keep_b": 0.90,
+            # Issue #191: deprecate_both MARKS both members (non-destructive)
+            # at the 0.90 record-aligned bar, below the 0.95 destructive bar.
+            "deprecate_both": 0.90,
             # #166 follow-up: correct/forget ENACT a deletion on auto-apply,
             # so they carry a higher destructive bar (0.95) than the
             # record-only keep_a/keep_b (0.90).

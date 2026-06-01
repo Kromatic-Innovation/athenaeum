@@ -24,9 +24,12 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from athenaeum.models import is_inactive_memory, parse_frontmatter
+
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
+
 
 @runtime_checkable
 class SearchBackend(Protocol):
@@ -89,21 +92,25 @@ class SearchBackend(Protocol):
 # Exposed as the single source of truth so shell hooks and downstream
 # callers don't re-hardcode their own copy. See `athenaeum stopwords`
 # CLI subcommand and examples/claude-code/user-prompt-recall.sh.
-STOPWORDS: tuple[str, ...] = tuple(sorted(set(
-    "the and for are but not you all can had her was one our out has his how "
-    "its let may new now old see way who did get got him she too use with from "
-    "have this that they will been call come each find give help here just know "
-    "like long look make many more most much must next only over said same some "
-    "such take tell than them then very want well went were what when which "
-    "while work also back been being both came does done down even goes going "
-    "good keep last left life line made need never part place point right show "
-    "small still think those turn used using where would about after again "
-    "could every great might often other shall should since start state still "
-    "there these thing think three through under until which while world would "
-    "years your into just like made over said some than them then time very "
-    "want what when will with year does really right going being looking "
-    "trying running check please sure okay yeah thanks".split()
-)))
+STOPWORDS: tuple[str, ...] = tuple(
+    sorted(
+        set(
+            "the and for are but not you all can had her was one our out has his how "
+            "its let may new now old see way who did get got him she too use with from "
+            "have this that they will been call come each find give help here just know "
+            "like long look make many more most much must next only over said same some "
+            "such take tell than them then very want well went were what when which "
+            "while work also back been being both came does done down even goes going "
+            "good keep last left life line made need never part place point right show "
+            "small still think those turn used using where would about after again "
+            "could every great might often other shall should since start state still "
+            "there these thing think three through under until which while world would "
+            "years your into just like made over said some than them then time very "
+            "want what when will with year does really right going being looking "
+            "trying running check please sure okay yeah thanks".split()
+        )
+    )
+)
 
 # Stopwords stripped before building an FTS5 query.
 _STOPWORDS: frozenset[str] = frozenset(STOPWORDS)
@@ -243,6 +250,13 @@ class FTS5Backend:
             except OSError:
                 continue
 
+            # Issue #191: skip inactive members (superseded_by / deprecated)
+            # so they never surface in recall. Frontmatter is at the top of
+            # the file, so the truncated read above is sufficient.
+            meta, _ = parse_frontmatter(text)
+            if is_inactive_memory(meta):
+                continue
+
             name, tags, aliases, description = _extract_frontmatter_fields(text)
 
             if not name:
@@ -325,6 +339,7 @@ class VectorBackend:
     def _get_chromadb(self) -> Any:
         try:
             import chromadb
+
             return chromadb
         except ImportError as exc:
             raise ImportError(
@@ -363,6 +378,7 @@ class VectorBackend:
         # causing create_collection to fail with "already exists". Clear
         # the cache so the new PersistentClient sees a fresh filesystem.
         from chromadb.api.client import SharedSystemClient
+
         SharedSystemClient.clear_system_cache()
 
         client = chromadb.PersistentClient(path=str(vector_dir))
@@ -376,6 +392,11 @@ class VectorBackend:
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")[:4000]
             except OSError:
+                continue
+
+            # Issue #191: skip inactive members (superseded_by / deprecated).
+            meta, _ = parse_frontmatter(text)
+            if is_inactive_memory(meta):
                 continue
 
             name, _tags, _aliases, _description = _extract_frontmatter_fields(text)
@@ -428,10 +449,12 @@ class VectorBackend:
             # doesn't sit silent — "vector returns nothing" was the top
             # first-adopter confusion in the v0.2.0 review.
             import logging
+
             logging.getLogger(__name__).warning(
-                "vector get_collection(%s) failed with %s: %s; "
-                "returning empty hits",
-                _VECTOR_COLLECTION, type(exc).__name__, exc,
+                "vector get_collection(%s) failed with %s: %s; " "returning empty hits",
+                _VECTOR_COLLECTION,
+                type(exc).__name__,
+                exc,
             )
             return []
 
@@ -518,9 +541,7 @@ def tokenize_keyword_query(query: str) -> list[str]:
     return [t for t in re.split(r"\W+", query.lower()) if len(t) >= 2]
 
 
-def score_keyword_page(
-    tokens: list[str], frontmatter: dict, body: str
-) -> float:
+def score_keyword_page(tokens: list[str], frontmatter: dict, body: str) -> float:
     """Score a wiki page against keyword tokens.
 
     Frontmatter fields (``name``, ``aliases``, ``tags``, ``description``,
@@ -571,7 +592,8 @@ class KeywordBackend:
         """
         del cache_dir
         count = sum(
-            1 for p in wiki_root.rglob("*.md")
+            1
+            for p in wiki_root.rglob("*.md")
             if not p.name.startswith("_") and p.name not in _INTAKE_SKIP_NAMES
         )
         if extra_roots:
@@ -579,8 +601,7 @@ class KeywordBackend:
                 if not root.is_dir():
                     continue
                 count += sum(
-                    1 for p in root.rglob("*.md")
-                    if p.name not in _INTAKE_SKIP_NAMES
+                    1 for p in root.rglob("*.md") if p.name not in _INTAKE_SKIP_NAMES
                 )
         return count
 
@@ -597,8 +618,6 @@ class KeywordBackend:
         del cache_dir
         if wiki_root is None or not wiki_root.is_dir():
             return []
-
-        from athenaeum.models import parse_frontmatter
 
         tokens = tokenize_keyword_query(query)
         if not tokens:
@@ -621,6 +640,9 @@ class KeywordBackend:
                 continue
 
             fm, body = parse_frontmatter(text)
+            # Issue #191: skip inactive members (superseded_by / deprecated).
+            if is_inactive_memory(fm):
+                continue
             score = score_keyword_page(tokens, fm, body)
             if score > 0:
                 name = fm.get("name") or md_file.stem
@@ -671,7 +693,9 @@ def build_fts5_index(
     """
     roots = [Path(r) for r in extra_roots] if extra_roots else None
     return FTS5Backend().build_index(
-        Path(wiki_root), Path(cache_dir), extra_roots=roots,
+        Path(wiki_root),
+        Path(cache_dir),
+        extra_roots=roots,
     )
 
 
@@ -699,7 +723,9 @@ def build_vector_index(
     """
     roots = [Path(r) for r in extra_roots] if extra_roots else None
     return VectorBackend().build_index(
-        Path(wiki_root), Path(cache_dir), extra_roots=roots,
+        Path(wiki_root),
+        Path(cache_dir),
+        extra_roots=roots,
     )
 
 
