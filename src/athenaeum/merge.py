@@ -203,6 +203,42 @@ def _filter_declared_pairs(
     return pruned, None
 
 
+def _order_member_paths(
+    result: ContradictionResult,
+    members: list["AutoMemoryFile"] | None,
+) -> list[str]:
+    """Return member file paths in the detector's flagged ``a``/``b`` order.
+
+    The resolver labels the two flagged snippets ``a`` and ``b`` in the
+    order they appear in ``result.members_involved`` — the SAME order
+    :func:`athenaeum.resolutions._build_user_message` presents them to the
+    model. The enactment lane (#166 follow-up) keys ``forget_*`` /
+    ``correct_*`` on those labels, so it needs the member PATHS in exactly
+    that order, not the (arbitrary) cluster/chunk order.
+
+    Matching mirrors ``_build_user_message`` / ``_declared_winner``: a
+    member matches a ref when ``"<origin_scope>/<filename>"`` equals the
+    ref or shares its trailing filename component. Unmatched refs and
+    members are dropped — a short/empty list makes the enactment lane
+    no-op, which is the safe default. Returns absolute path strings.
+    """
+    if not members:
+        return []
+    ordered: list[str] = []
+    used: set[int] = set()
+    for ref in result.members_involved:
+        ref_tail = ref.rsplit("/", 1)[-1]
+        for i, am in enumerate(members):
+            if i in used:
+                continue
+            tag = f"{am.origin_scope}/{am.path.name}"
+            if tag == ref or tag.endswith("/" + ref_tail):
+                ordered.append(str(am.path))
+                used.add(i)
+                break
+    return ordered
+
+
 # Filesystem prefix that distinguishes auto-memory wiki entries from
 # entity-schema entries (``<uid>-<kebab>.md``). Callers reading the
 # wiki directory can branch on this prefix without parsing frontmatter.
@@ -894,6 +930,16 @@ def merge_clusters_to_wiki(
                 entry.cluster_id,
             )
             return
+        # Mutating single-side verdicts (#166 follow-up): correct_a /
+        # correct_b (the losing side was WRONG — remove its claim) and
+        # forget_a / forget_b (one side is transient — delete it cleanly).
+        # These are genuine contradictions, NOT suppressions and NOT
+        # merge proposals, so they intentionally fall through to the
+        # normal pending-question escalation below. The auto-apply gate in
+        # tier4_escalate (per-action threshold 0.90, same as keep_a/keep_b)
+        # decides whether the resolution is applied in-place or left for
+        # the human — no special routing is needed here. Noted explicitly
+        # so a future reader greps the contract and does not add a branch.
         # Issue #146: run-scoped dedup by the flagged source-file set. The
         # check sits AFTER the suppress-verdict return on purpose: a
         # suppressed cluster never reaches here, so it does not consume a
@@ -944,6 +990,10 @@ def merge_clusters_to_wiki(
                 conflict_type=result.conflict_type or "factual",
                 description=description,
                 proposal=proposal,
+                # Flagged member paths in resolver a/b order so the
+                # enactment lane can delete the target on a high-confidence
+                # forget_*/correct_* auto-apply (#166 follow-up).
+                members=_order_member_paths(result, members),
             )
         )
 

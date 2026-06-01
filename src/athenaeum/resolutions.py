@@ -104,6 +104,21 @@ DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION: dict[str, float] = {
     "not_a_conflict": 0.75,
     "keep_a": 0.90,
     "keep_b": 0.90,
+    # Issue #166 follow-up (correct/forget modes). These are the ENACTING
+    # actions: on auto-apply the librarian DELETES a raw memory member
+    # (`correct_*` removes the wrong member's claim, `forget_*` deletes a
+    # transient member cleanly — see :data:`ENACTING_ACTIONS` /
+    # :func:`enact_resolution`). keep_a/keep_b only RECORD a verdict (both
+    # members survive, loser kept as superseded history). A destructive
+    # auto-delete deserves a higher bar than a record-only edit, so these
+    # four carry a 0.95 floor — only a very-high-confidence verdict
+    # auto-deletes; anything in [0.90, 0.95) escalates to the human.
+    # Locked here so the gate in tiers.py treats them as auto-applicable
+    # (above threshold) rather than escalate-only.
+    "correct_a": 0.95,
+    "correct_b": 0.95,
+    "forget_a": 0.95,
+    "forget_b": 0.95,
 }
 # Sentinel set of actions that never auto-apply regardless of threshold.
 # Belt-and-suspenders: Lane 3's ``_emit_escalation`` already routes
@@ -114,7 +129,10 @@ DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION: dict[str, float] = {
 # merge proposal slip past on confidence alone.
 _NEVER_AUTO_APPLY_ACTIONS: frozenset[str] = frozenset(("propose_merge",))
 # Actions that still honor the legacy scalar `resolve.auto_apply_threshold`
-# as a backward-compat fallback when no per-action override is set.
+# as a backward-compat fallback when no per-action override is set. The
+# correct/forget modes are NEW (no pre-#170 configs reference them) so
+# they are deliberately NOT in this set — they take their threshold from
+# the per-action default/override layers only.
 _LEGACY_SCALAR_FALLBACK_ACTIONS: frozenset[str] = frozenset(("keep_a", "keep_b"))
 
 # Lane 2 / issue #168: token-budget cap for the per-side full body the
@@ -148,6 +166,22 @@ ResolverAction = Literal[
     # a single canonical memory. Does NOT auto-apply — the proposed merge
     # is written to ``wiki/_pending_merges.md`` for human approval.
     "propose_merge",
+    # Correct verdict (#166 follow-up): for a DECISION conflict where the
+    # losing side was simply WRONG (a mistake / confusion), not
+    # valid-then-replaced. Distinct from supersede (keep_a/keep_b with a
+    # ``supersedes:`` marker, "history matters"): here the wrong member's
+    # claim should be removed/fixed, NOT enshrined as superseded. Winner
+    # is the correct side.
+    "correct_a",
+    "correct_b",
+    # Forget verdict (#166 follow-up): a single side is transient /
+    # no-longer-relevant / was confusion and should be deleted cleanly —
+    # no historical record. Distinct from ``supersede`` (keeps history)
+    # and from ``correct`` (which implies the OTHER side is the right
+    # answer to the same question). ``deprecate_both`` is the both-sides
+    # analogue; ``forget_a`` / ``forget_b`` drop exactly one member.
+    "forget_a",
+    "forget_b",
 ]
 
 _VALID_WINNERS: frozenset[str] = frozenset(("a", "b", "merge", "neither"))
@@ -160,6 +194,10 @@ _VALID_ACTIONS: frozenset[str] = frozenset(
         "retain_both_with_context",
         "not_a_conflict",
         "propose_merge",
+        "correct_a",
+        "correct_b",
+        "forget_a",
+        "forget_b",
     )
 )
 
@@ -169,6 +207,15 @@ SUPPRESS_ACTION = "not_a_conflict"
 # Merge-proposal verdict (Lane 3 / issue #169) — exported so :mod:`merge`
 # can branch on it cleanly.
 PROPOSE_MERGE_ACTION = "propose_merge"
+# Correct verdicts (#166 follow-up) — exported so :mod:`merge` and tests
+# can branch on / reference them without re-typing the literals. A correct
+# verdict mutates a wiki body (removes the wrong member's claim), so it
+# flows through the same escalation + auto-apply path as keep_a/keep_b.
+CORRECT_A_ACTION = "correct_a"
+CORRECT_B_ACTION = "correct_b"
+# Forget verdicts (#166 follow-up) — single-side clean delete, no history.
+FORGET_A_ACTION = "forget_a"
+FORGET_B_ACTION = "forget_b"
 
 
 @dataclass
@@ -183,6 +230,17 @@ class ResolutionProposal:
     # Free-form per-tier comparison strings the resolver leaned on; the
     # renderer joins them with " ; ".
     source_precedence_used: list[str] = field(default_factory=list)
+    # Disambiguation mode (#166 follow-up). When the resolver hits a
+    # FACT/identity conflict it CANNOT confidently resolve (and which is
+    # NOT two sequential dated snapshots — those stay ``not_a_conflict``),
+    # it returns the candidate values here instead of silently picking a
+    # precedence winner. ``tier4_escalate`` renders these as an enumerated
+    # question ("Which is correct: (a) X, (b) Y, (c) both, (d)
+    # neither/other?") instead of free-text. Empty list = no
+    # disambiguation; the trailing position keeps the dataclass
+    # backward-compatible (existing positional constructions are
+    # unaffected).
+    disambiguation_options: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -245,9 +303,20 @@ determines which action set applies.
     - "we pivoted from Heroku to Fly.io in 2026-04"
     - "deprecated the IPC bridge in favor of stdio"
     - architecture choices, strategy pivots, deprecations
-  Decisions need a historical trail. The OLD decision should be marked
-  inactive via `supersedes:`, not deleted — future readers may need to
-  know why the choice changed.
+  For a DECISION conflict you MUST ask: was the prior side WRONG, or was
+  it VALID-THEN-REPLACED?
+    * VALID-THEN-REPLACED (supersede): the old decision was correct at
+      the time and a later decision replaced it. History matters —
+      KEEP BOTH and mark the old one inactive via `supersedes:`, do NOT
+      delete it. Future readers may need to know why the choice changed.
+      Use keep_a / keep_b (the winner is the current decision; the loser
+      stays as superseded history).
+    * WRONG (correct): the old side was simply a mistake, or recorded
+      confusion that was never actually true — it is NOT
+      valid-then-replaced history worth preserving. The wrong claim
+      should be removed/fixed, NOT enshrined as "superseded." Use
+      correct_a / correct_b (the winner is the correct side; the other
+      member's claim is removed as erroneous).
 
   FACT — a timestamped snapshot of the world. Examples:
     - "develop tip is SHA abc123"
@@ -255,7 +324,11 @@ determines which action set applies.
     - "Acme is Series A (as of 2024-03)"
   Facts are inherently dated. Two differently-dated facts about the same
   thing are SEQUENTIAL SNAPSHOTS, not a conflict — treat as
-  `not_a_conflict`.
+  `not_a_conflict`. But a FACT/identity conflict that is NOT two
+  sequential dated snapshots (e.g. two undated, mutually-exclusive
+  claims about the same attribute) and that you CANNOT confidently
+  resolve by precedence should NOT silently pick a precedence winner —
+  return a DISAMBIGUATION question instead (see below).
 
 STEP 2 — APPLY THE CLASSIFICATION:
 
@@ -291,9 +364,26 @@ STEP 2 — APPLY THE CLASSIFICATION:
   confident proposals.
 
   keep_a / keep_b — return when the snippets ARE genuinely contradictory
-  (typically a DECISION with no `supersedes:` declared, or a prescriptive
-  preference where one violates the other). Apply the SOURCE-PRECEDENCE
-  TAXONOMY below to pick the winner.
+  AND the loser is VALID-THEN-REPLACED history worth preserving (typically
+  a DECISION superseded by a newer one, or a prescriptive preference where
+  one violates the other). The winner is the surviving side; the loser
+  stays as superseded history. Apply the SOURCE-PRECEDENCE TAXONOMY below
+  to pick the winner.
+
+  correct_a / correct_b — return for a DECISION conflict where the LOSING
+  side was simply WRONG (a mistake / recorded confusion), not
+  valid-then-replaced. The winner is the correct side; the other member's
+  claim is removed as erroneous (NOT kept as superseded history). Pick the
+  winner via the SOURCE-PRECEDENCE TAXONOMY. correct_a means a is correct
+  and b is removed; correct_b means b is correct and a is removed.
+
+  forget_a / forget_b — return when ONE side is transient /
+  no-longer-relevant / was confusion and should be deleted cleanly with
+  NO historical record. This differs from supersede (keep_*, which keeps
+  the old side as history) and from correct (which asserts the OTHER side
+  is the right answer to the same question). forget_a deletes a;
+  forget_b deletes b. Set recommended_winner to the SURVIVING side ("b"
+  for forget_a, "a" for forget_b).
 
   retain_both_with_context — fallback when classification is mixed or
   precedence cannot decide; both stay active and the human decides.
@@ -302,7 +392,20 @@ STEP 2 — APPLY THE CLASSIFICATION:
   the human-approval queue. Prefer `propose_merge` for preference pairs;
   reserve `merge` for cases where the merge is mechanical and uncontested.
 
-  deprecate_both — both sides are stale; neither should survive.
+  deprecate_both — BOTH sides are stale; neither should survive. (The
+  single-side analogue is forget_a / forget_b.)
+
+  DISAMBIGUATION — when a FACT/identity conflict is NOT two sequential
+  dated snapshots and you CANNOT confidently resolve it by precedence,
+  do NOT silently pick a winner. Return an action of
+  retain_both_with_context with recommended_winner "neither", and POPULATE
+  the `disambiguation_options` array with the candidate values (one entry
+  per side). The human is then asked an enumerated question rather than
+  shown a free-text precedence guess. Example: a morning note "I am
+  German" and an evening note "I am English" are mutually exclusive,
+  undated for the same attribute, and not resolvable by precedence — emit
+  `disambiguation_options: ["German", "English"]`, NOT "German superseded
+  by English."
 
 SOURCE-PRECEDENCE TAXONOMY (highest to lowest):
 
@@ -331,12 +434,19 @@ For most actions:
 {
   "recommended_winner": "a" | "b" | "merge" | "neither",
   "action":
-      "keep_a" | "keep_b" | "merge" | "deprecate_both"
+      "keep_a" | "keep_b" | "correct_a" | "correct_b"
+      | "forget_a" | "forget_b" | "merge" | "deprecate_both"
       | "retain_both_with_context" | "not_a_conflict",
   "rationale": "<one sentence: name the kind classification AND the rule applied>",
   "confidence": <float between 0 and 1>,
-  "source_precedence_used": ["a:<source-or-unsourced> > b:<source-or-unsourced>"]
+  "source_precedence_used": ["a:<source-or-unsourced> > b:<source-or-unsourced>"],
+  "disambiguation_options": ["<candidate A>", "<candidate B>"]
 }
+
+`disambiguation_options` is OPTIONAL — include it ONLY for the
+DISAMBIGUATION case (an unresolvable FACT/identity conflict, action
+retain_both_with_context, winner "neither"). Omit it for every other
+action.
 
 For action="propose_merge":
 {
@@ -1034,12 +1144,24 @@ def _parse_response(text: str) -> "ResolutionProposal | MergeProposal":
         log.warning("resolutions: resolver returned invalid winner: %r", winner)
         return _fallback("resolver-invalid-action")
 
+    # Disambiguation options (#166 follow-up). Optional trailing key —
+    # absent on every existing action; present only when the resolver
+    # chose to enumerate candidate values for a human to pick. Coerce to
+    # a list of non-empty strings; a non-list value is dropped silently
+    # (same tolerant discipline as source_precedence_used above).
+    disambig_raw = payload.get("disambiguation_options") or []
+    if isinstance(disambig_raw, list):
+        disambiguation = [str(o) for o in disambig_raw if str(o).strip()]
+    else:
+        disambiguation = []
+
     return ResolutionProposal(
         recommended_winner=winner,  # type: ignore[arg-type]
         action=action,  # type: ignore[arg-type]
         rationale=rationale,
         confidence=confidence,
         source_precedence_used=precedence,
+        disambiguation_options=disambiguation,
     )
 
 
@@ -1239,3 +1361,113 @@ def apply_auto_resolution(
         out.append(answer_block)
 
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Enactment lane (#166 follow-up): actually MUTATE state for forget/correct
+# ---------------------------------------------------------------------------
+#
+# Until now the auto-apply lane only RECORDED a verdict — `apply_auto_resolution`
+# flips the pending-question checkbox to `[x]` and stamps an `**Auto-resolved**:
+# true` marker, but no wiki/raw memory file is ever changed. For the single-side
+# mutating verdicts that means the wrong/transient claim survives in the corpus
+# and the detector re-fires next run. `enact_resolution` closes that gap: it
+# performs the side-effect the verdict promises.
+#
+# Scope (deliberately narrow — keep_*/deprecate_both are NOT enacted here; they
+# remain record-only and would need a supersede-marker mechanism that does not
+# yet exist):
+#
+#   * forget_a / forget_b — delete the transient member cleanly (no history).
+#   * correct_a / correct_b — the winner side is correct; the OTHER member's
+#     claim is wrong and is removed. A raw auto-memory member is a single
+#     atomic snippet/claim, so "remove the wrong claim" == delete that member
+#     file. The compiled wiki entry is regenerated from the surviving members
+#     on the next librarian `run`, so deleting the erroneous member removes the
+#     claim from the wiki without a divergent rewrite path.
+#
+# The labels `a` / `b` map to the resolver's flagged member order, i.e. the
+# order the detector reported in ``members_involved`` (the SAME order
+# :func:`_build_user_message` presents the snippets to the model). Callers MUST
+# pass ``member_paths`` in that order: ``member_paths[0]`` is side ``a``,
+# ``member_paths[1]`` is side ``b``.
+
+# Maps each enacting action to the index of the member to DELETE.
+# forget_a / correct_a both remove side a? NO: forget_a removes a (a is the
+# transient side); correct_a keeps a as correct and removes b (b is wrong).
+_ENACT_DELETE_INDEX: dict[str, int] = {
+    FORGET_A_ACTION: 0,  # forget a → delete a (the transient side)
+    FORGET_B_ACTION: 1,  # forget b → delete b
+    CORRECT_A_ACTION: 1,  # a is correct → delete b (the wrong claim)
+    CORRECT_B_ACTION: 0,  # b is correct → delete a (the wrong claim)
+}
+
+# Exported so callers / tests can ask "does this action mutate state?" without
+# re-deriving the set from the index map.
+ENACTING_ACTIONS: frozenset[str] = frozenset(_ENACT_DELETE_INDEX)
+
+
+def enact_resolution(
+    proposal: ResolutionProposal,
+    member_paths: list[Path] | list[str] | None,
+) -> Path | None:
+    """Enact the side-effect a single-side mutating verdict promises.
+
+    For ``forget_a`` / ``forget_b`` / ``correct_a`` / ``correct_b`` this
+    DELETES the target member file (see module section comment for which
+    side each action targets). For every other action it is a no-op.
+
+    Args:
+        proposal: The resolver verdict. Only :class:`ResolutionProposal`
+            instances with an enacting ``action`` do anything; a
+            :class:`MergeProposal`, a non-enacting action, or a fallback
+            proposal returns ``None``.
+        member_paths: The flagged member files in resolver ``a``/``b``
+            order — ``member_paths[0]`` is side ``a``, ``member_paths[1]``
+            is side ``b``. Strings are accepted and coerced to ``Path``.
+
+    Returns:
+        The :class:`Path` that was deleted, or ``None`` when nothing was
+        enacted (non-enacting action, missing/short member list, or the
+        target file did not exist / could not be removed).
+
+    Safety: a missing target file is tolerated (already gone == success
+    for a delete), and an :class:`OSError` on unlink is logged and
+    swallowed rather than raised — enactment is best-effort and must never
+    crash the merge pass.
+    """
+    action = getattr(proposal, "action", None)
+    if not isinstance(action, str):
+        return None
+    idx = _ENACT_DELETE_INDEX.get(action)
+    if idx is None:
+        return None
+    if not member_paths or len(member_paths) <= idx:
+        log.warning(
+            "resolutions: cannot enact %s — member_paths missing side index %d "
+            "(got %d path(s))",
+            action,
+            idx,
+            0 if not member_paths else len(member_paths),
+        )
+        return None
+    target = Path(member_paths[idx])
+    if not target.exists():
+        log.info(
+            "resolutions: enact %s — target %s already absent; nothing to delete",
+            action,
+            target,
+        )
+        return None
+    try:
+        target.unlink()
+    except OSError as exc:
+        log.warning(
+            "resolutions: enact %s — failed to delete %s (%s)",
+            action,
+            target,
+            exc,
+        )
+        return None
+    log.info("resolutions: enacted %s — deleted member %s", action, target)
+    return target

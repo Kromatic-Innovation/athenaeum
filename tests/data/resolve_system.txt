@@ -20,9 +20,20 @@ determines which action set applies.
     - "we pivoted from Heroku to Fly.io in 2026-04"
     - "deprecated the IPC bridge in favor of stdio"
     - architecture choices, strategy pivots, deprecations
-  Decisions need a historical trail. The OLD decision should be marked
-  inactive via `supersedes:`, not deleted — future readers may need to
-  know why the choice changed.
+  For a DECISION conflict you MUST ask: was the prior side WRONG, or was
+  it VALID-THEN-REPLACED?
+    * VALID-THEN-REPLACED (supersede): the old decision was correct at
+      the time and a later decision replaced it. History matters —
+      KEEP BOTH and mark the old one inactive via `supersedes:`, do NOT
+      delete it. Future readers may need to know why the choice changed.
+      Use keep_a / keep_b (the winner is the current decision; the loser
+      stays as superseded history).
+    * WRONG (correct): the old side was simply a mistake, or recorded
+      confusion that was never actually true — it is NOT
+      valid-then-replaced history worth preserving. The wrong claim
+      should be removed/fixed, NOT enshrined as "superseded." Use
+      correct_a / correct_b (the winner is the correct side; the other
+      member's claim is removed as erroneous).
 
   FACT — a timestamped snapshot of the world. Examples:
     - "develop tip is SHA abc123"
@@ -30,7 +41,11 @@ determines which action set applies.
     - "Acme is Series A (as of 2024-03)"
   Facts are inherently dated. Two differently-dated facts about the same
   thing are SEQUENTIAL SNAPSHOTS, not a conflict — treat as
-  `not_a_conflict`.
+  `not_a_conflict`. But a FACT/identity conflict that is NOT two
+  sequential dated snapshots (e.g. two undated, mutually-exclusive
+  claims about the same attribute) and that you CANNOT confidently
+  resolve by precedence should NOT silently pick a precedence winner —
+  return a DISAMBIGUATION question instead (see below).
 
 STEP 2 — APPLY THE CLASSIFICATION:
 
@@ -66,9 +81,26 @@ STEP 2 — APPLY THE CLASSIFICATION:
   confident proposals.
 
   keep_a / keep_b — return when the snippets ARE genuinely contradictory
-  (typically a DECISION with no `supersedes:` declared, or a prescriptive
-  preference where one violates the other). Apply the SOURCE-PRECEDENCE
-  TAXONOMY below to pick the winner.
+  AND the loser is VALID-THEN-REPLACED history worth preserving (typically
+  a DECISION superseded by a newer one, or a prescriptive preference where
+  one violates the other). The winner is the surviving side; the loser
+  stays as superseded history. Apply the SOURCE-PRECEDENCE TAXONOMY below
+  to pick the winner.
+
+  correct_a / correct_b — return for a DECISION conflict where the LOSING
+  side was simply WRONG (a mistake / recorded confusion), not
+  valid-then-replaced. The winner is the correct side; the other member's
+  claim is removed as erroneous (NOT kept as superseded history). Pick the
+  winner via the SOURCE-PRECEDENCE TAXONOMY. correct_a means a is correct
+  and b is removed; correct_b means b is correct and a is removed.
+
+  forget_a / forget_b — return when ONE side is transient /
+  no-longer-relevant / was confusion and should be deleted cleanly with
+  NO historical record. This differs from supersede (keep_*, which keeps
+  the old side as history) and from correct (which asserts the OTHER side
+  is the right answer to the same question). forget_a deletes a;
+  forget_b deletes b. Set recommended_winner to the SURVIVING side ("b"
+  for forget_a, "a" for forget_b).
 
   retain_both_with_context — fallback when classification is mixed or
   precedence cannot decide; both stay active and the human decides.
@@ -77,7 +109,20 @@ STEP 2 — APPLY THE CLASSIFICATION:
   the human-approval queue. Prefer `propose_merge` for preference pairs;
   reserve `merge` for cases where the merge is mechanical and uncontested.
 
-  deprecate_both — both sides are stale; neither should survive.
+  deprecate_both — BOTH sides are stale; neither should survive. (The
+  single-side analogue is forget_a / forget_b.)
+
+  DISAMBIGUATION — when a FACT/identity conflict is NOT two sequential
+  dated snapshots and you CANNOT confidently resolve it by precedence,
+  do NOT silently pick a winner. Return an action of
+  retain_both_with_context with recommended_winner "neither", and POPULATE
+  the `disambiguation_options` array with the candidate values (one entry
+  per side). The human is then asked an enumerated question rather than
+  shown a free-text precedence guess. Example: a morning note "I am
+  German" and an evening note "I am English" are mutually exclusive,
+  undated for the same attribute, and not resolvable by precedence — emit
+  `disambiguation_options: ["German", "English"]`, NOT "German superseded
+  by English."
 
 SOURCE-PRECEDENCE TAXONOMY (highest to lowest):
 
@@ -106,12 +151,19 @@ For most actions:
 {
   "recommended_winner": "a" | "b" | "merge" | "neither",
   "action":
-      "keep_a" | "keep_b" | "merge" | "deprecate_both"
+      "keep_a" | "keep_b" | "correct_a" | "correct_b"
+      | "forget_a" | "forget_b" | "merge" | "deprecate_both"
       | "retain_both_with_context" | "not_a_conflict",
   "rationale": "<one sentence: name the kind classification AND the rule applied>",
   "confidence": <float between 0 and 1>,
-  "source_precedence_used": ["a:<source-or-unsourced> > b:<source-or-unsourced>"]
+  "source_precedence_used": ["a:<source-or-unsourced> > b:<source-or-unsourced>"],
+  "disambiguation_options": ["<candidate A>", "<candidate B>"]
 }
+
+`disambiguation_options` is OPTIONAL — include it ONLY for the
+DISAMBIGUATION case (an unresolvable FACT/identity conflict, action
+retain_both_with_context, winner "neither"). Omit it for every other
+action.
 
 For action="propose_merge":
 {

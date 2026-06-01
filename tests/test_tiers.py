@@ -652,6 +652,79 @@ class TestTier3Merge:
             tier3_merge(action, "body", "ref", client)
 
 
+class TestTier3PrincipledEscalationIsAnswerable:
+    """Regression (#166): the tier-3 / `principled` ESCALATE producer must
+    emit an ANSWERABLE pending-question block — one carrying a `- [ ]`
+    checkbox that ``answers.parse_pending_questions`` parses as unanswered.
+
+    Historically a separate escalation path wrote ``**Conflict type**:
+    principled`` + ``**Description**:`` blocks WITHOUT the ``- [ ]`` line, so
+    the parser skipped them forever (a parser-side recovery now exists as
+    defense-in-depth — kept — but the PRODUCER must not rely on it). This
+    test pins the producer onto the single canonical renderer
+    (:func:`tier4_escalate`): the ``EscalationItem`` that ``tier3_merge``
+    builds on an ESCALATE verdict, when written via ``tier4_escalate``,
+    yields a checkbox-bearing, parseable block.
+    """
+
+    @pytest.mark.parametrize(
+        "raw_ref",
+        [
+            "drive/2026-06-01-note.md",
+            "claude-session/20260601T120000Z-aabb.md",
+            "briefings/2026-06-01.md",
+            "name-repairs/acme.md",
+            "retros/sprint-12.md",
+        ],
+    )
+    def test_principled_escalation_block_has_checkbox_and_parses(
+        self, raw_ref: str, tmp_path: Path
+    ) -> None:
+        from athenaeum.answers import parse_pending_questions
+
+        # The EscalationItem exactly as tier3_merge's ESCALATE handler builds
+        # it (conflict_type="principled"), for raw files from each of the
+        # source scopes that previously produced checkbox-less blocks.
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Acme pivoted away from fintech.",
+        )
+        response = (
+            "ESCALATE: Existing page says fintech, new observation says "
+            "pivot away. Strategic direction conflict.\n"
+            "---\n"
+            "# Acme Corp\n\nFintech startup (disputed)."
+        )
+        client = _mock_client(response)
+        _body, esc = tier3_merge(action, "# Acme Corp\n\nFintech.", raw_ref, client)
+        assert esc is not None
+        assert esc.conflict_type == "principled"
+
+        # Route the producer's EscalationItem through the single canonical
+        # renderer — no config (legacy path), so no auto-apply interferes.
+        pending = tmp_path / "_pending_questions.md"
+        tier4_escalate([esc], pending)
+
+        text = pending.read_text(encoding="utf-8")
+        # The block carries the answerable checkbox AND the principled keys.
+        assert "- [ ]" in text
+        assert "**Conflict type**: principled" in text
+
+        # And the canonical parser sees exactly one unanswered question — i.e.
+        # the block is genuinely answerable, not silently skipped.
+        pqs = parse_pending_questions(pending)
+        assert len(pqs) == 1
+        assert not pqs[0].answered
+        assert pqs[0].conflict_type == "principled"
+        assert pqs[0].source == raw_ref
+        assert pqs[0].question  # a non-empty question line was emitted
+
+
 # ---------------------------------------------------------------------------
 # Tier 3 — Write (integration with mocked LLM)
 # ---------------------------------------------------------------------------
