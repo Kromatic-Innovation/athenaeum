@@ -106,11 +106,29 @@ same, but the cost of an incorrect auto-apply is not symmetric:
   Default threshold: **0.75**.
 - `keep_a` / `keep_b` — mutates wiki bodies. A wrong auto-apply requires
   a human to chase down which memory was overwritten. Default
-  threshold: **0.90**.
+  threshold: **0.90**. Use for a DECISION that was *valid-then-replaced*:
+  the loser stays as superseded history.
+- `correct_a` / `correct_b` — mutates wiki bodies. For a DECISION conflict
+  where the losing side was simply **wrong** (a mistake / confusion), not
+  valid-then-replaced — the wrong claim is removed rather than enshrined
+  as superseded. Default threshold: **0.90** (same mutating bar as
+  `keep_*`).
+- `forget_a` / `forget_b` — mutates wiki bodies. One side is transient /
+  no-longer-relevant / was confusion and should be deleted cleanly with
+  **no historical record**. Distinct from supersede (keeps history) and
+  from correct (which asserts the other side is the right answer).
+  `deprecate_both` is the both-sides analogue. Default threshold: **0.90**.
 - `propose_merge` — **never auto-applies regardless of confidence**. The
   proposal carries an LLM-drafted merged body that must go through human
   review before it can land in a wiki page. This is a hard rule, not a
   threshold knob.
+- `retain_both_with_context` — does not auto-apply (escalates for the
+  human). When the resolver hits a FACT/identity conflict it cannot
+  confidently resolve and that is *not* two sequential dated snapshots, it
+  attaches `disambiguation_options` to the proposal; the pending-question
+  block then renders an enumerated question
+  (`Which is correct: (a) … (b) … (c) both, (d) neither/other?`) instead of
+  a free-text precedence guess.
 
 Configure per action via the new optional map:
 
