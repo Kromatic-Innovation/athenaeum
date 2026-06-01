@@ -520,6 +520,46 @@ def _question_from_description(
     return f"Resolve {conflict_type} conflict for {entity_name}"
 
 
+# Letters used to label disambiguation choices. The two candidate values
+# take (a)/(b); the trailing "both" / "neither/other" choices are always
+# appended so the human is never forced into a binary pick. Capped at the
+# alphabet length — disambiguation only ever enumerates two candidate
+# values plus the two canned tails, so 26 is never approached in practice.
+_DISAMBIG_LETTERS = "abcdefghijklmnopqrstuvwxyz"
+
+
+def _disambiguation_question(options: list[str]) -> str | None:
+    """Render an enumerated disambiguation question line (#166 follow-up).
+
+    When the resolver returns a FACT/identity conflict it could not
+    confidently resolve, it populates ``ResolutionProposal.disambiguation_options``
+    with the candidate values instead of silently picking a precedence
+    winner. This renders them as an explicit one-line question:
+
+        Which is correct: (a) <A>, (b) <B>, (c) both, (d) neither/other?
+
+    The two canned tails ("both", "neither/other") are always appended so
+    the answer is never a forced binary. Returns ``None`` when fewer than
+    two candidate values are supplied — a single-value (or empty) list is
+    not a disambiguation and the caller falls back to the free-text
+    question derived from the description.
+
+    The line is single-line (newlines in candidate values are flattened to
+    spaces) so it fits the ``- [ ] <question>`` checkbox row contract.
+    """
+    cleaned = [" ".join(str(o).split()) for o in options if str(o).strip()]
+    if len(cleaned) < 2:
+        return None
+    parts: list[str] = []
+    for idx, value in enumerate(cleaned):
+        parts.append(f"({_DISAMBIG_LETTERS[idx]}) {value}")
+    both_letter = _DISAMBIG_LETTERS[len(cleaned)]
+    neither_letter = _DISAMBIG_LETTERS[len(cleaned) + 1]
+    parts.append(f"({both_letter}) both")
+    parts.append(f"({neither_letter}) neither/other")
+    return "Which is correct: " + ", ".join(parts) + "?"
+
+
 def _pair_key_from_description(description: str) -> tuple[str, ...] | None:
     """Compute the dedup key for an escalation description (issue #157).
 
@@ -754,9 +794,19 @@ def tier4_escalate(
             continue
 
         # Path C: brand new — render and append.
-        question = _question_from_description(
-            item.description, item.entity_name, item.conflict_type
-        )
+        # Disambiguation mode (#166 follow-up): when the resolver attached
+        # candidate values, render an enumerated question instead of the
+        # free-text first-line-of-description question. Falls back to the
+        # free-text question when no (or too few) options are present.
+        proposal_for_q = getattr(item, "proposal", None)
+        disambig_opts = getattr(proposal_for_q, "disambiguation_options", None)
+        question = None
+        if isinstance(disambig_opts, list) and disambig_opts:
+            question = _disambiguation_question(disambig_opts)
+        if question is None:
+            question = _question_from_description(
+                item.description, item.entity_name, item.conflict_type
+            )
         escaped_entity = item.entity_name.replace("\\", "\\\\").replace('"', '\\"')
         block = (
             f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'

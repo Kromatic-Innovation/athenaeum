@@ -894,6 +894,16 @@ def merge_clusters_to_wiki(
                 entry.cluster_id,
             )
             return
+        # Mutating single-side verdicts (#166 follow-up): correct_a /
+        # correct_b (the losing side was WRONG — remove its claim) and
+        # forget_a / forget_b (one side is transient — delete it cleanly).
+        # These are genuine contradictions, NOT suppressions and NOT
+        # merge proposals, so they intentionally fall through to the
+        # normal pending-question escalation below. The auto-apply gate in
+        # tier4_escalate (per-action threshold 0.90, same as keep_a/keep_b)
+        # decides whether the resolution is applied in-place or left for
+        # the human — no special routing is needed here. Noted explicitly
+        # so a future reader greps the contract and does not add a branch.
         # Issue #146: run-scoped dedup by the flagged source-file set. The
         # check sits AFTER the suppress-verdict return on purpose: a
         # suppressed cluster never reaches here, so it does not consume a
