@@ -690,12 +690,34 @@ def tier4_escalate(
     # Late-import to avoid a hard module-load cycle with resolutions.py
     # (resolutions imports AutoMemoryFile from models, models is imported
     # here at module load via the top-of-file import block).
-    from athenaeum.resolutions import _get_model as _resolver_model
     from athenaeum.resolutions import (
+        ENACTING_ACTIONS,
         apply_auto_resolution,
+        enact_resolution,
         resolve_auto_apply,
         resolve_auto_apply_threshold_for,
     )
+    from athenaeum.resolutions import _get_model as _resolver_model
+
+    # Enactment lane (#166 follow-up): when a high-confidence forget_*/
+    # correct_* verdict auto-applies, the recorded `[x]` is not enough —
+    # the target member file must actually be deleted. We enact at most
+    # once per source-pair key per call, guarded so an idempotent
+    # re-apply (block already `[x]`) never double-enacts.
+    enacted_keys: set[Any] = set()
+
+    def _maybe_enact(prop: Any, members: list[str] | None, key: Any) -> None:
+        action = getattr(prop, "action", None)
+        if action not in ENACTING_ACTIONS:
+            return
+        # Use the source-pair key (or a sentinel for keyless items) as the
+        # once-only guard. Keyless enacting verdicts still enact, but each
+        # only once per item via the freshly-built sentinel.
+        guard = key if key is not None else object()
+        if guard in enacted_keys:
+            return
+        enacted_keys.add(guard)
+        enact_resolution(prop, members)
 
     auto_apply_enabled = resolve_auto_apply(config) if config is not None else False
     resolver_model_id = _resolver_model(config) if config is not None else None
@@ -765,11 +787,21 @@ def tier4_escalate(
     # (regression fix: previously a low-conf primary item could swallow a
     # later high-conf collapsing item's proposal and leave the block [ ]).
     best_proposal: dict[tuple[str, ...], Any] = {}
+    # Per-key flagged member paths (resolver a/b order) for the enactment
+    # lane. Tracked alongside best_proposal so the batched/cross-batch
+    # auto-apply sites can delete the right target even when the
+    # highest-confidence proposal came from a collapsing sibling item.
+    # Items sharing a key share the same source pair, so any one item's
+    # members list is authoritative; first non-empty wins.
+    best_members: dict[tuple[str, ...], list[str]] = {}
 
     def _consider_proposal(k: tuple[str, ...] | None, item_obj: Any) -> None:
         if k is None:
             return
         prop = getattr(item_obj, "proposal", None)
+        members = getattr(item_obj, "members", None)
+        if members and k not in best_members:
+            best_members[k] = list(members)
         if prop is None:
             return
         current = best_proposal.get(k)
@@ -827,6 +859,7 @@ def tier4_escalate(
                     proposal.confidence,
                     gate_threshold,
                 )
+                _maybe_enact(proposal, getattr(item, "members", None), key)
         if key is not None:
             batch_index[key] = len(sections)
         sections.append(block)
@@ -854,6 +887,7 @@ def tier4_escalate(
                     best.confidence,
                     gate_threshold,
                 )
+                _maybe_enact(best, best_members.get(key), key)
             sections[slot] = updated
 
     # Apply file-merges to the existing pending text (if any).
@@ -891,6 +925,9 @@ def tier4_escalate(
                             best.action,
                             best.confidence,
                             gate_threshold,
+                        )
+                        _maybe_enact(
+                            best, best_members.get(key_for_block), key_for_block
                         )
                     updated_block = rewritten
             # Replace verbatim — raw_block came from parse, so it lives

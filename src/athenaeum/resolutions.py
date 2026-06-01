@@ -1355,3 +1355,113 @@ def apply_auto_resolution(
         out.append(answer_block)
 
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Enactment lane (#166 follow-up): actually MUTATE state for forget/correct
+# ---------------------------------------------------------------------------
+#
+# Until now the auto-apply lane only RECORDED a verdict — `apply_auto_resolution`
+# flips the pending-question checkbox to `[x]` and stamps an `**Auto-resolved**:
+# true` marker, but no wiki/raw memory file is ever changed. For the single-side
+# mutating verdicts that means the wrong/transient claim survives in the corpus
+# and the detector re-fires next run. `enact_resolution` closes that gap: it
+# performs the side-effect the verdict promises.
+#
+# Scope (deliberately narrow — keep_*/deprecate_both are NOT enacted here; they
+# remain record-only and would need a supersede-marker mechanism that does not
+# yet exist):
+#
+#   * forget_a / forget_b — delete the transient member cleanly (no history).
+#   * correct_a / correct_b — the winner side is correct; the OTHER member's
+#     claim is wrong and is removed. A raw auto-memory member is a single
+#     atomic snippet/claim, so "remove the wrong claim" == delete that member
+#     file. The compiled wiki entry is regenerated from the surviving members
+#     on the next librarian `run`, so deleting the erroneous member removes the
+#     claim from the wiki without a divergent rewrite path.
+#
+# The labels `a` / `b` map to the resolver's flagged member order, i.e. the
+# order the detector reported in ``members_involved`` (the SAME order
+# :func:`_build_user_message` presents the snippets to the model). Callers MUST
+# pass ``member_paths`` in that order: ``member_paths[0]`` is side ``a``,
+# ``member_paths[1]`` is side ``b``.
+
+# Maps each enacting action to the index of the member to DELETE.
+# forget_a / correct_a both remove side a? NO: forget_a removes a (a is the
+# transient side); correct_a keeps a as correct and removes b (b is wrong).
+_ENACT_DELETE_INDEX: dict[str, int] = {
+    FORGET_A_ACTION: 0,  # forget a → delete a (the transient side)
+    FORGET_B_ACTION: 1,  # forget b → delete b
+    CORRECT_A_ACTION: 1,  # a is correct → delete b (the wrong claim)
+    CORRECT_B_ACTION: 0,  # b is correct → delete a (the wrong claim)
+}
+
+# Exported so callers / tests can ask "does this action mutate state?" without
+# re-deriving the set from the index map.
+ENACTING_ACTIONS: frozenset[str] = frozenset(_ENACT_DELETE_INDEX)
+
+
+def enact_resolution(
+    proposal: ResolutionProposal,
+    member_paths: list[Path] | list[str] | None,
+) -> Path | None:
+    """Enact the side-effect a single-side mutating verdict promises.
+
+    For ``forget_a`` / ``forget_b`` / ``correct_a`` / ``correct_b`` this
+    DELETES the target member file (see module section comment for which
+    side each action targets). For every other action it is a no-op.
+
+    Args:
+        proposal: The resolver verdict. Only :class:`ResolutionProposal`
+            instances with an enacting ``action`` do anything; a
+            :class:`MergeProposal`, a non-enacting action, or a fallback
+            proposal returns ``None``.
+        member_paths: The flagged member files in resolver ``a``/``b``
+            order — ``member_paths[0]`` is side ``a``, ``member_paths[1]``
+            is side ``b``. Strings are accepted and coerced to ``Path``.
+
+    Returns:
+        The :class:`Path` that was deleted, or ``None`` when nothing was
+        enacted (non-enacting action, missing/short member list, or the
+        target file did not exist / could not be removed).
+
+    Safety: a missing target file is tolerated (already gone == success
+    for a delete), and an :class:`OSError` on unlink is logged and
+    swallowed rather than raised — enactment is best-effort and must never
+    crash the merge pass.
+    """
+    action = getattr(proposal, "action", None)
+    if not isinstance(action, str):
+        return None
+    idx = _ENACT_DELETE_INDEX.get(action)
+    if idx is None:
+        return None
+    if not member_paths or len(member_paths) <= idx:
+        log.warning(
+            "resolutions: cannot enact %s — member_paths missing side index %d "
+            "(got %d path(s))",
+            action,
+            idx,
+            0 if not member_paths else len(member_paths),
+        )
+        return None
+    target = Path(member_paths[idx])
+    if not target.exists():
+        log.info(
+            "resolutions: enact %s — target %s already absent; nothing to delete",
+            action,
+            target,
+        )
+        return None
+    try:
+        target.unlink()
+    except OSError as exc:
+        log.warning(
+            "resolutions: enact %s — failed to delete %s (%s)",
+            action,
+            target,
+            exc,
+        )
+        return None
+    log.info("resolutions: enacted %s — deleted member %s", action, target)
+    return target
