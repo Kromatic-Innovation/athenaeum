@@ -493,6 +493,149 @@ def test_resolved_case_returns_not_a_conflict(
     ), f"{case.label}: confidence below contract floor ({proposal.confidence})"
 
 
+# Canonical correct/forget cases (#166 follow-up). These reuse the
+# generic file-writer + detector-result helpers; only the stubbed JSON
+# payload changes, so they pin the parser routing for each new action.
+_CORRECT_CASE = ResolvedCase(
+    label="heroku-fly-decision-correction",
+    files=[
+        (
+            "project_hosting_wrong.md",
+            "We host on Heroku.",
+            None,
+        ),
+        (
+            "project_hosting_right.md",
+            "We never used Heroku; the app has always been on Fly.io.",
+            None,
+        ),
+    ],
+    passages=(
+        "We host on Heroku.",
+        "We never used Heroku; always Fly.io.",
+    ),
+    rationale="DECISION conflict where a is simply wrong, not superseded",
+    expected_action="correct_b",
+)
+
+_FORGET_CASE = ResolvedCase(
+    label="transient-scratch-note-forget",
+    files=[
+        (
+            "project_scratch.md",
+            "TODO: try the experimental IPC bridge tomorrow.",
+            None,
+        ),
+        (
+            "project_ipc_decision.md",
+            "We deprecated the IPC bridge in favor of stdio.",
+            None,
+        ),
+    ],
+    passages=(
+        "TODO: try the experimental IPC bridge tomorrow.",
+        "We deprecated the IPC bridge in favor of stdio.",
+    ),
+    rationale="a is a transient scratch note, delete cleanly; b is the decision",
+    expected_action="forget_a",
+)
+
+
+def _simple_action_payload(action: str, winner: str, confidence: float = 0.93) -> str:
+    import json
+
+    return json.dumps(
+        {
+            "recommended_winner": winner,
+            "action": action,
+            "rationale": f"test-{action}",
+            "confidence": confidence,
+            "source_precedence_used": ["a:unsourced > b:unsourced"],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "case,winner",
+    [(_CORRECT_CASE, "b"), (_FORGET_CASE, "b")],
+    ids=[_CORRECT_CASE.label, _FORGET_CASE.label],
+)
+def test_correct_forget_routes_to_resolution_proposal(
+    case: ResolvedCase, winner: str, tmp_path: Path
+) -> None:
+    """correct_*/forget_* JSON routes to ResolutionProposal with the action.
+
+    Like the not_a_conflict cases, this pins the parser side only — the
+    stubbed client returns the literal JSON a correctly-prompted resolver
+    would emit. correct/forget are mutating verdicts, so they must arrive
+    as a :class:`ResolutionProposal` (NOT a MergeProposal).
+    """
+    ams = _write_case_files(case, tmp_path)
+    detector = _detector_result(case, ams)
+    client = _fake_client(_simple_action_payload(case.expected_action, winner))
+
+    proposal = propose_resolution(detector, ams, client)
+
+    assert isinstance(proposal, ResolutionProposal)
+    assert proposal.action == case.expected_action
+    assert proposal.recommended_winner == winner
+    # No disambiguation options on a confident mutating verdict.
+    assert proposal.disambiguation_options == []
+
+
+def test_disambiguation_options_round_trip(tmp_path: Path) -> None:
+    """A retain_both_with_context verdict can carry disambiguation_options.
+
+    The canonical example: morning "I am German", evening "I am English".
+    The resolver returns the candidate values instead of picking a
+    precedence winner; the parser preserves them on the proposal.
+    """
+    case = ResolvedCase(
+        label="german-vs-english-identity",
+        files=[
+            ("note_morning.md", "I am German.", None),
+            ("note_evening.md", "I am English.", None),
+        ],
+        passages=("I am German.", "I am English."),
+        rationale="unresolvable identity FACT conflict; enumerate candidates",
+        expected_action="retain_both_with_context",
+    )
+    ams = _write_case_files(case, tmp_path)
+    detector = _detector_result(case, ams)
+    import json
+
+    payload = json.dumps(
+        {
+            "recommended_winner": "neither",
+            "action": "retain_both_with_context",
+            "rationale": case.rationale,
+            "confidence": 0.4,
+            "source_precedence_used": [],
+            "disambiguation_options": ["German", "English"],
+        }
+    )
+    client = _fake_client(payload)
+
+    proposal = propose_resolution(detector, ams, client)
+
+    assert isinstance(proposal, ResolutionProposal)
+    assert proposal.action == "retain_both_with_context"
+    assert proposal.disambiguation_options == ["German", "English"]
+
+
+def test_disambiguation_options_absent_defaults_empty(tmp_path: Path) -> None:
+    """Existing payloads with no disambiguation_options key stay backward-compatible."""
+    case = NOT_A_CONFLICT_CASES[0]
+    ams = _write_case_files(case, tmp_path)
+    detector = _detector_result(case, ams)
+    client = _fake_client(_not_a_conflict_payload(case))
+
+    proposal = propose_resolution(detector, ams, client)
+
+    assert isinstance(proposal, ResolutionProposal)
+    assert proposal.disambiguation_options == []
+
+
 def test_sublime_numbers_yields_propose_merge(tmp_path: Path) -> None:
     """``_parse_response`` routes stubbed propose_merge JSON to MergeProposal.
 
