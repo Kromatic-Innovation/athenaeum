@@ -104,10 +104,17 @@ same, but the cost of an incorrect auto-apply is not symmetric:
 - `not_a_conflict` — false-suppress is cheap. If the resolver is wrong,
   the detector re-fires the next run and the conflict re-enters the queue.
   Default threshold: **0.75**.
-- `keep_a` / `keep_b` — mutates wiki bodies. A wrong auto-apply requires
-  a human to chase down which memory was overwritten. Default
-  threshold: **0.90**. Use for a DECISION that was *valid-then-replaced*:
-  the loser stays as superseded history.
+- `keep_a` / `keep_b` — **enacts** a non-destructive mark (see "Enactment"
+  below). Use for a DECISION that was *valid-then-replaced*: the loser is
+  marked `superseded_by: <winner name>` and stays as auditable history, but
+  drops out of the live wiki + recall. Default threshold: **0.90** — below
+  the 0.95 destructive-delete bar because a reversible mark is cheaper to be
+  wrong about than an irreversible delete.
+- `deprecate_both` — **enacts** a non-destructive mark (see "Enactment"
+  below). BOTH members are stale; each is marked `deprecated: true` so both
+  drop out of the live wiki + recall while remaining on disk for audit.
+  Default threshold: **0.90** (same record-aligned bar as `keep_*`, below
+  the 0.95 destructive bar).
 - `correct_a` / `correct_b` — **enacts** a deletion (see "Enactment"
   below). For a DECISION conflict where the losing side was simply **wrong**
   (a mistake / confusion), not valid-then-replaced — the wrong member is
@@ -181,13 +188,26 @@ Out-of-range values (`< 0.0` or `> 1.0`) and non-numeric entries raise
 ## Enactment: recording vs. mutating state
 
 Marking a pending-question block `[x]` only **records** a verdict — by
-itself it changes no memory. For the single-side *mutating* verdicts that
-is not enough: the wrong or transient claim must actually leave the corpus,
-or the cheap detector re-fires it on the next run. The enactment lane closes
-that gap. When a `forget_*` or `correct_*` proposal auto-applies (confidence
-`>=` its per-action threshold, default 0.95 — a higher bar than the
-record-only `keep_*` actions precisely because this deletes a member), the
-librarian also deletes the target raw auto-memory member file:
+itself it changes no memory. For an *enacting* verdict that
+is not enough: the wrong, transient, or superseded claim must actually leave
+the live corpus, or the cheap detector re-fires it on the next run. The
+enactment lane closes that gap in two flavors.
+
+**Destructive (delete)** — `forget_*` / `correct_*` at the **0.95** bar:
+when the proposal auto-applies, the librarian deletes the target raw
+auto-memory member file outright (no history).
+
+**Non-destructive (mark)** — `keep_*` / `deprecate_both` at the **0.90** bar
+(issue #191): the librarian *marks* the member's frontmatter instead of
+deleting it. `keep_a` / `keep_b` set `superseded_by: <winner name>` on the
+**losing** member (a DECISION's loser was valid-then-replaced, not wrong —
+history matters); `deprecate_both` sets `deprecated: true` on **both**
+members. A marked member is *inactive*: it stays on disk for audit but the
+C3 compile and recall both skip it (see
+`athenaeum.models.is_inactive_memory`), so its claim drops out of the live
+wiki and never surfaces in `recall`. The 0.90 bar is deliberately below the
+0.95 destructive bar — a reversible mark is cheaper to be wrong about than an
+irreversible delete, and it aligns with the existing 0.90 record threshold.
 
 | Action | Recorded | Enacted (state change) |
 |---|---|---|
@@ -195,25 +215,23 @@ librarian also deletes the target raw auto-memory member file:
 | `forget_b` | block → `[x]` | deletes member **b** |
 | `correct_a` | block → `[x]` | a is correct → deletes member **b** (the wrong claim) |
 | `correct_b` | block → `[x]` | b is correct → deletes member **a** (the wrong claim) |
-| `keep_a` / `keep_b` | block → `[x]` | **record-only** — both members survive (loser kept as superseded history) |
-| `deprecate_both` | block → `[x]` | **record-only** |
+| `keep_a` | block → `[x]` | marks loser **b** `superseded_by: <a name>` (b inactive; a survives) |
+| `keep_b` | block → `[x]` | marks loser **a** `superseded_by: <b name>` (a inactive; b survives) |
+| `deprecate_both` | block → `[x]` | marks **both** members `deprecated: true` (both inactive) |
 | `not_a_conflict` | block → `[x]` | nothing to enact (escalation suppressed upstream) |
 | `propose_merge` | never auto-applies | n/a |
 
-A raw auto-memory member is a single atomic snippet, so "remove the wrong
-claim" is implemented as deleting that member file. The compiled
-`wiki/auto-*.md` entry is regenerated from the surviving members on the next
-`athenaeum run`, so the claim disappears from the wiki without a separate
-body-rewrite path.
+A raw auto-memory member is a single atomic snippet, so for the destructive
+actions "remove the wrong claim" is implemented as deleting that member file.
+For the marking actions the file is preserved and its frontmatter is amended.
+Either way the compiled `wiki/auto-*.md` entry is regenerated from the
+surviving **active** members on the next `athenaeum run`, so the claim
+disappears from the wiki without a separate body-rewrite path.
 
 Enactment is best-effort and never crashes the merge pass: a member file
-that is already gone is treated as success, and an unlink failure is logged
-and swallowed. The labels `a` / `b` map to the resolver's flagged member
-order (the order shown in the block's `Members involved:` line).
-
-> Note: `keep_*` and `deprecate_both` remain **record-only** today — there
-> is no supersede-marker mechanism wired up to enact them, so the loser
-> still survives in the corpus. Enacting those is tracked separately.
+that is already gone is treated as success, and an unlink/write failure is
+logged and swallowed. The labels `a` / `b` map to the resolver's flagged
+member order (the order shown in the block's `Members involved:` line).
 
 ## Reversing an auto-resolution
 

@@ -60,7 +60,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from athenaeum.contradictions import ContradictionResult
-from athenaeum.models import AutoMemoryFile, parse_frontmatter, slugify
+from athenaeum.models import (
+    AutoMemoryFile,
+    parse_frontmatter,
+    render_frontmatter,
+    slugify,
+)
 
 if TYPE_CHECKING:
     import anthropic
@@ -104,6 +109,12 @@ DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION: dict[str, float] = {
     "not_a_conflict": 0.75,
     "keep_a": 0.90,
     "keep_b": 0.90,
+    # Issue #191: non-destructive MARKING verdict. deprecate_both marks BOTH
+    # members `deprecated: true` (no file is deleted). Aligned with the 0.90
+    # record threshold and deliberately BELOW the 0.95 destructive-delete bar
+    # used by correct_*/forget_* — a reversible mark is cheaper to be wrong
+    # about than an irreversible delete.
+    "deprecate_both": 0.90,
     # Issue #166 follow-up (correct/forget modes). These are the ENACTING
     # actions: on auto-apply the librarian DELETES a raw memory member
     # (`correct_*` removes the wrong member's claim, `forget_*` deletes a
@@ -216,6 +227,13 @@ CORRECT_B_ACTION = "correct_b"
 # Forget verdicts (#166 follow-up) — single-side clean delete, no history.
 FORGET_A_ACTION = "forget_a"
 FORGET_B_ACTION = "forget_b"
+# Marking verdicts (#191) — non-destructive. keep_a/keep_b mark the LOSING
+# member superseded_by the winner (history preserved); deprecate_both marks
+# BOTH members deprecated/stale. Exported so :mod:`merge` and tests can
+# reference them without re-typing the literals.
+KEEP_A_ACTION = "keep_a"
+KEEP_B_ACTION = "keep_b"
+DEPRECATE_BOTH_ACTION = "deprecate_both"
 
 
 @dataclass
@@ -1374,10 +1392,9 @@ def apply_auto_resolution(
 # and the detector re-fires next run. `enact_resolution` closes that gap: it
 # performs the side-effect the verdict promises.
 #
-# Scope (deliberately narrow — keep_*/deprecate_both are NOT enacted here; they
-# remain record-only and would need a supersede-marker mechanism that does not
-# yet exist):
+# Two flavors of enactment:
 #
+# DESTRUCTIVE (delete the member file — #166 follow-up, 0.95 bar):
 #   * forget_a / forget_b — delete the transient member cleanly (no history).
 #   * correct_a / correct_b — the winner side is correct; the OTHER member's
 #     claim is wrong and is removed. A raw auto-memory member is a single
@@ -1385,6 +1402,19 @@ def apply_auto_resolution(
 #     file. The compiled wiki entry is regenerated from the surviving members
 #     on the next librarian `run`, so deleting the erroneous member removes the
 #     claim from the wiki without a divergent rewrite path.
+#
+# NON-DESTRUCTIVE MARKING (issue #191, 0.90 bar — no file is deleted):
+#   * keep_a / keep_b — for a DECISION whose loser was VALID-THEN-REPLACED,
+#     mark the LOSING member `superseded_by: <winner name>`. History is
+#     preserved (the loser was valid, just replaced) and stays auditable on
+#     disk, but the marker makes it inactive: the C3 compile + recall skip
+#     inactive members (see :func:`athenaeum.models.is_inactive_memory`), so
+#     the superseded claim drops out of the live wiki.
+#   * deprecate_both — mark BOTH members `deprecated: true` (both stale). Same
+#     inactive-skip mechanism; nothing is deleted.
+# The marking actions reuse this same enactment hook rather than a divergent
+# path: :func:`enact_resolution` branches on action type, and
+# :data:`ENACTING_ACTIONS` is the union of the delete + mark action sets.
 #
 # The labels `a` / `b` map to the resolver's flagged member order, i.e. the
 # order the detector reported in ``members_involved`` (the SAME order
@@ -1402,20 +1432,95 @@ _ENACT_DELETE_INDEX: dict[str, int] = {
     CORRECT_B_ACTION: 0,  # b is correct → delete a (the wrong claim)
 }
 
+# Issue #191: non-destructive MARKING verdicts. keep_a/keep_b mark the
+# LOSING member as superseded_by the winner (history preserved — a
+# DECISION's loser was valid-then-replaced, NOT wrong). deprecate_both
+# marks BOTH members deprecated/stale. Unlike the delete actions these
+# never remove a file; recall + the C3 compile skip inactive members.
+# (winner_idx, loser_idx) for keep_*; deprecate_both handled separately.
+_ENACT_KEEP_WINNER_LOSER: dict[str, tuple[int, int]] = {
+    KEEP_A_ACTION: (0, 1),  # a wins, b is superseded
+    KEEP_B_ACTION: (1, 0),  # b wins, a is superseded
+}
+_ENACT_MARK_ACTIONS: frozenset[str] = frozenset(
+    set(_ENACT_KEEP_WINNER_LOSER) | {DEPRECATE_BOTH_ACTION}
+)
+
 # Exported so callers / tests can ask "does this action mutate state?" without
-# re-deriving the set from the index map.
-ENACTING_ACTIONS: frozenset[str] = frozenset(_ENACT_DELETE_INDEX)
+# re-deriving the set. Union of the destructive delete actions (#166) and the
+# non-destructive marking actions (#191).
+ENACTING_ACTIONS: frozenset[str] = frozenset(_ENACT_DELETE_INDEX) | _ENACT_MARK_ACTIONS
+
+
+def _mark_member_frontmatter(path: Path, key: str, value: Any) -> bool:
+    """Set ``key: value`` in a member file's YAML frontmatter, in place.
+
+    Reads the file, parses frontmatter via :func:`parse_frontmatter`,
+    sets ``meta[key] = value``, and rewrites ``render_frontmatter(meta) +
+    body``. If the file has no frontmatter, a fresh block is created.
+    Idempotent for a given (key, value). Best-effort: a missing/unreadable
+    file or write error is logged and returns False — enactment must never
+    crash the merge pass. Returns True when the file was (re)written.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning(
+            "resolutions: cannot mark %s=%r on %s — unreadable (%s)",
+            key,
+            value,
+            path,
+            exc,
+        )
+        return False
+    meta, body = parse_frontmatter(text)
+    meta = dict(meta) if meta else {}
+    meta[key] = value
+    rendered = render_frontmatter(meta) + body
+    try:
+        path.write_text(rendered, encoding="utf-8")
+    except OSError as exc:
+        log.warning(
+            "resolutions: cannot mark %s=%r on %s — write failed (%s)",
+            key,
+            value,
+            path,
+            exc,
+        )
+        return False
+    return True
+
+
+def _read_member_name(path: Path) -> str:
+    """Return a member file's frontmatter ``name``, falling back to its stem."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return path.stem
+    meta, _ = parse_frontmatter(text)
+    name = meta.get("name") if isinstance(meta, dict) else None
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return path.stem
 
 
 def enact_resolution(
     proposal: ResolutionProposal,
     member_paths: list[Path] | list[str] | None,
 ) -> Path | None:
-    """Enact the side-effect a single-side mutating verdict promises.
+    """Enact the side-effect an enacting verdict promises.
 
-    For ``forget_a`` / ``forget_b`` / ``correct_a`` / ``correct_b`` this
-    DELETES the target member file (see module section comment for which
-    side each action targets). For every other action it is a no-op.
+    Two flavors (see the module section comment above for the full
+    contract):
+
+    * DESTRUCTIVE delete — ``forget_a`` / ``forget_b`` / ``correct_a`` /
+      ``correct_b`` DELETE the target member file (#166). Returns the
+      deleted :class:`Path`.
+    * NON-DESTRUCTIVE mark (#191) — ``keep_a`` / ``keep_b`` set
+      ``superseded_by: <winner name>`` on the LOSING member (history
+      preserved, file kept). ``deprecate_both`` sets ``deprecated: true``
+      on BOTH members. No file is deleted; the marker makes the member
+      inactive so recall + the C3 compile skip it.
 
     Args:
         proposal: The resolver verdict. Only :class:`ResolutionProposal`
@@ -1427,18 +1532,68 @@ def enact_resolution(
             is side ``b``. Strings are accepted and coerced to ``Path``.
 
     Returns:
-        The :class:`Path` that was deleted, or ``None`` when nothing was
-        enacted (non-enacting action, missing/short member list, or the
-        target file did not exist / could not be removed).
+        For delete actions, the :class:`Path` that was deleted. For
+        ``keep_a`` / ``keep_b``, the LOSER :class:`Path` that was marked
+        ``superseded_by``. For ``deprecate_both``, BOTH members are marked
+        as a side effect but only ``member_paths[0]`` is returned. ``None``
+        when nothing was enacted (non-enacting action, missing/short member
+        list, or a file operation failed).
 
     Safety: a missing target file is tolerated (already gone == success
-    for a delete), and an :class:`OSError` on unlink is logged and
+    for a delete), and an :class:`OSError` on unlink/write is logged and
     swallowed rather than raised — enactment is best-effort and must never
     crash the merge pass.
     """
     action = getattr(proposal, "action", None)
     if not isinstance(action, str):
         return None
+
+    # --- Non-destructive marking branch (#191) ---
+    if action in _ENACT_KEEP_WINNER_LOSER:
+        winner_idx, loser_idx = _ENACT_KEEP_WINNER_LOSER[action]
+        max_idx = max(winner_idx, loser_idx)
+        if not member_paths or len(member_paths) <= max_idx:
+            log.warning(
+                "resolutions: cannot enact %s — member_paths missing a side "
+                "(got %d path(s))",
+                action,
+                0 if not member_paths else len(member_paths),
+            )
+            return None
+        winner_path = Path(member_paths[winner_idx])
+        loser_path = Path(member_paths[loser_idx])
+        winner_name = _read_member_name(winner_path)
+        if _mark_member_frontmatter(loser_path, "superseded_by", winner_name):
+            log.info(
+                "resolutions: enacted %s — marked %s superseded_by %r",
+                action,
+                loser_path,
+                winner_name,
+            )
+            return loser_path
+        return None
+
+    if action == DEPRECATE_BOTH_ACTION:
+        if not member_paths or len(member_paths) < 2:
+            log.warning(
+                "resolutions: cannot enact %s — need 2 member_paths (got %d)",
+                action,
+                0 if not member_paths else len(member_paths),
+            )
+            return None
+        marked_any = False
+        for mp in member_paths[:2]:
+            if _mark_member_frontmatter(Path(mp), "deprecated", True):
+                marked_any = True
+        if marked_any:
+            log.info(
+                "resolutions: enacted %s — marked both members deprecated",
+                action,
+            )
+            return Path(member_paths[0])
+        return None
+
+    # --- Destructive delete branch (#166) ---
     idx = _ENACT_DELETE_INDEX.get(action)
     if idx is None:
         return None

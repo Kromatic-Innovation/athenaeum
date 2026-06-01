@@ -63,8 +63,10 @@ from athenaeum.cross_scope import (
 from athenaeum.models import (
     AutoMemoryFile,
     EscalationItem,
+    parse_deprecated,
     parse_frontmatter,
     parse_refines,
+    parse_superseded_by,
     parse_supersedes,
     render_frontmatter,
     slugify,
@@ -663,11 +665,28 @@ def merge_cluster_row(
                 sources=sources,
                 refines=shim_refines,
                 supersedes=shim_supersedes,
+                # Issue #191: non-destructive inactive markers.
+                superseded_by=parse_superseded_by(meta if meta else None),
+                deprecated=parse_deprecated(meta if meta else None),
             )
+        # Issue #191: skip members marked inactive (superseded_by / deprecated)
+        # so their bodies are never composed into the wiki entry and they do
+        # not contribute sources. Inactive files stay on disk for audit.
+        if am.is_inactive():
+            log.info(
+                "cluster %s: member %s is inactive (superseded/deprecated); "
+                "excluding from compile",
+                cluster_id,
+                mp,
+            )
+            continue
         members.append((mp, am))
         resolved_member_paths.append(mp)
 
     if not members:
+        # Either no members resolved, or every resolved member is inactive
+        # (#191) — skip the row entirely; there is no live claim to compile.
+        log.info("cluster %s: no active members; skipping row", cluster_id)
         return None
 
     topic_slug = derive_topic_slug(resolved_member_paths, cluster_id)
@@ -997,7 +1016,12 @@ def merge_clusters_to_wiki(
             )
         )
 
-    auto_memory_list = list(auto_memory_files)
+    # Issue #191: drop inactive members (superseded_by / deprecated) from the
+    # detector pool so a superseded/deprecated claim cannot generate fresh
+    # contradiction escalations. ``am_by_path`` (the row-builder body lookup)
+    # is left intact — the row-level skip in ``merge_cluster_row`` handles
+    # compile exclusion.
+    auto_memory_list = [am for am in auto_memory_files if not am.is_inactive()]
     use_ancestor = mode in ("ancestor", "both")
 
     # Issue #126: Opus-backed resolver budget. The resolver is opt-in
