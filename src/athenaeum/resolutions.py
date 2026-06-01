@@ -104,15 +104,21 @@ DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION: dict[str, float] = {
     "not_a_conflict": 0.75,
     "keep_a": 0.90,
     "keep_b": 0.90,
-    # Issue #166 follow-up (correct/forget modes). Both mutate wiki bodies
-    # — `correct_*` removes the wrong member's claim, `forget_*` deletes a
-    # transient member cleanly — so they carry the same conservative 0.90
-    # floor as keep_a/keep_b. Locked here so the gate in tiers.py treats
-    # them as auto-applicable (above threshold) rather than escalate-only.
-    "correct_a": 0.90,
-    "correct_b": 0.90,
-    "forget_a": 0.90,
-    "forget_b": 0.90,
+    # Issue #166 follow-up (correct/forget modes). These are the ENACTING
+    # actions: on auto-apply the librarian DELETES a raw memory member
+    # (`correct_*` removes the wrong member's claim, `forget_*` deletes a
+    # transient member cleanly — see :data:`ENACTING_ACTIONS` /
+    # :func:`enact_resolution`). keep_a/keep_b only RECORD a verdict (both
+    # members survive, loser kept as superseded history). A destructive
+    # auto-delete deserves a higher bar than a record-only edit, so these
+    # four carry a 0.95 floor — only a very-high-confidence verdict
+    # auto-deletes; anything in [0.90, 0.95) escalates to the human.
+    # Locked here so the gate in tiers.py treats them as auto-applicable
+    # (above threshold) rather than escalate-only.
+    "correct_a": 0.95,
+    "correct_b": 0.95,
+    "forget_a": 0.95,
+    "forget_b": 0.95,
 }
 # Sentinel set of actions that never auto-apply regardless of threshold.
 # Belt-and-suspenders: Lane 3's ``_emit_escalation`` already routes
