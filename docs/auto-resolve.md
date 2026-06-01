@@ -106,11 +106,32 @@ same, but the cost of an incorrect auto-apply is not symmetric:
   Default threshold: **0.75**.
 - `keep_a` / `keep_b` — mutates wiki bodies. A wrong auto-apply requires
   a human to chase down which memory was overwritten. Default
-  threshold: **0.90**.
+  threshold: **0.90**. Use for a DECISION that was *valid-then-replaced*:
+  the loser stays as superseded history.
+- `correct_a` / `correct_b` — **enacts** a deletion (see "Enactment"
+  below). For a DECISION conflict where the losing side was simply **wrong**
+  (a mistake / confusion), not valid-then-replaced — the wrong member is
+  removed rather than enshrined as superseded. Default threshold: **0.95**.
+  Higher than `keep_*` because this action *destroys* a member on
+  auto-apply rather than recording a verdict — only a very-high-confidence
+  verdict auto-deletes.
+- `forget_a` / `forget_b` — **enacts** a deletion (see "Enactment" below).
+  One side is transient / no-longer-relevant / was confusion and should be
+  deleted cleanly with **no historical record**. Distinct from supersede
+  (keeps history) and from correct (which asserts the other side is the
+  right answer). `deprecate_both` is the both-sides analogue. Default
+  threshold: **0.95** (same destructive bar as `correct_*`).
 - `propose_merge` — **never auto-applies regardless of confidence**. The
   proposal carries an LLM-drafted merged body that must go through human
   review before it can land in a wiki page. This is a hard rule, not a
   threshold knob.
+- `retain_both_with_context` — does not auto-apply (escalates for the
+  human). When the resolver hits a FACT/identity conflict it cannot
+  confidently resolve and that is *not* two sequential dated snapshots, it
+  attaches `disambiguation_options` to the proposal; the pending-question
+  block then renders an enumerated question
+  (`Which is correct: (a) … (b) … (c) both, (d) neither/other?`) instead of
+  a free-text precedence guess.
 
 Configure per action via the new optional map:
 
@@ -156,6 +177,43 @@ resolve:
 
 Out-of-range values (`< 0.0` or `> 1.0`) and non-numeric entries raise
 `ValueError` on read — same loud-fail discipline as the legacy scalar.
+
+## Enactment: recording vs. mutating state
+
+Marking a pending-question block `[x]` only **records** a verdict — by
+itself it changes no memory. For the single-side *mutating* verdicts that
+is not enough: the wrong or transient claim must actually leave the corpus,
+or the cheap detector re-fires it on the next run. The enactment lane closes
+that gap. When a `forget_*` or `correct_*` proposal auto-applies (confidence
+`>=` its per-action threshold, default 0.95 — a higher bar than the
+record-only `keep_*` actions precisely because this deletes a member), the
+librarian also deletes the target raw auto-memory member file:
+
+| Action | Recorded | Enacted (state change) |
+|---|---|---|
+| `forget_a` | block → `[x]` | deletes member **a** (the transient side) |
+| `forget_b` | block → `[x]` | deletes member **b** |
+| `correct_a` | block → `[x]` | a is correct → deletes member **b** (the wrong claim) |
+| `correct_b` | block → `[x]` | b is correct → deletes member **a** (the wrong claim) |
+| `keep_a` / `keep_b` | block → `[x]` | **record-only** — both members survive (loser kept as superseded history) |
+| `deprecate_both` | block → `[x]` | **record-only** |
+| `not_a_conflict` | block → `[x]` | nothing to enact (escalation suppressed upstream) |
+| `propose_merge` | never auto-applies | n/a |
+
+A raw auto-memory member is a single atomic snippet, so "remove the wrong
+claim" is implemented as deleting that member file. The compiled
+`wiki/auto-*.md` entry is regenerated from the surviving members on the next
+`athenaeum run`, so the claim disappears from the wiki without a separate
+body-rewrite path.
+
+Enactment is best-effort and never crashes the merge pass: a member file
+that is already gone is treated as success, and an unlink failure is logged
+and swallowed. The labels `a` / `b` map to the resolver's flagged member
+order (the order shown in the block's `Members involved:` line).
+
+> Note: `keep_*` and `deprecate_both` remain **record-only** today — there
+> is no supersede-marker mechanism wired up to enact them, so the loser
+> still survives in the corpus. Enacting those is tracked separately.
 
 ## Reversing an auto-resolution
 

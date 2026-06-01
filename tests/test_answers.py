@@ -31,7 +31,7 @@ def _block(
     answer: str = "",
 ) -> str:
     block = (
-        f"## [{date}] Entity: \"{entity}\" (from {source})\n"
+        f'## [{date}] Entity: "{entity}" (from {source})\n'
         f"- {checkbox} {question}\n"
         f"**Conflict type**: {conflict_type}\n"
         f"**Description**: {description}\n"
@@ -124,14 +124,71 @@ class TestParsePendingQuestions:
         err = capsys.readouterr().err
         assert "malformed header" in err
 
-    def test_skips_block_without_checkbox(
+    def test_recovers_checkbox_less_block_with_description(
         self, pending_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        # A stray/legacy escalation writer that omits the `- [ ]` line still
+        # produces a recoverable block when it carries a `**Description**:`.
+        # The parser must synthesize a checkbox from the description's first
+        # line rather than silently dropping the block forever.
         content = (
             "# Pending Questions\n\n"
-            "## [2026-04-20] Entity: \"Acme\" (from sessions/x.md)\n"
+            '## [2026-04-20] Entity: "Acme" (from sessions/x.md)\n'
             "**Conflict type**: principled\n"
-            "**Description**: desc\n"
+            "**Description**: Wiki says Series A; new raw implies Series B.\n"
+        )
+        pending_path.write_text(content)
+        parsed = parse_pending_questions(pending_path)
+        assert len(parsed) == 1
+        pq = parsed[0]
+        assert pq.entity == "Acme"
+        assert pq.answered is False
+        # Question synthesized from the first line of the description.
+        assert pq.question == "Wiki says Series A; new raw implies Series B."
+        assert pq.conflict_type == "principled"
+        assert "Series B" in pq.description
+        # The recovered raw_block now carries a real `- [ ]` line so the
+        # repair persists across file rewrites (no relapse to skipped).
+        assert "- [ ] " in pq.raw_block
+        err = capsys.readouterr().err
+        assert "synthesized checkbox from description" in err
+
+    def test_recovered_block_persists_checkbox_through_resolve(
+        self, pending_path: Path
+    ) -> None:
+        # End-to-end: a checkbox-less block should be answerable via
+        # resolve_by_id, and the rewritten file must retain the checkbox so
+        # a subsequent parse sees a normal block (no relapse).
+        content = (
+            "# Pending Questions\n\n"
+            '## [2026-04-20] Entity: "Acme" (from sessions/x.md)\n'
+            "**Conflict type**: principled\n"
+            "**Description**: Series A vs Series B?\n"
+        )
+        pending_path.write_text(content)
+        pq = parse_pending_questions(pending_path)[0]
+
+        result = resolve_by_id(pending_path, pq.id, "Series B, closed March 2026.")
+        assert result["ok"] is True
+
+        # File now has a checked checkbox and the answer body.
+        text = pending_path.read_text()
+        assert "- [x] Series A vs Series B?" in text
+        assert "Series B, closed March 2026." in text
+
+        # Re-parse: block is well-formed and answered (no skip warning).
+        reparsed = parse_pending_questions(pending_path)
+        assert len(reparsed) == 1
+        assert reparsed[0].answered is True
+
+    def test_skips_block_without_checkbox_or_description(
+        self, pending_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # No checkbox AND no description => no recoverable question => skip.
+        content = (
+            "# Pending Questions\n\n"
+            '## [2026-04-20] Entity: "Acme" (from sessions/x.md)\n'
+            "**Conflict type**: principled\n"
         )
         pending_path.write_text(content)
         parsed = parse_pending_questions(pending_path)
@@ -159,9 +216,7 @@ class TestIngestAnswers:
         assert pending_path.read_text() == original
         assert not (pending_path.parent / "_pending_questions_archive.md").exists()
 
-    def test_round_trip_single_answer(
-        self, pending_path: Path, raw_root: Path
-    ) -> None:
+    def test_round_trip_single_answer(self, pending_path: Path, raw_root: Path) -> None:
         answered = _block(
             checkbox="[x]",
             answer="They closed Series B in March 2026.",
@@ -215,13 +270,13 @@ class TestIngestAnswers:
         # Checkbox for unanswered preserved.
         assert "- [ ]" in primary_text
 
-        archive_text = (pending_path.parent / "_pending_questions_archive.md").read_text()
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
         assert "Answered Co" in archive_text
         assert "Unanswered Co" not in archive_text
 
-    def test_idempotent_rerun_is_noop(
-        self, pending_path: Path, raw_root: Path
-    ) -> None:
+    def test_idempotent_rerun_is_noop(self, pending_path: Path, raw_root: Path) -> None:
         answered = _block(checkbox="[x]", answer="Confirmed.")
         pending_path.write_text("# Pending Questions\n\n" + answered)
 
@@ -231,9 +286,7 @@ class TestIngestAnswers:
         # Still exactly one raw answer file.
         assert len(list((raw_root / "answers").glob("*.md"))) == 1
 
-    def test_archive_newest_first(
-        self, pending_path: Path, raw_root: Path
-    ) -> None:
+    def test_archive_newest_first(self, pending_path: Path, raw_root: Path) -> None:
         # First run: archive "First" block.
         first = _block(entity="First Co", checkbox="[x]", answer="answer one")
         pending_path.write_text("# Pending Questions\n\n" + first)
@@ -244,21 +297,23 @@ class TestIngestAnswers:
         pending_path.write_text("# Pending Questions\n\n" + second)
         ingest_answers(pending_path, raw_root)
 
-        archive_text = (pending_path.parent / "_pending_questions_archive.md").read_text()
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
         second_pos = archive_text.find("Second Co")
         first_pos = archive_text.find("First Co")
         assert second_pos != -1 and first_pos != -1
         assert second_pos < first_pos  # newest-first
 
     def test_malformed_block_preserved_verbatim(
-        self, pending_path: Path, raw_root: Path,
+        self,
+        pending_path: Path,
+        raw_root: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         answered = _block(checkbox="[x]", answer="ok")
         malformed = (
-            "## Not a real header\n"
-            "- [x] garbled\n"
-            "**Conflict type**: ???\n"
+            "## Not a real header\n" "- [x] garbled\n" "**Conflict type**: ???\n"
         )
         pending_path.write_text(
             "# Pending Questions\n\n" + answered + "\n---\n\n" + malformed
@@ -271,9 +326,7 @@ class TestIngestAnswers:
         primary_text = pending_path.read_text()
         assert "Not a real header" in primary_text
 
-    def test_collision_safe_filenames(
-        self, pending_path: Path, raw_root: Path
-    ) -> None:
+    def test_collision_safe_filenames(self, pending_path: Path, raw_root: Path) -> None:
         # Two answered blocks for the same entity resolved in one run should
         # not clobber each other's raw files.
         a = _block(entity="Acme Co", checkbox="[x]", answer="first answer")
@@ -284,9 +337,7 @@ class TestIngestAnswers:
             answer="second answer",
             question="Second distinct question?",
         )
-        pending_path.write_text(
-            "# Pending Questions\n\n" + a + "\n---\n\n" + b
-        )
+        pending_path.write_text("# Pending Questions\n\n" + a + "\n---\n\n" + b)
         count = ingest_answers(pending_path, raw_root)
         assert count == 2
         assert len(list((raw_root / "answers").glob("*.md"))) == 2
@@ -325,9 +376,7 @@ class TestResolveById:
         assert len(items) == 1
         qid = items[0]["id"]
 
-        result = resolve_by_id(
-            pending_path, qid, "They closed Series B in March 2026."
-        )
+        result = resolve_by_id(pending_path, qid, "They closed Series B in March 2026.")
         assert result["ok"] is True
         assert "[x]" in result["block"]
         assert "Series B" in result["block"]
@@ -352,9 +401,7 @@ class TestResolveById:
         assert result["error_code"] == "file_missing"
         assert "not found" in result["message"]
 
-    def test_already_answered_returns_error(
-        self, pending_path: Path
-    ) -> None:
+    def test_already_answered_returns_error(self, pending_path: Path) -> None:
         pending_path.write_text("# Pending Questions\n\n" + _block())
         items = list_unanswered(pending_path)
         qid = items[0]["id"]
@@ -409,12 +456,12 @@ def test_tier4_render_round_trips_through_parser(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("entity_name", "raw_ref"),
     [
-        ('Acme Corp', 'sessions/foo.md'),  # clean baseline
-        ('Acme "The Great" Corp', 'sessions/foo.md'),  # embedded quotes
-        ('Acme Corp', 'sessions/foo (v2).md'),  # parens in ref
-        ('Acme "The Great" Corp', 'sessions/foo (v2).md'),  # both
-        ('Université "Étoile" Inc', 'sessions/straße.md'),  # unicode entity + ref
-        ('Globex', 'sessions/notes (rev 3) (final).md'),  # multiple parens in ref
+        ("Acme Corp", "sessions/foo.md"),  # clean baseline
+        ('Acme "The Great" Corp', "sessions/foo.md"),  # embedded quotes
+        ("Acme Corp", "sessions/foo (v2).md"),  # parens in ref
+        ('Acme "The Great" Corp', "sessions/foo (v2).md"),  # both
+        ('Université "Étoile" Inc', "sessions/straße.md"),  # unicode entity + ref
+        ("Globex", "sessions/notes (rev 3) (final).md"),  # multiple parens in ref
     ],
 )
 def test_tier4_round_trip_hostile_inputs(
@@ -480,7 +527,7 @@ def test_description_captures_multiple_lines(pending_path: Path) -> None:
     """
     content = (
         "# Pending Questions\n\n"
-        "## [2026-04-20] Entity: \"Acme Corp\" (from sessions/x.md)\n"
+        '## [2026-04-20] Entity: "Acme Corp" (from sessions/x.md)\n'
         "- [ ] Is Acme still Series A?\n"
         "**Conflict type**: principled\n"
         "**Description**: Line one of description.\n"
@@ -502,7 +549,8 @@ def test_description_captures_multiple_lines(pending_path: Path) -> None:
 
 
 def test_archive_skips_duplicate_entry(
-    pending_path: Path, raw_root: Path,
+    pending_path: Path,
+    raw_root: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """If the exact raw_block of an answered item is already in the archive,
@@ -529,9 +577,9 @@ def test_archive_skips_duplicate_entry(
 
     after_second = archive_path.read_text(encoding="utf-8")
     second_count = after_second.count("Acme Corp")
-    assert second_count == 1, (
-        f"archive must not duplicate: before={first_count}, after={second_count}"
-    )
+    assert (
+        second_count == 1
+    ), f"archive must not duplicate: before={first_count}, after={second_count}"
     err = capsys.readouterr().err
     assert "skipping duplicate archive entry" in err
 

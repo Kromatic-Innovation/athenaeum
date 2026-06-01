@@ -331,6 +331,14 @@ class EscalationItem:
     # AutoMemoryFile from this module). The runtime type is
     # ``athenaeum.resolutions.ResolutionProposal | None``.
     proposal: Any = None
+    # Absolute paths of the flagged member files in resolver ``a``/``b``
+    # order (``members[0]`` is side ``a``, ``members[1]`` is side ``b``).
+    # Populated by :func:`athenaeum.merge._emit_escalation` so the
+    # enactment lane (#166 follow-up) can DELETE the target member when a
+    # high-confidence ``forget_*`` / ``correct_*`` verdict auto-applies.
+    # Empty for non-source-attributed escalations (the enactment lane then
+    # no-ops). Stored as strings to keep the dataclass trivially copyable.
+    members: list[str] = field(default_factory=list)
 
 
 @dataclass
