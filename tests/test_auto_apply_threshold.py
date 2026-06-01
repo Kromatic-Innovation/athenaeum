@@ -50,6 +50,19 @@ class TestPerActionDefaults:
         # Hard rule, not a threshold — propose_merge never auto-applies.
         assert resolve_auto_apply_threshold_for({}, "propose_merge") is None
 
+    def test_correct_a_default_is_0_90(self) -> None:
+        # #166 follow-up: correct mutates a wiki body — same floor as keep_*.
+        assert resolve_auto_apply_threshold_for({}, "correct_a") == 0.90
+
+    def test_correct_b_default_is_0_90(self) -> None:
+        assert resolve_auto_apply_threshold_for({}, "correct_b") == 0.90
+
+    def test_forget_a_default_is_0_90(self) -> None:
+        assert resolve_auto_apply_threshold_for({}, "forget_a") == 0.90
+
+    def test_forget_b_default_is_0_90(self) -> None:
+        assert resolve_auto_apply_threshold_for({}, "forget_b") == 0.90
+
     def test_propose_merge_returns_none_even_with_explicit_override(self) -> None:
         # The sentinel is checked BEFORE per-action config so an accidental
         # entry in the YAML can't unlock auto-apply for propose_merge.
@@ -93,6 +106,16 @@ class TestLegacyScalarBackwardCompat:
     def test_legacy_scalar_does_not_unlock_propose_merge(self) -> None:
         cfg = {"resolve": {"auto_apply_threshold": 0.85}}
         assert resolve_auto_apply_threshold_for(cfg, "propose_merge") is None
+
+    def test_legacy_scalar_does_not_apply_to_correct_or_forget(self) -> None:
+        # correct/forget are NEW actions — no pre-#170 config references
+        # them, so the legacy scalar must NOT pull their threshold down to
+        # 0.85. They keep the per-action default (0.90).
+        cfg = {"resolve": {"auto_apply_threshold": 0.85}}
+        assert resolve_auto_apply_threshold_for(cfg, "correct_a") == 0.90
+        assert resolve_auto_apply_threshold_for(cfg, "correct_b") == 0.90
+        assert resolve_auto_apply_threshold_for(cfg, "forget_a") == 0.90
+        assert resolve_auto_apply_threshold_for(cfg, "forget_b") == 0.90
 
 
 class TestLegacyEnvVarBackwardCompat:
@@ -357,6 +380,38 @@ class TestTier4PerActionGate:
         assert "- [x]" in text
         assert "**Auto-resolved**: true" in text
 
+    @pytest.mark.parametrize(
+        "action", ["correct_a", "correct_b", "forget_a", "forget_b"]
+    )
+    def test_correct_forget_auto_apply_above_threshold(
+        self, action: str, tmp_path: Path
+    ) -> None:
+        """#166 follow-up: correct/forget auto-apply at confidence >= 0.90."""
+        pending = tmp_path / "_pending_questions.md"
+        cfg = {"resolve": {"auto_apply": True}}  # defaults — 0.90 floor.
+        item = _escalation(f"{action}Entity", _proposal(action, 0.95))
+        tier4_escalate([item], pending, config=cfg)
+        text = pending.read_text(encoding="utf-8")
+
+        assert "- [x]" in text
+        assert "**Auto-resolved**: true" in text
+
+    @pytest.mark.parametrize(
+        "action", ["correct_a", "correct_b", "forget_a", "forget_b"]
+    )
+    def test_correct_forget_stay_open_below_threshold(
+        self, action: str, tmp_path: Path
+    ) -> None:
+        """Below the 0.90 floor, correct/forget stay open for the human."""
+        pending = tmp_path / "_pending_questions.md"
+        cfg = {"resolve": {"auto_apply": True}}
+        item = _escalation(f"{action}Entity", _proposal(action, 0.80))
+        tier4_escalate([item], pending, config=cfg)
+        text = pending.read_text(encoding="utf-8")
+
+        assert "- [ ]" in text
+        assert "**Auto-resolved**" not in text
+
 
 # ---------------------------------------------------------------------------
 # Module constants — sanity pin
@@ -369,4 +424,10 @@ class TestModuleConstants:
             "not_a_conflict": 0.75,
             "keep_a": 0.90,
             "keep_b": 0.90,
+            # #166 follow-up: correct/forget modes mutate wiki bodies, so
+            # they carry the same 0.90 floor as keep_a/keep_b.
+            "correct_a": 0.90,
+            "correct_b": 0.90,
+            "forget_a": 0.90,
+            "forget_b": 0.90,
         }
