@@ -28,6 +28,14 @@ Running ``athenaeum ingest-answers`` then:
 Re-running with no new ``[x]`` blocks is a no-op. Malformed blocks are
 skipped with a warning on stderr and a log entry; the rest of the file is
 still processed.
+
+Defensive recovery: a block missing its ``- [ ]`` checkbox line (e.g. from
+a stray or legacy escalation writer that didn't route through
+``tier4_escalate``) is NOT silently dropped if it still carries a
+``**Description**:`` line. The parser synthesizes an unchecked checkbox
+from the first line of the description so the block becomes answerable, and
+the repair is persisted on the next file rewrite. Only blocks with neither
+a checkbox nor a description — i.e. no recoverable question — are skipped.
 """
 
 from __future__ import annotations
@@ -170,6 +178,44 @@ def _split_blocks(text: str) -> list[str]:
     return [b for b in blocks if b.startswith("## ")]
 
 
+def _synthesize_checkbox_block(lines: list[str]) -> list[str] | None:
+    """Recover a checkbox-less block by inserting a synthesized ``- [ ]`` line.
+
+    The well-formed escalation path (:func:`athenaeum.tiers.tier4_escalate`)
+    always emits a ``- [ ]`` checkbox directly under the header. A stray or
+    legacy writer that omits it produces a block the parser would otherwise
+    skip forever. When such a block still carries a recoverable question —
+    i.e. a ``**Description**:`` line — we synthesize an unchecked checkbox
+    from the first non-empty line of that description and insert it right
+    after the header, leaving every other line untouched.
+
+    Returns the rewritten line list (header, synthesized checkbox, original
+    remainder) or ``None`` when no description is present — a block with
+    neither a checkbox nor a description carries no recoverable question and
+    must still be skipped.
+    """
+    question: str | None = None
+    for raw_line in lines[1:]:
+        stripped = raw_line.strip()
+        if stripped.startswith("**Description**:"):
+            desc = stripped.removeprefix("**Description**:").strip()
+            # First non-empty line of the description, trimmed to a single
+            # checkbox row (no bullets). Mirrors tiers._question_from_description.
+            for desc_line in desc.splitlines():
+                cleaned = desc_line.strip().lstrip("-*").strip()
+                if cleaned:
+                    question = cleaned
+                    break
+            break
+
+    if question is None:
+        return None
+
+    # Insert the synthesized checkbox immediately after the header. The
+    # remaining lines (Conflict type, Description, etc.) are preserved.
+    return [lines[0], f"- [ ] {question}", *lines[1:]]
+
+
 def _parse_block(block_text: str) -> PendingQuestion | None:
     """Parse one block. Returns ``None`` on malformed input."""
     lines = block_text.splitlines()
@@ -196,13 +242,46 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
         break
 
     if checkbox_idx is None:
-        log.warning("Skipping block without checkbox line: %r", lines[0][:80])
+        # Defensive recovery: a block can lack the `- [ ]` line if it was
+        # written by a stray/legacy escalation path that omits it (the
+        # well-formed path is ``tier4_escalate``, which always emits the
+        # checkbox). Rather than silently dropping a block that still
+        # carries a recoverable question — i.e. has a ``**Description**:``
+        # line — synthesize an unchecked checkbox from that description so
+        # the block becomes answerable instead of being skipped forever.
+        # Blocks with neither a checkbox nor a description are genuinely
+        # unrecoverable and are still skipped.
+        synthesized = _synthesize_checkbox_block(lines)
+        if synthesized is None:
+            log.warning(
+                "Skipping block without checkbox line and no recoverable "
+                "question: %r",
+                lines[0][:80],
+            )
+            print(
+                f"[warn] skipping pending-question block without `- [ ]` line: "
+                f"{lines[0][:80]!r}",
+                file=sys.stderr,
+            )
+            return None
+        log.warning(
+            "Recovering checkbox-less block by synthesizing `- [ ]` from "
+            "description: %r",
+            lines[0][:80],
+        )
         print(
-            f"[warn] skipping pending-question block without `- [ ]` line: "
-            f"{lines[0][:80]!r}",
+            f"[warn] recovering pending-question block without `- [ ]` line "
+            f"(synthesized checkbox from description): {lines[0][:80]!r}",
             file=sys.stderr,
         )
-        return None
+        lines = synthesized
+        # Persist the repair: ``raw_block`` is what the file rewriters
+        # (``ingest_answers`` / ``resolve_by_id``) write back, so rebuild
+        # it from the now-well-formed lines. Otherwise the synthesized
+        # checkbox would be discarded on the next rewrite and the block
+        # would relapse to checkbox-less / unparseable.
+        block_text = "\n".join(lines)
+        checkbox_idx = 1
 
     cb_match = _CHECKBOX_RE.match(lines[checkbox_idx])
     if cb_match is None:
@@ -569,8 +648,12 @@ def resolve_by_id(pending_path: Path, question_id: str, answer: str) -> dict:
         if pq is None:
             rewritten_blocks.append(block_text)
             continue
+        # Use ``pq.raw_block`` rather than the raw split text: for a block
+        # recovered from a checkbox-less source, ``raw_block`` already
+        # carries the synthesized ``- [ ]`` line, so the repair persists in
+        # the rewritten file. For normal blocks the two are identical.
         if pq.id != question_id:
-            rewritten_blocks.append(block_text)
+            rewritten_blocks.append(pq.raw_block)
             continue
         if pq.answered:
             msg = f"question {question_id} already answered"
@@ -583,7 +666,7 @@ def resolve_by_id(pending_path: Path, question_id: str, answer: str) -> dict:
                 "error": msg,
             }
 
-        updated = _rewrite_block_as_answered(block_text, answer)
+        updated = _rewrite_block_as_answered(pq.raw_block, answer)
         new_block_text = updated
         rewritten_blocks.append(updated)
 
