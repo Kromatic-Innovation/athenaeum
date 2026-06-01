@@ -141,6 +141,55 @@ def parse_supersedes(meta: dict[str, object] | None) -> list[dict[str, str]]:
     return out
 
 
+def parse_superseded_by(meta: dict[str, object] | None) -> str:
+    """Return the frontmatter ``superseded_by`` pointer (winner name slug), or "".
+
+    Set by the resolver's keep_a/keep_b enactment on the LOSING member to
+    mark it as valid-then-replaced history. Non-empty => the member is
+    inactive (excluded from recall + C3 compile) but preserved on disk.
+    Tolerant: a non-string value coerces to its str form; missing => "".
+    """
+    if not meta:
+        return ""
+    raw = meta.get("superseded_by")
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
+def parse_deprecated(meta: dict[str, object] | None) -> bool:
+    """Return the truthy ``deprecated`` frontmatter flag (deprecate_both, #191).
+
+    Accepts a real bool, or a string variant (``true``/``1``/``yes``,
+    case-insensitive); any other truthy value coerces via ``bool``.
+    Missing / falsey => ``False``.
+    """
+    if not meta:
+        return False
+    dep = meta.get("deprecated")
+    if isinstance(dep, bool):
+        return dep
+    if isinstance(dep, str):
+        return dep.strip().lower() in ("true", "1", "yes")
+    return bool(dep)
+
+
+def is_inactive_memory(meta: dict[str, object] | None) -> bool:
+    """True when a memory file is marked inactive and must not surface as a live claim.
+
+    Inactive == frontmatter declares EITHER a non-empty ``superseded_by``
+    (keep_a/keep_b loser, issue #191) OR a truthy ``deprecated`` flag
+    (deprecate_both, issue #191). Inactive members are preserved on disk
+    for audit but are skipped by recall (search index) and by the C3 merge
+    compile so their claims drop out of the live wiki.
+    """
+    if not meta:
+        return False
+    if parse_superseded_by(meta):
+        return True
+    return parse_deprecated(meta)
+
+
 def render_frontmatter(meta: dict[str, object]) -> str:
     """Render a dict as a YAML frontmatter block.
 
@@ -213,6 +262,13 @@ class AutoMemoryFile:
     # by ``name:`` slug, not path.
     refines: list[str] = field(default_factory=list)
     supersedes: list[dict[str, str]] = field(default_factory=list)
+    # Issue #191: non-destructive inactive markers written by the resolver's
+    # keep_a/keep_b (superseded_by = winner name) and deprecate_both
+    # (deprecated = True) enactment. An inactive member is preserved on disk
+    # for audit but excluded from recall + the C3 compile so it does not
+    # resurface as a live claim.
+    superseded_by: str = ""
+    deprecated: bool = False
     _content: str | None = field(default=None, repr=False)
 
     @property
@@ -225,6 +281,10 @@ class AutoMemoryFile:
     def ref(self) -> str:
         """Short reference for footnotes — scope/filename."""
         return f"{self.origin_scope}/{self.path.name}"
+
+    def is_inactive(self) -> bool:
+        """True when this member carries a #191 inactive marker."""
+        return bool(self.superseded_by) or self.deprecated
 
     def supersedes_names(self) -> list[str]:
         """Return just the ``name`` keys from :attr:`supersedes` records."""

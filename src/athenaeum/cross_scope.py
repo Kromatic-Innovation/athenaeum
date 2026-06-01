@@ -51,8 +51,10 @@ from typing import Any, Iterable, Sequence
 from athenaeum._lint import _strip_self_reference
 from athenaeum.models import (
     AutoMemoryFile,
+    parse_deprecated,
     parse_frontmatter,
     parse_refines,
+    parse_superseded_by,
     parse_supersedes,
 )
 
@@ -466,6 +468,8 @@ def candidate_to_auto_memory_files(
             supersedes = []
         # Issue #181: same self-reference lint as discover_auto_memory_files.
         refines, supersedes = _strip_self_reference(name, refines, supersedes, path)
+        # Issue #191: non-destructive inactive markers (keep_*/deprecate_both).
+        meta_for_markers = meta if isinstance(meta, dict) else None
         out.append(
             AutoMemoryFile(
                 path=path,
@@ -475,6 +479,8 @@ def candidate_to_auto_memory_files(
                 description=description,
                 refines=refines,
                 supersedes=supersedes,
+                superseded_by=parse_superseded_by(meta_for_markers),
+                deprecated=parse_deprecated(meta_for_markers),
             )
         )
     return out

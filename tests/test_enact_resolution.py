@@ -95,8 +95,18 @@ def _item(
 
 class TestEnactResolutionUnit:
     def test_enacting_actions_set(self) -> None:
+        # #191: keep_a/keep_b/deprecate_both joined the enacting set (marking,
+        # not deleting) alongside the original four delete actions.
         assert ENACTING_ACTIONS == frozenset(
-            {"forget_a", "forget_b", "correct_a", "correct_b"}
+            {
+                "forget_a",
+                "forget_b",
+                "correct_a",
+                "correct_b",
+                "keep_a",
+                "keep_b",
+                "deprecate_both",
+            }
         )
 
     def test_forget_a_deletes_side_a(self, tmp_path: Path) -> None:
@@ -140,7 +150,7 @@ class TestEnactResolutionUnit:
         assert not a.exists()
 
     @pytest.mark.parametrize(
-        "action", ["keep_a", "keep_b", "deprecate_both", "not_a_conflict"]
+        "action", ["not_a_conflict", "retain_both_with_context", "merge"]
     )
     def test_non_enacting_actions_are_noops(self, action: str, tmp_path: Path) -> None:
         a = _make_member(tmp_path, "a.md")
