@@ -111,14 +111,16 @@ same, but the cost of an incorrect auto-apply is not symmetric:
 - `correct_a` / `correct_b` — **enacts** a deletion (see "Enactment"
   below). For a DECISION conflict where the losing side was simply **wrong**
   (a mistake / confusion), not valid-then-replaced — the wrong member is
-  removed rather than enshrined as superseded. Default threshold: **0.90**
-  (same mutating bar as `keep_*`).
+  removed rather than enshrined as superseded. Default threshold: **0.95**.
+  Higher than `keep_*` because this action *destroys* a member on
+  auto-apply rather than recording a verdict — only a very-high-confidence
+  verdict auto-deletes.
 - `forget_a` / `forget_b` — **enacts** a deletion (see "Enactment" below).
   One side is transient / no-longer-relevant / was confusion and should be
   deleted cleanly with **no historical record**. Distinct from supersede
   (keeps history) and from correct (which asserts the other side is the
   right answer). `deprecate_both` is the both-sides analogue. Default
-  threshold: **0.90**.
+  threshold: **0.95** (same destructive bar as `correct_*`).
 - `propose_merge` — **never auto-applies regardless of confidence**. The
   proposal carries an LLM-drafted merged body that must go through human
   review before it can land in a wiki page. This is a hard rule, not a
@@ -183,8 +185,9 @@ itself it changes no memory. For the single-side *mutating* verdicts that
 is not enough: the wrong or transient claim must actually leave the corpus,
 or the cheap detector re-fires it on the next run. The enactment lane closes
 that gap. When a `forget_*` or `correct_*` proposal auto-applies (confidence
-`>=` its per-action threshold, default 0.90), the librarian also deletes the
-target raw auto-memory member file:
+`>=` its per-action threshold, default 0.95 — a higher bar than the
+record-only `keep_*` actions precisely because this deletes a member), the
+librarian also deletes the target raw auto-memory member file:
 
 | Action | Recorded | Enacted (state change) |
 |---|---|---|
