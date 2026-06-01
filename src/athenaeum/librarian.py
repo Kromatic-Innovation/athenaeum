@@ -47,8 +47,10 @@ from athenaeum.models import (
     TokenUsage,
     WikiEntity,
     load_schema_list,
+    parse_deprecated,
     parse_frontmatter,
     parse_refines,
+    parse_superseded_by,
     parse_supersedes,
     render_frontmatter,
     slugify,
@@ -201,6 +203,8 @@ def discover_auto_memory_files(
                 refines, supersedes = _strip_self_reference(
                     name, refines, supersedes, fpath
                 )
+                # Issue #191: non-destructive inactive markers.
+                meta_for_markers = meta if meta else None
                 files.append(
                     AutoMemoryFile(
                         path=fpath,
@@ -213,6 +217,8 @@ def discover_auto_memory_files(
                         sources=sources,
                         refines=refines,
                         supersedes=supersedes,
+                        superseded_by=parse_superseded_by(meta_for_markers),
+                        deprecated=parse_deprecated(meta_for_markers),
                     )
                 )
     return files

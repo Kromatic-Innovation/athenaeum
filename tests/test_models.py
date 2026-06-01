@@ -8,12 +8,16 @@ from pathlib import Path
 import pytest
 
 from athenaeum.models import (
+    AutoMemoryFile,
     EntityAction,
     EntityIndex,
     WikiEntity,
     generate_uid,
+    is_inactive_memory,
     load_schema_list,
+    parse_deprecated,
     parse_frontmatter,
+    parse_superseded_by,
     render_frontmatter,
     slugify,
 )
@@ -454,3 +458,88 @@ class TestEntityAction:
     def test_kind_literal_annotation(self) -> None:
         annotation = EntityAction.__dataclass_fields__["kind"].type
         assert "Literal" in annotation
+
+
+# ---------------------------------------------------------------------------
+# Issue #191: inactive-member predicate + parse helpers
+# ---------------------------------------------------------------------------
+
+
+class TestParseSupersededBy:
+    def test_missing_returns_empty(self) -> None:
+        assert parse_superseded_by(None) == ""
+        assert parse_superseded_by({}) == ""
+        assert parse_superseded_by({"name": "x"}) == ""
+
+    def test_value_stripped(self) -> None:
+        assert parse_superseded_by({"superseded_by": "  Winner A  "}) == "Winner A"
+
+    def test_non_string_coerced(self) -> None:
+        assert parse_superseded_by({"superseded_by": 42}) == "42"
+
+    def test_none_value(self) -> None:
+        assert parse_superseded_by({"superseded_by": None}) == ""
+
+
+class TestParseDeprecated:
+    def test_missing_is_false(self) -> None:
+        assert parse_deprecated(None) is False
+        assert parse_deprecated({}) is False
+
+    def test_bool_true(self) -> None:
+        assert parse_deprecated({"deprecated": True}) is True
+
+    def test_bool_false(self) -> None:
+        assert parse_deprecated({"deprecated": False}) is False
+
+    @pytest.mark.parametrize("val", ["true", "TRUE", "1", "yes", " Yes "])
+    def test_string_truthy_variants(self, val: str) -> None:
+        assert parse_deprecated({"deprecated": val}) is True
+
+    @pytest.mark.parametrize("val", ["false", "0", "no", ""])
+    def test_string_falsey_variants(self, val: str) -> None:
+        assert parse_deprecated({"deprecated": val}) is False
+
+
+class TestIsInactiveMemory:
+    def test_empty(self) -> None:
+        assert is_inactive_memory(None) is False
+        assert is_inactive_memory({}) is False
+
+    def test_superseded_by(self) -> None:
+        assert is_inactive_memory({"superseded_by": "Winner"}) is True
+
+    def test_deprecated_flag(self) -> None:
+        assert is_inactive_memory({"deprecated": True}) is True
+        assert is_inactive_memory({"deprecated": "yes"}) is True
+
+    def test_active_keys_only(self) -> None:
+        assert is_inactive_memory({"name": "x", "deprecated": False}) is False
+
+
+class TestAutoMemoryFileInactive:
+    def test_defaults_active(self, tmp_path: Path) -> None:
+        am = AutoMemoryFile(
+            path=tmp_path / "m.md", origin_scope="s", memory_type="feedback"
+        )
+        assert am.superseded_by == ""
+        assert am.deprecated is False
+        assert am.is_inactive() is False
+
+    def test_superseded_by_makes_inactive(self, tmp_path: Path) -> None:
+        am = AutoMemoryFile(
+            path=tmp_path / "m.md",
+            origin_scope="s",
+            memory_type="feedback",
+            superseded_by="Winner",
+        )
+        assert am.is_inactive() is True
+
+    def test_deprecated_makes_inactive(self, tmp_path: Path) -> None:
+        am = AutoMemoryFile(
+            path=tmp_path / "m.md",
+            origin_scope="s",
+            memory_type="feedback",
+            deprecated=True,
+        )
+        assert am.is_inactive() is True
