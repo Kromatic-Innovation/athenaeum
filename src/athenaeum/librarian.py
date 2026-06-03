@@ -30,6 +30,7 @@ from pathlib import Path
 import anthropic
 
 from athenaeum._lint import _strip_self_reference
+from athenaeum._retry import TransientAPIError
 from athenaeum.clusters import (
     cluster_auto_memory_files,
     resolve_cluster_output_path,
@@ -791,6 +792,20 @@ def run(
                 dry_run=dry_run,
                 usage=usage,
             )
+        except TransientAPIError as exc:
+            # Issue #193: the Anthropic API was overloaded (429/529) and the
+            # bounded retry was exhausted. Defer to the next run exactly like a
+            # malformed-file failure, but log it distinctly so health reporting
+            # can tell "API was overloaded" (transient) apart from "this file
+            # is broken" (malformed).
+            log.error(
+                "Gave up after %d retries (transient API overload) %s: %s",
+                exc.attempts,
+                raw.ref,
+                type(exc.last_error).__name__,
+            )
+            failed_files.append(raw.ref)
+            continue
         except Exception:
             log.exception("Failed to process %s", raw.ref)
             failed_files.append(raw.ref)
