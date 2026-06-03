@@ -44,7 +44,7 @@ jobs:
           fetch-depth: 0
 
       - name: Load workflow-bot App credentials from 1Password
-        uses: 1password/load-secrets-action@v2
+        uses: 1password/load-secrets-action@v4
         with:
           export-env: true
         env:
