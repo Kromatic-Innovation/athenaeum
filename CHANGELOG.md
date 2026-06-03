@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Transient Anthropic overload no longer becomes a permanent librarian
+  backlog** (#193). The per-file classification path (`tiers.py` tier2/tier3
+  calls) now retries HTTP 429 (`RateLimitError`), 529 (`OverloadedError`),
+  and `APIConnectionError` with bounded exponential backoff + jitter (5
+  attempts, capped at 60s, honoring `Retry-After` when present) via the new
+  `athenaeum._retry.with_retry` helper. Previously a single overload window
+  deferred every affected file to the next run, and because the same files
+  landed in the same late position every night the backlog never self-healed.
+  On final give-up the loop logs `Gave up after N retries (transient API
+  overload)` distinctly from the malformed-file `Failed to process` line, so
+  health reporting can tell transient-API from a genuinely broken file.
+  Non-transient errors (e.g. 400 `BadRequestError`) still fail fast.
+
 ### Changed
 
 - Resolver per-run Opus call cap (`DEFAULT_RESOLVE_MAX_PER_RUN`) raised
