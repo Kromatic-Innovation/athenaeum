@@ -20,6 +20,7 @@ from typing import Any
 
 import anthropic
 
+from athenaeum._retry import with_retry
 from athenaeum.models import (
     ClassifiedEntity,
     EntityAction,
@@ -194,11 +195,14 @@ def tier2_classify(
         observation_filter_section=obs_filter,
     )
 
-    response = client.messages.create(
-        model=_get_classify_model(),
-        max_tokens=1024,
-        system=CLASSIFY_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
+    response = with_retry(
+        lambda: client.messages.create(
+            model=_get_classify_model(),
+            max_tokens=1024,
+            system=CLASSIFY_SYSTEM,
+            messages=[{"role": "user", "content": user_msg}],
+        ),
+        description=f"tier2_classify {raw.ref}",
     )
     _record_usage(response, usage)
 
@@ -333,11 +337,14 @@ def tier3_create(
         entity_template_section=tmpl_section,
     )
 
-    response = client.messages.create(
-        model=_get_write_model(),
-        max_tokens=2048,
-        system=CREATE_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
+    response = with_retry(
+        lambda: client.messages.create(
+            model=_get_write_model(),
+            max_tokens=2048,
+            system=CREATE_SYSTEM,
+            messages=[{"role": "user", "content": user_msg}],
+        ),
+        description=f"tier3_create {source_ref}",
     )
     _record_usage(response, usage)
 
@@ -382,11 +389,14 @@ def tier3_merge(
         observations=action.observations[:3000],
     )
 
-    response = client.messages.create(
-        model=_get_write_model(),
-        max_tokens=2048,
-        system=MERGE_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
+    response = with_retry(
+        lambda: client.messages.create(
+            model=_get_write_model(),
+            max_tokens=2048,
+            system=MERGE_SYSTEM,
+            messages=[{"role": "user", "content": user_msg}],
+        ),
+        description=f"tier3_merge {source_ref}",
     )
     _record_usage(response, usage)
 
