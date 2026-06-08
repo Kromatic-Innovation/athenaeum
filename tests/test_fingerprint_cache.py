@@ -22,6 +22,7 @@ from athenaeum.fingerprint import (
     fingerprint_from_description,
     is_resolved,
     load_resolved,
+    load_resolved_records,
     record_resolution,
 )
 from athenaeum.models import EscalationItem
@@ -142,6 +143,63 @@ class TestCacheRoundTrip:
         rec = json.loads(cache.splitlines()[0])
         assert rec["resolved_by"] == "auto"
         assert rec["fingerprint"] == fp
+
+
+# ---------------------------------------------------------------------------
+# Single authoritative ``action`` key (issue #207)
+# ---------------------------------------------------------------------------
+
+
+def _action_of(record: dict) -> str:
+    """Mirror the consumer fallback (tiers.py): ``action`` is authoritative,
+    ``verdict`` is a defensive fallback for legacy/external records."""
+    return record.get("action") or record.get("verdict") or ""
+
+
+class TestSingleAuthoritativeActionKey:
+    def test_writer_emits_action_not_duplicate_verdict(self, tmp_path: Path) -> None:
+        """A freshly written record carries ``action`` and NOT a duplicate
+        ``verdict`` key (issue #207 — drop the redundant key on write)."""
+        root = _knowledge_root(tmp_path)
+        fp = claim_pair_fingerprint(CLAIM_A, CLAIM_B, "factual")
+        record_resolution(
+            root, fingerprint=fp, verdict="correct_a", resolved_by="human"
+        )
+        rec = _resolved_records(root)[0]
+        assert rec["action"] == "correct_a"
+        assert "verdict" not in rec
+
+    def test_reader_tolerates_verdict_only_record(self, tmp_path: Path) -> None:
+        """``load_resolved_records`` still resolves a record that has ONLY
+        ``verdict`` (no ``action``) — the defensive fallback keeps backward
+        compat with any legacy or external writer."""
+        root = _knowledge_root(tmp_path)
+        fp = claim_pair_fingerprint(CLAIM_A, CLAIM_B, "factual")
+        cache = root / "raw" / "_resolved_contradictions.jsonl"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(
+            json.dumps(
+                {
+                    "fingerprint": fp,
+                    "verdict": "keep_a",
+                    "resolved_by": "human",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        records = load_resolved_records(root)
+        assert fp in records
+        assert _action_of(records[fp]) == "keep_a"
+
+    def test_roundtrip_resolves_correct_action(self, tmp_path: Path) -> None:
+        """record_resolution → load_resolved_records yields the right action
+        for the #199 auto-apply path."""
+        root = _knowledge_root(tmp_path)
+        fp = claim_pair_fingerprint(CLAIM_A, CLAIM_B, "factual")
+        record_resolution(root, fingerprint=fp, verdict="forget_b", resolved_by="human")
+        records = load_resolved_records(root)
+        assert _action_of(records[fp]) == "forget_b"
 
 
 # ---------------------------------------------------------------------------
