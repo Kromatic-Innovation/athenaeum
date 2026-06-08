@@ -59,6 +59,18 @@ def _normalize_claim(text: str) -> str:
     return _WS_RE.sub(" ", (text or "").strip()).casefold()
 
 
+def normalize_side(text: str) -> str:
+    """Public alias for the per-side claim normalization (issue #199).
+
+    ``claim_pair_fingerprint`` applies :func:`_normalize_claim` to each side
+    before sorting+hashing. The #199 orientation-reconciliation path needs the
+    SAME normalization to compare a new conflict's per-side text against the
+    stored ``side_a_norm`` / ``side_b_norm`` anchors. Exposing one helper keeps
+    record-time and match-time normalization identical by construction.
+    """
+    return _normalize_claim(text)
+
+
 def claim_pair_fingerprint(text_a: str, text_b: str, conflict_type: str | None) -> str:
     """Return a stable, order-independent fingerprint for a claim pair.
 
@@ -113,6 +125,8 @@ def record_resolution(
     resolved_by: str,
     source_verdict_id: str | None = None,
     resolved_at: str | None = None,
+    side_a_norm: str | None = None,
+    side_b_norm: str | None = None,
 ) -> None:
     """Append one resolved-contradiction record to the JSONL cache.
 
@@ -120,6 +134,17 @@ def record_resolution(
     fingerprint must never block the human-answer or auto-apply path. The
     ``resolved_by`` value MUST be ``"human"`` or ``"auto"`` (load-bearing for
     sibling #199).
+
+    ``side_a_norm`` / ``side_b_norm`` (issue #199) persist the per-side
+    NORMALIZED claim text in the verdict's ORIGINAL a/b orientation. The
+    fingerprint is order-independent, but enacting verdicts
+    (``correct_a``/``correct_b``/``keep_a``/``keep_b``/``forget_a``/``forget_b``)
+    are orientation-DEPENDENT, so the auto-apply lane needs these anchors to
+    decide whether a new conflict's a/b order matches the stored verdict's or
+    is reversed (and the action must be flipped). Callers SHOULD pass the
+    output of :func:`normalize_side` so record-time and match-time
+    normalization are identical. Omitted -> stored as ``None`` (orientation
+    unknown; the consumer falls back to safe escalation).
     """
     if not fingerprint:
         return
@@ -131,6 +156,8 @@ def record_resolution(
         "source_verdict_id": source_verdict_id,
         "resolved_at": resolved_at
         or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "side_a_norm": side_a_norm,
+        "side_b_norm": side_b_norm,
     }
     try:
         path = _cache_path(knowledge_root)
@@ -172,6 +199,57 @@ def load_resolved(knowledge_root: Path) -> set[str]:
         if isinstance(fp, str) and fp:
             resolved.add(fp)
     return resolved
+
+
+def load_resolved_records(knowledge_root: Path) -> dict[str, dict]:
+    """Return a ``fingerprint -> record`` map collapsed by precedence (#199).
+
+    Unlike :func:`load_resolved` (which only needs the set of resolved
+    fingerprints for #198 suppression), the auto-apply lane (#199) needs the
+    full record per fingerprint — ``resolved_by`` (only ``"human"`` verdicts
+    auto-apply), ``action`` (the verdict to enact; authoritative over the
+    duplicate ``verdict`` key), and ``source_verdict_id`` (for the audit log).
+
+    Precedence when a fingerprint appears multiple times in the append-only
+    cache: a HUMAN record always wins over an AUTO record (a human
+    ratification supersedes a prior auto-resolution). Among records of the
+    same ``resolved_by`` class, the LAST one wins (most-recent append). This
+    is the operative "human verdict wins" rule — no pre-existing page-level
+    do-not-edit/locked flag exists in the codebase, so the ordering guardrail
+    reduces to human authority.
+
+    Missing file -> empty map. Malformed lines are skipped.
+    """
+    path = _cache_path(knowledge_root)
+    records: dict[str, dict] = {}
+    if not path.exists():
+        return records
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - filesystem edge
+        log.warning("fingerprint: failed to read resolved cache (%s)", exc)
+        return records
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        fp = obj.get("fingerprint")
+        if not (isinstance(fp, str) and fp):
+            continue
+        prior = records.get(fp)
+        # Human supersedes auto; otherwise last-write-wins within a class.
+        if (
+            prior is not None
+            and prior.get("resolved_by") == "human"
+            and obj.get("resolved_by") != "human"
+        ):
+            continue
+        records[fp] = obj
+    return records
 
 
 def is_resolved(knowledge_root: Path, fingerprint: str) -> bool:
