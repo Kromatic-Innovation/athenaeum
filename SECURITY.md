@@ -6,6 +6,8 @@ Athenaeum is pre-1.0. Only the latest release on `main` is supported with securi
 
 ## Reporting a vulnerability
 
+Athenaeum is maintained by Kromatic Innovation. Security reports go to **open-source@kromatic.com**, which is actively monitored by the maintainers.
+
 Please report security vulnerabilities privately via email to **open-source@kromatic.com** with the subject prefix `[athenaeum security]`. Do **not** open a public GitHub issue for security problems.
 
 Include:

@@ -16,6 +16,19 @@ newly-detected conflict that matches a prior human verdict is auto-applied
 instead of re-escalated. Together these stop resolved contradictions from
 regenerating on the next wiki build.
 
+> **Upgrade impact — answering a pending question now edits your source
+> memory files.** Before 0.7.0, resolving a pending contradiction only wrote
+> a sibling `raw/answers/` provenance doc and left the source memory file
+> untouched. As of 0.7.0 the ratified verdict is enacted on the
+> source-of-truth file(s): `correct_*` / `forget_*` delete the wrong or
+> transient member file, `keep_*` / `deprecate_both` write `superseded_by` /
+> `deprecated` frontmatter markers, and `retain_both` / `not_a_conflict` add a
+> non-destructive annotation. The `raw/answers/` provenance doc is still
+> written. This is the intended fix for contradiction recurrence — but it
+> means answering a question now authorizes modification (and, for
+> `correct_*` / `forget_*`, deletion) of source memory content. Review
+> verdicts accordingly.
+
 ### Added
 
 - **Source write-back when answering a pending question (#197).** Answering a
@@ -84,6 +97,8 @@ regenerating on the next wiki build.
   auto-resolver now requires 0.95 confidence before applying a destructive
   DELETE, and the principled-escalation render path is locked so low-confidence
   conflicts escalate to a human rather than being auto-deleted.
+- CI: bumped `dependabot/fetch-metadata` v2→v3 (#194) and
+  `1password/load-secrets-action` v2→v4 (#195).
 
 ## [0.6.1] - 2026-05-24
 
@@ -701,6 +716,9 @@ knowledge librarian.
 
 [Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.0...v0.3.1
