@@ -137,6 +137,24 @@ class TestWithRetry:
         assert excinfo.value.attempts == 3
         assert isinstance(excinfo.value.last_error, OverloadedError)
 
+    def test_exhaustion_guard_is_O_safe(self) -> None:
+        """The post-loop guard must NOT be a bare ``assert`` (issue #207).
+
+        Under ``python -O`` asserts are stripped, so a control-flow guard
+        built on ``assert`` vanishes. The real contract: after exhausting
+        retries the wrapper re-raises the captured transient error wrapped in
+        ``TransientAPIError`` — and it must do so via a runtime guard that
+        survives ``-O``. We assert the raised type is ``TransientAPIError``
+        (never ``AssertionError``), and that its ``last_error`` is the
+        original transient error.
+        """
+        original = _overloaded_error()
+        call = MagicMock(side_effect=original)
+        with pytest.raises(TransientAPIError) as excinfo:
+            with_retry(call, description="unit", max_attempts=2, sleep=_no_sleep)
+        assert not isinstance(excinfo.value, AssertionError)
+        assert excinfo.value.last_error is original
+
     def test_non_transient_error_is_not_retried(self) -> None:
         """A 400 BadRequestError fails fast — no retry, original error raised."""
         call = MagicMock(side_effect=_bad_request_error())
@@ -294,9 +312,7 @@ class TestRunDistinctGiveUpLog:
         sessions = root / "raw" / "sessions"
         sessions.mkdir(parents=True)
         (sessions / ".gitkeep").write_text("")
-        subprocess.run(
-            ["git", "init", "-q", "-b", "test-branch"], cwd=root, check=True
-        )
+        subprocess.run(["git", "init", "-q", "-b", "test-branch"], cwd=root, check=True)
         subprocess.run(
             ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
         )
@@ -327,9 +343,7 @@ class TestRunDistinctGiveUpLog:
         # Client always 529s on classify -> retries exhausted -> TransientAPIError.
         mock_client = MagicMock()
         mock_client.messages.create.side_effect = _overloaded_error()
-        monkeypatch.setattr(
-            anthropic_mod, "Anthropic", lambda **kwargs: mock_client
-        )
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
         caplog.set_level(logging.DEBUG, logger="athenaeum")
 
@@ -369,9 +383,7 @@ class TestRunDistinctGiveUpLog:
         # Non-transient error (400) -> fails fast, generic malformed log path.
         mock_client = MagicMock()
         mock_client.messages.create.side_effect = _bad_request_error()
-        monkeypatch.setattr(
-            anthropic_mod, "Anthropic", lambda **kwargs: mock_client
-        )
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
         caplog.set_level(logging.DEBUG, logger="athenaeum")
 
