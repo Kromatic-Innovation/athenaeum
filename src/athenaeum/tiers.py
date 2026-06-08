@@ -22,10 +22,12 @@ import anthropic
 
 from athenaeum._retry import with_retry
 from athenaeum.fingerprint import (
+    extract_passages,
     fingerprint_from_description,
     knowledge_root_from_pending,
     load_resolved,
     load_resolved_records,
+    normalize_side,
     record_resolution,
 )
 from athenaeum.models import (
@@ -729,6 +731,7 @@ def tier4_escalate(
         ResolutionProposal,
         apply_auto_resolution,
         enact_resolution,
+        flip_action,
         resolve_auto_apply,
         resolve_auto_apply_threshold_for,
     )
@@ -767,11 +770,19 @@ def tier4_escalate(
         if not fp:
             return
         recorded_auto_keys.add(key)
+        # Issue #199: persist per-side anchors (original a/b orientation) so a
+        # later swapped re-surfacing can be orientation-reconciled. None when
+        # the key had fewer than two recoverable passages.
+        norms = key_side_norms.get(key)
+        side_a_norm = norms[0] if norms else None
+        side_b_norm = norms[1] if norms else None
         record_resolution(
             knowledge_root,
             fingerprint=fp,
             verdict=str(getattr(prop, "action", "") or "auto-applied"),
             resolved_by="auto",
+            side_a_norm=side_a_norm,
+            side_b_norm=side_b_norm,
         )
 
     auto_apply_enabled = resolve_auto_apply(config) if config is not None else False
@@ -869,6 +880,10 @@ def tier4_escalate(
     # sites (which key off the dedup key) can recover the fingerprint to
     # persist on resolution.
     key_fingerprints: dict[tuple[str, ...], str] = {}
+    # Issue #199: per-source-pair-key normalized side anchors (a, b), recovered
+    # off the same two passages the fingerprint is built from. Persisted on
+    # auto-apply so a future swapped re-surfacing can be orientation-reconciled.
+    key_side_norms: dict[tuple[str, ...], tuple[str, str]] = {}
 
     for item in items:
         # Issue #198: suppress candidates whose claim-pair was already
@@ -895,33 +910,113 @@ def tier4_escalate(
                 # "verdict"; enact_resolution branches on proposal.action).
                 action = record.get("action") or record.get("verdict") or ""
                 source_verdict_id = record.get("source_verdict_id")
-                if action in ENACTING_ACTIONS and getattr(item, "members", None):
+                members = list(getattr(item, "members", None) or [])
+
+                if action not in ENACTING_ACTIONS:
+                    # Orientation-AGNOSTIC / non-enacting human verdict
+                    # (not_a_conflict, retain_both_with_context, free-text,
+                    # ...). Nothing to enact and orientation is irrelevant —
+                    # suppress the re-ask as #198 did, no block.
+                    log.info(
+                        "auto-applied prior human verdict %s to entity=%s "
+                        "(fingerprint=%s action=%s, non-enacting)",
+                        source_verdict_id,
+                        item.entity_name,
+                        item_fingerprint,
+                        action,
+                    )
+                    suppressed_count += 1
+                    continue
+
+                # Enacting verdict. It is orientation-DEPENDENT for the
+                # _a/_b variants (correct/keep/forget); deprecate_both is
+                # enacting but orientation-agnostic. Reconcile the new
+                # conflict's a/b orientation against the stored anchors so a
+                # swapped re-surfacing of the order-independent-fingerprinted
+                # pair does not delete/mark the WRONG member (data corruption).
+                resolved_action: str | None = None
+                if flip_action(action) is None:
+                    # Orientation-agnostic enacting verdict (deprecate_both):
+                    # apply unchanged when members are present.
+                    if members:
+                        resolved_action = action
+                else:
+                    # Orientation-dependent. Need stored anchors + the new
+                    # conflict's two normalized side texts to decide
+                    # ALIGNED vs REVERSED.
+                    stored_a = record.get("side_a_norm")
+                    stored_b = record.get("side_b_norm")
+                    new_passages = extract_passages(item.description)
+                    if (
+                        members
+                        and len(members) >= 2
+                        and isinstance(stored_a, str)
+                        and isinstance(stored_b, str)
+                        and stored_a
+                        and stored_b
+                        and len(new_passages) >= 2
+                    ):
+                        new_a = normalize_side(new_passages[0])
+                        new_b = normalize_side(new_passages[1])
+                        if new_a == stored_a and new_b == stored_b:
+                            resolved_action = action  # ALIGNED
+                        elif new_a == stored_b and new_b == stored_a:
+                            resolved_action = flip_action(action)  # REVERSED
+                        # else: ambiguous -> leave None -> escalate.
+
+                if resolved_action is None:
+                    # Cannot safely apply (no anchors, orientation
+                    # unresolvable, or members missing/short). FAIL SAFE:
+                    # fall through to escalation so a human handles it — never
+                    # silently drop the conflict (SHOULD #3). No "auto-applied"
+                    # log line, because nothing was enacted.
+                    log.info(
+                        "prior human verdict %s for entity=%s not safely "
+                        "auto-applicable (fingerprint=%s action=%s) -> "
+                        "escalating",
+                        source_verdict_id,
+                        item.entity_name,
+                        item_fingerprint,
+                        action,
+                    )
+                    # fall through (do NOT continue) to normal escalation.
+                else:
                     proposal = ResolutionProposal(
                         recommended_winner="a",
-                        action=action,
+                        action=resolved_action,  # type: ignore[arg-type]
                         rationale=(
                             "auto-applied prior human-ratified verdict "
                             f"{source_verdict_id}"
                         ),
                         confidence=1.0,
                     )
-                    # item.members are in resolver a/b order (members[0]=a).
-                    enact_resolution(proposal, list(item.members))
-                log.info(
-                    "auto-applied prior human verdict %s to entity=%s "
-                    "(fingerprint=%s action=%s)",
-                    source_verdict_id,
-                    item.entity_name,
-                    item_fingerprint,
-                    action,
-                )
-                suppressed_count += 1
-                continue
-            # Auto-only cache hit -> fall through to normal escalation.
+                    # members are in THIS new conflict's a/b order
+                    # (members[0]=side a); resolved_action is already
+                    # oriented to that order.
+                    enact_resolution(proposal, members)
+                    log.info(
+                        "auto-applied prior human verdict %s to entity=%s "
+                        "(fingerprint=%s stored_action=%s applied_action=%s)",
+                        source_verdict_id,
+                        item.entity_name,
+                        item_fingerprint,
+                        action,
+                        resolved_action,
+                    )
+                    suppressed_count += 1
+                    continue
+            # Auto-only cache hit, OR un-appliable human verdict -> fall
+            # through to normal escalation.
 
         key = _pair_key_from_description(item.description) if dedup_enabled else None
         if key is not None and item_fingerprint and key not in key_fingerprints:
             key_fingerprints[key] = item_fingerprint
+            item_passages = extract_passages(item.description)
+            if len(item_passages) >= 2:
+                key_side_norms[key] = (
+                    normalize_side(item_passages[0]),
+                    normalize_side(item_passages[1]),
+                )
         _consider_proposal(key, item)
 
         # Path A: pair already lives in the file as an open block.
