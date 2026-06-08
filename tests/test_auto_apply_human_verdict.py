@@ -331,6 +331,48 @@ class TestAutoApplyHumanVerdict:
         # auto: escalated, not suppressed, block created.
         assert auto_suppressed == 0 and auto_block
 
+    def test_failed_enact_escalates_no_autoapply_log(
+        self, tmp_path: Path, caplog, monkeypatch
+    ) -> None:
+        """#203: enact_resolution returns None (file op failed / no-op) on an
+        otherwise auto-appliable HUMAN verdict -> must ESCALATE (block created),
+        emit NO "auto-applied" log, and NOT increment suppressed_count.
+
+        Fix-dependent: pre-fix code ignores the return value, logs auto-applied
+        and suppresses even though the source member was NOT corrected
+        (stale-retain). Post-fix falls through to escalation.
+        """
+        import athenaeum.resolutions as resolutions_mod
+
+        root = _knowledge_root(tmp_path)
+        pending = root / "wiki" / "_pending_questions.md"
+        _record_human(root, "correct_a", source_verdict_id="human-verdict-enactfail")
+
+        member_a = _source_member(root, "pageF/a.md", CLAIM_A)  # correct
+        member_b = _source_member(root, "pageF/b.md", CLAIM_B)  # wrong
+        item = EscalationItem(
+            raw_ref="wiki/pageF.md",
+            entity_name="EnactFailPair",
+            conflict_type="factual",
+            description=_desc(CLAIM_A, CLAIM_B, (str(member_a), str(member_b))),
+            members=[str(member_a), str(member_b)],
+        )
+
+        # Force enact to fail (simulates OSError on unlink/write or a no-op).
+        monkeypatch.setattr(resolutions_mod, "enact_resolution", lambda *a, **k: None)
+
+        with caplog.at_level(logging.INFO, logger="athenaeum"):
+            suppressed = tier4_escalate([item], pending)
+
+        # Escalates: not suppressed, block created.
+        assert suppressed == 0
+        assert pending.exists()
+        assert "EnactFailPair" in pending.read_text()
+        # No "auto-applied" log because nothing was actually enacted.
+        assert not any(
+            "auto-applied prior human verdict" in r.message for r in caplog.records
+        ), [r.message for r in caplog.records]
+
     def test_material_change_escalates(self, tmp_path: Path) -> None:
         """Materially different claim -> different fingerprint -> no cache hit."""
         root = _knowledge_root(tmp_path)
