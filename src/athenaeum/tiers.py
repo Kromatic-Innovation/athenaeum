@@ -25,6 +25,7 @@ from athenaeum.fingerprint import (
     fingerprint_from_description,
     knowledge_root_from_pending,
     load_resolved,
+    load_resolved_records,
     record_resolution,
 )
 from athenaeum.models import (
@@ -714,6 +715,10 @@ def tier4_escalate(
     # candidate whose fingerprint is in this set is suppressed (not rendered).
     knowledge_root = knowledge_root_from_pending(pending_path)
     resolved_fingerprints = load_resolved(knowledge_root)
+    # Issue #199: full records (fingerprint -> {resolved_by, action,
+    # source_verdict_id, ...}) so the cache-hit branch can distinguish a
+    # HUMAN-ratified verdict (auto-apply) from an auto-only one (escalate).
+    resolved_records = load_resolved_records(knowledge_root)
     suppressed_count = 0
 
     # Late-import to avoid a hard module-load cycle with resolutions.py
@@ -721,6 +726,7 @@ def tier4_escalate(
     # here at module load via the top-of-file import block).
     from athenaeum.resolutions import (
         ENACTING_ACTIONS,
+        ResolutionProposal,
         apply_auto_resolution,
         enact_resolution,
         resolve_auto_apply,
@@ -873,8 +879,45 @@ def tier4_escalate(
             item.description, item.conflict_type
         )
         if item_fingerprint and item_fingerprint in resolved_fingerprints:
-            suppressed_count += 1
-            continue
+            # Issue #199 refines #198's blanket suppression into three
+            # outcomes on a cache hit:
+            #   1. HUMAN-ratified verdict -> AUTO-APPLY it to THIS new
+            #      conflict's source files (reuse #197's enact_resolution
+            #      write-back), no new block, log the source verdict id.
+            #   2. Auto-only verdict -> ESCALATE normally. Never auto-apply a
+            #      prior AUTO resolution (would compound an automated mistake);
+            #      let a human ratify it. This CHANGES #198's auto-suppression
+            #      for the auto-only case.
+            #   3. (Handled above by fingerprint mismatch -> no cache hit.)
+            record = resolved_records.get(item_fingerprint)
+            if record is not None and record.get("resolved_by") == "human":
+                # Read the "action" key as authoritative (it mirrors
+                # "verdict"; enact_resolution branches on proposal.action).
+                action = record.get("action") or record.get("verdict") or ""
+                source_verdict_id = record.get("source_verdict_id")
+                if action in ENACTING_ACTIONS and getattr(item, "members", None):
+                    proposal = ResolutionProposal(
+                        recommended_winner="a",
+                        action=action,
+                        rationale=(
+                            "auto-applied prior human-ratified verdict "
+                            f"{source_verdict_id}"
+                        ),
+                        confidence=1.0,
+                    )
+                    # item.members are in resolver a/b order (members[0]=a).
+                    enact_resolution(proposal, list(item.members))
+                log.info(
+                    "auto-applied prior human verdict %s to entity=%s "
+                    "(fingerprint=%s action=%s)",
+                    source_verdict_id,
+                    item.entity_name,
+                    item_fingerprint,
+                    action,
+                )
+                suppressed_count += 1
+                continue
+            # Auto-only cache hit -> fall through to normal escalation.
 
         key = _pair_key_from_description(item.description) if dedup_enabled else None
         if key is not None and item_fingerprint and key not in key_fingerprints:

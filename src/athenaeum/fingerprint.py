@@ -174,6 +174,57 @@ def load_resolved(knowledge_root: Path) -> set[str]:
     return resolved
 
 
+def load_resolved_records(knowledge_root: Path) -> dict[str, dict]:
+    """Return a ``fingerprint -> record`` map collapsed by precedence (#199).
+
+    Unlike :func:`load_resolved` (which only needs the set of resolved
+    fingerprints for #198 suppression), the auto-apply lane (#199) needs the
+    full record per fingerprint — ``resolved_by`` (only ``"human"`` verdicts
+    auto-apply), ``action`` (the verdict to enact; authoritative over the
+    duplicate ``verdict`` key), and ``source_verdict_id`` (for the audit log).
+
+    Precedence when a fingerprint appears multiple times in the append-only
+    cache: a HUMAN record always wins over an AUTO record (a human
+    ratification supersedes a prior auto-resolution). Among records of the
+    same ``resolved_by`` class, the LAST one wins (most-recent append). This
+    is the operative "human verdict wins" rule — no pre-existing page-level
+    do-not-edit/locked flag exists in the codebase, so the ordering guardrail
+    reduces to human authority.
+
+    Missing file -> empty map. Malformed lines are skipped.
+    """
+    path = _cache_path(knowledge_root)
+    records: dict[str, dict] = {}
+    if not path.exists():
+        return records
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - filesystem edge
+        log.warning("fingerprint: failed to read resolved cache (%s)", exc)
+        return records
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        fp = obj.get("fingerprint")
+        if not (isinstance(fp, str) and fp):
+            continue
+        prior = records.get(fp)
+        # Human supersedes auto; otherwise last-write-wins within a class.
+        if (
+            prior is not None
+            and prior.get("resolved_by") == "human"
+            and obj.get("resolved_by") != "human"
+        ):
+            continue
+        records[fp] = obj
+    return records
+
+
 def is_resolved(knowledge_root: Path, fingerprint: str) -> bool:
     """True when ``fingerprint`` is present in the resolved cache."""
     if not fingerprint:
