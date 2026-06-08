@@ -497,6 +497,264 @@ def test_tier4_round_trip_hostile_inputs(
     assert pq.source == raw_ref  # paths preserved
 
 
+# ---------------------------------------------------------------------------
+# Issue #197: source write-back — ratified verdicts edit the SOURCE memory file
+# ---------------------------------------------------------------------------
+
+
+def _source_block(
+    *,
+    entity: str = "Acme Corp",
+    source: str,
+    answer: str,
+    also_affects: str = "",
+    passage: str = "Acme is Series A as of 2024.",
+    checkbox: str = "[x]",
+) -> str:
+    description = f"Wiki says Series A; new raw implies Series B.\nPassage A: {passage}"
+    block = (
+        f'## [2026-04-20] Entity: "{entity}" (from {source})\n'
+        f"- {checkbox} Is Acme still Series A?\n"
+        f"**Conflict type**: principled\n"
+        f"**Description**: {description}\n"
+    )
+    if also_affects:
+        block += f"**Also affects**: {also_affects}\n"
+    block += f"\n{answer}\n"
+    return block
+
+
+def _write_source(path: Path, body: str, *, name: str = "Acme Corp") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\n"
+        "type: reference\n"
+        f"name: {name}\n"
+        "source: user:session-2026-04-10\n"
+        "---\n\n" + body,
+        encoding="utf-8",
+    )
+
+
+def _two_member_block(
+    *,
+    a_rel: str,
+    b_rel: str,
+    answer: str,
+    entity: str = "Acme Corp",
+) -> str:
+    """Pending block naming two source members in resolver a/b order.
+
+    ``**Member paths**: a, b`` carries the source paths the verdict applies
+    to; ``member_paths[0]`` is side a, ``member_paths[1]`` is side b — the
+    same order develop's ``enact_resolution`` expects.
+    """
+    return (
+        f'## [2026-04-20] Entity: "{entity}" (from {a_rel})\n'
+        f"- [x] Which Acme series is current?\n"
+        f"**Conflict type**: principled\n"
+        f"**Member paths**: {a_rel}, {b_rel}\n"
+        f"**Description**: Wiki says Series A; new raw implies Series B.\n"
+        f"\n{answer}\n"
+    )
+
+
+class TestSourceWriteBack:
+    def test_correct_deletes_wrong_member_file(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        # develop's contract: correct_a means side a is correct → DELETE the
+        # WRONG member (side b = member_paths[1]). The wiki regenerates clean
+        # from the surviving member; no in-place passage rewrite.
+        a_rel = "auto-memory/scope/reference_acme_a.md"
+        b_rel = "auto-memory/scope/reference_acme_b.md"
+        a = raw_root / a_rel
+        b = raw_root / b_rel
+        _write_source(a, "Acme is Series A as of 2024.\n")
+        _write_source(b, "Acme is Series B.\n", name="Acme B")
+
+        block = _two_member_block(
+            a_rel=a_rel,
+            b_rel=b_rel,
+            answer="correct_a\nSide a is right.",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 1
+
+        # Winner (a) survives; wrong member (b) deleted.
+        assert a.exists()
+        assert not b.exists()
+
+        # Provenance doc STILL written.
+        answer_files = list((raw_root / "answers").glob("*.md"))
+        assert len(answer_files) == 1
+
+    def test_keep_marks_loser_superseded(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        # keep_a: a wins, the LOSING member (b) is marked superseded_by the
+        # winner's name. Non-destructive — both files kept.
+        a_rel = "auto-memory/scope/reference_acme_a.md"
+        b_rel = "auto-memory/scope/reference_acme_b.md"
+        a = raw_root / a_rel
+        b = raw_root / b_rel
+        _write_source(a, "Acme is Series A.\n", name="Acme Corp")
+        _write_source(b, "Acme is Series B.\n", name="Acme B")
+
+        block = _two_member_block(
+            a_rel=a_rel, b_rel=b_rel, answer="keep_a\nKeep the A snapshot."
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        assert ingest_answers(pending_path, raw_root) == 1
+
+        # Both files kept; loser b marked superseded_by the winner name.
+        assert a.exists()
+        assert b.exists()
+        assert "superseded_by: Acme Corp" in b.read_text()
+
+    def test_deprecate_both_marks_both_members(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        a_rel = "auto-memory/scope/reference_acme_a.md"
+        b_rel = "auto-memory/scope/reference_acme_b.md"
+        a = raw_root / a_rel
+        b = raw_root / b_rel
+        _write_source(a, "Acme is Series A.\n")
+        _write_source(b, "Acme is Series B.\n", name="Acme B")
+
+        block = _two_member_block(
+            a_rel=a_rel, b_rel=b_rel, answer="deprecate_both\nBoth stale."
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        assert ingest_answers(pending_path, raw_root) == 1
+        assert "deprecated: true" in a.read_text()
+        assert "deprecated: true" in b.read_text()
+
+    def test_archive_marks_single_source_deprecated(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        # A human "archive/mark historical" verdict on a single named source
+        # reuses the deprecated:true frontmatter marker — no new editor.
+        src_rel = "auto-memory/scope/reference_acme.md"
+        src = raw_root / src_rel
+        _write_source(src, "Acme is Series A as of 2024.\n")
+
+        block = _source_block(source=src_rel, answer="archive\nNo longer relevant.")
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        assert ingest_answers(pending_path, raw_root) == 1
+        src_text = src.read_text()
+        assert "deprecated: true" in src_text
+        # Body content preserved (non-destructive whole-file marker).
+        assert "Acme is Series A as of 2024." in src_text
+
+    def test_retain_both_annotates_source_non_destructively(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        src_rel = "auto-memory/scope/reference_acme.md"
+        src = raw_root / src_rel
+        _write_source(src, "Acme is Series A as of 2024.\n")
+
+        block = _source_block(
+            source=src_rel,
+            answer=(
+                "retain_both_with_context\n"
+                "Series A is the 2024 snapshot; Series B is 2026. Both valid."
+            ),
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 1
+
+        src_text = src.read_text()
+        # Original passage NOT deleted.
+        assert "Acme is Series A as of 2024." in src_text
+        # Annotation recorded.
+        assert "2024 snapshot" in src_text
+
+        # Provenance still emitted.
+        assert len(list((raw_root / "answers").glob("*.md"))) == 1
+
+    def test_free_text_answer_without_token_annotated_not_dropped(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        src_rel = "auto-memory/scope/reference_acme.md"
+        src = raw_root / src_rel
+        _write_source(src, "Acme is Series A as of 2024.\n")
+
+        block = _source_block(
+            source=src_rel,
+            answer="Honestly I'm not sure but lean towards keeping it for now.",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 1
+
+        src_text = src.read_text()
+        # Free-text recorded as an authoritative annotation — never dropped.
+        assert "lean towards keeping it" in src_text
+        # Non-destructive: original passage preserved.
+        assert "Acme is Series A as of 2024." in src_text
+
+    def test_provenance_still_written_when_source_missing(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        # Source file does not exist on disk — write-back is a no-op but the
+        # audit trail must still be emitted.
+        block = _source_block(
+            source="auto-memory/scope/gone.md",
+            answer="correct_a\nNew value.",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 1
+        assert len(list((raw_root / "answers").glob("*.md"))) == 1
+
+
+def test_corrected_source_no_longer_regenerates_conflict(
+    pending_path: Path, raw_root: Path
+) -> None:
+    """Regression / real acceptance (issue #197).
+
+    After ingest enacts ``correct_a``, the WRONG member file (side b) is
+    deleted. Re-running the detector over the SURVIVING member alone cannot
+    re-flag the same claim-pair — the conflicting partner is gone.
+    """
+    a_rel = "auto-memory/scope/reference_acme_a.md"
+    b_rel = "auto-memory/scope/reference_acme_b.md"
+    a = raw_root / a_rel
+    b = raw_root / b_rel
+    _write_source(a, "Acme is Series A as of 2024.\n")
+    _write_source(b, "Acme is Series B as of 2026.\n", name="Acme B")
+
+    block = _two_member_block(
+        a_rel=a_rel, b_rel=b_rel, answer="correct_a\nSide a is right."
+    )
+    pending_path.write_text("# Pending Questions\n\n" + block)
+
+    assert ingest_answers(pending_path, raw_root) == 1
+
+    # Wrong member (b) deleted; surviving member (a) kept.
+    assert a.exists()
+    assert not b.exists()
+
+    # A detector run over the surviving member alone yields no fresh
+    # escalation — the conflicting partner is gone.
+    from athenaeum.contradictions import detect_contradictions
+    from athenaeum.models import AutoMemoryFile
+
+    am = AutoMemoryFile(path=a, origin_scope="scope", memory_type="reference")
+    result = detect_contradictions([am], client=None)
+    assert result.detected is False
+
+
 def test_pending_question_is_dataclass() -> None:
     pq = PendingQuestion(
         id="abc",
