@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-08
+
+Patch release addressing two follow-up nits from the #207 Zenodotus review.
+No behavior change under normal execution.
+
+### Fixed
+
+- Hardened the transient-retry exhaustion guard in `_retry.py` so it survives
+  `python -O` (replaced an `assert` used for control flow with an explicit
+  runtime guard); the exhausted-retries path still re-raises the captured
+  transient error. (#207)
+- Resolved-contradiction cache records now write a single authoritative
+  `action` key instead of duplicate `verdict`/`action` keys; the reader still
+  tolerates legacy `verdict`-only records. (#207)
+
 ## [0.7.0] - 2026-06-08
 
 Pending-question recurrence fix. Answering an adjudicated contradiction now
@@ -714,7 +729,8 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.5.0...v0.6.0
