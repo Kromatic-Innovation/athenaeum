@@ -229,8 +229,16 @@ class TestTier4Dedup:
         assert content.count("## [") == 1
         assert "**Also affects**: Beta" in content
 
-    def test_resurrection_creates_new_block(self, tmp_path: Path) -> None:
-        """Once a block is archived ([x]), the same pair re-firing makes a NEW block."""
+    def test_resolved_pair_is_suppressed_not_resurrected(self, tmp_path: Path) -> None:
+        """Issue #198 supersedes the pre-#198 #157 'resurrection' rule.
+
+        Previously (``test_resurrection_creates_new_block``) an archived [x]
+        block that re-fired produced a brand-new block. With the resolved-
+        contradiction fingerprint cache, ``ingest_answers`` records the human
+        verdict's fingerprint, so the SAME claim-pair re-firing is SUPPRESSED
+        instead of resurrected — which is the whole point of #198 (a settled
+        claim-pair stops re-surfacing as a fresh pending question).
+        """
         pending = tmp_path / "_pending_questions.md"
         raw_root = tmp_path / "raw"
 
@@ -245,11 +253,13 @@ class TestTier4Dedup:
         # Open file should now be just the header.
         assert "## [" not in pending.read_text()
 
-        # Same pair re-fires — must produce a fresh block.
-        tier4_escalate([_item("Alpha", _desc_with_members("a.md", "b.md"))], pending)
+        # Same pair re-fires — #198 suppresses it (no new block).
+        suppressed = tier4_escalate(
+            [_item("Alpha", _desc_with_members("a.md", "b.md"))], pending
+        )
         content = pending.read_text()
-        assert content.count("## [") == 1
-        assert "**Also affects**" not in content
+        assert suppressed == 1
+        assert content.count("## [") == 0
 
     def test_unsourced_fallback_dedup(self, tmp_path: Path) -> None:
         pending = tmp_path / "_pending_questions.md"
