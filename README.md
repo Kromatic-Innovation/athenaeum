@@ -313,8 +313,8 @@ release line:
   welcome.
 - **FTS5 index rebuilds are non-atomic and unlocked.** A shell hook and the
   librarian run rebuilding simultaneously can race; the window is small and
-  single-user wikis do not hit it in practice, but multi-writer safety is
-  v0.3 work. Workaround: don't invoke `athenaeum rebuild-index` and
+  single-user wikis do not hit it in practice, but hardened multi-writer
+  safety remains future work. Workaround: don't invoke `athenaeum rebuild-index` and
   `athenaeum run` concurrently on the same `$KNOWLEDGE_ROOT`.
 - **The `keyword` search backend is a scan-on-query fallback.** It reads
   every wiki page on every query; fine under ~1,000 entities, painful past
