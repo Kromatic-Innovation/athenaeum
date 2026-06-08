@@ -48,6 +48,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from athenaeum.fingerprint import record_resolution
+
 log = logging.getLogger(__name__)
 
 # Header grammar — matches `## [ISO-DATE] Entity: "{name}" (from {ref})`.
@@ -117,6 +119,11 @@ class PendingQuestion:
     answered: bool
     answer_lines: list[str]
     raw_block: str
+    # Issue #198: claim-pair fingerprint embedded by tier4_escalate. Recovered
+    # off the ``**Fingerprint**:`` line so resolution can persist the
+    # adjudication to ``raw/_resolved_contradictions.jsonl``. Empty when the
+    # block predates #198 or carried no recoverable passage pair.
+    fingerprint: str = ""
     # Issue #157: entities sharing the same source-memory pair that
     # got merged into this block instead of getting their own. The
     # primary entity (header) is NOT included here. Empty by default
@@ -293,6 +300,7 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
     description = ""
     answer_lines: list[str] = []
     also_affects: list[str] = []
+    fingerprint = ""
 
     # Tracks whether we're still accumulating continuation lines into the
     # description field. A **Description**: line opens the window; the next
@@ -321,6 +329,13 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
             payload = stripped.removeprefix("**Also affects**:").strip()
             also_affects = [name.strip() for name in payload.split(",") if name.strip()]
             continue
+        if stripped.startswith("**Fingerprint**:"):
+            # Issue #198: claim-pair fingerprint metadata. Recognized so it
+            # does NOT leak into answer_lines (which would forge a phantom
+            # user answer).
+            in_description = False
+            fingerprint = stripped.removeprefix("**Fingerprint**:").strip()
+            continue
         if in_description:
             # Continuation: consume into description until we hit a terminator.
             # Blank line or another ``**Key**:`` tag closes the window.
@@ -341,6 +356,9 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
                     also_affects = [
                         name.strip() for name in payload.split(",") if name.strip()
                     ]
+                    continue
+                if stripped.startswith("**Fingerprint**:"):
+                    fingerprint = stripped.removeprefix("**Fingerprint**:").strip()
                     continue
                 # Unknown **Key**: — treat as answer body.
                 answer_lines.append(raw_line)
@@ -368,6 +386,7 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
         answered=answered,
         answer_lines=answer_lines,
         raw_block=block_text,
+        fingerprint=fingerprint,
         also_affects=also_affects,
     )
 
@@ -733,6 +752,22 @@ def ingest_answers(pending_path: Path, raw_root: Path) -> int:
                 "for entity=%s",
                 edited,
                 pq.entity,
+            )
+
+        # Issue #198: persist the human resolution to the fingerprint cache so
+        # the settled claim-pair stops re-escalating on future pages.
+        # resolved_by="human" is load-bearing for sibling #199 (only human
+        # verdicts auto-apply there). No-op when the block carried no
+        # fingerprint (pre-#198 block or no recoverable passage pair).
+        if pq.fingerprint:
+            verdict, _ = _parse_verdict("\n".join(pq.answer_lines))
+            record_resolution(
+                raw_root.parent,
+                fingerprint=pq.fingerprint,
+                verdict=verdict or "human-answered",
+                resolved_by="human",
+                source_verdict_id=pq.id,
+                resolved_at=iso_ts,
             )
 
         archived_new.append(_render_archive_block(pq, iso_ts))
