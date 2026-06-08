@@ -7,8 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-08
+
+Pending-question recurrence fix. Answering an adjudicated contradiction now
+writes the ratified verdict back to the source-of-truth memory files, the
+resolved pair is fingerprinted so the detector stops re-flagging it, and a
+newly-detected conflict that matches a prior human verdict is auto-applied
+instead of re-escalated. Together these stop resolved contradictions from
+regenerating on the next wiki build.
+
+### Added
+
+- **Source write-back when answering a pending question (#197).** Answering a
+  pending question now writes the ratified verdict back to the source-of-truth
+  memory file(s) via the existing `enact_resolution` machinery — `pq.source`
+  plus every involved member — rather than only emitting a sibling
+  `raw/answers/` provenance doc. `correct_*`, `forget_*`, `keep_*`, and
+  `deprecate_both` enact destructively on the source; `retain_both` and
+  `not_a_conflict` annotate non-destructively; the provenance doc is still
+  written. This stops adjudicated contradictions from regenerating on the next
+  wiki build.
+- **Resolved-contradiction fingerprint cache (#198).** Adjudicated claim-pairs
+  now get a page-independent, order-independent fingerprint persisted to
+  `raw/_resolved_contradictions.jsonl` on resolution (human or auto). The
+  detector suppresses already-resolved fingerprints and logs the suppression
+  count. A material change to a claim changes its fingerprint and re-enables
+  escalation.
+- **Auto-apply of prior human-ratified verdicts (#199).** A newly-detected
+  conflict that matches a prior **human** verdict is auto-applied without
+  re-escalation and routed through source write-back. Only human-ratified
+  verdicts auto-apply — prior auto-resolutions never do. The match is
+  orientation-safe: per-side claim anchors are stored so the verdict is
+  flipped to the new conflict's a/b orientation rather than deleting the
+  correct claim. Unresolvable orientation or a failed enact falls through to
+  escalation.
+
 ### Fixed
 
+- **Failed auto-apply enact now escalates instead of silently suppressing
+  (#203).** If applying a prior verdict's enact fails (file-op error or no-op),
+  the conflict escalates to a pending question rather than being silently
+  suppressed.
+- **Keep/deprecate verdicts are now enacted on the source (#191).** Resolving a
+  contradiction with a keep/deprecate verdict writes supersede/deprecate
+  markers to the source memory file rather than only recording the decision.
+- **Correct/forget verdicts are now enacted, not just recorded (#166).**
+  Resolving with a `correct` or `forget` verdict applies the edit to the source
+  memory file. Adds a disambiguation mode for pairs that are distinct entities
+  rather than a true contradiction, and routes `correct`/`forget` through the
+  tier and merge render paths. Pending-question blocks that lost their checkbox
+  line are now recovered rather than dropped.
 - **Transient Anthropic overload no longer becomes a permanent librarian
   backlog** (#193). The per-file classification path (`tiers.py` tier2/tier3
   calls) now retries HTTP 429 (`RateLimitError`), 529 (`OverloadedError`),
@@ -32,6 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The cap is a ceiling, not a target — small bases never approach it.
   Override via `contradiction.resolve_max_per_run` (yaml) or
   `ATHENAEUM_RESOLVE_MAX_PER_RUN` (env).
+- **Destructive auto-DELETE bar raised to 0.95 confidence (#166).** The
+  auto-resolver now requires 0.95 confidence before applying a destructive
+  DELETE, and the principled-escalation render path is locked so low-confidence
+  conflicts escalate to a human rather than being auto-deleted.
 
 ## [0.6.1] - 2026-05-24
 
@@ -647,7 +699,8 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.6.1...v0.7.0
 [0.4.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.3.0...v0.3.1
