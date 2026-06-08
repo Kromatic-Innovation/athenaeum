@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["knowledge-management", "ai", "llm", "memory", "compilation"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
