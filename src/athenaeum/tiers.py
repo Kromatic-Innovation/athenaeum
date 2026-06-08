@@ -21,6 +21,12 @@ from typing import Any
 import anthropic
 
 from athenaeum._retry import with_retry
+from athenaeum.fingerprint import (
+    fingerprint_from_description,
+    knowledge_root_from_pending,
+    load_resolved,
+    record_resolution,
+)
 from athenaeum.models import (
     ClassifiedEntity,
     EntityAction,
@@ -677,8 +683,13 @@ def tier4_escalate(
     pending_path: Path,
     *,
     config: dict[str, Any] | None = None,
-) -> None:
+) -> int:
     """Append escalation items to ``_pending_questions.md``.
+
+    Returns the number of candidate escalations SUPPRESSED because their
+    claim-pair fingerprint was already resolved (issue #198). A settled
+    claim-pair stops re-surfacing as a fresh pending question on every new
+    page that carries it.
 
     Each block is rendered with a leading checkbox line directly under the
     header so the user (or the ``resolve_question`` MCP tool) can flip
@@ -695,7 +706,15 @@ def tier4_escalate(
     get the pre-#156 behavior: every block is written as ``- [ ]``.
     """
     if not items:
-        return
+        return 0
+
+    # Issue #198: resolved-contradiction suppression. Derive the knowledge
+    # root from the pending-questions path (``<root>/wiki/_pending_questions.md``)
+    # and load the set of already-adjudicated claim-pair fingerprints. A
+    # candidate whose fingerprint is in this set is suppressed (not rendered).
+    knowledge_root = knowledge_root_from_pending(pending_path)
+    resolved_fingerprints = load_resolved(knowledge_root)
+    suppressed_count = 0
 
     # Late-import to avoid a hard module-load cycle with resolutions.py
     # (resolutions imports AutoMemoryFile from models, models is imported
@@ -728,6 +747,26 @@ def tier4_escalate(
             return
         enacted_keys.add(guard)
         enact_resolution(prop, members)
+
+    # Issue #198: record an auto-applied resolution to the fingerprint cache
+    # so a settled pair stops re-escalating. Keyed by source-pair key →
+    # fingerprint (computed at loop top). resolved_by="auto" is load-bearing
+    # for sibling #199. Once-only per key via ``recorded_auto_keys``.
+    recorded_auto_keys: set[Any] = set()
+
+    def _record_auto(prop: Any, key: Any) -> None:
+        if key is None or key in recorded_auto_keys:
+            return
+        fp = key_fingerprints.get(key)
+        if not fp:
+            return
+        recorded_auto_keys.add(key)
+        record_resolution(
+            knowledge_root,
+            fingerprint=fp,
+            verdict=str(getattr(prop, "action", "") or "auto-applied"),
+            resolved_by="auto",
+        )
 
     auto_apply_enabled = resolve_auto_apply(config) if config is not None else False
     resolver_model_id = _resolver_model(config) if config is not None else None
@@ -820,8 +859,26 @@ def tier4_escalate(
         ):
             best_proposal[k] = prop
 
+    # Issue #198: per-source-pair-key fingerprint, so the auto-apply record
+    # sites (which key off the dedup key) can recover the fingerprint to
+    # persist on resolution.
+    key_fingerprints: dict[tuple[str, ...], str] = {}
+
     for item in items:
+        # Issue #198: suppress candidates whose claim-pair was already
+        # adjudicated (human or auto). Computed from the two passages +
+        # conflict_type — page-independent, so a settled pair never re-fires
+        # regardless of which page surfaced it.
+        item_fingerprint = fingerprint_from_description(
+            item.description, item.conflict_type
+        )
+        if item_fingerprint and item_fingerprint in resolved_fingerprints:
+            suppressed_count += 1
+            continue
+
         key = _pair_key_from_description(item.description) if dedup_enabled else None
+        if key is not None and item_fingerprint and key not in key_fingerprints:
+            key_fingerprints[key] = item_fingerprint
         _consider_proposal(key, item)
 
         # Path A: pair already lives in the file as an open block.
@@ -850,11 +907,18 @@ def tier4_escalate(
                 item.description, item.entity_name, item.conflict_type
             )
         escaped_entity = item.entity_name.replace("\\", "\\\\").replace('"', '\\"')
+        # Issue #198: embed the claim-pair fingerprint so the resolution
+        # path (human ingest / auto-apply) can recover it and persist the
+        # adjudication to the cache.
+        fingerprint_line = (
+            f"**Fingerprint**: {item_fingerprint}\n" if item_fingerprint else ""
+        )
         block = (
             f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'
             f"- [ ] {question}\n\n"
             f"**Conflict type**: {item.conflict_type}\n"
             f"**Description**: {item.description}\n"
+            f"{fingerprint_line}"
         )
         proposal = getattr(item, "proposal", None)
         if auto_apply_enabled:
@@ -870,6 +934,7 @@ def tier4_escalate(
                     gate_threshold,
                 )
                 _maybe_enact(proposal, getattr(item, "members", None), key)
+                _record_auto(proposal, key)
         if key is not None:
             batch_index[key] = len(sections)
         sections.append(block)
@@ -898,6 +963,7 @@ def tier4_escalate(
                     gate_threshold,
                 )
                 _maybe_enact(best, best_members.get(key), key)
+                _record_auto(best, key)
             sections[slot] = updated
 
     # Apply file-merges to the existing pending text (if any).
@@ -939,6 +1005,7 @@ def tier4_escalate(
                         _maybe_enact(
                             best, best_members.get(key_for_block), key_for_block
                         )
+                        _record_auto(best, key_for_block)
                     updated_block = rewritten
             # Replace verbatim — raw_block came from parse, so it lives
             # inside existing_text byte-for-byte. Guard with `count=1` to
@@ -975,3 +1042,9 @@ def tier4_escalate(
         len(sections),
         sum(len(v) for v in file_merges.values()),
     )
+
+    # Issue #198: surface suppression once per pass (observable, not silent).
+    if suppressed_count:
+        log.info("suppressed %d already-adjudicated conflicts", suppressed_count)
+
+    return suppressed_count
