@@ -1451,6 +1451,36 @@ _ENACT_MARK_ACTIONS: frozenset[str] = frozenset(
 # non-destructive marking actions (#191).
 ENACTING_ACTIONS: frozenset[str] = frozenset(_ENACT_DELETE_INDEX) | _ENACT_MARK_ACTIONS
 
+# Issue #199: orientation-flip map. The claim-pair fingerprint is
+# ORDER-INDEPENDENT (it sorts the two normalized claims before hashing), so a
+# settled pair re-surfaced on a new page may arrive with its a/b sides SWAPPED
+# relative to the orientation the original verdict was issued in. Every
+# enacting verdict here is orientation-DEPENDENT (it deletes/marks side a OR
+# side b by index), so when the new conflict's orientation is REVERSED the
+# stored action must be flipped to hit the correct member. The auto-apply lane
+# (:mod:`athenaeum.tiers`) reconciles orientation via the persisted per-side
+# anchors and applies this flip when reversed. ``deprecate_both`` /
+# ``not_a_conflict`` / ``retain_both_with_context`` are orientation-AGNOSTIC
+# and deliberately absent — they need no flip.
+_FLIP_ACTION: dict[str, str] = {
+    CORRECT_A_ACTION: CORRECT_B_ACTION,
+    CORRECT_B_ACTION: CORRECT_A_ACTION,
+    KEEP_A_ACTION: KEEP_B_ACTION,
+    KEEP_B_ACTION: KEEP_A_ACTION,
+    FORGET_A_ACTION: FORGET_B_ACTION,
+    FORGET_B_ACTION: FORGET_A_ACTION,
+}
+
+
+def flip_action(action: str) -> str | None:
+    """Return the a/b-mirrored action for an orientation-dependent verdict.
+
+    ``None`` when the action has no orientation (``deprecate_both`` and the
+    non-enacting verdicts) — the caller applies it unchanged. See
+    :data:`_FLIP_ACTION` for the rationale.
+    """
+    return _FLIP_ACTION.get(action)
+
 
 def _mark_member_frontmatter(path: Path, key: str, value: Any) -> bool:
     """Set ``key: value`` in a member file's YAML frontmatter, in place.

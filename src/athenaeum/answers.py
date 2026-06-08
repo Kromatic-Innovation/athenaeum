@@ -48,7 +48,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from athenaeum.fingerprint import record_resolution
+from athenaeum.fingerprint import (
+    extract_passages,
+    normalize_side,
+    record_resolution,
+)
 
 log = logging.getLogger(__name__)
 
@@ -761,6 +765,18 @@ def ingest_answers(pending_path: Path, raw_root: Path) -> int:
         # fingerprint (pre-#198 block or no recoverable passage pair).
         if pq.fingerprint:
             verdict, _ = _parse_verdict("\n".join(pq.answer_lines))
+            # Issue #199: persist per-side anchors in the verdict's ORIGINAL
+            # a/b orientation so the auto-apply lane can reconcile a swapped
+            # re-surfacing of the same (order-independent-fingerprinted) pair.
+            # side a = Passage 1 = pq.source = member_paths[0]; side b =
+            # Passage 2. Normalized with the SAME helper the fingerprint uses.
+            side_passages = extract_passages(pq.description)
+            side_a_norm = (
+                normalize_side(side_passages[0]) if len(side_passages) >= 1 else None
+            )
+            side_b_norm = (
+                normalize_side(side_passages[1]) if len(side_passages) >= 2 else None
+            )
             record_resolution(
                 raw_root.parent,
                 fingerprint=pq.fingerprint,
@@ -768,6 +784,8 @@ def ingest_answers(pending_path: Path, raw_root: Path) -> int:
                 resolved_by="human",
                 source_verdict_id=pq.id,
                 resolved_at=iso_ts,
+                side_a_norm=side_a_norm,
+                side_b_norm=side_b_norm,
             )
 
         archived_new.append(_render_archive_block(pq, iso_ts))

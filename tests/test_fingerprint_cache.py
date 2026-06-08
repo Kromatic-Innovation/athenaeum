@@ -171,9 +171,14 @@ class TestEndToEndSuppression:
         pending = root / "wiki" / "_pending_questions.md"
 
         # Page X surfaces the conflict; record its resolution to the cache.
+        # Use an ORIENTATION-AGNOSTIC verdict (not_a_conflict) so this stays a
+        # pure-suppression test: #199's orientation reconciliation only gates
+        # the orientation-DEPENDENT enacting verdicts (correct/keep/forget),
+        # which — with no real source members — would correctly escalate
+        # rather than silently suppress. not_a_conflict suppresses unchanged.
         fp = claim_pair_fingerprint(CLAIM_A, CLAIM_B, "factual")
         record_resolution(
-            root, fingerprint=fp, verdict="correct_a", resolved_by="human"
+            root, fingerprint=fp, verdict="not_a_conflict", resolved_by="human"
         )
 
         # Page Y carries the SAME claim-pair (swapped order, different members).
