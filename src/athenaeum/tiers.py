@@ -906,8 +906,9 @@ def tier4_escalate(
             #   3. (Handled above by fingerprint mismatch -> no cache hit.)
             record = resolved_records.get(item_fingerprint)
             if record is not None and record.get("resolved_by") == "human":
-                # Read the "action" key as authoritative (it mirrors
-                # "verdict"; enact_resolution branches on proposal.action).
+                # "action" is authoritative (enact_resolution branches on
+                # proposal.action); fall back to a legacy/external
+                # "verdict"-only record defensively (issue #207).
                 action = record.get("action") or record.get("verdict") or ""
                 source_verdict_id = record.get("source_verdict_id")
                 members = list(getattr(item, "members", None) or [])

@@ -158,5 +158,6 @@ def with_retry(
             )
             sleep(delay)
 
-    assert last_error is not None  # only reachable after a transient failure
+    if last_error is None:  # pragma: no cover - only reachable on logic error
+        raise RuntimeError("retry loop exited without capturing an error")
     raise TransientAPIError(max_attempts, last_error)

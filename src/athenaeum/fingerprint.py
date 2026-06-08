@@ -150,7 +150,9 @@ def record_resolution(
         return
     record = {
         "fingerprint": fingerprint,
-        "verdict": verdict,
+        # ``action`` is the single authoritative key (issue #207). Consumers
+        # (load_resolved_records / the #199 auto-apply path) read ``action``;
+        # the ``verdict`` parameter is the value, not a second stored key.
         "action": verdict,
         "resolved_by": resolved_by,
         "source_verdict_id": source_verdict_id,
@@ -207,8 +209,9 @@ def load_resolved_records(knowledge_root: Path) -> dict[str, dict]:
     Unlike :func:`load_resolved` (which only needs the set of resolved
     fingerprints for #198 suppression), the auto-apply lane (#199) needs the
     full record per fingerprint — ``resolved_by`` (only ``"human"`` verdicts
-    auto-apply), ``action`` (the verdict to enact; authoritative over the
-    duplicate ``verdict`` key), and ``source_verdict_id`` (for the audit log).
+    auto-apply), ``action`` (the authoritative verdict to enact; a legacy or
+    external ``verdict``-only record is tolerated as a read-time fallback),
+    and ``source_verdict_id`` (for the audit log).
 
     Precedence when a fingerprint appears multiple times in the append-only
     cache: a HUMAN record always wins over an AUTO record (a human
