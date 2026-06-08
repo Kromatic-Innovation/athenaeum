@@ -553,35 +553,36 @@ def _writeback_source(pq: PendingQuestion, roots: list[Path]) -> int:
     source files edited. Never raises — a write-back failure must not block
     the provenance/archive path.
     """
-    from athenaeum.resolutions import (
-        ENACTING_ACTIONS,
-        ResolutionProposal,
-        _annotate_body,
-        _mark_member_frontmatter,
-        enact_resolution,
-    )
-
-    # ``**Member paths**:`` is block metadata that the block parser routes
-    # into answer_lines (it is not a recognized key). Strip it (and any stray
-    # ``Passage N:`` line) so it can't masquerade as the user's answer body.
-    answer_body = "\n".join(
-        line
-        for line in pq.answer_lines
-        if not _MEMBER_PATHS_RE.match(line) and not _PASSAGE_RE.match(line)
-    ).strip()
-    if not answer_body:
-        return 0
-
-    # Resolver a/b order: pq.source is side a; ``**Member paths**:`` refs are
-    # the additional members the block involves (also-affects), side b onward.
-    refs = [pq.source, *_extract_member_path_refs(pq.raw_block)]
-    member_paths = _resolve_source_files(refs, roots)
-    if not member_paths:
-        return 0
-
-    verdict, remainder = _parse_verdict(answer_body)
-
     try:
+        from athenaeum.resolutions import (
+            ENACTING_ACTIONS,
+            ResolutionProposal,
+            _annotate_body,
+            _mark_member_frontmatter,
+            enact_resolution,
+        )
+
+        # ``**Member paths**:`` is block metadata that the block parser routes
+        # into answer_lines (it is not a recognized key). Strip it (and any
+        # stray ``Passage N:`` line) so it can't masquerade as the answer body.
+        answer_body = "\n".join(
+            line
+            for line in pq.answer_lines
+            if not _MEMBER_PATHS_RE.match(line) and not _PASSAGE_RE.match(line)
+        ).strip()
+        if not answer_body:
+            return 0
+
+        # Resolver a/b order: pq.source is side a; ``**Member paths**:`` refs
+        # are the additional members the block involves (also-affects), side b
+        # onward.
+        refs = [pq.source, *_extract_member_path_refs(pq.raw_block)]
+        member_paths = _resolve_source_files(refs, roots)
+        if not member_paths:
+            return 0
+
+        verdict, remainder = _parse_verdict(answer_body)
+
         # --- Enacting verdicts: reuse develop's canonical enact machinery. ---
         # correct_*/forget_* DELETE the wrong/transient member file;
         # keep_*/deprecate_both MARK frontmatter (superseded_by/deprecated).

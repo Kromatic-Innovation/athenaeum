@@ -723,16 +723,59 @@ def test_corrected_source_no_longer_regenerates_conflict(
 ) -> None:
     """Regression / real acceptance (issue #197).
 
-    After ingest enacts ``correct_a``, the WRONG member file (side b) is
-    deleted. Re-running the detector over the SURVIVING member alone cannot
-    re-flag the same claim-pair — the conflicting partner is gone.
+    Proves the fix changes the detector's verdict, not merely the cluster
+    structure. A genuinely-conflicting 2-member cluster (a vs b) WOULD flag
+    pre-ingest (proven with a stubbed contradiction verdict). After ingest
+    enacts ``correct_a`` and write-back DELETES the wrong member (b), the
+    surviving member SET — rebuilt from disk — no longer contains the
+    conflicting partner, so the same stubbed detector cannot re-flag it.
+
+    Fix-dependent: if write-back is disabled, b survives on disk, the
+    rebuilt set is still ``[a, b]``, and the stub re-flags ``detected=True``
+    — so this test goes red. The post-ingest assertion's outcome is driven
+    by whether the wrong member was actually removed, not by a structural
+    singleton/None-client short-circuit.
     """
+    from unittest.mock import MagicMock
+
+    from athenaeum.contradictions import detect_contradictions
+    from athenaeum.models import AutoMemoryFile
+
     a_rel = "auto-memory/scope/reference_acme_a.md"
     b_rel = "auto-memory/scope/reference_acme_b.md"
     a = raw_root / a_rel
     b = raw_root / b_rel
     _write_source(a, "Acme is Series A as of 2024.\n")
     _write_source(b, "Acme is Series B as of 2026.\n", name="Acme B")
+
+    # Stub the Anthropic client to return a contradiction verdict for the
+    # a/b claim-pair. Mirrors tests/test_contradictions.py::_fake_client —
+    # no network call is made.
+    contradiction_payload = (
+        '{"detected": true, "conflict_type": "factual", '
+        '"members_involved": ["scope/reference_acme_a.md", '
+        '"scope/reference_acme_b.md"], '
+        '"conflicting_passages": ["Acme is Series A as of 2024.", '
+        '"Acme is Series B as of 2026."], '
+        '"rationale": "Series A vs Series B for the same company."}'
+    )
+    stub_client = MagicMock()
+    stub_response = MagicMock()
+    stub_response.content = [MagicMock(text=contradiction_payload)]
+    stub_client.messages.create.return_value = stub_response
+
+    def _members_on_disk() -> list[AutoMemoryFile]:
+        """Rebuild the member cluster from whatever survives on disk."""
+        return [
+            AutoMemoryFile(path=p, origin_scope="scope", memory_type="reference")
+            for p in sorted((raw_root / "auto-memory/scope").glob("*.md"))
+        ]
+
+    # PRE-ingest: the genuine 2-member cluster WOULD flag. This proves the
+    # pair really conflicts and the stub really detects it — independent of
+    # any write-back behavior.
+    pre = detect_contradictions(_members_on_disk(), client=stub_client)
+    assert pre.detected is True
 
     block = _two_member_block(
         a_rel=a_rel, b_rel=b_rel, answer="correct_a\nSide a is right."
@@ -741,18 +784,17 @@ def test_corrected_source_no_longer_regenerates_conflict(
 
     assert ingest_answers(pending_path, raw_root) == 1
 
-    # Wrong member (b) deleted; surviving member (a) kept.
+    # Write-back enacted ``correct_a``: wrong member (b) deleted, a kept.
     assert a.exists()
     assert not b.exists()
 
-    # A detector run over the surviving member alone yields no fresh
-    # escalation — the conflicting partner is gone.
-    from athenaeum.contradictions import detect_contradictions
-    from athenaeum.models import AutoMemoryFile
-
-    am = AutoMemoryFile(path=a, origin_scope="scope", memory_type="reference")
-    result = detect_contradictions([am], client=None)
-    assert result.detected is False
+    # POST-ingest: re-run the SAME stub detector over the surviving member
+    # set. The conflicting partner is gone, so the cluster can no longer be
+    # flagged. This is fix-dependent — with write-back disabled, b would
+    # still be on disk, the set would still be [a, b], and the stub would
+    # re-flag detected=True (test would fail).
+    post = detect_contradictions(_members_on_disk(), client=stub_client)
+    assert post.detected is False
 
 
 def test_pending_question_is_dataclass() -> None:
