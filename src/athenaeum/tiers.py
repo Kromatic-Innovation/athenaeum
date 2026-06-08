@@ -993,18 +993,37 @@ def tier4_escalate(
                     # members are in THIS new conflict's a/b order
                     # (members[0]=side a); resolved_action is already
                     # oriented to that order.
-                    enact_resolution(proposal, members)
-                    log.info(
-                        "auto-applied prior human verdict %s to entity=%s "
-                        "(fingerprint=%s stored_action=%s applied_action=%s)",
-                        source_verdict_id,
-                        item.entity_name,
-                        item_fingerprint,
-                        action,
-                        resolved_action,
-                    )
-                    suppressed_count += 1
-                    continue
+                    enacted = enact_resolution(proposal, members)
+                    if enacted is None:
+                        # #203: enact_resolution returns None on a failed file
+                        # op (OSError on unlink/write) or a no-op — the source
+                        # member was NOT corrected. FAIL SAFE: do NOT log
+                        # "auto-applied", do NOT suppress; fall through to
+                        # escalation so the un-corrected conflict surfaces
+                        # (mirrors the missing-members / unresolvable fail-safe
+                        # above). Otherwise the stale claim silently survives.
+                        log.warning(
+                            "prior human verdict %s for entity=%s failed to "
+                            "enact (fingerprint=%s applied_action=%s) -> "
+                            "escalating",
+                            source_verdict_id,
+                            item.entity_name,
+                            item_fingerprint,
+                            resolved_action,
+                        )
+                        # fall through (do NOT continue) to normal escalation.
+                    else:
+                        log.info(
+                            "auto-applied prior human verdict %s to entity=%s "
+                            "(fingerprint=%s stored_action=%s applied_action=%s)",
+                            source_verdict_id,
+                            item.entity_name,
+                            item_fingerprint,
+                            action,
+                            resolved_action,
+                        )
+                        suppressed_count += 1
+                        continue
             # Auto-only cache hit, OR un-appliable human verdict -> fall
             # through to normal escalation.
 
