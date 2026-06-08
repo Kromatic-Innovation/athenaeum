@@ -422,6 +422,224 @@ def _render_answer_raw_file(pq: PendingQuestion, resolved_at: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Source write-back (issue #197)
+# ---------------------------------------------------------------------------
+#
+# Answering a pending question must APPLY the ratified verdict to the
+# source-of-truth memory file(s), not merely emit a sibling provenance doc.
+# Without this the same contradiction regenerates on every wiki build because
+# the source memory was never edited. The edit reuses the canonical enact
+# machinery in :mod:`athenaeum.resolutions` — no parallel editor here.
+
+# Leading verdict token recognized at the head of a free-text answer, e.g.
+# an answer body that starts with ``correct_a`` followed by the ratified text.
+_VERDICT_TOKENS: frozenset[str] = frozenset(
+    (
+        "correct_a",
+        "correct_b",
+        "keep_a",
+        "keep_b",
+        "supersede",
+        "supersedes",
+        "deprecate",
+        "deprecate_both",
+        "archive",
+        "forget_a",
+        "forget_b",
+        "retain_both_with_context",
+        "not_a_conflict",
+    )
+)
+
+# Single-source historical verdicts (#197): a HUMAN answer can ask to archive
+# / deprecate / supersede a named source outright. These are NOT in develop's
+# resolver ``ENACTING_ACTIONS`` (a/b-indexed delete/mark); they take the
+# whole-file ``deprecated: true`` marker path via ``_mark_member_frontmatter``.
+_HISTORICAL_VERDICTS: frozenset[str] = frozenset(
+    ("archive", "deprecate", "supersede", "supersedes")
+)
+
+# ``**Member paths**: a, b`` — explicit source paths carried on the block.
+_MEMBER_PATHS_RE = re.compile(
+    r"^\s*\*\*Member paths\*\*:\s*(?P<payload>.+)$", re.MULTILINE
+)
+# ``Passage A: <text>`` / ``Passage 1: <text>`` inside the description.
+_PASSAGE_RE = re.compile(r"^\s*Passage\s+\S+:\s*(?P<text>.+)$", re.MULTILINE)
+
+
+def _parse_verdict(answer_body: str) -> tuple[str | None, str]:
+    """Split a leading verdict token off an answer body.
+
+    Returns ``(verdict, remainder)``. When the first non-blank line is a
+    recognized verdict token (optionally followed by ``:`` or whitespace),
+    that token is returned and the remainder is the rest of the body. When
+    no token is present, returns ``(None, original_body)`` — the caller must
+    NOT drop the free text; it is recorded as an authoritative annotation.
+    """
+    lines = answer_body.splitlines()
+    idx = 0
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx >= len(lines):
+        return None, answer_body
+    first = lines[idx].strip()
+    token = first.split(":", 1)[0].split()[0].strip().lower() if first else ""
+    if token in _VERDICT_TOKENS:
+        # Anything after the token on the same line is the start of the value.
+        same_line_rest = first[len(token) :].lstrip(": ").strip()
+        rest_lines = lines[idx + 1 :]
+        remainder_parts = []
+        if same_line_rest:
+            remainder_parts.append(same_line_rest)
+        remainder_parts.extend(rest_lines)
+        return token, "\n".join(remainder_parts).strip()
+    return None, answer_body
+
+
+def _extract_member_path_refs(raw_block: str) -> list[str]:
+    """Return explicit ``**Member paths**:`` refs from a pending block."""
+    refs: list[str] = []
+    for m in _MEMBER_PATHS_RE.finditer(raw_block):
+        for part in m.group("payload").split(","):
+            part = part.strip()
+            if part:
+                refs.append(part)
+    return refs
+
+
+def _resolve_source_files(refs: list[str], roots: list[Path]) -> list[Path]:
+    """Resolve raw-relative source refs to existing files under ``roots``.
+
+    Each ref is tried (in order) under each root; the first existing path
+    wins. Refs that resolve nowhere are skipped — the caller logs and the
+    provenance doc remains the durable audit trail. De-duplicated, order
+    preserved.
+    """
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for ref in refs:
+        ref = ref.strip()
+        if not ref:
+            continue
+        candidate = Path(ref)
+        resolved: Path | None = None
+        if candidate.is_absolute() and candidate.exists():
+            resolved = candidate
+        else:
+            for root in roots:
+                trial = root / ref
+                if trial.exists():
+                    resolved = trial
+                    break
+        if resolved is None:
+            log.warning("answers: source ref did not resolve: %r", ref)
+            continue
+        key = resolved.resolve()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(resolved)
+    return out
+
+
+def _writeback_source(pq: PendingQuestion, roots: list[Path]) -> int:
+    """Apply ``pq``'s ratified answer to its source memory file(s).
+
+    Resolves the primary ``pq.source`` plus any ``**Member paths**:`` refs,
+    parses a leading verdict token (falling back to a non-destructive
+    annotation for free text), and delegates the actual edit to
+    :func:`athenaeum.resolutions.enact_resolution`. Returns the number of
+    source files edited. Never raises — a write-back failure must not block
+    the provenance/archive path.
+    """
+    try:
+        from athenaeum.resolutions import (
+            ENACTING_ACTIONS,
+            ResolutionProposal,
+            _annotate_body,
+            _mark_member_frontmatter,
+            enact_resolution,
+        )
+
+        # ``**Member paths**:`` is block metadata that the block parser routes
+        # into answer_lines (it is not a recognized key). Strip it (and any
+        # stray ``Passage N:`` line) so it can't masquerade as the answer body.
+        answer_body = "\n".join(
+            line
+            for line in pq.answer_lines
+            if not _MEMBER_PATHS_RE.match(line) and not _PASSAGE_RE.match(line)
+        ).strip()
+        if not answer_body:
+            return 0
+
+        # Resolver a/b order: pq.source is side a; ``**Member paths**:`` refs
+        # are the additional members the block involves (also-affects), side b
+        # onward.
+        refs = [pq.source, *_extract_member_path_refs(pq.raw_block)]
+        member_paths = _resolve_source_files(refs, roots)
+        if not member_paths:
+            return 0
+
+        verdict, remainder = _parse_verdict(answer_body)
+
+        # --- Enacting verdicts: reuse develop's canonical enact machinery. ---
+        # correct_*/forget_* DELETE the wrong/transient member file;
+        # keep_*/deprecate_both MARK frontmatter (superseded_by/deprecated).
+        if verdict in ENACTING_ACTIONS:
+            proposal = ResolutionProposal(
+                recommended_winner="neither",
+                action=verdict,  # type: ignore[arg-type]
+                rationale="human-ratified via pending-question answer",
+                confidence=1.0,
+            )
+            result = enact_resolution(proposal, member_paths)
+            return 1 if result is not None else 0
+
+        # --- Historical / archive a single named source (#197). ---
+        # ``archive`` / ``deprecate`` / ``supersede`` mark the source(s)
+        # ``deprecated: true`` (whole-file inactive) — reuse the existing
+        # frontmatter marker rather than a new editor.
+        if verdict in _HISTORICAL_VERDICTS:
+            edited = 0
+            for path in member_paths:
+                if _mark_member_frontmatter(path, "deprecated", True):
+                    edited += 1
+            return edited
+
+        # --- Non-destructive: retain_both_with_context / not_a_conflict, or
+        # free-text with no verdict token. Annotate every source body; never
+        # delete and never silently drop the human's free text. ---
+        note = remainder if verdict is not None else answer_body
+        note = (note or answer_body).strip()
+        if not note:
+            return 0
+        edited = 0
+        from athenaeum.models import parse_frontmatter, render_frontmatter
+
+        for path in member_paths:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                log.warning("answers: source missing/unreadable: %s", path)
+                continue
+            meta, body = parse_frontmatter(text)
+            new_body = _annotate_body(body, note)
+            if new_body == body:
+                continue
+            if meta:
+                path.write_text(
+                    render_frontmatter(meta) + "\n" + new_body, encoding="utf-8"
+                )
+            else:
+                path.write_text(new_body, encoding="utf-8")
+            edited += 1
+        return edited
+    except Exception:  # noqa: BLE001 -- write-back must not block provenance
+        log.exception("answers: source write-back failed for entity=%s", pq.entity)
+        return 0
+
+
 def ingest_answers(pending_path: Path, raw_root: Path) -> int:
     """Parse resolved items from ``pending_path``, write raw intake, archive.
 
@@ -449,6 +667,10 @@ def ingest_answers(pending_path: Path, raw_root: Path) -> int:
         return 0
 
     answers_dir = raw_root / "answers"
+    # Issue #197: roots under which a block's source ref(s) are resolved for
+    # write-back. raw_root first (auto-memory sources live there), then the
+    # wiki root (``pending_path.parent``) for wiki-side memories.
+    source_roots = [raw_root, pending_path.parent]
 
     unanswered: list[PendingQuestion] = []
     archived_new: list[str] = []
@@ -498,6 +720,21 @@ def ingest_answers(pending_path: Path, raw_root: Path) -> int:
             candidate = answers_dir / f"{filename_ts}-{slug}-{counter}.md"
             counter += 1
         candidate.write_text(_render_answer_raw_file(pq, iso_ts), encoding="utf-8")
+
+        # Issue #197: apply the ratified verdict to the source memory
+        # file(s). The provenance doc above is the audit trail and is ALWAYS
+        # written first; this write-back is what stops the contradiction from
+        # regenerating on the next wiki build. Failures are swallowed inside
+        # _writeback_source so the audit/archive path is never blocked.
+        edited = _writeback_source(pq, source_roots)
+        if edited:
+            log.info(
+                "answers: wrote ratified verdict back to %d source file(s) "
+                "for entity=%s",
+                edited,
+                pq.entity,
+            )
+
         archived_new.append(_render_archive_block(pq, iso_ts))
         _archived_entities.append(pq.entity)
         _archived_raw_blocks.append(pq.raw_block)

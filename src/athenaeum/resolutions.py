@@ -1626,3 +1626,30 @@ def enact_resolution(
         return None
     log.info("resolutions: enacted %s — deleted member %s", action, target)
     return target
+
+
+# ---------------------------------------------------------------------------
+# Source write-back annotation (issue #197)
+# ---------------------------------------------------------------------------
+#
+# Non-enacting verdicts (``retain_both_with_context`` / ``not_a_conflict``)
+# and free-text human answers carry no destructive side effect. Instead of
+# deleting or marking a member they record a NON-destructive disambiguation
+# footnote on the source body so the contradiction context is preserved and
+# auditable. ``answers.ingest_answers`` / ``answers.resolve_by_id`` use this
+# helper for the non-enacting branch; the enacting branch reuses
+# :func:`enact_resolution` above.
+_ANNOTATION_MARKER = "> [!note] Ratified annotation (#197)"
+
+
+def _annotate_body(body: str, note: str) -> str:
+    """Append a non-destructive annotation footnote to a memory body.
+
+    Never deletes existing content — the disambiguation is recorded as a
+    trailing callout so the original passage round-trips untouched.
+    """
+    note = (note or "").strip()
+    if not note:
+        return body
+    sep = "" if body.endswith("\n") else "\n"
+    return f"{body}{sep}\n{_ANNOTATION_MARKER}\n> {note}\n"
