@@ -22,13 +22,15 @@ import anthropic
 
 from athenaeum._retry import with_retry
 from athenaeum.fingerprint import (
+    _member_key_str,
+    _pair_text_from_passages,
     extract_passages,
+    find_resolved_record,
     fingerprint_from_description,
     knowledge_root_from_pending,
-    load_resolved,
-    load_resolved_records,
     normalize_side,
     record_resolution,
+    resolve_resolved_similarity_threshold,
 )
 from athenaeum.models import (
     ClassifiedEntity,
@@ -42,6 +44,7 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
+from athenaeum.search import embed_texts
 
 log = logging.getLogger("athenaeum")
 
@@ -711,17 +714,19 @@ def tier4_escalate(
     if not items:
         return 0
 
-    # Issue #198: resolved-contradiction suppression. Derive the knowledge
-    # root from the pending-questions path (``<root>/wiki/_pending_questions.md``)
-    # and load the set of already-adjudicated claim-pair fingerprints. A
-    # candidate whose fingerprint is in this set is suppressed (not rendered).
+    # Issue #198/#211: resolved-contradiction suppression. Derive the knowledge
+    # root from the pending-questions path (``<root>/wiki/_pending_questions.md``).
+    # Issue #211 replaces the bare set-membership gate with find_resolved_record
+    # (3 strategies: exact fingerprint, member-pair key, embedding cosine), so
+    # load_resolved / load_resolved_records are no longer called directly here.
     knowledge_root = knowledge_root_from_pending(pending_path)
-    resolved_fingerprints = load_resolved(knowledge_root)
-    # Issue #199: full records (fingerprint -> {resolved_by, action,
-    # source_verdict_id, ...}) so the cache-hit branch can distinguish a
-    # HUMAN-ratified verdict (auto-apply) from an auto-only one (escalate).
-    resolved_records = load_resolved_records(knowledge_root)
     suppressed_count = 0
+
+    # Issue #211: threshold and embedder resolved once per call (not per item).
+    # The embedder is embed_texts from athenaeum.search; it memoizes the EF
+    # internally and returns None when chromadb is absent (graceful degradation).
+    _similarity_threshold = resolve_resolved_similarity_threshold(config)
+    _embedder = embed_texts
 
     # Late-import to avoid a hard module-load cycle with resolutions.py
     # (resolutions imports AutoMemoryFile from models, models is imported
@@ -776,6 +781,16 @@ def tier4_escalate(
         norms = key_side_norms.get(key)
         side_a_norm = norms[0] if norms else None
         side_b_norm = norms[1] if norms else None
+        # Issue #211: persist member_key and pair_text alongside fingerprint so
+        # future lookups can match via member-pair key or embedding similarity.
+        # key is a real member tuple when it does NOT start with "__passage_hash__".
+        mk: str | None = None
+        if isinstance(key, tuple) and key and key[0] != "__passage_hash__":
+            mk = _member_key_str(key)
+        norms2 = key_side_norms.get(key)
+        pt: str | None = (
+            _pair_text_from_passages(norms2[0], norms2[1]) if norms2 else None
+        )
         record_resolution(
             knowledge_root,
             fingerprint=fp,
@@ -783,6 +798,8 @@ def tier4_escalate(
             resolved_by="auto",
             side_a_norm=side_a_norm,
             side_b_norm=side_b_norm,
+            member_key=mk,
+            pair_text=pt,
         )
 
     auto_apply_enabled = resolve_auto_apply(config) if config is not None else False
@@ -893,7 +910,38 @@ def tier4_escalate(
         item_fingerprint = fingerprint_from_description(
             item.description, item.conflict_type
         )
-        if item_fingerprint and item_fingerprint in resolved_fingerprints:
+
+        # Issue #211: per-item member_key and pair_text for fuzzy matching.
+        # member_key is derived from _pair_key_from_description — only use it
+        # when the key is a REAL member tuple (not a __passage_hash__ fallback).
+        _item_raw_key = _pair_key_from_description(item.description)
+        item_member_key: str | None = None
+        if (
+            isinstance(_item_raw_key, tuple)
+            and _item_raw_key
+            and _item_raw_key[0] != "__passage_hash__"
+        ):
+            item_member_key = _member_key_str(_item_raw_key)
+        _item_passages = extract_passages(item.description)
+        item_pair_text: str | None = (
+            _pair_text_from_passages(_item_passages[0], _item_passages[1])
+            if len(_item_passages) >= 2
+            else None
+        )
+
+        # Issue #211: use find_resolved_record (3 strategies: exact fingerprint,
+        # member-pair key, embedding cosine) instead of the bare set-membership
+        # gate. Old records that lack member_key/pair_text still match via the
+        # exact-fingerprint strategy (back-compat).
+        record = find_resolved_record(
+            knowledge_root,
+            fingerprint=item_fingerprint,
+            member_key=item_member_key,
+            pair_text=item_pair_text,
+            threshold=_similarity_threshold,
+            embedder=_embedder,
+        )
+        if record is not None:
             # Issue #199 refines #198's blanket suppression into three
             # outcomes on a cache hit:
             #   1. HUMAN-ratified verdict -> AUTO-APPLY it to THIS new
@@ -903,9 +951,8 @@ def tier4_escalate(
             #      prior AUTO resolution (would compound an automated mistake);
             #      let a human ratify it. This CHANGES #198's auto-suppression
             #      for the auto-only case.
-            #   3. (Handled above by fingerprint mismatch -> no cache hit.)
-            record = resolved_records.get(item_fingerprint)
-            if record is not None and record.get("resolved_by") == "human":
+            #   3. find_resolved_record returns None -> no cache hit (below).
+            if record.get("resolved_by") == "human":
                 # "action" is authoritative (enact_resolution branches on
                 # proposal.action); fall back to a legacy/external
                 # "verdict"-only record defensively (issue #207).

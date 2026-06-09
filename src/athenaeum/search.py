@@ -738,3 +738,58 @@ def query_vector_index(
 ) -> list[tuple[str, str, float]]:
     """Query the chromadb vector index. Callable from shell hooks."""
     return VectorBackend().query(query, Path(cache_dir), n=n, exclude=exclude)
+
+
+# ---------------------------------------------------------------------------
+# Embedding helpers (issue #211 — decision-log semantic matching)
+# ---------------------------------------------------------------------------
+
+# Module-level memoized chromadb embedding function instance.  Loaded lazily
+# so the module can be imported when chromadb is absent (it is an optional
+# ``[vector]`` dependency).  When chromadb is not installed this stays ``None``
+# and all callers gracefully degrade.
+_EF: Any | None = None
+_EF_LOADED: bool = False  # True once we have tried to load (even if None)
+
+
+def _get_ef() -> Any | None:
+    """Return a memoized chromadb DefaultEmbeddingFunction, or None."""
+    global _EF, _EF_LOADED
+    if _EF_LOADED:
+        return _EF
+    _EF_LOADED = True
+    try:
+        from chromadb.utils import embedding_functions  # type: ignore[import]
+
+        _EF = embedding_functions.DefaultEmbeddingFunction()
+    except Exception:  # ImportError, any chromadb init error
+        _EF = None
+    return _EF
+
+
+def embed_texts(texts: list[str]) -> list[list[float]] | None:
+    """Embed a list of texts using chromadb's default EF.
+
+    Returns a list of float vectors (one per input string), or ``None`` when
+    chromadb is not installed or the embedding call fails.  This function is
+    the injectable default used by :func:`athenaeum.fingerprint.find_resolved_record`
+    for the embedding similarity strategy.  Tests MUST inject a stub embedder —
+    never rely on real chromadb in the test suite.
+    """
+    ef = _get_ef()
+    if ef is None:
+        return None
+    try:
+        result = ef(texts)
+        # chromadb EF returns a list-like of list-likes; normalise to list[list[float]]
+        return [list(map(float, vec)) for vec in result]
+    except Exception:
+        return None
+
+
+def embed_text(text: str) -> list[float] | None:
+    """Convenience wrapper: embed a single string.  Returns None on failure."""
+    result = embed_texts([text])
+    if result is None:
+        return None
+    return result[0]
