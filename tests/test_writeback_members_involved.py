@@ -120,6 +120,49 @@ def test_ingest_edits_source_via_members_involved(tmp_path: Path) -> None:
     assert "> Krobar and Kromatic are co-equal" not in edited
 
 
+def test_record_member_key_and_pair_text_from_full_block(tmp_path: Path) -> None:
+    """Issue #216: the decision-log record must carry a non-empty member_key
+    (from ``Members involved:``) and a pair_text that survives a ``**``-prefixed
+    line between Passage 1 and Passage 2 (which truncates pq.description)."""
+    import json
+
+    from athenaeum.fingerprint import _member_key_str
+
+    raw_root = tmp_path / "raw"
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir(parents=True, exist_ok=True)
+    (raw_root).mkdir(parents=True, exist_ok=True)
+    refs = ["-Users-x-Code/a.md", "-Users-x-Code/b.md"]
+    pending = wiki_root / "_pending_questions.md"
+    pending.write_text(
+        "# Pending Questions\n\n"
+        '## [2026-06-08] Entity: "x" (from wiki/auto-foo.md)\n'
+        "- [x] Which framing is right?\n"
+        "\n"
+        "Both ventures are co-equal; drop the primary framing.\n"
+        "\n"
+        "**Conflict type**: factual\n"
+        "**Description**: subtle framing conflict.\n"
+        "Passage 1: Krobar is the current primary venture.\n"
+        "**Founder & Lead, Kromatic** — intervening bold line truncates desc.\n"
+        "Passage 2: Both are co-equal current ventures.\n"
+        f"Members involved: {refs[0]}, {refs[1]}\n"
+        "**Fingerprint**: abc123def4567890\n",
+        encoding="utf-8",
+    )
+
+    # client=None: recording still happens (it is independent of write-back).
+    ingest_answers(pending, raw_root, client=None, config=None)
+
+    log_path = raw_root / "_resolved_contradictions.jsonl"
+    assert log_path.exists()
+    rec = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["member_key"] == _member_key_str(refs)
+    assert rec["member_key"]  # non-empty
+    assert rec["pair_text"]  # Passage 2 survived the ** truncation
+    assert "\n##\n" in rec["pair_text"]
+
+
 def test_ingest_without_client_falls_back_to_annotation(tmp_path: Path) -> None:
     """No client => no LLM edit; the offending claim survives (annotation path).
     Confirms the members-involved resolution still finds the file (so the
