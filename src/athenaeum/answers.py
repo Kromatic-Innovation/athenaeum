@@ -905,20 +905,32 @@ def ingest_answers(
             # re-surfacing of the same (order-independent-fingerprinted) pair.
             # side a = Passage 1 = pq.source = member_paths[0]; side b =
             # Passage 2. Normalized with the SAME helper the fingerprint uses.
-            side_passages = extract_passages(pq.description)
+            # Issue #216 (follow-up to #211): derive side passages from the
+            # FULL raw block, not pq.description. ``_parse_block`` truncates the
+            # description at the first line starting with ``**`` (an intervening
+            # bold passage line drops Passage 2), which silently emptied the
+            # pair_text / side-norm anchors.
+            side_passages = extract_passages(pq.raw_block)
             side_a_norm = (
                 normalize_side(side_passages[0]) if len(side_passages) >= 1 else None
             )
             side_b_norm = (
                 normalize_side(side_passages[1]) if len(side_passages) >= 2 else None
             )
-            # Issue #211: persist member_key and pair_text so the
-            # decision-log matcher can suppress re-detections that share
-            # the same member pair even when the passage text drifted.
-            _answer_refs = [pq.source, *_extract_member_path_refs(pq.raw_block)]
-            _answer_member_key = (
-                _member_key_str(_answer_refs) if len(_answer_refs) >= 2 else None
-            )
+            # Issue #211 + #216: persist member_key and pair_text so the
+            # decision-log matcher can suppress re-detections that share the
+            # same member pair even when the passage text drifted. The real
+            # source attribution is the ``Members involved:`` line (the block
+            # ``source:`` header is a compiled wiki page, not a memory pair).
+            # Derive the key from it the SAME way the matcher does:
+            # ``_member_key_str`` sorts+dedups, so feeding it the same
+            # ``Members involved:`` refs yields a key identical to the one
+            # ``tiers`` computes via ``_pair_key_from_description``.
+            _answer_refs = [
+                *_extract_members_involved_refs(pq.raw_block),
+                *_extract_member_path_refs(pq.raw_block),
+            ]
+            _answer_member_key = _member_key_str(_answer_refs)
             _answer_pair_text: str | None = (
                 _pair_text_from_passages(side_passages[0], side_passages[1])
                 if len(side_passages) >= 2
