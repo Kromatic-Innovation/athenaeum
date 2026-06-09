@@ -47,6 +47,10 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import anthropic
 
 from athenaeum.fingerprint import (
     extract_passages,
@@ -566,7 +570,13 @@ def _resolve_source_files(refs: list[str], roots: list[Path]) -> list[Path]:
     return out
 
 
-def _writeback_source(pq: PendingQuestion, roots: list[Path]) -> int:
+def _writeback_source(
+    pq: PendingQuestion,
+    roots: list[Path],
+    *,
+    client: "object | None" = None,
+    config: "dict | None" = None,
+) -> int:
     """Apply ``pq``'s ratified answer to its source memory file(s).
 
     Resolves the primary ``pq.source`` plus any ``**Member paths**:`` refs,
@@ -575,6 +585,14 @@ def _writeback_source(pq: PendingQuestion, roots: list[Path]) -> int:
     :func:`athenaeum.resolutions.enact_resolution`. Returns the number of
     source files edited. Never raises — a write-back failure must not block
     the provenance/archive path.
+
+    When ``verdict`` is ``None`` (pure free-text answer) and a live Anthropic
+    ``client`` is provided, the LLM-backed proposer
+    (:func:`athenaeum.resolutions.propose_freetext_source_edits`) is invoked
+    to interpret the ruling as a concrete source-file edit. The annotation
+    path is used as a fallback when the proposer returns no edits or when
+    ``client is None``. ``retain_both_with_context`` / ``not_a_conflict``
+    verdicts always annotate (do not call the proposer).
     """
     try:
         from athenaeum.resolutions import (
@@ -631,15 +649,68 @@ def _writeback_source(pq: PendingQuestion, roots: list[Path]) -> int:
             return edited
 
         # --- Non-destructive: retain_both_with_context / not_a_conflict, or
-        # free-text with no verdict token. Annotate every source body; never
-        # delete and never silently drop the human's free text. ---
+        # free-text with no verdict token.
+        #
+        # For explicit non-destructive verdicts (retain_both_with_context /
+        # not_a_conflict) always annotate — "keep both" means no mutation.
+        #
+        # For pure free-text (verdict is None): FIRST try the LLM-backed
+        # proposer to interpret the ruling as a concrete source-file edit.
+        # If the proposer returns edits, apply them (re-attaching frontmatter).
+        # If the proposer returns nothing (no client, API failure, unchanged
+        # body), fall back to the annotation path below.
+        # ---
+        from athenaeum.models import parse_frontmatter, render_frontmatter
+
+        if verdict is None and client is not None:
+            # Free-text path: try LLM-backed source edit proposer.
+            from athenaeum.resolutions import propose_freetext_source_edits
+
+            passages = extract_passages(pq.description)
+            # Build (path, body) pairs for the proposer.
+            source_pairs: list[tuple[Path, str]] = []
+            path_to_meta: dict[Path, dict] = {}
+            for path in member_paths:
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    log.warning("answers: source missing/unreadable: %s", path)
+                    continue
+                meta, body = parse_frontmatter(text)
+                source_pairs.append((path, body))
+                path_to_meta[path] = meta or {}
+
+            if source_pairs:
+                proposed = propose_freetext_source_edits(
+                    answer_body, source_pairs, passages, client, config
+                )
+                if proposed:
+                    edited = 0
+                    for path, new_body in proposed.items():
+                        meta = path_to_meta.get(path, {})
+                        if meta:
+                            path.write_text(
+                                render_frontmatter(meta) + "\n" + new_body,
+                                encoding="utf-8",
+                            )
+                        else:
+                            path.write_text(new_body, encoding="utf-8")
+                        edited += 1
+                    if edited:
+                        log.info(
+                            "answers: freetext proposer edited %d source file(s) "
+                            "for entity=%s",
+                            edited,
+                            pq.entity,
+                        )
+                        return edited
+                # Proposer returned no edits — fall through to annotation.
+
         note = remainder if verdict is not None else answer_body
         note = (note or answer_body).strip()
         if not note:
             return 0
         edited = 0
-        from athenaeum.models import parse_frontmatter, render_frontmatter
-
         for path in member_paths:
             try:
                 text = path.read_text(encoding="utf-8")
@@ -663,7 +734,13 @@ def _writeback_source(pq: PendingQuestion, roots: list[Path]) -> int:
         return 0
 
 
-def ingest_answers(pending_path: Path, raw_root: Path) -> int:
+def ingest_answers(
+    pending_path: Path,
+    raw_root: Path,
+    *,
+    client: "anthropic.Anthropic | None" = None,
+    config: "dict | None" = None,
+) -> int:
     """Parse resolved items from ``pending_path``, write raw intake, archive.
 
     Walks ``_pending_questions.md``; for each ``[x]`` block writes a file
@@ -677,6 +754,12 @@ def ingest_answers(pending_path: Path, raw_root: Path) -> int:
     Args:
         pending_path: Path to ``_pending_questions.md``.
         raw_root: Raw intake root (answers land in ``raw_root/answers/``).
+        client: Optional live Anthropic client. When provided, free-text
+            answers invoke the LLM-backed proposer to generate source-file
+            edits instead of falling back to annotation-only. Keyword-only;
+            defaults to ``None`` so every existing caller is unaffected.
+        config: Optional athenaeum config dict. Forwarded to the resolver
+            for model selection. Keyword-only; defaults to ``None``.
 
     Returns:
         Count of answers ingested on this run.
@@ -744,12 +827,14 @@ def ingest_answers(pending_path: Path, raw_root: Path) -> int:
             counter += 1
         candidate.write_text(_render_answer_raw_file(pq, iso_ts), encoding="utf-8")
 
-        # Issue #197: apply the ratified verdict to the source memory
+        # Issue #197/#210: apply the ratified verdict to the source memory
         # file(s). The provenance doc above is the audit trail and is ALWAYS
         # written first; this write-back is what stops the contradiction from
         # regenerating on the next wiki build. Failures are swallowed inside
         # _writeback_source so the audit/archive path is never blocked.
-        edited = _writeback_source(pq, source_roots)
+        # Issue #210: thread client/config so free-text answers can use the
+        # LLM-backed proposer to enact source edits instead of annotating only.
+        edited = _writeback_source(pq, source_roots, client=client, config=config)
         if edited:
             log.info(
                 "answers: wrote ratified verdict back to %d source file(s) "
