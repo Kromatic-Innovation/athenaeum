@@ -650,8 +650,16 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
     """Ingest answered blocks from `_pending_questions.md` as raw intake.
 
     See :func:`athenaeum.answers.ingest_answers` for the semantics.
+
+    When ``ANTHROPIC_API_KEY`` is set, builds a live Anthropic client and
+    passes it to ``ingest_answers`` so free-text answers can use the
+    LLM-backed proposer (issue #210). When the key is absent or client
+    construction fails, the annotation fallback is used instead.
     """
+    import os
+
     from athenaeum.answers import ingest_answers
+    from athenaeum.config import load_config
 
     target = args.path.expanduser().resolve()
     if not target.exists():
@@ -665,8 +673,24 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
     pending_path = target / "wiki" / "_pending_questions.md"
     raw_root = target / "raw"
 
+    cfg = load_config(target)
+
+    # Issue #210: build an Anthropic client when the key is available so
+    # free-text answers trigger the LLM-backed source-edit proposer.
+    # Fail gracefully (None) on any import or construction error.
+    anthropic_client = None
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            import anthropic as _anthropic
+
+            anthropic_client = _anthropic.Anthropic()
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
-        count = ingest_answers(pending_path, raw_root)
+        count = ingest_answers(
+            pending_path, raw_root, client=anthropic_client, config=cfg
+        )
     except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
         print(
             f"Fatal error ingesting answers ({type(exc).__name__}): {exc}",
