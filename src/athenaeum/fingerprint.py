@@ -34,10 +34,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Callable, Iterable
 
 log = logging.getLogger("athenaeum")
 
@@ -127,6 +128,8 @@ def record_resolution(
     resolved_at: str | None = None,
     side_a_norm: str | None = None,
     side_b_norm: str | None = None,
+    member_key: str | None = None,
+    pair_text: str | None = None,
 ) -> None:
     """Append one resolved-contradiction record to the JSONL cache.
 
@@ -145,6 +148,17 @@ def record_resolution(
     output of :func:`normalize_side` so record-time and match-time
     normalization are identical. Omitted -> stored as ``None`` (orientation
     unknown; the consumer falls back to safe escalation).
+
+    ``member_key`` (issue #211) is the sorted-tuple member-pair joined with
+    ``"||"`` (see :func:`_member_key_str`).  When present, the decision-log
+    matcher can suppress re-detected contradictions that share the same
+    member pair even when the passage text drifted (different fingerprint).
+
+    ``pair_text`` (issue #211) is the canonical normalized pair-text string
+    (``"{norm_side0}\\n##\\n{norm_side1}"`` from :func:`_pair_text_from_passages`).
+    Persisted so the embedding similarity path can embed it at match time
+    without re-running the detector.  Old records lacking this field are
+    still matched by exact fingerprint.
     """
     if not fingerprint:
         return
@@ -160,6 +174,8 @@ def record_resolution(
         or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "side_a_norm": side_a_norm,
         "side_b_norm": side_b_norm,
+        "member_key": member_key,
+        "pair_text": pair_text,
     }
     try:
         path = _cache_path(knowledge_root)
@@ -308,3 +324,165 @@ def fingerprints_from_descriptions(
         if fp:
             out.append(fp)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Resolved-similarity threshold (issue #211)
+# ---------------------------------------------------------------------------
+
+_ENV_RESOLVED_SIMILARITY_THRESHOLD = "ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD"
+_DEFAULT_RESOLVED_SIMILARITY_THRESHOLD = 0.83
+
+
+def resolve_resolved_similarity_threshold(
+    config: dict[str, Any] | None = None,
+) -> float:
+    """Resolve the cosine similarity threshold for decision-log matching.
+
+    Precedence: env var ``ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD`` >
+    ``contradiction.resolved_similarity_threshold`` in config > default
+    (0.83).  Mirrors :func:`athenaeum.cross_scope.resolve_similarity_threshold`.
+    """
+    env_val = os.environ.get(_ENV_RESOLVED_SIMILARITY_THRESHOLD)
+    if env_val:
+        try:
+            return float(env_val.strip())
+        except ValueError:
+            pass
+    if config is not None:
+        contradiction_cfg = config.get("contradiction") or {}
+        raw = contradiction_cfg.get("resolved_similarity_threshold")
+        try:
+            if raw is not None:
+                return float(raw)
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# Semantic matching (issue #211)
+# ---------------------------------------------------------------------------
+
+
+def _member_key_str(member_paths: list[str] | tuple[str, ...]) -> str | None:
+    """Return a stable string key from a list/tuple of member paths.
+
+    Sorts and deduplicates the paths, joins with ``"||"`` so the result is
+    unambiguous and safe to compare by equality.  Returns ``None`` for
+    empty / single-element inputs.
+    """
+    deduped = sorted(set(str(p).strip() for p in member_paths if str(p).strip()))
+    if len(deduped) < 2:
+        return None
+    return "||".join(deduped)
+
+
+def _pair_text_from_passages(passage_a: str, passage_b: str) -> str:
+    """Return the canonical pair-text string for two normalized passages.
+
+    Uses the SAME sorted+normalized ordering that ``claim_pair_fingerprint``
+    applies, so the pair_text is recoverable and embeddable at match time
+    independent of a/b order.
+    """
+    norm = sorted((_normalize_claim(passage_a), _normalize_claim(passage_b)))
+    return f"{norm[0]}\n##\n{norm[1]}"
+
+
+def find_resolved_record(
+    knowledge_root: Path,
+    *,
+    fingerprint: str | None,
+    member_key: str | None,
+    pair_text: str | None,
+    threshold: float,
+    embedder: Callable[[list[str]], list[list[float]] | None] | None = None,
+) -> dict[str, Any] | None:
+    """Find the best matching resolved record for a re-detected contradiction.
+
+    Tries three strategies in order; returns the first match:
+
+    1. **Exact fingerprint** — fast path, backward-compatible.
+    2. **Member-pair key** — deterministic. Matches when both the stored
+       record and the new item carry a ``member_key`` referencing the same
+       sorted set of member file paths.  This collapses the live drift cases
+       (same pair, drifting passages) even when chromadb is absent.
+    3. **Embedding cosine similarity** — general fuzzy fix.  Uses ``embedder``
+       (defaults to :func:`athenaeum.search.embed_texts`) to embed the new
+       item's ``pair_text`` and every stored record's ``pair_text``.  Picks the
+       record with the highest cosine above ``threshold``.  Skipped silently
+       when ``embedder`` returns ``None`` (chromadb absent).
+
+    The records are loaded once via :func:`load_resolved_records` (human
+    supersedes auto, last-write-wins within a class).  Old records lacking
+    ``member_key`` / ``pair_text`` fall through to the embedding strategy (or
+    are skipped there too when embedding is unavailable) — they are still
+    matched by the exact fingerprint path.
+
+    ``embedder`` is an injectable callable ``list[str] -> list[list[float]] | None``
+    so tests can supply a deterministic stub without real chromadb.
+    """
+    records = load_resolved_records(knowledge_root)
+    if not records:
+        return None
+
+    # Strategy 1: exact fingerprint
+    if fingerprint:
+        rec = records.get(fingerprint)
+        if rec is not None:
+            return rec
+
+    # Strategy 2: member-pair key
+    if member_key:
+        for rec in records.values():
+            stored_mk = rec.get("member_key")
+            if isinstance(stored_mk, str) and stored_mk == member_key:
+                return rec
+
+    # Strategy 3: embedding cosine similarity
+    if not pair_text:
+        return None
+
+    # Resolve embedder default lazily to avoid import at module load time.
+    if embedder is None:
+        try:
+            from athenaeum.search import embed_texts  # noqa: PLC0415
+
+            embedder = embed_texts
+        except ImportError:
+            return None
+
+    # Collect stored records that have pair_text for embedding comparison.
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    stored_pair_texts = [rec.get("pair_text") for rec in records.values()]
+    # We need to embed the new pair_text plus all stored ones in one batch.
+    texts_to_embed = [pair_text] + [
+        pt for pt in stored_pair_texts if isinstance(pt, str) and pt
+    ]
+    if len(texts_to_embed) < 2:
+        return None  # no stored pair_texts to compare against
+
+    vecs = embedder(texts_to_embed)
+    if vecs is None or len(vecs) < 2:
+        return None
+
+    from athenaeum.cross_scope import _cosine  # noqa: PLC0415
+
+    new_vec = vecs[0]
+    stored_recs_with_pt = [
+        rec
+        for rec in records.values()
+        if isinstance(rec.get("pair_text"), str) and rec["pair_text"]
+    ]
+    for idx, rec in enumerate(stored_recs_with_pt):
+        stored_vec = vecs[idx + 1]
+        sim = _cosine(new_vec, stored_vec)
+        if sim >= threshold:
+            candidates.append((sim, rec))
+
+    if not candidates:
+        return None
+
+    # Return the record with the highest similarity.
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
