@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-06-09
+
+Pending-question recurrence hardening. Free-text human answers now enact a
+concrete source-file edit, the resolved-contradiction decision log matches by
+member-pair and vector similarity instead of brittle exact-text fingerprints,
+and a nightly self-heal pass re-resolves proposal-less escalations. Builds on
+the 0.7.0 source write-back.
+
+### Added
+
+- **Vector + member-pair matching for the resolved-contradiction decision log
+  (#211).** The decision log keyed each record by a SHA-1 of the exact passage
+  text the detector quoted; the detector re-quotes a drifting snippet every
+  run, so the key never matched and an already-resolved contradiction
+  re-escalated indefinitely. Matching now flows fingerprint → member-pair key
+  → embedding cosine, with a configurable
+  `contradiction.resolved_similarity_threshold` (default 0.83). Member-pair
+  matching is deterministic and works without chromadb; the embedding layer is
+  the optional `[vector]` extra and degrades gracefully when absent.
+- **Nightly re-resolve pass for open proposal-less questions (#188).** A
+  question first escalated without a proposal (resolver budget exhausted or
+  offline) previously stayed raw forever, because the open-pair dedup merged
+  re-detections into the existing block instead of re-running the resolver.
+  `reresolve_open_questions` (wired into `librarian.run` and exposed as
+  `athenaeum reresolve-questions`) now re-resolves such blocks on a later,
+  budgeted run: `not_a_conflict` drops/archives the question, a real verdict
+  annotates it. Budget-aware, idempotent, and a no-op offline.
+
+### Changed
+
+- **Free-text answers enact a source edit, not just an annotation (#210).**
+  When a human resolves a contradiction with a free-text ruling (no verdict
+  token), the resolver now interprets that ruling into a concrete edit of the
+  source memory file(s) via an LLM-backed proposer and applies it through the
+  existing write-back path, instead of appending a non-destructive annotation
+  that left the contradictory claim in place. Falls back to annotation when no
+  client is available or the proposer returns no edit.
+
+### Fixed
+
+- **Write-back resolves the true source files from `Members involved:` (#214,
+  follow-up to #210).** The auto-memory contradiction blocks attribute their
+  real source via a `Members involved:` line (refs relative to
+  `raw/auto-memory/`) while their `source:` header names a compiled wiki page.
+  The write-back only parsed `**Member paths**:` and resolved under `raw/` +
+  `wiki/`, so on real blocks it resolved nothing and edited nothing. It now
+  parses `Members involved:` and resolves under the configured intake roots.
+- **Decision-log records persist a non-empty `member_key` and full `pair_text`
+  (#216, follow-up to #211).** The human-resolution record site derived
+  `member_key` from `pq.source` (a wiki page) and `pair_text` from the
+  `**`-truncated `pq.description`, recording empty keys that the matcher could
+  never hit. Both are now derived from the full raw block.
+
 ## [0.7.1] - 2026-06-08
 
 Patch release addressing two follow-up nits from the #207 Zenodotus review.
@@ -729,7 +782,8 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.6.0...v0.6.1
