@@ -33,6 +33,7 @@ from athenaeum.fingerprint import (
     resolve_resolved_similarity_threshold,
 )
 from athenaeum.models import (
+    AutoMemoryFile,
     ClassifiedEntity,
     EntityAction,
     EntityIndex,
@@ -1253,3 +1254,379 @@ def tier4_escalate(
         log.info("suppressed %d already-adjudicated conflicts", suppressed_count)
 
     return suppressed_count
+
+
+# ---------------------------------------------------------------------------
+# Issue #188 — re-resolve OPEN, PROPOSAL-LESS pending questions
+# ---------------------------------------------------------------------------
+#
+# A question first escalated WITHOUT a proposal (resolver budget exhausted that
+# run, or no API key) is dedup-merged into its open ``[ ]`` block on every
+# later run by ``tier4_escalate`` — so the raw ``(no proposal yet)`` block stays
+# forever, even on runs that DO have budget. A single transient cap-hit / offline
+# run becomes permanent operator-facing cruft. This pass re-runs the resolver on
+# those proposal-less open blocks so a budget-exhausted run self-heals later.
+
+# Markers used to decide whether a block already has a resolution.
+_PROPOSAL_MARKER = "**Proposed resolution**:"
+_AUTO_RESOLVED_MARKER_TEXT = "**Auto-resolved**: true"
+# ``**Member paths**: a, b`` — explicit source paths carried on a block.
+_MEMBER_PATHS_LINE_RE = re.compile(
+    r"^\s*\*\*Member paths\*\*:\s*(?P<payload>.+)$", re.MULTILINE
+)
+
+
+def _block_has_proposal(raw_block: str) -> bool:
+    """True when a pending block already carries a resolver verdict.
+
+    Either the optional ``**Proposed resolution**:`` block (advisory, kept
+    open) or the auto-applied ``**Auto-resolved**: true`` marker (block flipped
+    to ``[x]``). Idempotency hinge: such blocks are NEVER re-resolved.
+    """
+    return _PROPOSAL_MARKER in raw_block or _AUTO_RESOLVED_MARKER_TEXT in raw_block
+
+
+def _member_refs_from_block(pq: Any) -> list[str]:
+    """Recover the member refs a proposal-less block was escalated from.
+
+    Mirrors ``answers.py``/``fingerprint.py`` recovery: prefer explicit
+    ``**Member paths**:`` refs when present, else fall back to the
+    ``Members involved:`` line inside the description. Returns refs in the
+    order they appear (de-duplicated, order preserved).
+    """
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    def _add(ref: str) -> None:
+        ref = ref.strip()
+        if ref and ref not in seen:
+            seen.add(ref)
+            refs.append(ref)
+
+    for m in _MEMBER_PATHS_LINE_RE.finditer(pq.raw_block):
+        for part in m.group("payload").split(","):
+            _add(part)
+    # ``Members involved:`` lives inside the description text.
+    for line in (pq.description or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Members involved:"):
+            payload = stripped.removeprefix("Members involved:").strip()
+            for part in payload.split(","):
+                _add(part)
+    return refs
+
+
+def _resolve_members_for_block(
+    refs: list[str],
+    am_by_ref: dict[str, "AutoMemoryFile"],
+) -> list["AutoMemoryFile"]:
+    """Map recovered member refs to discovered :class:`AutoMemoryFile` records.
+
+    ``am_by_ref`` is keyed by every recoverable handle for each discovered
+    file (``<scope>/<name>`` ref, bare basename, absolute path). A ref that
+    resolves nowhere is skipped — the caller treats a sub-2-member result as
+    non-reconstructable and leaves the block open.
+    """
+    out: list[AutoMemoryFile] = []
+    seen: set[str] = set()
+    for ref in refs:
+        am = am_by_ref.get(ref) or am_by_ref.get(Path(ref).name)
+        if am is None:
+            continue
+        key = str(am.path)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(am)
+    return out
+
+
+def reresolve_open_questions(
+    pending_path: Path,
+    *,
+    client: "anthropic.Anthropic | None",
+    config: dict[str, Any] | None = None,
+    usage: TokenUsage | None = None,
+) -> int:
+    """Re-resolve OPEN, PROPOSAL-LESS pending questions (issue #188).
+
+    Parses ``_pending_questions.md`` for open ``[ ]`` blocks that carry NO
+    resolver verdict (no ``**Proposed resolution**:`` and no
+    ``**Auto-resolved**: true`` marker), reconstructs the resolver inputs from
+    each block, and re-runs :func:`athenaeum.resolutions.propose_resolution`
+    subject to the SAME per-run budget cap (``resolve_max_per_run``):
+
+    - ``not_a_conflict`` (SUPPRESS): the question is DROPPED from the primary
+      file and archived to ``_pending_questions_archive.md`` with a
+      auto-dropped note (audit trail preserved — never silently deleted).
+    - A real verdict (non-fallback proposal): the block is annotated IN PLACE
+      with the ``**Proposed resolution**:`` block via
+      :func:`athenaeum.resolutions.render_proposal_block`. When the per-action
+      auto-apply gate is met, the block is flipped to ``[x]`` via
+      :func:`athenaeum.resolutions.apply_auto_resolution` (and enacted) just
+      like a fresh escalation.
+    - Deterministic fallback / budget-exhausted / non-reconstructable: the
+      block is left OPEN and untouched (re-resolvable next run).
+
+    Properties:
+    - Budget-aware: at most ``resolve_max_per_run`` resolver calls; surplus
+      proposal-less blocks are left untouched (partial progress, converges).
+    - Idempotent: blocks that already carry a verdict are never re-resolved.
+    - Offline-safe: ``client=None`` leaves every proposal-less block exactly
+      as-is (still raw, still open) — no mutation, returns 0.
+
+    Returns the number of blocks re-resolved (annotated/auto-applied) PLUS the
+    number dropped as not-a-conflict.
+    """
+    if not pending_path.exists():
+        return 0
+
+    # Offline: no resolver. Leave everything as-is so a later run can heal it.
+    # propose_resolution would only return the deterministic fallback here,
+    # which renders to "" — so this is also a cost/no-op short-circuit.
+    if client is None:
+        return 0
+
+    from athenaeum.answers import parse_pending_questions
+    from athenaeum.contradictions import ContradictionResult
+    from athenaeum.librarian import discover_auto_memory_files
+    from athenaeum.resolutions import (
+        ENACTING_ACTIONS,
+        SUPPRESS_ACTION,
+        MergeProposal,
+        ResolutionProposal,
+        apply_auto_resolution,
+        enact_resolution,
+        propose_resolution,
+        render_proposal_block,
+        resolve_auto_apply,
+        resolve_auto_apply_threshold_for,
+        resolve_max_per_run,
+    )
+    from athenaeum.resolutions import _get_model as _resolver_model
+
+    questions = parse_pending_questions(pending_path)
+    # Fast exit: nothing proposal-less and open → no work, no discovery cost.
+    targets = [
+        pq
+        for pq in questions
+        if not pq.answered and not _block_has_proposal(pq.raw_block)
+    ]
+    if not targets:
+        return 0
+
+    knowledge_root = knowledge_root_from_pending(pending_path)
+    from athenaeum.config import load_config
+
+    # On-disk config (defaulted) drives intake-root DISCOVERY so member-file
+    # resolution works even when the caller passes a sparse config dict (e.g.
+    # a test fixture or a CLI that only set the budget knob). The resolver
+    # KNOBS (budget, auto-apply gate, model) come from the caller's config
+    # when provided, falling back to the loaded defaults.
+    disk_config = load_config(knowledge_root)
+    resolved_config = config if config is not None else disk_config
+
+    # Discover auto-memory members once and index by every handle a block's
+    # recovered refs might use. Use the defaulted disk config so intake roots
+    # resolve even when the caller's config omits ``recall.extra_intake_roots``.
+    am_files = discover_auto_memory_files(knowledge_root, config=disk_config)
+    am_by_ref: dict[str, AutoMemoryFile] = {}
+    for am in am_files:
+        am_by_ref.setdefault(f"{am.origin_scope}/{am.path.name}", am)
+        am_by_ref.setdefault(am.path.name, am)
+        try:
+            am_by_ref.setdefault(str(am.path.resolve()), am)
+        except OSError:
+            pass
+        am_by_ref.setdefault(str(am.path), am)
+
+    budget = resolve_max_per_run(resolved_config)
+    auto_apply_enabled = resolve_auto_apply(resolved_config)
+    resolver_model_id = _resolver_model(resolved_config)
+
+    def _should_auto_apply(prop: Any) -> bool:
+        action = getattr(prop, "action", None)
+        if not isinstance(action, str):
+            return False
+        thr = resolve_auto_apply_threshold_for(resolved_config, action)
+        if thr is None:
+            return False
+        return getattr(prop, "confidence", 0.0) >= thr
+
+    calls = 0
+    reresolved = 0
+    dropped = 0
+    # Map raw_block (verbatim, as it sits in the file) -> action.
+    rewrites: dict[str, str] = {}  # block -> replacement text (annotated)
+    drops: set[str] = set()  # blocks to remove from primary + archive
+
+    for pq in targets:
+        if calls >= budget:
+            # Budget exhausted — leave remaining proposal-less blocks open so
+            # the next run can heal them. Not a crash; partial progress stands.
+            break
+
+        # Reconstruct resolver inputs. Passages + members must both be
+        # recoverable, else the block is non-reconstructable → SKIP (leave
+        # open) rather than dropping it.
+        passages = extract_passages(pq.description)
+        refs = _member_refs_from_block(pq)
+        members = _resolve_members_for_block(refs, am_by_ref)
+        if len(passages) < 2 or len(members) < 2:
+            log.info(
+                "reresolve: block for entity=%s not reconstructable "
+                "(passages=%d, members=%d); leaving open",
+                pq.entity,
+                len(passages),
+                len(members),
+            )
+            continue
+
+        result = ContradictionResult(
+            detected=True,
+            conflict_type=pq.conflict_type or "factual",  # type: ignore[arg-type]
+            members_involved=[f"{m.origin_scope}/{m.path.name}" for m in members[:2]],
+            conflicting_passages=passages[:2],
+            rationale=pq.description.splitlines()[0] if pq.description else "",
+        )
+
+        calls += 1
+        proposal = propose_resolution(result, members, client)
+        _record_usage_from_resolver(proposal, usage)
+
+        action = getattr(proposal, "action", None)
+        confidence = getattr(proposal, "confidence", 0.0)
+
+        # Deterministic fallback (confidence 0.0) or a merge proposal: leave the
+        # block raw + open. A merge proposal here would need the _pending_merges
+        # sidecar; re-routing it is out of scope for the heal pass — next full
+        # run handles merges. render_proposal_block is a no-op on the fallback.
+        if confidence == 0.0 or isinstance(proposal, MergeProposal):
+            continue
+
+        if action == SUPPRESS_ACTION:
+            drops.add(pq.raw_block)
+            dropped += 1
+            log.info(
+                "reresolve: cleared entity=%s as not_a_conflict; "
+                "dropping pending question",
+                pq.entity,
+            )
+            continue
+
+        assert isinstance(proposal, ResolutionProposal)
+        # Annotate IN PLACE: append the proposal block to the existing block so
+        # the format is byte-identical to a fresh escalation that carried one.
+        block = pq.raw_block.rstrip("\n")
+        rendered = render_proposal_block(proposal)
+        if rendered:
+            block = block + "\n" + rendered
+
+        if auto_apply_enabled and _should_auto_apply(proposal):
+            applied = apply_auto_resolution(block, proposal, model=resolver_model_id)
+            if applied != block:
+                log.info(
+                    "reresolve: auto-resolved entity=%s action=%s " "(confidence=%.2f)",
+                    pq.entity,
+                    action,
+                    confidence,
+                )
+                if action in ENACTING_ACTIONS:
+                    enact_resolution(proposal, [str(m.path) for m in members])
+            block = applied
+        else:
+            log.info(
+                "reresolve: annotated entity=%s with proposal action=%s "
+                "(confidence=%.2f); left open for human review",
+                pq.entity,
+                action,
+                confidence,
+            )
+
+        rewrites[pq.raw_block] = block + "\n"
+        reresolved += 1
+
+    if not rewrites and not drops:
+        return 0
+
+    # Rewrite the primary file: keep the header, drop dropped blocks, replace
+    # annotated blocks, preserve everything else verbatim.
+    archived_blocks: list[str] = []
+    primary_parts = ["# Pending Questions"]
+    for pq in questions:
+        if pq.raw_block in drops:
+            archived_blocks.append(pq.raw_block)
+            continue
+        replacement = rewrites.get(pq.raw_block)
+        primary_parts.append(
+            (replacement.rstrip("\n")) if replacement is not None else pq.raw_block
+        )
+    primary_body = "\n\n---\n\n".join(primary_parts) + "\n"
+    pending_path.write_text(primary_body, encoding="utf-8")
+
+    # Archive dropped (not_a_conflict) blocks — preserve the audit trail rather
+    # than silently delete (mirrors ingest_answers' archive append, newest-first).
+    if archived_blocks:
+        _append_dropped_to_archive(pending_path, archived_blocks)
+
+    log.info(
+        "reresolve: re-resolved %d, dropped %d (resolver calls=%d, budget=%d)",
+        reresolved,
+        dropped,
+        calls,
+        budget,
+    )
+    return reresolved + dropped
+
+
+def _record_usage_from_resolver(proposal: Any, usage: TokenUsage | None) -> None:
+    """No-op usage hook.
+
+    ``propose_resolution`` does not currently surface token usage on its
+    return value, so there is nothing to add here; the hook exists so a
+    future resolver that returns usage can wire it without changing the
+    call site. Kept tiny + side-effect-free.
+    """
+    return None
+
+
+def _append_dropped_to_archive(pending_path: Path, blocks: list[str]) -> None:
+    """Append auto-dropped not-a-conflict blocks to the archive (newest-first).
+
+    Mirrors :func:`athenaeum.answers.ingest_answers`'s archive append so the
+    on-disk format stays uniform: a header, ``---``-separated blocks, newest
+    at the top. Each block gets an auto-dropped trailer for the audit trail.
+    De-duplicates against blocks already present in the archive.
+    """
+    archive_path = pending_path.parent / "_pending_questions_archive.md"
+    existing = ""
+    if archive_path.exists():
+        existing = archive_path.read_text(encoding="utf-8")
+
+    today = date.today().isoformat()
+    rendered: list[str] = []
+    for raw_block in blocks:
+        if raw_block.strip() and raw_block in existing:
+            continue
+        rendered.append(
+            f"{raw_block.rstrip()}\n\n"
+            f"**Auto-dropped**: {today} (re-resolved as not_a_conflict, issue #188)\n"
+        )
+    if not rendered:
+        return
+
+    new_section = "\n\n---\n\n".join(rendered)
+    if existing.strip():
+        if existing.startswith("# Answered Questions"):
+            _, _, rest = existing.partition("\n")
+            combined = (
+                "# Answered Questions\n"
+                + new_section
+                + "\n\n---\n\n"
+                + rest.lstrip("\n")
+            )
+        else:
+            combined = new_section + "\n\n---\n\n" + existing.lstrip("\n")
+    else:
+        combined = "# Answered Questions\n\n" + new_section + "\n"
+    archive_path.write_text(combined.rstrip("\n") + "\n", encoding="utf-8")

@@ -248,6 +248,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Knowledge directory (default: ~/knowledge)",
     )
 
+    # reresolve-questions command (issue #188) — re-run the resolver on OPEN,
+    # PROPOSAL-LESS pending questions so a prior cap-hit / offline escalation
+    # self-heals. Budget-aware + idempotent; offline (no key) is a no-op.
+    reresolve_parser = subparsers.add_parser(
+        "reresolve-questions",
+        help="Re-resolve open proposal-less pending questions "
+        "(self-heal transient cap/offline escalations, issue #188)",
+    )
+    reresolve_parser.add_argument(
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+
     # recall command — shell-accessible recall for validation harnesses
     # and operator debugging. Wraps the MCP `recall` tool so scripts and
     # `gh_wait_status.sh`-style tooling can exercise the same search path
@@ -419,6 +434,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ingest-answers":
         return _cmd_ingest_answers(args)
+
+    if args.command == "reresolve-questions":
+        return _cmd_reresolve_questions(args)
 
     if args.command == "rebuild-index":
         return _cmd_rebuild_index(args)
@@ -699,6 +717,53 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
         return 2
 
     print(f"Ingested {count} answered question(s).")
+    return 0
+
+
+def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
+    """Re-resolve open, proposal-less pending questions (issue #188).
+
+    Mirrors :func:`_cmd_ingest_answers`: loads config, builds a live Anthropic
+    client from ``ANTHROPIC_API_KEY`` (``None`` when absent — offline is a
+    no-op), and delegates to :func:`athenaeum.tiers.reresolve_open_questions`.
+    """
+    import os
+
+    from athenaeum.config import load_config
+    from athenaeum.tiers import reresolve_open_questions
+
+    target = args.path.expanduser().resolve()
+    if not target.exists():
+        print(f"Knowledge directory not found: {target}", file=sys.stderr)
+        return 1
+
+    pending_path = target / "wiki" / "_pending_questions.md"
+    cfg = load_config(target)
+
+    anthropic_client = None
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            import anthropic as _anthropic
+
+            anthropic_client = _anthropic.Anthropic()
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        count = reresolve_open_questions(
+            pending_path, client=anthropic_client, config=cfg
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+        print(
+            f"Fatal error re-resolving questions ({type(exc).__name__}): {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    if anthropic_client is None:
+        print("No ANTHROPIC_API_KEY; offline — left proposal-less questions as-is.")
+    else:
+        print(f"Re-resolved {count} proposal-less question(s).")
     return 0
 
 

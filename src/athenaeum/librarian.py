@@ -628,6 +628,32 @@ def _run_cluster_pass(
     return len(clusters)
 
 
+def _run_reresolve_pass(
+    knowledge_root: Path,
+    *,
+    config: dict[str, object] | None,
+    client: anthropic.Anthropic | None,
+) -> int:
+    """Re-resolve open, proposal-less pending questions (issue #188).
+
+    Thin wrapper around :func:`athenaeum.tiers.reresolve_open_questions` so the
+    nightly librarian self-heals transient cap-hit / offline escalations on a
+    later, budgeted run. No-op (returns 0) when the pending file is absent or
+    when ``client`` is ``None`` (offline → leave blocks raw, re-resolvable).
+    Failures are swallowed: a re-resolve hiccup must never block the run.
+    """
+    from athenaeum.tiers import reresolve_open_questions
+
+    pending_path = knowledge_root / "wiki" / "_pending_questions.md"
+    if not pending_path.exists():
+        return 0
+    try:
+        return reresolve_open_questions(pending_path, client=client, config=config)
+    except Exception as exc:  # noqa: BLE001 — heal pass must not fail the run
+        log.warning("reresolve pass failed (%s); leaving questions untouched", exc)
+        return 0
+
+
 def run(
     raw_root: Path = DEFAULT_RAW_ROOT,
     wiki_root: Path = DEFAULT_WIKI_ROOT,
@@ -691,6 +717,11 @@ def run(
             dry_run=dry_run,
             client=merge_client,
         )
+        # Issue #188: self-heal proposal-less open questions (a prior
+        # budget-exhausted / offline run leaves raw blocks; re-resolve them
+        # now that this run has budget). No-op on dry-run / offline.
+        if not dry_run:
+            _run_reresolve_pass(knowledge_root, config=config, client=merge_client)
         return 0
 
     # C1 + C2: auto-memory discovery followed by the C2 cluster pass.
@@ -731,6 +762,11 @@ def run(
             dry_run=dry_run,
             client=merge_client,
         )
+
+        # Issue #188: re-resolve open, proposal-less pending questions so a
+        # prior cap-hit / offline escalation self-heals on this (budgeted) run.
+        if not dry_run:
+            _run_reresolve_pass(knowledge_root, config=config, client=merge_client)
 
     if cluster_only:
         return 0
