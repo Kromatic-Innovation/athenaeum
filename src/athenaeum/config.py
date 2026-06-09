@@ -70,6 +70,13 @@ _DEFAULTS: dict[str, Any] = {
         # without a proposal (degraded mode). Env var
         # ``ATHENAEUM_RESOLVE_MAX_PER_RUN`` wins over this setting.
         "resolve_max_per_run": 50,
+        # Cosine similarity threshold for matching a re-detected contradiction
+        # against the resolved-decisions log by embedding similarity (issue
+        # #211). A re-surfaced contradiction whose passages embed above this
+        # threshold relative to a prior resolved record is suppressed / auto-
+        # applied without requiring an exact-text fingerprint match. Env
+        # override: ``ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD``.
+        "resolved_similarity_threshold": 0.83,
     },
 }
 
@@ -167,6 +174,7 @@ search_backend: fts5
 #   similarity_threshold: 0.85
 #   resolve_model: claude-opus-4-7
 #   resolve_max_per_run: 50
+#   resolved_similarity_threshold: 0.83  # cosine threshold for decision-log matching (#211)
 """
 
 
