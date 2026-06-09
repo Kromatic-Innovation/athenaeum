@@ -493,6 +493,14 @@ _HISTORICAL_VERDICTS: frozenset[str] = frozenset(
 _MEMBER_PATHS_RE = re.compile(
     r"^\s*\*\*Member paths\*\*:\s*(?P<payload>.+)$", re.MULTILINE
 )
+# ``Members involved: a, b`` — the detector's source-attribution line on
+# auto-memory contradiction blocks (issue #210 follow-up). The refs are
+# relative to the configured intake roots (default ``raw/auto-memory``), and
+# the block's ``source:`` header points at a compiled wiki page rather than
+# the raw memory — so this line is the only handle on the true source files.
+_MEMBERS_INVOLVED_RE = re.compile(
+    r"^\s*Members involved:\s*(?P<payload>.+)$", re.MULTILINE
+)
 # ``Passage A: <text>`` / ``Passage 1: <text>`` inside the description.
 _PASSAGE_RE = re.compile(r"^\s*Passage\s+\S+:\s*(?P<text>.+)$", re.MULTILINE)
 
@@ -530,6 +538,24 @@ def _extract_member_path_refs(raw_block: str) -> list[str]:
     """Return explicit ``**Member paths**:`` refs from a pending block."""
     refs: list[str] = []
     for m in _MEMBER_PATHS_RE.finditer(raw_block):
+        for part in m.group("payload").split(","):
+            part = part.strip()
+            if part:
+                refs.append(part)
+    return refs
+
+
+def _extract_members_involved_refs(raw_block: str) -> list[str]:
+    """Return ``Members involved:`` source refs from a pending block.
+
+    Issue #210 follow-up: auto-memory contradiction blocks carry their true
+    source files on a ``Members involved:`` line (comma-separated, relative to
+    the intake roots), while the block ``source:`` header names a compiled
+    wiki page. Without recovering these refs the write-back resolves nothing
+    and the source contradiction is never edited.
+    """
+    refs: list[str] = []
+    for m in _MEMBERS_INVOLVED_RE.finditer(raw_block):
         for part in m.group("payload").split(","):
             part = part.strip()
             if part:
@@ -611,7 +637,9 @@ def _writeback_source(
         answer_body = "\n".join(
             line
             for line in pq.answer_lines
-            if not _MEMBER_PATHS_RE.match(line) and not _PASSAGE_RE.match(line)
+            if not _MEMBER_PATHS_RE.match(line)
+            and not _MEMBERS_INVOLVED_RE.match(line)
+            and not _PASSAGE_RE.match(line)
         ).strip()
         if not answer_body:
             return 0
@@ -619,7 +647,11 @@ def _writeback_source(
         # Resolver a/b order: pq.source is side a; ``**Member paths**:`` refs
         # are the additional members the block involves (also-affects), side b
         # onward.
-        refs = [pq.source, *_extract_member_path_refs(pq.raw_block)]
+        refs = [
+            pq.source,
+            *_extract_member_path_refs(pq.raw_block),
+            *_extract_members_involved_refs(pq.raw_block),
+        ]
         member_paths = _resolve_source_files(refs, roots)
         if not member_paths:
             return 0
@@ -778,7 +810,23 @@ def ingest_answers(
     # Issue #197: roots under which a block's source ref(s) are resolved for
     # write-back. raw_root first (auto-memory sources live there), then the
     # wiki root (``pending_path.parent``) for wiki-side memories.
-    source_roots = [raw_root, pending_path.parent]
+    #
+    # Issue #210 follow-up: the detector attributes auto-memory contradictions
+    # via ``Members involved:`` refs that are relative to the configured intake
+    # roots (default ``raw/auto-memory``), not to ``raw/`` directly. Add the
+    # auto-memory root and any configured extra intake roots so those refs
+    # resolve to the real source files instead of nothing.
+    source_roots = [raw_root, raw_root / "auto-memory", pending_path.parent]
+    try:
+        from athenaeum.config import load_config, resolve_extra_intake_roots
+
+        knowledge_root = raw_root.parent
+        cfg = config if config is not None else load_config(knowledge_root)
+        for extra in resolve_extra_intake_roots(knowledge_root, cfg):
+            if extra not in source_roots:
+                source_roots.append(extra)
+    except Exception:  # noqa: BLE001 -- config is best-effort; defaults suffice
+        pass
 
     unanswered: list[PendingQuestion] = []
     archived_new: list[str] = []
