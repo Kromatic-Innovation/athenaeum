@@ -8,7 +8,7 @@ Most new functionality in this release is delivered via CLI subcommands
 etc.) — see the CLI documentation in ``README.md`` and ``athenaeum --help``
 for the full subcommand list. Internal modules (``contradictions``,
 ``merge``, ``clusters``, ``dedupe``, ``repair``, ``answers``,
-``provenance``, ``resolutions``) are importable but not part of the stable
+``provenance``, ``resolutions``, ``json_utils``) are importable but not part of the stable
 public surface; their signatures may change between minor releases.
 """
 
