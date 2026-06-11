@@ -263,7 +263,7 @@ yaml; the yaml overrides built-in defaults.
 |---------|----------|---------|--------|
 | `ATHENAEUM_CLASSIFY_MODEL` | `classify_model` (top-level) | `claude-haiku-4-5-20251001` | Detector model. Shared with Tier 2 classifier — one knob, not a C4-only dial. |
 | `ATHENAEUM_RESOLVE_MODEL` | `contradiction.resolve_model` | `claude-opus-4-7` | Resolver model. Configurable per-operator so cheaper models can be substituted. |
-| `ATHENAEUM_RESOLVE_MAX_PER_RUN` | `contradiction.resolve_max_per_run` | `50` | Per-ingest cap on Opus calls. Surplus contradictions escalate WITHOUT a proposal (degraded mode). |
+| `ATHENAEUM_RESOLVE_MAX_PER_RUN` | `contradiction.resolve_max_per_run` | `250` (raised from 50 in #187) | Per-ingest cap on Opus calls. Surplus contradictions escalate WITHOUT a proposal (degraded mode). |
 | `ATHENAEUM_CROSS_SCOPE_MODE` | `contradiction.cross_scope_mode` | `ancestor` | `off` / `ancestor` / `similarity` / `both` — see § 2. |
 | n/a | `contradiction.cluster_size_cap` | `25` | Pooled-cluster size threshold; oversized pools split into newest-first chunks of `<= cap`. |
 | n/a | `contradiction.similarity_threshold` | `0.85` | Cosine cutoff for the cross-scope similarity sweep. |
@@ -272,7 +272,7 @@ yaml; the yaml overrides built-in defaults.
 Notes:
 
 - `ATHENAEUM_RESOLVE_MAX_PER_RUN` accepts non-negative integers. Negative
-  or non-numeric values fall back to `50`. Setting it to `0` disables the
+  or non-numeric values fall back to `250`. Setting it to `0` disables the
   resolver entirely; every detection escalates without a proposal.
 - The per-ingest cap is enforced in `merge.py:_maybe_propose` (a closure
   in `merge_clusters_to_wiki`), NOT in `propose_resolution` itself.
@@ -472,9 +472,11 @@ The model is configurable (`ATHENAEUM_RESOLVE_MODEL` /
 `contradiction.resolve_model`) so an operator can substitute a cheaper
 model when the cost tradeoff is unacceptable.
 
-### Why the per-run cap defaults to 50
+### Why the per-run cap defaults to 250
 
-A guard against runaway cost on a noisy ingest. 50 × ~$0.10 = ~$5 of
+A guard against runaway cost on a noisy ingest. The cap was raised from
+50 to 250 in issue #187 so a full-knowledge-base ingest no longer
+exhausts the confirmation pass partway through. 250 × ~$0.10 = ~$25 of
 worst-case Opus spend per run; high enough that real workloads rarely
 hit the cap, low enough that a buggy detector returning `detected=true`
 on every cluster cannot empty the operator's credit balance overnight.
