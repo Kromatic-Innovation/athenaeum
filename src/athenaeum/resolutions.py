@@ -674,7 +674,9 @@ def resolve_max_per_run(config: dict[str, Any] | None = None) -> int:
         cfg = config.get("contradiction") if isinstance(config, dict) else None
         if isinstance(cfg, dict):
             raw = cfg.get("resolve_max_per_run")
-            if isinstance(raw, int) and raw >= 0:
+            # bool is an int subclass — `resolve_max_per_run: yes` in yaml
+            # must not silently become a cap of 1.
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
                 return raw
     return DEFAULT_RESOLVE_MAX_PER_RUN
 
