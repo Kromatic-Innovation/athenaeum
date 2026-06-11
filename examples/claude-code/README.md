@@ -207,6 +207,6 @@ athenaeum questions list --with-proposal --limit 5  # all unresolved (capped)
 | Session message shows `0 wiki pages`            | `$KNOWLEDGE_ROOT/wiki/` is empty or unreadable — if `raw/` has files, run `athenaeum run`       |
 | `remember` saves but `recall` finds nothing     | Raw observations compile to wiki only when `athenaeum run` fires. Check `ls ~/knowledge/raw/` for pending files, then run `athenaeum run --path ~/knowledge` |
 | No `[Knowledge context]` on user turns          | Run `sqlite3 ~/.cache/athenaeum/wiki-index.db 'select count(*) from wiki'` — should be > 0     |
-| Vector backend silent                           | Re-run with `ATHENAEUM_HOOK_DEBUG=1` — usually `pip install athenaeum[vector]` missing         |
+| Vector backend silent                           | Re-run with `ATHENAEUM_HOOK_DEBUG=1` — usually `pip install 'athenaeum[vector]'` missing         |
 | `query-topics` running without its API key      | `cat ~/.cache/athenaeum/config.env` — should contain `ANTHROPIC_API_KEY=...`                   |
 | Hook ran "green" but recall never fires         | Check the settings-snippet was merged correctly: `grep UserPromptSubmit ~/.claude/settings.json`|

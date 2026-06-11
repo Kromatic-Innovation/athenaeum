@@ -1041,7 +1041,6 @@ def run(
     # the next run), but the summary line is machine-greppable and a manifest
     # records exactly what was deferred. A clean run clears any stale
     # manifest left by a previous tripped run.
-    manifest_path = wiki_root / DEFERRED_MANIFEST_NAME
     if deferred_refs:
         manifest_path = _write_deferred_manifest(
             wiki_root,
@@ -1063,8 +1062,8 @@ def run(
             manifest_path,
         )
     else:
-        if not dry_run and manifest_path.exists():
-            manifest_path.unlink()
+        if not dry_run:
+            _clear_stale_deferred_manifest(wiki_root)
         log.info(
             "Done: %d created, %d updated, %d escalated, %d skipped, %d failed",
             total_created,
