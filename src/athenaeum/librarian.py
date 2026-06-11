@@ -798,6 +798,7 @@ def run(
     max_api_calls: int | None = None,
     cluster_only: bool = False,
     merge_only: bool = False,
+    strict_budget: bool = False,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error.
 
@@ -816,6 +817,11 @@ def run(
     ``None`` (the default) it resolves via env ``ATHENAEUM_MAX_API_CALLS`` >
     yaml ``librarian.max_api_calls`` > :data:`DEFAULT_MAX_API_CALLS`. An
     explicit value (e.g. from the CLI flag) wins over all three.
+
+    ``strict_budget`` (issue #227) makes a budget-tripped (DEGRADED) run
+    return 1 instead of the default 0, for exit-code-based alerting (e.g.
+    the CLI ``--strict-budget`` flag). All other DEGRADED-path behavior —
+    warning summary, deferred-work manifest, git snapshot — is unchanged.
     """
     skip_entity_tiers = cluster_only or merge_only
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -1095,6 +1101,14 @@ def run(
 
     if failed_files:
         log.warning("Failed files (will retry next run): %s", ", ".join(failed_files))
+        return 1
+
+    # Issue #227: opt-in strict mode for exit-code-based alerting. The
+    # default stays 0 (a trip is not a crash — the next run picks the
+    # deferred files up), but operators who alert on exit codes can ask
+    # for a nonzero exit when the budget tripped.
+    if deferred_refs and strict_budget:
+        log.warning("strict_budget: budget-tripped run — exiting nonzero")
         return 1
 
     return 0

@@ -20,6 +20,7 @@ with `pip install -e ".[dev,vector]"` to run them), and MCP server tests need
 - Include tests for new functionality
 - Ensure all existing tests pass
 - Follow the existing code style (enforced by ruff)
+- Keep mechanical reformat commits separate from behavior changes — a reviewer (or release gate) should never have to dig a logic change out of a formatting diff
 
 ## Branch flow and promotion
 
