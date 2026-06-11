@@ -24,7 +24,7 @@ import logging
 import os
 import re
 import subprocess
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import anthropic
@@ -71,6 +71,22 @@ log = logging.getLogger("athenaeum")
 DEFAULT_KNOWLEDGE_ROOT = Path.home() / "knowledge"
 DEFAULT_RAW_ROOT = DEFAULT_KNOWLEDGE_ROOT / "raw"
 DEFAULT_WIKI_ROOT = DEFAULT_KNOWLEDGE_ROOT / "wiki"
+
+# Run-level API call budget.
+# Raised 400 -> 800 (issue #220): the 2026-06-11 nightly observed 404 calls
+# hit the 400 cap with intake remaining — now that the #187 confirmation
+# pass runs at full coverage, a busy night legitimately needs more than 400
+# calls, and the budget-tripped run stopped early while reporting success.
+# The cap is a ceiling, not a target: quiet runs never approach it and pay
+# nothing extra. Operators can override via `librarian.max_api_calls`
+# (yaml), `ATHENAEUM_MAX_API_CALLS` (env), or `--max-api-calls` (CLI flag,
+# wins over both).
+DEFAULT_MAX_API_CALLS = 800
+
+# Manifest written next to _pending_questions.md when a budget-tripped run
+# defers intake (issue #220). Overwritten on every tripped run; removed by
+# the next clean run.
+DEFERRED_MANIFEST_NAME = "_deferred_work.md"
 
 # Fallback valid values if schema files are missing
 FALLBACK_TYPES = [
@@ -654,13 +670,79 @@ def _run_reresolve_pass(
         return 0
 
 
+def librarian_max_api_calls(config: dict[str, object] | None = None) -> int:
+    """Resolve the run-level API call cap from env > config > default.
+
+    Issue #220. Environment override wins over the YAML setting so an
+    operator can bump the cap on a single run without editing config.
+    Negative or non-numeric values fall back to
+    :data:`DEFAULT_MAX_API_CALLS`. Mirrors
+    :func:`athenaeum.resolutions.resolve_max_per_run`.
+    """
+    env = os.environ.get("ATHENAEUM_MAX_API_CALLS")
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict):
+            raw = cfg.get("max_api_calls")
+            if isinstance(raw, int) and raw >= 0:
+                return raw
+    return DEFAULT_MAX_API_CALLS
+
+
+def _write_deferred_manifest(
+    wiki_root: Path,
+    deferred_refs: list[str],
+    *,
+    api_calls: int,
+    budget: int,
+) -> Path:
+    """Write the deferred-work manifest after a budget-tripped run (#220).
+
+    Lists the raw files the run did NOT process so an operator (or the next
+    run's health reporting) can see what was silently deferred. The deferred
+    files stay on disk and are picked up automatically by the next run; this
+    manifest is informational. Overwritten on every tripped run; the next
+    clean run removes it.
+    """
+    path = wiki_root / DEFERRED_MANIFEST_NAME
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = [
+        "# Deferred work — librarian run budget exhausted",
+        "",
+        "The last librarian run stopped early because the run-level API call",
+        "budget was exhausted. The raw files below were NOT processed this",
+        "run; they remain on disk and the next run picks them up",
+        "automatically. This file is overwritten on every budget-tripped run",
+        "and removed by the next clean run.",
+        "",
+        f"- run: {now}",
+        f"- api_calls_used: {api_calls}",
+        f"- api_call_budget: {budget}",
+        f"- deferred_count: {len(deferred_refs)}",
+        "",
+        "## Deferred raw files",
+        "",
+        *[f"- {ref}" for ref in deferred_refs],
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
 def run(
     raw_root: Path = DEFAULT_RAW_ROOT,
     wiki_root: Path = DEFAULT_WIKI_ROOT,
     knowledge_root: Path = DEFAULT_KNOWLEDGE_ROOT,
     dry_run: bool = False,
     max_files: int = 50,
-    max_api_calls: int = 200,
+    max_api_calls: int | None = None,
     cluster_only: bool = False,
     merge_only: bool = False,
 ) -> int:
@@ -676,6 +758,11 @@ def run(
     ``wiki/auto-<topic-slug>.md`` entries. Neither discovery, clustering,
     nor the entity tier pipeline runs. Useful for iterating on the merge
     output without re-embedding or re-clustering.
+
+    ``max_api_calls`` is the run-level API call budget (issue #220). When
+    ``None`` (the default) it resolves via env ``ATHENAEUM_MAX_API_CALLS`` >
+    yaml ``librarian.max_api_calls`` > :data:`DEFAULT_MAX_API_CALLS`. An
+    explicit value (e.g. from the CLI flag) wins over all three.
     """
     skip_entity_tiers = cluster_only or merge_only
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -698,6 +785,11 @@ def run(
         return 1
 
     config = load_config(knowledge_root)
+
+    # Issue #220: resolve the run-level API call budget (explicit arg >
+    # env > yaml > default).
+    if max_api_calls is None:
+        max_api_calls = librarian_max_api_calls(config)
 
     # Build the shared Anthropic client early so both the entity tiers and
     # the C4 contradiction detector can share it. ``None`` when the key is
@@ -805,14 +897,18 @@ def run(
     total_escalated = 0
     total_skipped = 0
     failed_files: list[str] = []
+    deferred_refs: list[str] = []
 
-    for raw in raw_files:
+    for i, raw in enumerate(raw_files):
         if not dry_run and usage.api_calls >= max_api_calls:
             log.warning(
                 "API call budget exhausted (%d/%d) — stopping early",
                 usage.api_calls,
                 max_api_calls,
             )
+            # Issue #220: everything from here on is deferred to the next
+            # run — record it so the manifest + summary can surface it.
+            deferred_refs = [r.ref for r in raw_files[i:]]
             break
 
         log.info("Processing: %s", raw.ref)
@@ -856,14 +952,41 @@ def run(
             raw.path.unlink()
             log.info("  Deleted: %s", raw.path)
 
-    log.info(
-        "Done: %d created, %d updated, %d escalated, %d skipped, %d failed",
-        total_created,
-        total_updated,
-        total_escalated,
-        total_skipped,
-        len(failed_files),
-    )
+    # Issue #220: a budget-tripped run must be visibly DEGRADED, not "Done".
+    # Exit code stays 0 (not a crash — the deferred files are picked up by
+    # the next run), but the summary line is machine-greppable and a manifest
+    # records exactly what was deferred. A clean run clears any stale
+    # manifest left by a previous tripped run.
+    manifest_path = wiki_root / DEFERRED_MANIFEST_NAME
+    if deferred_refs:
+        manifest_path = _write_deferred_manifest(
+            wiki_root,
+            deferred_refs,
+            api_calls=usage.api_calls,
+            budget=max_api_calls,
+        )
+        log.info(
+            "Done (DEGRADED — budget exhausted): %d created, %d updated, "
+            "%d escalated, %d skipped, %d failed, %d deferred (manifest: %s)",
+            total_created,
+            total_updated,
+            total_escalated,
+            total_skipped,
+            len(failed_files),
+            len(deferred_refs),
+            manifest_path,
+        )
+    else:
+        if not dry_run and manifest_path.exists():
+            manifest_path.unlink()
+        log.info(
+            "Done: %d created, %d updated, %d escalated, %d skipped, %d failed",
+            total_created,
+            total_updated,
+            total_escalated,
+            total_skipped,
+            len(failed_files),
+        )
     if usage.api_calls > 0:
         log.info(
             "Token usage: %d API calls, %d input + %d output = %d total"
