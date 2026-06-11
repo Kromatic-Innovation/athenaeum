@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-06-11
+
+Contradiction-pipeline reliability release, closing the silent-loss paths
+surfaced by the 2026-06-11 nightly run. LLM JSON responses wrapped in
+markdown fences or prose no longer drop clusters, and a run that exhausts
+its API budget now says so loudly and leaves a manifest of the deferred
+work instead of reporting a clean "Done".
+
+### Changed
+
+- **Run-level API call budget is configurable and counts every call (#220).**
+  The budget now resolves `ATHENAEUM_MAX_API_CALLS` env var over
+  `librarian.max_api_calls` yaml over the default, and the default is raised
+  from 400 to 800 to fit the post-#187 full-coverage confirmation-pass
+  profile. The counter now includes merge-phase detector/resolver and
+  nightly re-resolve calls, making it a true run-level ceiling. The CLI
+  `--max-api-calls` flag validates positive integers and explicitly wins
+  over env and yaml.
+
+### Fixed
+
+- **Lenient JSON extraction for LLM responses (#219).** The contradiction
+  detector and resolver parsed model output with a strict first-to-last-brace
+  regex and silently dropped clusters when the model wrapped its JSON in
+  markdown ```json fences or surrounding prose — 38 silent drops were
+  observed in one nightly run. A new shared `extract_json_object()` helper
+  (`athenaeum.json_utils`) prefers fenced content, applies an exactly-one
+  rule for unfenced text, and returns None on ambiguity so callers keep
+  their loud safe fallback. RecursionError is contained and decode
+  diagnostics are logged at debug level. (PR #221)
+- **Fence pairing is robust to inline backticks, and the last legacy parse
+  site is migrated (#222).** Only line-leading ``` (CommonMark, up to three
+  spaces of indentation) delimits a fence, so stray inline backticks can no
+  longer shift fence pairing. When fences yield no object, the helper falls
+  back to a whole-text exactly-one scan. `propose_freetext_source_edits` is
+  migrated off the greedy first-to-last-brace regex. (PR #223)
+- **Librarian run-level budget exhaustion is no longer silent (#220).** When
+  the budget trips, the run now writes a `wiki/_deferred_work.md` manifest
+  itemizing deferred intake (in-window and beyond-window, with failed files
+  listed separately) and logs a warning-level `Done (DEGRADED — budget
+  exhausted)` summary with deferred counts instead of a clean "Done". Stale
+  manifests are cleared by the next clean run. (PR #224)
+
 ## [0.7.2] - 2026-06-09
 
 Pending-question recurrence hardening. Free-text human answers now enact a
@@ -782,7 +825,8 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.6.1...v0.7.0
