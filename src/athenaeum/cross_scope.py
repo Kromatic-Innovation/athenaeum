@@ -90,7 +90,9 @@ def resolve_cross_scope_mode(config: dict[str, Any] | None = None) -> str:
             DEFAULT_MODE,
         )
     if config is not None:
-        contradiction_cfg = config.get("contradiction") or {}
+        contradiction_cfg = config.get("contradiction")
+        if not isinstance(contradiction_cfg, dict):
+            contradiction_cfg = {}
         cfg_val = contradiction_cfg.get("cross_scope_mode")
         if isinstance(cfg_val, str):
             cfg_val = cfg_val.strip().lower()
@@ -109,7 +111,9 @@ def resolve_cluster_size_cap(config: dict[str, Any] | None = None) -> int:
     """Resolve the pooled-cluster size cap (default 25)."""
     if config is None:
         return DEFAULT_CLUSTER_SIZE_CAP
-    contradiction_cfg = config.get("contradiction") or {}
+    contradiction_cfg = config.get("contradiction")
+    if not isinstance(contradiction_cfg, dict):
+        contradiction_cfg = {}
     raw = contradiction_cfg.get("cluster_size_cap")
     try:
         if raw is None:
@@ -124,7 +128,9 @@ def resolve_similarity_threshold(config: dict[str, Any] | None = None) -> float:
     """Resolve cosine similarity threshold for cross-scope sweep (default 0.85)."""
     if config is None:
         return DEFAULT_SIMILARITY_THRESHOLD
-    contradiction_cfg = config.get("contradiction") or {}
+    contradiction_cfg = config.get("contradiction")
+    if not isinstance(contradiction_cfg, dict):
+        contradiction_cfg = {}
     raw = contradiction_cfg.get("similarity_threshold")
     try:
         if raw is None:

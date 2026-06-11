@@ -22,7 +22,9 @@ class TestLoadConfig:
         assert cfg["vector"]["provider"] == "chromadb"
 
     def test_reads_yaml(self, tmp_path: Path) -> None:
-        (tmp_path / "athenaeum.yaml").write_text("auto_recall: false\nsearch_backend: vector\n")
+        (tmp_path / "athenaeum.yaml").write_text(
+            "auto_recall: false\nsearch_backend: vector\n"
+        )
         cfg = load_config(tmp_path)
         assert cfg["auto_recall"] is False
         assert cfg["search_backend"] == "vector"
@@ -49,6 +51,227 @@ class TestLoadConfig:
         cfg = load_config(tmp_path)
         assert cfg["auto_recall"] is True
 
+    def test_mutating_returned_config_does_not_leak(self, tmp_path: Path) -> None:
+        """A shallow seed copy aliased _DEFAULTS' nested values: mutating
+        ``recall.extra_intake_roots`` on one returned config corrupted every
+        subsequent load_config() process-wide. The seed must be a deep copy.
+        """
+        cfg = load_config(tmp_path)
+        cfg["recall"]["extra_intake_roots"].append("raw/mutated")
+        cfg["vector"]["provider"] = "mutated"
+
+        fresh = load_config(tmp_path)
+        assert fresh["recall"]["extra_intake_roots"] == ["raw/auto-memory"]
+        assert fresh["vector"]["provider"] == "chromadb"
+
+
+class TestDefaultsDoNotShadowCodeDefaults:
+    """Regression tests for issue #231.
+
+    ``_DEFAULTS`` used to seed concrete values for keys whose real
+    defaults live next to their consumer code (``contradiction.*``,
+    ``librarian.cluster_threshold`` / ``cluster_output``). Because
+    ``load_config()`` always merged those seeds in, every resolver saw
+    them as "user-set" and its own code default became unreachable —
+    which is how the #187 resolver-cap raise (50 -> 250) was silently
+    reverted to 50 through the config path.
+    """
+
+    def test_resolver_cap_default_reaches_187_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE #231 bug: a plain load_config() must yield the #187 cap."""
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MAX_PER_RUN", raising=False)
+        from athenaeum.resolutions import (
+            DEFAULT_RESOLVE_MAX_PER_RUN,
+            resolve_max_per_run,
+        )
+
+        cfg = load_config(tmp_path)
+        assert DEFAULT_RESOLVE_MAX_PER_RUN == 250
+        assert resolve_max_per_run(cfg) == DEFAULT_RESOLVE_MAX_PER_RUN
+
+    def test_cross_scope_mode_code_default_reachable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_CROSS_SCOPE_MODE", raising=False)
+        from athenaeum.cross_scope import DEFAULT_MODE, resolve_cross_scope_mode
+
+        cfg = load_config(tmp_path)
+        assert "cross_scope_mode" not in (cfg.get("contradiction") or {})
+        assert resolve_cross_scope_mode(cfg) == DEFAULT_MODE
+
+    def test_resolved_similarity_threshold_code_default_reachable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
+        from athenaeum.fingerprint import (
+            _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD,
+            resolve_resolved_similarity_threshold,
+        )
+
+        cfg = load_config(tmp_path)
+        assert "resolved_similarity_threshold" not in (cfg.get("contradiction") or {})
+        assert resolve_resolved_similarity_threshold(cfg) == pytest.approx(
+            _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
+        )
+
+    def test_cluster_size_cap_code_default_reachable(self, tmp_path: Path) -> None:
+        from athenaeum.cross_scope import (
+            DEFAULT_CLUSTER_SIZE_CAP,
+            resolve_cluster_size_cap,
+        )
+
+        cfg = load_config(tmp_path)
+        assert "cluster_size_cap" not in (cfg.get("contradiction") or {})
+        assert DEFAULT_CLUSTER_SIZE_CAP == 25
+        assert resolve_cluster_size_cap(cfg) == DEFAULT_CLUSTER_SIZE_CAP
+
+    def test_similarity_threshold_code_default_reachable(self, tmp_path: Path) -> None:
+        from athenaeum.cross_scope import (
+            DEFAULT_SIMILARITY_THRESHOLD,
+            resolve_similarity_threshold,
+        )
+
+        cfg = load_config(tmp_path)
+        assert "similarity_threshold" not in (cfg.get("contradiction") or {})
+        assert DEFAULT_SIMILARITY_THRESHOLD == pytest.approx(0.85)
+        assert resolve_similarity_threshold(cfg) == pytest.approx(
+            DEFAULT_SIMILARITY_THRESHOLD
+        )
+
+    def test_cluster_output_code_default_reachable(self, tmp_path: Path) -> None:
+        from athenaeum.clusters import (
+            DEFAULT_CLUSTER_OUTPUT,
+            resolve_cluster_output_path,
+        )
+
+        cfg = load_config(tmp_path)
+        assert "cluster_output" not in (cfg.get("librarian") or {})
+        assert (
+            resolve_cluster_output_path(tmp_path, config=cfg)
+            == tmp_path / DEFAULT_CLUSTER_OUTPUT
+        )
+
+    def test_cluster_threshold_code_default_reachable(self, tmp_path: Path) -> None:
+        from athenaeum.clusters import (
+            DEFAULT_CLUSTER_THRESHOLD,
+            resolve_cluster_threshold,
+        )
+
+        cfg = load_config(tmp_path)
+        assert "cluster_threshold" not in (cfg.get("librarian") or {})
+        assert resolve_cluster_threshold(tmp_path, config=cfg) == pytest.approx(
+            DEFAULT_CLUSTER_THRESHOLD
+        )
+
+    def test_user_yaml_still_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit yaml values must survive load_config and beat code defaults."""
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MAX_PER_RUN", raising=False)
+        monkeypatch.delenv("ATHENAEUM_CROSS_SCOPE_MODE", raising=False)
+        monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
+        from athenaeum.clusters import resolve_cluster_threshold
+        from athenaeum.cross_scope import resolve_cross_scope_mode
+        from athenaeum.fingerprint import resolve_resolved_similarity_threshold
+        from athenaeum.resolutions import resolve_max_per_run
+
+        (tmp_path / "athenaeum.yaml").write_text(
+            "contradiction:\n"
+            "  resolve_max_per_run: 7\n"
+            "  cross_scope_mode: similarity\n"
+            "  resolved_similarity_threshold: 0.9\n"
+            "librarian:\n"
+            "  cluster_threshold: 0.75\n"
+        )
+        cfg = load_config(tmp_path)
+        assert resolve_max_per_run(cfg) == 7
+        assert resolve_cross_scope_mode(cfg) == "similarity"
+        assert resolve_resolved_similarity_threshold(cfg) == pytest.approx(0.9)
+        assert resolve_cluster_threshold(tmp_path, config=cfg) == pytest.approx(0.75)
+
+    def test_unknown_top_level_sections_pass_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sections absent from _DEFAULTS (e.g. ``resolve:``) must not be dropped."""
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        from athenaeum.resolutions import _get_model
+
+        (tmp_path / "athenaeum.yaml").write_text(
+            "resolve:\n  model: claude-haiku-test\n"
+        )
+        cfg = load_config(tmp_path)
+        assert cfg["resolve"]["model"] == "claude-haiku-test"
+        # End-to-end: the resolver must actually see the user-set model.
+        assert _get_model(cfg) == "claude-haiku-test"
+
+    def test_template_advertises_187_cap(self) -> None:
+        from athenaeum.config import _DEFAULT_CONFIG_CONTENT
+
+        assert "resolve_max_per_run: 250" in _DEFAULT_CONFIG_CONTENT
+        assert "resolve_max_per_run: 50" not in _DEFAULT_CONFIG_CONTENT
+
+    def test_template_names_live_resolver_model_key(self) -> None:
+        """The template must advertise ``resolve.model`` (the key _get_model
+        reads), not the dead ``contradiction.resolve_model``.
+        """
+        from athenaeum.config import _DEFAULT_CONFIG_CONTENT
+
+        assert "resolve_model:" not in _DEFAULT_CONFIG_CONTENT
+        assert "# resolve:" in _DEFAULT_CONFIG_CONTENT
+        assert "#   model: claude-opus-4-7" in _DEFAULT_CONFIG_CONTENT
+
+
+class TestNonDictSectionsDegradeGracefully:
+    """A truthy scalar/list section value (``contradiction: oops``) must
+    degrade to code defaults, not crash the resolver functions.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_value", ["oops", ["a", "b"], 3, 1.5], ids=["str", "list", "int", "float"]
+    )
+    def test_scalar_or_list_sections_fall_back_to_code_defaults(
+        self, bad_value: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_CROSS_SCOPE_MODE", raising=False)
+        monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
+        from athenaeum.clusters import (
+            DEFAULT_CLUSTER_OUTPUT,
+            DEFAULT_CLUSTER_THRESHOLD,
+            resolve_cluster_output_path,
+            resolve_cluster_threshold,
+        )
+        from athenaeum.cross_scope import (
+            DEFAULT_CLUSTER_SIZE_CAP,
+            DEFAULT_MODE,
+            DEFAULT_SIMILARITY_THRESHOLD,
+            resolve_cluster_size_cap,
+            resolve_cross_scope_mode,
+            resolve_similarity_threshold,
+        )
+        from athenaeum.fingerprint import (
+            _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD,
+            resolve_resolved_similarity_threshold,
+        )
+
+        cfg = {"contradiction": bad_value, "librarian": bad_value}
+        assert resolve_cross_scope_mode(cfg) == DEFAULT_MODE
+        assert resolve_resolved_similarity_threshold(cfg) == pytest.approx(
+            _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
+        )
+        assert resolve_cluster_size_cap(cfg) == DEFAULT_CLUSTER_SIZE_CAP
+        assert resolve_similarity_threshold(cfg) == pytest.approx(
+            DEFAULT_SIMILARITY_THRESHOLD
+        )
+        assert resolve_cluster_threshold(tmp_path, config=cfg) == pytest.approx(
+            DEFAULT_CLUSTER_THRESHOLD
+        )
+        assert (
+            resolve_cluster_output_path(tmp_path, config=cfg)
+            == tmp_path / DEFAULT_CLUSTER_OUTPUT
+        )
+
 
 class TestRecallExtraIntakeRootsDefault:
     """The default config advertises ``raw/auto-memory`` as an extra root
@@ -73,7 +296,9 @@ class TestResolveExtraIntakeRoots:
         assert resolved[0].name == "auto-memory"
         assert resolved[0].is_absolute()
 
-    def test_drops_missing_roots(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    def test_drops_missing_roots(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """Missing intake roots must not blow up index build, but they
         should emit a WARNING so operators notice a typo'd or unmounted
         path rather than silently losing recall coverage.
@@ -84,7 +309,8 @@ class TestResolveExtraIntakeRoots:
         warnings = [
             r
             for r in caplog.records
-            if r.levelno == logging.WARNING and "extra_intake_root not found" in r.getMessage()
+            if r.levelno == logging.WARNING
+            and "extra_intake_root not found" in r.getMessage()
         ]
         assert len(warnings) == 1
         assert "raw/auto-memory" in warnings[0].getMessage()
@@ -92,7 +318,9 @@ class TestResolveExtraIntakeRoots:
     def test_accepts_absolute_path(self, tmp_path: Path) -> None:
         extra = tmp_path / "extra"
         extra.mkdir()
-        (tmp_path / "athenaeum.yaml").write_text(f"recall:\n  extra_intake_roots:\n    - {extra}\n")
+        (tmp_path / "athenaeum.yaml").write_text(
+            f"recall:\n  extra_intake_roots:\n    - {extra}\n"
+        )
         resolved = resolve_extra_intake_roots(tmp_path)
         assert resolved == [extra.resolve()]
 
@@ -104,17 +332,25 @@ class TestResolveExtraIntakeRoots:
             resolved = resolve_extra_intake_roots(tmp_path)
         assert resolved == []
         # Empty list must stay silent — no dropped paths to warn about.
-        assert not [r for r in caplog.records if "extra_intake_root not found" in r.getMessage()]
+        assert not [
+            r for r in caplog.records if "extra_intake_root not found" in r.getMessage()
+        ]
 
-    def test_non_list_returns_empty(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    def test_non_list_returns_empty(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """Malformed config (scalar instead of list) degrades gracefully."""
-        (tmp_path / "athenaeum.yaml").write_text("recall:\n  extra_intake_roots: raw/auto-memory\n")
+        (tmp_path / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots: raw/auto-memory\n"
+        )
         with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
             resolved = resolve_extra_intake_roots(tmp_path)
         assert resolved == []
         # Non-list config is a distinct failure mode (malformed yaml),
         # not per-root warnings — stay silent here too.
-        assert not [r for r in caplog.records if "extra_intake_root not found" in r.getMessage()]
+        assert not [
+            r for r in caplog.records if "extra_intake_root not found" in r.getMessage()
+        ]
 
 
 class TestWriteDefaultConfig:

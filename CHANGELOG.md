@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Config `_DEFAULTS` no longer shadow module code defaults (#231).**
+  `load_config()` seeded concrete values for `contradiction.*` and
+  `librarian.cluster_threshold` / `cluster_output` into every loaded
+  config, so resolver functions always saw a "user-set" value and their
+  own code defaults were unreachable. Most visibly, the #187 resolver-cap
+  raise (50 -> 250) never took effect through the config path — the
+  default resolver cap was silently 50. Those keys are removed from
+  `_DEFAULTS`; the module-level defaults (and their env > yaml > default
+  precedence) are now live. The merge also passes through user yaml
+  sections absent from `_DEFAULTS` (e.g. `resolve:`) instead of dropping
+  them. Explicit yaml settings still win unchanged.
+
 ## [0.7.3] - 2026-06-11
 
 Contradiction-pipeline reliability release, closing the silent-loss paths
