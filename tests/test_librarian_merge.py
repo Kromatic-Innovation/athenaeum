@@ -1003,8 +1003,8 @@ class TestContradictionFixture:
         parseable JSON must NOT silently suppress a real conflict. The
         mock returns a well-formed response object whose ``.content[0].text``
         is plain prose, so execution flows through ``_parse_response``,
-        ``_JSON_OBJECT_RE`` finds no JSON object, and the path taken is
-        ``_fallback("resolver-returned-no-json")``. That fallback returns
+        ``extract_json_object`` finds no JSON object, and the path taken
+        is ``_fallback("resolver-returned-no-json")``. That fallback returns
         ``retain_both_with_context`` — not ``SUPPRESS_ACTION`` — so the
         cluster still escalates to ``_pending_questions.md``.
         """

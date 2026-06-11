@@ -73,15 +73,18 @@ def _fake_client(payload_text: str) -> MagicMock:
 
 class TestPositiveDetection:
     def test_contradiction_detected_with_two_members(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         scope = tmp_path / "scope"
         m1 = _write_am(
-            scope, "feedback_a.md",
+            scope,
+            "feedback_a.md",
             "Always commit directly to develop. Do not park on WIP.",
         )
         m2 = _write_am(
-            scope, "feedback_b.md",
+            scope,
+            "feedback_b.md",
             "Park prior-session debris on a WIP branch. Do not commit directly.",
         )
         payload = (
@@ -135,6 +138,50 @@ class TestPositiveDetection:
         result = detect_contradictions([m1, m2], _fake_client(payload))
         assert result.detected is True
 
+    def test_fenced_json_response_is_tolerated(self, tmp_path: Path) -> None:
+        """Issue #219: fence-wrapped output + trailing brace span must parse.
+
+        The 2026-06-11 nightly run dropped 38 clusters on this shape —
+        the greedy first-``{``-to-last-``}`` regex swallowed the trailing
+        prose's braces and json.loads raised ``Extra data``.
+        """
+        scope = tmp_path / "scope"
+        m1 = _write_am(scope, "a.md", "Facts A.")
+        m2 = _write_am(scope, "b.md", "Facts B.")
+        payload = (
+            "```json\n"
+            '{"detected": true, "conflict_type": "factual", '
+            f'"members_involved": ["{m1.origin_scope}/{m1.path.name}", '
+            f'"{m2.origin_scope}/{m2.path.name}"], '
+            '"conflicting_passages": ["Facts A.", "Facts B."], '
+            '"rationale": "r"}'
+            "\n```\n"
+            'A non-conflict would instead be {"detected": false}.'
+        )
+        result = detect_contradictions([m1, m2], _fake_client(payload))
+        assert result.detected is True
+        assert result.conflict_type == "factual"
+
+    def test_bare_fenced_json_response_is_tolerated(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Issue #219: a bare ``` fence (no language tag) also parses."""
+        scope = tmp_path / "scope"
+        m1 = _write_am(scope, "a.md", "Facts A.")
+        m2 = _write_am(scope, "b.md", "Facts B.")
+        payload = (
+            "```\n"
+            '{"detected": true, "conflict_type": "factual", '
+            f'"members_involved": ["{m1.origin_scope}/{m1.path.name}", '
+            f'"{m2.origin_scope}/{m2.path.name}"], '
+            '"conflicting_passages": ["Facts A.", "Facts B."], '
+            '"rationale": "r {with braces}"}'
+            "\n```"
+        )
+        result = detect_contradictions([m1, m2], _fake_client(payload))
+        assert result.detected is True
+
 
 # ---------------------------------------------------------------------------
 # Negative path
@@ -179,7 +226,9 @@ class TestNegativeDetection:
 
 class TestFallback:
     def test_no_client_returns_llm_unavailable(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         scope = tmp_path / "scope"
         m1 = _write_am(scope, "a.md", "A")
@@ -191,7 +240,8 @@ class TestFallback:
         assert any("no Anthropic client" in rec.message for rec in caplog.records)
 
     def test_api_exception_falls_back_to_llm_unavailable(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         scope = tmp_path / "scope"
         m1 = _write_am(scope, "a.md", "A")
@@ -203,18 +253,22 @@ class TestFallback:
         assert result.rationale == "llm-unavailable"
 
     def test_non_json_response_returns_detected_false(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         scope = tmp_path / "scope"
         m1 = _write_am(scope, "a.md", "A")
         m2 = _write_am(scope, "b.md", "B")
         result = detect_contradictions(
-            [m1, m2], _fake_client("no json here, just prose"),
+            [m1, m2],
+            _fake_client("no json here, just prose"),
         )
         assert result.detected is False
+        assert result.rationale == "detector-returned-no-json"
 
     def test_invalid_conflict_type_returns_detected_false(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """Detector claims detected=true but with an invalid conflict_type."""
         scope = tmp_path / "scope"
@@ -248,9 +302,7 @@ class TestPromptBuilding:
         detect_contradictions([m1, m2], client)
         # Each body trims to <= PER_MEMBER_BODY_CHARS chars — the user
         # message we sent should not contain 3× the cap in a row.
-        user_content = client.messages.create.call_args.kwargs["messages"][0][
-            "content"
-        ]
+        user_content = client.messages.create.call_args.kwargs["messages"][0]["content"]
         assert user_content.count("x" * (PER_MEMBER_BODY_CHARS + 1)) == 0
         # Sanity: we still embed the (trimmed) body.
         assert "x" * 100 in user_content
@@ -266,9 +318,7 @@ class TestPromptBuilding:
             '"rationale": ""}'
         )
         detect_contradictions([m1, m2, m3], client)
-        user_content = client.messages.create.call_args.kwargs["messages"][0][
-            "content"
-        ]
+        user_content = client.messages.create.call_args.kwargs["messages"][0]["content"]
         for name in ("alpha.md", "bravo.md", "charlie.md"):
             assert name in user_content
 
