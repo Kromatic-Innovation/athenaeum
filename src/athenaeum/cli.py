@@ -100,9 +100,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument(
         "--knowledge-root",
+        "--path",
         type=Path,
         default=None,
-        help="Knowledge git repo root (default: ~/knowledge)",
+        help="Knowledge git repo root (default: ~/knowledge). "
+        "--path is an alias, matching init/status/serve.",
     )
     run_parser.add_argument(
         "--dry-run",
@@ -124,6 +126,14 @@ def main(argv: list[str] | None = None) -> int:
             "ATHENAEUM_MAX_API_CALLS env, then athenaeum.yaml "
             "librarian.max_api_calls, then 800)"
         ),
+    )
+    run_parser.add_argument(
+        "--strict-budget",
+        action="store_true",
+        help="Exit nonzero when the run trips the API call budget "
+        "(the DEGRADED path) instead of the default 0. Opt-in, for "
+        "exit-code-based alerting; the warning summary and deferred-work "
+        "manifest are written either way.",
     )
     run_parser.add_argument(
         "--verbose",
@@ -682,6 +692,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         max_api_calls=args.max_api_calls,
         cluster_only=getattr(args, "cluster_only", False),
         merge_only=getattr(args, "merge_only", False),
+        strict_budget=args.strict_budget,
     )
 
 

@@ -662,3 +662,69 @@ class TestRunMaxApiCallsFlag:
             main(["run", "--max-api-calls", bad])
         assert excinfo.value.code == 2
         assert "--max-api-calls" in capsys.readouterr().err
+
+
+def _capture_librarian_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Replace librarian.run with a kwargs-capturing stub returning 0."""
+    import athenaeum.librarian as librarian_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(librarian_mod, "run", fake_run)
+    return captured
+
+
+class TestRunPathAlias:
+    """Issue #227 — `run --path` aliases `--knowledge-root`."""
+
+    def test_path_alias_sets_knowledge_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured = _capture_librarian_run(monkeypatch)
+        rc = main(["run", "--path", str(tmp_path), "--dry-run"])
+        assert rc == 0
+        assert captured["knowledge_root"] == tmp_path
+
+    def test_knowledge_root_still_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured = _capture_librarian_run(monkeypatch)
+        rc = main(["run", "--knowledge-root", str(tmp_path), "--dry-run"])
+        assert rc == 0
+        assert captured["knowledge_root"] == tmp_path
+
+    def test_help_mentions_both_spellings(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["run", "--help"])
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        assert "--knowledge-root" in out
+        assert "--path" in out
+
+
+class TestRunStrictBudgetFlag:
+    """Issue #227 — `run --strict-budget` plumbs through to librarian.run."""
+
+    def test_default_is_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured = _capture_librarian_run(monkeypatch)
+        rc = main(["run", "--knowledge-root", str(tmp_path), "--dry-run"])
+        assert rc == 0
+        assert captured["strict_budget"] is False
+
+    def test_flag_passes_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured = _capture_librarian_run(monkeypatch)
+        rc = main(
+            ["run", "--knowledge-root", str(tmp_path), "--dry-run", "--strict-budget"]
+        )
+        assert rc == 0
+        assert captured["strict_budget"] is True
