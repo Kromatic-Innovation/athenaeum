@@ -101,8 +101,12 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument(
         "--max-api-calls",
         type=int,
-        default=200,
-        help="Maximum estimated API calls per run (default: 200)",
+        default=None,
+        help=(
+            "Maximum estimated API calls per run (default: "
+            "ATHENAEUM_MAX_API_CALLS env, then athenaeum.yaml "
+            "librarian.max_api_calls, then 800)"
+        ),
     )
     run_parser.add_argument(
         "--verbose",
