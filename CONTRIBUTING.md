@@ -9,6 +9,11 @@ Thank you for your interest in contributing to Athenaeum!
 3. Run the test suite: `pytest tests/ -v`
 4. Run the linter: `ruff check src/ tests/`
 
+Some tests exercise optional extras and skip automatically when the extra is
+not installed: vector-search and clustering tests need `chromadb` (install
+with `pip install -e ".[dev,vector]"` to run them), and MCP server tests need
+`fastmcp` (already included in `[dev]`).
+
 ## Pull requests
 
 - Open PRs against the `develop` branch. Never open a PR directly against `main` — `main` is the release branch and is only updated via the promotion workflow.
