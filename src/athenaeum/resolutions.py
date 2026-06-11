@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from athenaeum.contradictions import ContradictionResult
+from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     AutoMemoryFile,
     parse_frontmatter,
@@ -1105,19 +1106,16 @@ def _parse_response(text: str) -> "ResolutionProposal | MergeProposal":
 
     Returns :class:`MergeProposal` when ``action="propose_merge"``;
     otherwise :class:`ResolutionProposal`. Tolerant on:
-    - leading/trailing prose around the JSON object.
+    - markdown code fences and leading/trailing prose around the JSON
+      object (issue #219 — first balanced object via
+      :func:`athenaeum.json_utils.extract_json_object`).
     - unknown ``recommended_winner`` / ``action`` values → fallback.
     - confidence outside ``[0, 1]`` → clamped.
     """
-    match = _JSON_OBJECT_RE.search(text)
-    if not match:
+    payload = extract_json_object(text)
+    if payload is None:
         log.warning("resolutions: resolver returned no JSON object: %s", text[:200])
         return _fallback("resolver-returned-no-json")
-    try:
-        payload = json.loads(match.group())
-    except json.JSONDecodeError as exc:
-        log.warning("resolutions: resolver JSON invalid: %s (%s)", text[:200], exc)
-        return _fallback("resolver-json-invalid")
 
     action = str(payload.get("action", "")).strip()
     if action not in _VALID_ACTIONS:

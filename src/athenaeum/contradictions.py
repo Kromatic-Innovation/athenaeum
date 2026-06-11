@@ -33,13 +33,12 @@ Out of scope (deliberate):
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+from athenaeum.json_utils import extract_json_object
 from athenaeum.models import AutoMemoryFile, parse_frontmatter
 
 if TYPE_CHECKING:
@@ -109,9 +108,6 @@ conflict_type must be null, and rationale can explain briefly why no conflict
 was found (or be empty)."""
 
 
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-
 def _member_snippet(am: AutoMemoryFile) -> str:
     """Return a bounded body excerpt for one auto-memory file.
 
@@ -167,32 +163,27 @@ def _get_model() -> str:
 
 
 def _parse_response(
-    text: str, members: list[AutoMemoryFile],
+    text: str,
+    members: list[AutoMemoryFile],
 ) -> ContradictionResult:
     """Parse the detector's JSON output into a :class:`ContradictionResult`.
 
     Tolerant on:
-    - leading/trailing prose around the JSON object (regex-picks the first
-      ``{...}`` span).
+    - markdown code fences and leading/trailing prose around the JSON
+      object (issue #219 — first balanced object via
+      :func:`athenaeum.json_utils.extract_json_object`).
     - ``conflict_type`` values outside the allowed literal -- falls back to
       ``detected=False`` with a warning.
     """
-    match = _JSON_OBJECT_RE.search(text)
-    if not match:
+    payload = extract_json_object(text)
+    if payload is None:
         log.warning(
-            "contradictions: detector returned no JSON object: %s", text[:200],
+            "contradictions: detector returned no JSON object: %s",
+            text[:200],
         )
         return ContradictionResult(
-            detected=False, rationale="detector-returned-no-json",
-        )
-    try:
-        payload = json.loads(match.group())
-    except json.JSONDecodeError as exc:
-        log.warning(
-            "contradictions: detector JSON invalid: %s (%s)", text[:200], exc,
-        )
-        return ContradictionResult(
-            detected=False, rationale="detector-json-invalid",
+            detected=False,
+            rationale="detector-returned-no-json",
         )
 
     detected = bool(payload.get("detected"))
@@ -210,7 +201,8 @@ def _parse_response(
             conflict_type_raw,
         )
         return ContradictionResult(
-            detected=False, rationale="detector-invalid-conflict-type",
+            detected=False,
+            rationale="detector-invalid-conflict-type",
         )
 
     members_raw = payload.get("members_involved") or []
@@ -284,7 +276,9 @@ def detect_contradictions(
             system=_DETECT_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
         )
-    except Exception as exc:  # noqa: BLE001 -- fall back to no-detection on any API error
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 -- fall back to no-detection on any API error
         log.warning(
             "contradictions: detector call failed (%s); returning detected=False",
             exc,
@@ -295,10 +289,12 @@ def detect_contradictions(
         text = response.content[0].text
     except (AttributeError, IndexError) as exc:
         log.warning(
-            "contradictions: detector response malformed (%s)", exc,
+            "contradictions: detector response malformed (%s)",
+            exc,
         )
         return ContradictionResult(
-            detected=False, rationale="detector-malformed-response",
+            detected=False,
+            rationale="detector-malformed-response",
         )
 
     return _parse_response(text, cluster_members)

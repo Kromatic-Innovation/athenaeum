@@ -181,6 +181,48 @@ class TestJsonHardening:
         assert proposal.action == "retain_both_with_context"
         assert proposal.confidence == 0.0
 
+    def test_fenced_json_parses(self, tmp_path: Path) -> None:
+        """Issue #219: fence-wrapped resolver output must not fall back.
+
+        Same nightly-run shape as the detector: ```json fences plus
+        trailing prose containing braces ("resolver returned no JSON
+        object" / Extra data under the old greedy-regex parse).
+        """
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "x")
+        b = _write_am(scope, "b.md", "y")
+        payload = (
+            "```json\n"
+            '{"recommended_winner": "b", "action": "keep_b", '
+            '"confidence": 0.9, "rationale": "fresher source", '
+            '"source_precedence_used": []}'
+            "\n```\n"
+            "Braces like {this} sometimes appear in trailing prose."
+        )
+        client = _fake_client(payload)
+        proposal = propose_resolution(_detected([a, b]), [a, b], client)
+        assert proposal.action == "keep_b"
+        assert proposal.confidence == 0.9
+
+    def test_prose_wrapped_json_with_nested_braces_parses(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Issue #219: prose around object + braces inside a string value."""
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "x")
+        b = _write_am(scope, "b.md", "y")
+        payload = (
+            "Here is my verdict:\n"
+            '{"recommended_winner": "neither", "action": "not_a_conflict", '
+            '"confidence": 0.8, "rationale": "both use {placeholders}", '
+            '"source_precedence_used": []}'
+            "\nLet me know if you need more."
+        )
+        client = _fake_client(payload)
+        proposal = propose_resolution(_detected([a, b]), [a, b], client)
+        assert proposal.action == "not_a_conflict"
+
     def test_invalid_action_returns_fallback(self, tmp_path: Path) -> None:
         scope = tmp_path / "scope"
         a = _write_am(scope, "a.md", "x")
