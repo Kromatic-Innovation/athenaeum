@@ -1491,6 +1491,11 @@ def reresolve_open_questions(
         )
 
         calls += 1
+        # Issue #220: count the resolver call against the run-level budget.
+        # Token counts are not surfaced by propose_resolution (see
+        # _record_usage_from_resolver), so only the call counter moves.
+        if usage is not None and client is not None:
+            usage.api_calls += 1
         proposal = propose_resolution(result, members, client)
         _record_usage_from_resolver(proposal, usage)
 

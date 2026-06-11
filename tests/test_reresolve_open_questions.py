@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from athenaeum.answers import parse_pending_questions
-from athenaeum.models import EscalationItem
+from athenaeum.models import EscalationItem, TokenUsage
 from athenaeum.tiers import reresolve_open_questions, tier4_escalate
 
 # ---------------------------------------------------------------------------
@@ -282,3 +282,67 @@ def test_unreconstructable_block_left_open(tmp_path: Path) -> None:
     assert count == 0
     client.messages.create.assert_not_called()
     assert pending.read_text(encoding="utf-8") == before
+
+
+# ---------------------------------------------------------------------------
+# run-level budget accounting (issue #220) — resolver calls hit TokenUsage
+# ---------------------------------------------------------------------------
+
+
+def test_reresolve_counts_resolver_calls_against_usage(tmp_path: Path) -> None:
+    """N resolver calls in the heal pass increment usage.api_calls by N.
+
+    Symmetric to test_merge_counts_detector_and_resolver_calls (issue #220):
+    the threaded run-level TokenUsage must see every propose_resolution call
+    made by reresolve_open_questions so the run budget can trip on it.
+    """
+    wiki = tmp_path / "wiki"
+    wiki.mkdir(parents=True, exist_ok=True)
+    ref_a = _write_member(tmp_path, "scope-x", "feedback_a.md", "claim A1")
+    ref_b = _write_member(tmp_path, "scope-x", "feedback_b.md", "claim A2")
+    ref_c = _write_member(tmp_path, "scope-x", "feedback_c.md", "claim B1")
+    ref_d = _write_member(tmp_path, "scope-x", "feedback_d.md", "claim B2")
+    pending = wiki / "_pending_questions.md"
+    tier4_escalate(
+        [
+            EscalationItem(
+                raw_ref="wiki/auto-1.md",
+                entity_name="One",
+                conflict_type="factual",
+                description=(
+                    "r1\nPassage 1: claim A1\nPassage 2: claim A2\n"
+                    f"Members involved: {ref_a}, {ref_b}"
+                ),
+            ),
+            EscalationItem(
+                raw_ref="wiki/auto-2.md",
+                entity_name="Two",
+                conflict_type="factual",
+                description=(
+                    "r2\nPassage 1: claim B1\nPassage 2: claim B2\n"
+                    f"Members involved: {ref_c}, {ref_d}"
+                ),
+            ),
+        ],
+        pending,
+    )
+
+    # keep_a at 0.80 (below gate) → annotate-only; both blocks get a call.
+    client = _fake_client(_payload("keep_a", confidence=0.80))
+    usage = TokenUsage()
+    count = reresolve_open_questions(pending, client=client, config={}, usage=usage)
+
+    assert count == 2
+    assert client.messages.create.call_count == 2
+    assert usage.api_calls == 2
+
+
+def test_reresolve_offline_counts_nothing(tmp_path: Path) -> None:
+    """client=None makes no resolver calls and leaves usage.api_calls at 0."""
+    pending = _escalate_proposalless(tmp_path)
+    usage = TokenUsage()
+
+    count = reresolve_open_questions(pending, client=None, config={}, usage=usage)
+
+    assert count == 0
+    assert usage.api_calls == 0

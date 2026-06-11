@@ -590,4 +590,59 @@ class TestPeopleCommand:
         assert "Olivier Pomel" not in names
 
 
+class TestRunMaxApiCallsFlag:
+    """Issue #220 fix round — CLI coverage for --max-api-calls."""
 
+    def test_default_passes_none_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`athenaeum run` without --max-api-calls hands None to librarian.run,
+        leaving env/yaml/default precedence to the library."""
+        import athenaeum.librarian as librarian_mod
+
+        captured: dict[str, object] = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(librarian_mod, "run", fake_run)
+        rc = main(["run", "--knowledge-root", str(tmp_path), "--dry-run"])
+        assert rc == 0
+        assert "max_api_calls" in captured
+        assert captured["max_api_calls"] is None
+
+    def test_explicit_flag_passes_value_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.librarian as librarian_mod
+
+        captured: dict[str, object] = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(librarian_mod, "run", fake_run)
+        rc = main(
+            [
+                "run",
+                "--knowledge-root",
+                str(tmp_path),
+                "--dry-run",
+                "--max-api-calls",
+                "42",
+            ]
+        )
+        assert rc == 0
+        assert captured["max_api_calls"] == 42
+
+    @pytest.mark.parametrize("bad", ["0", "-3", "banana"])
+    def test_rejects_zero_negative_and_garbage(
+        self, bad: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Zero/negative/non-numeric --max-api-calls is an argparse error (exit 2)."""
+        with pytest.raises(SystemExit) as excinfo:
+            main(["run", "--max-api-calls", bad])
+        assert excinfo.value.code == 2
+        assert "--max-api-calls" in capsys.readouterr().err
