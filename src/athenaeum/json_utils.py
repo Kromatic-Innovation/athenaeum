@@ -30,10 +30,13 @@ log = logging.getLogger(__name__)
 
 _DECODER = json.JSONDecoder()
 
-#: A markdown code fence: ``` plus an optional language tag (any case,
-#: e.g. ``json``/``JSON``), then everything up to the closing ```.
-#: ``[^\n]*`` tolerates a ``\r`` before the newline (CRLF output).
-_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+#: A markdown code fence: line-leading ``` plus an optional language tag
+#: (any case, e.g. ``json``/``JSON``), then everything up to a closing
+#: line-leading ```. Both delimiters must start a line (issue #222) — an
+#: inline backtick run in prose (e.g. "wrap it in ``` fences") must not
+#: pair with the real fence opener and shift every subsequent block
+#: boundary. ``[^\n]*`` tolerates a ``\r`` before the newline (CRLF).
+_FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)^```", re.DOTALL | re.MULTILINE)
 
 
 def _scan_objects(
@@ -75,9 +78,10 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
 
     Contract, in priority order:
 
-    1. If ``text`` contains one or more fenced code blocks (``` with or
-       without a language tag, any case), extraction is attempted ONLY
-       from fenced content — the fence marks the deliberate answer. The
+    1. If ``text`` contains one or more fenced code blocks (line-leading
+       ``` with or without a language tag, any case; inline backtick
+       runs in prose are not fence delimiters), extraction is attempted
+       ONLY from fenced content — the fence marks the deliberate answer. The
        first fenced block that yields a balanced object wins; unfenced
        braces (e.g. example objects in surrounding prose) are ignored.
     2. Otherwise the whole text is scanned: if EXACTLY ONE balanced
@@ -110,6 +114,11 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
                 "last decode error: %s (pos %d)",
                 last_err.msg,
                 last_err.pos,
+            )
+        else:
+            log.debug(
+                "json_utils: fenced content present but contains no JSON "
+                "object; returning None"
             )
         return None
 

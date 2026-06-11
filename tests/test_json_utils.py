@@ -146,3 +146,42 @@ def test_malformed_json_logs_debug(caplog) -> None:  # type: ignore[no-untyped-d
     with caplog.at_level(logging.DEBUG, logger="athenaeum.json_utils"):
         assert extract_json_object('{"detected": tru') is None
     assert any("last decode error" in r.message for r in caplog.records)
+
+
+def test_inline_backtick_run_before_real_fence() -> None:
+    """Issue #222 fence-pairing probe: a stray inline ``` run in prose
+    must not pair with the real fence opener — only line-leading ```
+    delimits a fence. The fenced object must still be extracted."""
+    text = (
+        "Wrap your answer in ``` fences, e.g. ```json is fine.\n"
+        '```json\n{"detected": true}\n```\n'
+    )
+    assert extract_json_object(text) == {"detected": True}
+
+
+def test_fences_without_object_log_debug(caplog) -> None:  # type: ignore[no-untyped-def]
+    """Issue #222 observability: fences present but yielding no balanced
+    object (no decode error occurs — there is no ``{`` at all) must emit
+    a debug log instead of returning ``None`` silently."""
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="athenaeum.json_utils"):
+        assert extract_json_object("```\nno braces at all\n```") is None
+    assert any("no JSON object" in r.message for r in caplog.records)
+
+
+def test_real_object_then_example_object_unfenced_is_ambiguous() -> None:
+    """Reverse ordering of the example-then-answer case: answer first,
+    example second — still two unfenced top-level objects → ``None``."""
+    text = (
+        '{"detected": true, "conflict_type": "factual"} '
+        'For contrast, a non-conflict looks like {"detected": false}.'
+    )
+    assert extract_json_object(text) is None
+
+
+def test_multi_object_top_level_array_is_ambiguous() -> None:
+    """Two objects inside a top-level array count as two top-level
+    objects under the ``{``-anchored scan → ``None`` via the
+    exactly-one rule (pinned behavior)."""
+    assert extract_json_object('[{"a": 1}, {"b": 2}]') is None
