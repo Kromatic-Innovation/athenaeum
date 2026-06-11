@@ -711,3 +711,71 @@ class TestEarlyReturnPathsClearStaleManifest:
 
         assert rc == 0
         assert stale.read_text(encoding="utf-8") == stale_content
+
+
+# ---------------------------------------------------------------------------
+# --strict-budget: opt-in nonzero exit on a budget-tripped run (issue #227)
+# ---------------------------------------------------------------------------
+
+
+class TestStrictBudget:
+    def _setup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, n_files: int
+    ) -> Path:
+        root = _seed_knowledge_root(tmp_path, n_files=n_files)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one", _fake_process_one_factory()
+        )
+        return root
+
+    def test_trip_with_strict_budget_exits_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Budget trip + strict_budget=True → exit 1 (manifest still written)."""
+        root = self._setup(tmp_path, monkeypatch, n_files=3)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=1,
+            strict_budget=True,
+        )
+
+        assert rc == 1
+        # The DEGRADED-path side effects are unchanged: manifest still lands.
+        assert (root / "wiki" / "_deferred_work.md").exists()
+
+    def test_trip_without_flag_exits_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default behavior unchanged: budget trip exits 0."""
+        root = self._setup(tmp_path, monkeypatch, n_files=3)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=1,
+        )
+
+        assert rc == 0
+
+    def test_clean_run_with_strict_budget_exits_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """strict_budget on a run that never trips must not change the exit."""
+        root = self._setup(tmp_path, monkeypatch, n_files=1)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=50,
+            strict_budget=True,
+        )
+
+        assert rc == 0
+        assert not (root / "wiki" / "_deferred_work.md").exists()
