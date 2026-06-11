@@ -408,11 +408,24 @@ class TokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     api_calls: int = 0
+    # Prompt-caching counters (issue #230). ``input_tokens`` from the API
+    # excludes cached tokens, so these accumulate separately: creation is
+    # billed at ~1.25x the input rate, reads at ~0.1x.
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
-    def add(self, input_tokens: int, output_tokens: int) -> None:
+    def add(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation_input_tokens: int = 0,
+        cache_read_input_tokens: int = 0,
+    ) -> None:
         """Record tokens from one API call."""
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
+        self.cache_creation_input_tokens += cache_creation_input_tokens
+        self.cache_read_input_tokens += cache_read_input_tokens
         self.api_calls += 1
 
     @property
@@ -428,6 +441,28 @@ class TokenUsage:
         return (
             self.input_tokens * 1.50 / 1_000_000 + self.output_tokens * 7.50 / 1_000_000
         )
+
+
+def cache_usage_counts(response: object) -> tuple[int, int, int, int]:
+    """Extract token counts from an Anthropic API response (issue #230).
+
+    Returns ``(input_tokens, output_tokens, cache_creation_input_tokens,
+    cache_read_input_tokens)``. Missing or non-int fields coerce to 0 so
+    callers can log/accumulate without guarding against older SDK shapes
+    or test doubles that omit the cache fields.
+    """
+    usage = getattr(response, "usage", None)
+
+    def _count(name: str) -> int:
+        value = getattr(usage, name, 0)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    return (
+        _count("input_tokens"),
+        _count("output_tokens"),
+        _count("cache_creation_input_tokens"),
+        _count("cache_read_input_tokens"),
+    )
 
 
 @dataclass

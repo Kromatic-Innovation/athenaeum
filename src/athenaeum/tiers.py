@@ -41,6 +41,7 @@ from athenaeum.models import (
     RawFile,
     TokenUsage,
     WikiEntity,
+    cache_usage_counts,
     generate_uid,
     parse_frontmatter,
     render_frontmatter,
@@ -68,10 +69,16 @@ def _record_usage(
 ) -> None:
     """Record token usage from an API response if tracking is enabled."""
     if usage is not None and hasattr(response, "usage"):
-        usage.add(
-            response.usage.input_tokens,
-            response.usage.output_tokens,
+        input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(
+            response
         )
+        usage.add(input_toks, output_toks, cache_creation, cache_read)
+        if cache_creation or cache_read:
+            log.debug(
+                "prompt cache: %d tokens written, %d tokens read",
+                cache_creation,
+                cache_read,
+            )
 
 
 def _load_schema_text(wiki_root: Path, filename: str) -> str:
