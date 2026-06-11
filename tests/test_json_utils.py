@@ -20,7 +20,25 @@ reintroducing silent wrong-object extraction.
 
 from __future__ import annotations
 
+import sys
+
 from athenaeum.json_utils import extract_json_object
+
+
+def _recursion_busting_depth() -> int:
+    """Nesting depth guaranteed to raise ``RecursionError`` inside
+    ``json`` on every supported interpreter.
+
+    A fixed depth (5000) was flaky across versions: CPython 3.12's C
+    ``json`` scanner guards recursion with the C-level recursion limit
+    (``Py_C_RECURSION_LIMIT``, 8000+ on some builds), which is decoupled
+    from ``sys.setrecursionlimit`` — so 5000 tripped ``RecursionError``
+    on 3.11/3.13 but parsed past the guard on 3.12 and failed with a
+    plain ``JSONDecodeError`` instead (wrong branch). Derive a depth
+    comfortably above both the Python-level recursion limit (covers the
+    pure-Python decoder fallback) and any known C-level limit.
+    """
+    return max(sys.getrecursionlimit() * 5, 20_000)
 
 
 def test_plain_strict_json() -> None:
@@ -198,7 +216,7 @@ def test_truncated_object_returns_none() -> None:
 def test_pathologically_deep_nesting_returns_none() -> None:
     """``RecursionError`` inside ``raw_decode`` is contained — the
     helper's returns-``None`` contract holds instead of raising."""
-    assert extract_json_object('{"a":' * 5000) is None
+    assert extract_json_object('{"a":' * _recursion_busting_depth()) is None
 
 
 def test_malformed_json_logs_debug(caplog) -> None:  # type: ignore[no-untyped-def]
@@ -241,7 +259,7 @@ def test_fenced_recursion_only_not_reported_as_no_object(caplog) -> None:  # typ
     as containing no JSON object — the recursion case logs distinctly."""
     import logging
 
-    text = '```json\n{"a": ' + "[" * 5000 + "\n```"
+    text = '```json\n{"a": ' + "[" * _recursion_busting_depth() + "\n```"
     with caplog.at_level(logging.DEBUG, logger="athenaeum.json_utils"):
         assert extract_json_object(text) is None
     assert any("recursion" in r.message for r in caplog.records)
