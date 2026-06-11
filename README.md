@@ -55,7 +55,7 @@ athenaeum init --path ~/my-knowledge
 # Run the librarian (compile raw intake → wiki entities).
 # `athenaeum run` needs ANTHROPIC_API_KEY — use --dry-run to explore keyless.
 # `run` and `status` operate on ~/knowledge by default (point elsewhere with
-# `run --knowledge-root` / `status --path`).
+# `--path`; `run` also accepts `--knowledge-root` as the original spelling).
 athenaeum run
 athenaeum run --dry-run         # inspect without writing
 
@@ -71,7 +71,7 @@ omit the flag to accept the default):
 athenaeum run \
   --raw-root ~/knowledge/raw \
   --wiki-root ~/knowledge/wiki \
-  --knowledge-root ~/knowledge \
+  --path ~/knowledge \
   --max-files 50 \
   --max-api-calls 200 \
   --verbose
@@ -316,6 +316,9 @@ cleared by the next clean run (full, merge-only, or cluster-only).
 The cap is enforced at the entity-tier loop; merge-phase and re-resolve
 calls count toward the budget but do not themselves stop the run, so a
 merge-heavy run can overshoot the cap before enforcement kicks in.
+A degraded run still exits `0` by default; pass `athenaeum run
+--strict-budget` to make a budget-tripped run exit nonzero instead —
+opt-in, for exit-code-based alerting.
 
 ## Known limitations
 

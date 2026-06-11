@@ -15,6 +15,16 @@ markdown fences or prose no longer drop clusters, and a run that exhausts
 its API budget now says so loudly and leaves a manifest of the deferred
 work instead of reporting a clean "Done".
 
+### Added
+
+- **`athenaeum run --path` as an alias for `--knowledge-root` (#227).** `run`
+  now accepts the same `--path` spelling as `init`/`status`/`serve`;
+  `--knowledge-root` keeps working unchanged.
+- **`athenaeum run --strict-budget` (#227).** Opt-in flag that makes a
+  budget-tripped (DEGRADED) run exit nonzero for exit-code-based alerting.
+  Default behavior is unchanged: exit 0 with the warning summary and the
+  `wiki/_deferred_work.md` manifest.
+
 ### Changed
 
 - **Run-level API call budget is configurable and counts every call (#220).**
