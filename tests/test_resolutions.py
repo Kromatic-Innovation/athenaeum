@@ -134,6 +134,35 @@ class TestWorkedExample:
         assert proposal.source_precedence_used
         assert "user:session-2026-04-10" in proposal.source_precedence_used[0]
 
+    def test_resolver_call_carries_cache_control_breakpoint(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue #230: the resolver system prompt is sent as a cacheable block.
+
+        The system prompt is the only stable prefix the resolver has; it is
+        marked with an ephemeral ``cache_control`` breakpoint so prompt
+        caching engages whenever the configured model's minimum cacheable
+        prefix allows it.
+        """
+        import athenaeum.resolutions as resolutions_mod
+
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "x")
+        b = _write_am(scope, "b.md", "y")
+        client = _fake_client(
+            '{"recommended_winner": "a", "action": "keep_a", '
+            '"confidence": 0.9, "rationale": "r", "source_precedence_used": []}'
+        )
+        propose_resolution(_detected([a, b]), [a, b], client)
+
+        kwargs = client.messages.create.call_args.kwargs
+        system = kwargs["system"]
+        assert isinstance(system, list) and len(system) == 1
+        block = system[0]
+        assert block["type"] == "text"
+        assert block["text"] == resolutions_mod._RESOLVE_SYSTEM
+        assert block["cache_control"] == {"type": "ephemeral"}
+
 
 # ---------------------------------------------------------------------------
 # Pass-through paths

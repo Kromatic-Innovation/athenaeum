@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 from athenaeum.json_utils import extract_json_object
-from athenaeum.models import AutoMemoryFile, parse_frontmatter
+from athenaeum.models import AutoMemoryFile, cache_usage_counts, parse_frontmatter
 
 if TYPE_CHECKING:
     import anthropic
@@ -284,6 +284,16 @@ def detect_contradictions(
             exc,
         )
         return ContradictionResult(detected=False, rationale="llm-unavailable")
+
+    input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
+    log.debug(
+        "contradictions: detector usage input=%d output=%d"
+        " cache_creation=%d cache_read=%d",
+        input_toks,
+        output_toks,
+        cache_creation,
+        cache_read,
+    )
 
     try:
         text = response.content[0].text

@@ -1081,11 +1081,13 @@ def run(
     if usage.api_calls > 0:
         log.info(
             "Token usage: %d API calls, %d input + %d output = %d total"
-            " (~$%.4f estimated)",
+            " (cache: %d written, %d read) (~$%.4f estimated)",
             usage.api_calls,
             usage.input_tokens,
             usage.output_tokens,
             usage.total_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
             usage.estimated_cost_usd,
         )
 
