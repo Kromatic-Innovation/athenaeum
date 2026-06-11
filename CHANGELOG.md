@@ -54,6 +54,13 @@ work instead of reporting a clean "Done".
   listed separately) and logs a warning-level `Done (DEGRADED — budget
   exhausted)` summary with deferred counts instead of a clean "Done". Stale
   manifests are cleared by the next clean run. (PR #224)
+- **`athenaeum init` now creates the `raw/auto-memory/` intake directory**, so
+  first runs no longer warn about a missing extra-intake root.
+- **Yaml `resolve_max_per_run: yes` (a bool) is no longer accepted as an
+  integer cap of 1** — bools fall through to the default, using the same guard
+  as `librarian.max_api_calls`.
+- **`athenaeum test-mcp` now declares `sources=` on its own `remember()`
+  call**, so the smoke test no longer trips the issue-#90 provenance warning.
 
 ## [0.7.2] - 2026-06-09
 
