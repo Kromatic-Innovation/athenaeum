@@ -235,6 +235,7 @@ class TestNonDictSectionsDegradeGracefully:
         self, bad_value: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("ATHENAEUM_CROSS_SCOPE_MODE", raising=False)
+        monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
         from athenaeum.clusters import (
             DEFAULT_CLUSTER_OUTPUT,
             DEFAULT_CLUSTER_THRESHOLD,
@@ -249,9 +250,16 @@ class TestNonDictSectionsDegradeGracefully:
             resolve_cross_scope_mode,
             resolve_similarity_threshold,
         )
+        from athenaeum.fingerprint import (
+            _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD,
+            resolve_resolved_similarity_threshold,
+        )
 
         cfg = {"contradiction": bad_value, "librarian": bad_value}
         assert resolve_cross_scope_mode(cfg) == DEFAULT_MODE
+        assert resolve_resolved_similarity_threshold(cfg) == pytest.approx(
+            _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
+        )
         assert resolve_cluster_size_cap(cfg) == DEFAULT_CLUSTER_SIZE_CAP
         assert resolve_similarity_threshold(cfg) == pytest.approx(
             DEFAULT_SIMILARITY_THRESHOLD
