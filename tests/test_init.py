@@ -193,3 +193,31 @@ def test_schema_files_match_bundled(tmp_path: Path) -> None:
         bundled = (schema_pkg / fname).read_text(encoding="utf-8")
         copied = (target / "wiki" / "_schema" / fname).read_text(encoding="utf-8")
         assert copied == bundled, f"schema mismatch: {fname}"
+
+
+def test_fresh_init_creates_auto_memory_intake_root(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """init creates raw/auto-memory so the first run doesn't warn.
+
+    ``resolve_extra_intake_roots`` warns "extra_intake_root not found" for
+    every configured-but-missing root; the default config points at
+    ``raw/auto-memory``, so a freshly-inited knowledge dir used to warn on
+    the very first ``athenaeum run`` (v0.7.3 release-gate review).
+    """
+    import logging
+
+    from athenaeum.config import resolve_extra_intake_roots
+
+    target = tmp_path / "knowledge"
+    init_knowledge_dir(target)
+
+    auto_memory = target / "raw" / "auto-memory"
+    assert auto_memory.is_dir()
+
+    with caplog.at_level(logging.WARNING):
+        roots = resolve_extra_intake_roots(target)
+    assert auto_memory.resolve() in roots
+    assert not [
+        r for r in caplog.records if "extra_intake_root not found" in r.getMessage()
+    ]

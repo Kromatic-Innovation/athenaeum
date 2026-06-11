@@ -20,11 +20,16 @@ work instead of reporting a clean "Done".
 - **Run-level API call budget is configurable and counts every call (#220).**
   The budget now resolves `ATHENAEUM_MAX_API_CALLS` env var over
   `librarian.max_api_calls` yaml over the default, and the default is raised
-  from 400 to 800 to fit the post-#187 full-coverage confirmation-pass
-  profile. The counter now includes merge-phase detector/resolver and
+  from 200 to 800 — quadrupling the default per-run API cost ceiling — to fit
+  the post-#187 full-coverage confirmation-pass profile. Operators who want
+  the previous ceiling should pin it explicitly via the env var, yaml key, or
+  CLI flag. The counter now includes merge-phase detector/resolver and
   nightly re-resolve calls, making it a true run-level ceiling. The CLI
   `--max-api-calls` flag validates positive integers and explicitly wins
-  over env and yaml.
+  over env and yaml. The additive configuration surface here (env var, yaml
+  key, deferred-work manifest) ships in a patch release because it exists to
+  fix the silent-loss defect below; the cost-default change is the one
+  operator-visible behavior shift worth reviewing before upgrading.
 
 ### Fixed
 

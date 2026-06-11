@@ -39,7 +39,11 @@ def _build_vector_index(knowledge_root: Path, extra_roots) -> Path:
     tests exercise the production path (real MiniLM embeddings) instead
     of falling back to the hashing-trick path. The hashing-trick path is
     still covered by the fallback unit test below.
+
+    Skips the calling test when chromadb (the ``[vector]`` extra) is not
+    installed — repo convention, matching tests/test_search.py.
     """
+    pytest.importorskip("chromadb")
     from athenaeum.search import VectorBackend
 
     cache_dir = knowledge_root / ".athenaeum-cache"
