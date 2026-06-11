@@ -12,6 +12,10 @@ callers keep their existing warning + fallback behavior.
 Contract hardening (QA round): fenced content is preferred over unfenced
 text, exactly one unfenced object parses, and multiple unfenced objects
 are ambiguous → ``None`` (never guess between an example and the answer).
+Clause-2 amendment (QA triage round, F1): fences present but yielding no
+balanced object fall back to the whole-text exactly-one scan, recovering
+the "fenced plan/diff + unfenced answer object" shape without
+reintroducing silent wrong-object extraction.
 """
 
 from __future__ import annotations
@@ -109,10 +113,69 @@ def test_fenced_answer_wins_over_unfenced_example() -> None:
     assert extract_json_object(text) == {"detected": True}
 
 
-def test_fence_without_object_ignores_unfenced_object() -> None:
-    """Fences present → extraction is attempted ONLY in fenced content,
-    even when unfenced text contains a parseable object."""
+def test_fence_without_object_falls_back_to_unfenced_scan() -> None:
+    """Clause-2 fallback (F1): fences present but yielding no balanced
+    object → the whole text is scanned, so a single unfenced object is
+    still extracted. (Deliberate amendment of the earlier fences-only
+    pin, which dropped this recoverable shape.)"""
     text = '```\nnot json at all\n```\n{"detected": true}'
+    assert extract_json_object(text) == {"detected": True}
+
+
+def test_fence_without_object_two_unfenced_objects_ambiguous() -> None:
+    """Clause-2 fallback keeps the exactly-one rule: fenced non-JSON plus
+    TWO unfenced objects is still ambiguous → ``None``, never a guess."""
+    text = (
+        "```\nnot json at all\n```\n"
+        'Example: {"detected": false}. Actual: {"detected": true}'
+    )
+    assert extract_json_object(text) is None
+
+
+def test_fenced_diff_preview_with_unfenced_edits_object() -> None:
+    """F1 probe shape from the freetext-writeback call site: the model
+    fences a diff preview and leaves the ``{"edits": [...]}`` answer
+    unfenced — the clause-2 fallback recovers it."""
+    text = (
+        "Plan:\n"
+        "```diff\n- old line\n+ new line\n```\n"
+        'Applying:\n{"edits": [{"path": "notes.md", "changed": true}]}'
+    )
+    assert extract_json_object(text) == {
+        "edits": [{"path": "notes.md", "changed": True}]
+    }
+
+
+def test_unterminated_fence_object_extracted_via_fallback() -> None:
+    """F2a: an opening fence with no closer is not a fenced block, so the
+    complete object after it is found by the whole-text scan."""
+    text = '```json\n{"detected": true}'
+    assert extract_json_object(text) == {"detected": True}
+
+
+def test_complete_fenced_example_beats_unterminated_answer_fence() -> None:
+    """F2b: a complete fenced example object followed by an unterminated
+    answer fence — the example is the only well-formed fenced block, so
+    clause 1 returns it. Pinned as the safe-or-equal parity outcome: the
+    old greedy regex would not have recovered the answer here either."""
+    text = '```json\n{"detected": false}\n```\n' 'Answer:\n```json\n{"detected": true}'
+    assert extract_json_object(text) == {"detected": False}
+
+
+def test_one_space_indented_fence_recognized() -> None:
+    """F3: CommonMark allows fence delimiters indented up to 3 spaces — a
+    1-space-indented fenced object wins clause 1 over the unfenced decoy
+    (without fence recognition the scan would be ambiguous → ``None``)."""
+    text = ' ```json\n {"detected": true}\n ```\nExample: {"detected": false}'
+    assert extract_json_object(text) == {"detected": True}
+
+
+def test_four_space_indented_fence_is_not_a_fence() -> None:
+    """F3: 4 spaces is an indented code block, not a fence (CommonMark) —
+    the object inside it is just another unfenced object, so two unfenced
+    objects are ambiguous → ``None``. Were the 4-space block treated as a
+    fence, clause 1 would return ``{"a": 1}``."""
+    text = '    ```json\n    {"a": 1}\n    ```\n{"b": 2}'
     assert extract_json_object(text) is None
 
 
@@ -162,12 +225,27 @@ def test_inline_backtick_run_before_real_fence() -> None:
 def test_fences_without_object_log_debug(caplog) -> None:  # type: ignore[no-untyped-def]
     """Issue #222 observability: fences present but yielding no balanced
     object (no decode error occurs — there is no ``{`` at all) must emit
-    a debug log instead of returning ``None`` silently."""
+    the fences-branch debug message. Pinned on a substring unique to the
+    fences-present branch (F5) — not "no JSON object", which both debug
+    branches share."""
     import logging
 
     with caplog.at_level(logging.DEBUG, logger="athenaeum.json_utils"):
         assert extract_json_object("```\nno braces at all\n```") is None
-    assert any("no JSON object" in r.message for r in caplog.records)
+    assert any("falling back to whole-text scan" in r.message for r in caplog.records)
+
+
+def test_fenced_recursion_only_not_reported_as_no_object(caplog) -> None:  # type: ignore[no-untyped-def]
+    """F6: a fenced block whose only parse attempt raised
+    ``RecursionError`` (so ``last_err`` is ``None``) must not be described
+    as containing no JSON object — the recursion case logs distinctly."""
+    import logging
+
+    text = '```json\n{"a": ' + "[" * 5000 + "\n```"
+    with caplog.at_level(logging.DEBUG, logger="athenaeum.json_utils"):
+        assert extract_json_object(text) is None
+    assert any("recursion" in r.message for r in caplog.records)
+    assert not any("contains no JSON object" in r.message for r in caplog.records)
 
 
 def test_real_object_then_example_object_unfenced_is_ambiguous() -> None:
