@@ -73,9 +73,9 @@ DEFAULT_RAW_ROOT = DEFAULT_KNOWLEDGE_ROOT / "raw"
 DEFAULT_WIKI_ROOT = DEFAULT_KNOWLEDGE_ROOT / "wiki"
 
 # Run-level API call budget.
-# Raised 400 -> 800 (issue #220): the 2026-06-11 nightly observed 404 calls
-# hit the 400 cap with intake remaining — now that the #187 confirmation
-# pass runs at full coverage, a busy night legitimately needs more than 400
+# Raised 200 -> 800 (issue #220): the 2026-06-11 nightly observed 404 calls
+# hit the 200 cap with intake remaining — now that the #187 confirmation
+# pass runs at full coverage, a busy night legitimately needs more than 200
 # calls, and the budget-tripped run stopped early while reporting success.
 # The cap is a ceiling, not a target: quiet runs never approach it and pay
 # nothing extra. Operators can override via `librarian.max_api_calls`
