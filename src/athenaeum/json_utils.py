@@ -94,6 +94,10 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
        first — the fence marks the deliberate answer. The first fenced
        block that yields a balanced object wins outright; unfenced
        braces (e.g. example objects in surrounding prose) are ignored.
+       Within a single fenced block containing multiple top-level
+       objects, the FIRST balanced object is returned — the exactly-one
+       ambiguity rule (clauses 3-4) applies only to whole-text scans,
+       not within a fence.
     2. If fenced blocks are present but NONE yields a balanced object
        (e.g. the model fenced a plan/diff/quote and left the answer
        object unfenced), the whole text is scanned under the same

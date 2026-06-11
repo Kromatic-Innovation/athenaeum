@@ -258,6 +258,30 @@ def test_real_object_then_example_object_unfenced_is_ambiguous() -> None:
     assert extract_json_object(text) is None
 
 
+def test_malformed_fenced_answer_falls_back_to_unfenced_object() -> None:
+    """N1 — accepted clause-2 contract (issue #222 triage): a malformed
+    fenced ANSWER (here a trailing comma) yields no balanced fenced
+    object, so the whole-text fallback fires and extracts the only
+    well-formed object — the unfenced EXAMPLE. This wrong-object risk is
+    the accepted trade for recovering the "fenced plan + unfenced
+    answer" shape: downstream call sites shape-guard (action allowlist /
+    edits-list validation), so a wrong-shaped fallback object is
+    contained rather than acted on."""
+    text = (
+        'Example: {"detected": false}.\n' 'Answer:\n```json\n{"detected": true,}\n```'
+    )
+    assert extract_json_object(text) == {"detected": False}
+
+
+def test_two_objects_within_single_fence_first_wins() -> None:
+    """N2 — a single fenced block containing TWO top-level objects
+    returns the FIRST: the exactly-one ambiguity rule (clauses 3-4)
+    applies only to whole-text scans, never within a fence (pinned
+    asymmetry, issue #222 triage)."""
+    text = '```json\n{"first": 1}\n{"second": 2}\n```'
+    assert extract_json_object(text) == {"first": 1}
+
+
 def test_multi_object_top_level_array_is_ambiguous() -> None:
     """Two objects inside a top-level array count as two top-level
     objects under the ``{``-anchored scan → ``None`` via the
