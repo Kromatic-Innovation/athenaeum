@@ -33,14 +33,14 @@ _SYSTEM_PROMPT = (
     "librarian to use against a wiki. Return ONLY a JSON array of short "
     "topic strings — proper nouns, entity names, company names, project "
     "names, concrete concepts. Ignore meta-instructions (\"don't call "
-    "tools\", \"quote verbatim\", \"say so\"), generic verbs, and filler. "
+    'tools", "quote verbatim", "say so"), generic verbs, and filler. '
     "Prefer the exact casing the user used. Return at most 8 topics. "
     "If the message has no substantive topic, return []."
 )
 
 _USER_TEMPLATE = (
     "User message:\n---\n{prompt}\n---\n\n"
-    "Respond with JSON only, no prose. Example: [\"Return Path\", \"lean startup\"]"
+    'Respond with JSON only, no prose. Example: ["Return Path", "lean startup"]'
 )
 
 
@@ -77,7 +77,9 @@ def extract_topics(prompt: str, timeout: float = 3.0) -> list[str]:
             model=_get_topic_model(),
             max_tokens=256,
             system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": _USER_TEMPLATE.format(prompt=prompt)}],
+            messages=[
+                {"role": "user", "content": _USER_TEMPLATE.format(prompt=prompt)}
+            ],
         )
     except Exception as exc:
         # WARNING (not debug): silent fall-through to the regex extractor
@@ -87,9 +89,22 @@ def extract_topics(prompt: str, timeout: float = 3.0) -> list[str]:
         # SDK-level bug without needing to reproduce.
         log.warning(
             "query_topics: API call failed (%s); falling back to regex extractor: %s",
-            exc.__class__.__name__, exc,
+            exc.__class__.__name__,
+            exc,
         )
         return []
+
+    # Usage logging (issue #230). Inline getattr (not the shared
+    # models.cache_usage_counts helper) — this module stays import-light
+    # because it runs on the recall-hook path with a 3s budget.
+    _usage = getattr(response, "usage", None)
+    log.debug(
+        "query_topics: usage input=%s output=%s cache_creation=%s cache_read=%s",
+        getattr(_usage, "input_tokens", 0),
+        getattr(_usage, "output_tokens", 0),
+        getattr(_usage, "cache_creation_input_tokens", 0),
+        getattr(_usage, "cache_read_input_tokens", 0),
+    )
 
     try:
         text = response.content[0].text.strip()
@@ -108,4 +123,6 @@ def extract_topics(prompt: str, timeout: float = 3.0) -> list[str]:
     if not isinstance(items, list):
         return []
 
-    return [str(item).strip() for item in items if isinstance(item, str) and item.strip()][:8]
+    return [
+        str(item).strip() for item in items if isinstance(item, str) and item.strip()
+    ][:8]

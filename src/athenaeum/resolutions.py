@@ -63,6 +63,7 @@ from athenaeum.contradictions import ContradictionResult
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     AutoMemoryFile,
+    cache_usage_counts,
     parse_frontmatter,
     render_frontmatter,
     slugify,
@@ -1236,7 +1237,20 @@ def propose_resolution(
         response = client.messages.create(
             model=_get_model(config),
             max_tokens=1024,
-            system=_RESOLVE_SYSTEM,
+            # Prompt-caching breakpoint (issue #230): the resolver system
+            # prompt is the largest stable prefix in the codebase (~2.3K
+            # tokens) and the resolver is called repeatedly within a run.
+            # Below a model's minimum cacheable prefix the marker is a
+            # silent no-op (no error, no extra cost), so this engages
+            # automatically when ATHENAEUM_RESOLVE_MODEL / resolve.model
+            # points at a model whose minimum is <= the prompt size.
+            system=[
+                {
+                    "type": "text",
+                    "text": _RESOLVE_SYSTEM,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": user_msg}],
         )
     except Exception as exc:  # noqa: BLE001 -- fall back on any API error
@@ -1245,6 +1259,16 @@ def propose_resolution(
             exc,
         )
         return _fallback("resolver-unavailable")
+
+    input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
+    log.debug(
+        "resolutions: propose_resolution usage input=%d output=%d"
+        " cache_creation=%d cache_read=%d",
+        input_toks,
+        output_toks,
+        cache_creation,
+        cache_read,
+    )
 
     try:
         text = response.content[0].text
@@ -1771,6 +1795,16 @@ def propose_freetext_source_edits(
             "falling back to annotation"
         )
         return {}
+
+    input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
+    log.debug(
+        "resolutions: propose_freetext_source_edits usage input=%d output=%d"
+        " cache_creation=%d cache_read=%d",
+        input_toks,
+        output_toks,
+        cache_creation,
+        cache_read,
+    )
 
     try:
         text = response.content[0].text
