@@ -63,6 +63,7 @@ from athenaeum.cross_scope import (
 from athenaeum.models import (
     AutoMemoryFile,
     EscalationItem,
+    TokenUsage,
     parse_deprecated,
     parse_frontmatter,
     parse_refines,
@@ -780,6 +781,7 @@ def merge_clusters_to_wiki(
     config: dict[str, Any] | None = None,
     dry_run: bool = False,
     client: "anthropic.Anthropic | None" = None,
+    usage: TokenUsage | None = None,
 ) -> list[MergedWikiEntry]:
     """Read the canonical cluster JSONL and emit one wiki entry per cluster.
 
@@ -799,6 +801,12 @@ def merge_clusters_to_wiki(
             unset), the detector is skipped with a deterministic
             ``detected=False`` fallback — see
             :func:`athenaeum.contradictions.detect_contradictions`.
+        usage: Optional run-level :class:`TokenUsage` (issue #220). When
+            provided AND a live client is present, every detector (Haiku)
+            and resolver (Opus) call increments ``usage.api_calls`` so the
+            librarian's run-level budget sees this phase's spend. Token
+            counts are not surfaced by these calls, so only the call
+            counter moves.
 
     Returns:
         The list of :class:`MergedWikiEntry` records in cluster-file order.
@@ -1056,6 +1064,8 @@ def merge_clusters_to_wiki(
                 )
             return None
         resolve_calls += 1
+        if usage is not None and client is not None:
+            usage.api_calls += 1
         return propose_resolution(result, members, client)
 
     for entry in entries:
@@ -1099,6 +1109,8 @@ def merge_clusters_to_wiki(
                 )
                 continue
             haiku_calls += 1
+            if usage is not None and client is not None:
+                usage.api_calls += 1
             result = detect_contradictions(filtered, client)
             _record_pair_keys(chunk)
             if result.detected and aggregate is None:
@@ -1160,6 +1172,8 @@ def merge_clusters_to_wiki(
             if declared is not None and not _filtered:
                 continue
             haiku_calls += 1
+            if usage is not None and client is not None:
+                usage.api_calls += 1
             result = detect_contradictions(pair, client)
             if result.detected:
                 pairs_added_via_similarity += 1

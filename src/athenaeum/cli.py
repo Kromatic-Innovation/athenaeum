@@ -9,6 +9,23 @@ from pathlib import Path
 from typing import Any
 
 
+def _positive_int(value: str) -> int:
+    """Argparse type for flags that must be a strictly positive integer.
+
+    Issue #220: a zero or negative ``--max-api-calls`` would defer the
+    entire intake while exiting 0 — reject it at parse time instead.
+    """
+    try:
+        ivalue = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid positive int value: {value!r}"
+        ) from None
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer (got {value!r})")
+    return ivalue
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="athenaeum",
@@ -100,9 +117,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument(
         "--max-api-calls",
-        type=int,
-        default=200,
-        help="Maximum estimated API calls per run (default: 200)",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Maximum estimated API calls per run (default: "
+            "ATHENAEUM_MAX_API_CALLS env, then athenaeum.yaml "
+            "librarian.max_api_calls, then 800)"
+        ),
     )
     run_parser.add_argument(
         "--verbose",
