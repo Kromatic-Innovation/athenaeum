@@ -192,6 +192,7 @@ def _resolve_embeddings(
     if id_to_file:
         try:
             from athenaeum.search import VectorBackend  # noqa: WPS433
+
             backend = VectorBackend()
             raw_hits = backend.fetch_embeddings(id_to_file.keys(), cache_dir)
         except Exception as exc:  # noqa: BLE001
@@ -209,7 +210,9 @@ def _resolve_embeddings(
     if missing:
         log.debug(
             "cluster embeddings: %d of %d served from chromadb, %d fell back",
-            len(files) - len(missing), len(files), len(missing),
+            len(files) - len(missing),
+            len(files),
+            len(missing),
         )
         embeddings.update(_fallback_embeddings(missing))
 
@@ -295,8 +298,20 @@ def _shared_tokens(files: Sequence[AutoMemoryFile], limit: int = 4) -> list[str]
         token_sets.append(tokens)
     common = set.intersection(*token_sets) if token_sets else set()
     # Drop obvious structural words
-    boring = {"the", "and", "for", "with", "memory", "feedback", "project",
-              "reference", "user", "recall", "note", "auto"}
+    boring = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "memory",
+        "feedback",
+        "project",
+        "reference",
+        "user",
+        "recall",
+        "note",
+        "auto",
+    }
     interesting = sorted(t for t in common if t not in boring)
     return interesting[:limit]
 
@@ -330,7 +345,9 @@ def cluster_auto_memory_files(
         return []
 
     embeddings = _resolve_embeddings(
-        files, extra_roots=list(extra_roots), cache_dir=cache_dir,
+        files,
+        extra_roots=list(extra_roots),
+        cache_dir=cache_dir,
     )
     # Index files by the string form of their absolute path (stable and
     # unique; avoids Path equality surprises across tempdirs).
@@ -372,12 +389,14 @@ def cluster_auto_memory_files(
                 f"members share tokens: {token_blurb}; "
                 f"mean intra-sim {centroid:.2f}"
             )
-        clusters.append(Cluster(
-            cluster_id=cluster_id,
-            member_paths=relpaths,
-            centroid_score=centroid,
-            rationale=rationale,
-        ))
+        clusters.append(
+            Cluster(
+                cluster_id=cluster_id,
+                member_paths=relpaths,
+                centroid_score=centroid,
+                rationale=rationale,
+            )
+        )
 
     return clusters
 
@@ -386,7 +405,8 @@ def _atomic_replace(target: Path, text: str) -> None:
     """Write *text* to *target* atomically (tempfile + os.replace)."""
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmppath = tempfile.mkstemp(
-        prefix=target.name + ".", dir=str(target.parent),
+        prefix=target.name + ".",
+        dir=str(target.parent),
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -440,8 +460,11 @@ def resolve_cluster_output_path(
     """Resolve the cluster report path from config, relative to *knowledge_root*."""
     if config is None:
         from athenaeum.config import load_config
+
         config = load_config(knowledge_root)
-    librarian_cfg = config.get("librarian") or {}
+    librarian_cfg = config.get("librarian")
+    if not isinstance(librarian_cfg, dict):
+        librarian_cfg = {}
     raw_path = librarian_cfg.get("cluster_output") or DEFAULT_CLUSTER_OUTPUT
     candidate = Path(str(raw_path)).expanduser()
     if not candidate.is_absolute():
@@ -456,8 +479,11 @@ def resolve_cluster_threshold(
     """Resolve the cluster threshold from config; fall back to default."""
     if config is None:
         from athenaeum.config import load_config
+
         config = load_config(knowledge_root)
-    librarian_cfg = config.get("librarian") or {}
+    librarian_cfg = config.get("librarian")
+    if not isinstance(librarian_cfg, dict):
+        librarian_cfg = {}
     value = librarian_cfg.get("cluster_threshold")
     try:
         if value is None:

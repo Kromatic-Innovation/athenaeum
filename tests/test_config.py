@@ -51,6 +51,19 @@ class TestLoadConfig:
         cfg = load_config(tmp_path)
         assert cfg["auto_recall"] is True
 
+    def test_mutating_returned_config_does_not_leak(self, tmp_path: Path) -> None:
+        """A shallow seed copy aliased _DEFAULTS' nested values: mutating
+        ``recall.extra_intake_roots`` on one returned config corrupted every
+        subsequent load_config() process-wide. The seed must be a deep copy.
+        """
+        cfg = load_config(tmp_path)
+        cfg["recall"]["extra_intake_roots"].append("raw/mutated")
+        cfg["vector"]["provider"] = "mutated"
+
+        fresh = load_config(tmp_path)
+        assert fresh["recall"]["extra_intake_roots"] == ["raw/auto-memory"]
+        assert fresh["vector"]["provider"] == "chromadb"
+
 
 class TestDefaultsDoNotShadowCodeDefaults:
     """Regression tests for issue #231.
@@ -103,6 +116,43 @@ class TestDefaultsDoNotShadowCodeDefaults:
             _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
         )
 
+    def test_cluster_size_cap_code_default_reachable(self, tmp_path: Path) -> None:
+        from athenaeum.cross_scope import (
+            DEFAULT_CLUSTER_SIZE_CAP,
+            resolve_cluster_size_cap,
+        )
+
+        cfg = load_config(tmp_path)
+        assert "cluster_size_cap" not in (cfg.get("contradiction") or {})
+        assert DEFAULT_CLUSTER_SIZE_CAP == 25
+        assert resolve_cluster_size_cap(cfg) == DEFAULT_CLUSTER_SIZE_CAP
+
+    def test_similarity_threshold_code_default_reachable(self, tmp_path: Path) -> None:
+        from athenaeum.cross_scope import (
+            DEFAULT_SIMILARITY_THRESHOLD,
+            resolve_similarity_threshold,
+        )
+
+        cfg = load_config(tmp_path)
+        assert "similarity_threshold" not in (cfg.get("contradiction") or {})
+        assert DEFAULT_SIMILARITY_THRESHOLD == pytest.approx(0.85)
+        assert resolve_similarity_threshold(cfg) == pytest.approx(
+            DEFAULT_SIMILARITY_THRESHOLD
+        )
+
+    def test_cluster_output_code_default_reachable(self, tmp_path: Path) -> None:
+        from athenaeum.clusters import (
+            DEFAULT_CLUSTER_OUTPUT,
+            resolve_cluster_output_path,
+        )
+
+        cfg = load_config(tmp_path)
+        assert "cluster_output" not in (cfg.get("librarian") or {})
+        assert (
+            resolve_cluster_output_path(tmp_path, config=cfg)
+            == tmp_path / DEFAULT_CLUSTER_OUTPUT
+        )
+
     def test_cluster_threshold_code_default_reachable(self, tmp_path: Path) -> None:
         from athenaeum.clusters import (
             DEFAULT_CLUSTER_THRESHOLD,
@@ -146,17 +196,73 @@ class TestDefaultsDoNotShadowCodeDefaults:
     ) -> None:
         """Sections absent from _DEFAULTS (e.g. ``resolve:``) must not be dropped."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        from athenaeum.resolutions import _get_model
+
         (tmp_path / "athenaeum.yaml").write_text(
             "resolve:\n  model: claude-haiku-test\n"
         )
         cfg = load_config(tmp_path)
         assert cfg["resolve"]["model"] == "claude-haiku-test"
+        # End-to-end: the resolver must actually see the user-set model.
+        assert _get_model(cfg) == "claude-haiku-test"
 
     def test_template_advertises_187_cap(self) -> None:
         from athenaeum.config import _DEFAULT_CONFIG_CONTENT
 
         assert "resolve_max_per_run: 250" in _DEFAULT_CONFIG_CONTENT
         assert "resolve_max_per_run: 50" not in _DEFAULT_CONFIG_CONTENT
+
+    def test_template_names_live_resolver_model_key(self) -> None:
+        """The template must advertise ``resolve.model`` (the key _get_model
+        reads), not the dead ``contradiction.resolve_model``.
+        """
+        from athenaeum.config import _DEFAULT_CONFIG_CONTENT
+
+        assert "resolve_model:" not in _DEFAULT_CONFIG_CONTENT
+        assert "# resolve:" in _DEFAULT_CONFIG_CONTENT
+        assert "#   model: claude-opus-4-7" in _DEFAULT_CONFIG_CONTENT
+
+
+class TestNonDictSectionsDegradeGracefully:
+    """A truthy scalar/list section value (``contradiction: oops``) must
+    degrade to code defaults, not crash the resolver functions.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_value", ["oops", ["a", "b"], 3, 1.5], ids=["str", "list", "int", "float"]
+    )
+    def test_scalar_or_list_sections_fall_back_to_code_defaults(
+        self, bad_value: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_CROSS_SCOPE_MODE", raising=False)
+        from athenaeum.clusters import (
+            DEFAULT_CLUSTER_OUTPUT,
+            DEFAULT_CLUSTER_THRESHOLD,
+            resolve_cluster_output_path,
+            resolve_cluster_threshold,
+        )
+        from athenaeum.cross_scope import (
+            DEFAULT_CLUSTER_SIZE_CAP,
+            DEFAULT_MODE,
+            DEFAULT_SIMILARITY_THRESHOLD,
+            resolve_cluster_size_cap,
+            resolve_cross_scope_mode,
+            resolve_similarity_threshold,
+        )
+
+        cfg = {"contradiction": bad_value, "librarian": bad_value}
+        assert resolve_cross_scope_mode(cfg) == DEFAULT_MODE
+        assert resolve_cluster_size_cap(cfg) == DEFAULT_CLUSTER_SIZE_CAP
+        assert resolve_similarity_threshold(cfg) == pytest.approx(
+            DEFAULT_SIMILARITY_THRESHOLD
+        )
+        assert resolve_cluster_threshold(tmp_path, config=cfg) == pytest.approx(
+            DEFAULT_CLUSTER_THRESHOLD
+        )
+        assert (
+            resolve_cluster_output_path(tmp_path, config=cfg)
+            == tmp_path / DEFAULT_CLUSTER_OUTPUT
+        )
 
 
 class TestRecallExtraIntakeRootsDefault:
