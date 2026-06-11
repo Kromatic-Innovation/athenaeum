@@ -255,14 +255,16 @@ tool both require explicit user confirmation before applying.
 
 ## 4. Configuration reference
 
-All keys live under `contradiction:` in `athenaeum.yaml` (see
+Detection keys live under `contradiction:` in `athenaeum.yaml`; the
+resolver model lives under the top-level `resolve:` block (see
+[auto-resolve.md](auto-resolve.md) for the full resolver knob set and
 `src/athenaeum/config.py` for the loaded defaults). Env vars override the
 yaml; the yaml overrides built-in defaults.
 
 | Env var | YAML key | Default | Effect |
 |---------|----------|---------|--------|
 | `ATHENAEUM_CLASSIFY_MODEL` | `classify_model` (top-level) | `claude-haiku-4-5-20251001` | Detector model. Shared with Tier 2 classifier — one knob, not a C4-only dial. |
-| `ATHENAEUM_RESOLVE_MODEL` | `contradiction.resolve_model` | `claude-opus-4-7` | Resolver model. Configurable per-operator so cheaper models can be substituted. |
+| `ATHENAEUM_RESOLVE_MODEL` | `resolve.model` (top-level `resolve:` block) | `claude-opus-4-7` | Resolver model. Configurable per-operator so cheaper models can be substituted. |
 | `ATHENAEUM_RESOLVE_MAX_PER_RUN` | `contradiction.resolve_max_per_run` | `250` (raised from 50 in #187) | Per-ingest cap on Opus calls. Surplus contradictions escalate WITHOUT a proposal (degraded mode). |
 | `ATHENAEUM_CROSS_SCOPE_MODE` | `contradiction.cross_scope_mode` | `ancestor` | `off` / `ancestor` / `similarity` / `both` — see § 2. |
 | n/a | `contradiction.cluster_size_cap` | `25` | Pooled-cluster size threshold; oversized pools split into newest-first chunks of `<= cap`. |
@@ -284,12 +286,14 @@ Example `athenaeum.yaml`:
 ```yaml
 search_backend: vector
 
+resolve:
+  model: claude-opus-4-7
+
 contradiction:
   cross_scope_mode: both          # tightest coverage
   cluster_size_cap: 25
   similarity_threshold: 0.85
-  resolve_model: claude-opus-4-7
-  resolve_max_per_run: 50
+  resolve_max_per_run: 250
 ```
 
 ---
@@ -469,7 +473,7 @@ weaker rationales on the precedence-tier comparison. Cost is bounded by
 the most expensive model.
 
 The model is configurable (`ATHENAEUM_RESOLVE_MODEL` /
-`contradiction.resolve_model`) so an operator can substitute a cheaper
+`resolve.model`) so an operator can substitute a cheaper
 model when the cost tradeoff is unacceptable.
 
 ### Why the per-run cap defaults to 250

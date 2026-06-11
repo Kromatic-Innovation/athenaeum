@@ -9,6 +9,7 @@ Missing config or missing keys fall back to sensible defaults.
 
 from __future__ import annotations
 
+import copy
 import logging
 from pathlib import Path
 from typing import Any
@@ -68,11 +69,10 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
     # from _DEFAULTS pass through untouched so module-level code defaults
     # (and their env > yaml > default precedence chains) stay live and
     # user-set sections like ``contradiction:`` or ``resolve:`` are not
-    # dropped (issue #231).
-    result: dict[str, Any] = {
-        key: dict(val) if isinstance(val, dict) else val
-        for key, val in _DEFAULTS.items()
-    }
+    # dropped (issue #231). Deep-copy the seed so callers mutating nested
+    # values (e.g. ``recall.extra_intake_roots``) cannot corrupt _DEFAULTS
+    # process-wide.
+    result: dict[str, Any] = copy.deepcopy(_DEFAULTS)
     for key, user_val in config.items():
         default_val = result.get(key)
         if isinstance(default_val, dict) and isinstance(user_val, dict):
@@ -132,9 +132,7 @@ search_backend: fts5
 #   into newest-first chunks before detection.
 # similarity_threshold: cosine cutoff for the cross-scope sweep.
 # Env override: ATHENAEUM_CROSS_SCOPE_MODE.
-# Opus-backed resolver (issue #126).
-# resolve_model: model used to propose a winner once Haiku flags a contradiction.
-#   Defaults to claude-opus-4-7. Env override: ATHENAEUM_RESOLVE_MODEL.
+# Opus-backed resolver caps (issue #126).
 # resolve_max_per_run: cap on resolver calls per ingest. Surplus contradictions
 #   are escalated without a proposal (degraded mode). Default raised from
 #   50 to 250 in issue #187. Env override: ATHENAEUM_RESOLVE_MAX_PER_RUN.
@@ -142,9 +140,15 @@ search_backend: fts5
 #   cross_scope_mode: ancestor
 #   cluster_size_cap: 25
 #   similarity_threshold: 0.85
-#   resolve_model: claude-opus-4-7
 #   resolve_max_per_run: 250  # raised from 50 in #187
 #   resolved_similarity_threshold: 0.83  # cosine threshold for decision-log matching (#211)
+
+# Contradiction resolver (issue #126). See docs/auto-resolve.md for the
+# full knob set (auto_apply, auto_apply_threshold, full_body_token_cap).
+# model: model used to propose a winner once Haiku flags a contradiction.
+#   Defaults to claude-opus-4-7. Env override: ATHENAEUM_RESOLVE_MODEL.
+# resolve:
+#   model: claude-opus-4-7
 """
 
 
