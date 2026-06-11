@@ -9,6 +9,7 @@ Missing config or missing keys fall back to sensible defaults.
 
 from __future__ import annotations
 
+import copy
 import logging
 from pathlib import Path
 from typing import Any
@@ -33,51 +34,14 @@ _DEFAULTS: dict[str, Any] = {
         # list to restrict recall to the compiled wiki only.
         "extra_intake_roots": ["raw/auto-memory"],
     },
-    "librarian": {
-        # Cluster pass (issue #196, C2). ``cluster_threshold`` is the
-        # cosine-similarity cutoff used by single-linkage clustering over
-        # auto-memory files. Empirically tuned against the voltaire
-        # fixture (5 files sharing a nanoclaw/voltaire token and one typo
-        # clone land in a single cluster at 0.6 without dragging in
-        # unrelated singletons). ``cluster_output`` is the canonical
-        # JSONL report path (resolved relative to the knowledge root);
-        # every run rotates a timestamped sibling and atomically replaces
-        # the canonical file.
-        "cluster_threshold": 0.55,
-        "cluster_output": "raw/_librarian-clusters.jsonl",
-    },
-    "contradiction": {
-        # Cross-scope contradiction detection (issue #125, #81-A).
-        # Modes: off | ancestor | similarity | both. Default ``ancestor``
-        # pools each per-scope cluster with members from any ancestor scope
-        # (e.g. ``-Users-tristankromer-Code-foo``'s pool also includes
-        # ``-Users-tristankromer-Code``). ``similarity`` runs a cosine
-        # cross-product over the recall index (raw + wiki). ``both`` runs
-        # ancestor pooling AND the similarity sweep. Env override:
-        # ``ATHENAEUM_CROSS_SCOPE_MODE``.
-        "cross_scope_mode": "ancestor",
-        # Hard cap on pooled-cluster size before splitting into newest-first
-        # chunks for the detector.
-        "cluster_size_cap": 25,
-        # Cosine similarity threshold for the cross-scope sweep.
-        "similarity_threshold": 0.85,
-        # Issue #126: Opus-backed resolver between Haiku detection and
-        # tier4_escalate. ``resolve_model`` overrides the default Opus
-        # model so users can pick a cheaper resolver. Env var
-        # ``ATHENAEUM_RESOLVE_MODEL`` wins over this setting.
-        "resolve_model": "claude-opus-4-7",
-        # Per-run cap on Opus calls. Surplus contradictions get escalated
-        # without a proposal (degraded mode). Env var
-        # ``ATHENAEUM_RESOLVE_MAX_PER_RUN`` wins over this setting.
-        "resolve_max_per_run": 50,
-        # Cosine similarity threshold for matching a re-detected contradiction
-        # against the resolved-decisions log by embedding similarity (issue
-        # #211). A re-surfaced contradiction whose passages embed above this
-        # threshold relative to a prior resolved record is suppressed / auto-
-        # applied without requiring an exact-text fingerprint match. Env
-        # override: ``ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD``.
-        "resolved_similarity_threshold": 0.83,
-    },
+    # NOTE (issue #231): only seed a key here when this dict is its single
+    # source of truth. Keys whose defaults live next to their consumer code
+    # (librarian.cluster_threshold / cluster_output, contradiction.*) must
+    # NOT be seeded: load_config() would merge the seed into every config,
+    # the resolver would see it as "user-set", and the module-level code
+    # default — plus any future change to it — becomes unreachable. That is
+    # how the #187 resolver-cap raise (50 -> 250) was silently reverted to
+    # 50 through the config path.
 }
 
 
@@ -101,14 +65,20 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
         except (yaml.YAMLError, OSError):
             pass  # fall back to defaults
 
-    # Merge with defaults (one level deep)
-    result = dict(_DEFAULTS)
-    for key, default_val in _DEFAULTS.items():
-        if key in config:
-            if isinstance(default_val, dict) and isinstance(config[key], dict):
-                result[key] = {**default_val, **config[key]}
-            else:
-                result[key] = config[key]
+    # Merge user config over defaults (one level deep). User keys absent
+    # from _DEFAULTS pass through untouched so module-level code defaults
+    # (and their env > yaml > default precedence chains) stay live and
+    # user-set sections like ``contradiction:`` or ``resolve:`` are not
+    # dropped (issue #231). Deep-copy the seed so callers mutating nested
+    # values (e.g. ``recall.extra_intake_roots``) cannot corrupt _DEFAULTS
+    # process-wide.
+    result: dict[str, Any] = copy.deepcopy(_DEFAULTS)
+    for key, user_val in config.items():
+        default_val = result.get(key)
+        if isinstance(default_val, dict) and isinstance(user_val, dict):
+            result[key] = {**default_val, **user_val}
+        else:
+            result[key] = user_val
 
     return result
 
@@ -162,19 +132,23 @@ search_backend: fts5
 #   into newest-first chunks before detection.
 # similarity_threshold: cosine cutoff for the cross-scope sweep.
 # Env override: ATHENAEUM_CROSS_SCOPE_MODE.
-# Opus-backed resolver (issue #126).
-# resolve_model: model used to propose a winner once Haiku flags a contradiction.
-#   Defaults to claude-opus-4-7. Env override: ATHENAEUM_RESOLVE_MODEL.
+# Opus-backed resolver caps (issue #126).
 # resolve_max_per_run: cap on resolver calls per ingest. Surplus contradictions
-#   are escalated without a proposal (degraded mode).
-#   Env override: ATHENAEUM_RESOLVE_MAX_PER_RUN.
+#   are escalated without a proposal (degraded mode). Default raised from
+#   50 to 250 in issue #187. Env override: ATHENAEUM_RESOLVE_MAX_PER_RUN.
 # contradiction:
 #   cross_scope_mode: ancestor
 #   cluster_size_cap: 25
 #   similarity_threshold: 0.85
-#   resolve_model: claude-opus-4-7
-#   resolve_max_per_run: 50
+#   resolve_max_per_run: 250  # raised from 50 in #187
 #   resolved_similarity_threshold: 0.83  # cosine threshold for decision-log matching (#211)
+
+# Contradiction resolver (issue #126). See docs/auto-resolve.md for the
+# full knob set (auto_apply, auto_apply_threshold, full_body_token_cap).
+# model: model used to propose a winner once Haiku flags a contradiction.
+#   Defaults to claude-opus-4-7. Env override: ATHENAEUM_RESOLVE_MODEL.
+# resolve:
+#   model: claude-opus-4-7
 """
 
 

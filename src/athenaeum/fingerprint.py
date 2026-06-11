@@ -350,7 +350,9 @@ def resolve_resolved_similarity_threshold(
         except ValueError:
             pass
     if config is not None:
-        contradiction_cfg = config.get("contradiction") or {}
+        contradiction_cfg = config.get("contradiction")
+        if not isinstance(contradiction_cfg, dict):
+            contradiction_cfg = {}
         raw = contradiction_cfg.get("resolved_similarity_threshold")
         try:
             if raw is not None:
