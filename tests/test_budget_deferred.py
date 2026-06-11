@@ -652,3 +652,62 @@ class TestRunLevelBudgetThreading:
             == DEFAULT_RESOLVE_MAX_PER_RUN
         )
         assert resolve_max_per_run({"contradiction": {"resolve_max_per_run": 7}}) == 7
+
+
+# ---------------------------------------------------------------------------
+# merge-only / cluster-only early returns clear the stale manifest
+# (v0.7.3 release-gate review)
+# ---------------------------------------------------------------------------
+
+
+class TestEarlyReturnPathsClearStaleManifest:
+    @pytest.mark.parametrize("mode", ["merge_only", "cluster_only"])
+    def test_early_return_clears_stale_manifest(
+        self, mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """merge-only / cluster-only runs are clean runs: stale manifest goes.
+
+        Regression: both early-return paths used to skip the stale
+        ``_deferred_work.md`` clearing that full and empty-intake runs
+        perform, so a budget-tripped full run followed by merge-only or
+        cluster-only maintenance runs preserved the stale manifest
+        indefinitely.
+        """
+        root = _seed_knowledge_root(tmp_path, n_files=0)
+        stale = root / "wiki" / "_deferred_work.md"
+        stale.write_text("# Deferred work — stale from previous run\n")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            **{mode: True},
+        )
+
+        assert rc == 0
+        assert not stale.exists()
+
+    @pytest.mark.parametrize("mode", ["merge_only", "cluster_only"])
+    def test_dry_run_early_return_keeps_stale_manifest(
+        self, mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dry-run merge-only / cluster-only must not touch the manifest."""
+        root = _seed_knowledge_root(tmp_path, n_files=0)
+        stale = root / "wiki" / "_deferred_work.md"
+        stale_content = "# Deferred work — stale from previous run\n"
+        stale.write_text(stale_content)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            dry_run=True,
+            **{mode: True},
+        )
+
+        assert rc == 0
+        assert stale.read_text(encoding="utf-8") == stale_content

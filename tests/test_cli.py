@@ -292,6 +292,22 @@ class TestTestMcp:
         assert "PASS  create_server (FastMCP)" in captured.out
         assert "3 passed, 0 failed" in captured.out
 
+    def test_smoke_remember_declares_provenance(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The smoke test passes ``sources``, so it must not trip the
+        issue-#90 "no `sources` supplied" warning the server logs for
+        provenance-less writes (v0.7.3 release-gate review)."""
+        import logging
+
+        pytest.importorskip("fastmcp")
+        with caplog.at_level(logging.WARNING, logger="athenaeum.mcp_server"):
+            rc = main(["test-mcp"])
+        assert rc == 0
+        assert not [
+            r for r in caplog.records if "no `sources` supplied" in r.getMessage()
+        ]
+
     def test_keep_flag_preserves_temp_dir(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:

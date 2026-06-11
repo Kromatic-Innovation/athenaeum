@@ -9,8 +9,6 @@
 [![License](https://img.shields.io/pypi/l/athenaeum.svg)](https://github.com/Kromatic-Innovation/athenaeum/blob/develop/LICENSE)
 
 **Production-grade agentic memory for teams deploying multiple AI agents.**
-Athenaeum follows trunk-style development with `develop` as the active branch
-and `main` as the released-revision pointer.
 Append-only intake, a tiered librarian that compiles raw observations into a
 trustworthy wiki, and a sidecar that makes recall happen passively on every
 turn.
@@ -52,7 +50,8 @@ pip install athenaeum
 athenaeum init                  # default: ~/knowledge
 athenaeum init --path ~/my-knowledge
 
-# Run the librarian (compile raw intake → wiki entities)
+# Run the librarian (compile raw intake → wiki entities).
+# `athenaeum run` needs ANTHROPIC_API_KEY — use --dry-run to explore keyless.
 athenaeum run
 athenaeum run --dry-run         # inspect without writing
 
@@ -60,7 +59,9 @@ athenaeum run --dry-run         # inspect without writing
 athenaeum status
 ```
 
-Full run with custom paths and budgets:
+Full run with custom paths and budgets (`--max-api-calls 200` here
+deliberately lowers the per-run API budget below the default of 800 —
+omit the flag to accept the default):
 
 ```bash
 athenaeum run \
@@ -237,6 +238,7 @@ silently to the regex extractor if the API key or CLI is unavailable.
 | `ATHENAEUM_WRITE_MODEL` | No | Override Tier 3 model (default: `claude-sonnet-4-6`) |
 | `ATHENAEUM_RESOLVE_MODEL` | No | Override the contradiction-resolver model (default: `claude-opus-4-7`) |
 | `ATHENAEUM_RESOLVE_MAX_PER_RUN` | No | Cap resolver calls per ingest run (default: `50`) |
+| `ATHENAEUM_MAX_API_CALLS` | No | Run-level API call budget for `athenaeum run`. Precedence: `--max-api-calls` CLI flag > env > `librarian.max_api_calls` in `athenaeum.yaml` > default `800`. Env `0` is valid and defers the entire intake (writes `wiki/_deferred_work.md` and logs the DEGRADED summary); the CLI flag rejects `0` |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY` | No | Auto-apply high-confidence resolutions (default: `true`). See [`docs/auto-resolve.md`](docs/auto-resolve.md) |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | No | Confidence floor for auto-apply, in `[0.0, 1.0]` (default: `0.90`) |
 | `ATHENAEUM_TOPIC_MODEL` | No | Override query-topic model (default: `claude-haiku-4-5-20251001`) |
@@ -299,6 +301,15 @@ Entities are indexed in `wiki/_index.md` grouped by type. Conflicts requiring
 human review are appended to `wiki/_pending_questions.md`. Each run logs
 token usage and estimated costs at the end.
 
+**Degraded runs.** When a run exhausts its API call budget (see
+`ATHENAEUM_MAX_API_CALLS` above), it writes a `wiki/_deferred_work.md`
+manifest itemizing the raw files it did not process and ends with a
+warning-level `Done (DEGRADED — budget exhausted)` summary line — the
+machine-greppable signal that intake was deferred rather than completed.
+The deferred files stay on disk and are picked up automatically by the
+next run. The manifest is overwritten on every budget-tripped run and
+cleared by the next clean run (full, merge-only, or cluster-only).
+
 ## Known limitations
 
 Athenaeum is pre-1.0. These trade-offs are intentional for the current
@@ -338,7 +349,8 @@ ruff check src/ tests/
 
 ## Branch flow
 
-Athenaeum uses a trunk-style branch model:
+Athenaeum follows trunk-style development, with `develop` as the active
+branch and `main` as the released-revision pointer:
 
 - **`develop`** is the active development branch and the GitHub default. All
   pull requests target `develop`.
