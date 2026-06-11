@@ -39,6 +39,8 @@ Memory](https://kromatic.com/blog/agentic-memory-in-production/).
 
 ## Installation
 
+Requires Python 3.11+.
+
 ```bash
 pip install athenaeum
 ```
@@ -52,6 +54,8 @@ athenaeum init --path ~/my-knowledge
 
 # Run the librarian (compile raw intake → wiki entities).
 # `athenaeum run` needs ANTHROPIC_API_KEY — use --dry-run to explore keyless.
+# `run` and `status` operate on ~/knowledge by default (point elsewhere with
+# `run --knowledge-root` / `status --path`).
 athenaeum run
 athenaeum run --dry-run         # inspect without writing
 
@@ -79,7 +83,7 @@ Athenaeum ships an MCP server exposing `remember` and `recall` tools so AI
 agents can write to raw intake and search the compiled wiki:
 
 ```bash
-pip install athenaeum[mcp]
+pip install 'athenaeum[mcp]'
 athenaeum serve --path ~/knowledge
 
 # Smoke test the round-trip without a live session
@@ -201,7 +205,7 @@ each backend rescues a failure class the other has (short-query proper-noun
 collisions for vector; no-lexical-overlap semantic queries for FTS5).
 
 ```bash
-pip install athenaeum[vector]
+pip install 'athenaeum[vector]'
 ```
 
 Enable it in `athenaeum.yaml`:
@@ -309,6 +313,9 @@ machine-greppable signal that intake was deferred rather than completed.
 The deferred files stay on disk and are picked up automatically by the
 next run. The manifest is overwritten on every budget-tripped run and
 cleared by the next clean run (full, merge-only, or cluster-only).
+The cap is enforced at the entity-tier loop; merge-phase and re-resolve
+calls count toward the budget but do not themselves stop the run, so a
+merge-heavy run can overshoot the cap before enforcement kicks in.
 
 ## Known limitations
 
