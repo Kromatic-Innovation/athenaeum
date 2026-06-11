@@ -173,6 +173,43 @@ class TestTier2:
         assert usage.input_tokens == 150
         assert usage.output_tokens == 20
         assert usage.api_calls == 1
+        # MagicMock auto-attrs for the cache fields are not ints — they
+        # must coerce to 0, not blow up or accumulate mock objects.
+        assert usage.cache_creation_input_tokens == 0
+        assert usage.cache_read_input_tokens == 0
+
+    def test_classify_records_cache_usage(self) -> None:
+        """Issue #230: cache creation/read tokens recorded when present."""
+        from athenaeum.models import TokenUsage
+        from athenaeum.tiers import tier2_classify
+
+        raw = _make_raw("Some content.")
+        client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="[]")]
+        mock_response.usage = MagicMock(
+            input_tokens=150,
+            output_tokens=20,
+            cache_creation_input_tokens=2300,
+            cache_read_input_tokens=4600,
+        )
+        client.messages.create.return_value = mock_response
+
+        usage = TokenUsage()
+        tier2_classify(
+            raw,
+            [],
+            ["person"],
+            [],
+            ["internal"],
+            client,
+            usage=usage,
+        )
+        assert usage.input_tokens == 150
+        assert usage.output_tokens == 20
+        assert usage.cache_creation_input_tokens == 2300
+        assert usage.cache_read_input_tokens == 4600
+        assert usage.api_calls == 1
 
     def test_extracts_new_entity(self) -> None:
         from athenaeum.tiers import tier2_classify
