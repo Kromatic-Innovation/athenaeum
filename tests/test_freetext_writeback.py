@@ -172,6 +172,64 @@ class TestProposeFreetextSourceEdits:
         )
         assert result == {}
 
+    def test_fenced_json_response_parsed(self, tmp_path: Path) -> None:
+        """Issue #222: model wraps the edits object in ```json fences —
+        the shared extractor must still recover the edits."""
+        src = tmp_path / "mem.md"
+        original_body = "Old claim.\n"
+        new_body = "Corrected claim.\n"
+        payload = _edits_json(
+            [{"path": str(src), "changed": True, "new_body": new_body}]
+        )
+        client = _fake_client(f"```json\n{payload}\n```")
+        result = propose_freetext_source_edits(
+            "ruling",
+            [(src, original_body)],
+            [],
+            client=client,
+        )
+        assert result == {src: new_body}
+
+    def test_prose_wrapped_json_response_parsed(self, tmp_path: Path) -> None:
+        """Issue #222: leading/trailing prose around the edits object."""
+        src = tmp_path / "mem.md"
+        original_body = "Old claim.\n"
+        new_body = "Corrected claim.\n"
+        payload = _edits_json(
+            [{"path": str(src), "changed": True, "new_body": new_body}]
+        )
+        client = _fake_client(f"Here are the edits:\n{payload}\nHope that helps!")
+        result = propose_freetext_source_edits(
+            "ruling",
+            [(src, original_body)],
+            [],
+            client=client,
+        )
+        assert result == {src: new_body}
+
+    def test_fenced_response_with_trailing_example_brace(self, tmp_path: Path) -> None:
+        """The #219 failure shape at this call site: fenced object plus a
+        later brace span in trailing prose. The old greedy ``\\{.*\\}``
+        regex swallowed both and failed to decode; the shared extractor
+        prefers the fenced object."""
+        src = tmp_path / "mem.md"
+        original_body = "Old claim.\n"
+        new_body = "Corrected claim.\n"
+        payload = _edits_json(
+            [{"path": str(src), "changed": True, "new_body": new_body}]
+        )
+        client = _fake_client(
+            f"```json\n{payload}\n```\n"
+            'An unchanged file would look like {"changed": false}.'
+        )
+        result = propose_freetext_source_edits(
+            "ruling",
+            [(src, original_body)],
+            [],
+            client=client,
+        )
+        assert result == {src: new_body}
+
 
 # ---------------------------------------------------------------------------
 # _writeback_source integration tests
