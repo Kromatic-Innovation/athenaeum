@@ -33,6 +33,11 @@ _TEMPLATE_FILES = [
 _SUBDIRS = [
     "raw",
     "raw/sessions",
+    # Default auto-memory intake root (mirrors config.py's default
+    # recall.extra_intake_roots) — created up front so the first
+    # `athenaeum run` on a fresh root doesn't warn
+    # "extra_intake_root not found".
+    "raw/auto-memory",
     "wiki",
     "wiki/_schema",
 ]

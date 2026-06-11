@@ -1130,6 +1130,9 @@ def _cmd_test_mcp(args: argparse.Namespace) -> int:
             raw_root,
             "Smoke test observation from `athenaeum test-mcp`.",
             source="test-mcp",
+            # Declare per-claim provenance so the smoke test itself doesn't
+            # trip the issue-#90 "no `sources` supplied" warning.
+            sources="cli:athenaeum-test-mcp",
         )
         written = list((raw_root / "test-mcp").glob("*.md"))
         ok = result.startswith("Saved to ") and len(written) == 1

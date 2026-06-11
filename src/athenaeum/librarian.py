@@ -707,6 +707,19 @@ def librarian_max_api_calls(config: dict[str, object] | None = None) -> int:
     return DEFAULT_MAX_API_CALLS
 
 
+def _clear_stale_deferred_manifest(wiki_root: Path) -> None:
+    """Remove a stale deferred-work manifest left by a budget-tripped run.
+
+    Every clean (non-dry-run) exit path must call this — the full entity
+    run, the empty-intake early return, and the merge-only / cluster-only
+    early returns — so a stale manifest cannot outlive the backlog it
+    described.
+    """
+    stale = wiki_root / DEFERRED_MANIFEST_NAME
+    if stale.exists():
+        stale.unlink()
+
+
 def _write_deferred_manifest(
     wiki_root: Path,
     deferred_refs: list[str],
@@ -864,6 +877,10 @@ def run(
             _run_reresolve_pass(
                 knowledge_root, config=config, client=merge_client, usage=usage
             )
+            # A merge-only run is a clean run from the manifest's
+            # perspective: clear a stale deferred-work manifest left by a
+            # prior budget-tripped run (v0.7.3 release-gate review).
+            _clear_stale_deferred_manifest(wiki_root)
         return 0
 
     # C1 + C2: auto-memory discovery followed by the C2 cluster pass.
@@ -914,6 +931,10 @@ def run(
             )
 
     if cluster_only:
+        # Same contract as the merge-only early return above: a clean
+        # cluster-only run must not preserve a stale deferred manifest.
+        if not dry_run:
+            _clear_stale_deferred_manifest(wiki_root)
         return 0
 
     raw_files = discover_raw_files(raw_root)
@@ -923,9 +944,7 @@ def run(
         # early return below would preserve the stale manifest forever once
         # the backlog drains without new intake.
         if not dry_run:
-            stale_manifest = wiki_root / DEFERRED_MANIFEST_NAME
-            if stale_manifest.exists():
-                stale_manifest.unlink()
+            _clear_stale_deferred_manifest(wiki_root)
         log.info("No raw files to process. Nothing to do.")
         return 0
 

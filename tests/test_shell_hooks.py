@@ -36,6 +36,34 @@ def _require(tool: str) -> None:
         pytest.skip(f"{tool} not available on this runner")
 
 
+def _require_hook_python(hook_env: dict[str, str], module: str) -> None:
+    """Skip when the hook's python can't import *module* under the isolated HOME.
+
+    The ``hook_env`` fixture isolates ``HOME``, which hides per-user
+    site-packages (PEP 370). On machines where athenaeum's dependencies
+    are installed in the user site, the hook's python subprocess can't
+    import them; the hooks then fail open by design (silent exit 0) and
+    these tests would fail on a missing environment precondition rather
+    than a hook regression.
+    """
+    src = Path(hook_env["ATHENAEUM_SRC"]) / "src"
+    code = f"import sys; sys.path.insert(0, {str(src)!r}); import {module}"
+    proc = subprocess.run(
+        [hook_env["ATHENAEUM_PYTHON"], "-c", code],
+        env=hook_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()
+        last_line = stderr.splitlines()[-1] if stderr else "unknown error"
+        pytest.skip(
+            f"hook python cannot import {module} under isolated HOME "
+            f"(user-site dependencies hidden): {last_line}"
+        )
+
+
 @pytest.fixture
 def hook_env(tmp_path: Path) -> dict[str, str]:
     """Isolated env for hook subprocesses.
@@ -84,6 +112,7 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
 class TestSessionStartRecall:
     def test_builds_fts5_index(self, hook_env: dict[str, str], tmp_path: Path) -> None:
         _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
         result = subprocess.run(
             ["bash", str(SESSION_START)],
             env=hook_env,
@@ -136,6 +165,7 @@ class TestUserPromptRecall:
         _require("bash")
         _require("jq")
         _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
         self._seed_index(hook_env)
 
         stdin_payload = json.dumps(
@@ -339,6 +369,7 @@ class TestRebuildIndex:
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
         result = subprocess.run(
             ["bash", str(REBUILD_INDEX)],
             env=hook_env,
@@ -438,6 +469,7 @@ class TestPendingQuestionsSurface:
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         _require("bash")
+        _require_hook_python(hook_env, "athenaeum.cli")
         knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
         self._seed_pending(knowledge, count=3)
 
@@ -481,6 +513,7 @@ class TestPendingQuestionsSurface:
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         _require("bash")
+        _require_hook_python(hook_env, "athenaeum.cli")
         knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
         self._seed_pending(knowledge, count=1)
 
