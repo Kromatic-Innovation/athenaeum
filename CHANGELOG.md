@@ -5,7 +5,7 @@ All notable changes to Athenaeum are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-06-12
 
 ### Added
 
@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the cache counters at the documented multipliers — cache writes at
   1.25x the blended input rate, cache reads at ~0.1x — instead of
   silently omitting cached traffic.
+- **Prompt caching on the resolver system prompt (#230).** The
+  contradiction-resolver call now sets a `cache_control: ephemeral`
+  breakpoint on its static system prompt, so repeated resolver calls
+  within a run hit the Anthropic prompt cache instead of re-billing the
+  full prompt as fresh input tokens, and cache usage (cache writes /
+  cache reads) is logged per call. Shipped via PR #237; the
+  resolver-phase cache observability work above (#239) builds on these
+  counters.
 - **Canonical configuration reference at `docs/configuration.md` (#233).**
   One page listing every operator-tunable knob — librarian run budgets,
   model selection, contradiction/resolver tuning, recall/search, and the
@@ -85,6 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **anthropic SDK floor raised from `>=0.30.0` to `>=0.39.0` (#236).** The
+  Messages Batch API surface used by the new `--batch-mode` requires SDK
+  0.39.0. Environments pinned to anthropic 0.30–0.38 must upgrade the SDK
+  before installing this release; the `<1.0` upper bound is unchanged.
 - **README polish (#235).** Tagline reworded from "production-grade" to
   "production-tested" (consistent with the honest pre-1.0 framing in Known
   Limitations), and the hero image moved below the value-prop line and
@@ -953,7 +965,7 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
-[Unreleased]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.3...HEAD
+[0.8.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.0...v0.7.1
