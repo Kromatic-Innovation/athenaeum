@@ -31,7 +31,9 @@ dependencies = [
     # We cap each at an explicit upper bound (next-major boundary or wider)
     # so a surprise release can't silently break a released athenaeum
     # wheel — bumps are explicit PRs.
-    "anthropic>=0.30.0,<1.0",
+    # Floor 0.39.0: first stable release shipping client.messages.batches
+    # (the Batch API surface batch-mode depends on, #236).
+    "anthropic>=0.39.0,<1.0",
     "pydantic>=2.0,<3.0",
 ]
 

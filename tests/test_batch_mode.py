@@ -353,6 +353,41 @@ class TestBatchModeCLI:
         assert rc == 0
         assert captured["batch_mode"] is None
 
+    def test_no_flag_passes_false_overriding_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The off-switch: --no-batch-mode pins False even when the env
+        # default is on (explicit CLI > env > yaml precedence).
+        monkeypatch.setenv("ATHENAEUM_BATCH_MODE", "1")
+        captured = self._capture_run(monkeypatch)
+        rc = main(
+            ["run", "--knowledge-root", str(tmp_path), "--dry-run", "--no-batch-mode"]
+        )
+        assert rc == 0
+        assert captured["batch_mode"] is False
+
+    def test_explicit_false_overrides_env_on_at_run_level(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        contents = ["Standalone fact about WidgetEnv gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        _clean_env(monkeypatch)
+        monkeypatch.setenv("ATHENAEUM_BATCH_MODE", "1")
+        client = _FakeClient(_scripted_responder)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=False,
+        )
+        assert rc == 0
+        # Synchronous path used despite env=on: no Batch API traffic.
+        assert client.batches.submitted == []
+        assert client.sync_calls
+
 
 # ---------------------------------------------------------------------------
 # Equivalence: batch output == sync output for the same intake + responses
@@ -361,7 +396,10 @@ class TestBatchModeCLI:
 
 class TestBatchSyncEquivalence:
     def test_wiki_output_identical(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         contents = [
             "Standalone fact about WidgetAlpha gadget.\n",
@@ -371,6 +409,7 @@ class TestBatchSyncEquivalence:
         root_sync = _seed_root(tmp_path, "sync", contents, with_acme=True)
         root_batch = _seed_root(tmp_path, "batch", contents, with_acme=True)
         _clean_env(monkeypatch)
+        caplog.set_level(logging.INFO, logger="athenaeum")
 
         sync_client = _FakeClient(_scripted_responder)
         monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: sync_client)
@@ -386,6 +425,62 @@ class TestBatchSyncEquivalence:
         # Flag off → the Batch API surface is never touched.
         assert sync_client.batches.submitted == []
         assert sync_client.sync_calls, "sync path made no API calls"
+        sync_done = [
+            r.getMessage() for r in caplog.records if r.getMessage().startswith("Done:")
+        ]
+        caplog.clear()
+
+        batch_client = _FakeClient(_scripted_responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: batch_client)
+        _patch_uids(monkeypatch)
+        assert (
+            run(
+                raw_root=root_batch / "raw",
+                wiki_root=root_batch / "wiki",
+                knowledge_root=root_batch,
+                batch_mode=True,
+            )
+            == 0
+        )
+        batch_done = [
+            r.getMessage() for r in caplog.records if r.getMessage().startswith("Done:")
+        ]
+
+        assert _wiki_snapshot(root_batch) == _wiki_snapshot(root_sync)
+        # Summary accounting (created/updated/escalated/skipped/failed)
+        # identical between the two transports.
+        assert sync_done and sync_done == batch_done
+        # Intake fully consumed on both paths.
+        assert not list((root_sync / "raw" / "sessions").glob("*.md"))
+        assert not list((root_batch / "raw" / "sessions").glob("*.md"))
+        # Phased fan-out: one tier-2 batch, one tier-3 batch.
+        assert len(batch_client.batches.submitted) == 2
+        # The unique-target merge was batched, not synchronous.
+        assert any(
+            "## Existing page content" in m for m in _all_batch_messages(batch_client)
+        )
+
+    def test_multi_action_file_create_plus_merge_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # One intake file producing BOTH a tier-3 create (WidgetMulti) and
+        # a tier-3 merge (tier-1 match on Acme Corp) through each path.
+        contents = ["WidgetMulti gadget built by Acme Corp.\n"]
+        root_sync = _seed_root(tmp_path, "sync", contents, with_acme=True)
+        root_batch = _seed_root(tmp_path, "batch", contents, with_acme=True)
+        _clean_env(monkeypatch)
+
+        sync_client = _FakeClient(_scripted_responder)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: sync_client)
+        _patch_uids(monkeypatch)
+        assert (
+            run(
+                raw_root=root_sync / "raw",
+                wiki_root=root_sync / "wiki",
+                knowledge_root=root_sync,
+            )
+            == 0
+        )
 
         batch_client = _FakeClient(_scripted_responder, allow_sync=False)
         monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: batch_client)
@@ -401,15 +496,64 @@ class TestBatchSyncEquivalence:
         )
 
         assert _wiki_snapshot(root_batch) == _wiki_snapshot(root_sync)
-        # Intake fully consumed on both paths.
-        assert not list((root_sync / "raw" / "sessions").glob("*.md"))
-        assert not list((root_batch / "raw" / "sessions").glob("*.md"))
-        # Phased fan-out: one tier-2 batch, one tier-3 batch.
-        assert len(batch_client.batches.submitted) == 2
-        # The unique-target merge was batched, not synchronous.
-        assert any(
-            "## Existing page content" in m for m in _all_batch_messages(batch_client)
+        # Both actions of the one file went through the Batch API.
+        msgs = _all_batch_messages(batch_client)
+        assert any("## Entity to create" in m for m in msgs)
+        assert any("## Existing page content" in m for m in msgs)
+
+    def test_escalate_protocol_through_batch_transport(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ESCALATE: merge response through the batch transport must land
+        # in the tier-4 escalation path exactly like the sync transport.
+        def responder(params: dict[str, Any]) -> str:
+            user_msg = params["messages"][0]["content"]
+            if "## Existing page content" in user_msg:
+                return "ESCALATE: principled conflict about Acme facts"
+            return _scripted_responder(params)
+
+        contents = ["Acme Corp conflicting update.\n"]
+        root_sync = _seed_root(tmp_path, "sync", contents, with_acme=True)
+        root_batch = _seed_root(tmp_path, "batch", contents, with_acme=True)
+        _clean_env(monkeypatch)
+
+        sync_client = _FakeClient(responder)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: sync_client)
+        _patch_uids(monkeypatch)
+        assert (
+            run(
+                raw_root=root_sync / "raw",
+                wiki_root=root_sync / "wiki",
+                knowledge_root=root_sync,
+            )
+            == 0
         )
+
+        batch_client = _FakeClient(responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: batch_client)
+        _patch_uids(monkeypatch)
+        assert (
+            run(
+                raw_root=root_batch / "raw",
+                wiki_root=root_batch / "wiki",
+                knowledge_root=root_batch,
+                batch_mode=True,
+            )
+            == 0
+        )
+
+        for root in (root_sync, root_batch):
+            pending = root / "wiki" / "_pending_questions.md"
+            assert pending.exists(), f"no escalation written under {root.name}"
+            text = pending.read_text(encoding="utf-8")
+            assert "acme corp" in text.lower()
+            assert "principled conflict about Acme facts" in text
+            # ESCALATE without a merged body leaves the page untouched and
+            # consumes the raw file on both transports.
+            page = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+            assert "Original body line." in page
+            assert "Merged note" not in page
+            assert not list((root / "raw" / "sessions").glob("*.md"))
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +916,101 @@ class TestSamePageMerges:
         ref1 = "Merged note from sessions/20240411T120000Z-aabbccd1.md"
         assert ref0 in page and ref1 in page
         assert page.index(ref0) < page.index(ref1)
+
+
+# ---------------------------------------------------------------------------
+# Documented dedup divergence: tier 0/1 runs up front for the whole window
+# ---------------------------------------------------------------------------
+
+
+class TestBatchDedupDivergence:
+    def test_same_new_entity_in_two_files_creates_duplicate_pages(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Documented divergence from the sync loop (batch.py module
+        # docstring): tier 0/1 runs for the whole intake window BEFORE any
+        # creation, so an entity created from file A this run is not
+        # tier-1-matchable by file B — batch mode creates duplicate pages
+        # with distinct uids where the sync loop would merge. Pinned here
+        # so a future change to this contract is deliberate.
+        contents = [
+            "Standalone fact about WidgetTwin gadget.\n",
+            "More notes about WidgetTwin gadget.\n",
+        ]
+        root = _seed_root(tmp_path, "k", contents)
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+        )
+        assert rc == 0
+        twin_pages = sorted(n for n in _wiki_snapshot(root) if "widgettwin" in n)
+        assert twin_pages == [
+            "uid00001-widgettwin.md",
+            "uid00002-widgettwin.md",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Mid-assembly failure: drop the file's already-appended requests
+# ---------------------------------------------------------------------------
+
+
+class TestMidAssemblyFailure:
+    def test_failed_file_requests_dropped_before_submit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # File 1 assembles its tier-3 create, then blows up assembling its
+        # merge. Its already-appended create request must be dropped before
+        # submit — the file can never be written, so submitting its
+        # requests would be pure wasted spend.
+        contents = [
+            "Standalone fact about WidgetFine gadget.\n",
+            "WidgetOops gadget built by Acme Corp.\n",
+        ]
+        root = _seed_root(tmp_path, "k", contents, with_acme=True)
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+
+        import athenaeum.batch as batch_mod
+
+        real_merge_params = batch_mod.tier3_merge_params
+
+        def boom(action: Any, existing_body: str, source_ref: str, **kw: Any) -> Any:
+            if "aabbccd1" in source_ref:
+                raise RuntimeError("merge params exploded")
+            return real_merge_params(action, existing_body, source_ref, **kw)
+
+        monkeypatch.setattr(batch_mod, "tier3_merge_params", boom)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+        )
+        assert rc == 1
+        # Tier-3 batch carries only WidgetFine's create; WidgetOops's
+        # appended-then-dropped create never reached the API.
+        t3_msgs = [
+            req["params"]["messages"][0]["content"]
+            for req in client.batches.submitted[1]
+        ]
+        assert len(t3_msgs) == 1
+        assert "WidgetFine" in t3_msgs[0]
+        names = " ".join(_wiki_snapshot(root))
+        assert "widgetfine" in names
+        assert "widgetoops" not in names
+        remaining = [p.name for p in (root / "raw" / "sessions").glob("*.md")]
+        assert remaining == ["20240411T120000Z-aabbccd1.md"]
 
 
 # ---------------------------------------------------------------------------

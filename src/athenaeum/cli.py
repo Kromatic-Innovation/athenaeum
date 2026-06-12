@@ -141,13 +141,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument(
         "--batch-mode",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=None,
         help="Submit tier-2/tier-3 LLM calls via the Anthropic Messages "
         "Batch API at a 50%% token discount (issue #236). Latency-tolerant: "
         "most batches finish within an hour, 24h worst case — intended for "
-        "the nightly run. Default: ATHENAEUM_BATCH_MODE env, then "
-        "athenaeum.yaml librarian.batch_mode, then off.",
+        "the nightly run. --no-batch-mode forces the synchronous path even "
+        "when the env/yaml default is on. Default: ATHENAEUM_BATCH_MODE "
+        "env, then athenaeum.yaml librarian.batch_mode, then off.",
     )
     run_parser.add_argument(
         "--verbose",
