@@ -113,9 +113,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument(
         "--max-files",
-        type=int,
-        default=50,
-        help="Stop after processing this many raw files (default: 50)",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Stop after processing this many raw files (default: "
+            "ATHENAEUM_MAX_FILES env, then athenaeum.yaml "
+            "librarian.max_files, then 50)"
+        ),
     )
     run_parser.add_argument(
         "--max-api-calls",
@@ -1082,9 +1086,13 @@ def _cmd_stopwords(_args: argparse.Namespace) -> int:
 
 def _cmd_query_topics(args: argparse.Namespace) -> int:
     """Print extracted topics, one per line. Empty output = fall back."""
+    from athenaeum.config import load_config
     from athenaeum.query_topics import extract_topics
 
-    for topic in extract_topics(args.prompt, timeout=args.timeout):
+    # Issue #232: load the operator's yaml so ``models.topic`` reaches the
+    # call. The hook runs against the default knowledge root (~/knowledge).
+    config = load_config()
+    for topic in extract_topics(args.prompt, timeout=args.timeout, config=config):
         print(topic)
     return 0
 

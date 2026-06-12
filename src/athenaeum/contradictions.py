@@ -34,10 +34,10 @@ Out of scope (deliberate):
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+from athenaeum.config import resolve_model
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import AutoMemoryFile, cache_usage_counts, parse_frontmatter
 
@@ -158,8 +158,12 @@ def _build_user_message(members: list[AutoMemoryFile]) -> str:
     return "\n".join(lines)
 
 
-def _get_model() -> str:
-    return os.environ.get("ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CONTRADICTION_MODEL)
+def _get_model(config: dict[str, object] | None = None) -> str:
+    # Same knob as tier2_classify: env ATHENAEUM_CLASSIFY_MODEL > yaml
+    # models.classify > code default (issue #232).
+    return resolve_model(
+        "classify", "ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CONTRADICTION_MODEL, config
+    )
 
 
 def _parse_response(
@@ -239,6 +243,7 @@ def _parse_response(
 def detect_contradictions(
     cluster_members: list[AutoMemoryFile],
     client: "anthropic.Anthropic | None",
+    config: dict[str, object] | None = None,
 ) -> ContradictionResult:
     """Run one detector call against a cluster; return the structured result.
 
@@ -249,6 +254,9 @@ def detect_contradictions(
         client: A live Anthropic client, or ``None`` when the key is unset.
             ``None`` short-circuits to the deterministic fallback so offline
             runs still produce a :class:`ContradictionResult`.
+        config: Optional resolved athenaeum.yaml dict (issue #232) — routes
+            ``models.classify`` to the detector call. ``None`` keeps env >
+            code-default resolution.
 
     Returns:
         A :class:`ContradictionResult`. Callers MUST NOT assume
@@ -271,7 +279,7 @@ def detect_contradictions(
 
     try:
         response = client.messages.create(
-            model=_get_model(),
+            model=_get_model(config),
             max_tokens=1024,
             system=_DETECT_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
