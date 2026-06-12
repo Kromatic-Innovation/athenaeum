@@ -723,11 +723,11 @@ class TestRunLevelBudgetThreading:
         )
         monkeypatch.setattr(
             "athenaeum.merge.detect_contradictions",
-            lambda members, client, config=None: detected,
+            lambda members, client, config=None, usage=None: detected,
         )
         monkeypatch.setattr(
             "athenaeum.merge.propose_resolution",
-            lambda result, members, client: SimpleNamespace(
+            lambda result, members, client, usage=None: SimpleNamespace(
                 action="keep_a", confidence=0.0
             ),
         )
@@ -757,6 +757,85 @@ class TestRunLevelBudgetThreading:
         )
         assert entries == []
         assert usage.api_calls == 0
+
+    def test_merge_threads_detector_and_resolver_token_counts(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """#239: detector + resolver responses feed token/cache counters
+        into the threaded run-level TokenUsage (not just api_calls), so
+        the librarian run summary's cache line reflects this phase."""
+        import json
+        from unittest.mock import MagicMock
+
+        from athenaeum.merge import merge_clusters_to_wiki
+
+        knowledge_root = tmp_path / "knowledge"
+        scope = knowledge_root / "raw" / "auto-memory" / "scopeA"
+        scope.mkdir(parents=True)
+        for name, body in [
+            ("project_alpha.md", "Alpha says X."),
+            ("project_beta.md", "Beta says not-X."),
+        ]:
+            (scope / name).write_text(
+                f"---\nname: {name}\ntype: feedback\n---\n{body}\n",
+                encoding="utf-8",
+            )
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
+            encoding="utf-8",
+        )
+        rows = [
+            {
+                "cluster_id": "c1",
+                "member_paths": [
+                    "scopeA/project_alpha.md",
+                    "scopeA/project_beta.md",
+                ],
+                "centroid_score": 0.9,
+                "rationale": "test",
+            }
+        ]
+        (knowledge_root / "raw" / "_librarian-clusters.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+        )
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "factual", '
+            '"members_involved": ["scopeA/project_alpha.md", '
+            '"scopeA/project_beta.md"], '
+            '"conflicting_passages": ["X", "not-X"], "rationale": "conflict"}'
+        )
+        resolver_payload = (
+            '{"recommended_winner": "a", "action": "keep_a", '
+            '"confidence": 0.5, "rationale": "r", '
+            '"source_precedence_used": []}'
+        )
+
+        def _response(payload: str, cache_read: int) -> MagicMock:
+            response = MagicMock()
+            response.content = [MagicMock(text=payload)]
+            response.usage = MagicMock(
+                input_tokens=100,
+                output_tokens=20,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=cache_read,
+            )
+            return response
+
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            _response(detector_payload, 900),
+            _response(resolver_payload, 2400),
+        ]
+
+        usage = TokenUsage()
+        merge_clusters_to_wiki(knowledge_root, dry_run=True, client=client, usage=usage)
+
+        assert usage.api_calls == 2
+        assert usage.input_tokens == 200
+        assert usage.output_tokens == 40
+        assert usage.cache_read_input_tokens == 3300
 
     def test_yaml_bool_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """`max_api_calls: yes` in yaml must not become a cap of 1 (bool is int)."""

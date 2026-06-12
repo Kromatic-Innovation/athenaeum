@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -452,6 +453,95 @@ class TestTokenUsage:
         assert usage.api_calls == 0
         assert usage.total_tokens == 0
         assert usage.estimated_cost_usd == 0.0
+
+    def test_add_tokens_accumulates_without_counting_a_call(self) -> None:
+        """#239: token-only accumulation for call sites that count attempts
+        separately (merge.py's detector/resolver loop)."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add_tokens(100, 50, 10, 20)
+        usage.add_tokens(200, 75)
+        assert usage.input_tokens == 300
+        assert usage.output_tokens == 125
+        assert usage.cache_creation_input_tokens == 10
+        assert usage.cache_read_input_tokens == 20
+        assert usage.api_calls == 0
+
+    def test_estimated_cost_includes_cache_terms(self) -> None:
+        """#239: input_tokens excludes cached tokens, so the estimate must
+        fold in cache writes at 1.25x and cache reads at 0.1x input rate."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(
+            1_000_000,
+            0,
+            cache_creation_input_tokens=1_000_000,
+            cache_read_input_tokens=1_000_000,
+        )
+        # $1.50 input + $1.875 cache-write (1.25x) + $0.15 cache-read (0.1x)
+        assert abs(usage.estimated_cost_usd - 3.525) < 0.001
+
+    def test_estimated_cost_cache_read_only(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(0, 0, cache_read_input_tokens=10_000_000)
+        # 10M cache-read tokens at 0.1 * $1.50/M = $1.50
+        assert abs(usage.estimated_cost_usd - 1.50) < 0.001
+
+
+class TestCacheUsageCounts:
+    """Direct unit coverage for ``cache_usage_counts`` (#239 nit b)."""
+
+    def test_full_usage_extracted(self) -> None:
+        from athenaeum.models import cache_usage_counts
+
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=10,
+                output_tokens=5,
+                cache_creation_input_tokens=2300,
+                cache_read_input_tokens=4600,
+            )
+        )
+        assert cache_usage_counts(response) == (10, 5, 2300, 4600)
+
+    def test_missing_usage_attribute_returns_zeros(self) -> None:
+        from athenaeum.models import cache_usage_counts
+
+        assert cache_usage_counts(object()) == (0, 0, 0, 0)
+
+    def test_missing_cache_fields_default_to_zero(self) -> None:
+        from athenaeum.models import cache_usage_counts
+
+        response = SimpleNamespace(
+            usage=SimpleNamespace(input_tokens=7, output_tokens=3)
+        )
+        assert cache_usage_counts(response) == (7, 3, 0, 0)
+
+    def test_bool_fields_coerce_to_zero(self) -> None:
+        """bool is an int subclass — ``True`` must not count as 1 token."""
+        from athenaeum.models import cache_usage_counts
+
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=True,
+                output_tokens=5,
+                cache_creation_input_tokens=True,
+                cache_read_input_tokens=False,
+            )
+        )
+        assert cache_usage_counts(response) == (0, 5, 0, 0)
+
+    def test_non_int_fields_coerce_to_zero(self) -> None:
+        from athenaeum.models import cache_usage_counts
+
+        response = SimpleNamespace(
+            usage=SimpleNamespace(input_tokens="12", output_tokens=None)
+        )
+        assert cache_usage_counts(response) == (0, 0, 0, 0)
 
 
 class TestEntityAction:

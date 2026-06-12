@@ -329,12 +329,23 @@ def test_reresolve_counts_resolver_calls_against_usage(tmp_path: Path) -> None:
 
     # keep_a at 0.80 (below gate) → annotate-only; both blocks get a call.
     client = _fake_client(_payload("keep_a", confidence=0.80))
+    # #239: the resolver responses must also feed token + cache counters
+    # into the threaded usage so the run summary's cache line moves.
+    client.messages.create.return_value.usage = MagicMock(
+        input_tokens=100,
+        output_tokens=10,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=2400,
+    )
     usage = TokenUsage()
     count = reresolve_open_questions(pending, client=client, config={}, usage=usage)
 
     assert count == 2
     assert client.messages.create.call_count == 2
     assert usage.api_calls == 2
+    assert usage.input_tokens == 200
+    assert usage.output_tokens == 20
+    assert usage.cache_read_input_tokens == 4800
 
 
 def test_reresolve_offline_counts_nothing(tmp_path: Path) -> None:
