@@ -518,7 +518,8 @@ class TestZeroBudgetStartupWarning:
         zero_warnings = [
             r for r in caplog.records if "API budget is 0" in r.getMessage()
         ]
-        assert zero_warnings, [r.getMessage() for r in caplog.records]
+        # Exactly once: the warning must fire, and must not be duplicated.
+        assert len(zero_warnings) == 1, [r.getMessage() for r in caplog.records]
         assert all(r.levelno == logging.WARNING for r in zero_warnings)
         # The message must name the knobs so the operator can fix it.
         assert any(
@@ -546,6 +547,32 @@ class TestZeroBudgetStartupWarning:
             wiki_root=root / "wiki",
             knowledge_root=root,
             max_api_calls=100,
+        )
+
+        assert rc == 0
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("API budget is 0" in m for m in messages), messages
+
+    def test_warning_does_not_fire_when_budget_positive_from_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Positive budget resolved from env (not CLI arg) is also silent."""
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setenv("ATHENAEUM_MAX_API_CALLS", "5")
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one", _fake_process_one_factory()
+        )
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=None,
         )
 
         assert rc == 0

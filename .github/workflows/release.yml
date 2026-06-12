@@ -115,13 +115,24 @@ jobs:
       # Idempotent: the next release may be cut manually with
       # `gh release create` before this job runs — if a release already
       # exists for the tag, skip cleanly instead of failing or duplicating.
+      # The probe distinguishes a true 404 (no release yet -> create) from
+      # transient API failures (auth/5xx -> fail loudly rather than risk
+      # creating a duplicate on unknown state).
       - name: Create GitHub Release (skip if it already exists)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          set +e
+          probe_err=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --silent 2>&1)
+          probe_rc=$?
+          set -e
+          if [ "$probe_rc" -eq 0 ]; then
             echo "Release $GITHUB_REF_NAME already exists — skipping."
             exit 0
+          fi
+          if ! printf '%s\n' "$probe_err" | grep -q "HTTP 404"; then
+            echo "::error::Release existence probe for $GITHUB_REF_NAME failed with a non-404 error; refusing to create a release on unknown state. Probe output: $probe_err"
+            exit 1
           fi
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
