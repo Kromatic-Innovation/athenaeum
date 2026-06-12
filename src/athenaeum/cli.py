@@ -260,6 +260,15 @@ def main(argv: list[str] | None = None) -> int:
         default=3.0,
         help="Seconds to wait for the LLM before giving up (default: 3.0)",
     )
+    query_topics_parser.add_argument(
+        "--knowledge-root",
+        "--path",
+        type=Path,
+        default=None,
+        help="Knowledge directory whose athenaeum.yaml supplies "
+        "models.topic (default: ~/knowledge). "
+        "--path is an alias, matching init/status/serve.",
+    )
 
     # stopwords command — print the canonical stopword list for shell hooks
     subparsers.add_parser(
@@ -1090,8 +1099,14 @@ def _cmd_query_topics(args: argparse.Namespace) -> int:
     from athenaeum.query_topics import extract_topics
 
     # Issue #232: load the operator's yaml so ``models.topic`` reaches the
-    # call. The hook runs against the default knowledge root (~/knowledge).
-    config = load_config()
+    # call. --knowledge-root covers non-default roots; when omitted,
+    # load_config falls back to ~/knowledge.
+    knowledge_root = (
+        args.knowledge_root.expanduser().resolve()
+        if args.knowledge_root is not None
+        else None
+    )
+    config = load_config(knowledge_root)
     for topic in extract_topics(args.prompt, timeout=args.timeout, config=config):
         print(topic)
     return 0

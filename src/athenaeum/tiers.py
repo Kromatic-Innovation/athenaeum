@@ -379,8 +379,9 @@ def tier3_create(
 
     # Issue #95: stamp authoritative provenance at construction time.
     # Format: ``claude:tier3-create:<model>:<YYYY-MM-DD>``. The model
-    # name is read live from the same env-driven setting used for the
-    # API call so the source matches the model that actually wrote.
+    # name is resolved live from the same config chain used for the API
+    # call (env > yaml ``models.write`` > default, issue #232) so the
+    # source matches the model that actually wrote.
     model = _get_write_model(config) or "unknown"
     source = f"claude:tier3-create:{model}:{today}"
 
