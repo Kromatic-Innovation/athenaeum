@@ -235,6 +235,10 @@ silently to the regex extractor if the API key or CLI is unavailable.
 
 ## Environment variables
 
+The table below covers the common knobs. The exhaustive list — every env var,
+yaml key, and CLI flag with its code default and precedence chain — lives in
+[`docs/configuration.md`](docs/configuration.md).
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `ANTHROPIC_API_KEY` | Yes (unless `--dry-run`) | API key for Tier 2/3 LLM calls |
@@ -246,8 +250,15 @@ silently to the regex extractor if the API key or CLI is unavailable.
 | `ATHENAEUM_MAX_FILES` | No | Per-run intake batch size for `athenaeum run`. Precedence: `--max-files` CLI flag > env > `librarian.max_files` in `athenaeum.yaml` > default `50`. Env `0` is valid (defer-everything window); the CLI flag rejects `0` |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY` | No | Auto-apply high-confidence resolutions (default: `true`). See [`docs/auto-resolve.md`](docs/auto-resolve.md) |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | No | Confidence floor for auto-apply, in `[0.0, 1.0]` (default: `0.90`) |
+| `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | No | Per-side body cap for the resolver's full-body context, ~4 chars/token (default: `1500`; must be positive) |
+| `ATHENAEUM_CROSS_SCOPE_MODE` | No | Cross-scope contradiction detection: `off` / `ancestor` / `similarity` / `both` (default: `ancestor`). See [`docs/contradiction-detection.md`](docs/contradiction-detection.md) |
+| `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD` | No | Cosine threshold for matching new detections against the resolved-decision log (default: `0.83`) |
+| `ATHENAEUM_TIER4_DEDUP` | No | Dedupe pending-question escalations by source-memory pair (default: `true`; set `false`/`0`/`no`/`off` for legacy always-append) |
+| `ATHENAEUM_CACHE_DIR` | No | Cache root for the librarian's embedding/cluster pass (default: `~/.cache/athenaeum`) |
 | `ATHENAEUM_TOPIC_MODEL` | No | Override query-topic model. Precedence: env > `models.topic` in `athenaeum.yaml` > default `claude-haiku-4-5-20251001` |
 | `ATHENAEUM_OP_KEY_PATH` | No | 1Password path for the session-start `ANTHROPIC_API_KEY` bootstrap (default: `op://Agent Tools/Anthropic API Key/credential`) |
+| `ATHENAEUM_PQ_SNOOZE_HOURS` | No | Snooze TTL in hours for pending-questions surfacing (default: `24`; consumed by the `resolve-questions` skill) |
+| `ATHENAEUM_PYTHON` | No | Python interpreter used by the example hooks (default: `python3`) |
 | `AUTO_RECALL` | No | Per-turn recall on/off (hook shell env; overrides `athenaeum.yaml`'s `auto_recall`). Default: `true` |
 | `SEARCH_BACKEND` | No | `fts5` or `vector` (hook shell env; overrides `athenaeum.yaml`'s `search_backend`). Default: `fts5` |
 | `ATHENAEUM_HOOK_DEBUG` | No | Set to `1` to log vector-backend errors from `user-prompt-recall.sh` to stderr |
@@ -267,7 +278,7 @@ for the 1Password bootstrap pattern.
 
 ## Configuration
 
-Settings are resolved in the order **env var > `<knowledge_root>/athenaeum.yaml` > built-in default**, so a one-off shell export beats the yaml without requiring an edit. The contradiction-resolver knobs live under a top-level `resolve:` block:
+Settings are resolved in the order **CLI flag > env var > `<knowledge_root>/athenaeum.yaml` > built-in default**, so a one-off shell export beats the yaml without requiring an edit. The canonical reference for every knob — librarian budgets, model selection, contradiction/resolver tuning, recall/search, and hook environment — is [`docs/configuration.md`](docs/configuration.md). As one example, the contradiction-resolver knobs live under a top-level `resolve:` block:
 
 ```yaml
 resolve:
@@ -278,6 +289,8 @@ resolve:
 ```
 
 When `auto_apply` is on and a proposal's confidence meets or exceeds `auto_apply_threshold`, the pending-question block is auto-flipped to answered with an `Auto-resolved: true` audit-trail tag. See [`docs/auto-resolve.md`](docs/auto-resolve.md) for the full lane, including how to disable, lower the threshold, or reverse an auto-resolution.
+
+**Alternative model gateways.** All model calls go through the Anthropic SDK, which honors `ANTHROPIC_BASE_URL` — so a LiteLLM proxy or any Anthropic-compatible gateway can serve alternative models with zero code change. Only Claude models are first-party tested; see [`docs/configuration.md`](docs/configuration.md#alternative-model-gateways-anthropic_base_url) for the details and [#234](https://github.com/Kromatic-Innovation/athenaeum/issues/234) for multi-provider tracking.
 
 ## Data formats
 

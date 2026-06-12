@@ -39,14 +39,12 @@ review — exactly as before.
 
 ## Configuration
 
-Three precedence layers, resolved as **env > yaml > default**:
-
-| Setting | Env var | YAML path | Default |
-|---|---|---|---|
-| Enable auto-apply | `ATHENAEUM_RESOLVE_AUTO_APPLY` | `resolve.auto_apply` | `true` |
-| Confidence threshold | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | `resolve.auto_apply_threshold` | `0.90` |
-| Resolver model | `ATHENAEUM_RESOLVE_MODEL` | `resolve.model` | `claude-opus-4-7` |
-| Full-body token cap (per side) | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | `resolve.full_body_token_cap` | `1500` |
+The resolver knobs (`resolve.auto_apply`, `resolve.auto_apply_threshold`,
+`resolve.model`, `resolve.full_body_token_cap`, and their env vars) follow the
+standard **env > yaml > default** precedence. The canonical knob table with
+all defaults lives in
+[`docs/configuration.md`](configuration.md#contradiction-detection-and-resolver);
+this document covers the behavior behind those knobs.
 
 Env-var boolean values accept `true`/`false`, `1`/`0`, `yes`/`no` (case-insensitive). An invalid env value falls through to the yaml/default layers — auto-apply is a behavior knob, not a hard validation surface.
 
