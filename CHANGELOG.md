@@ -38,6 +38,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   yaml wins over the code default. The contradiction-resolver model is
   unchanged and stays at `resolve.model`. None of the new keys are seeded
   into config defaults, preserving the #231 fix.
+- **GitHub Release automation in `release.yml` (#235).** After the PyPI
+  publish job succeeds, a new `github-release` job creates the GitHub
+  Release for the pushed tag, with the matching `[X.Y.Z]` section of
+  CHANGELOG.md as the release notes. Idempotent: if a release already
+  exists for the tag (e.g. cut manually with `gh release create`), the job
+  skips cleanly instead of failing or duplicating. Uses the workflow's
+  `GITHUB_TOKEN` with job-scoped `contents: write` — no new secrets.
+- **Startup warning when the API budget resolves to 0 (#235).** Env/yaml
+  `0` is a valid defer-everything cap, but it is also the most likely
+  accidental misconfiguration. `athenaeum run` now logs a prominent
+  warning at run start ("API budget is 0 — all LLM tiers deferred this
+  run...") so an unintended zero is diagnosable immediately rather than
+  from the DEGRADED summary at the end.
+
+### Changed
+
+- **README polish (#235).** Tagline reworded from "production-grade" to
+  "production-tested" (consistent with the honest pre-1.0 framing in Known
+  Limitations), and the hero image moved below the value-prop line and
+  shrunk so the install command stays above the fold on small windows.
+- **CONTRIBUTING.md gains a project-continuity note (#235).** One paragraph
+  stating plainly that the project has a single primary maintainer today,
+  and what users can rely on if it goes quiet: Apache-2.0 fork rights, the
+  repo and history staying public, and releases reproducible from source.
+- **docs/configuration.md records the env-0/CLI-0 asymmetry decision
+  (#235).** A design-decision note next to the budget table: CLI flags
+  reject `0` (typo guard at the interactive surface) while env/yaml accept
+  `0` as a deliberate defer-everything cap — intentional, decided
+  2026-06-12, refs #235 and the #240 review.
 
 ### Fixed
 
