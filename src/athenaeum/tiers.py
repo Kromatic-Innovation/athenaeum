@@ -1510,12 +1510,11 @@ def reresolve_open_questions(
 
         calls += 1
         # Issue #220: count the resolver call against the run-level budget.
-        # Token counts are not surfaced by propose_resolution (see
-        # _record_usage_from_resolver), so only the call counter moves.
+        # Token + cache counts from the response accumulate inside
+        # propose_resolution via the threaded ``usage`` (#239).
         if usage is not None and client is not None:
             usage.api_calls += 1
-        proposal = propose_resolution(result, members, client)
-        _record_usage_from_resolver(proposal, usage)
+        proposal = propose_resolution(result, members, client, usage=usage)
 
         action = getattr(proposal, "action", None)
         confidence = getattr(proposal, "confidence", 0.0)
@@ -1600,17 +1599,6 @@ def reresolve_open_questions(
         budget,
     )
     return reresolved + dropped
-
-
-def _record_usage_from_resolver(proposal: Any, usage: TokenUsage | None) -> None:
-    """No-op usage hook.
-
-    ``propose_resolution`` does not currently surface token usage on its
-    return value, so there is nothing to add here; the hook exists so a
-    future resolver that returns usage can wire it without changing the
-    call site. Kept tiny + side-effect-free.
-    """
-    return None
 
 
 def _append_dropped_to_archive(pending_path: Path, blocks: list[str]) -> None:

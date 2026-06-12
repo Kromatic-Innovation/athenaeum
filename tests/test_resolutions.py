@@ -31,7 +31,7 @@ import pytest
 
 from athenaeum.answers import parse_pending_questions
 from athenaeum.contradictions import ContradictionResult
-from athenaeum.models import AutoMemoryFile, EscalationItem
+from athenaeum.models import AutoMemoryFile, EscalationItem, TokenUsage
 from athenaeum.resolutions import (
     DEFAULT_RESOLVE_MAX_PER_RUN,
     DEFAULT_RESOLVE_MODEL,
@@ -542,3 +542,47 @@ class TestSuppressVerdict:
 
         assert SUPPRESS_ACTION == "not_a_conflict"
         assert SUPPRESS_ACTION in _VALID_ACTIONS
+
+
+# ---------------------------------------------------------------------------
+# Run-level usage threading (issue #239)
+# ---------------------------------------------------------------------------
+
+
+class TestUsageThreading:
+    def test_resolver_records_token_and_cache_counts(self, tmp_path: Path) -> None:
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "Claim A.")
+        b = _write_am(scope, "b.md", "Claim B.")
+        payload = (
+            '{"recommended_winner": "a", "action": "keep_a", '
+            '"confidence": 0.9, "rationale": "r", '
+            '"source_precedence_used": []}'
+        )
+        client = _fake_client(payload)
+        client.messages.create.return_value.usage = MagicMock(
+            input_tokens=200,
+            output_tokens=40,
+            cache_creation_input_tokens=3400,
+            cache_read_input_tokens=0,
+        )
+        usage = TokenUsage()
+        propose_resolution(_detected([a, b]), [a, b], client, usage=usage)
+        assert usage.input_tokens == 200
+        assert usage.output_tokens == 40
+        assert usage.cache_creation_input_tokens == 3400
+        assert usage.cache_read_input_tokens == 0
+        # Attempt counting stays at the call site; the callee must NOT
+        # bump api_calls.
+        assert usage.api_calls == 0
+
+    def test_no_client_records_nothing(self, tmp_path: Path) -> None:
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "Claim A.")
+        b = _write_am(scope, "b.md", "Claim B.")
+        usage = TokenUsage()
+        proposal = propose_resolution(_detected([a, b]), [a, b], None, usage=usage)
+        assert proposal.confidence == 0.0
+        assert usage.input_tokens == 0
+        assert usage.cache_creation_input_tokens == 0
+        assert usage.api_calls == 0

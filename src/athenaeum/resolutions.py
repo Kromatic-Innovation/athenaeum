@@ -63,6 +63,7 @@ from athenaeum.contradictions import ContradictionResult
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     AutoMemoryFile,
+    TokenUsage,
     cache_usage_counts,
     parse_frontmatter,
     render_frontmatter,
@@ -1191,6 +1192,7 @@ def propose_resolution(
     members: list[AutoMemoryFile],
     client: "anthropic.Anthropic | None",
     config: dict[str, Any] | None = None,
+    usage: TokenUsage | None = None,
 ) -> "ResolutionProposal | MergeProposal":
     """Run one resolver call against a detected contradiction.
 
@@ -1202,6 +1204,11 @@ def propose_resolution(
             flagged member's ``source:`` field for the prompt.
         client: A live Anthropic client, or ``None`` when the key is
             unset. ``None`` short-circuits to the deterministic fallback.
+        usage: Optional run-level :class:`TokenUsage` (#239). The response's
+            token + cache counts accumulate via
+            :meth:`TokenUsage.add_tokens`; ``api_calls`` is NOT bumped here
+            — the orchestrating call sites (merge.py, the #188 reresolve
+            pass) count attempts.
 
     Returns:
         A :class:`ResolutionProposal`. On any failure path (no client,
@@ -1238,8 +1245,15 @@ def propose_resolution(
             model=_get_model(config),
             max_tokens=1024,
             # Prompt-caching breakpoint (issue #230): the resolver system
-            # prompt is the largest stable prefix in the codebase (~2.3K
-            # tokens) and the resolver is called repeatedly within a run.
+            # prompt is the largest stable prefix in the codebase (3,387
+            # tokens per the Anthropic count-tokens endpoint with the Opus
+            # tokenizer; a live Sonnet run's cache counters reported 2,437)
+            # and the resolver is called repeatedly within a run.
+            # Note: 3,387 tokens is BELOW the Opus-tier 4,096-token minimum
+            # cacheable prefix, so on the default Opus resolver this
+            # breakpoint no-ops and the run summary's cache counters
+            # correctly read 0; caching engages on Sonnet-tier overrides
+            # (2,048-token minimum).
             # Below a model's minimum cacheable prefix the marker is a
             # silent no-op (no error, no extra cost), so this engages
             # automatically when ATHENAEUM_RESOLVE_MODEL / resolve.model
@@ -1261,6 +1275,8 @@ def propose_resolution(
         return _fallback("resolver-unavailable")
 
     input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
+    if usage is not None:
+        usage.add_tokens(input_toks, output_toks, cache_creation, cache_read)
     log.debug(
         "resolutions: propose_resolution usage input=%d output=%d"
         " cache_creation=%d cache_read=%d",

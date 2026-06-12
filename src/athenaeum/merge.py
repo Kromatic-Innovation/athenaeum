@@ -804,9 +804,10 @@ def merge_clusters_to_wiki(
         usage: Optional run-level :class:`TokenUsage` (issue #220). When
             provided AND a live client is present, every detector (Haiku)
             and resolver (Opus) call increments ``usage.api_calls`` so the
-            librarian's run-level budget sees this phase's spend. Token
-            counts are not surfaced by these calls, so only the call
-            counter moves.
+            librarian's run-level budget sees this phase's spend. Each
+            response's token + cache counts are accumulated by the callee
+            (#239), so the run summary's cache line also reflects this
+            phase's traffic.
 
     Returns:
         The list of :class:`MergedWikiEntry` records in cluster-file order.
@@ -1066,7 +1067,7 @@ def merge_clusters_to_wiki(
         resolve_calls += 1
         if usage is not None and client is not None:
             usage.api_calls += 1
-        return propose_resolution(result, members, client)
+        return propose_resolution(result, members, client, usage=usage)
 
     for entry in entries:
         if use_ancestor:
@@ -1111,7 +1112,9 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
-            result = detect_contradictions(filtered, client, config=resolved_config)
+            result = detect_contradictions(
+                filtered, client, config=resolved_config, usage=usage
+            )
             _record_pair_keys(chunk)
             if result.detected and aggregate is None:
                 proposal = _maybe_propose(result, filtered)
@@ -1174,7 +1177,9 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
-            result = detect_contradictions(pair, client, config=resolved_config)
+            result = detect_contradictions(
+                pair, client, config=resolved_config, usage=usage
+            )
             if result.detected:
                 pairs_added_via_similarity += 1
                 # Synthesize a thin escalation entry; we don't have a
