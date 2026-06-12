@@ -15,6 +15,7 @@ No live API calls; every client is a fake.
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 from pathlib import Path
@@ -25,6 +26,7 @@ import pytest
 
 import athenaeum.contradictions as contradictions_mod
 import athenaeum.query_topics as query_topics_mod
+import athenaeum.resolutions as resolutions_mod
 import athenaeum.tiers as tiers_mod
 from athenaeum.cli import main
 from athenaeum.config import _DEFAULTS, load_config
@@ -47,9 +49,15 @@ class TestLibrarianMaxFiles:
         monkeypatch.delenv("ATHENAEUM_MAX_FILES", raising=False)
         assert librarian_max_files({"librarian": {"max_files": 7}}) == 7
 
-    def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("ATHENAEUM_MAX_FILES", "3")
-        assert librarian_max_files({"librarian": {"max_files": 7}}) == 3
+    @pytest.mark.parametrize(("env_value", "expected"), [("3", 3), ("0", 0)])
+    def test_env_wins_over_yaml(
+        self, env_value: str, expected: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Env beats yaml. ``"0"`` is VALID — a defer-everything window,
+        mirroring the ``librarian_max_api_calls`` ``>= 0`` precedent; only
+        the CLI flag rejects 0 (via ``_positive_int``)."""
+        monkeypatch.setenv("ATHENAEUM_MAX_FILES", env_value)
+        assert librarian_max_files({"librarian": {"max_files": 7}}) == expected
 
     def test_bool_yaml_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """`max_files: yes` must not silently become a window of 1."""
@@ -149,6 +157,34 @@ class TestRunResolvesMaxFiles:
         assert rc == 0
         messages = [r.getMessage() for r in caplog.records]
         assert any("processing 2 of 3 files" in m for m in messages), messages
+
+    def test_yaml_caps_window_when_arg_and_env_unset(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """run() must hand its own loaded config to librarian_max_files —
+        otherwise ``librarian.max_files`` in athenaeum.yaml is dead config
+        on the production path."""
+        root = _seed_knowledge_root(tmp_path, n_files=2)
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  max_files: 1\n", encoding="utf-8"
+        )
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MAX_FILES", raising=False)
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            dry_run=True,
+        )
+
+        assert rc == 0
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("processing 1 of 2 files" in m for m in messages), messages
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +457,167 @@ class TestModelPlumbing:
         assert rc == 0
         assert captured["config"] == {"models": {"topic": "cfg-model"}}
         assert "a-topic" in capsys.readouterr().out
+
+    def test_cli_query_topics_knowledge_root_flag(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """--knowledge-root must route a non-default root's athenaeum.yaml
+        (and its ``models.topic``) into extract_topics — operators with
+        non-default roots could not reach the knob before (#232 QA)."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "models:\n  topic: root-topic-model\n", encoding="utf-8"
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_extract(
+            prompt: str, timeout: float = 3.0, config: Any = None
+        ) -> list[str]:
+            captured["config"] = config
+            return ["a-topic"]
+
+        monkeypatch.setattr("athenaeum.query_topics.extract_topics", fake_extract)
+        rc = main(["query-topics", "--knowledge-root", str(tmp_path), "hello world"])
+        assert rc == 0
+        assert captured["config"]["models"]["topic"] == "root-topic-model"
+        assert "a-topic" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Production-path plumbing: run() / merge load + thread the config themselves
+# ---------------------------------------------------------------------------
+
+
+class TestModelPlumbingProductionPath:
+    """The yaml ``models:`` section must reach the live API calls via the
+    pipeline's OWN load_config — not only when a test hand-feeds
+    ``config=``. Dropping any ``config=config`` hop between run() /
+    merge_clusters_to_wiki() and ``messages.create`` turns these red."""
+
+    def test_run_routes_yaml_models_to_tier2_and_tier3(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anthropic as anthropic_mod
+
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        schema = root / "wiki" / "_schema"
+        schema.mkdir()
+        (schema / "types.md").write_text("# Types\n\n| Type |\n|------|\n| person |\n")
+        (schema / "tags.md").write_text("# Tags\n\n| Tag |\n|-----|\n| active |\n")
+        (schema / "access-levels.md").write_text(
+            "# Access\n\n| Level |\n|-------|\n| internal |\n"
+        )
+        (root / "athenaeum.yaml").write_text(
+            "models:\n  classify: yaml-classify-model\n  write: yaml-write-model\n",
+            encoding="utf-8",
+        )
+
+        classify_response = MagicMock()
+        classify_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    [
+                        {
+                            "name": "Alice Zhang",
+                            "entity_type": "person",
+                            "tags": ["active"],
+                            "access": "internal",
+                            "observations": "Product leader.",
+                        }
+                    ]
+                )
+            )
+        ]
+        create_response = MagicMock()
+        create_response.content = [MagicMock(text="# Alice Zhang\n\nProduct leader.")]
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = [classify_response, create_response]
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-key")
+        monkeypatch.delenv("ATHENAEUM_CLASSIFY_MODEL", raising=False)
+        monkeypatch.delenv("ATHENAEUM_WRITE_MODEL", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MAX_FILES", raising=False)
+
+        rc = run(raw_root=root / "raw", wiki_root=root / "wiki", knowledge_root=root)
+
+        assert rc == 0
+        models = [
+            call.kwargs["model"] for call in mock_client.messages.create.call_args_list
+        ]
+        assert models == ["yaml-classify-model", "yaml-write-model"]
+
+    def test_merge_routes_config_to_detector(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """merge_clusters_to_wiki must pass its resolved_config down to
+        detect_contradictions: the detector's model resolves from
+        ``models.classify`` only when the thread is intact."""
+        monkeypatch.delenv("ATHENAEUM_CLASSIFY_MODEL", raising=False)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path / "cache"))
+        from athenaeum.merge import merge_clusters_to_wiki
+
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        scope = root / "raw" / "auto-memory" / "-Users-probe-Code"
+        _write_am(scope, "feedback_claim_a.md", "Always use tabs.")
+        _write_am(scope, "feedback_claim_b.md", "Never use tabs.")
+        (root / "raw" / "_librarian-clusters.jsonl").write_text(
+            json.dumps(
+                {
+                    "cluster_id": "probe-0001",
+                    "member_paths": [
+                        "-Users-probe-Code/feedback_claim_a.md",
+                        "-Users-probe-Code/feedback_claim_b.md",
+                    ],
+                    "centroid_score": 0.9,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        client = _fake_anthropic_client('{"detected": false}')
+        config = {
+            "recall": {"extra_intake_roots": ["raw/auto-memory"]},
+            "models": {"classify": "yaml-detect-model"},
+        }
+        entries = merge_clusters_to_wiki(
+            root, config=config, client=client, dry_run=True
+        )
+        assert len(entries) == 1
+        assert client.messages.create.call_args is not None, (
+            "detector was never called — fixture no longer reaches "
+            "detect_contradictions"
+        )
+        assert client.messages.create.call_args.kwargs["model"] == "yaml-detect-model"
+
+
+# ---------------------------------------------------------------------------
+# Resolver model stays at resolve.model — NOT routed through models:
+# ---------------------------------------------------------------------------
+
+
+class TestResolverModelUntouched:
+    """The contradiction-resolver model must ignore the new ``models:``
+    section and keep resolving from env > ``resolve.model`` > default."""
+
+    _MODELS_ONLY = {"models": {"classify": "x", "write": "y", "topic": "z"}}
+
+    def test_models_section_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        assert (
+            resolutions_mod._get_model(self._MODELS_ONLY)
+            == resolutions_mod.DEFAULT_RESOLVE_MODEL
+        )
+
+    def test_resolve_model_still_resolves(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        cfg = {**self._MODELS_ONLY, "resolve": {"model": "my-resolver"}}
+        assert resolutions_mod._get_model(cfg) == "my-resolver"
 
 
 # ---------------------------------------------------------------------------
