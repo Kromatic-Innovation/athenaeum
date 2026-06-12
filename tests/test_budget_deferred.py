@@ -837,6 +837,118 @@ class TestRunLevelBudgetThreading:
         assert usage.output_tokens == 40
         assert usage.cache_read_input_tokens == 3300
 
+    def test_run_summary_cache_line_renders_from_resolver_only_traffic(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """#239 acceptance: the rendered run-summary cache line shows nonzero
+        cache counters from merge-phase (detector + resolver) traffic alone.
+
+        The entity tiers are stubbed to burn ZERO api_calls, so the
+        ``usage.api_calls > 0`` gate on the "Token usage:" INFO line must be
+        satisfied by the merge phase's attempt counting — pinning that
+        resolver-only runs still surface their cache spend in the summary.
+        """
+        import json
+        from unittest.mock import MagicMock
+
+        import anthropic
+
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        # Auto-memory cluster fixture (same shape as the merge-threading
+        # tests above) so the REAL merge_clusters_to_wiki -> detector ->
+        # resolver path runs inside run().
+        scope = root / "raw" / "auto-memory" / "scopeA"
+        scope.mkdir(parents=True)
+        for name, body in [
+            ("project_alpha.md", "Alpha says X."),
+            ("project_beta.md", "Beta says not-X."),
+        ]:
+            (scope / name).write_text(
+                f"---\nname: {name}\ntype: feedback\n---\n{body}\n",
+                encoding="utf-8",
+            )
+        (root / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
+            encoding="utf-8",
+        )
+        rows = [
+            {
+                "cluster_id": "c1",
+                "member_paths": [
+                    "scopeA/project_alpha.md",
+                    "scopeA/project_beta.md",
+                ],
+                "centroid_score": 0.9,
+                "rationale": "test",
+            }
+        ]
+        (root / "raw" / "_librarian-clusters.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+        )
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "factual", '
+            '"members_involved": ["scopeA/project_alpha.md", '
+            '"scopeA/project_beta.md"], '
+            '"conflicting_passages": ["X", "not-X"], "rationale": "conflict"}'
+        )
+        resolver_payload = (
+            '{"recommended_winner": "a", "action": "keep_a", '
+            '"confidence": 0.5, "rationale": "r", '
+            '"source_precedence_used": []}'
+        )
+
+        def _response(payload: str, creation: int, read: int) -> MagicMock:
+            response = MagicMock()
+            response.content = [MagicMock(text=payload)]
+            response.usage = MagicMock(
+                input_tokens=100,
+                output_tokens=20,
+                cache_creation_input_tokens=creation,
+                cache_read_input_tokens=read,
+            )
+            return response
+
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            _response(detector_payload, 1200, 0),
+            _response(resolver_payload, 0, 2400),
+        ]
+        # run() builds its own client; hand it the mock instead.
+        monkeypatch.setattr(anthropic, "Anthropic", lambda **kwargs: client)
+
+        # Skip the embedding-backed cluster pass; merge reads the seeded
+        # JSONL directly. Entity tiers burn zero API calls.
+        monkeypatch.setattr("athenaeum.librarian._run_cluster_pass", lambda *a, **k: 0)
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one",
+            _fake_process_one_factory(calls_per_file=0),
+        )
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            dry_run=True,
+        )
+
+        assert rc == 0
+        messages = [r.getMessage() for r in caplog.records]
+        token_lines = [m for m in messages if m.startswith("Token usage:")]
+        assert token_lines, messages
+        line = token_lines[0]
+        # Gate satisfied purely by merge-phase attempt counts (1 detector
+        # + 1 resolver); cache counters rendered nonzero in the summary.
+        assert "2 API calls" in line, line
+        assert "(cache: 1200 written, 2400 read)" in line, line
+
     def test_yaml_bool_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """`max_api_calls: yes` in yaml must not become a cap of 1 (bool is int)."""
         monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
