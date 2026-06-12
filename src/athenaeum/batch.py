@@ -25,11 +25,19 @@ Known divergences from the synchronous loop (deliberate, documented):
 - Tier 0/1 run for the whole intake window up front, so an entity created
   from file A this run is not Tier-1-matchable by a later file B in the
   same run. The synchronous loop registers creations incrementally.
-- The run-level API budget (#220) is enforced at phase-1 assembly with the
-  same per-file ``>=`` gate as the synchronous loop; each batched request
-  counts as one ``api_calls`` attempt at assembly time. Files admitted to
-  phase 1 complete their phase-2 calls even past the cap — mirroring the
-  sync loop, which also finishes a started file past the cap.
+- The run-level API budget (#220) is enforced with the same per-file
+  ``>=`` gate as the synchronous loop at every point that spends calls:
+  phase-1 assembly, phase-2 assembly (re-checked per file, since phase-1
+  spend plus earlier files' tier-3 requests may have exhausted the cap by
+  then), and the finalize-time same-page synchronous merges. Each batched
+  request counts as one ``api_calls`` attempt at assembly time. To mirror
+  the sync loop's guaranteed progress (an admitted file completes all its
+  calls past the cap), each gate lets the FIRST file through even at the
+  cap — so overshoot is bounded to one file's worth of calls per gate,
+  never unbounded. Files deferred at phase 2 or finalize keep their raw
+  files on disk and land in the #220 deferred manifest; their tier-2 (and,
+  at finalize, batched tier-3) spend is wasted — acceptable, the next run
+  redoes them.
 
 Polling interval and timeout are module constants — deliberately not a
 config surface; the nightly window is latency-tolerant.
@@ -116,8 +124,12 @@ def execute_batch(
     at batch-assembly time by the caller, one per request — not here).
 
     Raises :class:`BatchExecutionError` when the batch cannot be submitted,
-    polled, or collected, or does not end within *timeout* (best-effort
-    cancel on timeout). ``sleep`` is injectable so tests don't wait.
+    polled, or collected — transient errors that exhausted their retries
+    AND non-transient ones (e.g. a 400 from a malformed payload) alike, so
+    a whole-batch failure always reaches the callers' per-file failure
+    path instead of escaping as a run-fatal traceback — or when the batch
+    does not end within *timeout* (best-effort cancel on timeout).
+    ``sleep`` is injectable so tests don't wait.
     """
     if not requests:
         return {}
@@ -128,7 +140,7 @@ def execute_batch(
             lambda: client.messages.batches.create(requests=payload),
             description=f"batch submit ({description})",
         )
-    except TransientAPIError as exc:
+    except Exception as exc:  # noqa: BLE001 — any submit failure is batch-fatal
         raise BatchExecutionError(
             f"batch submit failed ({description}): {exc}"
         ) from exc
@@ -158,7 +170,7 @@ def execute_batch(
                 lambda: client.messages.batches.retrieve(batch.id),
                 description=f"batch poll ({description})",
             )
-        except TransientAPIError as exc:
+        except Exception as exc:  # noqa: BLE001 — any poll failure is batch-fatal
             raise BatchExecutionError(
                 f"batch poll failed ({description}): {exc}"
             ) from exc
@@ -188,7 +200,7 @@ def execute_batch(
                     rtype,
                     description,
                 )
-    except TransientAPIError as exc:
+    except Exception as exc:  # noqa: BLE001 — any results failure is batch-fatal
         raise BatchExecutionError(
             f"batch results failed ({description}): {exc}"
         ) from exc
@@ -215,6 +227,10 @@ class _FileState:
     created: list[WikiEntity] = field(default_factory=list)
     failed: bool = False
     done: bool = False
+    # Set when the budget re-check at phase-2 assembly or before the
+    # finalize-time sync merges defers this file (#220): raw stays on
+    # disk, ref goes to the deferred manifest, nothing is written.
+    deferred: bool = False
 
 
 @dataclass
@@ -405,9 +421,36 @@ def process_batch_run(
                 )
 
     t3_requests: list[BatchRequest] = []
+    # Re-check the run budget per file before assembling its tier-3
+    # requests: phase-1 spend plus earlier files' tier-3 requests may have
+    # exhausted the cap by now, and the phase-1 gate alone would let every
+    # admitted file bump ``api_calls`` past the cap unbounded. Mirroring
+    # the sync loop's guaranteed progress (an admitted file completes all
+    # its calls), the FIRST file that spends phase-2 budget proceeds even
+    # at the cap, so overshoot is bounded to one file's worth of requests.
+    # A deferred file keeps its raw on disk and lands in the #220 deferred
+    # manifest; its tier-2 spend is wasted — acceptable, the next run
+    # re-classifies it.
+    phase2_spent = False
     for i, st in enumerate(states):
         if st.failed or st.done:
             continue
+        if phase2_spent and usage.api_calls >= max_api_calls:
+            log.warning(
+                "API call budget exhausted (%d/%d) at phase-2 assembly — "
+                "deferring %s",
+                usage.api_calls,
+                max_api_calls,
+                st.raw.ref,
+            )
+            st.deferred = True
+            continue
+        # Fix for mid-assembly failures: if this file throws after some of
+        # its requests were appended, drop them (and their attempt counts)
+        # before submit so the batch carries no spend for a file that can
+        # never be written.
+        requests_mark = len(t3_requests)
+        calls_mark = usage.api_calls
         try:
             for j, action in enumerate(st.actions):
                 if action.kind == "create":
@@ -449,8 +492,15 @@ def process_batch_run(
                         )
                     )
                     st.merge_ids.append((cid, action, existing_path, meta))
+            if len(t3_requests) > requests_mark or st.sync_merges:
+                phase2_spent = True
         except Exception:
             log.exception("Failed to process %s", st.raw.ref)
+            # Drop this file's already-appended requests and restore their
+            # attempt counts — they are never submitted, so they must not
+            # consume budget or batch spend.
+            del t3_requests[requests_mark:]
+            usage.api_calls = calls_mark
             st.failed = True
 
     # --- Phase 2: tier-3 batch ---
@@ -473,9 +523,30 @@ def process_batch_run(
     # Same-page synchronous merges execute here, serialized in intake
     # order, re-reading the page fresh so each sees the previous write.
     resolved_config = config if config is not None else load_config(wiki_root.parent)
+    deferred_now: list[str] = []
+    sync_merges_started = False
     for st in states:
         if st.failed:
             result.failed_refs.append(st.raw.ref)
+            continue
+        if st.deferred:
+            deferred_now.append(st.raw.ref)
+            continue
+        # Budget gate for the same-page synchronous merges below: each one
+        # is a live API call at finalize time, so over-cap files defer here
+        # too (their batched tier-3 spend is wasted — acceptable, the next
+        # run redoes them). As at phase-2 assembly, the first file to run
+        # sync merges proceeds even at the cap (guaranteed progress,
+        # one-file overshoot — mirroring the sync loop).
+        if st.sync_merges and sync_merges_started and usage.api_calls >= max_api_calls:
+            log.warning(
+                "API call budget exhausted (%d/%d) before synchronous "
+                "merges — deferring %s",
+                usage.api_calls,
+                max_api_calls,
+                st.raw.ref,
+            )
+            deferred_now.append(st.raw.ref)
             continue
         if st.done:
             result.created += len(st.created)
@@ -513,6 +584,8 @@ def process_batch_run(
                     )
                     updated_uids.append(action.existing_uid or "")
 
+            if st.sync_merges:
+                sync_merges_started = True
             for action in st.sync_merges:
                 existing_path = index.get_by_uid(action.existing_uid or "")
                 if not existing_path or not existing_path.exists():
@@ -589,4 +662,7 @@ def process_batch_run(
             log.exception("Failed to process %s", st.raw.ref)
             result.failed_refs.append(st.raw.ref)
 
+    # Intake order: files deferred at phase-2/finalize precede the tail
+    # deferred at phase-1 assembly (raw_files[i:]).
+    result.deferred_refs = deferred_now + result.deferred_refs
     return result

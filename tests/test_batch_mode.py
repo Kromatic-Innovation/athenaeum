@@ -79,16 +79,20 @@ class _FakeBatches:
         polls_until_end: int = 1,
         never_end: bool = False,
         fail_marker: str | None = None,
+        create_error: Exception | None = None,
     ) -> None:
         self._responder = responder
         self._polls_until_end = polls_until_end
         self._never_end = never_end
         self._fail_marker = fail_marker
+        self._create_error = create_error
         self.submitted: list[list[dict[str, Any]]] = []
         self.cancelled: list[str] = []
         self._retrieve_counts: dict[str, int] = {}
 
     def create(self, *, requests: list[dict[str, Any]]) -> SimpleNamespace:
+        if self._create_error is not None:
+            raise self._create_error
         requests = list(requests)
         self.submitted.append(requests)
         batch_id = f"msgbatch_{len(self.submitted)}"
@@ -479,6 +483,169 @@ class TestBatchBudget:
         assert manifest.exists()
         assert "deferred_count: 1" in manifest.read_text(encoding="utf-8")
         assert list((root / "raw" / "sessions").glob("*.md"))
+
+
+# ---------------------------------------------------------------------------
+# Budget re-check at phase-2 assembly + finalize sync merges (QA blocker 1)
+# ---------------------------------------------------------------------------
+
+
+class TestPhase2BudgetGate:
+    def _run(self, root: Path, cap: int) -> int:
+        return run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=cap,
+            batch_mode=True,
+        )
+
+    def test_phase2_assembly_recheck_defers_over_cap_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 3 files fit phase 1 (3 tier-2 calls <= cap 4) but their tier-3
+        # creates would push to 6. The phase-2 re-check must defer files
+        # once the cap is hit instead of bumping past it unbounded.
+        contents = [f"Standalone fact about Widget{i} gadget.\n" for i in range(3)]
+        root = _seed_root(tmp_path, "k", contents)
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+
+        assert self._run(root, cap=4) == 0
+        # Phase 1: 3 tier-2 requests (calls 1-3). Phase 2: file 0's create
+        # lands at call 4; files 1-2 are over-cap at assembly → deferred.
+        assert [len(reqs) for reqs in client.batches.submitted] == [3, 1]
+        names = " ".join(_wiki_snapshot(root))
+        assert "widget0" in names
+        assert "widget1" not in names and "widget2" not in names
+        text = (root / "wiki" / "_deferred_work.md").read_text(encoding="utf-8")
+        assert "deferred_count: 2" in text
+        assert "aabbccd1" in text and "aabbccd2" in text
+        remaining = sorted(p.name for p in (root / "raw" / "sessions").glob("*.md"))
+        assert remaining == [
+            "20240411T120000Z-aabbccd1.md",
+            "20240412T120000Z-aabbccd2.md",
+        ]
+
+    def test_phase2_overshoot_bounded_to_one_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Cap exactly consumed by phase 1: the first phase-2 file still
+        # proceeds (sync-path one-file overshoot semantics — an admitted
+        # file completes), everything after it defers.
+        contents = [f"Standalone fact about Widget{i} gadget.\n" for i in range(3)]
+        root = _seed_root(tmp_path, "k", contents)
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+
+        assert self._run(root, cap=3) == 0
+        # api_calls ends at 4 = cap + exactly one file's tier-3 spend.
+        assert [len(reqs) for reqs in client.batches.submitted] == [3, 1]
+        names = " ".join(_wiki_snapshot(root))
+        assert "widget0" in names
+        assert "widget1" not in names and "widget2" not in names
+        text = (root / "wiki" / "_deferred_work.md").read_text(encoding="utf-8")
+        assert "deferred_count: 2" in text
+
+    def test_finalize_sync_merges_gated_by_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Two files merging into the SAME page go down the synchronous
+        # serialized path at finalize; each is a live API call, so the cap
+        # must gate them per file too.
+        contents = ["Acme Corp update one.\n", "Acme Corp update two.\n"]
+        root = _seed_root(tmp_path, "k", contents, with_acme=True)
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder)  # sync allowed for merges
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+
+        # Phase 1 uses 2 calls; the first sync merge lands at call 3 (cap),
+        # so the second file must defer instead of running a 4th call.
+        assert self._run(root, cap=3) == 0
+        merge_calls = [
+            c
+            for c in client.sync_calls
+            if "## Existing page content" in c["messages"][0]["content"]
+        ]
+        assert len(merge_calls) == 1
+        page = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+        assert "Merged note from sessions/20240410T120000Z-aabbccd0.md" in page
+        assert "20240411T120000Z-aabbccd1.md" not in page
+        text = (root / "wiki" / "_deferred_work.md").read_text(encoding="utf-8")
+        assert "deferred_count: 1" in text
+        assert "aabbccd1" in text
+        remaining = [p.name for p in (root / "raw" / "sessions").glob("*.md")]
+        assert remaining == ["20240411T120000Z-aabbccd1.md"]
+
+
+# ---------------------------------------------------------------------------
+# Non-transient batch errors → BatchExecutionError → per-file failure path
+# (QA blocker 2)
+# ---------------------------------------------------------------------------
+
+
+class TestNonTransientBatchErrors:
+    def test_execute_batch_wraps_non_transient_submit_error(self) -> None:
+        client = _FakeClient(
+            lambda params: "ok",
+            allow_sync=False,
+            create_error=RuntimeError("400 invalid_request: bad params"),
+        )
+        with pytest.raises(BatchExecutionError):
+            execute_batch(
+                client, _one_request(), description="test", sleep=lambda s: None
+            )
+
+    def test_whole_batch_400_maps_to_per_file_failure_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # batches.create raising a 400-style (non-transient) error must not
+        # crash the run with a traceback: every admitted file lands in the
+        # failure accounting, the summary renders, and the run exits 1.
+        contents = [
+            "Standalone fact about WidgetZero gadget.\n",
+            "Standalone fact about WidgetOne gadget.\n",
+        ]
+        root = _seed_root(tmp_path, "k", contents)
+        _clean_env(monkeypatch)
+        client = _FakeClient(
+            _scripted_responder,
+            allow_sync=False,
+            create_error=RuntimeError("400 invalid_request: bad params"),
+        )
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+        )
+        assert rc == 1
+        # Raw files stay on disk for next-run pickup; nothing was written.
+        remaining = sorted(p.name for p in (root / "raw" / "sessions").glob("*.md"))
+        assert remaining == [
+            "20240410T120000Z-aabbccd0.md",
+            "20240411T120000Z-aabbccd1.md",
+        ]
+        assert _wiki_snapshot(root) == {}
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "Failed files (will retry next run)" in m
+            and "aabbccd0" in m
+            and "aabbccd1" in m
+            for m in messages
+        )
+        assert any(m.startswith("Done: 0 created") for m in messages)
 
 
 # ---------------------------------------------------------------------------
