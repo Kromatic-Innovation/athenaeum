@@ -32,6 +32,10 @@ Athenaeum uses a develop-first flow, matching the rest of the Kromatic repos:
 
 There is no `staging` branch — unlike our deploy-pipeline repos, athenaeum is a library, and PyPI releases are handled separately via [`release.yml`](.github/workflows/release.yml).
 
+## Project continuity
+
+Athenaeum currently has a single primary maintainer, and it is worth saying so plainly: if the project goes quiet for a stretch, issues and PRs may sit unanswered. The mitigations are structural rather than aspirational. The code is Apache-2.0, so anyone can fork it and carry on without permission. The repository and its full history stay public on GitHub. And every release is reproducible from source — tags live on `main` and [`release.yml`](.github/workflows/release.yml) builds and publishes from the tag with provenance attestations — so you are never dependent on the maintainer to keep using or rebuilding what you already run. If you are betting on Athenaeum for something important and want to shrink that risk further, contributing reviews, tests, or docs is the most direct way to widen the bus factor.
+
 ## Reporting issues
 
 Please use [GitHub Issues](https://github.com/Kromatic-Innovation/athenaeum/issues) to report bugs or request features.

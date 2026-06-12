@@ -480,6 +480,136 @@ class TestMaxApiCallsPrecedence:
 
 
 # ---------------------------------------------------------------------------
+# Zero-budget startup warning (#235)
+# ---------------------------------------------------------------------------
+
+
+class TestZeroBudgetStartupWarning:
+    """A resolved budget of 0 must be flagged loudly at run start.
+
+    Env/yaml ``0`` is a valid defer-everything cap, but it is also the most
+    common accidental misconfiguration — issue #235 requires a prominent
+    WARNING at run start so an unintended 0 is diagnosable immediately
+    rather than from the DEGRADED summary.
+    """
+
+    def test_warning_fires_when_resolved_budget_is_zero(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setenv("ATHENAEUM_MAX_API_CALLS", "0")
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one", _fake_process_one_factory()
+        )
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=None,
+        )
+
+        assert rc == 0
+        zero_warnings = [
+            r for r in caplog.records if "API budget is 0" in r.getMessage()
+        ]
+        # Exactly once: the warning must fire, and must not be duplicated.
+        assert len(zero_warnings) == 1, [r.getMessage() for r in caplog.records]
+        assert all(r.levelno == logging.WARNING for r in zero_warnings)
+        # The message must name the knobs so the operator can fix it.
+        assert any(
+            "ATHENAEUM_MAX_API_CALLS" in r.getMessage()
+            and "librarian.max_api_calls" in r.getMessage()
+            for r in zero_warnings
+        ), [r.getMessage() for r in zero_warnings]
+
+    def test_warning_does_not_fire_when_budget_positive(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one", _fake_process_one_factory()
+        )
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+        )
+
+        assert rc == 0
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("API budget is 0" in m for m in messages), messages
+
+    def test_warning_does_not_fire_when_budget_positive_from_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Positive budget resolved from env (not CLI arg) is also silent."""
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setenv("ATHENAEUM_MAX_API_CALLS", "5")
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one", _fake_process_one_factory()
+        )
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=None,
+        )
+
+        assert rc == 0
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("API budget is 0" in m for m in messages), messages
+
+    def test_warning_fires_for_yaml_zero(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """yaml ``librarian.max_api_calls: 0`` triggers the warning too."""
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  max_api_calls: 0\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one", _fake_process_one_factory()
+        )
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=None,
+        )
+
+        assert rc == 0
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("API budget is 0" in m for m in messages), messages
+
+
+# ---------------------------------------------------------------------------
 # Run-level budget threading (#220 fix round, finding 3)
 # ---------------------------------------------------------------------------
 

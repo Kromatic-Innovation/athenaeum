@@ -318,8 +318,8 @@ that hallucinations are a well-known issue.
 it isn't functional recall. Recall needs to be automatic and cheap.
 
 None of these are revolutionary. Human brains work much the same way. But
-they separate a production-grade agentic memory from a single-user markdown
-file.
+they separate a memory system you can run in production from a single-user
+markdown file.
 
 ## FAQ
 
