@@ -422,11 +422,33 @@ class TokenUsage:
         cache_read_input_tokens: int = 0,
     ) -> None:
         """Record tokens from one API call."""
+        self.add_tokens(
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        )
+        self.api_calls += 1
+
+    def add_tokens(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation_input_tokens: int = 0,
+        cache_read_input_tokens: int = 0,
+    ) -> None:
+        """Accumulate token counters WITHOUT counting an API call (#239).
+
+        For callees whose orchestrating call site counts ``api_calls``
+        separately (attempt counting — e.g. the merge-phase detector/
+        resolver loop and the #188 reresolve pass): the call site bumps
+        ``api_calls`` before the request; the callee lands the response's
+        token + cache counts here once they are known.
+        """
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.cache_creation_input_tokens += cache_creation_input_tokens
         self.cache_read_input_tokens += cache_read_input_tokens
-        self.api_calls += 1
 
     @property
     def total_tokens(self) -> int:
@@ -436,10 +458,25 @@ class TokenUsage:
     def estimated_cost_usd(self) -> float:
         """Estimate cost using Haiku/Sonnet blended rates.
 
-        Uses a conservative blended rate: $1.50/M input, $7.50/M output.
+        Uses a blended rate of $1.50/M input and $7.50/M output for ALL
+        calls regardless of which model served them. This UNDER-states
+        cost when higher-priced models dominate traffic — the default
+        Opus resolver ($5/M input, $25/M output) bills at roughly 3.3x
+        the blended rate, so resolver-heavy runs are under-estimated by
+        about that factor. Accurate per-model attribution would require
+        tagging each call's token counts with the serving model, which
+        ``TokenUsage`` does not track.
+
+        ``input_tokens`` from the API excludes cached tokens, so the cache
+        counters are folded in at the documented multipliers (#239):
+        cache writes bill at 1.25x the input rate, cache reads at ~0.1x.
         """
+        input_rate = 1.50 / 1_000_000
         return (
-            self.input_tokens * 1.50 / 1_000_000 + self.output_tokens * 7.50 / 1_000_000
+            self.input_tokens * input_rate
+            + self.output_tokens * 7.50 / 1_000_000
+            + self.cache_creation_input_tokens * input_rate * 1.25
+            + self.cache_read_input_tokens * input_rate * 0.10
         )
 
 

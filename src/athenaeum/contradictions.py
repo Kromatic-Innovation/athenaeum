@@ -39,7 +39,12 @@ from typing import TYPE_CHECKING, Literal
 
 from athenaeum.config import resolve_model
 from athenaeum.json_utils import extract_json_object
-from athenaeum.models import AutoMemoryFile, cache_usage_counts, parse_frontmatter
+from athenaeum.models import (
+    AutoMemoryFile,
+    TokenUsage,
+    cache_usage_counts,
+    parse_frontmatter,
+)
 
 if TYPE_CHECKING:
     import anthropic
@@ -244,6 +249,7 @@ def detect_contradictions(
     cluster_members: list[AutoMemoryFile],
     client: "anthropic.Anthropic | None",
     config: dict[str, object] | None = None,
+    usage: TokenUsage | None = None,
 ) -> ContradictionResult:
     """Run one detector call against a cluster; return the structured result.
 
@@ -257,6 +263,10 @@ def detect_contradictions(
         config: Optional resolved athenaeum.yaml dict (issue #232) — routes
             ``models.classify`` to the detector call. ``None`` keeps env >
             code-default resolution.
+        usage: Optional run-level :class:`TokenUsage` (#239). The response's
+            token + cache counts accumulate via
+            :meth:`TokenUsage.add_tokens`; ``api_calls`` is NOT bumped here
+            — the orchestrating call site (merge.py) counts attempts.
 
     Returns:
         A :class:`ContradictionResult`. Callers MUST NOT assume
@@ -294,6 +304,8 @@ def detect_contradictions(
         return ContradictionResult(detected=False, rationale="llm-unavailable")
 
     input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
+    if usage is not None:
+        usage.add_tokens(input_toks, output_toks, cache_creation, cache_read)
     log.debug(
         "contradictions: detector usage input=%d output=%d"
         " cache_creation=%d cache_read=%d",

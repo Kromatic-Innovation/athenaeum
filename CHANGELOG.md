@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Resolver-phase cache observability (#239).** The merge-phase
+  contradiction detector (Haiku) and resolver (Opus) calls — including the
+  #188 reresolve heal pass — now feed their token and prompt-cache counters
+  into the run-level `TokenUsage`, so the librarian run summary's
+  `(cache: N written, N read)` line reflects resolver traffic instead of
+  only the entity tiers. Previously these call sites only bumped
+  `api_calls`. New `TokenUsage.add_tokens()` accumulates counters without
+  incrementing `api_calls`, for call sites that count attempts separately.
+- **Cache-aware `estimated_cost_usd` (#239).** The API's `input_tokens`
+  excludes cached tokens, so the run-summary cost estimate now folds in
+  the cache counters at the documented multipliers — cache writes at
+  1.25x the blended input rate, cache reads at ~0.1x — instead of
+  silently omitting cached traffic.
 - **Canonical configuration reference at `docs/configuration.md` (#233).**
   One page listing every operator-tunable knob — librarian run budgets,
   model selection, contradiction/resolver tuning, recall/search, and the

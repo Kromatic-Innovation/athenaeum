@@ -29,7 +29,7 @@ from athenaeum.contradictions import (
     ContradictionResult,
     detect_contradictions,
 )
-from athenaeum.models import AutoMemoryFile
+from athenaeum.models import AutoMemoryFile, TokenUsage
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -336,3 +336,45 @@ class TestContradictionResult:
         assert r.members_involved == []
         assert r.conflicting_passages == []
         assert r.rationale == ""
+
+
+# ---------------------------------------------------------------------------
+# Run-level usage threading (issue #239)
+# ---------------------------------------------------------------------------
+
+
+class TestUsageThreading:
+    def test_detector_records_token_and_cache_counts(self, tmp_path: Path) -> None:
+        scope = tmp_path / "scope"
+        m1 = _write_am(scope, "a.md", "X is true.")
+        m2 = _write_am(scope, "b.md", "X is false.")
+        client = _fake_client(
+            '{"detected": false, "conflict_type": null, '
+            '"members_involved": [], "conflicting_passages": [], '
+            '"rationale": ""}'
+        )
+        client.messages.create.return_value.usage = MagicMock(
+            input_tokens=120,
+            output_tokens=30,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=900,
+        )
+        usage = TokenUsage()
+        detect_contradictions([m1, m2], client, usage=usage)
+        assert usage.input_tokens == 120
+        assert usage.output_tokens == 30
+        assert usage.cache_creation_input_tokens == 0
+        assert usage.cache_read_input_tokens == 900
+        # Attempt counting stays at the orchestrating call site (merge.py),
+        # so the callee must NOT bump api_calls.
+        assert usage.api_calls == 0
+
+    def test_offline_records_nothing(self, tmp_path: Path) -> None:
+        scope = tmp_path / "scope"
+        m1 = _write_am(scope, "a.md", "X is true.")
+        m2 = _write_am(scope, "b.md", "X is false.")
+        usage = TokenUsage()
+        detect_contradictions([m1, m2], None, usage=usage)
+        assert usage.input_tokens == 0
+        assert usage.cache_read_input_tokens == 0
+        assert usage.api_calls == 0
