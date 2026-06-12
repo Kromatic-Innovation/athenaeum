@@ -21,6 +21,7 @@ from typing import Any
 import anthropic
 
 from athenaeum._retry import with_retry
+from athenaeum.config import resolve_model
 from athenaeum.fingerprint import (
     _member_key_str,
     _pair_text_from_passages,
@@ -50,17 +51,20 @@ from athenaeum.search import embed_texts
 
 log = logging.getLogger("athenaeum")
 
-# Model defaults — override via environment variables
+# Model defaults — override via env var or the yaml `models:` section
+# (env > yaml > default; issue #232).
 DEFAULT_CLASSIFY_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_WRITE_MODEL = "claude-sonnet-4-6"
 
 
-def _get_classify_model() -> str:
-    return os.environ.get("ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CLASSIFY_MODEL)
+def _get_classify_model(config: dict[str, Any] | None = None) -> str:
+    return resolve_model(
+        "classify", "ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CLASSIFY_MODEL, config
+    )
 
 
-def _get_write_model() -> str:
-    return os.environ.get("ATHENAEUM_WRITE_MODEL", DEFAULT_WRITE_MODEL)
+def _get_write_model(config: dict[str, Any] | None = None) -> str:
+    return resolve_model("write", "ATHENAEUM_WRITE_MODEL", DEFAULT_WRITE_MODEL, config)
 
 
 def _record_usage(
@@ -192,6 +196,7 @@ def tier2_classify(
     client: anthropic.Anthropic,
     wiki_root: Path | None = None,
     usage: TokenUsage | None = None,
+    config: dict[str, Any] | None = None,
 ) -> list[ClassifiedEntity]:
     """Use a fast LLM to classify entities in the raw text.
 
@@ -217,7 +222,7 @@ def tier2_classify(
 
     response = with_retry(
         lambda: client.messages.create(
-            model=_get_classify_model(),
+            model=_get_classify_model(config),
             max_tokens=1024,
             system=CLASSIFY_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
@@ -337,6 +342,7 @@ def tier3_create(
     client: anthropic.Anthropic,
     wiki_root: Path | None = None,
     usage: TokenUsage | None = None,
+    config: dict[str, Any] | None = None,
 ) -> WikiEntity:
     """Use a capable LLM to create a new entity page."""
     tmpl_section = ""
@@ -359,7 +365,7 @@ def tier3_create(
 
     response = with_retry(
         lambda: client.messages.create(
-            model=_get_write_model(),
+            model=_get_write_model(config),
             max_tokens=2048,
             system=CREATE_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
@@ -375,7 +381,7 @@ def tier3_create(
     # Format: ``claude:tier3-create:<model>:<YYYY-MM-DD>``. The model
     # name is read live from the same env-driven setting used for the
     # API call so the source matches the model that actually wrote.
-    model = _get_write_model() or "unknown"
+    model = _get_write_model(config) or "unknown"
     source = f"claude:tier3-create:{model}:{today}"
 
     return WikiEntity(
@@ -398,6 +404,7 @@ def tier3_merge(
     source_ref: str,
     client: anthropic.Anthropic,
     usage: TokenUsage | None = None,
+    config: dict[str, Any] | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
     """Use a capable LLM to merge observations into an existing entity page.
 
@@ -411,7 +418,7 @@ def tier3_merge(
 
     response = with_retry(
         lambda: client.messages.create(
-            model=_get_write_model(),
+            model=_get_write_model(config),
             max_tokens=2048,
             system=MERGE_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
@@ -447,6 +454,7 @@ def tier3_write(
     wiki_root: Path,
     client: anthropic.Anthropic,
     usage: TokenUsage | None = None,
+    config: dict[str, Any] | None = None,
 ) -> tuple[list[WikiEntity], list[str], list[EscalationItem]]:
     """Process all entity actions for a raw file through the capable LLM.
 
@@ -469,6 +477,7 @@ def tier3_write(
                     client,
                     wiki_root=wiki_root,
                     usage=usage,
+                    config=config,
                 )
             )
 
@@ -490,6 +499,7 @@ def tier3_write(
                 raw.ref,
                 client,
                 usage=usage,
+                config=config,
             )
             if esc:
                 escalations.append(esc)
@@ -503,7 +513,7 @@ def tier3_write(
                 # field, so its source wins for that field). Preserve
                 # canonical's existing field_sources for non-touched
                 # fields.
-                model = _get_write_model() or "unknown"
+                model = _get_write_model(config) or "unknown"
                 merge_source = f"claude:tier3-merge:{model}:{today_iso}"
                 fs = meta.get("field_sources")
                 if not isinstance(fs, dict):

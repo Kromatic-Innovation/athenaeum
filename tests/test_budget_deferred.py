@@ -593,7 +593,7 @@ class TestRunLevelBudgetThreading:
         )
         monkeypatch.setattr(
             "athenaeum.merge.detect_contradictions",
-            lambda members, client: detected,
+            lambda members, client, config=None: detected,
         )
         monkeypatch.setattr(
             "athenaeum.merge.propose_resolution",

@@ -24,6 +24,8 @@ import logging
 import os
 import re
 
+from athenaeum.config import resolve_model
+
 log = logging.getLogger("athenaeum")
 
 DEFAULT_TOPIC_MODEL = "claude-haiku-4-5-20251001"
@@ -44,11 +46,16 @@ _USER_TEMPLATE = (
 )
 
 
-def _get_topic_model() -> str:
-    return os.environ.get("ATHENAEUM_TOPIC_MODEL", DEFAULT_TOPIC_MODEL)
+def _get_topic_model(config: dict[str, object] | None = None) -> str:
+    # env ATHENAEUM_TOPIC_MODEL > yaml models.topic > code default (#232).
+    return resolve_model("topic", "ATHENAEUM_TOPIC_MODEL", DEFAULT_TOPIC_MODEL, config)
 
 
-def extract_topics(prompt: str, timeout: float = 3.0) -> list[str]:
+def extract_topics(
+    prompt: str,
+    timeout: float = 3.0,
+    config: dict[str, object] | None = None,
+) -> list[str]:
     """Extract substantive search topics from a user prompt.
 
     Returns an empty list (never raises) on any failure: missing API key,
@@ -58,6 +65,9 @@ def extract_topics(prompt: str, timeout: float = 3.0) -> list[str]:
     Args:
         prompt: The raw user message.
         timeout: Seconds to wait for the API call before giving up.
+        config: Optional resolved athenaeum.yaml dict (issue #232) — routes
+            ``models.topic`` to the call. ``None`` keeps env > code-default
+            resolution.
     """
     if not prompt or len(prompt.strip()) < 4:
         return []
@@ -74,7 +84,7 @@ def extract_topics(prompt: str, timeout: float = 3.0) -> list[str]:
     try:
         client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=0)
         response = client.messages.create(
-            model=_get_topic_model(),
+            model=_get_topic_model(config),
             max_tokens=256,
             system=_SYSTEM_PROMPT,
             messages=[

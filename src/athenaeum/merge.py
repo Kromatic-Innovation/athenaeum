@@ -1111,7 +1111,7 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
-            result = detect_contradictions(filtered, client)
+            result = detect_contradictions(filtered, client, config=resolved_config)
             _record_pair_keys(chunk)
             if result.detected and aggregate is None:
                 proposal = _maybe_propose(result, filtered)
@@ -1174,7 +1174,7 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
-            result = detect_contradictions(pair, client)
+            result = detect_contradictions(pair, client, config=resolved_config)
             if result.detected:
                 pairs_added_via_similarity += 1
                 # Synthesize a thin escalation entry; we don't have a
