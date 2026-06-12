@@ -413,6 +413,14 @@ class TokenUsage:
     # billed at ~1.25x the input rate, reads at ~0.1x.
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    # Batch API counters (issue #236). Batch traffic is folded into the
+    # main counters above (so totals and the run-summary log include it)
+    # AND tracked separately here so ``estimated_cost_usd`` can apply the
+    # Batch API's 50% discount to exactly the batch-attributed share.
+    batch_input_tokens: int = 0
+    batch_output_tokens: int = 0
+    batch_cache_creation_input_tokens: int = 0
+    batch_cache_read_input_tokens: int = 0
 
     def add(
         self,
@@ -450,6 +458,34 @@ class TokenUsage:
         self.cache_creation_input_tokens += cache_creation_input_tokens
         self.cache_read_input_tokens += cache_read_input_tokens
 
+    def add_batch_tokens(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation_input_tokens: int = 0,
+        cache_read_input_tokens: int = 0,
+    ) -> None:
+        """Accumulate token counters from a Batch API result (#236).
+
+        Folds the counts into the main counters (so ``total_tokens`` and
+        the run-summary line include batch traffic) and additionally into
+        the batch-attributed counters so ``estimated_cost_usd`` applies
+        the Batch API's 50% discount. Does NOT bump ``api_calls`` — batch
+        call sites count one attempt per request at batch-assembly time
+        (budget enforcement point, mirroring :meth:`add_tokens`'s
+        attempt-counting contract from #239).
+        """
+        self.add_tokens(
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        )
+        self.batch_input_tokens += input_tokens
+        self.batch_output_tokens += output_tokens
+        self.batch_cache_creation_input_tokens += cache_creation_input_tokens
+        self.batch_cache_read_input_tokens += cache_read_input_tokens
+
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
@@ -470,14 +506,26 @@ class TokenUsage:
         ``input_tokens`` from the API excludes cached tokens, so the cache
         counters are folded in at the documented multipliers (#239):
         cache writes bill at 1.25x the input rate, cache reads at ~0.1x.
+
+        Batch API traffic (#236) bills at 50% of the synchronous rate on
+        all token usage; the batch-attributed counters subtract half of
+        their share from the synchronous estimate.
         """
         input_rate = 1.50 / 1_000_000
-        return (
+        output_rate = 7.50 / 1_000_000
+        cost = (
             self.input_tokens * input_rate
-            + self.output_tokens * 7.50 / 1_000_000
+            + self.output_tokens * output_rate
             + self.cache_creation_input_tokens * input_rate * 1.25
             + self.cache_read_input_tokens * input_rate * 0.10
         )
+        batch_cost = (
+            self.batch_input_tokens * input_rate
+            + self.batch_output_tokens * output_rate
+            + self.batch_cache_creation_input_tokens * input_rate * 1.25
+            + self.batch_cache_read_input_tokens * input_rate * 0.10
+        )
+        return cost - 0.5 * batch_cost
 
 
 def cache_usage_counts(response: object) -> tuple[int, int, int, int]:
