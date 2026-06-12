@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,34 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
     return result
 
 
+def resolve_model(
+    knob: str,
+    env_var: str,
+    default: str,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """Resolve a model id from env > yaml ``models.<knob>`` > code default.
+
+    Issue #232. Mirrors :func:`athenaeum.librarian.librarian_max_api_calls`:
+    the env var wins over the yaml key so an operator can swap a model for a
+    single run without editing config, and the yaml key is read only when
+    the operator actually set it — no seed in ``_DEFAULTS`` (issue #231).
+    Non-string or blank yaml values fall through to *default*. The
+    contradiction-resolver model is NOT routed through here; it stays at
+    ``resolve.model`` (see :func:`athenaeum.resolutions._get_model`).
+    """
+    env = os.environ.get(env_var)
+    if env:
+        return env
+    if isinstance(config, dict):
+        models = config.get("models")
+        if isinstance(models, dict):
+            raw = models.get(knob)
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    return default
+
+
 _DEFAULT_CONFIG_CONTENT = """\
 # Athenaeum sidecar configuration
 # See https://github.com/Kromatic-Innovation/athenaeum for docs.
@@ -117,9 +146,27 @@ search_backend: fts5
 # cluster_output: canonical JSONL output path (relative to knowledge
 #   root). Each run also writes a timestamped sibling and atomically
 #   replaces this path.
+# max_files: per-run intake batch size — stop after processing this many
+#   raw files (issue #232). Precedence: --max-files CLI flag, then
+#   ATHENAEUM_MAX_FILES env, then this key, then 50.
 # librarian:
 #   cluster_threshold: 0.55
 #   cluster_output: raw/_librarian-clusters.jsonl
+#   max_files: 50
+
+# Model selection (issue #232). Per knob: env var wins over the yaml key,
+# which wins over the built-in default. Values are free-form model id
+# strings passed to the Anthropic SDK.
+# classify: Tier-2 classifier + C4 contradiction detector
+#   (env: ATHENAEUM_CLASSIFY_MODEL).
+# write: Tier-3 writer (env: ATHENAEUM_WRITE_MODEL).
+# topic: recall query-topic extraction (env: ATHENAEUM_TOPIC_MODEL).
+# The contradiction-resolver model is configured separately under
+# ``resolve.model`` below (env: ATHENAEUM_RESOLVE_MODEL).
+# models:
+#   classify: claude-haiku-4-5-20251001
+#   write: claude-sonnet-4-6
+#   topic: claude-haiku-4-5-20251001
 
 # Cross-scope contradiction detection (issue #125).
 # cross_scope_mode: off | ancestor (default) | similarity | both.

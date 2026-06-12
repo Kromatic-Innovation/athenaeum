@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--max-files` gains env and yaml knobs (#232).** The per-run intake batch
+  size now resolves CLI `--max-files` > `ATHENAEUM_MAX_FILES` env >
+  `librarian.max_files` yaml > default 50, mirroring the #220
+  `--max-api-calls` pattern. The flag also now validates positive integers
+  at parse time (zero/negative/non-numeric values are an argparse error,
+  matching `--max-api-calls`).
+- **New `models:` yaml section for the env-only model knobs (#232).**
+  `models.classify` (Tier-2 classifier + C4 contradiction detector, env
+  `ATHENAEUM_CLASSIFY_MODEL`), `models.write` (Tier-3 writer, env
+  `ATHENAEUM_WRITE_MODEL`), and `models.topic` (recall query-topic
+  extraction, env `ATHENAEUM_TOPIC_MODEL`). Per knob: env wins over yaml,
+  yaml wins over the code default. The contradiction-resolver model is
+  unchanged and stays at `resolve.model`. None of the new keys are seeded
+  into config defaults, preserving the #231 fix.
+
 ### Fixed
 
 - **Config `_DEFAULTS` no longer shadow module code defaults (#231).**
