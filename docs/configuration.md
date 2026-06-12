@@ -18,8 +18,9 @@ one-off shell export changes a single run without editing config.
 
 `athenaeum.yaml` lives at the knowledge root
 (`<knowledge_root>/athenaeum.yaml`, default `~/knowledge/athenaeum.yaml`);
-`athenaeum init` writes a commented template covering every yaml key on this
-page. Keys you do not set fall through to the code defaults — the loader
+`athenaeum init` writes a commented template covering the most common yaml
+keys; the full set of knobs is the tables on this page. Keys you do not set
+fall through to the code defaults — the loader
 deliberately does not seed defaults for keys whose source of truth lives next
 to their consumer code (#231), so a future change to a code default takes
 effect without a config migration.
@@ -83,13 +84,17 @@ under `resolve:`. Pipeline walkthrough:
 |---|---|---|---|---|---|
 | Auto-recall | — | `AUTO_RECALL` (hook shell env) | `auto_recall` | `true` | Per-turn recall via the UserPromptSubmit hook. The shell env is read by the example hooks and beats the yaml. |
 | Search backend | `--backend` (`recall` / `rebuild-index`) | `SEARCH_BACKEND` (hook shell env) | `search_backend` | `fts5` | `fts5` (SQLite FTS5, BM25 + porter stemming) or `vector` (chromadb + `all-MiniLM-L6-v2`, needs `pip install athenaeum[vector]`). `athenaeum recall --backend keyword` additionally exposes the zero-dependency scan-on-query fallback. |
-| Vector provider | — | — | `vector.provider` | `chromadb` | Vector backend provider (only `chromadb` today). |
-| Vector collection | — | — | `vector.collection` | `wiki` | Chromadb collection name. |
 | Extra intake roots | — | — | `recall.extra_intake_roots` | `["raw/auto-memory"]` | Additional directories (relative to the knowledge root) scanned recursively into the recall index. Set `[]` to restrict recall to the compiled wiki. |
 | Recall result count | `--top-k` (`recall`) | — | — | `5` | Hits returned by the shell `recall` command. |
 | Index cache dir | `--cache-dir` (`recall` / `rebuild-index`) | — | — | `~/.cache/athenaeum` | Where the FTS5 db / chromadb collection live. |
 | Topic-extraction timeout | `--timeout` (`query-topics`) | — | — | `3.0` | Seconds before `query-topics` gives up and the hook falls back to the regex extractor. |
 | Topic-extraction config root | `--knowledge-root` / `--path` (`query-topics`) | — | — | `~/knowledge` | Knowledge root whose `athenaeum.yaml` supplies `models.topic` (#232). |
+
+**Reserved keys (not yet read by code).** `vector.provider` (default
+`chromadb`) and `vector.collection` (default `wiki`) appear in the loader's
+`_DEFAULTS` seed but no code reads them yet — the vector backend hardcodes
+chromadb and the `wiki` collection name. Setting either key has no effect
+today.
 
 ## Hook / sidecar environment (examples/claude-code)
 
