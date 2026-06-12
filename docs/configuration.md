@@ -40,6 +40,15 @@ Every default figure on this page is verified against the code under
 | Embedding cache root | — | `ATHENAEUM_CACHE_DIR` | — | `~/.cache/athenaeum` | Cache root used by the librarian's cluster pass (chromadb lives at `<dir>/wiki-vectors/`). The `recall` / `rebuild-index` commands do **not** read this var — they take `--cache-dir` (same default). |
 | API key | — | `ANTHROPIC_API_KEY` | — | (required) | Required for Tier 2/3 LLM calls. Optional with `--dry-run`, `--cluster-only`, or `--merge-only`. |
 
+> **Design decision — CLI rejects `0`, env/yaml accept it.** The
+> `--max-api-calls` and `--max-files` flags reject `0` at parse time as a
+> typo guard at the interactive surface, while `ATHENAEUM_MAX_API_CALLS=0` /
+> `librarian.max_api_calls: 0` (and the `max_files` equivalents) are accepted
+> as deliberate defer-everything caps for scripted deployments. This
+> asymmetry is intentional, not an oversight (decided 2026-06-12; refs #235
+> and the #240 review). A run whose budget resolves to `0` logs a prominent
+> warning at start so an accidental zero is diagnosable immediately.
+
 Path and mode flags on `athenaeum run` (CLI-only): `--raw-root` and
 `--wiki-root` (default under the knowledge root), `--knowledge-root` /
 `--path` (default `~/knowledge`), `--dry-run`, `--cluster-only`,
