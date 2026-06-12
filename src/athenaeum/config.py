@@ -149,10 +149,16 @@ search_backend: fts5
 # max_files: per-run intake batch size — stop after processing this many
 #   raw files (issue #232). Precedence: --max-files CLI flag, then
 #   ATHENAEUM_MAX_FILES env, then this key, then 50.
+# batch_mode: submit tier-2/tier-3 LLM calls via the Anthropic Messages
+#   Batch API at a 50% token discount (issue #236). Latency-tolerant:
+#   most batches finish within an hour, 24h worst case — intended for the
+#   nightly run. Precedence: --batch-mode CLI flag, then
+#   ATHENAEUM_BATCH_MODE env, then this key, then off.
 # librarian:
 #   cluster_threshold: 0.55
 #   cluster_output: raw/_librarian-clusters.jsonl
 #   max_files: 50
+#   batch_mode: false
 
 # Model selection (issue #232). Per knob: env var wins over the yaml key,
 # which wins over the built-in default. Values are free-form model id
