@@ -898,6 +898,19 @@ def run(
     if max_files is None:
         max_files = librarian_max_files(config)
 
+    # Issue #235: a resolved budget of 0 is a valid defer-everything cap
+    # (env/yaml zero — the CLI flag rejects it), but it is also the most
+    # likely accidental misconfiguration: every LLM tier is skipped and the
+    # whole intake is deferred. Flag it loudly at run start so an
+    # unintended 0 is diagnosable immediately, not from the DEGRADED
+    # summary at the end of the run.
+    if max_api_calls == 0:
+        log.warning(
+            "API budget is 0 — all LLM tiers deferred this run; set "
+            "ATHENAEUM_MAX_API_CALLS / librarian.max_api_calls to a "
+            "positive value if unintended"
+        )
+
     # One run-level TokenUsage threaded through every phase (cluster, merge
     # incl. the C4 detector + resolver, #188 reresolve, entity tiers) so
     # ``max_api_calls`` is a genuine run-level ceiling. Earlier phases

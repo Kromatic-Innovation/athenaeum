@@ -1,17 +1,17 @@
 # Athenaeum
 
-<p align="center">
-  <img src="docs/assets/athena.png" alt="Athena with her owl companion, holding an open book showing a knowledge graph" width="480">
-</p>
-
 [![PyPI version](https://img.shields.io/pypi/v/athenaeum.svg)](https://pypi.org/project/athenaeum/)
 [![Python versions](https://img.shields.io/pypi/pyversions/athenaeum.svg)](https://pypi.org/project/athenaeum/)
 [![License](https://img.shields.io/pypi/l/athenaeum.svg)](https://github.com/Kromatic-Innovation/athenaeum/blob/develop/LICENSE)
 
-**Production-grade agentic memory for teams deploying multiple AI agents.**
+**Production-tested agentic memory for teams deploying multiple AI agents.**
 Append-only intake, a tiered librarian that compiles raw observations into a
 trustworthy wiki, and a sidecar that makes recall happen passively on every
 turn.
+
+<p align="center">
+  <img src="docs/assets/athena.png" alt="Athena with her owl companion, holding an open book showing a knowledge graph" width="360">
+</p>
 
 > **Is this for me?** If you're running more than one agent on shared
 > knowledge — or if you want agents and humans reading and writing the same
