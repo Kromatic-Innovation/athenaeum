@@ -16,6 +16,7 @@ Environment:
   ANTHROPIC_API_KEY          Required for Tier 2/3 LLM calls.
   ATHENAEUM_CLASSIFY_MODEL   Override the Tier 2 model (default: claude-haiku-4-5-20251001)
   ATHENAEUM_WRITE_MODEL      Override the Tier 3 model (default: claude-sonnet-4-6)
+  ATHENAEUM_MAX_FILES        Override the per-run intake batch size (default: 50)
 """
 
 from __future__ import annotations
@@ -88,6 +89,11 @@ DEFAULT_WIKI_ROOT = DEFAULT_KNOWLEDGE_ROOT / "wiki"
 # spent. The merge-phase resolver additionally has its own per-run cap
 # (`contradiction.resolve_max_per_run`).
 DEFAULT_MAX_API_CALLS = 800
+
+# Per-run intake batch size (issue #232). Precedence: `--max-files` (CLI
+# flag, wins) > `ATHENAEUM_MAX_FILES` (env) > `librarian.max_files` (yaml)
+# > this default. Resolved by `librarian_max_files()` below.
+DEFAULT_MAX_FILES = 50
 
 # Manifest written next to _pending_questions.md when a budget-tripped run
 # defers intake (issue #220). Overwritten on every tripped run; removed by
@@ -452,8 +458,14 @@ def process_one(
     valid_access: list[str],
     dry_run: bool = False,
     usage: TokenUsage | None = None,
+    config: dict[str, object] | None = None,
 ) -> ProcessingResult:
-    """Process a single raw file through all tiers."""
+    """Process a single raw file through all tiers.
+
+    ``config`` is the resolved athenaeum.yaml dict (issue #232) — it routes
+    the ``models:`` section to the Tier 2/3 calls. ``None`` (legacy/test
+    callers) keeps env > code-default model resolution.
+    """
     result = ProcessingResult(raw_file=raw)
 
     # --- Tier 0: passthrough for pre-structured raw-intake ---
@@ -508,6 +520,7 @@ def process_one(
         client,
         wiki_root=wiki_root,
         usage=usage,
+        config=config,
     )
     log.info("  T2 classified %d new entities", len(classified))
 
@@ -553,6 +566,7 @@ def process_one(
         wiki_root,
         client,
         usage=usage,
+        config=config,
     )
 
     for entity in new_entities:
@@ -578,12 +592,13 @@ def process_one(
     # --- Tier 4: Escalation ---
     if escalations:
         # wiki_root is <knowledge_root>/wiki; the config sits at the
-        # knowledge_root level. Resolve config here so the auto-apply
-        # lane (issue #156) sees the operator's yaml settings.
+        # knowledge_root level. Reuse the caller's resolved config when
+        # provided; otherwise resolve it here so the auto-apply lane
+        # (issue #156) sees the operator's yaml settings.
         tier4_escalate(
             escalations,
             wiki_root / "_pending_questions.md",
-            config=load_config(wiki_root.parent),
+            config=config if config is not None else load_config(wiki_root.parent),
         )
 
     return result
@@ -707,6 +722,34 @@ def librarian_max_api_calls(config: dict[str, object] | None = None) -> int:
     return DEFAULT_MAX_API_CALLS
 
 
+def librarian_max_files(config: dict[str, object] | None = None) -> int:
+    """Resolve the per-run intake batch size from env > config > default.
+
+    Issue #232. Mirrors :func:`librarian_max_api_calls` (#220): the
+    environment override wins over the YAML setting so a cron deployment
+    can tune the window on a single run without editing config or the
+    crontab command line. Negative or non-numeric values fall back to
+    :data:`DEFAULT_MAX_FILES`.
+    """
+    env = os.environ.get("ATHENAEUM_MAX_FILES")
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict):
+            raw = cfg.get("max_files")
+            # bool is an int subclass — `max_files: yes` in yaml must
+            # not silently become a window of 1.
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                return raw
+    return DEFAULT_MAX_FILES
+
+
 def _clear_stale_deferred_manifest(wiki_root: Path) -> None:
     """Remove a stale deferred-work manifest left by a budget-tripped run.
 
@@ -794,7 +837,7 @@ def run(
     wiki_root: Path = DEFAULT_WIKI_ROOT,
     knowledge_root: Path = DEFAULT_KNOWLEDGE_ROOT,
     dry_run: bool = False,
-    max_files: int = 50,
+    max_files: int | None = None,
     max_api_calls: int | None = None,
     cluster_only: bool = False,
     merge_only: bool = False,
@@ -849,6 +892,11 @@ def run(
     # env > yaml > default).
     if max_api_calls is None:
         max_api_calls = librarian_max_api_calls(config)
+
+    # Issue #232: resolve the per-run intake batch size the same way
+    # (explicit arg > env > yaml > default).
+    if max_files is None:
+        max_files = librarian_max_files(config)
 
     # One run-level TokenUsage threaded through every phase (cluster, merge
     # incl. the C4 detector + resolver, #188 reresolve, entity tiers) so
@@ -1013,6 +1061,7 @@ def run(
                 valid_access,
                 dry_run=dry_run,
                 usage=usage,
+                config=config,
             )
         except TransientAPIError as exc:
             # Issue #193: the Anthropic API was overloaded (429/529) and the

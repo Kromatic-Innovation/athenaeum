@@ -263,7 +263,7 @@ yaml; the yaml overrides built-in defaults.
 
 | Env var | YAML key | Default | Effect |
 |---------|----------|---------|--------|
-| `ATHENAEUM_CLASSIFY_MODEL` | `classify_model` (top-level) | `claude-haiku-4-5-20251001` | Detector model. Shared with Tier 2 classifier — one knob, not a C4-only dial. |
+| `ATHENAEUM_CLASSIFY_MODEL` | `models.classify` (top-level `models:` block, #232) | `claude-haiku-4-5-20251001` | Detector model. Shared with Tier 2 classifier — one knob, not a C4-only dial. |
 | `ATHENAEUM_RESOLVE_MODEL` | `resolve.model` (top-level `resolve:` block) | `claude-opus-4-7` | Resolver model. Configurable per-operator so cheaper models can be substituted. |
 | `ATHENAEUM_RESOLVE_MAX_PER_RUN` | `contradiction.resolve_max_per_run` | `250` (raised from 50 in #187) | Per-ingest cap on Opus calls. Surplus contradictions escalate WITHOUT a proposal (degraded mode). |
 | `ATHENAEUM_CROSS_SCOPE_MODE` | `contradiction.cross_scope_mode` | `ancestor` | `off` / `ancestor` / `similarity` / `both` — see § 2. |
