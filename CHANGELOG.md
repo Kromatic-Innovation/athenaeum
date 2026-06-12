@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in Batch API mode for the librarian's tier-2/tier-3 calls (#236).**
+  `athenaeum run --batch-mode` (env `ATHENAEUM_BATCH_MODE`, yaml
+  `librarian.batch_mode`; CLI > env > yaml > default off) restructures the
+  entity-tier loop into phased fan-out against the
+  [Anthropic Messages Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing),
+  which bills all token usage at a 50% discount: phase 1 batches every
+  tier-2 classification, phase 2 batches every tier-3 create plus the
+  tier-3 merges whose target page is touched exactly once this run —
+  same-page merges stay synchronous, serialized in intake order. The
+  run-level API budget (#220) is enforced at batch-assembly time (each
+  batched request counts as one `api_calls` attempt; the truncated
+  remainder lands in the `_deferred_work.md` manifest), per-result
+  `errored`/`expired`/`canceled` outcomes map onto the existing per-file
+  failure path, and batch token usage — including prompt-cache counters —
+  feeds `TokenUsage` with the 50% discount folded into
+  `estimated_cost_usd` via new batch-attributed counters. The synchronous
+  path is untouched when the flag is off. The C4 detector and resolver
+  calls are not batched (tier-2/tier-3 dominate spend).
 - **Resolver-phase cache observability (#239).** The merge-phase
   contradiction detector (Haiku) and resolver (Opus) calls — including the
   #188 reresolve heal pass — now feed their token and prompt-cache counters
