@@ -1249,6 +1249,11 @@ def propose_resolution(
             # tokens per the Anthropic count-tokens endpoint with the Opus
             # tokenizer; a live Sonnet run's cache counters reported 2,437)
             # and the resolver is called repeatedly within a run.
+            # Note: 3,387 tokens is BELOW the Opus-tier 4,096-token minimum
+            # cacheable prefix, so on the default Opus resolver this
+            # breakpoint no-ops and the run summary's cache counters
+            # correctly read 0; caching engages on Sonnet-tier overrides
+            # (2,048-token minimum).
             # Below a model's minimum cacheable prefix the marker is a
             # silent no-op (no error, no extra cost), so this engages
             # automatically when ATHENAEUM_RESOLVE_MODEL / resolve.model

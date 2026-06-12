@@ -458,7 +458,15 @@ class TokenUsage:
     def estimated_cost_usd(self) -> float:
         """Estimate cost using Haiku/Sonnet blended rates.
 
-        Uses a conservative blended rate: $1.50/M input, $7.50/M output.
+        Uses a blended rate of $1.50/M input and $7.50/M output for ALL
+        calls regardless of which model served them. This UNDER-states
+        cost when higher-priced models dominate traffic — the default
+        Opus resolver ($5/M input, $25/M output) bills at roughly 3.3x
+        the blended rate, so resolver-heavy runs are under-estimated by
+        about that factor. Accurate per-model attribution would require
+        tagging each call's token counts with the serving model, which
+        ``TokenUsage`` does not track.
+
         ``input_tokens`` from the API excludes cached tokens, so the cache
         counters are folded in at the documented multipliers (#239):
         cache writes bill at 1.25x the input rate, cache reads at ~0.1x.
