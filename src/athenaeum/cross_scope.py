@@ -84,7 +84,8 @@ def resolve_cross_scope_mode(config: dict[str, Any] | None = None) -> str:
         if env_val in VALID_MODES:
             return env_val
         log.warning(
-            "cross_scope: invalid %s=%r; falling back to %s",
+            "cross_scope: invalid %s=%r; falling back to yaml config, "
+            "then default %s",
             ENV_VAR,
             env_val,
             DEFAULT_MODE,

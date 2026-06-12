@@ -141,7 +141,7 @@ search_backend: fts5
 
 # Librarian pipeline configuration.
 # cluster_threshold: cosine cutoff for auto-memory clustering (C2,
-#   issue #196). Higher = tighter clusters; 0.6 is tuned against the
+#   issue #196). Higher = tighter clusters; 0.55 is tuned against the
 #   voltaire/nanoclaw near-duplicate fixture.
 # cluster_output: canonical JSONL output path (relative to knowledge
 #   root). Each run also writes a timestamped sibling and atomically

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Canonical configuration reference at `docs/configuration.md` (#233).**
+  One page listing every operator-tunable knob — librarian run budgets,
+  model selection, contradiction/resolver tuning, recall/search, and the
+  hook/sidecar environment — with env var, yaml key, CLI flag, code
+  default, and the global precedence convention (CLI > env > yaml > code
+  default). Includes the `ANTHROPIC_BASE_URL` escape hatch for serving
+  alternative models through a LiteLLM proxy or any Anthropic-compatible
+  gateway (multi-provider support tracked in #234). The README env table
+  gains the previously undocumented rows (`ATHENAEUM_CACHE_DIR`,
+  `ATHENAEUM_TIER4_DEDUP`, `ATHENAEUM_CROSS_SCOPE_MODE`,
+  `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD`,
+  `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP`, `ATHENAEUM_PQ_SNOOZE_HOURS`,
+  `ATHENAEUM_PYTHON`) and links to the full reference; the duplicated
+  config tables in `docs/auto-resolve.md` and
+  `docs/contradiction-detection.md` are trimmed to link there instead.
 - **`--max-files` gains env and yaml knobs (#232).** The per-run intake batch
   size now resolves CLI `--max-files` > `ATHENAEUM_MAX_FILES` env >
   `librarian.max_files` yaml > default 50, mirroring the #220

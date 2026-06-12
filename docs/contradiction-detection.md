@@ -255,21 +255,16 @@ tool both require explicit user confirmation before applying.
 
 ## 4. Configuration reference
 
-Detection keys live under `contradiction:` in `athenaeum.yaml`; the
-resolver model lives under the top-level `resolve:` block (see
-[auto-resolve.md](auto-resolve.md) for the full resolver knob set and
-`src/athenaeum/config.py` for the loaded defaults). Env vars override the
-yaml; the yaml overrides built-in defaults.
-
-| Env var | YAML key | Default | Effect |
-|---------|----------|---------|--------|
-| `ATHENAEUM_CLASSIFY_MODEL` | `models.classify` (top-level `models:` block, #232) | `claude-haiku-4-5-20251001` | Detector model. Shared with Tier 2 classifier — one knob, not a C4-only dial. |
-| `ATHENAEUM_RESOLVE_MODEL` | `resolve.model` (top-level `resolve:` block) | `claude-opus-4-7` | Resolver model. Configurable per-operator so cheaper models can be substituted. |
-| `ATHENAEUM_RESOLVE_MAX_PER_RUN` | `contradiction.resolve_max_per_run` | `250` (raised from 50 in #187) | Per-ingest cap on Opus calls. Surplus contradictions escalate WITHOUT a proposal (degraded mode). |
-| `ATHENAEUM_CROSS_SCOPE_MODE` | `contradiction.cross_scope_mode` | `ancestor` | `off` / `ancestor` / `similarity` / `both` — see § 2. |
-| n/a | `contradiction.cluster_size_cap` | `25` | Pooled-cluster size threshold; oversized pools split into newest-first chunks of `<= cap`. |
-| n/a | `contradiction.similarity_threshold` | `0.85` | Cosine cutoff for the cross-scope similarity sweep. |
-| `ATHENAEUM_PQ_SNOOZE_HOURS` | n/a | `24` | Skill-side default for snooze TTL writes. The hook ONLY reads the snooze cache; the env var is consumed by the `resolve-questions` skill when it writes the cache file. |
+Detection keys live under `contradiction:` in `athenaeum.yaml`; the detector
+model under the top-level `models:` block (`models.classify`, #232); the
+resolver knobs under the top-level `resolve:` block. Env vars override the
+yaml; the yaml overrides built-in defaults. The canonical knob table — every
+env var, yaml key, and code default for this pipeline (`models.classify`,
+`resolve.model`, `contradiction.cross_scope_mode`, `cluster_size_cap`,
+`similarity_threshold`, `resolve_max_per_run`,
+`resolved_similarity_threshold`, `ATHENAEUM_TIER4_DEDUP`,
+`ATHENAEUM_PQ_SNOOZE_HOURS`, and the auto-apply lane) — lives in
+[`docs/configuration.md`](configuration.md#contradiction-detection-and-resolver).
 
 Notes:
 
