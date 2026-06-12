@@ -17,6 +17,7 @@ Environment:
   ATHENAEUM_CLASSIFY_MODEL   Override the Tier 2 model (default: claude-haiku-4-5-20251001)
   ATHENAEUM_WRITE_MODEL      Override the Tier 3 model (default: claude-sonnet-4-6)
   ATHENAEUM_MAX_FILES        Override the per-run intake batch size (default: 50)
+  ATHENAEUM_BATCH_MODE       Opt into Batch API mode for tier-2/3 calls (default: off)
 """
 
 from __future__ import annotations
@@ -750,6 +751,32 @@ def librarian_max_files(config: dict[str, object] | None = None) -> int:
     return DEFAULT_MAX_FILES
 
 
+def librarian_batch_mode(config: dict[str, object] | None = None) -> bool:
+    """Resolve the Batch API opt-in from env > config > default off.
+
+    Issue #236. Mirrors :func:`librarian_max_files` (#232): the
+    ``ATHENAEUM_BATCH_MODE`` env var wins over the yaml
+    ``librarian.batch_mode`` key so a cron deployment can flip the mode on
+    a single run; the CLI ``--batch-mode`` flag (resolved by the caller)
+    wins over both. Unrecognized env values fall through to the yaml key;
+    non-bool yaml values fall through to the default (off).
+    """
+    env = os.environ.get("ATHENAEUM_BATCH_MODE")
+    if env is not None:
+        normalized = env.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict):
+            raw = cfg.get("batch_mode")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 def _clear_stale_deferred_manifest(wiki_root: Path) -> None:
     """Remove a stale deferred-work manifest left by a budget-tripped run.
 
@@ -842,6 +869,7 @@ def run(
     cluster_only: bool = False,
     merge_only: bool = False,
     strict_budget: bool = False,
+    batch_mode: bool | None = None,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error.
 
@@ -865,6 +893,15 @@ def run(
     return 1 instead of the default 0, for exit-code-based alerting (e.g.
     the CLI ``--strict-budget`` flag). All other DEGRADED-path behavior —
     warning summary, deferred-work manifest, git snapshot — is unchanged.
+
+    ``batch_mode`` (issue #236) routes the entity-tier LLM calls through
+    the Anthropic Messages Batch API (50% token discount, latency-tolerant)
+    instead of the synchronous per-file loop. When ``None`` (the default)
+    it resolves via env ``ATHENAEUM_BATCH_MODE`` > yaml
+    ``librarian.batch_mode`` > off; an explicit value (e.g. from the CLI
+    ``--batch-mode`` flag) wins over both. Off keeps the synchronous path
+    untouched; dry-run always uses the synchronous (call-free) path. See
+    :mod:`athenaeum.batch` for phase layout and budget semantics.
     """
     skip_entity_tiers = cluster_only or merge_only
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -897,6 +934,11 @@ def run(
     # (explicit arg > env > yaml > default).
     if max_files is None:
         max_files = librarian_max_files(config)
+
+    # Issue #236: resolve the Batch API opt-in the same way (explicit arg >
+    # env > yaml > default off).
+    if batch_mode is None:
+        batch_mode = librarian_batch_mode(config)
 
     # Issue #235: a resolved budget of 0 is a valid defer-everything cap
     # (env/yaml zero — the CLI flag rejects it), but it is also the most
@@ -1050,59 +1092,90 @@ def run(
     failed_files: list[str] = []
     deferred_refs: list[str] = []
 
-    for i, raw in enumerate(raw_files):
-        if not dry_run and usage.api_calls >= max_api_calls:
-            log.warning(
-                "API call budget exhausted (%d/%d) — stopping early",
-                usage.api_calls,
-                max_api_calls,
-            )
-            # Issue #220: everything from here on is deferred to the next
-            # run — record it so the manifest + summary can surface it.
-            deferred_refs = [r.ref for r in raw_files[i:]]
-            break
+    if batch_mode and dry_run:
+        log.info(
+            "Batch mode requested but --dry-run makes no API calls — "
+            "using the synchronous dry-run path"
+        )
 
-        log.info("Processing: %s", raw.ref)
-        try:
-            result = process_one(
-                raw,
-                index,
-                wiki_root,
-                client,
-                valid_types,
-                valid_tags,
-                valid_access,
-                dry_run=dry_run,
-                usage=usage,
-                config=config,
-            )
-        except TransientAPIError as exc:
-            # Issue #193: the Anthropic API was overloaded (429/529) and the
-            # bounded retry was exhausted. Defer to the next run exactly like a
-            # malformed-file failure, but log it distinctly so health reporting
-            # can tell "API was overloaded" (transient) apart from "this file
-            # is broken" (malformed).
-            log.error(
-                "Gave up after %d retries (transient API overload) %s: %s",
-                exc.attempts,
-                raw.ref,
-                type(exc.last_error).__name__,
-            )
-            failed_files.append(raw.ref)
-            continue
-        except Exception:
-            log.exception("Failed to process %s", raw.ref)
-            failed_files.append(raw.ref)
-            continue
+    if batch_mode and not dry_run and client is not None:
+        # Issue #236: phased fan-out via the Messages Batch API. The
+        # synchronous loop below is untouched when the flag is off.
+        from athenaeum.batch import process_batch_run
 
-        total_created += len(result.created)
-        total_updated += len(result.updated)
-        total_escalated += len(result.escalated)
-        total_skipped += len(result.skipped)
+        log.info("Batch mode: tier-2/tier-3 calls via the Messages Batch API")
+        outcome = process_batch_run(
+            raw_files,
+            index,
+            wiki_root,
+            client,
+            valid_types,
+            valid_tags,
+            valid_access,
+            usage=usage,
+            config=config,
+            max_api_calls=max_api_calls,
+        )
+        total_created = outcome.created
+        total_updated = outcome.updated
+        total_escalated = outcome.escalated
+        total_skipped = outcome.skipped
+        failed_files = outcome.failed_refs
+        deferred_refs = outcome.deferred_refs
+    else:
+        for i, raw in enumerate(raw_files):
+            if not dry_run and usage.api_calls >= max_api_calls:
+                log.warning(
+                    "API call budget exhausted (%d/%d) — stopping early",
+                    usage.api_calls,
+                    max_api_calls,
+                )
+                # Issue #220: everything from here on is deferred to the next
+                # run — record it so the manifest + summary can surface it.
+                deferred_refs = [r.ref for r in raw_files[i:]]
+                break
 
-        if not dry_run:
-            raw.path.unlink()
-            log.info("  Deleted: %s", raw.path)
+            log.info("Processing: %s", raw.ref)
+            try:
+                result = process_one(
+                    raw,
+                    index,
+                    wiki_root,
+                    client,
+                    valid_types,
+                    valid_tags,
+                    valid_access,
+                    dry_run=dry_run,
+                    usage=usage,
+                    config=config,
+                )
+            except TransientAPIError as exc:
+                # Issue #193: the Anthropic API was overloaded (429/529) and
+                # the bounded retry was exhausted. Defer to the next run
+                # exactly like a malformed-file failure, but log it distinctly
+                # so health reporting can tell "API was overloaded" (transient)
+                # apart from "this file is broken" (malformed).
+                log.error(
+                    "Gave up after %d retries (transient API overload) %s: %s",
+                    exc.attempts,
+                    raw.ref,
+                    type(exc.last_error).__name__,
+                )
+                failed_files.append(raw.ref)
+                continue
+            except Exception:
+                log.exception("Failed to process %s", raw.ref)
+                failed_files.append(raw.ref)
+                continue
+
+            total_created += len(result.created)
+            total_updated += len(result.updated)
+            total_escalated += len(result.escalated)
+            total_skipped += len(result.skipped)
+
+            if not dry_run:
+                raw.path.unlink()
+                log.info("  Deleted: %s", raw.path)
 
     # Issue #220: a budget-tripped run must be visibly DEGRADED, not "Done".
     # Exit code stays 0 (not a crash — the deferred files are picked up by

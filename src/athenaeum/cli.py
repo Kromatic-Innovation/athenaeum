@@ -140,6 +140,17 @@ def main(argv: list[str] | None = None) -> int:
         "manifest are written either way.",
     )
     run_parser.add_argument(
+        "--batch-mode",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Submit tier-2/tier-3 LLM calls via the Anthropic Messages "
+        "Batch API at a 50%% token discount (issue #236). Latency-tolerant: "
+        "most batches finish within an hour, 24h worst case — intended for "
+        "the nightly run. --no-batch-mode forces the synchronous path even "
+        "when the env/yaml default is on. Default: ATHENAEUM_BATCH_MODE "
+        "env, then athenaeum.yaml librarian.batch_mode, then off.",
+    )
+    run_parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -706,6 +717,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         cluster_only=getattr(args, "cluster_only", False),
         merge_only=getattr(args, "merge_only", False),
         strict_budget=args.strict_budget,
+        batch_mode=args.batch_mode,
     )
 
 
