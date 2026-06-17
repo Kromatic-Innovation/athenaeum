@@ -60,6 +60,14 @@ from athenaeum.cross_scope import (
     resolve_cross_scope_mode,
     resolve_similarity_threshold,
 )
+from athenaeum.fingerprint import (
+    _member_key_str,
+    _pair_text_from_passages,
+    claim_pair_fingerprint,
+    load_resolved_records,
+    normalize_side,
+    record_resolution,
+)
 from athenaeum.models import (
     AutoMemoryFile,
     EscalationItem,
@@ -137,8 +145,7 @@ def _declared_relationship(a: "AutoMemoryFile", b: "AutoMemoryFile") -> str | No
     # the pair falls through to the detector/resolver path.
     if a_supersedes_b and b_supersedes_a:
         log.warning(
-            "merge: mutual supersedes between %r and %r — not a "
-            "declarable relationship",
+            "merge: mutual supersedes between %r and %r — not a declarable relationship",
             a_name,
             b_name,
         )
@@ -240,6 +247,18 @@ def _order_member_paths(
                 used.add(i)
                 break
     return ordered
+
+
+def _result_claim_fingerprint(result: ContradictionResult) -> str | None:
+    """Claim-pair fingerprint for a detector result (issue #249).
+
+    Returns ``None`` when fewer than two conflicting passages are present —
+    no stable pair to fingerprint, so the caller must NOT cache or skip.
+    """
+    passages = result.conflicting_passages or []
+    if len(passages) < 2:
+        return None
+    return claim_pair_fingerprint(passages[0], passages[1], result.conflict_type)
 
 
 # Filesystem prefix that distinguishes auto-memory wiki entries from
@@ -625,9 +644,7 @@ def merge_cluster_row(
             origin_session_id = meta.get("originSessionId") if meta else None
             origin_turn_raw = meta.get("originTurn") if meta else None
             try:
-                origin_turn = (
-                    int(origin_turn_raw) if origin_turn_raw is not None else None
-                )
+                origin_turn = int(origin_turn_raw) if origin_turn_raw is not None else None
             except (TypeError, ValueError):
                 origin_turn = None
             sources_raw = meta.get("sources") if meta else None
@@ -640,8 +657,7 @@ def merge_cluster_row(
                 shim_supersedes = parse_supersedes(meta if meta else None)
             except ValueError as exc:
                 log.warning(
-                    "cluster %s shim: invalid refines/supersedes on %s (%s); "
-                    "treating as empty",
+                    "cluster %s shim: invalid refines/supersedes on %s (%s); treating as empty",
                     cluster_id,
                     resolved,
                     exc,
@@ -675,8 +691,7 @@ def merge_cluster_row(
         # not contribute sources. Inactive files stay on disk for audit.
         if am.is_inactive():
             log.info(
-                "cluster %s: member %s is inactive (superseded/deprecated); "
-                "excluding from compile",
+                "cluster %s: member %s is inactive (superseded/deprecated); excluding from compile",
                 cluster_id,
                 mp,
             )
@@ -853,9 +868,7 @@ def merge_clusters_to_wiki(
         if base in slug_counts:
             slug_counts[base] += 1
             suffix = re.sub(r"[^a-z0-9]+", "-", entry.cluster_id.lower()).strip("-")
-            entry.topic_slug = (
-                f"{base}-{suffix}" if suffix else f"{base}-{slug_counts[base]}"
-            )
+            entry.topic_slug = f"{base}-{suffix}" if suffix else f"{base}-{slug_counts[base]}"
         else:
             slug_counts[base] = 1
 
@@ -892,12 +905,35 @@ def merge_clusters_to_wiki(
     # there dedupes both passes.
     escalated_member_keys: set[tuple[str, ...]] = set()
 
+    # Issue #249: fingerprints already settled as not_a_conflict (auto OR human)
+    # BEFORE this run started. Skipping ONLY this verdict is safe: other verdicts
+    # (keep_a, correct_*, ...) must still flow to tier4_escalate so a prior HUMAN
+    # verdict gets auto-enacted on the new page. load_resolved_records applies
+    # human-supersedes-auto precedence, so a pair later overridden by a human
+    # keep_a is NOT in this set.
+    #
+    # This is the SKIP gate and is frozen at run start on purpose: a pair the
+    # resolver suppresses mid-run must NOT begin short-circuiting later clusters
+    # in the SAME run, or it would silently drop a later cluster that the
+    # resolver would genuinely re-detect (#145/#146 contract — see
+    # ``test_suppressed_pair_does_not_block_later_genuine_detection``). Only a
+    # FUTURE run, reloading the cache fresh, treats this run's clearances as
+    # settled.
+    cleared_not_a_conflict_fps = {
+        fp
+        for fp, rec in load_resolved_records(knowledge_root).items()
+        if (rec.get("action") or rec.get("verdict")) == SUPPRESS_ACTION
+    }
+    # Write-dedup set (issue #249, open-question #2): fingerprints written to the
+    # cache during THIS run. Bounds file growth without feeding the skip gate
+    # above — a mid-run clearance is recorded once but does not suppress later
+    # re-detection of the same pair within the run.
+    recorded_not_a_conflict_fps: set[str] = set()
+
     def _record_pair_keys(members: list[AutoMemoryFile]) -> None:
         for i in range(len(members)):
             for j in range(i + 1, len(members)):
-                covered_pair_keys.add(
-                    tuple(sorted((str(members[i].path), str(members[j].path))))
-                )
+                covered_pair_keys.add(tuple(sorted((str(members[i].path), str(members[j].path)))))
 
     def _emit_escalation(
         entry: MergedWikiEntry,
@@ -952,6 +988,36 @@ def merge_clusters_to_wiki(
         # and escalate as before, so cost stays bounded and an offline
         # run still escalates.
         if proposal is not None and proposal.action == SUPPRESS_ACTION:
+            # Issue #249: record this clearance so future nights skip the Opus
+            # confirmation for this settled pair. Dedup against the in-memory
+            # set bounds file growth (open-question #2). Best-effort — the
+            # writer swallows OSError and must never block the drop below.
+            fp = _result_claim_fingerprint(result)
+            if (
+                fp
+                and fp not in cleared_not_a_conflict_fps
+                and fp not in recorded_not_a_conflict_fps
+            ):
+                passages = result.conflicting_passages or []
+                side_a = normalize_side(passages[0]) if len(passages) >= 2 else None
+                side_b = normalize_side(passages[1]) if len(passages) >= 2 else None
+                mk = _member_key_str(tuple(sorted(result.members_involved)))
+                pt = (
+                    _pair_text_from_passages(passages[0], passages[1])
+                    if len(passages) >= 2
+                    else None
+                )
+                record_resolution(
+                    knowledge_root,
+                    fingerprint=fp,
+                    verdict=SUPPRESS_ACTION,
+                    resolved_by="auto",
+                    side_a_norm=side_a,
+                    side_b_norm=side_b,
+                    member_key=mk,
+                    pair_text=pt,
+                )
+                recorded_not_a_conflict_fps.add(fp)
             log.info(
                 "contradictions: confirmation pass cleared cluster %s "
                 "(resolver verdict not_a_conflict); escalation dropped",
@@ -997,9 +1063,7 @@ def merge_clusters_to_wiki(
             for i, passage in enumerate(result.conflicting_passages, start=1):
                 description_parts.append(f"Passage {i}: {passage}")
         if result.members_involved:
-            description_parts.append(
-                "Members involved: " + ", ".join(result.members_involved)
-            )
+            description_parts.append("Members involved: " + ", ".join(result.members_involved))
         description = "\n".join(description_parts) or (
             f"Cluster {entry.cluster_id} flagged by contradiction detector."
         )
@@ -1051,6 +1115,24 @@ def merge_clusters_to_wiki(
         nonlocal resolve_calls, resolve_budget_exhausted_logged
         if not result.detected:
             return None
+        # Issue #249: a pair already settled as not_a_conflict (auto or human)
+        # skips the expensive Opus confirmation entirely. Synthesize the
+        # SUPPRESS proposal so existing code drops the escalation (the loop
+        # sets ``suppressed`` and ``_emit_escalation`` returns) WITHOUT
+        # consuming budget or an api_call.
+        fp = _result_claim_fingerprint(result)
+        if fp and fp in cleared_not_a_conflict_fps:
+            log.info(
+                "contradictions: claim-pair already settled as not_a_conflict "
+                "(fingerprint=%s); skipping Opus confirmation (issue #249)",
+                fp,
+            )
+            return ResolutionProposal(
+                recommended_winner="neither",
+                action=SUPPRESS_ACTION,
+                rationale="cached not_a_conflict (issue #249)",
+                confidence=1.0,
+            )
         if resolve_calls >= resolve_budget:
             if not resolve_budget_exhausted_logged:
                 log.warning(
@@ -1060,9 +1142,7 @@ def merge_clusters_to_wiki(
                 )
                 resolve_budget_exhausted_logged = True
             else:
-                log.warning(
-                    "resolutions: budget-exhausted; escalating without proposal"
-                )
+                log.warning("resolutions: budget-exhausted; escalating without proposal")
             return None
         resolve_calls += 1
         if usage is not None and client is not None:
@@ -1112,9 +1192,7 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
-            result = detect_contradictions(
-                filtered, client, config=resolved_config, usage=usage
-            )
+            result = detect_contradictions(filtered, client, config=resolved_config, usage=usage)
             _record_pair_keys(chunk)
             if result.detected and aggregate is None:
                 proposal = _maybe_propose(result, filtered)
@@ -1177,9 +1255,7 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
-            result = detect_contradictions(
-                pair, client, config=resolved_config, usage=usage
-            )
+            result = detect_contradictions(pair, client, config=resolved_config, usage=usage)
             if result.detected:
                 pairs_added_via_similarity += 1
                 # Synthesize a thin escalation entry; we don't have a
@@ -1196,8 +1272,7 @@ def merge_clusters_to_wiki(
                 _emit_escalation(synthetic, result, proposal, members=list(pair))
 
     log.info(
-        "contradictions: mode=%s; haiku_calls=%d; chunks_run=%d; "
-        "pairs_added_via_similarity=%d",
+        "contradictions: mode=%s; haiku_calls=%d; chunks_run=%d; pairs_added_via_similarity=%d",
         mode,
         haiku_calls,
         chunks_run,
