@@ -75,7 +75,7 @@ def _write_am_file(
             if "date" in s:
                 meta_lines.append(f"    date: {s['date']}")
             if "excerpt" in s:
-                meta_lines.append(f"    excerpt: \"{s['excerpt']}\"")
+                meta_lines.append(f'    excerpt: "{s["excerpt"]}"')
     meta_lines.append("---")
     text = "\n".join(meta_lines) + "\n" + body + "\n"
     path.write_text(text, encoding="utf-8")
@@ -111,9 +111,7 @@ def _write_cluster_jsonl(
 def voltaire_merge_root(tmp_path: Path) -> Path:
     """5 voltaire/nanoclaw files + matching cluster JSONL (one cluster, 5 members)."""
     knowledge_root = tmp_path / "knowledge"
-    scope = (
-        knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-voltaire"
-    )
+    scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-voltaire"
 
     specs = [
         ("project_voltaire_nanoclaw.md", "s-aaa", 1, "Voltaire+nanoclaw"),
@@ -527,9 +525,7 @@ def singleton_merge_root(tmp_path: Path) -> Path:
         description="macOS dns",
         origin_session_id="s-dns",
         origin_turn=1,
-        sources=[
-            {"session": "s-dns", "turn": 1, "date": "2026-04-10", "excerpt": "dns"}
-        ],
+        sources=[{"session": "s-dns", "turn": 1, "date": "2026-04-10", "excerpt": "dns"}],
         body="mDNSResponder flakes.",
     )
     _write_am_file(
@@ -539,9 +535,7 @@ def singleton_merge_root(tmp_path: Path) -> Path:
         description="profile",
         origin_session_id="s-prof",
         origin_turn=1,
-        sources=[
-            {"session": "s-prof", "turn": 1, "date": "2026-04-10", "excerpt": "profile"}
-        ],
+        sources=[{"session": "s-prof", "turn": 1, "date": "2026-04-10", "excerpt": "profile"}],
         body="Consultant.",
     )
 
@@ -642,8 +636,7 @@ class TestReadClusterRows:
     def test_reads_canonical_only(self, tmp_path: Path) -> None:
         path = tmp_path / "clusters.jsonl"
         path.write_text(
-            '{"cluster_id":"a","member_paths":["p"]}\n'
-            '{"cluster_id":"b","member_paths":["q"]}\n',
+            '{"cluster_id":"a","member_paths":["p"]}\n{"cluster_id":"b","member_paths":["q"]}\n',
             encoding="utf-8",
         )
         rows = read_cluster_rows(path)
@@ -1022,9 +1015,7 @@ class TestContradictionFixture:
         )
         # Garbled, non-JSON resolver output — _parse_response cannot
         # extract a JSON object, so the fallback proposal is used.
-        malformed_resolver_response = (
-            "I'm sorry, I cannot resolve this contradiction right now."
-        )
+        malformed_resolver_response = "I'm sorry, I cannot resolve this contradiction right now."
 
         def _make_response(text: str) -> MagicMock:
             resp = MagicMock()
@@ -1418,10 +1409,7 @@ class TestRawFilesUntouched:
         voltaire_merge_root: Path,
     ) -> None:
         raw_root = (
-            voltaire_merge_root
-            / "raw"
-            / "auto-memory"
-            / "-Users-tristankromer-Code-voltaire"
+            voltaire_merge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-voltaire"
         )
         before = sorted(p.name for p in raw_root.glob("*.md"))
         merge_clusters_to_wiki(voltaire_merge_root)
@@ -1471,8 +1459,7 @@ class TestClusterShimSelfReferenceLint:
 
         member = tmp_path / "shim_self.md"
         member.write_text(
-            "---\nname: Shim Mem\ntype: feedback\n"
-            "refines:\n  - Shim Mem\n  - Other\n---\nbody\n",
+            "---\nname: Shim Mem\ntype: feedback\nrefines:\n  - Shim Mem\n  - Other\n---\nbody\n",
             encoding="utf-8",
         )
         row = {
@@ -1521,3 +1508,238 @@ class TestClusterShimSelfReferenceLint:
             and str(member) in r.getMessage()
             for r in caplog.records
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #249: incremental confirmation pass — cache not_a_conflict verdicts
+# ---------------------------------------------------------------------------
+
+
+class TestNotAConflictCache:
+    """Issue #249: the nightly confirmation pass caches ``not_a_conflict``
+    verdicts so the expensive Opus confirmation call is skipped for claim
+    pairs already settled as false positives.
+
+    These exercise :func:`merge_clusters_to_wiki` against the
+    ``contradiction_merge_root`` fixture, whose two opposing-guidance files
+    flag a ``prescriptive`` conflict. The detector + resolver are stubbed
+    via a ``MagicMock`` client with a scripted ``side_effect`` — exactly the
+    pattern ``TestContradictionFixture`` uses.
+    """
+
+    # The two passages the detector reports for contradiction_merge_root,
+    # in the resolver's a/b order, plus the conflict type. The fingerprint
+    # is computed over these — keep in sync with the payloads below.
+    PASSAGE_A = "Commit prior-session debris directly to develop."
+    PASSAGE_B = "Park prior-session debris on a WIP branch."
+    CONFLICT_TYPE = "prescriptive"
+
+    DETECTOR_PAYLOAD = (
+        '{"detected": true, "conflict_type": "prescriptive", '
+        '"members_involved": ['
+        '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+        '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+        '"conflicting_passages": ['
+        '"Commit prior-session debris directly to develop.", '
+        '"Park prior-session debris on a WIP branch."], '
+        '"rationale": "One says commit directly; the other says park on WIP."}'
+    )
+    SUPPRESS_PAYLOAD = (
+        '{"recommended_winner": "neither", "action": "not_a_conflict", '
+        '"confidence": 0.91, '
+        '"rationale": "Different-scenario rules; they never both apply.", '
+        '"source_precedence_used": []}'
+    )
+
+    @staticmethod
+    def _make_response(text: str):
+        from unittest.mock import MagicMock
+
+        resp = MagicMock()
+        resp.content = [MagicMock(text=text)]
+        return resp
+
+    @classmethod
+    def _expected_fingerprint(cls) -> str:
+        from athenaeum.fingerprint import claim_pair_fingerprint
+
+        return claim_pair_fingerprint(cls.PASSAGE_A, cls.PASSAGE_B, cls.CONFLICT_TYPE)
+
+    @staticmethod
+    def _cache_rows(knowledge_root: Path) -> list[dict]:
+        path = knowledge_root / "raw" / "_resolved_contradictions.jsonl"
+        if not path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_records_not_a_conflict_on_clear(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """A detected cluster the resolver clears as ``not_a_conflict``
+        writes exactly one cache row (``action=not_a_conflict``,
+        ``resolved_by=auto``) keyed by the claim-pair fingerprint."""
+        from unittest.mock import MagicMock
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+            self._make_response(self.SUPPRESS_PAYLOAD),
+        ]
+
+        merge_clusters_to_wiki(contradiction_merge_root, client=fake_client)
+
+        rows = self._cache_rows(contradiction_merge_root)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["action"] == "not_a_conflict"
+        assert row["resolved_by"] == "auto"
+        assert row["fingerprint"] == self._expected_fingerprint()
+
+    def test_cache_hit_skips_opus_and_drops_escalation(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """Pre-seeding the cache with the pair's ``not_a_conflict``
+        fingerprint must skip the Opus confirmation call entirely and drop
+        the escalation (no pending question written)."""
+        from unittest.mock import MagicMock
+
+        from athenaeum.fingerprint import record_resolution
+
+        record_resolution(
+            contradiction_merge_root,
+            fingerprint=self._expected_fingerprint(),
+            verdict="not_a_conflict",
+            resolved_by="auto",
+        )
+
+        # Only the detector (Haiku) should be called. If the resolver
+        # (Opus) is invoked, side_effect runs dry → StopIteration, which
+        # the test would surface. We additionally assert the call count.
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+        ]
+
+        entries = merge_clusters_to_wiki(contradiction_merge_root, client=fake_client)
+        assert len(entries) == 1
+        # Cache hit → confirmation suppressed → entry not flagged.
+        assert entries[0].contradictions_detected is False
+
+        # Exactly one API call: the detector. No Opus confirmation call.
+        assert fake_client.messages.create.call_count == 1
+
+        wiki = contradiction_merge_root / "wiki"
+        # Escalation dropped → no pending question.
+        assert not (wiki / "_pending_questions.md").exists()
+
+    def test_no_duplicate_cache_rows_on_repeat_run(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """Running the pass a second time must NOT append a second cache
+        row for the same pair (dedup bounds file growth)."""
+        from unittest.mock import MagicMock
+
+        # Run 1: detector + resolver-suppress → records one row.
+        client1 = MagicMock()
+        client1.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+            self._make_response(self.SUPPRESS_PAYLOAD),
+        ]
+        merge_clusters_to_wiki(contradiction_merge_root, client=client1)
+        assert len(self._cache_rows(contradiction_merge_root)) == 1
+
+        # Run 2: cache hit → only the detector runs; no new row appended.
+        client2 = MagicMock()
+        client2.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+        ]
+        merge_clusters_to_wiki(contradiction_merge_root, client=client2)
+
+        rows = self._cache_rows(contradiction_merge_root)
+        assert len(rows) == 1
+        assert client2.messages.create.call_count == 1
+
+    def test_material_edit_reescalates(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """A material edit to a passage changes the fingerprint → cache
+        miss → the resolver IS called for the new pair."""
+        from unittest.mock import MagicMock
+
+        from athenaeum.fingerprint import record_resolution
+
+        # Seed the cache with the ORIGINAL pair's fingerprint.
+        record_resolution(
+            contradiction_merge_root,
+            fingerprint=self._expected_fingerprint(),
+            verdict="not_a_conflict",
+            resolved_by="auto",
+        )
+
+        # Detector now reports a MATERIALLY different passage B → different
+        # fingerprint → not in the cache → resolver must run.
+        edited_detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Stash prior-session debris on a feature branch instead."], '
+            '"rationale": "One says commit; the other says stash on a branch."}'
+        )
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            self._make_response(edited_detector_payload),
+            self._make_response(self.SUPPRESS_PAYLOAD),
+        ]
+
+        merge_clusters_to_wiki(contradiction_merge_root, client=fake_client)
+
+        # Both calls fired: detector AND the Opus confirmation (cache miss).
+        assert fake_client.messages.create.call_count == 2
+
+    def test_human_verdict_not_short_circuited(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """A pair settled by a HUMAN ``keep_a`` verdict is NOT in the
+        ``not_a_conflict`` skip set, so the resolver still runs (the verdict
+        can flow to tier4_escalate for enactment). Issue #249's scoping
+        refinement: only ``not_a_conflict`` verdicts short-circuit Opus."""
+        from unittest.mock import MagicMock
+
+        from athenaeum.fingerprint import record_resolution
+
+        # Human keep_a verdict on the SAME pair — NOT a not_a_conflict clear.
+        record_resolution(
+            contradiction_merge_root,
+            fingerprint=self._expected_fingerprint(),
+            verdict="keep_a",
+            resolved_by="human",
+        )
+
+        keep_payload = (
+            '{"recommended_winner": "a", "action": "keep_a", '
+            '"confidence": 0.92, "rationale": "Real conflict; keep a.", '
+            '"source_precedence_used": []}'
+        )
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+            self._make_response(keep_payload),
+        ]
+
+        merge_clusters_to_wiki(contradiction_merge_root, client=fake_client)
+
+        # Resolver IS still called (detector + Opus) — the human verdict is
+        # not in the not_a_conflict skip set.
+        assert fake_client.messages.create.call_count == 2
