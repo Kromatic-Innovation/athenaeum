@@ -492,6 +492,107 @@ class TestTokenUsage:
         assert abs(usage.estimated_cost_usd - 1.50) < 0.001
 
 
+class TestPerModelCostAttribution:
+    """#247: per-model cost attribution in ``estimated_cost_usd``.
+
+    Tokens tagged with a known model price at that model's rate; untagged
+    or unknown-model tokens fall back to the blended rate. The existing
+    cache and batch multipliers compose per model.
+    """
+
+    def test_opus_tagged_traffic_uses_opus_rates(self) -> None:
+        """RED on blended-only code: resolver traffic tagged
+        ``claude-opus-4-7`` must price at Opus rates (~3.3x blended)."""
+        from athenaeum.models import TokenUsage
+
+        tagged = TokenUsage()
+        tagged.add(1_000_000, 1_000_000, model="claude-opus-4-7")
+        # Opus: $5/M input + $25/M output = $30.00
+        assert abs(tagged.estimated_cost_usd - 30.0) < 0.01
+
+        blended = TokenUsage()
+        blended.add(1_000_000, 1_000_000)
+        # Blended: $1.50 + $7.50 = $9.00; Opus is ~3.33x.
+        assert (
+            abs(tagged.estimated_cost_usd / blended.estimated_cost_usd - 3.333) < 0.01
+        )
+
+    def test_sonnet_and_haiku_dated_ids_resolve_by_prefix(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        sonnet = TokenUsage()
+        sonnet.add(1_000_000, 1_000_000, model="claude-sonnet-4-6")
+        # Sonnet: $3/M input + $15/M output = $18.00
+        assert abs(sonnet.estimated_cost_usd - 18.0) < 0.01
+
+        haiku = TokenUsage()
+        haiku.add(1_000_000, 1_000_000, model="claude-haiku-4-5-20251001")
+        # Haiku: $1/M input + $5/M output = $6.00
+        assert abs(haiku.estimated_cost_usd - 6.0) < 0.01
+
+    def test_unknown_model_falls_back_to_blended(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(1_000_000, 1_000_000, model="some-proxy-model-x")
+        # Unknown id => blended $9.00
+        assert abs(usage.estimated_cost_usd - 9.0) < 0.01
+
+    def test_untagged_falls_back_to_blended(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(1_000_000, 1_000_000)  # no model kwarg
+        assert abs(usage.estimated_cost_usd - 9.0) < 0.01
+
+    def test_mixed_tagged_and_untagged(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(1_000_000, 1_000_000, model="claude-opus-4-7")  # $30
+        usage.add(1_000_000, 1_000_000)  # blended $9
+        assert abs(usage.estimated_cost_usd - 39.0) < 0.01
+
+    def test_cache_multipliers_compose_with_per_model_rates(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(
+            1_000_000,
+            0,
+            cache_creation_input_tokens=1_000_000,
+            cache_read_input_tokens=1_000_000,
+            model="claude-opus-4-7",
+        )
+        # Opus input $5/M: $5 input + $6.25 cache-write (1.25x)
+        # + $0.50 cache-read (0.1x) = $11.75
+        assert abs(usage.estimated_cost_usd - 11.75) < 0.001
+
+    def test_batch_discount_composes_with_per_model_rates(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add_batch_tokens(1_000_000, 1_000_000, model="claude-opus-4-7")
+        # Opus $30 at 50% batch discount = $15.00
+        assert abs(usage.estimated_cost_usd - 15.0) < 0.01
+
+    def test_add_tokens_threads_model(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add_tokens(1_000_000, 1_000_000, model="claude-opus-4-7")
+        assert usage.api_calls == 0
+        assert abs(usage.estimated_cost_usd - 30.0) < 0.01
+
+    def test_default_constructors_stay_valid(self) -> None:
+        """Additive change: existing positional constructions unchanged."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage(input_tokens=10, output_tokens=5, api_calls=1)
+        assert usage.input_tokens == 10
+        assert usage.estimated_cost_usd > 0
+
+
 class TestCacheUsageCounts:
     """Direct unit coverage for ``cache_usage_counts`` (#239 nit b)."""
 

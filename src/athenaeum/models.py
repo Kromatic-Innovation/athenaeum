@@ -401,6 +401,40 @@ class EscalationItem:
     members: list[str] = field(default_factory=list)
 
 
+# Per-model rate table (issue #247). Maps a model-id PREFIX to its
+# (input, output) price in USD per million tokens. Matched by LONGEST
+# prefix so dated ids (``claude-haiku-4-5-20251001``) resolve to the
+# right family. Source: Anthropic public pricing
+# (https://www.anthropic.com/pricing), as of 2026-06-17.
+_MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-opus-4": (5.0, 25.0),
+    "claude-sonnet-4": (3.0, 15.0),
+    "claude-haiku-4": (1.0, 5.0),
+}
+
+# Blended fallback rate (USD per million tokens) for tokens accumulated
+# WITHOUT a model tag, or tagged with an id that matches no prefix above
+# (e.g. routed via a proxy). Matches the historical pre-#247 estimate.
+_BLENDED_INPUT_USD_PER_MTOK = 1.50
+_BLENDED_OUTPUT_USD_PER_MTOK = 7.50
+
+
+def _rates_for_model(model: str | None) -> tuple[float, float]:
+    """Return ``(input, output)`` USD/MTok for *model* (longest-prefix match).
+
+    Untagged (``None``) or unknown ids fall back to the blended rate.
+    """
+    if model:
+        best: tuple[float, float] | None = None
+        best_len = -1
+        for prefix, rates in _MODEL_RATES_USD_PER_MTOK.items():
+            if model.startswith(prefix) and len(prefix) > best_len:
+                best, best_len = rates, len(prefix)
+        if best is not None:
+            return best
+    return (_BLENDED_INPUT_USD_PER_MTOK, _BLENDED_OUTPUT_USD_PER_MTOK)
+
+
 @dataclass
 class TokenUsage:
     """Accumulated API token usage for a pipeline run."""
@@ -421,6 +455,49 @@ class TokenUsage:
     batch_output_tokens: int = 0
     batch_cache_creation_input_tokens: int = 0
     batch_cache_read_input_tokens: int = 0
+    # Per-model attribution (issue #247). Keyed by the model-id string the
+    # call site passed to ``messages.create``; each value tracks the same
+    # six counters as the scalar fields above but for THAT model's share.
+    # The scalar fields stay authoritative for totals/run-summary; this
+    # dict is the additive subset that carries a model tag, letting
+    # ``estimated_cost_usd`` price tagged tokens per model and fall back to
+    # the blended rate for the untagged remainder. Excluded from ``repr``
+    # to keep run-summary logging concise.
+    per_model: dict[str, dict[str, int]] = field(default_factory=dict, repr=False)
+
+    def _tag_model(
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation_input_tokens: int,
+        cache_read_input_tokens: int,
+        *,
+        is_batch: bool,
+    ) -> None:
+        """Accumulate this call's counts into the per-model subset (#247)."""
+        bucket = self.per_model.setdefault(
+            model,
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "batch_input_tokens": 0,
+                "batch_output_tokens": 0,
+                "batch_cache_creation_input_tokens": 0,
+                "batch_cache_read_input_tokens": 0,
+            },
+        )
+        bucket["input_tokens"] += input_tokens
+        bucket["output_tokens"] += output_tokens
+        bucket["cache_creation_input_tokens"] += cache_creation_input_tokens
+        bucket["cache_read_input_tokens"] += cache_read_input_tokens
+        if is_batch:
+            bucket["batch_input_tokens"] += input_tokens
+            bucket["batch_output_tokens"] += output_tokens
+            bucket["batch_cache_creation_input_tokens"] += cache_creation_input_tokens
+            bucket["batch_cache_read_input_tokens"] += cache_read_input_tokens
 
     def add(
         self,
@@ -428,13 +505,20 @@ class TokenUsage:
         output_tokens: int,
         cache_creation_input_tokens: int = 0,
         cache_read_input_tokens: int = 0,
+        model: str | None = None,
     ) -> None:
-        """Record tokens from one API call."""
+        """Record tokens from one API call.
+
+        *model* (issue #247) is the serving model-id; when given, the
+        counts are additionally attributed to that model for per-model
+        cost estimation. Untagged calls fall back to the blended rate.
+        """
         self.add_tokens(
             input_tokens,
             output_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
+            model=model,
         )
         self.api_calls += 1
 
@@ -444,6 +528,7 @@ class TokenUsage:
         output_tokens: int,
         cache_creation_input_tokens: int = 0,
         cache_read_input_tokens: int = 0,
+        model: str | None = None,
     ) -> None:
         """Accumulate token counters WITHOUT counting an API call (#239).
 
@@ -452,11 +537,23 @@ class TokenUsage:
         resolver loop and the #188 reresolve pass): the call site bumps
         ``api_calls`` before the request; the callee lands the response's
         token + cache counts here once they are known.
+
+        *model* (issue #247) optionally tags the serving model-id for
+        per-model cost attribution.
         """
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.cache_creation_input_tokens += cache_creation_input_tokens
         self.cache_read_input_tokens += cache_read_input_tokens
+        if model:
+            self._tag_model(
+                model,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                is_batch=False,
+            )
 
     def add_batch_tokens(
         self,
@@ -464,6 +561,7 @@ class TokenUsage:
         output_tokens: int,
         cache_creation_input_tokens: int = 0,
         cache_read_input_tokens: int = 0,
+        model: str | None = None,
     ) -> None:
         """Accumulate token counters from a Batch API result (#236).
 
@@ -474,7 +572,14 @@ class TokenUsage:
         call sites count one attempt per request at batch-assembly time
         (budget enforcement point, mirroring :meth:`add_tokens`'s
         attempt-counting contract from #239).
+
+        *model* (issue #247) optionally tags the serving model-id; the
+        batch share is attributed per model so the 50% discount composes
+        with that model's rates.
         """
+        # Accumulate into the scalar + per-model counters once (untagged
+        # remainder stays blended); add_tokens with model=None here so the
+        # batch share is tagged via _tag_model below with is_batch=True.
         self.add_tokens(
             input_tokens,
             output_tokens,
@@ -485,47 +590,126 @@ class TokenUsage:
         self.batch_output_tokens += output_tokens
         self.batch_cache_creation_input_tokens += cache_creation_input_tokens
         self.batch_cache_read_input_tokens += cache_read_input_tokens
+        if model:
+            self._tag_model(
+                model,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                is_batch=True,
+            )
 
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
-    @property
-    def estimated_cost_usd(self) -> float:
-        """Estimate cost using Haiku/Sonnet blended rates.
-
-        Uses a blended rate of $1.50/M input and $7.50/M output for ALL
-        calls regardless of which model served them. This UNDER-states
-        cost when higher-priced models dominate traffic — the default
-        Opus resolver ($5/M input, $25/M output) bills at roughly 3.3x
-        the blended rate, so resolver-heavy runs are under-estimated by
-        about that factor. Accurate per-model attribution would require
-        tagging each call's token counts with the serving model, which
-        ``TokenUsage`` does not track.
+    @staticmethod
+    def _cost_for(
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation_input_tokens: int,
+        cache_read_input_tokens: int,
+        batch_input_tokens: int,
+        batch_output_tokens: int,
+        batch_cache_creation_input_tokens: int,
+        batch_cache_read_input_tokens: int,
+        rates_usd_per_mtok: tuple[float, float],
+    ) -> float:
+        """Price one model's share at *rates*, composing cache + batch (#247).
 
         ``input_tokens`` from the API excludes cached tokens, so the cache
-        counters are folded in at the documented multipliers (#239):
-        cache writes bill at 1.25x the input rate, cache reads at ~0.1x.
-
-        Batch API traffic (#236) bills at 50% of the synchronous rate on
-        all token usage; the batch-attributed counters subtract half of
-        their share from the synchronous estimate.
+        counters are folded in at the documented multipliers (#239): cache
+        writes bill at 1.25x the input rate, cache reads at ~0.1x. Batch
+        API traffic (#236) bills at 50% of the synchronous rate, so half of
+        the batch-attributed share is subtracted.
         """
-        input_rate = 1.50 / 1_000_000
-        output_rate = 7.50 / 1_000_000
+        input_rate = rates_usd_per_mtok[0] / 1_000_000
+        output_rate = rates_usd_per_mtok[1] / 1_000_000
         cost = (
-            self.input_tokens * input_rate
-            + self.output_tokens * output_rate
-            + self.cache_creation_input_tokens * input_rate * 1.25
-            + self.cache_read_input_tokens * input_rate * 0.10
+            input_tokens * input_rate
+            + output_tokens * output_rate
+            + cache_creation_input_tokens * input_rate * 1.25
+            + cache_read_input_tokens * input_rate * 0.10
         )
         batch_cost = (
-            self.batch_input_tokens * input_rate
-            + self.batch_output_tokens * output_rate
-            + self.batch_cache_creation_input_tokens * input_rate * 1.25
-            + self.batch_cache_read_input_tokens * input_rate * 0.10
+            batch_input_tokens * input_rate
+            + batch_output_tokens * output_rate
+            + batch_cache_creation_input_tokens * input_rate * 1.25
+            + batch_cache_read_input_tokens * input_rate * 0.10
         )
         return cost - 0.5 * batch_cost
+
+    @property
+    def estimated_cost_usd(self) -> float:
+        """Estimate cost with per-model attribution (issue #247).
+
+        Tokens tagged with a known model (via the ``model=`` kwarg on the
+        accumulation methods) price at that model's rates from
+        :data:`_MODEL_RATES_USD_PER_MTOK`, matched by longest id prefix.
+        Tokens accumulated WITHOUT a model tag — or tagged with an id that
+        matches no known prefix (e.g. routed through a proxy) — fall back
+        to the blended rate ($1.50/M input, $7.50/M output). The cache
+        multipliers (#239) and the Batch API 50% discount (#236) compose
+        unchanged per model.
+
+        Caveat: untagged/unknown-model traffic is still only approximated
+        at the blended rate; it cannot be attributed to a specific model.
+        """
+        total = 0.0
+        # Per-model tagged share at each model's own rates.
+        tagged = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "batch_input_tokens": 0,
+            "batch_output_tokens": 0,
+            "batch_cache_creation_input_tokens": 0,
+            "batch_cache_read_input_tokens": 0,
+        }
+        for model, bucket in self.per_model.items():
+            for key in tagged:
+                tagged[key] += bucket.get(key, 0)
+            total += self._cost_for(
+                bucket.get("input_tokens", 0),
+                bucket.get("output_tokens", 0),
+                bucket.get("cache_creation_input_tokens", 0),
+                bucket.get("cache_read_input_tokens", 0),
+                bucket.get("batch_input_tokens", 0),
+                bucket.get("batch_output_tokens", 0),
+                bucket.get("batch_cache_creation_input_tokens", 0),
+                bucket.get("batch_cache_read_input_tokens", 0),
+                _rates_for_model(model),
+            )
+        # Untagged remainder (scalar totals minus the tagged subset) priced
+        # at the blended rate. Clamped at 0 so a hypothetical double-count
+        # can never make the remainder negative.
+        blended_rates = (_BLENDED_INPUT_USD_PER_MTOK, _BLENDED_OUTPUT_USD_PER_MTOK)
+        total += self._cost_for(
+            max(self.input_tokens - tagged["input_tokens"], 0),
+            max(self.output_tokens - tagged["output_tokens"], 0),
+            max(
+                self.cache_creation_input_tokens
+                - tagged["cache_creation_input_tokens"],
+                0,
+            ),
+            max(self.cache_read_input_tokens - tagged["cache_read_input_tokens"], 0),
+            max(self.batch_input_tokens - tagged["batch_input_tokens"], 0),
+            max(self.batch_output_tokens - tagged["batch_output_tokens"], 0),
+            max(
+                self.batch_cache_creation_input_tokens
+                - tagged["batch_cache_creation_input_tokens"],
+                0,
+            ),
+            max(
+                self.batch_cache_read_input_tokens
+                - tagged["batch_cache_read_input_tokens"],
+                0,
+            ),
+            blended_rates,
+        )
+        return total
 
 
 def cache_usage_counts(response: object) -> tuple[int, int, int, int]:

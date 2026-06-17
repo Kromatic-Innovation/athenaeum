@@ -5,6 +5,26 @@ All notable changes to Athenaeum are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Per-model cost attribution in `TokenUsage.estimated_cost_usd` (#247).**
+  Token-accumulation methods (`TokenUsage.add` / `add_tokens` /
+  `add_batch_tokens`) gain an optional `model=` keyword; the call sites that
+  know the serving model (tier-2/tier-3 in `tiers.py`, the C4 detector in
+  `contradictions.py`, the resolver in `resolutions.py`, and the Batch API
+  consumer in `batch.py`) thread it through. The estimate now prices tokens
+  tagged with a known model at that model's rates from a module-level table
+  (`claude-opus-4` → $5/$25, `claude-sonnet-4` → $3/$15, `claude-haiku-4` →
+  $1/$5 per MTok; longest-prefix match so dated ids resolve), composing the
+  existing cache-write (1.25x), cache-read (0.1x), and Batch API (50%)
+  multipliers per model. Untagged or unknown-model traffic falls back to the
+  blended $1.50/$7.50 rate, so Opus-heavy resolver runs — previously
+  under-estimated ~3.3x — now bill at Opus rates. The change is additive:
+  the scalar counters keep their current totals and existing `TokenUsage`
+  constructors stay valid. No new config surface; rates are code constants.
+
 ## [0.8.0] - 2026-06-12
 
 ### Added
