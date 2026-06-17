@@ -111,7 +111,9 @@ def _write_cluster_jsonl(
 def voltaire_merge_root(tmp_path: Path) -> Path:
     """5 voltaire/nanoclaw files + matching cluster JSONL (one cluster, 5 members)."""
     knowledge_root = tmp_path / "knowledge"
-    scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-voltaire"
+    scope = (
+        knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-voltaire"
+    )
 
     specs = [
         ("project_voltaire_nanoclaw.md", "s-aaa", 1, "Voltaire+nanoclaw"),
@@ -525,7 +527,9 @@ def singleton_merge_root(tmp_path: Path) -> Path:
         description="macOS dns",
         origin_session_id="s-dns",
         origin_turn=1,
-        sources=[{"session": "s-dns", "turn": 1, "date": "2026-04-10", "excerpt": "dns"}],
+        sources=[
+            {"session": "s-dns", "turn": 1, "date": "2026-04-10", "excerpt": "dns"}
+        ],
         body="mDNSResponder flakes.",
     )
     _write_am_file(
@@ -535,7 +539,9 @@ def singleton_merge_root(tmp_path: Path) -> Path:
         description="profile",
         origin_session_id="s-prof",
         origin_turn=1,
-        sources=[{"session": "s-prof", "turn": 1, "date": "2026-04-10", "excerpt": "profile"}],
+        sources=[
+            {"session": "s-prof", "turn": 1, "date": "2026-04-10", "excerpt": "profile"}
+        ],
         body="Consultant.",
     )
 
@@ -1015,7 +1021,9 @@ class TestContradictionFixture:
         )
         # Garbled, non-JSON resolver output — _parse_response cannot
         # extract a JSON object, so the fallback proposal is used.
-        malformed_resolver_response = "I'm sorry, I cannot resolve this contradiction right now."
+        malformed_resolver_response = (
+            "I'm sorry, I cannot resolve this contradiction right now."
+        )
 
         def _make_response(text: str) -> MagicMock:
             resp = MagicMock()
@@ -1409,7 +1417,10 @@ class TestRawFilesUntouched:
         voltaire_merge_root: Path,
     ) -> None:
         raw_root = (
-            voltaire_merge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-voltaire"
+            voltaire_merge_root
+            / "raw"
+            / "auto-memory"
+            / "-Users-tristankromer-Code-voltaire"
         )
         before = sorted(p.name for p in raw_root.glob("*.md"))
         merge_clusters_to_wiki(voltaire_merge_root)
@@ -1513,6 +1524,22 @@ class TestClusterShimSelfReferenceLint:
 # ---------------------------------------------------------------------------
 # Issue #249: incremental confirmation pass — cache not_a_conflict verdicts
 # ---------------------------------------------------------------------------
+
+
+class _StubEmbedder:
+    """Deterministic embedding provider for the similarity-sweep test.
+
+    Mirrors ``test_cross_scope._StubEmbedder``: the constructor takes
+    ``{recall_index_id: vector}`` and ``fetch_embeddings`` returns the
+    intersection of requested ids and the stored map.
+    """
+
+    def __init__(self, embeddings: dict[str, list[float]]) -> None:
+        self._embeddings = embeddings
+
+    def fetch_embeddings(self, ids: object, cache_dir: Path) -> dict[str, list[float]]:
+        del cache_dir
+        return {i: self._embeddings[i] for i in ids if i in self._embeddings}
 
 
 class TestNotAConflictCache:
@@ -1743,3 +1770,195 @@ class TestNotAConflictCache:
         # Resolver IS still called (detector + Opus) — the human verdict is
         # not in the not_a_conflict skip set.
         assert fake_client.messages.create.call_count == 2
+
+    def test_cosmetic_edit_stays_cached(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """The mirror of ``test_material_edit_reescalates``: a COSMETIC edit
+        (whitespace + case churn, substance identical) does NOT change the
+        fingerprint, so the cache still hits → the Opus confirmation is
+        skipped and no pending question is written.
+
+        Together with ``test_material_edit_reescalates`` this pins the
+        material-vs-cosmetic boundary at the MERGE layer, not just in the
+        ``fingerprint.py`` unit tests.
+        """
+        from unittest.mock import MagicMock
+
+        from athenaeum.fingerprint import record_resolution
+
+        # Seed the cache with the ORIGINAL pair's fingerprint.
+        record_resolution(
+            contradiction_merge_root,
+            fingerprint=self._expected_fingerprint(),
+            verdict="not_a_conflict",
+            resolved_by="auto",
+        )
+
+        # Detector reports the SAME claims but re-cased and re-spaced —
+        # `_normalize_claim` (casefold + whitespace collapse) maps these to
+        # the same normalized strings, so the fingerprint is unchanged → the
+        # cache still hits.
+        cosmetic_detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"  COMMIT   prior-session debris   directly to DEVELOP.  ", '
+            '"park PRIOR-session   debris  on a WIP   branch."], '
+            '"rationale": "Same claims, only whitespace/case churn."}'
+        )
+        # If the cache hit fails, the resolver would be consulted and the
+        # one-element side_effect list runs dry → StopIteration surfaces.
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            self._make_response(cosmetic_detector_payload),
+        ]
+
+        entries = merge_clusters_to_wiki(contradiction_merge_root, client=fake_client)
+        assert len(entries) == 1
+        # Cache still hit (cosmetic-stable fingerprint) → entry not flagged.
+        assert entries[0].contradictions_detected is False
+
+        # Exactly one API call: the detector. No Opus confirmation call —
+        # `propose_resolution` was never reached.
+        assert fake_client.messages.create.call_count == 1
+
+        wiki = contradiction_merge_root / "wiki"
+        assert not (wiki / "_pending_questions.md").exists()
+
+    def test_similarity_sweep_cache_hit_skips_opus(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The similarity-sweep branch routes through the SAME
+        ``_maybe_propose`` cache gate as the per-cluster path: a swept pair
+        whose ``not_a_conflict`` fingerprint is pre-seeded skips the Opus
+        confirmation call and produces no pending question.
+
+        Two members live in DIFFERENT scopes as singleton clusters, so the
+        per-cluster pass makes zero detector calls — the only detection comes
+        from the similarity sweep (mode=``similarity``). This guards against a
+        future refactor that bypasses the shared chokepoint on the sweep path.
+        """
+        from unittest.mock import MagicMock
+
+        from athenaeum import cross_scope as cs
+        from athenaeum.fingerprint import claim_pair_fingerprint, record_resolution
+
+        monkeypatch.setenv("ATHENAEUM_CROSS_SCOPE_MODE", "similarity")
+
+        # Two singleton clusters in different scope branches (no ancestor
+        # link) — the sweep is the only path that pairs them.
+        knowledge_root = tmp_path / "knowledge"
+        scope_a = (
+            knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-foo"
+        )
+        scope_b = (
+            knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-bar"
+        )
+        _write_am_file(
+            scope_a,
+            "feedback_commit_directly.md",
+            frontmatter_name="Commit directly",
+            description="commit directly",
+            origin_session_id="s-foo",
+            origin_turn=1,
+            sources=[
+                {"session": "s-foo", "turn": 1, "date": "2026-04-10", "excerpt": "x"}
+            ],
+            body=self.PASSAGE_A,
+        )
+        _write_am_file(
+            scope_b,
+            "feedback_park_on_wip.md",
+            frontmatter_name="Park on WIP",
+            description="park on WIP",
+            origin_session_id="s-bar",
+            origin_turn=1,
+            sources=[
+                {"session": "s-bar", "turn": 1, "date": "2026-04-11", "excerpt": "y"}
+            ],
+            body=self.PASSAGE_B,
+        )
+        _write_cluster_jsonl(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "foo-0001",
+                    "member_paths": [
+                        "-Users-tristankromer-Code-foo/feedback_commit_directly.md"
+                    ],
+                    "centroid_score": 1.0,
+                    "rationale": "singleton",
+                },
+                {
+                    "cluster_id": "bar-0001",
+                    "member_paths": [
+                        "-Users-tristankromer-Code-bar/feedback_park_on_wip.md"
+                    ],
+                    "centroid_score": 1.0,
+                    "rationale": "singleton",
+                },
+            ],
+        )
+        _write_config(knowledge_root)
+
+        # Pre-seed the cache with the swept pair's not_a_conflict fingerprint.
+        fingerprint = claim_pair_fingerprint(
+            self.PASSAGE_A, self.PASSAGE_B, self.CONFLICT_TYPE
+        )
+        record_resolution(
+            knowledge_root,
+            fingerprint=fingerprint,
+            verdict="not_a_conflict",
+            resolved_by="auto",
+        )
+
+        # Inject a deterministic embedder so the sweep returns the pair
+        # (mirrors test_cross_scope.TestModeWiring).
+        a_id = "auto-memory/-Users-tristankromer-Code-foo/feedback_commit_directly.md"
+        b_id = "auto-memory/-Users-tristankromer-Code-bar/feedback_park_on_wip.md"
+        embedder = _StubEmbedder({a_id: [1.0, 0.0], b_id: [0.99, 0.05]})
+        original_pairs = cs.cross_scope_similarity_pairs
+
+        def patched_pairs(*args: object, **kwargs: object):
+            kwargs["embedding_provider"] = embedder
+            return original_pairs(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "athenaeum.merge.cross_scope_similarity_pairs",
+            patched_pairs,
+        )
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code-foo/feedback_commit_directly.md", '
+            '"-Users-tristankromer-Code-bar/feedback_park_on_wip.md"], '
+            '"conflicting_passages": ['
+            f'"{self.PASSAGE_A}", '
+            f'"{self.PASSAGE_B}"], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        # Only the sweep's detector (Haiku) should fire. If the resolver
+        # (Opus) is reached, the one-element side_effect list runs dry →
+        # StopIteration surfaces.
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            self._make_response(detector_payload),
+        ]
+
+        merge_clusters_to_wiki(knowledge_root, client=fake_client)
+
+        # Singletons skip per-cluster detection; the sweep makes the single
+        # detector call. The cache hit at _maybe_propose skips the Opus
+        # confirmation entirely.
+        assert fake_client.messages.create.call_count == 1
+
+        wiki = knowledge_root / "wiki"
+        # Sweep escalation dropped by the shared cache gate → no question.
+        assert not (wiki / "_pending_questions.md").exists()
