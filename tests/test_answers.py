@@ -718,6 +718,197 @@ class TestSourceWriteBack:
         assert len(list((raw_root / "answers").glob("*.md"))) == 1
 
 
+def _freetext_proposer_client(
+    new_body: str,
+    *,
+    path_str: str,
+    input_tokens: int = 120,
+    output_tokens: int = 40,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+):
+    """Fake Anthropic client for the free-text source-edit proposer.
+
+    Returns a JSON ``edits`` payload naming ``path_str`` with the supplied
+    ``new_body``, and a ``.usage`` carrying real ints so
+    :func:`athenaeum.models.cache_usage_counts` accumulates non-zero counts
+    (a bare ``MagicMock`` would coerce to 0 via the int-guard).
+    """
+    import json
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    response = MagicMock()
+    payload = json.dumps(
+        {"edits": [{"path": path_str, "changed": True, "new_body": new_body}]}
+    )
+    response.content = [MagicMock(text=payload)]
+    response.usage = MagicMock(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+    )
+    client.messages.create.return_value = response
+    return client
+
+
+class TestIngestAnswersUsageAccounting:
+    """Issue #248: the ingest-answers free-text path is metered.
+
+    The free-text proposer (the only LLM call on this path) accumulates its
+    response's token + cache counts into a run-level ``TokenUsage`` and the
+    call site counts one ``api_calls`` attempt. A one-line cost summary is
+    emitted when >= 1 API call was made, and absent otherwise.
+    """
+
+    def test_freetext_proposer_accumulates_tokens_and_cache(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        """RED on current code: tokens/cache flow into the threaded usage."""
+        from athenaeum.models import TokenUsage
+        from athenaeum.resolutions import propose_freetext_source_edits
+
+        src = raw_root / "auto-memory" / "scope" / "reference_acme.md"
+        _write_source(src, "Acme is Series A as of 2024.\n")
+        _, body = (
+            src.read_text(encoding="utf-8").split("---\n\n", 1)
+            if "---\n\n" in src.read_text(encoding="utf-8")
+            else ("", "Acme is Series A as of 2024.\n")
+        )
+
+        client = _freetext_proposer_client(
+            "Acme is Series B as of 2026.\n",
+            path_str=str(src),
+            input_tokens=120,
+            output_tokens=40,
+            cache_creation_input_tokens=15,
+            cache_read_input_tokens=7,
+        )
+        usage = TokenUsage()
+        proposed = propose_freetext_source_edits(
+            "Use the 2026 figure.",
+            [(src, body)],
+            ["Acme is Series A as of 2024."],
+            client,
+            None,
+            usage=usage,
+        )
+
+        assert proposed  # the proposer returned an edit
+        assert usage.input_tokens == 120
+        assert usage.output_tokens == 40
+        assert usage.cache_creation_input_tokens == 15
+        assert usage.cache_read_input_tokens == 7
+        # #239 convention: the callee never bumps api_calls (caller counts).
+        assert usage.api_calls == 0
+
+    def test_callee_does_not_bump_api_calls(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        """Mirror the #239 convention test: the proposer counts no attempt."""
+        from athenaeum.models import TokenUsage
+        from athenaeum.resolutions import propose_freetext_source_edits
+
+        src = raw_root / "auto-memory" / "scope" / "reference_acme.md"
+        _write_source(src, "Acme is Series A.\n")
+        client = _freetext_proposer_client("Acme is Series B.\n", path_str=str(src))
+        usage = TokenUsage()
+        propose_freetext_source_edits(
+            "Use the newer value.",
+            [(src, "Acme is Series A.\n")],
+            [],
+            client,
+            None,
+            usage=usage,
+        )
+        assert usage.api_calls == 0
+
+    def test_call_without_usage_keeps_current_behavior(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        """External callers omitting ``usage`` are unaffected (keyword-default)."""
+        from athenaeum.resolutions import propose_freetext_source_edits
+
+        src = raw_root / "auto-memory" / "scope" / "reference_acme.md"
+        _write_source(src, "Acme is Series A.\n")
+        client = _freetext_proposer_client("Acme is Series B.\n", path_str=str(src))
+        # No usage kwarg — must not raise and must still return the edit.
+        proposed = propose_freetext_source_edits(
+            "Use the newer value.",
+            [(src, "Acme is Series A.\n")],
+            [],
+            client,
+            None,
+        )
+        assert proposed[src] == "Acme is Series B.\n"
+
+    def test_ingest_run_accumulates_and_logs_summary(
+        self,
+        pending_path: Path,
+        raw_root: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """End-to-end: a free-text ingest run meters spend and logs a summary."""
+        import logging
+
+        src_rel = "auto-memory/scope/reference_acme.md"
+        src = raw_root / src_rel
+        _write_source(src, "Acme is Series A as of 2024.\n")
+
+        block = _source_block(
+            source=src_rel,
+            answer="Use the 2026 figure going forward.",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        client = _freetext_proposer_client(
+            "Acme is Series B as of 2026.\n",
+            path_str=str(src),
+            input_tokens=200,
+            output_tokens=60,
+            cache_creation_input_tokens=10,
+            cache_read_input_tokens=5,
+        )
+        caplog.set_level(logging.INFO, logger="athenaeum.answers")
+
+        count = ingest_answers(pending_path, raw_root, client=client)
+        assert count == 1
+
+        messages = [r.getMessage() for r in caplog.records]
+        summary = [m for m in messages if m.startswith("Token usage:")]
+        assert summary, messages
+        line = summary[0]
+        assert "1 API calls" in line
+        assert "200 input + 60 output = 260 total" in line
+        assert "(cache: 10 written, 5 read)" in line
+        assert "estimated)" in line
+
+    def test_no_summary_when_no_api_call(
+        self,
+        pending_path: Path,
+        raw_root: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A run that makes no API call emits no summary line."""
+        import logging
+
+        src_rel = "auto-memory/scope/reference_acme.md"
+        src = raw_root / src_rel
+        _write_source(src, "Acme is Series A as of 2024.\n")
+
+        # An enacting verdict (archive) never calls the proposer; client=None
+        # also guarantees no API call.
+        block = _source_block(source=src_rel, answer="archive\nNo longer relevant.")
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        caplog.set_level(logging.INFO, logger="athenaeum.answers")
+
+        count = ingest_answers(pending_path, raw_root, client=None)
+        assert count == 1
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any(m.startswith("Token usage:") for m in messages), messages
+
+
 def test_corrected_source_no_longer_regenerates_conflict(
     pending_path: Path, raw_root: Path
 ) -> None:
