@@ -70,13 +70,19 @@ def _get_write_model(config: dict[str, Any] | None = None) -> str:
 def _record_usage(
     response: anthropic.types.Message,
     usage: TokenUsage | None,
+    model: str | None = None,
 ) -> None:
-    """Record token usage from an API response if tracking is enabled."""
+    """Record token usage from an API response if tracking is enabled.
+
+    *model* (issue #247) tags the serving model-id so
+    ``TokenUsage.estimated_cost_usd`` can attribute cost per model;
+    untagged calls fall back to the blended rate.
+    """
     if usage is not None and hasattr(response, "usage"):
         input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(
             response
         )
-        usage.add(input_toks, output_toks, cache_creation, cache_read)
+        usage.add(input_toks, output_toks, cache_creation, cache_read, model=model)
         if cache_creation or cache_read:
             log.debug(
                 "prompt cache: %d tokens written, %d tokens read",
@@ -256,7 +262,7 @@ def tier2_classify(
         lambda: client.messages.create(**params),
         description=f"tier2_classify {raw.ref}",
     )
-    _record_usage(response, usage)
+    _record_usage(response, usage, model=params["model"])
 
     return parse_tier2_entities(
         response.content[0].text,
@@ -434,7 +440,7 @@ def tier3_create(
         lambda: client.messages.create(**params),
         description=f"tier3_create {source_ref}",
     )
-    _record_usage(response, usage)
+    _record_usage(response, usage, model=params["model"])
 
     return tier3_entity_from_text(action, response.content[0].text, config=config)
 
@@ -516,7 +522,7 @@ def tier3_merge(
         lambda: client.messages.create(**params),
         description=f"tier3_merge {source_ref}",
     )
-    _record_usage(response, usage)
+    _record_usage(response, usage, model=params["model"])
 
     return parse_tier3_merge(response.content[0].text, action, source_ref)
 

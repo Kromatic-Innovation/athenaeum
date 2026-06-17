@@ -287,9 +287,10 @@ def detect_contradictions(
 
     user_msg = _build_user_message(cluster_members)
 
+    detect_model = _get_model(config)
     try:
         response = client.messages.create(
-            model=_get_model(config),
+            model=detect_model,
             max_tokens=1024,
             system=_DETECT_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
@@ -305,7 +306,9 @@ def detect_contradictions(
 
     input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
     if usage is not None:
-        usage.add_tokens(input_toks, output_toks, cache_creation, cache_read)
+        usage.add_tokens(
+            input_toks, output_toks, cache_creation, cache_read, model=detect_model
+        )
     log.debug(
         "contradictions: detector usage input=%d output=%d"
         " cache_creation=%d cache_read=%d",
