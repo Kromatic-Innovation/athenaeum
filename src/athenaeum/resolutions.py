@@ -1753,6 +1753,7 @@ def propose_freetext_source_edits(
     passages: "list[str]",
     client: "anthropic.Anthropic | None",
     config: "dict | None" = None,
+    usage: TokenUsage | None = None,
 ) -> "dict[Path, str]":
     """Propose concrete body edits for a free-text human ruling.
 
@@ -1765,6 +1766,12 @@ def propose_freetext_source_edits(
         client: A live Anthropic client, or ``None`` (deterministic fallback:
             returns ``{}`` immediately — no network in CI).
         config: Optional athenaeum config dict for ``_get_model`` resolution.
+        usage: Optional run-level :class:`TokenUsage` (#239/#248). The
+            response's token + cache counts accumulate via
+            :meth:`TokenUsage.add_tokens` (tagged with the resolved model id
+            for per-model attribution, #247); ``api_calls`` is NOT bumped
+            here — the orchestrating call site (``answers._writeback_source``)
+            counts the attempt.
 
     Returns:
         ``{path: new_body}`` — only files the model reports as changed AND
@@ -1801,9 +1808,10 @@ def propose_freetext_source_edits(
 
     user_msg = "\n".join(lines)
 
+    freetext_model = _get_model(config)
     try:
         response = client.messages.create(
-            model=_get_model(config),
+            model=freetext_model,
             max_tokens=4096,
             system=_FREETEXT_EDIT_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
@@ -1816,6 +1824,10 @@ def propose_freetext_source_edits(
         return {}
 
     input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
+    if usage is not None:
+        usage.add_tokens(
+            input_toks, output_toks, cache_creation, cache_read, model=freetext_model
+        )
     log.debug(
         "resolutions: propose_freetext_source_edits usage input=%d output=%d"
         " cache_creation=%d cache_read=%d",

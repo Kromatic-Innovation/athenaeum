@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Usage accounting for the `ingest-answers` free-text path (#248).**
+  `propose_freetext_source_edits` (the last LLM call invisible to cost
+  accounting) gains an optional `usage: TokenUsage | None = None` keyword and
+  accumulates its response's token + cache counts via `add_tokens(...,
+  model=<resolved model>)` — tokens and cache counters only, never an
+  `api_calls` bump (the caller counts attempts, per the #239 convention). The
+  `ingest-answers` CLI path (`answers.ingest_answers`) now creates a run-level
+  `TokenUsage`, threads it through `_writeback_source` into the proposer,
+  bumps `api_calls` once per attempted proposer call at the call site, and
+  logs one cost summary line (tokens in/out, cache written/read, estimated
+  cost) at the end of a run that made >= 1 API call — mirroring the
+  librarian's run-summary format. No summary is emitted when zero calls were
+  made. The new parameter is keyword-defaulted so external callers are
+  unaffected; the existing DEBUG-level per-call cache log is unchanged. No
+  budget enforcement and no new config surface on this interactive path.
+
 ### Changed
 
 - **Per-model cost attribution in `TokenUsage.estimated_cost_usd` (#247).**
