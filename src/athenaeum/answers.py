@@ -604,6 +604,7 @@ def _writeback_source(
     *,
     client: "object | None" = None,
     config: "dict | None" = None,
+    usage: "object | None" = None,
 ) -> int:
     """Apply ``pq``'s ratified answer to its source memory file(s).
 
@@ -621,6 +622,12 @@ def _writeback_source(
     path is used as a fallback when the proposer returns no edits or when
     ``client is None``. ``retain_both_with_context`` / ``not_a_conflict``
     verdicts always annotate (do not call the proposer).
+
+    When ``usage`` is a :class:`athenaeum.models.TokenUsage`, the proposer
+    call is metered into it (#248): this function bumps ``api_calls`` once per
+    attempted proposer call (the caller counts attempts, mirroring the #239
+    convention) and the proposer accumulates the response's token + cache
+    counts. Verdict paths that make no API call leave ``usage`` untouched.
     """
     try:
         from athenaeum.resolutions import (
@@ -715,8 +722,14 @@ def _writeback_source(
                 path_to_meta[path] = meta or {}
 
             if source_pairs:
+                # #248: count one attempt per proposer call at the call site
+                # (the callee accumulates tokens but never bumps api_calls,
+                # mirroring the #239 convention). Bump BEFORE the call so an
+                # API failure still counts as an attempt.
+                if usage is not None:
+                    usage.api_calls += 1
                 proposed = propose_freetext_source_edits(
-                    answer_body, source_pairs, passages, client, config
+                    answer_body, source_pairs, passages, client, config, usage=usage
                 )
                 if proposed:
                     edited = 0
@@ -828,6 +841,14 @@ def ingest_answers(
     except Exception:  # noqa: BLE001 -- config is best-effort; defaults suffice
         pass
 
+    # #248: meter the LLM calls this run makes (the free-text proposer is the
+    # only API call on the ingest-answers path). The accumulator is threaded
+    # into _writeback_source; a one-line cost summary is emitted at the end of
+    # a run that made >= 1 API call. No budget enforcement on this path.
+    from athenaeum.models import TokenUsage
+
+    usage = TokenUsage()
+
     unanswered: list[PendingQuestion] = []
     archived_new: list[str] = []
     # Parallel arrays used only for dedup-skip logging and for matching each
@@ -884,7 +905,9 @@ def ingest_answers(
         # _writeback_source so the audit/archive path is never blocked.
         # Issue #210: thread client/config so free-text answers can use the
         # LLM-backed proposer to enact source edits instead of annotating only.
-        edited = _writeback_source(pq, source_roots, client=client, config=config)
+        edited = _writeback_source(
+            pq, source_roots, client=client, config=config, usage=usage
+        )
         if edited:
             log.info(
                 "answers: wrote ratified verdict back to %d source file(s) "
@@ -953,6 +976,26 @@ def ingest_answers(
         _archived_entities.append(pq.entity)
         _archived_raw_blocks.append(pq.raw_block)
         ingested += 1
+
+    # #248: one cost summary per run that made >= 1 API call (the free-text
+    # proposer). Mirrors the librarian's run-summary format string in
+    # ``librarian.run`` (tokens in/out, cache written/read, estimated cost).
+    # No line is emitted when zero API calls were made. The per-call cache
+    # DEBUG log in ``propose_freetext_source_edits`` is unchanged; this is
+    # additive. Placed before the early ``ingested == 0`` return so a run that
+    # attempted the proposer but ingested nothing still reports its spend.
+    if usage.api_calls > 0:
+        log.info(
+            "Token usage: %d API calls, %d input + %d output = %d total"
+            " (cache: %d written, %d read) (~$%.4f estimated)",
+            usage.api_calls,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.total_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+            usage.estimated_cost_usd,
+        )
 
     if ingested == 0:
         return 0
