@@ -179,6 +179,12 @@ def execute_batch(
     log.info("Batch %s ended after %.0fs (%s)", batch.id, waited, description)
 
     results: dict[str, Any] = {r.custom_id: None for r in requests}
+    # Map each request's custom_id to its serving model-id so batch token
+    # usage attributes per model (issue #247). The model lives in each
+    # request's params (``messages.create`` payload).
+    model_by_cid: dict[str, str | None] = {
+        r.custom_id: r.params.get("model") for r in requests
+    }
     try:
         entries = with_retry(
             lambda: client.messages.batches.results(batch.id),
@@ -191,7 +197,13 @@ def execute_batch(
                 message = result.message
                 if usage is not None:
                     inp, out, cache_w, cache_r = cache_usage_counts(message)
-                    usage.add_batch_tokens(inp, out, cache_w, cache_r)
+                    usage.add_batch_tokens(
+                        inp,
+                        out,
+                        cache_w,
+                        cache_r,
+                        model=model_by_cid.get(entry.custom_id),
+                    )
                 results[entry.custom_id] = message
             else:
                 log.warning(

@@ -1240,9 +1240,10 @@ def propose_resolution(
 
     user_msg = _build_user_message(detector_result, members, config)
 
+    resolve_model = _get_model(config)
     try:
         response = client.messages.create(
-            model=_get_model(config),
+            model=resolve_model,
             max_tokens=1024,
             # Prompt-caching breakpoint (issue #230): the resolver system
             # prompt is the largest stable prefix in the codebase (3,387
@@ -1276,7 +1277,9 @@ def propose_resolution(
 
     input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
     if usage is not None:
-        usage.add_tokens(input_toks, output_toks, cache_creation, cache_read)
+        usage.add_tokens(
+            input_toks, output_toks, cache_creation, cache_read, model=resolve_model
+        )
     log.debug(
         "resolutions: propose_resolution usage input=%d output=%d"
         " cache_creation=%d cache_read=%d",
