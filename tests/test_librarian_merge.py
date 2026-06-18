@@ -21,6 +21,7 @@ Load-bearing fixtures:
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1962,3 +1963,385 @@ class TestNotAConflictCache:
         wiki = knowledge_root / "wiki"
         # Sweep escalation dropped by the shared cache gate → no question.
         assert not (wiki / "_pending_questions.md").exists()
+
+
+class TestNotAConflictDecay:
+    """Issue #251: read-time decay of stale auto ``not_a_conflict``
+    suppressions. With a positive ``not_a_conflict_ttl_days``, an auto
+    suppression older than the ttl is treated as ABSENT when building the
+    skip set, so the pair re-enters the Opus confirmation pass. The cache
+    file is never mutated — decay is a read-time interpretation.
+
+    Reuses ``TestNotAConflictCache``'s payloads + fixture; ``now`` is
+    injected into ``merge_clusters_to_wiki`` for determinism (no wall-clock).
+    """
+
+    NOW = datetime(2026, 6, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _make_response(text: str):
+        return TestNotAConflictCache._make_response(text)
+
+    @classmethod
+    def _expected_fingerprint(cls) -> str:
+        return TestNotAConflictCache._expected_fingerprint()
+
+    @staticmethod
+    def _cache_rows(knowledge_root: Path) -> list[dict]:
+        return TestNotAConflictCache._cache_rows(knowledge_root)
+
+    @staticmethod
+    def _stamp(now: datetime, days_ago: int) -> str:
+        return (now - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    DETECTOR_PAYLOAD = TestNotAConflictCache.DETECTOR_PAYLOAD
+    SUPPRESS_PAYLOAD = TestNotAConflictCache.SUPPRESS_PAYLOAD
+
+    def _seed_auto_suppress(
+        self,
+        knowledge_root: Path,
+        resolved_at: str,
+        resolved_by: str = "auto",
+        verdict: str = "not_a_conflict",
+    ) -> None:
+        from athenaeum.fingerprint import record_resolution
+
+        record_resolution(
+            knowledge_root,
+            fingerprint=self._expected_fingerprint(),
+            verdict=verdict,
+            resolved_by=resolved_by,
+            resolved_at=resolved_at,
+        )
+
+    def test_ttl_zero_old_row_still_suppresses(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """ttl_days unset/0 → byte-identical to today: a 40-day-old auto
+        suppress still skips the Opus confirmation (only the detector fires)."""
+        from unittest.mock import MagicMock
+
+        self._seed_auto_suppress(contradiction_merge_root, self._stamp(self.NOW, 40))
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+        ]
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root, client=fake_client, now=self.NOW
+        )
+        # ttl=0 → still cached → only detector, no Opus.
+        assert fake_client.messages.create.call_count == 1
+
+    def test_expired_row_reenters_confirmation(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """ttl_days=30, auto suppress dated 40 days ago → NOT in the skip
+        set → the pair re-enters the Opus confirmation (detector + Opus)."""
+        from unittest.mock import MagicMock
+
+        self._seed_auto_suppress(contradiction_merge_root, self._stamp(self.NOW, 40))
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+            self._make_response(self.SUPPRESS_PAYLOAD),
+        ]
+
+        cfg = {
+            "recall": {"extra_intake_roots": ["raw/auto-memory"]},
+            "contradiction": {"not_a_conflict_ttl_days": 30},
+        }
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+            config=cfg,
+            now=self.NOW,
+        )
+        # Expired → cache miss → Opus confirmation runs.
+        assert fake_client.messages.create.call_count == 2
+
+    def test_recent_row_still_suppresses(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """ttl_days=30, auto suppress dated 10 days ago (< ttl) → still in
+        the skip set → Opus is skipped (only the detector fires)."""
+        from unittest.mock import MagicMock
+
+        self._seed_auto_suppress(contradiction_merge_root, self._stamp(self.NOW, 10))
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+        ]
+
+        cfg = {
+            "recall": {"extra_intake_roots": ["raw/auto-memory"]},
+            "contradiction": {"not_a_conflict_ttl_days": 30},
+        }
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+            config=cfg,
+            now=self.NOW,
+        )
+        assert fake_client.messages.create.call_count == 1
+
+    def test_human_verdict_never_decays(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """A HUMAN not_a_conflict verdict, even dated 400 days ago, is never
+        decayed — it stays in the skip set so Opus is skipped."""
+        from unittest.mock import MagicMock
+
+        self._seed_auto_suppress(
+            contradiction_merge_root,
+            self._stamp(self.NOW, 400),
+            resolved_by="human",
+        )
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+        ]
+
+        cfg = {
+            "recall": {"extra_intake_roots": ["raw/auto-memory"]},
+            "contradiction": {"not_a_conflict_ttl_days": 30},
+        }
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+            config=cfg,
+            now=self.NOW,
+        )
+        # Human verdict never decays → still cached → no Opus.
+        assert fake_client.messages.create.call_count == 1
+
+    def test_undated_row_still_suppresses(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """A row with NO resolved_at (legacy/external) is fail-safe: treated
+        as not stale, so it keeps suppressing even with a positive ttl."""
+        from unittest.mock import MagicMock
+
+        from athenaeum.fingerprint import record_resolution
+
+        # record_resolution stamps resolved_at by default; write an undated
+        # row directly to exercise the missing-field path.
+        path = contradiction_merge_root / "raw" / "_resolved_contradictions.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "fingerprint": self._expected_fingerprint(),
+                    "action": "not_a_conflict",
+                    "resolved_by": "auto",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        # Reference the import so ruff/readers see why we bypassed it.
+        assert record_resolution is not None
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+        ]
+
+        cfg = {
+            "recall": {"extra_intake_roots": ["raw/auto-memory"]},
+            "contradiction": {"not_a_conflict_ttl_days": 30},
+        }
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+            config=cfg,
+            now=self.NOW,
+        )
+        assert fake_client.messages.create.call_count == 1
+
+    def test_refresh_resets_clock_newest_wins(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """After an expired pair re-clears, the fresh auto row supersedes the
+        stale one (newest-wins) and the clock resets: a follow-up run finds
+        the pair cached again and skips Opus.
+
+        Run 1: stale (40d) row + ttl=30 → re-enters → Opus suppresses →
+        appends a FRESH row stamped at ``now``. Run 2 (same ttl/now) →
+        fresh row is < ttl → cached → Opus skipped."""
+        from unittest.mock import MagicMock
+
+        self._seed_auto_suppress(contradiction_merge_root, self._stamp(self.NOW, 40))
+
+        cfg = {
+            "recall": {"extra_intake_roots": ["raw/auto-memory"]},
+            "contradiction": {"not_a_conflict_ttl_days": 30},
+        }
+
+        # Run 1: expired → Opus runs and re-clears → fresh row appended.
+        client1 = MagicMock()
+        client1.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+            self._make_response(self.SUPPRESS_PAYLOAD),
+        ]
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=client1,
+            config=cfg,
+            now=self.NOW,
+        )
+        assert client1.messages.create.call_count == 2
+        rows = self._cache_rows(contradiction_merge_root)
+        # Append-only: the stale row stays as history; a fresh row is added.
+        assert len(rows) == 2
+        assert rows[-1]["resolved_at"] == self._stamp(self.NOW, 0)
+
+        # Run 2: the fresh row (age 0 < ttl) now wins → cached → no Opus.
+        client2 = MagicMock()
+        client2.messages.create.side_effect = [
+            self._make_response(self.DETECTOR_PAYLOAD),
+        ]
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=client2,
+            config=cfg,
+            now=self.NOW,
+        )
+        assert client2.messages.create.call_count == 1
+
+    def test_large_expired_backlog_respects_resolve_max_per_run(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        """A large backlog of expired auto suppressions must not exceed
+        ``resolve_max_per_run`` Opus calls in one run — re-validation flows
+        through the existing per-run cap, spreading cost across nights."""
+        from unittest.mock import MagicMock
+
+        from athenaeum.fingerprint import claim_pair_fingerprint, record_resolution
+
+        knowledge_root = tmp_path / "knowledge"
+        scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+
+        # Build N distinct clusters, each a unique conflicting pair. Seed an
+        # EXPIRED auto suppress for every pair so all N would re-enter the
+        # confirmation pass absent the cap.
+        n_pairs = 6
+        cap = 2
+        cluster_rows: list[dict[str, object]] = []
+        detector_payloads: list[str] = []
+        for i in range(n_pairs):
+            a_name = f"feedback_decay_a_{i}.md"
+            b_name = f"feedback_decay_b_{i}.md"
+            pa = f"Always rotate the widget clockwise (case {i})."
+            pb = f"Always rotate the widget counter-clockwise (case {i})."
+            _write_am_file(
+                scope,
+                a_name,
+                frontmatter_name=f"Decay a {i}",
+                description="clockwise",
+                origin_session_id=f"s-a-{i}",
+                origin_turn=1,
+                sources=[{"session": f"s-a-{i}", "turn": 1}],
+                body=pa,
+            )
+            _write_am_file(
+                scope,
+                b_name,
+                frontmatter_name=f"Decay b {i}",
+                description="counter",
+                origin_session_id=f"s-b-{i}",
+                origin_turn=1,
+                sources=[{"session": f"s-b-{i}", "turn": 1}],
+                body=pb,
+            )
+            cluster_rows.append(
+                {
+                    "cluster_id": f"code-decay-{i:04d}",
+                    "member_paths": [
+                        f"-Users-tristankromer-Code/{a_name}",
+                        f"-Users-tristankromer-Code/{b_name}",
+                    ],
+                    "centroid_score": 0.60,
+                    "rationale": "decay backlog fixture",
+                }
+            )
+            fp = claim_pair_fingerprint(pa, pb, "prescriptive")
+            record_resolution(
+                knowledge_root,
+                fingerprint=fp,
+                verdict="not_a_conflict",
+                resolved_by="auto",
+                resolved_at=self._stamp(self.NOW, 40),
+            )
+            detector_payloads.append(
+                json.dumps(
+                    {
+                        "detected": True,
+                        "conflict_type": "prescriptive",
+                        "members_involved": [
+                            f"-Users-tristankromer-Code/{a_name}",
+                            f"-Users-tristankromer-Code/{b_name}",
+                        ],
+                        "conflicting_passages": [pa, pb],
+                        "rationale": "opposing rotation guidance",
+                    }
+                )
+            )
+
+        _write_cluster_jsonl(knowledge_root, cluster_rows)
+        _write_config(knowledge_root)
+
+        # Scripted client: every detector call returns detected=True; every
+        # resolver call returns the suppress verdict. The detector + resolver
+        # interleave per cluster, so script enough responses for the worst
+        # case (all detectors + up-to-cap resolvers) and count resolver calls.
+        monkeypatch.setenv("ATHENAEUM_RESOLVE_MAX_PER_RUN", str(cap))
+
+        resolver_calls = {"n": 0}
+
+        def _side_effect(*args, **kwargs):
+            body = json.dumps(kwargs)
+            # Distinguish resolver (system prompt mentions "resolver") from
+            # detector by inspecting the system text passed to the client.
+            system = kwargs.get("system", "")
+            if isinstance(system, str) and "resolver" in system.lower():
+                resolver_calls["n"] += 1
+                return self._make_response(self.SUPPRESS_PAYLOAD)
+            # Detector: return the next opposing-pair payload. Any of them is
+            # fine — the gate keys off the fingerprint of the returned pair.
+            idx = min(_side_effect.detector_idx, len(detector_payloads) - 1)
+            _side_effect.detector_idx += 1
+            assert body is not None
+            return self._make_response(detector_payloads[idx])
+
+        _side_effect.detector_idx = 0
+
+        fake_client = MagicMock()
+        fake_client.messages.create.side_effect = _side_effect
+
+        cfg = {
+            "recall": {"extra_intake_roots": ["raw/auto-memory"]},
+            "contradiction": {"not_a_conflict_ttl_days": 30},
+        }
+        merge_clusters_to_wiki(
+            knowledge_root,
+            client=fake_client,
+            config=cfg,
+            now=self.NOW,
+        )
+
+        # The expired backlog re-enters, but the per-run cap bounds Opus
+        # calls: never more than ``cap`` resolver invocations in one run.
+        assert resolver_calls["n"] <= cap

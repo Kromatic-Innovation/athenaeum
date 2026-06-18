@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Read-time decay of stale auto `not_a_conflict` suppressions (#251).** A new
+  `contradiction.not_a_conflict_ttl_days` knob (env
+  `ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS`, code default `0` = disabled, not seeded in
+  `_DEFAULTS` per #231) decays cached auto `not_a_conflict` verdicts at read
+  time. When set `> 0`, an auto suppression whose `resolved_at` is older than the
+  TTL is dropped from the confirmation-pass skip set (`merge.py`), so the
+  claim-pair re-enters the Opus confirmation instead of being suppressed
+  forever. A pure, injected-`now` helper
+  `fingerprint.is_stale_auto_suppression(record, ttl_days, now)` decides
+  staleness: only `resolved_by == "auto"` + `not_a_conflict` rows with a parseable
+  `resolved_at` can decay; human verdicts and enacting auto verdicts
+  (`keep_*`/`correct_*`/`forget_*`/`deprecate_both`) never decay, and a missing or
+  unparseable `resolved_at` keeps suppressing (fail-safe for legacy/external
+  rows). `now` is frozen once at run start (the same instant the re-clear stamps
+  the fresh row with, so refresh resets the clock deterministically) and
+  `merge_clusters_to_wiki` gains an additive `now=` keyword for test
+  determinism. The append-only contract is unchanged — no row mutation,
+  deletion, tombstones, or compaction; an expired row stays as history and is
+  simply re-interpreted. Re-validation flows through the existing
+  `resolve_max_per_run` cap, so a large expired backlog spreads across nights
+  rather than spiking one Opus bill.
 - **Usage accounting for the `ingest-answers` free-text path (#248).**
   `propose_freetext_source_edits` (the last LLM call invisible to cost
   accounting) gains an optional `usage: TokenUsage | None = None` keyword and

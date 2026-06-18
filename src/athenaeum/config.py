@@ -195,6 +195,7 @@ search_backend: fts5
 #   similarity_threshold: 0.85
 #   resolve_max_per_run: 250  # raised from 50 in #187
 #   resolved_similarity_threshold: 0.83  # cosine threshold for decision-log matching (#211)
+#   not_a_conflict_ttl_days: 0  # decay stale auto not_a_conflict (#251); 0 = off
 
 # Contradiction resolver (issue #126). See docs/auto-resolve.md for the
 # full knob set (auto_apply, auto_apply_threshold, full_body_token_cap).

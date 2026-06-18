@@ -36,7 +36,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -360,6 +360,107 @@ def resolve_resolved_similarity_threshold(
         except (TypeError, ValueError):
             pass
     return _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# Read-time decay of stale auto not_a_conflict suppressions (issue #251)
+# ---------------------------------------------------------------------------
+
+_ENV_NOT_A_CONFLICT_TTL_DAYS = "ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS"
+# Code default 0 == disabled (no decay; current behavior). Per the #231
+# rule this is NOT seeded into config._DEFAULTS — it resolves through the
+# env > yaml > code-default chain below.
+_DEFAULT_NOT_A_CONFLICT_TTL_DAYS = 0
+
+# The suppress verdict value. Re-declared locally (not imported from
+# :mod:`athenaeum.resolutions`) so this module keeps its no-heavy-imports
+# contract; the literal is locked in resolutions.SUPPRESS_ACTION and must
+# stay in sync.
+_SUPPRESS_VERDICT = "not_a_conflict"
+
+# Resolved-at timestamp format stamped by :func:`record_resolution`.
+_RESOLVED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def resolve_not_a_conflict_ttl_days(config: dict[str, Any] | None = None) -> int:
+    """Resolve the auto-suppression TTL (days) from env > yaml > default.
+
+    Issue #251. Precedence mirrors
+    :func:`athenaeum.resolutions.resolve_max_per_run`: the env var
+    ``ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS`` wins over
+    ``contradiction.not_a_conflict_ttl_days`` in the yaml, which wins over
+    the code default ``0`` (disabled). Per the #231 rule the key is NOT
+    seeded in ``config._DEFAULTS``. Negative, non-numeric, or boolean
+    values fall back to the default. ``0`` disables decay entirely (current
+    behavior — an auto suppression never expires).
+    """
+    env = os.environ.get(_ENV_NOT_A_CONFLICT_TTL_DAYS)
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if isinstance(config, dict):
+        cfg = config.get("contradiction")
+        if isinstance(cfg, dict):
+            raw = cfg.get("not_a_conflict_ttl_days")
+            # bool is an int subclass — ``not_a_conflict_ttl_days: yes`` in
+            # yaml must not silently become a ttl of 1 (mirrors
+            # resolve_max_per_run).
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                return raw
+    return _DEFAULT_NOT_A_CONFLICT_TTL_DAYS
+
+
+def is_stale_auto_suppression(
+    record: dict[str, Any],
+    ttl_days: int,
+    now: datetime,
+) -> bool:
+    """Return True when an AUTO ``not_a_conflict`` record has decayed.
+
+    Issue #251. A stale record is treated as ABSENT when building the
+    confirmation-pass skip set, so the pair re-enters the Opus confirmation
+    path — but the row itself is NEVER mutated (append-only contract).
+
+    Returns True only when ALL hold:
+
+    * ``ttl_days > 0`` (0 == disabled; current no-decay behavior).
+    * ``resolved_by == "auto"`` — human verdicts NEVER decay.
+    * ``(action or verdict) == "not_a_conflict"`` — enacting auto verdicts
+      (``keep_*`` / ``correct_*`` / ``forget_*`` / ``deprecate_both``) NEVER
+      decay; only suppressions do.
+    * ``resolved_at`` parses as ``%Y-%m-%dT%H:%M:%SZ`` AND is older than
+      ``ttl_days`` before ``now``.
+
+    Fail-safe: a missing or unparseable ``resolved_at`` returns False (the
+    record keeps suppressing) so legacy/external undated rows are never
+    expired.
+
+    ``now`` is INJECTED — the helper reads no wall-clock — so callers can
+    freeze a single run-start timestamp and tests stay deterministic.
+    """
+    if ttl_days <= 0:
+        return False
+    if record.get("resolved_by") != "auto":
+        return False
+    if (record.get("action") or record.get("verdict")) != _SUPPRESS_VERDICT:
+        return False
+    raw = record.get("resolved_at")
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        resolved_at = datetime.strptime(raw, _RESOLVED_AT_FORMAT)
+    except ValueError:
+        return False
+    # record_resolution stamps UTC without an offset; compare in UTC. If the
+    # caller's ``now`` is tz-aware, normalize the parsed value to match.
+    if now.tzinfo is not None:
+        resolved_at = resolved_at.replace(tzinfo=timezone.utc)
+    age = now - resolved_at
+    return age > timedelta(days=ttl_days)
 
 
 # ---------------------------------------------------------------------------

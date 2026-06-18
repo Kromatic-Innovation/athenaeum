@@ -338,3 +338,123 @@ class TestResolvedByRecorded:
         auto = [r for r in recs if r["fingerprint"] == fp]
         assert auto, "expected a recorded resolution for the auto-applied pair"
         assert all(r["resolved_by"] == "auto" for r in auto)
+
+
+# ---------------------------------------------------------------------------
+# Read-time decay of stale auto not_a_conflict suppressions (issue #251)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone  # noqa: E402
+
+from athenaeum.fingerprint import (  # noqa: E402
+    is_stale_auto_suppression,
+    resolve_not_a_conflict_ttl_days,
+)
+
+# Deterministic "now" used across the decay tests — no wall-clock anywhere.
+_NOW = datetime(2026, 6, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _stamp(days_ago: int) -> str:
+    """ISO ``%Y-%m-%dT%H:%M:%SZ`` timestamp ``days_ago`` before ``_NOW``."""
+    from datetime import timedelta
+
+    return (_NOW - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _auto_suppress(resolved_at: str | None) -> dict:
+    rec = {
+        "fingerprint": "fp",
+        "action": "not_a_conflict",
+        "resolved_by": "auto",
+    }
+    if resolved_at is not None:
+        rec["resolved_at"] = resolved_at
+    return rec
+
+
+class TestIsStaleAutoSuppression:
+    def test_ttl_zero_never_stale(self) -> None:
+        # ttl_days=0 (disabled) → an old-looking auto suppress is NOT stale.
+        rec = _auto_suppress(_stamp(40))
+        assert is_stale_auto_suppression(rec, ttl_days=0, now=_NOW) is False
+
+    def test_old_auto_suppress_is_stale(self) -> None:
+        rec = _auto_suppress(_stamp(40))
+        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is True
+
+    def test_recent_auto_suppress_not_stale(self) -> None:
+        rec = _auto_suppress(_stamp(10))
+        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is False
+
+    def test_human_verdict_never_stale(self) -> None:
+        rec = {
+            "fingerprint": "fp",
+            "action": "not_a_conflict",
+            "resolved_by": "human",
+            "resolved_at": _stamp(400),
+        }
+        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is False
+
+    def test_enacting_auto_verdicts_never_stale(self) -> None:
+        for action in (
+            "keep_a",
+            "keep_b",
+            "correct_a",
+            "correct_b",
+            "forget_a",
+            "forget_b",
+            "deprecate_both",
+        ):
+            rec = {
+                "fingerprint": "fp",
+                "action": action,
+                "resolved_by": "auto",
+                "resolved_at": _stamp(400),
+            }
+            assert (
+                is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is False
+            ), action
+
+    def test_missing_resolved_at_not_stale(self) -> None:
+        rec = _auto_suppress(None)
+        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is False
+
+    def test_unparseable_resolved_at_not_stale(self) -> None:
+        rec = _auto_suppress("not-a-date")
+        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is False
+
+    def test_verdict_key_fallback(self) -> None:
+        # Legacy rows may carry ``verdict`` instead of ``action``.
+        rec = {
+            "fingerprint": "fp",
+            "verdict": "not_a_conflict",
+            "resolved_by": "auto",
+            "resolved_at": _stamp(40),
+        }
+        assert is_stale_auto_suppression(rec, ttl_days=30, now=_NOW) is True
+
+
+class TestResolveNotAConflictTtlDays:
+    def test_default_is_zero(self) -> None:
+        assert resolve_not_a_conflict_ttl_days(None) == 0
+        assert resolve_not_a_conflict_ttl_days({}) == 0
+
+    def test_yaml_value(self) -> None:
+        cfg = {"contradiction": {"not_a_conflict_ttl_days": 30}}
+        assert resolve_not_a_conflict_ttl_days(cfg) == 30
+
+    def test_env_overrides_yaml(self, monkeypatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS", "7")
+        cfg = {"contradiction": {"not_a_conflict_ttl_days": 30}}
+        assert resolve_not_a_conflict_ttl_days(cfg) == 7
+
+    def test_negative_falls_back_to_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS", "-5")
+        assert resolve_not_a_conflict_ttl_days({}) == 0
+
+    def test_bool_yaml_rejected(self) -> None:
+        # bool is an int subclass — ``not_a_conflict_ttl_days: yes`` must not
+        # silently become a ttl of 1 (mirrors resolve_max_per_run).
+        cfg = {"contradiction": {"not_a_conflict_ttl_days": True}}
+        assert resolve_not_a_conflict_ttl_days(cfg) == 0
