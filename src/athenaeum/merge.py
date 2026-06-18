@@ -44,6 +44,7 @@ import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -64,9 +65,11 @@ from athenaeum.fingerprint import (
     _member_key_str,
     _pair_text_from_passages,
     claim_pair_fingerprint,
+    is_stale_auto_suppression,
     load_resolved_records,
     normalize_side,
     record_resolution,
+    resolve_not_a_conflict_ttl_days,
 )
 from athenaeum.models import (
     AutoMemoryFile,
@@ -644,7 +647,9 @@ def merge_cluster_row(
             origin_session_id = meta.get("originSessionId") if meta else None
             origin_turn_raw = meta.get("originTurn") if meta else None
             try:
-                origin_turn = int(origin_turn_raw) if origin_turn_raw is not None else None
+                origin_turn = (
+                    int(origin_turn_raw) if origin_turn_raw is not None else None
+                )
             except (TypeError, ValueError):
                 origin_turn = None
             sources_raw = meta.get("sources") if meta else None
@@ -797,6 +802,7 @@ def merge_clusters_to_wiki(
     dry_run: bool = False,
     client: "anthropic.Anthropic | None" = None,
     usage: TokenUsage | None = None,
+    now: datetime | None = None,
 ) -> list[MergedWikiEntry]:
     """Read the canonical cluster JSONL and emit one wiki entry per cluster.
 
@@ -823,6 +829,12 @@ def merge_clusters_to_wiki(
             response's token + cache counts are accumulated by the callee
             (#239), so the run summary's cache line also reflects this
             phase's traffic.
+        now: Optional run-start timestamp (issue #251). Injected for
+            deterministic read-time decay of stale auto ``not_a_conflict``
+            suppressions — a single frozen ``now`` is compared against each
+            cached row's ``resolved_at``. Defaults to ``datetime.now(UTC)``
+            (frozen once here so all clusters in the run share one clock).
+            Tests pass a fixed value so no wall-clock leaks into assertions.
 
     Returns:
         The list of :class:`MergedWikiEntry` records in cluster-file order.
@@ -868,7 +880,9 @@ def merge_clusters_to_wiki(
         if base in slug_counts:
             slug_counts[base] += 1
             suffix = re.sub(r"[^a-z0-9]+", "-", entry.cluster_id.lower()).strip("-")
-            entry.topic_slug = f"{base}-{suffix}" if suffix else f"{base}-{slug_counts[base]}"
+            entry.topic_slug = (
+                f"{base}-{suffix}" if suffix else f"{base}-{slug_counts[base]}"
+            )
         else:
             slug_counts[base] = 1
 
@@ -919,10 +933,23 @@ def merge_clusters_to_wiki(
     # ``test_suppressed_pair_does_not_block_later_genuine_detection``). Only a
     # FUTURE run, reloading the cache fresh, treats this run's clearances as
     # settled.
+    #
+    # Issue #251: read-time decay. With a positive
+    # ``contradiction.not_a_conflict_ttl_days``, an AUTO suppression older
+    # than the ttl is DROPPED from this skip set (treated as absent) so the
+    # pair re-enters the Opus confirmation path. ``now`` is frozen once here
+    # — the same instant ``record_resolution`` compares against and the same
+    # run-start freeze the skip gate already uses — so every cluster in the
+    # run decays against one clock. The cache file is NEVER mutated: an
+    # expired row stays as history and is simply re-interpreted. Human and
+    # enacting auto verdicts never decay (see ``is_stale_auto_suppression``).
+    decay_now = now if now is not None else datetime.now(timezone.utc)
+    ttl_days = resolve_not_a_conflict_ttl_days(resolved_config)
     cleared_not_a_conflict_fps = {
         fp
         for fp, rec in load_resolved_records(knowledge_root).items()
         if (rec.get("action") or rec.get("verdict")) == SUPPRESS_ACTION
+        and not is_stale_auto_suppression(rec, ttl_days, decay_now)
     }
     # Write-dedup set (issue #249, open-question #2): fingerprints written to the
     # cache during THIS run. Bounds file growth without feeding the skip gate
@@ -933,7 +960,9 @@ def merge_clusters_to_wiki(
     def _record_pair_keys(members: list[AutoMemoryFile]) -> None:
         for i in range(len(members)):
             for j in range(i + 1, len(members)):
-                covered_pair_keys.add(tuple(sorted((str(members[i].path), str(members[j].path)))))
+                covered_pair_keys.add(
+                    tuple(sorted((str(members[i].path), str(members[j].path))))
+                )
 
     def _emit_escalation(
         entry: MergedWikiEntry,
@@ -1012,6 +1041,11 @@ def merge_clusters_to_wiki(
                     fingerprint=fp,
                     verdict=SUPPRESS_ACTION,
                     resolved_by="auto",
+                    # Issue #251: stamp the run-start ``now`` so the decay
+                    # clock is single-sourced — a re-cleared expired pair's
+                    # fresh row resets the clock against the SAME instant the
+                    # skip gate decayed against (deterministic refresh).
+                    resolved_at=decay_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     side_a_norm=side_a,
                     side_b_norm=side_b,
                     member_key=mk,
@@ -1063,7 +1097,9 @@ def merge_clusters_to_wiki(
             for i, passage in enumerate(result.conflicting_passages, start=1):
                 description_parts.append(f"Passage {i}: {passage}")
         if result.members_involved:
-            description_parts.append("Members involved: " + ", ".join(result.members_involved))
+            description_parts.append(
+                "Members involved: " + ", ".join(result.members_involved)
+            )
         description = "\n".join(description_parts) or (
             f"Cluster {entry.cluster_id} flagged by contradiction detector."
         )
@@ -1142,7 +1178,9 @@ def merge_clusters_to_wiki(
                 )
                 resolve_budget_exhausted_logged = True
             else:
-                log.warning("resolutions: budget-exhausted; escalating without proposal")
+                log.warning(
+                    "resolutions: budget-exhausted; escalating without proposal"
+                )
             return None
         resolve_calls += 1
         if usage is not None and client is not None:
@@ -1192,7 +1230,9 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
-            result = detect_contradictions(filtered, client, config=resolved_config, usage=usage)
+            result = detect_contradictions(
+                filtered, client, config=resolved_config, usage=usage
+            )
             _record_pair_keys(chunk)
             if result.detected and aggregate is None:
                 proposal = _maybe_propose(result, filtered)
@@ -1255,7 +1295,9 @@ def merge_clusters_to_wiki(
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
-            result = detect_contradictions(pair, client, config=resolved_config, usage=usage)
+            result = detect_contradictions(
+                pair, client, config=resolved_config, usage=usage
+            )
             if result.detected:
                 pairs_added_via_similarity += 1
                 # Synthesize a thin escalation entry; we don't have a
