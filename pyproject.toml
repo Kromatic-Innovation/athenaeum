@@ -33,6 +33,9 @@ dependencies = [
     # wheel — bumps are explicit PRs.
     # Floor 0.39.0: first stable release shipping client.messages.batches
     # (the Batch API surface batch-mode depends on, #236).
+    # Last tested against anthropic 0.109.2 (2026-06-18). The range stays
+    # open to <1.0; record the tested minor here so a CI run that resolves a
+    # newer-than-tested 0.x is visible at a glance against this baseline.
     "anthropic>=0.39.0,<1.0",
     "pydantic>=2.0,<3.0",
 ]
