@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from athenaeum import fingerprint, resolutions
 from athenaeum.answers import ingest_answers
 from athenaeum.fingerprint import (
     claim_pair_fingerprint,
@@ -27,6 +28,15 @@ from athenaeum.fingerprint import (
 )
 from athenaeum.models import EscalationItem
 from athenaeum.tiers import tier4_escalate
+
+
+def test_suppress_verdict_matches_resolutions_constant() -> None:
+    """``fingerprint._SUPPRESS_VERDICT`` is re-declared locally to keep the
+    module free of heavy imports; it must stay equal to the canonical
+    ``resolutions.SUPPRESS_ACTION``. Enforce mechanically so drift fails the
+    suite instead of relying on the in-code comment (issue #251 cleanup)."""
+    assert fingerprint._SUPPRESS_VERDICT == resolutions.SUPPRESS_ACTION
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
