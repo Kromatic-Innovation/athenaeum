@@ -10,7 +10,7 @@ trustworthy wiki, and a sidecar that makes recall happen passively on every
 turn.
 
 <p align="center">
-  <img src="docs/assets/athena.png" alt="Athena with her owl companion, holding an open book showing a knowledge graph" width="360">
+  <img src="https://github.com/Kromatic-Innovation/athenaeum/raw/main/docs/assets/athena.png" alt="Athena with her owl companion, holding an open book showing a knowledge graph" width="360">
 </p>
 
 > **Is this for me?** If you're running more than one agent on shared
@@ -25,15 +25,15 @@ Four design choices separate a production memory system from a single-user
 markdown file. Each one fixes something that quietly breaks when a team scales
 past one agent:
 
-1. **[Sources as first-class objects](docs/why-athenaeum.md#1-sources-are-first-class-objects-trust-but-verify)** — every claim carries provenance, the way Wikipedia does. An unfootnoted fact is an assertion.
-2. **[The librarian — a tiered compilation pipeline](docs/why-athenaeum.md#2-the-librarian--a-tiered-compilation-pipeline)** — agents can only _append_ to raw intake. A separate compiler is the only writer to the wiki. Safety from structure, not trust.
-3. **[Passive recall](docs/why-athenaeum.md#3-passive-recall--recall-on-every-turn-automatically)** — a hybrid FTS5+vector search fires on every turn and injects breadcrumbs into context. The agent doesn't have to remember to look.
-4. **[An editable observation filter](docs/why-athenaeum.md#4-the-notetaker--a-configurable-editable-observation-filter)** — what the agent saves is governed by a prompt you can read, edit, and audit. Not a black box.
+1. **[Sources as first-class objects](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md#1-sources-are-first-class-objects-trust-but-verify)** — every claim carries provenance, the way Wikipedia does. An unfootnoted fact is an assertion.
+2. **[The librarian — a tiered compilation pipeline](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md#2-the-librarian--a-tiered-compilation-pipeline)** — agents can only _append_ to raw intake. A separate compiler is the only writer to the wiki. Safety from structure, not trust.
+3. **[Passive recall](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md#3-passive-recall--recall-on-every-turn-automatically)** — a hybrid FTS5+vector search fires on every turn and injects breadcrumbs into context. The agent doesn't have to remember to look.
+4. **[An editable observation filter](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md#4-the-notetaker--a-configurable-editable-observation-filter)** — what the agent saves is governed by a prompt you can read, edit, and audit. Not a black box.
 
 Full rationale, comparison with alternatives (Claude memory, Anthropic's
 memory tool, RAG, Karpathy's gist, mem0/Letta/Zep/Cognee), and the lessons
 from running it on our own operations live in
-[**docs/why-athenaeum.md**](docs/why-athenaeum.md). For the companion blog
+[**docs/why-athenaeum.md**](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md). For the companion blog
 post: [What We Learned Running Our Own Operations on Agentic
 Memory](https://kromatic.com/blog/agentic-memory-in-production/).
 
@@ -193,8 +193,8 @@ Full setup guide, smoke test, and environment-variable reference:
 
 ## Integrations
 
-- **Claude Code auto-memory** — bridge `~/.claude/projects/<scope>/memory/` into Athenaeum's `raw/` intake so the librarian can cluster, merge, and contradiction-check Claude Code's durable memory alongside other sources. See [`docs/integrations/claude-code.md`](docs/integrations/claude-code.md).
-- **Contradiction detection** — pipeline overview, cross-scope modes, source-precedence taxonomy, configuration reference, and cost model for the auto-memory contradiction path. See [`docs/contradiction-detection.md`](docs/contradiction-detection.md).
+- **Claude Code auto-memory** — bridge `~/.claude/projects/<scope>/memory/` into Athenaeum's `raw/` intake so the librarian can cluster, merge, and contradiction-check Claude Code's durable memory alongside other sources. See [`docs/integrations/claude-code.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/integrations/claude-code.md).
+- **Contradiction detection** — pipeline overview, cross-scope modes, source-precedence taxonomy, configuration reference, and cost model for the auto-memory contradiction path. See [`docs/contradiction-detection.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/contradiction-detection.md).
 
 ## Vector search (optional)
 
@@ -215,7 +215,7 @@ search_backend: vector
 ```
 
 Full walkthrough and the four invariants a future simplification must not
-remove: [`docs/recall-architecture.md`](docs/recall-architecture.md).
+remove: [`docs/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/recall-architecture.md).
 
 ## Query-topic extraction (optional)
 
@@ -237,7 +237,7 @@ silently to the regex extractor if the API key or CLI is unavailable.
 
 The table below covers the common knobs. The exhaustive list — every env var,
 yaml key, and CLI flag with its code default and precedence chain — lives in
-[`docs/configuration.md`](docs/configuration.md).
+[`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -249,10 +249,10 @@ yaml key, and CLI flag with its code default and precedence chain — lives in
 | `ATHENAEUM_MAX_API_CALLS` | No | Run-level API call budget for `athenaeum run`. Precedence: `--max-api-calls` CLI flag > env > `librarian.max_api_calls` in `athenaeum.yaml` > default `800`. Env `0` is valid and defers the entire intake (writes `wiki/_deferred_work.md` and logs the DEGRADED summary); the CLI flag rejects `0` |
 | `ATHENAEUM_MAX_FILES` | No | Per-run intake batch size for `athenaeum run`. Precedence: `--max-files` CLI flag > env > `librarian.max_files` in `athenaeum.yaml` > default `50`. Env `0` is valid (defer-everything window); the CLI flag rejects `0` |
 | `ATHENAEUM_BATCH_MODE` | No | Opt-in [Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing) mode for `athenaeum run` (#236): tier-2/tier-3 calls are submitted as batches at a 50% token discount. Latency-tolerant — most batches finish within an hour, 24h worst case — intended for the nightly run. Precedence: `--batch-mode` / `--no-batch-mode` CLI flags > env > `librarian.batch_mode` in `athenaeum.yaml` > default off (`--no-batch-mode` forces the synchronous path even when env/yaml turn batch mode on) |
-| `ATHENAEUM_RESOLVE_AUTO_APPLY` | No | Auto-apply high-confidence resolutions (default: `true`). See [`docs/auto-resolve.md`](docs/auto-resolve.md) |
+| `ATHENAEUM_RESOLVE_AUTO_APPLY` | No | Auto-apply high-confidence resolutions (default: `true`). See [`docs/auto-resolve.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/auto-resolve.md) |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | No | Confidence floor for auto-apply, in `[0.0, 1.0]` (default: `0.90`) |
 | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | No | Per-side body cap for the resolver's full-body context, ~4 chars/token (default: `1500`; must be positive) |
-| `ATHENAEUM_CROSS_SCOPE_MODE` | No | Cross-scope contradiction detection: `off` / `ancestor` / `similarity` / `both` (default: `ancestor`). See [`docs/contradiction-detection.md`](docs/contradiction-detection.md) |
+| `ATHENAEUM_CROSS_SCOPE_MODE` | No | Cross-scope contradiction detection: `off` / `ancestor` / `similarity` / `both` (default: `ancestor`). See [`docs/contradiction-detection.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/contradiction-detection.md) |
 | `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD` | No | Cosine threshold for matching new detections against the resolved-decision log (default: `0.83`) |
 | `ATHENAEUM_TIER4_DEDUP` | No | Dedupe pending-question escalations by source-memory pair (default: `true`; set `false`/`0`/`no`/`off` for legacy always-append) |
 | `ATHENAEUM_CACHE_DIR` | No | Cache root for the librarian's embedding/cluster pass (default: `~/.cache/athenaeum`) |
@@ -274,12 +274,12 @@ thing to check when the hook "ignores" a config change.
 scoped to its inference endpoint, and the Anthropic Messages API rejects it
 with `401 OAuth authentication is currently not supported`. The pipeline and
 example hooks need a separate console API key — see
-[`docs/recall-architecture.md`](docs/recall-architecture.md#anthropic_api_key-bootstrap-sessionstart)
+[`docs/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/recall-architecture.md#anthropic_api_key-bootstrap-sessionstart)
 for the 1Password bootstrap pattern.
 
 ## Configuration
 
-Settings are resolved in the order **CLI flag > env var > `<knowledge_root>/athenaeum.yaml` > built-in default**, so a one-off shell export beats the yaml without requiring an edit. The canonical reference for every knob — librarian budgets, model selection, contradiction/resolver tuning, recall/search, and hook environment — is [`docs/configuration.md`](docs/configuration.md). As one example, the contradiction-resolver knobs live under a top-level `resolve:` block:
+Settings are resolved in the order **CLI flag > env var > `<knowledge_root>/athenaeum.yaml` > built-in default**, so a one-off shell export beats the yaml without requiring an edit. The canonical reference for every knob — librarian budgets, model selection, contradiction/resolver tuning, recall/search, and hook environment — is [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md). As one example, the contradiction-resolver knobs live under a top-level `resolve:` block:
 
 ```yaml
 resolve:
@@ -289,9 +289,9 @@ resolve:
   full_body_token_cap: 1500       # ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP, per-side body cap (~4 chars/token)
 ```
 
-When `auto_apply` is on and a proposal's confidence meets or exceeds `auto_apply_threshold`, the pending-question block is auto-flipped to answered with an `Auto-resolved: true` audit-trail tag. See [`docs/auto-resolve.md`](docs/auto-resolve.md) for the full lane, including how to disable, lower the threshold, or reverse an auto-resolution.
+When `auto_apply` is on and a proposal's confidence meets or exceeds `auto_apply_threshold`, the pending-question block is auto-flipped to answered with an `Auto-resolved: true` audit-trail tag. See [`docs/auto-resolve.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/auto-resolve.md) for the full lane, including how to disable, lower the threshold, or reverse an auto-resolution.
 
-**Alternative model gateways.** All model calls go through the Anthropic SDK, which honors `ANTHROPIC_BASE_URL` — so a LiteLLM proxy or any Anthropic-compatible gateway can serve alternative models with zero code change. Only Claude models are first-party tested; see [`docs/configuration.md`](docs/configuration.md#alternative-model-gateways-anthropic_base_url) for the details and [#234](https://github.com/Kromatic-Innovation/athenaeum/issues/234) for multi-provider tracking.
+**Alternative model gateways.** All model calls go through the Anthropic SDK, which honors `ANTHROPIC_BASE_URL` — so a LiteLLM proxy or any Anthropic-compatible gateway can serve alternative models with zero code change. Only Claude models are first-party tested; see [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md#alternative-model-gateways-anthropic_base_url) for the details and [#234](https://github.com/Kromatic-Innovation/athenaeum/issues/234) for multi-provider tracking.
 
 ## Data formats
 
@@ -392,7 +392,7 @@ cd athenaeum
 git checkout "$(git describe --tags --abbrev=0)"
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full promotion flow.
+See [CONTRIBUTING.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/CONTRIBUTING.md) for the full promotion flow.
 
 ## Getting help
 
