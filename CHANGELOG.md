@@ -5,7 +5,24 @@ All notable changes to Athenaeum are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- README image and doc links now use absolute `github.com/.../raw/main` and
+  `.../blob/main` URLs so they render on the PyPI project page (which serves
+  the README out of repo context). No content change beyond link targets.
+
+### Changed
+
+- Added a mechanical regression test asserting
+  `fingerprint._SUPPRESS_VERDICT == resolutions.SUPPRESS_ACTION`, so drift in
+  the locally re-declared suppress-verdict literal is caught by the suite
+  rather than relying on a comment.
+
 ## [0.9.0] - 2026-06-18
+
+_Honest per-run LLM cost accounting, and an incremental contradiction pass that stops re-paying to confirm already-settled conflicts._
 
 ### Added
 
