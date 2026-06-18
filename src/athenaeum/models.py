@@ -406,6 +406,13 @@ class EscalationItem:
 # prefix so dated ids (``claude-haiku-4-5-20251001``) resolve to the
 # right family. Source: Anthropic public pricing
 # (https://www.anthropic.com/pricing), as of 2026-06-17.
+#
+# PERIODIC REVIEW: these are hard-coded Anthropic public list prices captured
+# on the date above. They do NOT auto-update — Anthropic price changes (new
+# model families, rate cuts, tier changes) require a manual edit HERE. This
+# constant is the single update site for model pricing; nothing else in the
+# codebase hard-codes per-MTok rates. Re-check against the pricing page when a
+# new Claude generation ships or when cost estimates drift from billing.
 _MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-opus-4": (5.0, 25.0),
     "claude-sonnet-4": (3.0, 15.0),
