@@ -12,7 +12,7 @@ for the full subcommand list. Internal modules (``contradictions``,
 public surface; their signatures may change between minor releases.
 """
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 from athenaeum.init import init_knowledge_dir
 from athenaeum.librarian import discover_raw_files, process_one, rebuild_index, run
