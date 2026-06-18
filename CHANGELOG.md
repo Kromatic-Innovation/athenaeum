@@ -5,7 +5,7 @@ All notable changes to Athenaeum are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-06-18
 
 ### Added
 
@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   simply re-interpreted. Re-validation flows through the existing
   `resolve_max_per_run` cap, so a large expired backlog spreads across nights
   rather than spiking one Opus bill.
+- **Incremental `not_a_conflict` caching for the nightly contradiction pass (#249).** Auto-cleared `not_a_conflict` claim-pairs are now cached (`resolved_by: "auto"` rows in `raw/_resolved_contradictions.jsonl`) so the nightly Opus confirmation pass skips pairs it already settled, cutting a full re-confirmation run from roughly seven hours to minutes. A material edit to either claim changes the fingerprint and re-escalates that pair; a per-run write-dedup set bounds cache-file growth. Read-time decay of these auto verdicts (#251) is a later, opt-in follow-up.
 - **Usage accounting for the `ingest-answers` free-text path (#248).**
   `propose_freetext_source_edits` (the last LLM call invisible to cost
   accounting) gains an optional `usage: TokenUsage | None = None` keyword and
@@ -1024,6 +1025,7 @@ knowledge librarian.
 - Test suite extracted from upstream + CI coverage enforcement (`>=75%`)
 - Transactional writes, type-safety hardening, prompt-injection mitigation, API budget caps
 
+[0.9.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/Kromatic-Innovation/athenaeum/compare/v0.7.1...v0.7.2
