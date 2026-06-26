@@ -49,6 +49,7 @@ from athenaeum.models import (
     RawFile,
     TokenUsage,
     WikiEntity,
+    coerce_source_type,
     load_schema_list,
     parse_deprecated,
     parse_frontmatter,
@@ -56,6 +57,7 @@ from athenaeum.models import (
     parse_superseded_by,
     parse_supersedes,
     render_frontmatter,
+    safe_source_ref,
     slugify,
 )
 from athenaeum.schemas import validate_wiki_meta
@@ -214,6 +216,18 @@ def discover_auto_memory_files(
                     sources = [str(s) for s in sources_raw]
                 else:
                     sources = []
+                # Issue #260 (slice A of #259): origin-traced provenance.
+                # Missing source_type defaults to ``inferred``; source_ref is
+                # the ultimate reference and is never this file's own name.
+                source_type = coerce_source_type(
+                    meta.get("source_type") if meta else None
+                )
+                # Guard the explicit path: a frontmatter source_ref that is a
+                # raw filename (or any ``.md``) is rejected to "" rather than
+                # cited as the ultimate source (#260 invariant).
+                source_ref = safe_source_ref(
+                    meta.get("source_ref") if meta else None, ""
+                )
                 # Lane 1 / #167: declared refines/supersedes relationships.
                 # Malformed entries raise — surfacing the bad file rather
                 # than silently dropping the declaration.
@@ -249,6 +263,8 @@ def discover_auto_memory_files(
                         supersedes=supersedes,
                         superseded_by=parse_superseded_by(meta_for_markers),
                         deprecated=parse_deprecated(meta_for_markers),
+                        source_type=source_type,
+                        source_ref=source_ref,
                     )
                 )
     return files
