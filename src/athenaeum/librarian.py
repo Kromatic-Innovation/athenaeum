@@ -57,6 +57,7 @@ from athenaeum.models import (
     parse_superseded_by,
     parse_supersedes,
     render_frontmatter,
+    safe_source_ref,
     slugify,
 )
 from athenaeum.schemas import validate_wiki_meta
@@ -221,8 +222,12 @@ def discover_auto_memory_files(
                 source_type = coerce_source_type(
                     meta.get("source_type") if meta else None
                 )
-                source_ref_raw = meta.get("source_ref") if meta else None
-                source_ref = str(source_ref_raw) if source_ref_raw else ""
+                # Guard the explicit path: a frontmatter source_ref that is a
+                # raw filename (or any ``.md``) is rejected to "" rather than
+                # cited as the ultimate source (#260 invariant).
+                source_ref = safe_source_ref(
+                    meta.get("source_ref") if meta else None, ""
+                )
                 # Lane 1 / #167: declared refines/supersedes relationships.
                 # Malformed entries raise — surfacing the bad file rather
                 # than silently dropping the declaration.

@@ -83,6 +83,7 @@ from athenaeum.models import (
     parse_superseded_by,
     parse_supersedes,
     render_frontmatter,
+    safe_source_ref,
     slugify,
 )
 from athenaeum.pending_merges import write_pending_merge
@@ -510,9 +511,10 @@ def _parse_one_source(raw: Any, fallback_scope: str) -> dict[str, Any] | None:
             entry["excerpt"] = str(excerpt)
         entry["origin_scope"] = str(raw.get("origin_scope", fallback_scope))
         entry["source_type"] = coerce_source_type(raw.get("source_type"))
-        source_ref = raw.get("source_ref")
-        entry["source_ref"] = (
-            str(source_ref) if source_ref else _default_source_ref(entry)
+        # Guard the EXPLICIT path too: a producer that stamps a raw filename
+        # into source_ref is rejected and back-filled from session+turn.
+        entry["source_ref"] = safe_source_ref(
+            raw.get("source_ref"), _default_source_ref(entry)
         )
         return entry
     if isinstance(raw, str):
@@ -521,7 +523,8 @@ def _parse_one_source(raw: Any, fallback_scope: str) -> dict[str, Any] | None:
             "origin_scope": fallback_scope,
             "source_type": DEFAULT_SOURCE_TYPE,
             # The legacy bare-UUID ref is the session id itself — a valid
-            # ultimate ref, never a filename.
+            # ultimate ref, never a filename (no better fallback exists for
+            # a bare string, so it passes through as the session ref).
             "source_ref": raw,
         }
     return None
@@ -546,9 +549,10 @@ def _am_as_implicit_source(am: AutoMemoryFile) -> dict[str, Any] | None:
     # Issue #260: carry origin-traced provenance. An implicit source recovered
     # from originSessionId/turn is unverified at this layer, so honor the
     # file's own declared source_type (default ``inferred``) and back-fill a
-    # session+turn ref — never the raw filename.
-    entry["source_type"] = coerce_source_type(getattr(am, "source_type", None))
-    entry["source_ref"] = getattr(am, "source_ref", "") or _default_source_ref(entry)
+    # session+turn ref — never the raw filename. The guard also rejects a
+    # filename-shaped source_ref the file may carry.
+    entry["source_type"] = coerce_source_type(am.source_type)
+    entry["source_ref"] = safe_source_ref(am.source_ref, _default_source_ref(entry))
     return entry
 
 
@@ -560,6 +564,12 @@ def dedupe_sources(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     the same (session, turn) are merged (first wins, stable order).
     Entries missing a turn fall back to ``(session, None)`` and only
     collapse among themselves.
+
+    Provenance note (#260): the dedupe key is ``(session, turn)`` ONLY — it
+    ignores ``source_type`` / ``source_ref``. So two entries citing the same
+    (session, turn) with *different* provenance collapse to the FIRST one
+    (input order). Callers that want the verified provenance to win must
+    order the verified entry first before deduping.
     """
     seen: set[tuple[str, Any]] = set()
     out: list[dict[str, Any]] = []

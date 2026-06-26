@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -13,6 +14,8 @@ if TYPE_CHECKING:
     from collections.abc import ItemsView, Iterator
 
 import yaml
+
+log = logging.getLogger("athenaeum")
 
 # --- UID generation ---
 
@@ -50,7 +53,49 @@ def coerce_source_type(value: object) -> str:
     """
     if isinstance(value, str) and value in SOURCE_TYPES:
         return value
+    # A non-empty, out-of-vocabulary value is a real downgrade (typo or stale
+    # schema) worth a breadcrumb; ``None`` / empty is the ordinary legacy path
+    # and stays quiet.
+    if value not in (None, ""):
+        log.debug(
+            "coerce_source_type: downgrading invalid source_type %r to %s",
+            value,
+            DEFAULT_SOURCE_TYPE,
+        )
     return DEFAULT_SOURCE_TYPE
+
+
+def is_filename_like_ref(ref: object) -> bool:
+    """True when a ``source_ref`` looks like a raw ``auto-memory`` filename.
+
+    The load-bearing #260 invariant: a citation must point at the ULTIMATE
+    source (session+turn / URL / document), never at the transient raw
+    ``auto-memory/<scope>/<prefix>_<slug>.md`` view that retires on move
+    (#259). A ref is filename-shaped when it references the auto-memory tree
+    or ends in ``.md``.
+    """
+    if not isinstance(ref, str) or not ref:
+        return False
+    lowered = ref.lower()
+    return "auto-memory" in lowered or lowered.endswith(".md")
+
+
+def safe_source_ref(candidate: object, fallback: str) -> str:
+    """Return ``candidate`` unless it is filename-shaped, else ``fallback``.
+
+    Enforces the #260 invariant on the EXPLICIT path: a producer that stamps
+    a raw filename into ``source_ref`` is rejected and replaced with a safe
+    session-anchored fallback. Empty candidate also falls back.
+    """
+    if isinstance(candidate, str) and candidate and not is_filename_like_ref(candidate):
+        return candidate
+    if is_filename_like_ref(candidate):
+        log.debug(
+            "safe_source_ref: rejecting filename-shaped source_ref %r; using %r",
+            candidate,
+            fallback,
+        )
+    return fallback
 
 
 def slugify(name: str) -> str:

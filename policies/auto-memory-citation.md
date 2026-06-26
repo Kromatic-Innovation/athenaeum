@@ -62,6 +62,17 @@ See `athenaeum.merge.render_source_footnotes`. Sources still render to
 frontmatter as well; the footnotes are the human-readable, ultimate-source
 citation.
 
+### Slice A renders a sources *appendix*, not inline per-fact markers
+
+In slice A the `[^src-N]` definitions are appended as a trailing **sources
+appendix** for the whole compiled entry — the synthesized body carries no
+inline `[^src-N]` reference markers attached to individual facts. Per-fact
+inline attachment (a `[^name]` marker next to each claim, as in the
+hand-authored worked example) depends on the move-then-retire logic that
+tracks which fact came from which source, and lands in **slice B** (#259).
+The appendix is the honest slice-A contract: every source is cited on the
+page, even though the per-claim wiring is deferred.
+
 ## Transcript verification
 
 `athenaeum.transcript_verify.verify_user_stated(scope, session_id, turn,

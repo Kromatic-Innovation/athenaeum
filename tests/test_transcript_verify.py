@@ -143,6 +143,197 @@ class TestExternal:
         assert sref == "https://www.hbs.edu/startup"
 
 
+class TestCrossSessionIsolation:
+    def test_claim_in_other_session_not_attributed(self, projects_root: Path) -> None:
+        from athenaeum.transcript_verify import verify_user_stated
+
+        # Quine S1: two sessions in ONE scope. The claim lives only in
+        # session B. Verifying against session A must NOT return user-stated
+        # attributed to A — only A's own transcript is scanned.
+        scope = "shared-scope"
+        session_a = "aaaa0001"
+        session_b = "bbbb0002"
+        _write_transcript(
+            projects_root,
+            scope,
+            session_a,
+            [
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "Session A small talk."},
+                },
+            ],
+        )
+        _write_transcript(
+            projects_root,
+            scope,
+            session_b,
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "Krobar.ai launched in March 2025.",
+                    },
+                },
+            ],
+        )
+        stype, sref = verify_user_stated(
+            scope,
+            session_a,
+            turn=1,
+            claim="Krobar.ai launched in March 2025",
+            projects_root=projects_root,
+        )
+        assert stype == "inferred"
+        assert sref == f"{session_a}#turn1"
+        # And session B itself still resolves correctly.
+        stype_b, sref_b = verify_user_stated(
+            scope,
+            session_b,
+            turn=5,
+            claim="Krobar.ai launched in March 2025",
+            projects_root=projects_root,
+        )
+        assert stype_b == "user-stated"
+        assert sref_b == f"{session_b}#turn5"
+
+
+class TestUserWinsOverExternal:
+    def test_user_message_beats_agent_quoted_url(self, projects_root: Path) -> None:
+        from athenaeum.transcript_verify import verify_user_stated
+
+        # Quine C1: the same claim appears first as an agent-quoted URL and
+        # then in a user message. user-stated must win.
+        scope = "some-scope"
+        session = "winuser1"
+        _write_transcript(
+            projects_root,
+            scope,
+            session,
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": "I found it at https://example.com/canvas here.",
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "Yes, the canvas is the right model.",
+                    },
+                },
+            ],
+        )
+        stype, sref = verify_user_stated(
+            scope,
+            session,
+            turn=9,
+            claim="the canvas",
+            projects_root=projects_root,
+        )
+        assert stype == "user-stated"
+        assert sref == f"{session}#turn9"
+
+
+class TestExternalUrlHygiene:
+    def test_trailing_punctuation_stripped_from_url(self, projects_root: Path) -> None:
+        from athenaeum.transcript_verify import verify_user_stated
+
+        # Quine N3: a URL ending a sentence must not keep the trailing period.
+        scope = "some-scope"
+        session = "urlpunc1"
+        _write_transcript(
+            projects_root,
+            scope,
+            session,
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": "The source is https://www.hbs.edu/startup.",
+                    },
+                },
+            ],
+        )
+        stype, sref = verify_user_stated(
+            scope,
+            session,
+            turn=None,
+            claim="The source is",
+            projects_root=projects_root,
+        )
+        assert stype == "external"
+        assert sref == "https://www.hbs.edu/startup"
+
+
+class TestUnicodeAndTurnZero:
+    def test_unicode_claim_matches(self, projects_root: Path) -> None:
+        from athenaeum.transcript_verify import verify_user_stated
+
+        # Quine C3: a unicode-bearing claim must match cleanly.
+        scope = "_unscoped"
+        session = "uni00001"
+        _write_transcript(
+            projects_root,
+            scope,
+            session,
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": (
+                            "I appreciate the term Widerspruchsfreiheit "
+                            "(Zettelkasten)."
+                        ),
+                    },
+                },
+            ],
+        )
+        stype, sref = verify_user_stated(
+            scope,
+            session,
+            turn=2,
+            claim="Widerspruchsfreiheit (Zettelkasten)",
+            projects_root=projects_root,
+        )
+        assert stype == "user-stated"
+        assert sref == f"{session}#turn2"
+
+    def test_turn_zero_preserved_in_ref(self, projects_root: Path) -> None:
+        from athenaeum.transcript_verify import verify_user_stated
+
+        # Quine C3: turn 0 is a real turn — the ref must be ``#turn0``, not
+        # collapse to the bare session (guards a future ``if turn:`` bug).
+        scope = "some-scope"
+        session = "turn0001"
+        _write_transcript(
+            projects_root,
+            scope,
+            session,
+            [
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "First thing I said."},
+                },
+            ],
+        )
+        stype, sref = verify_user_stated(
+            scope,
+            session,
+            turn=0,
+            claim="First thing I said",
+            projects_root=projects_root,
+        )
+        assert stype == "user-stated"
+        assert sref == f"{session}#turn0"
+
+
 class TestInferred:
     def test_missing_transcript_resolves_inferred(self, projects_root: Path) -> None:
         from athenaeum.transcript_verify import verify_user_stated
