@@ -682,6 +682,36 @@ def _run_cluster_pass(
     return len(clusters)
 
 
+def _run_retire(
+    merged_entries: list,
+    knowledge_root: Path,
+    *,
+    config: dict[str, object] | None,
+    dry_run: bool,
+    projects_root: Path | None,
+) -> None:
+    """Run the move-then-retire pass (issue #261) over the merged entries.
+
+    Thin wrapper around :func:`athenaeum.retire.run_retire_pass` so the run
+    loop stays readable. Lazy-imports ``retire`` to avoid a hard import cycle
+    (retire imports merge, not librarian). Failures are swallowed: a retire
+    hiccup must never abort the nightly compile — the held raw simply stays in
+    the queue for the next run.
+    """
+    from athenaeum.retire import run_retire_pass
+
+    try:
+        run_retire_pass(
+            merged_entries,
+            knowledge_root,
+            config=config,
+            dry_run=dry_run,
+            projects_root=projects_root,
+        )
+    except Exception as exc:  # noqa: BLE001 — retire must not fail the run
+        log.warning("retire pass failed (%s); leaving raw intake in place", exc)
+
+
 def _run_reresolve_pass(
     knowledge_root: Path,
     *,
@@ -886,6 +916,7 @@ def run(
     merge_only: bool = False,
     strict_budget: bool = False,
     batch_mode: bool | None = None,
+    projects_root: Path | None = None,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error.
 
@@ -988,12 +1019,22 @@ def run(
         # the canonical cluster JSONL written by a prior C2 run and
         # compiles ``wiki/auto-*.md`` entries from it. Discovery still
         # happens inside merge_clusters_to_wiki() for source propagation.
-        merge_clusters_to_wiki(
+        merged_entries = merge_clusters_to_wiki(
             knowledge_root,
             config=config,
             dry_run=dry_run,
             client=merge_client,
             usage=usage,
+        )
+        # Issue #261 (slice B of #259): move-then-retire. Non-contradictory
+        # raw is moved into its wiki entry (origin-traced footnote) and git
+        # rm'd; contradictory raw is held in the queue. No-op without .git.
+        _run_retire(
+            merged_entries,
+            knowledge_root,
+            config=config,
+            dry_run=dry_run,
+            projects_root=projects_root,
         )
         # Issue #188: self-heal proposal-less open questions (a prior
         # budget-exhausted / offline run leaves raw blocks; re-resolve them
@@ -1039,7 +1080,7 @@ def run(
         # cluster + merge together. Uses the cluster JSONL written above.
         # C4: contradiction detection runs inside merge_clusters_to_wiki
         # and reuses the shared Anthropic client.
-        merge_clusters_to_wiki(
+        merged_entries = merge_clusters_to_wiki(
             knowledge_root,
             auto_memory_files=auto_memory_files,
             config=config,
@@ -1047,6 +1088,20 @@ def run(
             client=merge_client,
             usage=usage,
         )
+
+        # Issue #261 (slice B of #259): move-then-retire lifecycle. Runs after
+        # merge + C4 detection. Non-contradictory raw is moved into its wiki
+        # entry (origin-traced footnote) and git rm'd; contradictory raw is
+        # held for human confirmation. Skipped for the cluster_only diagnostic
+        # mode and a no-op without a git repo.
+        if not cluster_only:
+            _run_retire(
+                merged_entries,
+                knowledge_root,
+                config=config,
+                dry_run=dry_run,
+                projects_root=projects_root,
+            )
 
         # Issue #188: re-resolve open, proposal-less pending questions so a
         # prior cap-hit / offline escalation self-heals on this (budgeted) run.

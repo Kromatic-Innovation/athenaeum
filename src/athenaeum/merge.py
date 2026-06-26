@@ -316,6 +316,13 @@ class MergedWikiEntry:
     body: str = ""
     member_paths: list[str] = field(default_factory=list)
     contradiction: ContradictionResult | None = None
+    # Issue #261 (slice B of #259): set by the move-then-retire pass when the
+    # cluster's raw intake has been MOVED into this wiki entry (long-term
+    # memory) and the raw files retired (git rm). Rendered as ``retired: true``
+    # in frontmatter so a reader can tell the fact now lives here permanently
+    # rather than in the expiring intake queue. Default False keeps every
+    # non-retire write byte-identical to the pre-#261 output.
+    retired: bool = False
     # Resolved :class:`AutoMemoryFile` records backing this cluster. Populated
     # by :func:`merge_cluster_row` so the outer orchestrator does not need to
     # re-resolve filesystem paths to run the C4 contradiction detector.
@@ -880,6 +887,9 @@ def render_merged_entry(entry: MergedWikiEntry) -> str:
         meta["status"] = CONTRADICTION_STATUS_FLAGGED
         if entry.contradiction is not None and entry.contradiction.conflict_type:
             meta["contradiction_type"] = entry.contradiction.conflict_type
+    # Issue #261: mark the entry as a retired-on-move long-term memory.
+    if entry.retired:
+        meta["retired"] = True
     # Issue #260: append origin-traced source footnotes to the BODY (sources
     # already render to frontmatter above; the footnotes give the human-
     # readable, ultimate-source citation the worked example used).
