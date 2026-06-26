@@ -72,9 +72,11 @@ from athenaeum.fingerprint import (
     resolve_not_a_conflict_ttl_days,
 )
 from athenaeum.models import (
+    DEFAULT_SOURCE_TYPE,
     AutoMemoryFile,
     EscalationItem,
     TokenUsage,
+    coerce_source_type,
     parse_deprecated,
     parse_frontmatter,
     parse_refines,
@@ -455,12 +457,38 @@ def derive_topic_slug(
 # ---------------------------------------------------------------------------
 
 
+def _default_source_ref(entry: dict[str, Any]) -> str:
+    """Best-effort ``source_ref`` from session+turn — NEVER the raw filename.
+
+    Issue #260: when a source carries no explicit ``source_ref``, we
+    synthesize one from ``session`` (+ ``turn`` when present) so the
+    citation always points at the originating session, never at the raw
+    ``auto-memory/...`` file. Returns ``""`` only when there is no session
+    to cite.
+    """
+    session = entry.get("session")
+    if not session:
+        return ""
+    turn = entry.get("turn")
+    if turn is not None:
+        return f"{session}#turn{turn}"
+    return str(session)
+
+
 def _parse_one_source(raw: Any, fallback_scope: str) -> dict[str, Any] | None:
     """Normalize one ``sources[]`` entry into a plain dict + origin_scope.
 
     Accepts dict (the shape defined in
     ``policies/auto-memory-citation.md``) or raw string (legacy bare
     session UUID). Returns ``None`` for unparseable input.
+
+    Issue #260 (slice A of #259): every parsed source carries an
+    origin-traced ``source_type`` (one of :data:`SOURCE_TYPES`, default
+    ``inferred``) and a ``source_ref`` — the ULTIMATE reference
+    (session-id+turn / URL / document path), back-filled from session+turn
+    when not explicitly supplied. ``source_ref`` is NEVER the raw
+    ``auto-memory/...`` filename. Legacy sources without these keys still
+    parse cleanly (missing ``source_type`` => ``inferred``).
     """
     if isinstance(raw, dict):
         entry: dict[str, Any] = {}
@@ -481,9 +509,21 @@ def _parse_one_source(raw: Any, fallback_scope: str) -> dict[str, Any] | None:
         if excerpt is not None:
             entry["excerpt"] = str(excerpt)
         entry["origin_scope"] = str(raw.get("origin_scope", fallback_scope))
+        entry["source_type"] = coerce_source_type(raw.get("source_type"))
+        source_ref = raw.get("source_ref")
+        entry["source_ref"] = (
+            str(source_ref) if source_ref else _default_source_ref(entry)
+        )
         return entry
     if isinstance(raw, str):
-        return {"session": raw, "origin_scope": fallback_scope}
+        return {
+            "session": raw,
+            "origin_scope": fallback_scope,
+            "source_type": DEFAULT_SOURCE_TYPE,
+            # The legacy bare-UUID ref is the session id itself — a valid
+            # ultimate ref, never a filename.
+            "source_ref": raw,
+        }
     return None
 
 
@@ -503,6 +543,12 @@ def _am_as_implicit_source(am: AutoMemoryFile) -> dict[str, Any] | None:
     }
     if am.origin_turn is not None:
         entry["turn"] = int(am.origin_turn)
+    # Issue #260: carry origin-traced provenance. An implicit source recovered
+    # from originSessionId/turn is unverified at this layer, so honor the
+    # file's own declared source_type (default ``inferred``) and back-fill a
+    # session+turn ref — never the raw filename.
+    entry["source_type"] = coerce_source_type(getattr(am, "source_type", None))
+    entry["source_ref"] = getattr(am, "source_ref", "") or _default_source_ref(entry)
     return entry
 
 
@@ -767,6 +813,39 @@ def merge_cluster_row(
     )
 
 
+def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
+    """Render ``[^name]: **Source:** ...`` footnotes for a source list (#260).
+
+    Each origin-traced source becomes one Markdown footnote definition
+    carrying its ``source_type`` + ``source_ref``, matching the worked
+    example's ``[^name]: **Source:** ...`` style
+    (``wiki/a545c038-tristan-kromer.md``). Labels are stable (``src-1``,
+    ``src-2``, ...) over the deterministic deduped source order.
+
+    The ULTIMATE-source rule is preserved here: the rendered ref is the
+    source's ``source_ref`` (session+turn / URL / document path), back-filled
+    from session+turn when absent — never the raw ``auto-memory/...``
+    filename. Returns ``""`` for an empty source list.
+    """
+    lines: list[str] = []
+    for i, src in enumerate(sources, 1):
+        source_type = coerce_source_type(src.get("source_type"))
+        source_ref = src.get("source_ref") or _default_source_ref(src)
+        text = f"**Source:** {source_type}"
+        if source_ref:
+            text += f" — `{source_ref}`"
+        scope = src.get("origin_scope")
+        if scope:
+            text += f" (origin scope `{scope}`)"
+        excerpt = src.get("excerpt")
+        if excerpt:
+            text += f': "{excerpt}"'
+        lines.append(f"[^src-{i}]: {text}")
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
 def render_merged_entry(entry: MergedWikiEntry) -> str:
     """Render a :class:`MergedWikiEntry` as a full wiki markdown file.
 
@@ -791,7 +870,15 @@ def render_merged_entry(entry: MergedWikiEntry) -> str:
         meta["status"] = CONTRADICTION_STATUS_FLAGGED
         if entry.contradiction is not None and entry.contradiction.conflict_type:
             meta["contradiction_type"] = entry.contradiction.conflict_type
-    return render_frontmatter(meta) + "\n" + entry.body
+    # Issue #260: append origin-traced source footnotes to the BODY (sources
+    # already render to frontmatter above; the footnotes give the human-
+    # readable, ultimate-source citation the worked example used).
+    body = entry.body
+    footnotes = render_source_footnotes(entry.sources)
+    if footnotes:
+        sep = "" if body.endswith("\n") or not body else "\n"
+        body = f"{body}{sep}\n{footnotes}"
+    return render_frontmatter(meta) + "\n" + body
 
 
 def merge_clusters_to_wiki(

@@ -22,6 +22,37 @@ def generate_uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
+# --- Origin-traced source provenance (issue #260, slice A of #259) ---
+
+# The four legal ``source_type`` values for an origin-traced citation. The
+# librarian must cite the ULTIMATE source of a fact — the user, an external
+# URL, a permanent document, or (when nothing can be established) an honest
+# ``inferred``. It must NEVER cite the raw ``auto-memory/...`` filename as the
+# source. See ``policies/auto-memory-citation.md``.
+SOURCE_TYPES: frozenset[str] = frozenset(
+    {"user-stated", "external", "document", "inferred"}
+)
+
+# Default when origin cannot be established. ``inferred`` is the honest
+# fallback — an unverifiable agent leap is labeled as such, not promoted to
+# ``user-stated``.
+DEFAULT_SOURCE_TYPE = "inferred"
+
+
+def coerce_source_type(value: object) -> str:
+    """Return a valid ``source_type``, defaulting unknown input to ``inferred``.
+
+    Backward-compatible: legacy sources written before #260 carry no
+    ``source_type`` (``None``) and resolve to ``inferred``. A typo'd or
+    out-of-vocabulary value is also coerced rather than raising — the
+    citation policy is enforced at write time, and a bad value must not
+    crash the nightly compile.
+    """
+    if isinstance(value, str) and value in SOURCE_TYPES:
+        return value
+    return DEFAULT_SOURCE_TYPE
+
+
 def slugify(name: str) -> str:
     """Convert a name to a filesystem-safe slug."""
     slug = name.lower().strip()
@@ -269,6 +300,13 @@ class AutoMemoryFile:
     # resurface as a live claim.
     superseded_by: str = ""
     deprecated: bool = False
+    # Issue #260 (slice A of #259): origin-traced provenance. ``source_type``
+    # is one of :data:`SOURCE_TYPES` (default ``inferred`` so memories written
+    # before the citation policy still parse). ``source_ref`` is the ULTIMATE
+    # reference — session-id+turn, URL, or document path — NEVER this file's
+    # own ``raw/auto-memory/...`` name. Empty when unestablished.
+    source_type: str = DEFAULT_SOURCE_TYPE
+    source_ref: str = ""
     _content: str | None = field(default=None, repr=False)
 
     @property
@@ -319,6 +357,13 @@ class WikiEntity:
     # OR ``list[dict]`` of ``{"value", "source"}`` records (per-value
     # attribution for list fields, issue #102).
     field_sources: dict[str, str | dict | list] | None = None
+    # Issue #260: origin-traced provenance threaded onto the entity. Both
+    # optional so legacy entities round-trip unchanged. ``source_type`` is one
+    # of :data:`SOURCE_TYPES`; ``source_ref`` is the ultimate reference and is
+    # never the raw ``auto-memory/...`` filename. Rendered into frontmatter
+    # only when set.
+    source_type: str | None = None
+    source_ref: str | None = None
 
     @property
     def filename(self) -> str:
@@ -346,6 +391,10 @@ class WikiEntity:
             meta["source"] = self.source
         if self.field_sources:
             meta["field_sources"] = self.field_sources
+        if self.source_type is not None:
+            meta["source_type"] = self.source_type
+        if self.source_ref is not None:
+            meta["source_ref"] = self.source_ref
         return render_frontmatter(meta) + "\n" + self.body
 
 

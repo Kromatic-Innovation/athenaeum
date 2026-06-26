@@ -369,3 +369,172 @@ class TestSelfReferenceLint:
         assert len(files) == 1
         assert [s["name"] for s in files[0].supersedes] == ["Other Memory"]
         assert any("supersedes self" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Issue #260: origin-traced source footnotes (source_type / source_ref)
+# ---------------------------------------------------------------------------
+
+
+class TestSourceTypeSchema:
+    """``_parse_one_source`` carries source_type + source_ref (slice A, #260)."""
+
+    def test_dict_source_carries_type_and_ref(self) -> None:
+        from athenaeum.merge import _parse_one_source
+
+        parsed = _parse_one_source(
+            {
+                "session": "abc123",
+                "turn": 4,
+                "source_type": "user-stated",
+                "source_ref": "abc123#turn4",
+            },
+            "some-scope",
+        )
+        assert parsed is not None
+        assert parsed["source_type"] == "user-stated"
+        assert parsed["source_ref"] == "abc123#turn4"
+
+    def test_missing_type_defaults_inferred(self) -> None:
+        from athenaeum.merge import _parse_one_source
+
+        parsed = _parse_one_source({"session": "abc123", "turn": 2}, "some-scope")
+        assert parsed is not None
+        assert parsed["source_type"] == "inferred"
+        # A missing source_ref is back-filled from session+turn, never blank.
+        assert parsed["source_ref"] == "abc123#turn2"
+
+    def test_invalid_type_coerced_to_inferred(self) -> None:
+        from athenaeum.merge import _parse_one_source
+
+        parsed = _parse_one_source(
+            {"session": "abc123", "source_type": "wishful-thinking"},
+            "some-scope",
+        )
+        assert parsed is not None
+        assert parsed["source_type"] == "inferred"
+
+    def test_bare_string_source_is_inferred(self) -> None:
+        from athenaeum.merge import _parse_one_source
+
+        parsed = _parse_one_source("abc123", "some-scope")
+        assert parsed is not None
+        assert parsed["source_type"] == "inferred"
+        # The legacy bare-UUID ref is the session id — never a filename.
+        assert parsed["source_ref"] == "abc123"
+
+    def test_source_ref_is_never_the_raw_filename(self) -> None:
+        from athenaeum.merge import _parse_one_source
+
+        parsed = _parse_one_source(
+            {"session": "abc123", "turn": 1, "origin_scope": "some-scope"},
+            "some-scope",
+        )
+        assert parsed is not None
+        assert "auto-memory" not in parsed["source_ref"]
+        assert not parsed["source_ref"].endswith(".md")
+
+
+class TestSourceFootnoteRendering:
+    """``render_merged_entry`` renders origin-traced footnotes into the body."""
+
+    def _entry(self) -> "object":
+        from athenaeum.merge import MergedWikiEntry
+
+        return MergedWikiEntry(
+            topic_slug="tristan-profile",
+            cluster_id="some-scope-1",
+            cluster_centroid_score=1.0,
+            contradictions_detected=False,
+            origin_scopes=["some-scope"],
+            sources=[
+                {
+                    "session": "abc123",
+                    "turn": 4,
+                    "origin_scope": "some-scope",
+                    "source_type": "user-stated",
+                    "source_ref": "abc123#turn4",
+                },
+                {
+                    "session": "def456",
+                    "origin_scope": "some-scope",
+                    "source_type": "external",
+                    "source_ref": "https://www.hbs.edu/startup",
+                },
+            ],
+            body="Tristan's profile.\n",
+        )
+
+    def test_footnotes_rendered_in_body(self) -> None:
+        from athenaeum.merge import render_merged_entry
+
+        out = render_merged_entry(self._entry())
+        # Footnote definitions carrying source_type + source_ref appear in
+        # the body, matching the worked-example ``[^name]: **Source:**`` style.
+        assert "[^src-1]:" in out
+        assert "**Source:**" in out
+        assert "user-stated" in out
+        assert "abc123#turn4" in out
+        assert "external" in out
+        assert "https://www.hbs.edu/startup" in out
+
+    def test_footnotes_never_cite_raw_filename(self) -> None:
+        from athenaeum.merge import render_merged_entry, render_source_footnotes
+
+        out = render_merged_entry(self._entry())
+        footnotes = render_source_footnotes(self._entry().sources)
+        assert footnotes.strip() != ""
+        # The ultimate-source rule: the raw auto-memory path is never cited.
+        assert "raw/auto-memory" not in out
+        assert ".md`" not in footnotes
+
+    def test_round_trip_type_and_ref_through_frontmatter(self) -> None:
+        from athenaeum.merge import _parse_one_source, render_merged_entry
+        from athenaeum.models import parse_frontmatter
+
+        out = render_merged_entry(self._entry())
+        meta, _body = parse_frontmatter(out)
+        sources = meta["sources"]
+        assert sources[0]["source_type"] == "user-stated"
+        assert sources[0]["source_ref"] == "abc123#turn4"
+        # Re-parsing the rendered frontmatter preserves the new fields.
+        reparsed = _parse_one_source(sources[0], "some-scope")
+        assert reparsed is not None
+        assert reparsed["source_type"] == "user-stated"
+        assert reparsed["source_ref"] == "abc123#turn4"
+
+
+class TestAutoMemoryFileSourceFields:
+    """``AutoMemoryFile`` threads source_type / source_ref from frontmatter."""
+
+    def test_defaults_to_inferred_when_absent(self, auto_memory_root: Path) -> None:
+        from athenaeum.librarian import discover_auto_memory_files
+
+        files = discover_auto_memory_files(auto_memory_root)
+        by_name = {f.path.name: f for f in files}
+        # Files without explicit citation provenance default to inferred.
+        assert by_name["user_tristan_profile.md"].source_type == "inferred"
+
+    def test_parses_explicit_source_fields(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import discover_auto_memory_files
+
+        knowledge_root = tmp_path / "knowledge"
+        scope = knowledge_root / "raw" / "auto-memory" / "some-scope"
+        scope.mkdir(parents=True)
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
+            encoding="utf-8",
+        )
+        (scope / "user_addr.md").write_text(
+            "---\n"
+            "name: Address\n"
+            "type: user\n"
+            "source_type: user-stated\n"
+            "source_ref: sess9#turn3\n"
+            "---\nHome address.\n",
+            encoding="utf-8",
+        )
+        files = discover_auto_memory_files(knowledge_root)
+        assert len(files) == 1
+        assert files[0].source_type == "user-stated"
+        assert files[0].source_ref == "sess9#turn3"
