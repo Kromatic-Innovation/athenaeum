@@ -434,6 +434,64 @@ class TestSourceTypeSchema:
         assert "auto-memory" not in parsed["source_ref"]
         assert not parsed["source_ref"].endswith(".md")
 
+    def test_explicit_filename_source_ref_is_rejected(self) -> None:
+        from athenaeum.merge import _parse_one_source
+
+        # The DANGEROUS path (Quine M1): a producer explicitly stamps a raw
+        # auto-memory filename into source_ref. The guard must reject it and
+        # fall back to the safe session+turn ref — not pass it through.
+        parsed = _parse_one_source(
+            {
+                "session": "abc123",
+                "turn": 7,
+                "origin_scope": "some-scope",
+                "source_ref": "raw/auto-memory/some-scope/user_tristan_address.md",
+            },
+            "some-scope",
+        )
+        assert parsed is not None
+        assert parsed["source_ref"] == "abc123#turn7"
+        assert "auto-memory" not in parsed["source_ref"]
+        assert not parsed["source_ref"].endswith(".md")
+
+    def test_explicit_bare_md_source_ref_is_rejected(self) -> None:
+        from athenaeum.merge import _parse_one_source
+
+        # Even a non-auto-memory ``.md`` ref is filename-shaped and rejected.
+        parsed = _parse_one_source(
+            {"session": "sess9", "source_ref": "user_profile.md"},
+            "some-scope",
+        )
+        assert parsed is not None
+        assert parsed["source_ref"] == "sess9"
+
+    def test_turn_zero_ref_is_preserved(self) -> None:
+        from athenaeum.merge import _parse_one_source
+
+        # Guard against a future ``if turn:`` regression — turn 0 is a real
+        # turn and must render ``#turn0``, not collapse to the bare session.
+        parsed = _parse_one_source({"session": "abc123", "turn": 0}, "some-scope")
+        assert parsed is not None
+        assert parsed["source_ref"] == "abc123#turn0"
+
+
+class TestDedupeSourcesProvenance:
+    """``dedupe_sources`` collapses same-(session,turn) to the FIRST entry."""
+
+    def test_first_provenance_wins_on_collision(self) -> None:
+        from athenaeum.merge import dedupe_sources
+
+        # Same (session, turn), different provenance. The dedupe key ignores
+        # source_type/source_ref, so the FIRST entry (input order) wins.
+        deduped = dedupe_sources(
+            [
+                {"session": "s1", "turn": 2, "source_type": "user-stated"},
+                {"session": "s1", "turn": 2, "source_type": "inferred"},
+            ]
+        )
+        assert len(deduped) == 1
+        assert deduped[0]["source_type"] == "user-stated"
+
 
 class TestSourceFootnoteRendering:
     """``render_merged_entry`` renders origin-traced footnotes into the body."""
@@ -502,6 +560,21 @@ class TestSourceFootnoteRendering:
         assert reparsed is not None
         assert reparsed["source_type"] == "user-stated"
         assert reparsed["source_ref"] == "abc123#turn4"
+
+    def test_footnotes_are_a_trailing_appendix_not_inline(self) -> None:
+        from athenaeum.merge import render_merged_entry
+
+        # Slice-A contract (Quine S2): footnotes are a trailing sources
+        # APPENDIX. The original body text precedes all [^src-N] definitions,
+        # and the synthesized body carries no inline [^src-N] reference marker
+        # attached to the fact (per-fact inline attachment is slice B).
+        out = render_merged_entry(self._entry())
+        body_marker = out.index("Tristan's profile.")
+        first_footnote = out.index("[^src-1]:")
+        assert body_marker < first_footnote
+        # The body paragraph itself has no inline [^src reference appended.
+        body_line = out[body_marker : out.index("\n", body_marker)]
+        assert "[^src" not in body_line
 
 
 class TestAutoMemoryFileSourceFields:

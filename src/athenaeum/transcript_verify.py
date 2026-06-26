@@ -99,28 +99,34 @@ def _is_user_record(record: object) -> bool:
     return False
 
 
-def _iter_transcript_records(scope_dir: Path) -> list[object]:
-    """Read every ``*.jsonl`` line under ``scope_dir`` into record dicts.
+def _iter_session_records(scope_dir: Path, session_id: str) -> list[object]:
+    """Read the ORIGINATING session's ``{session_id}.jsonl`` into record dicts.
 
-    Malformed lines are skipped. Files are read in sorted order so the scan
-    is deterministic. Returns ``[]`` when the directory is absent.
+    Issue #260 (Quine S1): the scan is restricted to the originating session's
+    transcript, NOT every ``*.jsonl`` in the scope. Globbing the whole scope
+    and then returning the caller-supplied ``session_id`` would let a claim
+    that only appears in session B be falsely attributed to session A. One
+    session = one file, so we read exactly that file.
+
+    Malformed lines are skipped. Returns ``[]`` when the file is absent
+    (transcript rolled off / missing).
     """
-    if not scope_dir.is_dir():
+    jsonl = scope_dir / f"{session_id}.jsonl"
+    if not jsonl.is_file():
+        return []
+    try:
+        text = jsonl.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return []
     records: list[object] = []
-    for jsonl in sorted(scope_dir.glob("*.jsonl")):
-        try:
-            text = jsonl.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
             continue
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
     return records
 
 
@@ -158,7 +164,7 @@ def verify_user_stated(
         # Nothing to verify against — honest inferred.
         return DEFAULT_SOURCE_TYPE, fallback
 
-    records = _iter_transcript_records(root / scope)
+    records = _iter_session_records(root / scope, session_id)
     if not records:
         # Transcript missing or rolled off — honest inferred (NOT user-stated).
         return DEFAULT_SOURCE_TYPE, fallback
@@ -178,7 +184,9 @@ def verify_user_stated(
         if external_ref is None:
             url = _URL_RE.search(text)
             if url:
-                external_ref = url.group(0)
+                # Strip trailing sentence punctuation the regex may have
+                # swept in (e.g. "...startup." → "...startup").
+                external_ref = url.group(0).rstrip(".,;:!?")
 
     if external_ref is not None:
         return "external", external_ref
