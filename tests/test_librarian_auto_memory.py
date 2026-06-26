@@ -611,3 +611,438 @@ class TestAutoMemoryFileSourceFields:
         assert len(files) == 1
         assert files[0].source_type == "user-stated"
         assert files[0].source_ref == "sess9#turn3"
+
+
+# ---------------------------------------------------------------------------
+# Issue #261: move-then-retire lifecycle (slice B of #259)
+# ---------------------------------------------------------------------------
+
+
+import json  # noqa: E402
+import subprocess  # noqa: E402
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _git_init(root: Path) -> None:
+    """Initialize a git repo with an identity and an initial commit of everything."""
+    _git(root, "init", "-b", "develop")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Retire Test")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "initial: seed raw intake")
+
+
+def _write_am(
+    scope_dir: Path,
+    filename: str,
+    *,
+    name: str,
+    session: str,
+    turn: int,
+    body: str,
+    extra_fm: str = "",
+) -> Path:
+    scope_dir.mkdir(parents=True, exist_ok=True)
+    path = scope_dir / filename
+    path.write_text(
+        "---\n"
+        f"name: {name}\n"
+        "type: feedback\n"
+        f"originSessionId: {session}\n"
+        f"originTurn: {turn}\n"
+        "sources:\n"
+        f"  - session: {session}\n"
+        f"    turn: {turn}\n"
+        f"{extra_fm}"
+        "---\n"
+        f"{body}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_config(knowledge_root: Path) -> None:
+    (knowledge_root / "athenaeum.yaml").write_text(
+        "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
+        encoding="utf-8",
+    )
+
+
+def _write_clusters(knowledge_root: Path, rows: list[dict]) -> None:
+    out = knowledge_root / "raw" / "_librarian-clusters.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def retire_root(tmp_path: Path) -> Path:
+    """A git-initialized knowledge root with one non-contradictory cluster.
+
+    A single ``berlin`` memory in one scope, clustered as a singleton. With no
+    Anthropic client the C4 detector returns ``detected=False`` so the cluster
+    is eligible for move-then-retire.
+    """
+    knowledge_root = tmp_path / "knowledge"
+    scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-home"
+    _write_am(
+        scope,
+        "user_tristan_berlin_address.md",
+        name="Tristan Berlin address",
+        session="sess-berlin",
+        turn=3,
+        body="Tristan lives in Berlin, Germany.",
+    )
+    _write_clusters(
+        knowledge_root,
+        [
+            {
+                "cluster_id": "home-0001",
+                "member_paths": [
+                    "-Users-tristankromer-Code-home/user_tristan_berlin_address.md"
+                ],
+                "centroid_score": 1.0,
+                "rationale": "singleton",
+            }
+        ],
+    )
+    _write_config(knowledge_root)
+    (knowledge_root / "wiki").mkdir(parents=True, exist_ok=True)
+    _git_init(knowledge_root)
+    return knowledge_root
+
+
+def _raw_file(knowledge_root: Path) -> Path:
+    return (
+        knowledge_root
+        / "raw"
+        / "auto-memory"
+        / "-Users-tristankromer-Code-home"
+        / "user_tristan_berlin_address.md"
+    )
+
+
+class TestRetireNonContradictory:
+    def test_noncontradictory_raw_is_moved_and_git_removed(
+        self, retire_root: Path
+    ) -> None:
+        from athenaeum.merge import AUTO_WIKI_PREFIX, merge_clusters_to_wiki
+        from athenaeum.models import parse_frontmatter
+        from athenaeum.retire import run_retire_pass
+
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root)
+
+        raw = _raw_file(retire_root)
+        # The raw file is git-removed from the working tree...
+        assert not raw.exists()
+        assert report.committed is True
+        assert len(report.moved) == 1
+
+        # ...but recoverable from git history.
+        log = _git(retire_root, "log", "--diff-filter=D", "--name-only", "--format=")
+        assert "user_tristan_berlin_address.md" in log.stdout
+
+        # The fact + an origin-traced footnote now live in the wiki entry.
+        wiki = retire_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        text = entry_file.read_text(encoding="utf-8")
+        assert "Berlin" in text
+        assert "[^src-1]:" in text
+        assert "**Source:**" in text
+        meta, _ = parse_frontmatter(text)
+        assert meta["retired"] is True
+        # The ultimate-source invariant: never cite the raw filename.
+        assert "raw/auto-memory" not in text
+
+    def test_wiki_update_and_deletion_land_in_one_commit(
+        self, retire_root: Path
+    ) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import run_retire_pass
+
+        entries = merge_clusters_to_wiki(retire_root)
+        run_retire_pass(entries, retire_root)
+
+        # The HEAD commit (commit B) must contain BOTH the wiki write and the
+        # raw deletion together.
+        show = _git(retire_root, "show", "--stat", "--format=", "HEAD")
+        assert "wiki/auto-" in show.stdout
+        assert "user_tristan_berlin_address.md" in show.stdout
+        status = _git(retire_root, "status", "--porcelain")
+        assert status.stdout.strip() == ""
+
+    def test_second_run_is_a_noop(self, retire_root: Path) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import run_retire_pass
+
+        entries = merge_clusters_to_wiki(retire_root)
+        run_retire_pass(entries, retire_root)
+        head_after_first = _git(retire_root, "rev-parse", "HEAD").stdout.strip()
+
+        # Re-merge: the member is gone, so no entry resolves; retire is a no-op.
+        entries2 = merge_clusters_to_wiki(retire_root)
+        report2 = run_retire_pass(entries2, retire_root)
+        head_after_second = _git(retire_root, "rev-parse", "HEAD").stdout.strip()
+
+        assert report2.moved == []
+        assert report2.committed is False
+        assert head_after_first == head_after_second
+
+    def test_recall_over_retired_tree_still_surfaces_fact(
+        self, retire_root: Path
+    ) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import run_retire_pass
+        from athenaeum.search import FTS5Backend
+
+        entries = merge_clusters_to_wiki(retire_root)
+        run_retire_pass(entries, retire_root)
+
+        wiki_root = retire_root / "wiki"
+        extra_roots = [retire_root / "raw" / "auto-memory"]
+        cache_dir = retire_root / ".cache"
+        backend = FTS5Backend()
+        backend.build_index(wiki_root, cache_dir, extra_roots=extra_roots)
+
+        hits = backend.query("berlin", cache_dir, n=5)
+        filenames = {h[0] for h in hits}
+        # The fact still surfaces — via the compiled wiki entry, not the
+        # (now-retired) raw intake file.
+        assert any(f.startswith("auto-") for f in filenames)
+        assert not any("auto-memory/" in f for f in filenames)
+
+
+class TestRetireContradictory:
+    def test_contradictory_raw_is_held_not_deleted(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import HOLD, run_retire_pass
+
+        knowledge_root = tmp_path / "knowledge"
+        scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        a = _write_am(
+            scope,
+            "feedback_commit_v1.md",
+            name="Commit directly",
+            session="s-111",
+            turn=1,
+            body="Commit prior-session debris directly to develop.",
+        )
+        b = _write_am(
+            scope,
+            "feedback_commit_v2.md",
+            name="Park on WIP",
+            session="s-222",
+            turn=2,
+            body="Park prior-session debris on a WIP branch; do not commit.",
+        )
+        _write_clusters(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "code-0001",
+                    "member_paths": [
+                        "-Users-tristankromer-Code/feedback_commit_v1.md",
+                        "-Users-tristankromer-Code/feedback_commit_v2.md",
+                    ],
+                    "centroid_score": 0.62,
+                    "rationale": "opposing guidance",
+                }
+            ],
+        )
+        _write_config(knowledge_root)
+        (knowledge_root / "wiki").mkdir(parents=True, exist_ok=True)
+        _git_init(knowledge_root)
+
+        payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_commit_v1.md", '
+            '"-Users-tristankromer-Code/feedback_commit_v2.md"], '
+            '"conflicting_passages": ["Commit directly.", "Park on WIP."], '
+            '"rationale": "One says commit; the other says park."}'
+        )
+        response = MagicMock()
+        response.content = [MagicMock(text=payload)]
+        fake_client = MagicMock()
+        fake_client.messages.create.return_value = response
+
+        entries = merge_clusters_to_wiki(knowledge_root, client=fake_client)
+        assert entries[0].contradictions_detected is True
+
+        report = run_retire_pass(entries, knowledge_root)
+        # The contradictory raw stays queued — a delete must never race a
+        # pending confirmation.
+        assert a.exists()
+        assert b.exists()
+        assert report.moved == []
+        assert len(report.held) == 2
+        assert all(d.disposition == HOLD for d in report.dispositions)
+        assert report.committed is False
+
+
+class TestRetireDryRun:
+    def test_dry_run_writes_nothing_but_reports_plan(self, retire_root: Path) -> None:
+        from athenaeum.merge import AUTO_WIKI_PREFIX, merge_clusters_to_wiki
+        from athenaeum.retire import MOVE, run_retire_pass
+
+        # dry_run merge builds entries without writing wiki; retire dry_run
+        # must likewise write nothing.
+        entries = merge_clusters_to_wiki(retire_root, dry_run=True)
+        head_before = _git(retire_root, "rev-parse", "HEAD").stdout.strip()
+
+        report = run_retire_pass(entries, retire_root, dry_run=True)
+
+        raw = _raw_file(retire_root)
+        assert raw.exists()  # nothing removed
+        wiki = retire_root / "wiki"
+        assert list(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md")) == []  # nothing written
+        head_after = _git(retire_root, "rev-parse", "HEAD").stdout.strip()
+        assert head_before == head_after  # no commit
+
+        # ...but the plan is reported with the intended disposition.
+        assert report.dry_run is True
+        assert report.committed is False
+        assert len(report.dispositions) == 1
+        assert report.dispositions[0].disposition == MOVE
+
+
+class TestRetireOriginTracing:
+    def test_footnote_upgrades_to_user_stated_when_transcript_confirms(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.merge import AUTO_WIKI_PREFIX, merge_clusters_to_wiki
+        from athenaeum.retire import run_retire_pass
+
+        knowledge_root = tmp_path / "knowledge"
+        scope_name = "-Users-tristankromer-Code-home"
+        scope = knowledge_root / "raw" / "auto-memory" / scope_name
+        _write_am(
+            scope,
+            "user_tristan_berlin_address.md",
+            name="Tristan Berlin address",
+            session="sess-berlin",
+            turn=3,
+            body="Tristan lives in Berlin, Germany.",
+        )
+        _write_clusters(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "home-0001",
+                    "member_paths": [f"{scope_name}/user_tristan_berlin_address.md"],
+                    "centroid_score": 1.0,
+                    "rationale": "singleton",
+                }
+            ],
+        )
+        _write_config(knowledge_root)
+        (knowledge_root / "wiki").mkdir(parents=True, exist_ok=True)
+        _git_init(knowledge_root)
+
+        # Synthetic transcript tree: the user authored the claim in the
+        # originating session.
+        projects_root = tmp_path / "projects"
+        session_dir = projects_root / scope_name
+        session_dir.mkdir(parents=True)
+        (session_dir / "sess-berlin.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "Tristan lives in Berlin, Germany.",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        entries = merge_clusters_to_wiki(knowledge_root)
+        run_retire_pass(entries, knowledge_root, projects_root=projects_root)
+
+        wiki = knowledge_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        text = entry_file.read_text(encoding="utf-8")
+        # The footnote is upgraded from the honest ``inferred`` default to the
+        # verified ``user-stated`` with a session+turn ref.
+        assert "user-stated" in text
+        assert "sess-berlin#turn3" in text
+
+
+class TestRetireNoGitSafety:
+    def test_no_git_repo_means_no_retire(self, tmp_path: Path) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import SKIP, run_retire_pass
+
+        knowledge_root = tmp_path / "knowledge"
+        scope = (
+            knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-home"
+        )
+        raw = _write_am(
+            scope,
+            "user_tristan_berlin_address.md",
+            name="Tristan Berlin address",
+            session="sess-berlin",
+            turn=3,
+            body="Tristan lives in Berlin, Germany.",
+        )
+        _write_clusters(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "home-0001",
+                    "member_paths": [
+                        "-Users-tristankromer-Code-home/user_tristan_berlin_address.md"
+                    ],
+                    "centroid_score": 1.0,
+                    "rationale": "singleton",
+                }
+            ],
+        )
+        _write_config(knowledge_root)
+        (knowledge_root / "wiki").mkdir(parents=True, exist_ok=True)
+        # NOTE: no _git_init — recovery is git-only, so retire must refuse.
+
+        entries = merge_clusters_to_wiki(knowledge_root)
+        report = run_retire_pass(entries, knowledge_root)
+
+        assert raw.exists()  # nothing retired without git
+        assert report.moved == []
+        assert report.committed is False
+        assert any(d.disposition == SKIP for d in report.dispositions)
+
+
+class TestRetireIntegrationViaRun:
+    def test_run_merge_only_retires_by_default(self, retire_root: Path) -> None:
+        from athenaeum.librarian import run
+        from athenaeum.merge import AUTO_WIKI_PREFIX
+        from athenaeum.models import parse_frontmatter
+
+        rc = run(
+            raw_root=retire_root / "raw",
+            wiki_root=retire_root / "wiki",
+            knowledge_root=retire_root,
+            merge_only=True,
+        )
+        assert rc == 0
+        # Default-on: a normal merge run retires the non-contradictory raw.
+        assert not _raw_file(retire_root).exists()
+        wiki = retire_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
+        assert meta["retired"] is True
