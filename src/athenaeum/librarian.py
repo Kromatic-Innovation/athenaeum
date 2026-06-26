@@ -689,27 +689,33 @@ def _run_retire(
     config: dict[str, object] | None,
     dry_run: bool,
     projects_root: Path | None,
-) -> None:
+):
     """Run the move-then-retire pass (issue #261) over the merged entries.
 
     Thin wrapper around :func:`athenaeum.retire.run_retire_pass` so the run
     loop stays readable. Lazy-imports ``retire`` to avoid a hard import cycle
-    (retire imports merge, not librarian). Failures are swallowed: a retire
-    hiccup must never abort the nightly compile — the held raw simply stays in
-    the queue for the next run.
+    (retire imports merge, not librarian). A retire hiccup must never abort the
+    nightly compile — the held raw simply stays in the queue for the next run —
+    so the exception is caught, but it is logged at ERROR with the traceback
+    (Quine C1) so a persistently-failing retire is visible to monitoring rather
+    than buried in a WARNING. Returns the :class:`RetireReport` on success, or
+    ``None`` when the pass raised.
     """
     from athenaeum.retire import run_retire_pass
 
     try:
-        run_retire_pass(
+        return run_retire_pass(
             merged_entries,
             knowledge_root,
             config=config,
             dry_run=dry_run,
             projects_root=projects_root,
         )
-    except Exception as exc:  # noqa: BLE001 — retire must not fail the run
-        log.warning("retire pass failed (%s); leaving raw intake in place", exc)
+    except Exception:
+        log.exception(
+            "retire pass failed; leaving raw intake in place (nothing retired)"
+        )
+        return None
 
 
 def _run_reresolve_pass(

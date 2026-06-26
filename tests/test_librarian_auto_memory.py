@@ -1046,3 +1046,269 @@ class TestRetireIntegrationViaRun:
         entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
         meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
         assert meta["retired"] is True
+
+
+def _build_two_member_root(
+    tmp_path: Path,
+    *,
+    body_a: str,
+    body_b: str,
+    scope_name: str = "-Users-tristankromer-Code",
+) -> Path:
+    """A git-initialized root with one 2-member cluster (for M1/S2/S4 tests)."""
+    knowledge_root = tmp_path / "knowledge"
+    scope = knowledge_root / "raw" / "auto-memory" / scope_name
+    _write_am(
+        scope,
+        "feedback_a.md",
+        name="Memory A",
+        session="s-aaa",
+        turn=1,
+        body=body_a,
+    )
+    _write_am(
+        scope,
+        "feedback_b.md",
+        name="Memory B",
+        session="s-bbb",
+        turn=2,
+        body=body_b,
+    )
+    _write_clusters(
+        knowledge_root,
+        [
+            {
+                "cluster_id": "two-0001",
+                "member_paths": [
+                    f"{scope_name}/feedback_a.md",
+                    f"{scope_name}/feedback_b.md",
+                ],
+                "centroid_score": 0.9,
+                "rationale": "cohesive",
+            }
+        ],
+    )
+    _write_config(knowledge_root)
+    (knowledge_root / "wiki").mkdir(parents=True, exist_ok=True)
+    _git_init(knowledge_root)
+    return knowledge_root
+
+
+def _clean_detector_client(detected: bool = False):
+    """A MagicMock Anthropic client whose detector returns a clean verdict."""
+    from unittest.mock import MagicMock
+
+    payload = (
+        '{"detected": false, "conflict_type": null, "members_involved": [], '
+        '"conflicting_passages": [], "rationale": "all consistent"}'
+    )
+    if detected:
+        payload = (
+            '{"detected": true, "conflict_type": "factual", '
+            '"members_involved": [], "conflicting_passages": [], '
+            '"rationale": "conflict"}'
+        )
+    response = MagicMock()
+    response.content = [MagicMock(text=payload)]
+    client = MagicMock()
+    client.messages.create.return_value = response
+    return client
+
+
+class TestRetireDegradedDetection:
+    """Quine M1: a degraded not-detected verdict must NOT retire."""
+
+    def test_offline_multimember_cluster_is_held_not_retired(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import HOLD, run_retire_pass
+
+        root = _build_two_member_root(
+            tmp_path,
+            body_a="Deploy on Fridays is fine.",
+            body_b="Never deploy on Fridays.",
+        )
+        # client=None → detector returns detected=False rationale='llm-unavailable'
+        # which is INDISTINGUISHABLE from a clean verdict at the bool level.
+        entries = merge_clusters_to_wiki(root, client=None)
+        assert entries[0].contradictions_detected is False
+        assert entries[0].contradiction.rationale == "llm-unavailable"
+
+        report = run_retire_pass(entries, root)
+
+        scope = root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        # A degraded verdict is not trustworthy — both raw files stay on disk.
+        assert (scope / "feedback_a.md").exists()
+        assert (scope / "feedback_b.md").exists()
+        assert report.moved == []
+        assert report.committed is False
+        assert len(report.held) == 2
+        assert all(d.disposition == HOLD for d in report.dispositions)
+
+
+class TestRetirePendingQueueCrosscheck:
+    """Quine S1: never retire raw referenced by an open pending entry."""
+
+    def test_member_in_pending_questions_is_held(self, retire_root: Path) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import HOLD, run_retire_pass
+
+        # Simulate a prior-run open pending entry referencing this member.
+        pending = retire_root / "wiki" / "_pending_questions.md"
+        pending.write_text(
+            "# Pending Questions\n\n"
+            "## Conflict (from wiki/auto-foo.md)\n\n"
+            "Members involved: "
+            "-Users-tristankromer-Code-home/user_tristan_berlin_address.md\n",
+            encoding="utf-8",
+        )
+
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root)
+
+        # The member is still under open confirmation — do not retire it.
+        assert _raw_file(retire_root).exists()
+        assert report.moved == []
+        assert report.committed is False
+        assert any(
+            d.disposition == HOLD and "pending" in d.reason for d in report.dispositions
+        )
+
+
+class TestRetireDroppedSection:
+    """Quine S2: only git rm a member whose fact actually landed in the body."""
+
+    def test_member_with_dropped_section_is_retained(self, tmp_path: Path) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import MOVE, SKIP, run_retire_pass
+
+        # Identical bodies: synthesize_body keeps member A's section and drops
+        # member B's (all paragraphs already seen). B's raw must NOT be removed.
+        root = _build_two_member_root(
+            tmp_path,
+            body_a="The exact same fact.",
+            body_b="The exact same fact.",
+        )
+        entries = merge_clusters_to_wiki(root, client=_clean_detector_client())
+        assert entries[0].contradictions_detected is False
+
+        report = run_retire_pass(entries, root)
+
+        scope = root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        # A landed; B's section dropped → A retired, B retained.
+        assert not (scope / "feedback_a.md").exists()
+        assert (scope / "feedback_b.md").exists()
+        assert len(report.moved) == 1
+        assert report.committed is True
+        assert any(
+            d.disposition == SKIP and "feedback_b.md" in d.path
+            for d in report.dispositions
+        )
+        assert any(
+            d.disposition == MOVE and "feedback_a.md" in d.path
+            for d in report.dispositions
+        )
+
+
+class TestRetireOutOfRootMember:
+    """Quine S3: only retire members that live under knowledge_root."""
+
+    def test_member_outside_knowledge_root_is_retained(self, tmp_path: Path) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import SKIP, run_retire_pass
+
+        knowledge_root = tmp_path / "knowledge"
+        external = tmp_path / "external-intake"
+        scope = external / "ext-scope"
+        _write_am(
+            scope,
+            "user_external_fact.md",
+            name="External fact",
+            session="s-ext",
+            turn=1,
+            body="A fact that lives outside the knowledge root.",
+        )
+        _write_clusters(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "ext-0001",
+                    "member_paths": ["ext-scope/user_external_fact.md"],
+                    "centroid_score": 1.0,
+                    "rationale": "singleton",
+                }
+            ],
+        )
+        # Configure the external dir as an absolute extra intake root.
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "recall:\n"
+            "  extra_intake_roots:\n"
+            "    - raw/auto-memory\n"
+            f"    - {external}\n",
+            encoding="utf-8",
+        )
+        (knowledge_root / "raw" / "auto-memory").mkdir(parents=True, exist_ok=True)
+        (knowledge_root / "wiki").mkdir(parents=True, exist_ok=True)
+        _git_init(knowledge_root)
+
+        entries = merge_clusters_to_wiki(knowledge_root)
+        report = run_retire_pass(entries, knowledge_root)
+
+        # The member is outside knowledge_root — not git-recoverable from this
+        # repo, so it is retained rather than deleted.
+        assert (scope / "user_external_fact.md").exists()
+        assert report.moved == []
+        assert report.committed is False
+        assert any(
+            d.disposition == SKIP and "knowledge_root" in d.reason
+            for d in report.dispositions
+        )
+
+
+class TestRetireMultiMemberMove:
+    """Quine S4: a multi-member non-contradictory cluster moves every member."""
+
+    def test_all_members_moved_and_facts_retained(self, tmp_path: Path) -> None:
+        from athenaeum.merge import AUTO_WIKI_PREFIX, merge_clusters_to_wiki
+        from athenaeum.retire import run_retire_pass
+
+        root = _build_two_member_root(
+            tmp_path,
+            body_a="Alpha distinctive fact.",
+            body_b="Bravo distinctive fact.",
+        )
+        entries = merge_clusters_to_wiki(root, client=_clean_detector_client())
+        report = run_retire_pass(entries, root)
+
+        scope = root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        assert not (scope / "feedback_a.md").exists()
+        assert not (scope / "feedback_b.md").exists()
+        assert len(report.moved) == 2
+        assert report.committed is True
+
+        wiki = root / "wiki"
+        text = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md")).read_text(encoding="utf-8")
+        assert "Alpha distinctive fact." in text
+        assert "Bravo distinctive fact." in text
+
+    def test_no_resolvable_members_is_a_noop(self, retire_root: Path) -> None:
+        from athenaeum.contradictions import ContradictionResult
+        from athenaeum.merge import MergedWikiEntry
+        from athenaeum.retire import run_retire_pass
+
+        head_before = _git(retire_root, "rev-parse", "HEAD").stdout.strip()
+        ghost = MergedWikiEntry(
+            topic_slug="ghost",
+            cluster_id="ghost-0001",
+            cluster_centroid_score=1.0,
+            contradictions_detected=False,
+            member_paths=["nonexistent-scope/ghost.md"],
+            contradiction=ContradictionResult(detected=False, rationale="singleton"),
+        )
+        report = run_retire_pass([ghost], retire_root)
+
+        assert report.moved == []
+        assert report.committed is False
+        head_after = _git(retire_root, "rev-parse", "HEAD").stdout.strip()
+        assert head_before == head_after

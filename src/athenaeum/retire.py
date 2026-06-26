@@ -58,6 +58,23 @@ MOVE = "move"
 HOLD = "hold"
 SKIP = "skip"
 
+# Issue #261 / Quine M1: ``detect_contradictions`` returns ``detected=False``
+# both for a genuine clean verdict AND when it degraded (offline, API error,
+# unparseable response). A degraded not-detected verdict is NOT trustworthy —
+# retiring a genuinely-contradictory cluster on a degraded verdict would delete
+# raw that a working detector would have held. These rationales mark the
+# degraded paths (see ``athenaeum.contradictions`` + the merge C4 loop); a
+# cluster carrying one of them is HELD, never moved. A legitimate
+# ``singleton`` / ``declared-*`` / empty (real clean) rationale still moves.
+DEGRADED_RATIONALES: frozenset[str] = frozenset(
+    {
+        "llm-unavailable",
+        "detector-returned-no-json",
+        "detector-invalid-conflict-type",
+        "detector-malformed-response",
+    }
+)
+
 
 @dataclass
 class FileDisposition:
@@ -93,21 +110,92 @@ def _git(
     )
 
 
-def _git_snapshot(knowledge_root: Path, message: str) -> bool:
-    """Stage all changes and commit if any. Returns True when a commit was made.
+def _commit_paths_if_staged(
+    knowledge_root: Path, rel_paths: list[str], message: str
+) -> bool:
+    """Stage ONLY ``rel_paths`` and commit iff that produces staged changes.
 
-    Mirrors :func:`athenaeum.librarian.git_snapshot` but is inlined here to
-    avoid importing ``librarian`` (which imports this module — a cycle).
+    Quine C2/nit3: the provenance snapshot must not ``git add -A`` — that
+    sweeps unrelated working-tree edits and any prior staged deletion into a
+    misleadingly-labelled "provenance" commit. We stage exactly the
+    auto-memory raw intake paths being snapshotted and commit only if the
+    add actually staged something (already-committed unchanged files stage
+    nothing → no empty commit). Returns True when a commit was made.
     """
-    if not (knowledge_root / ".git").exists():
+    if not rel_paths:
         return False
-    status = _git(knowledge_root, "status", "--porcelain")
-    if not status.stdout.strip():
+    _git(knowledge_root, "add", "--", *rel_paths)
+    # diff --cached --quiet exits 1 when there are staged changes, 0 when clean.
+    staged = _git(knowledge_root, "diff", "--cached", "--quiet", check=False)
+    if staged.returncode == 0:
         return False
-    _git(knowledge_root, "add", "-A")
     _git(knowledge_root, "commit", "-m", message)
     log.info("retire: git commit: %s", message)
     return True
+
+
+def _move_eligibility(entry: MergedWikiEntry) -> tuple[bool, str]:
+    """Decide whether a cluster may be MOVED, and the HOLD reason if not.
+
+    Quine M1: MOVE only on a TRUSTWORTHY not-detected verdict. A cluster is
+    held when the detector flagged it, when there is no verdict at all, or
+    when the verdict is one of :data:`DEGRADED_RATIONALES` (offline / API
+    error / unparseable). Everything else (real clean verdict, ``singleton``,
+    declared resolutions) is move-eligible.
+    """
+    if entry.contradictions_detected:
+        return False, "contradiction flagged — queued for human confirmation"
+    c = entry.contradiction
+    if c is None:
+        return False, "no contradiction verdict available — not safe to retire"
+    if c.rationale in DEGRADED_RATIONALES:
+        return False, f"degraded detection ({c.rationale}) — not safe to retire"
+    return True, ""
+
+
+def _open_pending_text(wiki_root: Path) -> str:
+    """Concatenated text of the open pending-confirmation sidecars.
+
+    Quine S1: the retire decision must also respect prior-run human
+    confirmations still in flight. We read ``_pending_questions.md`` and
+    ``_pending_merges.md`` and let the caller substring-check member refs;
+    a member referenced anywhere in them is held (conservative — "if in
+    doubt, keep it"). Missing files contribute the empty string.
+    """
+    parts: list[str] = []
+    for name in ("_pending_questions.md", "_pending_merges.md"):
+        p = wiki_root / name
+        if p.is_file():
+            try:
+                parts.append(p.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+    return "\n".join(parts)
+
+
+def _member_in_pending(member: Path, pending_text: str) -> bool:
+    """True when a member is referenced by an open pending entry (Quine S1).
+
+    Matches both writer formats: the ``<scope>/<filename>`` ref used in
+    ``_pending_questions.md`` ("Members involved: …") and the absolute path
+    used in ``_pending_merges.md`` (sources list).
+    """
+    if not pending_text:
+        return False
+    ref = f"{member.parent.name}/{member.name}"
+    return ref in pending_text or str(member) in pending_text
+
+
+def _member_landed(member: Path, body: str) -> bool:
+    """True when a member's section is present in the synthesized body (Quine S2).
+
+    ``synthesize_body`` drops a member whose paragraphs were all seen verbatim
+    in an earlier member (or whose body is empty). If a member's fact did not
+    land in the wiki entry, its raw must NOT be git rm'd. The section header is
+    the deterministic ``## From `<scope>/<filename>` `` form.
+    """
+    header = f"## From `{member.parent.name}/{member.name}`"
+    return (header + "\n") in body
 
 
 def _member_claim(am_path: Path, fallback: str) -> str:
@@ -240,12 +328,34 @@ def run_retire_pass(
     resolved_config = config if config is not None else load_config(knowledge_root)
     extra_roots = resolve_extra_intake_roots(knowledge_root, config=resolved_config)
     wiki_root = knowledge_root / "wiki"
+    kr = knowledge_root.resolve()
+    pending_text = _open_pending_text(wiki_root)
 
+    # (entry, members_to_retire) — only the members whose fact actually landed
+    # in the wiki body AND that live under knowledge_root are retire-eligible.
     retiring: list[tuple[MergedWikiEntry, list[Path]]] = []
     for entry in entries:
         members = _resolve_members(entry, extra_roots)
-        if entry.contradictions_detected:
-            # HOLD: a delete must never race a pending confirmation.
+
+        eligible, hold_reason = _move_eligibility(entry)
+        if not eligible:
+            # HOLD: contradictory OR a degraded/absent verdict — a delete must
+            # never race a pending confirmation, and a degraded verdict is not
+            # trustworthy enough to retire on.
+            for m in members:
+                report.held.append(str(m))
+                report.dispositions.append(
+                    FileDisposition(str(m), HOLD, entry.cluster_id, hold_reason)
+                )
+            continue
+
+        if not members:
+            # No live members resolved (already retired / removed) — nothing
+            # to move. Idempotency falls out of this branch.
+            continue
+
+        # Quine S1: never retire raw still referenced by an open pending entry.
+        if any(_member_in_pending(m, pending_text) for m in members):
             for m in members:
                 report.held.append(str(m))
                 report.dispositions.append(
@@ -253,17 +363,40 @@ def run_retire_pass(
                         str(m),
                         HOLD,
                         entry.cluster_id,
-                        "contradiction flagged — queued for human confirmation",
+                        "open pending confirmation references this cluster — "
+                        "not retired",
                     )
                 )
             continue
-        if not members:
-            # No live members resolved (already retired / removed) — nothing
-            # to move. Idempotency falls out of this branch.
-            continue
-        retiring.append((entry, members))
-        report.wiki_updated.append(entry.filename)
+
+        # Quine S2 + S3: a member is retire-eligible only when its fact landed
+        # in the wiki body AND it lives under knowledge_root (git-recoverable
+        # from this repo). Otherwise retain its raw.
+        retire_members: list[Path] = []
         for m in members:
+            if not _member_landed(m, entry.body):
+                report.dispositions.append(
+                    FileDisposition(
+                        str(m),
+                        SKIP,
+                        entry.cluster_id,
+                        "section dropped (empty/duplicate) — raw retained",
+                    )
+                )
+                continue
+            try:
+                m.resolve().relative_to(kr)
+            except ValueError:
+                report.dispositions.append(
+                    FileDisposition(
+                        str(m),
+                        SKIP,
+                        entry.cluster_id,
+                        "member outside knowledge_root — raw retained",
+                    )
+                )
+                continue
+            retire_members.append(m)
             report.moved.append(str(m))
             report.dispositions.append(
                 FileDisposition(
@@ -273,6 +406,10 @@ def run_retire_pass(
                     f"non-contradictory — moved into wiki/{entry.filename}",
                 )
             )
+
+        if retire_members:
+            retiring.append((entry, retire_members))
+            report.wiki_updated.append(entry.filename)
 
     if dry_run:
         _log_report(report)
@@ -292,6 +429,7 @@ def run_retire_pass(
                 disp.reason = "no git repo — not retired (recovery is git-only)"
         report.moved = []
         report.wiki_updated = []
+        _log_report(report)  # Quine nit1: surface why nothing happened.
         return report
 
     if not retiring:
@@ -299,29 +437,37 @@ def run_retire_pass(
         _log_report(report)
         return report
 
-    kr = knowledge_root.resolve()
-
-    # Commit A — provenance snapshot. Commits the raw intake (and the merge's
-    # freshly written wiki entries) so every file we are about to git rm is
+    # Commit A — provenance snapshot. Commits ONLY the raw intake about to be
+    # retired (scoped add, Quine C2) so every file we are about to git rm is
     # recoverable from history.
-    _git_snapshot(knowledge_root, "librarian: auto-memory provenance snapshot")
+    snapshot_rel = [
+        str(m.resolve().relative_to(kr)) for _e, members in retiring for m in members
+    ]
+    _commit_paths_if_staged(
+        knowledge_root,
+        snapshot_rel,
+        "librarian: auto-memory raw intake provenance snapshot",
+    )
 
     # Move: enrich each retiring entry's wiki page (verified footnotes +
     # per-fact markers + retired flag) and overwrite it.
+    wiki_rel: list[str] = []
     for entry, _members in retiring:
         _enrich_entry(entry, projects_root)
         page = wiki_root / entry.filename
         page.write_text(render_merged_entry(entry), encoding="utf-8")
+        wiki_rel.append(str(page.resolve().relative_to(kr)))
 
     # Retire: git rm the moved raw files (staged deletion, recoverable).
-    rel_paths: list[str] = []
-    for _entry, members in retiring:
-        for m in members:
-            rel_paths.append(str(m.resolve().relative_to(kr)))
-    _git(knowledge_root, "rm", "--quiet", "--", *rel_paths)
+    del_rel = [
+        str(m.resolve().relative_to(kr)) for _e, members in retiring for m in members
+    ]
+    _git(knowledge_root, "rm", "--quiet", "--", *del_rel)
 
-    # Commit B — wiki updates + raw deletions TOGETHER (single recoverable commit).
-    _git(knowledge_root, "add", "-A")
+    # Commit B — wiki updates + raw deletions TOGETHER (single recoverable
+    # commit). Scoped staging (Quine C2): the deletions are already staged by
+    # ``git rm``; we add exactly the wiki entries we rewrote, not ``-A``.
+    _git(knowledge_root, "add", "--", *wiki_rel)
     _git(
         knowledge_root,
         "commit",
@@ -331,7 +477,7 @@ def run_retire_pass(
     )
     report.committed = True
     log.info(
-        "retire: moved %d raw file(s) into %d wiki entr(y/ies); held %d; " "committed",
+        "retire: moved %d raw file(s) into %d wiki entr(y/ies); held %d; committed",
         len(report.moved),
         len(report.wiki_updated),
         len(report.held),
