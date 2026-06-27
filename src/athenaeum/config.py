@@ -92,9 +92,13 @@ def resolve_owner(config: dict[str, Any] | None) -> dict[str, Any] | None:
     source — it comes entirely from ``athenaeum.yaml``::
 
         owner:
-          uid: a545c038                          # canonical owner person UID
-          google_contact: people/c7657288...     # owner Google contact id
-          aliases: ["user_tristan", "..."]       # optional name/handle aliases
+          uid: <owner-person-uid>                # canonical owner person UID
+          google_contact: people/<contact-id>    # owner Google contact id
+          aliases: ["<your_user_handle>", ...]   # optional name/handle aliases
+
+    Aliases used for name matching must be FULL names (≥2 tokens); a
+    single-token alias is ignored for name matching so it cannot absorb
+    every stranger who shares that one name.
 
     Returns a normalized dict ``{"uid", "google_contact", "aliases"}`` when at
     least one usable field is set, else ``None``. A ``None`` return makes every
@@ -185,13 +189,15 @@ search_backend: fts5
 #   aliases: optional name/handle aliases (display names, git author emails,
 #     ``user_*`` handles). Pages whose name/handle/process-context author
 #     matches an alias auto-bind to the owner. The ``user_*`` namespace is
-#     always treated as an owner alias when an owner is configured.
+#     always treated as an owner alias when an owner is configured. Name
+#     aliases must be FULL names (>=2 tokens) — a single-token alias is
+#     ignored for name matching so it cannot absorb every same-named stranger.
 # owner:
-#   uid: a545c038
-#   google_contact: people/c765728850212863135
+#   uid: <owner-person-uid>
+#   google_contact: people/<google-contact-id>
 #   aliases:
-#     - user_tristan
-#     - Tristan Kromer
+#     - <your_user_handle>
+#     - <Your Name>
 
 # Recall configuration.
 # extra_intake_roots: additional directories (resolved relative to the

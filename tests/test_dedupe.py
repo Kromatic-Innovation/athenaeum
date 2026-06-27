@@ -153,6 +153,12 @@ class TestFindDuplicatePersons:
             "gggg2222",
         }
 
+    def test_no_google_contact_no_pair(self, wiki_root: Path) -> None:
+        # Two persons both lacking google_contact must NOT collide on "".
+        _write_person(wiki_root, uid="ngc11111", name="Helen North")
+        _write_person(wiki_root, uid="ngc22222", name="Ivan Oates")
+        assert find_duplicate_persons(wiki_root) == []
+
 
 class TestOwnerSingleton:
     """Owner auto-bind invariant (issue #263, slice D of #259)."""
@@ -241,6 +247,22 @@ class TestOwnerSingleton:
         )
         assert find_duplicate_persons(wiki_root, owner=OWNER) == []
 
+    def test_shared_first_name_not_absorbed(self, wiki_root: Path) -> None:
+        # A stranger sharing only the owner's FIRST name must NOT bind
+        # (load-bearing invariant — pinned so a future token-subset change
+        # cannot silently regress it).
+        self._owner_page(wiki_root)
+        _write_person(wiki_root, uid="bumg1111", name="Tristan Bumgarner")
+        assert find_duplicate_persons(wiki_root, owner=OWNER) == []
+
+    def test_single_token_alias_does_not_absorb_stranger(self, wiki_root: Path) -> None:
+        # A misconfigured single-token name alias must not auto-bind every
+        # same-named stranger to the owner.
+        single_owner = {"uid": "a545c038", "google_contact": "", "aliases": ["Tristan"]}
+        self._owner_page(wiki_root)
+        _write_person(wiki_root, uid="jones111", name="Tristan Jones")
+        assert find_duplicate_persons(wiki_root, owner=single_owner) == []
+
     def test_inert_when_owner_unset(self, wiki_root: Path) -> None:
         # Same process-context fragment, but no owner configured → no bind.
         self._owner_page(wiki_root)
@@ -299,6 +321,18 @@ class TestOwnerSignal:
             owner_signal({"name": "Jane Doe", "git_author": "jane@example.com"}, OWNER)
             is None
         )
+
+    def test_shared_first_name_no_signal(self) -> None:
+        assert owner_signal({"name": "Tristan Bumgarner"}, OWNER) is None
+
+    def test_single_token_alias_excluded_from_name_match(self) -> None:
+        single_owner = {"uid": "x", "google_contact": "", "aliases": ["Tristan"]}
+        assert owner_signal({"name": "Tristan Jones"}, single_owner) is None
+
+    def test_user_namespace_is_owner_by_design(self) -> None:
+        # Single-owner KB contract: the user_* namespace is always the owner,
+        # even an unfamiliar handle. Pinned intentionally.
+        assert owner_signal({"name": "user_someoneelse"}, OWNER) == "owner_alias"
 
 
 class TestMergePreservesFieldSources:

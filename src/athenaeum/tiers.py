@@ -320,6 +320,10 @@ def parse_tier2_entities(
         if owner and "reference" in valid_types:
             from athenaeum.owner import route_owner_memory
 
+            # Conservative-by-design: act ONLY on a "reference" verdict.
+            # route_owner_memory's "person"/None results are intentionally
+            # ignored here — owner routing can steer a memory TOWARD a
+            # reference page, never away from the classifier's own choice.
             if route_owner_memory(item["name"], owner) == "reference":
                 entity_type = "reference"
         access = item.get("access", "internal")
