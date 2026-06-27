@@ -523,6 +523,18 @@ def _parse_one_source(raw: Any, fallback_scope: str) -> dict[str, Any] | None:
         entry["source_ref"] = safe_source_ref(
             raw.get("source_ref"), _default_source_ref(entry)
         )
+        # Issue #262 (slice C of #259): carry the granular diff target. When a
+        # fact is moved into a wiki entry, ``retire.py`` stamps the atomic
+        # ``claim`` text (and a resolved ``verdict``/disposition when one
+        # exists) onto the source so a future memory has a footnote-level
+        # thing to diff against. Both are OPTIONAL — sources written before
+        # slice C carry neither and still round-trip unchanged.
+        claim = raw.get("claim")
+        if claim is not None and str(claim).strip():
+            entry["claim"] = str(claim)
+        verdict = raw.get("verdict")
+        if verdict is not None and str(verdict).strip():
+            entry["verdict"] = str(verdict)
         return entry
     if isinstance(raw, str):
         return {
@@ -843,6 +855,14 @@ def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
     source's ``source_ref`` (session+turn / URL / document path), back-filled
     from session+turn when absent — never the raw ``auto-memory/...``
     filename. Returns ``""`` for an empty source list.
+
+    Issue #262 (slice C of #259): when a source carries the granular
+    ``claim`` text moved into this entry (and a resolved ``verdict`` /
+    disposition, when one exists), they are appended to the footnote so the
+    wiki fact keeps a footnote-level diff target for future intake — the
+    contradiction engine now compares new memories against THIS, not the
+    retired raw atom. Both are optional; pre-slice-C sources render exactly
+    as before.
     """
     lines: list[str] = []
     for i, src in enumerate(sources, 1):
@@ -857,6 +877,12 @@ def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
         excerpt = src.get("excerpt")
         if excerpt:
             text += f': "{excerpt}"'
+        claim = src.get("claim")
+        if claim is not None and str(claim).strip():
+            text += f' — **Claim:** "{str(claim).strip()}"'
+        verdict = src.get("verdict")
+        if verdict is not None and str(verdict).strip():
+            text += f" — **Verdict:** {str(verdict).strip()}"
         lines.append(f"[^src-{i}]: {text}")
     if not lines:
         return ""
@@ -1390,6 +1416,11 @@ def merge_clusters_to_wiki(
             cache_dir=DEFAULT_CACHE_DIR,
             threshold=similarity_threshold,
             excluded_pair_keys=covered_pair_keys,
+            # Issue #262: only compare NEW raw intake against the matching
+            # wiki entry. Wiki-vs-wiki pairs are dropped, so an unchanged
+            # corpus with zero new intake costs ~0 detector calls instead of
+            # one per wiki-pair (O(new intake + open) not O(corpus²)).
+            require_raw_side=True,
         )
         for cand in candidates:
             pair = candidate_to_auto_memory_files(cand)

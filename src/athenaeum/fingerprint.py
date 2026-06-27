@@ -327,7 +327,42 @@ def fingerprints_from_descriptions(
 
 
 # ---------------------------------------------------------------------------
-# Resolved-similarity threshold (issue #211)
+# Deprecated suppression knobs (issue #262, slice C of #259)
+# ---------------------------------------------------------------------------
+#
+# ``resolved_similarity_threshold`` (#211) and ``not_a_conflict_ttl_days``
+# (#251) exist ONLY to babysit the permanent-raw design: they suppress
+# re-detection of the same raw atoms (forever, or for a TTL window). With
+# retire-on-move (#261) the raw atom is gone after a fact lands in the wiki,
+# and with footnote-targeting (#262) re-detection compares NEW intake against
+# the wiki footnote — not the raw corpus — so the same atom is never re-swept.
+# Both knobs are therefore largely moot. They are DEPRECATED, not removed: a
+# config that still sets them keeps working (tolerate), but emits a one-time
+# warning so operators can drop them. Removal is tracked as a follow-up.
+
+# One warning per key per process — nightly resolves these repeatedly and we
+# do not want to flood the log. Tests clear this set to re-arm the warning.
+_DEPRECATED_CONFIG_WARNED: set[str] = set()
+
+
+def _warn_deprecated_suppression_knob(key: str, env_var: str) -> None:
+    """Emit a one-time deprecation warning for a moot suppression knob (#262)."""
+    if key in _DEPRECATED_CONFIG_WARNED:
+        return
+    _DEPRECATED_CONFIG_WARNED.add(key)
+    log.warning(
+        "config: contradiction.%s (env %s) is DEPRECATED (issue #262). With "
+        "retire-on-move (#261) + footnote-targeted detection (#262) the raw "
+        "atom it suppressed no longer re-enters the nightly sweep, so the knob "
+        "is moot. It is still honored for now; remove it from athenaeum.yaml "
+        "to silence this warning.",
+        key,
+        env_var,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Resolved-similarity threshold (issue #211 — DEPRECATED by #262)
 # ---------------------------------------------------------------------------
 
 _ENV_RESOLVED_SIMILARITY_THRESHOLD = "ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD"
@@ -342,11 +377,19 @@ def resolve_resolved_similarity_threshold(
     Precedence: env var ``ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD`` >
     ``contradiction.resolved_similarity_threshold`` in config > default
     (0.83).  Mirrors :func:`athenaeum.cross_scope.resolve_similarity_threshold`.
+
+    DEPRECATED (issue #262): see :func:`_warn_deprecated_suppression_knob`. An
+    explicit env or config value still wins (tolerate) but logs a one-time
+    deprecation warning; the default path stays silent.
     """
     env_val = os.environ.get(_ENV_RESOLVED_SIMILARITY_THRESHOLD)
     if env_val:
         try:
-            return float(env_val.strip())
+            value = float(env_val.strip())
+            _warn_deprecated_suppression_knob(
+                "resolved_similarity_threshold", _ENV_RESOLVED_SIMILARITY_THRESHOLD
+            )
+            return value
         except ValueError:
             pass
     if config is not None:
@@ -356,14 +399,20 @@ def resolve_resolved_similarity_threshold(
         raw = contradiction_cfg.get("resolved_similarity_threshold")
         try:
             if raw is not None:
-                return float(raw)
+                value = float(raw)
+                _warn_deprecated_suppression_knob(
+                    "resolved_similarity_threshold",
+                    _ENV_RESOLVED_SIMILARITY_THRESHOLD,
+                )
+                return value
         except (TypeError, ValueError):
             pass
     return _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
-# Read-time decay of stale auto not_a_conflict suppressions (issue #251)
+# Read-time decay of stale auto not_a_conflict suppressions
+# (issue #251 — DEPRECATED by #262)
 # ---------------------------------------------------------------------------
 
 _ENV_NOT_A_CONFLICT_TTL_DAYS = "ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS"
@@ -399,6 +448,9 @@ def resolve_not_a_conflict_ttl_days(config: dict[str, Any] | None = None) -> int
         try:
             value = int(env)
             if value >= 0:
+                _warn_deprecated_suppression_knob(
+                    "not_a_conflict_ttl_days", _ENV_NOT_A_CONFLICT_TTL_DAYS
+                )
                 return value
         except (TypeError, ValueError):
             pass
@@ -410,6 +462,9 @@ def resolve_not_a_conflict_ttl_days(config: dict[str, Any] | None = None) -> int
             # yaml must not silently become a ttl of 1 (mirrors
             # resolve_max_per_run).
             if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                _warn_deprecated_suppression_knob(
+                    "not_a_conflict_ttl_days", _ENV_NOT_A_CONFLICT_TTL_DAYS
+                )
                 return raw
     return _DEFAULT_NOT_A_CONFLICT_TTL_DAYS
 
