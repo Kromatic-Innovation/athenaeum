@@ -408,6 +408,33 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to the YAML report to apply (default: stdin). --apply only.",
     )
 
+    # claims command — cross-entity recurring-claim detector (issue #272,
+    # slice 1 of #258). READ-ONLY: scans the wiki, embeds claim texts via the
+    # recall-index provider, and prints a YAML report of claims restated across
+    # distinct entities. Mutates nothing under wiki/.
+    claims_parser = subparsers.add_parser(
+        "claims",
+        help="Detect claims restated across distinct wiki entities (read-only). "
+        "Default --find prints a YAML report.",
+    )
+    claims_parser.add_argument(
+        "--find",
+        action="store_true",
+        help="Discover recurring claims and print a YAML report.",
+    )
+    claims_parser.add_argument(
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    claims_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Cosine similarity cutoff (default: 0.85)",
+    )
+
     # repair command — frontmatter YAML repair tools (tag-indent, value-quoting)
     repair_parser = subparsers.add_parser(
         "repair",
@@ -524,6 +551,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "dedupe":
         return _cmd_dedupe(args)
 
+    if args.command == "claims":
+        return _cmd_claims(args)
+
     if args.command == "repair":
         return _cmd_repair(args)
 
@@ -598,6 +628,46 @@ def _cmd_dedupe(args: argparse.Namespace) -> int:
     for err in merge_report.errors:
         print(f"  ERROR: {err}", file=sys.stderr)
     return 0 if not merge_report.errors else 1
+
+
+def _cmd_claims(args: argparse.Namespace) -> int:
+    """Dispatch ``athenaeum claims --find`` (issue #272). READ-ONLY.
+
+    Scans the configured wiki, embeds claim texts via the recall-index
+    embedding provider, and prints a YAML report of claims restated across
+    distinct entities. Degrades gracefully to an empty report when no
+    embedding backend is available.
+    """
+    from athenaeum.recurring_claims import (
+        DEFAULT_THRESHOLD,
+        extract_claim_occurrences,
+        group_recurring_claims,
+        render_report,
+    )
+    from athenaeum.search import embed_texts
+
+    if not args.find:
+        print("usage: athenaeum claims --find ...", file=sys.stderr)
+        return 2
+
+    knowledge_root = args.path.expanduser().resolve()
+    wiki_root = knowledge_root / "wiki"
+    if not wiki_root.is_dir():
+        print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
+        return 1
+
+    threshold = args.threshold if args.threshold is not None else DEFAULT_THRESHOLD
+    # Scan the wiki ONCE: reuse the occurrence list for both the entity count
+    # and the grouping pass instead of re-walking the tree (C6).
+    occurrences = extract_claim_occurrences(wiki_root)
+    entities_scanned = len({o.entity_id for o in occurrences})
+    groups = group_recurring_claims(
+        occurrences, threshold=threshold, embedding_provider=embed_texts
+    )
+    sys.stdout.write(
+        render_report(groups, threshold=threshold, entities_scanned=entities_scanned)
+    )
+    return 0
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
