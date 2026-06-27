@@ -243,7 +243,7 @@ def remember_write(
                Example::
 
                    {"_field_sources": {"current_title": "api:apollo:2026-05-09",
-                                       "linkedin_url":  "linkedin:tristankromer"}}
+                                       "linkedin_url":  "linkedin:alice"}}
 
             ``None`` (default) — stamps ``source: claude:inferred`` and
             emits a server-side warning.

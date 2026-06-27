@@ -78,11 +78,14 @@ _LINKEDIN_KEYS = {
     "linkedin_company_at_connect",
     "linkedin_connected_on",
 }
-_GOOGLE_KEYS = {
-    "google_contact",
-    "google_contact_kromatic",
-    "google_contact_tristankromer",
-}
+# Base Google-contact dedup join/merge key. Always active and generic.
+# Operator-specific namespace VARIANTS (extra field names that also carry a
+# Google contact id) are NOT hardcoded here -- they are supplied via config
+# (``dedupe.google_contact_keys``, see
+# :func:`athenaeum.config.resolve_google_contact_keys`) and threaded into the
+# merge, so no personal contact-namespace literal ships in the wheel
+# (issue #269). Default (no config) = base key only.
+_GOOGLE_CONTACT_KEY = "google_contact"
 _SOCIAL_KEYS = {
     "twitter_url",
     "github_url",
@@ -595,7 +598,10 @@ def _merge_field_sources(
 
 
 def _merge_meta(
-    canonical: dict[str, Any], absorbed: dict[str, Any], absorbed_uid: str
+    canonical: dict[str, Any],
+    absorbed: dict[str, Any],
+    absorbed_uid: str,
+    google_contact_keys: Iterable[str] = (),
 ) -> dict[str, Any]:
     out = dict(canonical)
 
@@ -607,17 +613,22 @@ def _merge_meta(
     if absorbed.get("name") and absorbed["name"] != canonical.get("name"):
         out["aliases"] = _union_list(out.get("aliases"), [absorbed["name"]])
 
-    # Google fields
-    for k in _GOOGLE_KEYS:
+    # Google fields -- the generic ``google_contact`` join key plus any
+    # operator-configured namespace variants (issue #269). Variant field
+    # names come from config, never hardcoded, so no personal contact
+    # namespace literal ships in source. Default (empty extras) coalesces
+    # only the base key.
+    extra_google_keys = tuple(google_contact_keys)
+    for k in (_GOOGLE_CONTACT_KEY, *extra_google_keys):
         merged_v = _coalesce(canonical.get(k), absorbed.get(k))
         if merged_v:
             out[k] = merged_v
     if (
-        canonical.get("google_contact")
-        and absorbed.get("google_contact")
-        and canonical["google_contact"] != absorbed["google_contact"]
+        canonical.get(_GOOGLE_CONTACT_KEY)
+        and absorbed.get(_GOOGLE_CONTACT_KEY)
+        and canonical[_GOOGLE_CONTACT_KEY] != absorbed[_GOOGLE_CONTACT_KEY]
     ):
-        for kspec in ("google_contact_kromatic", "google_contact_tristankromer"):
+        for kspec in extra_google_keys:
             if absorbed.get(kspec) and not canonical.get(kspec):
                 out[kspec] = absorbed[kspec]
 
@@ -679,7 +690,12 @@ def _merge_body(canonical_body: str, absorbed_body: str, absorbed_uid: str) -> s
     )
 
 
-def _perform_merge(canonical_path: Path, absorbed_path: Path, dry_run: bool) -> str:
+def _perform_merge(
+    canonical_path: Path,
+    absorbed_path: Path,
+    dry_run: bool,
+    google_contact_keys: Iterable[str] = (),
+) -> str:
     canonical_text = canonical_path.read_text(encoding="utf-8")
     absorbed_text = absorbed_path.read_text(encoding="utf-8")
     cmeta, cbody = parse_frontmatter(canonical_text)
@@ -691,7 +707,9 @@ def _perform_merge(canonical_path: Path, absorbed_path: Path, dry_run: bool) -> 
     if not canonical_uid or not absorbed_uid:
         return f"SKIP_NO_UID:{absorbed_path.name}"
 
-    new_meta = _merge_meta(cmeta, ameta, absorbed_uid)
+    new_meta = _merge_meta(
+        cmeta, ameta, absorbed_uid, google_contact_keys=google_contact_keys
+    )
     new_body = _merge_body(cbody, abody, absorbed_uid)
     new_text = render_frontmatter(new_meta) + "\n" + new_body
 
@@ -761,6 +779,7 @@ def merge_duplicate_persons(
     pairs: Iterable[DuplicatePair],
     apply: bool = False,
     wiki_root: Path | None = None,
+    google_contact_keys: Iterable[str] = (),
 ) -> MergeReport:
     """Merge a list of duplicate pairs.
 
@@ -770,7 +789,14 @@ def merge_duplicate_persons(
 
     ``wiki_root`` is used only to resolve relative paths recorded on
     :class:`DuplicatePair` — absolute paths bypass it.
+
+    ``google_contact_keys`` lists extra operator-configured Google-contact
+    namespace field-names to coalesce alongside the generic ``google_contact``
+    key (issue #269); resolve it via
+    :func:`athenaeum.config.resolve_google_contact_keys`. Empty (the default)
+    merges on the generic key only.
     """
+    gc_keys = tuple(google_contact_keys)
     report = MergeReport(dry_run=not apply)
     for pair in pairs:
         cpath = Path(pair.canonical_path)
@@ -786,7 +812,9 @@ def merge_duplicate_persons(
             report.already_merged += 1
             continue
         try:
-            outcome = _perform_merge(cpath, apath, dry_run=not apply)
+            outcome = _perform_merge(
+                cpath, apath, dry_run=not apply, google_contact_keys=gc_keys
+            )
         except (OSError, UnicodeDecodeError) as exc:
             report.errors.append(f"{pair.absorbed_uid}: {exc}")
             continue
