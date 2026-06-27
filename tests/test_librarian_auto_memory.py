@@ -576,6 +576,87 @@ class TestSourceFootnoteRendering:
         body_line = out[body_marker : out.index("\n", body_marker)]
         assert "[^src" not in body_line
 
+    def test_footnote_carries_claim_and_verdict(self) -> None:
+        """Issue #262: a footnote renders the granular claim + resolved verdict."""
+        from athenaeum.merge import MergedWikiEntry, render_source_footnotes
+
+        entry = MergedWikiEntry(
+            topic_slug="t",
+            cluster_id="c-1",
+            cluster_centroid_score=1.0,
+            contradictions_detected=False,
+            sources=[
+                {
+                    "session": "abc123",
+                    "turn": 4,
+                    "source_type": "user-stated",
+                    "source_ref": "abc123#turn4",
+                    "claim": "Tristan lives in San Francisco.",
+                    "verdict": "not_a_conflict",
+                }
+            ],
+        )
+        footnotes = render_source_footnotes(entry.sources)
+        assert "**Claim:**" in footnotes
+        assert "Tristan lives in San Francisco." in footnotes
+        assert "**Verdict:** not_a_conflict" in footnotes
+
+    def test_claim_and_verdict_round_trip_through_frontmatter(self) -> None:
+        """The granular diff target survives a frontmatter render + reparse."""
+        from athenaeum.merge import (
+            MergedWikiEntry,
+            _parse_one_source,
+            render_merged_entry,
+        )
+        from athenaeum.models import parse_frontmatter
+
+        entry = MergedWikiEntry(
+            topic_slug="t",
+            cluster_id="c-1",
+            cluster_centroid_score=1.0,
+            contradictions_detected=False,
+            sources=[
+                {
+                    "session": "abc123",
+                    "turn": 4,
+                    "source_type": "user-stated",
+                    "source_ref": "abc123#turn4",
+                    "claim": "Tristan lives in San Francisco.",
+                    "verdict": "not_a_conflict",
+                }
+            ],
+            body="Body.\n",
+        )
+        out = render_merged_entry(entry)
+        meta, _ = parse_frontmatter(out)
+        reparsed = _parse_one_source(meta["sources"][0], "scope")
+        assert reparsed is not None
+        assert reparsed["claim"] == "Tristan lives in San Francisco."
+        assert reparsed["verdict"] == "not_a_conflict"
+
+    def test_legacy_source_without_claim_or_verdict_still_renders(self) -> None:
+        """Backward compat: a pre-#262 source (no claim/verdict) is unchanged."""
+        from athenaeum.merge import MergedWikiEntry, render_source_footnotes
+
+        entry = MergedWikiEntry(
+            topic_slug="t",
+            cluster_id="c-1",
+            cluster_centroid_score=1.0,
+            contradictions_detected=False,
+            sources=[
+                {
+                    "session": "abc123",
+                    "turn": 4,
+                    "source_type": "user-stated",
+                    "source_ref": "abc123#turn4",
+                }
+            ],
+        )
+        footnotes = render_source_footnotes(entry.sources)
+        assert "**Claim:**" not in footnotes
+        assert "**Verdict:**" not in footnotes
+        assert "[^src-1]:" in footnotes
+
 
 class TestAutoMemoryFileSourceFields:
     """``AutoMemoryFile`` threads source_type / source_ref from frontmatter."""
@@ -765,6 +846,30 @@ class TestRetireNonContradictory:
         assert meta["retired"] is True
         # The ultimate-source invariant: never cite the raw filename.
         assert "raw/auto-memory" not in text
+
+    def test_moved_fact_footnote_carries_granular_claim(
+        self, retire_root: Path
+    ) -> None:
+        """Issue #262: the moved fact's footnote keeps the atomic claim text.
+
+        After retire-on-move the raw atom is gone, so the wiki footnote must
+        carry the granular claim as the diff target for future intake.
+        """
+        from athenaeum.merge import AUTO_WIKI_PREFIX, merge_clusters_to_wiki
+        from athenaeum.models import parse_frontmatter
+        from athenaeum.retire import run_retire_pass
+
+        entries = merge_clusters_to_wiki(retire_root)
+        run_retire_pass(entries, retire_root)
+
+        entry_file = next((retire_root / "wiki").glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        text = entry_file.read_text(encoding="utf-8")
+        # Rendered footnote carries the claim...
+        assert "**Claim:**" in text
+        assert "Tristan lives in Berlin, Germany." in text
+        # ...and it round-trips through the frontmatter source dict too.
+        meta, _ = parse_frontmatter(text)
+        assert meta["sources"][0]["claim"] == "Tristan lives in Berlin, Germany."
 
     def test_wiki_update_and_deletion_land_in_one_commit(
         self, retire_root: Path

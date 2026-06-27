@@ -11,9 +11,10 @@ two manifestations the merge pipeline still has to catch:
    ``-Users-tristankromer-Code-foo`` and one under
    ``-Users-tristankromer-Code``). The per-scope clustering never groups
    them, so the detector never sees them.
-2. **Wiki-vs-wiki post-merge** — distinct ``wiki/auto-*.md`` entries
-   merged from different clusters can still contradict each other, and
-   the librarian deletes the raw originals after a successful merge.
+2. **New-intake-vs-wiki post-merge** — a new raw entry can contradict a
+   fact already moved into a ``wiki/auto-*.md`` entry. After retire-on-move
+   (#261) the raw original of the wiki fact is gone, so the comparison has
+   to reach the wiki side directly.
 
 This module adds two cooperative passes the merge orchestrator can
 toggle in via ``ATHENAEUM_CROSS_SCOPE_MODE``:
@@ -24,12 +25,21 @@ toggle in via ``ATHENAEUM_CROSS_SCOPE_MODE``:
   ``cluster_size_cap``, split into ordered chunks (newest-first by
   ``created`` frontmatter, ``mtime`` fallback) and run the detector
   once per chunk.
-- **similarity sweep**: a second-pass embedding cross-product over BOTH
-  ``raw/auto-memory/**`` AND ``wiki/**``. Any pair whose cosine
+- **similarity sweep**: a second-pass embedding cross-product that pairs
+  each ``raw/auto-memory/**`` intake against topically-similar
+  ``raw/auto-memory/**`` AND ``wiki/**`` entries. Any pair whose cosine
   similarity exceeds the configured threshold and that is NOT already
   contained in a single cluster is fed to the detector as a 2-member
   pseudo-cluster. Embeddings come from the recall index — we do NOT
   open a second chromadb collection.
+
+  Issue #262 (slice C of #259): the sweep no longer cross-products
+  ``wiki/**`` against itself. The wiki is settled long-term memory; with
+  move-then-retire the granular claim a future memory must diff against
+  now lives on the wiki fact's FOOTNOTE, so re-detection only needs to
+  compare NEW raw intake against the matching wiki entry. Dropping the
+  wiki-vs-wiki term collapses the nightly cost from O(corpus²) to
+  O(new intake + open contradictions). See ``require_raw_side``.
 
 Modes:
 
@@ -69,6 +79,12 @@ VALID_MODES = ("off", "ancestor", "similarity", "both")
 
 DEFAULT_CLUSTER_SIZE_CAP = 25
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
+
+# Sentinel ``origin_scope`` stamped on wiki entries inside the similarity
+# sweep. A candidate pair where BOTH sides carry this scope is a
+# wiki-vs-wiki pair — dropped by default under issue #262 (see the
+# ``require_raw_side`` argument of :func:`cross_scope_similarity_pairs`).
+WIKI_SCOPE = "<wiki>"
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +349,7 @@ def cross_scope_similarity_pairs(
     cache_dir: Path,
     threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     excluded_pair_keys: Iterable[tuple[str, str]] = (),
+    require_raw_side: bool = True,
     embedding_provider: Any = None,
 ) -> list[SimilarityCandidate]:
     """Find candidate pairs via cosine similarity over the recall index.
@@ -340,8 +357,9 @@ def cross_scope_similarity_pairs(
     Args:
         auto_memory_files: All discovered raw auto-memory files.
         wiki_files: Optional list of compiled ``wiki/auto-*.md`` paths to
-            include in the sweep so wiki-vs-wiki contradictions can fire
-            after raw originals are deleted.
+            include in the sweep so a NEW raw intake claim can be diffed
+            against the matching (topically-similar) wiki entry after the
+            wiki fact's raw original was retired on move (#261).
         wiki_root: Wiki root directory (used to compute recall-index ids
             for ``wiki_files``). Required if ``wiki_files`` is non-empty.
         extra_roots: Same list passed to :mod:`athenaeum.clusters` —
@@ -352,6 +370,14 @@ def cross_scope_similarity_pairs(
             pairs already contained in a single cluster — these are
             filtered out so the per-scope pass's coverage isn't repeated.
             Order-insensitive (we sort the key).
+        require_raw_side: Issue #262 — when True (default), a candidate pair
+            where BOTH sides are wiki entries (:data:`WIKI_SCOPE`) is
+            dropped. The wiki is settled long-term memory whose granular
+            diff target now lives on the fact's footnote, so re-detection
+            only compares NEW raw intake against the matching wiki entry.
+            This removes the O(corpus²) wiki-vs-wiki term: an unchanged
+            corpus with zero new intake produces zero candidates. Set False
+            to restore the legacy full cross-product (raw + wiki vs all).
         embedding_provider: Optional override for testing. Must expose a
             ``fetch_embeddings(ids, cache_dir)`` method. Defaults to
             :class:`athenaeum.search.VectorBackend`.
@@ -377,7 +403,7 @@ def cross_scope_similarity_pairs(
             idx = _wiki_indexed_id(wp, wiki_root)
             if idx is None:
                 continue
-            id_to_entry[idx] = (wp, "<wiki>")
+            id_to_entry[idx] = (wp, WIKI_SCOPE)
 
     if len(id_to_entry) < 2:
         return []
@@ -416,6 +442,13 @@ def cross_scope_similarity_pairs(
             idx_j, path_j, scope_j, vec_j = items[j]
             sim = _cosine(vec_i, vec_j)
             if sim < threshold:
+                continue
+            # Issue #262: drop wiki-vs-wiki pairs. Re-detection targets new
+            # raw intake against the matching wiki footnote, not a full
+            # wiki×wiki cross-product, so a pair with no raw side carries no
+            # new claim to adjudicate — skipping it is the O(corpus²)→
+            # O(new intake + open) collapse.
+            if require_raw_side and scope_i == WIKI_SCOPE and scope_j == WIKI_SCOPE:
                 continue
             key = tuple(sorted((str(path_i), str(path_j))))
             if key in excluded:
