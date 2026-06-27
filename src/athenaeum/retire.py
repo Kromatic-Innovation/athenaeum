@@ -257,6 +257,13 @@ _VERDICT_RATIONALES: dict[str, str] = {
     "not_a_conflict": "not_a_conflict",
     "declared-supersession": "declared-supersession",
     "declared-refinement": "declared-refinement",
+    # merge.py prunes a chunk to <2 members when every undeclared pair has been
+    # removed (a declared refines/supersedes resolution lived in the text). The
+    # surviving entry is move-eligible and genuinely settled, so its declared
+    # resolution is persisted too (Quine #3a). The specific class (refinement
+    # vs supersession) is not carried on this rationale, so it records the
+    # generic "declared-resolution".
+    "declared-pruned-to-singleton": "declared-resolution",
 }
 
 
