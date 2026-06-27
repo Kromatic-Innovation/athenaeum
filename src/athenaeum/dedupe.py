@@ -190,6 +190,13 @@ def _owner_alias_sets(owner: dict[str, Any]) -> tuple[set[str], set[str]]:
     Kromer") with handles/emails ("tristan@kromatic.com", "user_tristan"):
     the normalized-name set catches name matches, the raw lowercase set
     catches handle/email matches.
+
+    The normalized-name set holds only FULL names (>=2 tokens). A
+    single-token alias (e.g. ``"Tristan"``) is deliberately excluded from
+    name matching so it cannot auto-bind every stranger who happens to share
+    that one name to the owner (misconfiguration hardening, #263). Such an
+    alias still lives in the raw-handle set, where it only matches an
+    explicit handle/process-author field — never a person's display name.
     """
     aliases = owner.get("aliases") or []
     norm: set[str] = set()
@@ -200,7 +207,7 @@ def _owner_alias_sets(owner: dict[str, Any]) -> tuple[set[str], set[str]]:
             continue
         raw.add(s.lower())
         n = _normalize_name(s)
-        if n:
+        if n and len(n.split()) >= 2:
             norm.add(n)
     return norm, raw
 
@@ -241,7 +248,11 @@ def owner_signal(meta: dict[str, Any], owner: dict[str, Any] | None) -> str | No
     if name_norm and name_norm in alias_norm:
         return "owner_name"
 
-    if _is_owner_handle(str(meta.get("name") or "")):
+    # A person's display name is matched ONLY via the full-name path above —
+    # never against the raw-handle set — so a single-token alias cannot
+    # absorb a same-named stranger. The one exception is the ``user_*``
+    # namespace, which is always an owner handle by design (single-owner KB).
+    if str(meta.get("name") or "").strip().lower().startswith("user_"):
         return "owner_alias"
     page_aliases = meta.get("aliases")
     if isinstance(page_aliases, list):
