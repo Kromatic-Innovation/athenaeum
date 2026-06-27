@@ -91,6 +91,21 @@ _SOCIAL_KEYS = {
 # Fields where "list union with canonical-first order" is the merge rule.
 _LIST_UNION_KEYS = {"emails", "tags", "aliases"}
 
+# Frontmatter fields that carry an owner's *process-context* authorship
+# (issue #263): a person fragment minted from a commit author or a
+# ruling/confirmation footnote. When one of these resolves to a configured
+# owner alias, the fragment auto-binds to the canonical owner instead of
+# persisting standalone. A fragment whose author is NOT an owner alias is
+# left untouched (false-positive guard).
+_OWNER_PROCESS_FIELDS = (
+    "git_author",
+    "git_author_email",
+    "commit_author",
+    "authored_by",
+    "confirmed_by",
+    "ruling_by",
+)
+
 
 # --- Public types ---
 
@@ -103,7 +118,9 @@ class DuplicatePair:
         canonical_uid: uid of the wiki that wins the merge.
         absorbed_uid: uid of the wiki to be absorbed (deleted on apply).
         match_signal: one of ``"apollo_id"``, ``"linkedin_url"``,
-            ``"name_exact"``.
+            ``"google_contact"``, ``"name_exact"``, or an owner auto-bind
+            signal (``"owner_uid"`` / ``"owner_google_contact"`` /
+            ``"owner_name"`` / ``"owner_alias"`` / ``"owner_process"``).
         confidence: always ``"HIGH"`` for pairs returned by
             :func:`find_duplicate_persons` — kept on the dataclass for
             JSONL/YAML round-trip compatibility with the cwc worksheet.
@@ -163,6 +180,98 @@ def _canonical_linkedin(url: str) -> str:
     return u
 
 
+# --- Owner identity (issue #263) ---
+
+
+def _owner_alias_sets(owner: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """Project owner aliases into (normalized-name set, raw-handle set).
+
+    Aliases are matched two ways because they mix display names ("Ada
+    Lovelace") with handles/emails ("ada@example.com", "user_ada"): the
+    normalized-name set catches name matches, the raw lowercase set catches
+    handle/email matches.
+
+    The normalized-name set holds only FULL names (>=2 tokens). A
+    single-token alias (e.g. ``"Ada"``) is deliberately excluded from
+    name matching so it cannot auto-bind every stranger who happens to share
+    that one name to the owner (misconfiguration hardening, #263). Such an
+    alias still lives in the raw-handle set, where it only matches an
+    explicit handle/process-author field — never a person's display name.
+    """
+    aliases = owner.get("aliases") or []
+    norm: set[str] = set()
+    raw: set[str] = set()
+    for alias in aliases:
+        s = str(alias).strip()
+        if not s:
+            continue
+        raw.add(s.lower())
+        n = _normalize_name(s)
+        if n and len(n.split()) >= 2:
+            norm.add(n)
+    return norm, raw
+
+
+def owner_signal(meta: dict[str, Any], owner: dict[str, Any] | None) -> str | None:
+    """Return the confident owner-identity signal for *meta*, else ``None``.
+
+    Conservative by design (issue #263): a fragment binds to the owner only on
+    a CONFIDENT signal — a configured uid / google_contact match, a name or
+    handle that matches a configured alias (the ``user_*`` namespace always
+    counts as an owner alias), or an owner-authored process-context field
+    (commit authorship / ruling-confirmation footnote) whose author resolves
+    to an owner alias. A random new person matches none of these and returns
+    ``None``, so it is never absorbed into the owner. Inert (``None``) when no
+    owner is configured.
+
+    Signals (most-specific first): ``owner_uid``, ``owner_google_contact``,
+    ``owner_name``, ``owner_alias``, ``owner_process``.
+    """
+    if not owner:
+        return None
+
+    uid = str(meta.get("uid") or "").strip()
+    if owner.get("uid") and uid == owner["uid"]:
+        return "owner_uid"
+
+    google_contact = str(meta.get("google_contact") or "").strip()
+    if owner.get("google_contact") and google_contact == owner["google_contact"]:
+        return "owner_google_contact"
+
+    alias_norm, alias_raw = _owner_alias_sets(owner)
+
+    def _is_owner_handle(candidate: str) -> bool:
+        c = candidate.strip().lower()
+        return bool(c) and (c in alias_raw or c.startswith("user_"))
+
+    name_norm = _normalize_name(str(meta.get("name") or ""))
+    if name_norm and name_norm in alias_norm:
+        return "owner_name"
+
+    # A person's display name is matched ONLY via the full-name path above —
+    # never against the raw-handle set — so a single-token alias cannot
+    # absorb a same-named stranger. The one exception is the ``user_*``
+    # namespace, which is always an owner handle by design (single-owner KB).
+    if str(meta.get("name") or "").strip().lower().startswith("user_"):
+        return "owner_alias"
+    page_aliases = meta.get("aliases")
+    if isinstance(page_aliases, list):
+        for a in page_aliases:
+            if _is_owner_handle(str(a)):
+                return "owner_alias"
+
+    for fld in _OWNER_PROCESS_FIELDS:
+        val = meta.get(fld)
+        if val is None:
+            continue
+        sval = str(val)
+        sval_norm = _normalize_name(sval)
+        if _is_owner_handle(sval) or (sval_norm and sval_norm in alias_norm):
+            return "owner_process"
+
+    return None
+
+
 # --- Wiki loading ---
 
 
@@ -194,8 +303,10 @@ def _load_persons(wiki_root: Path) -> list[dict[str, Any]]:
                 "emails": [str(e).lower() for e in emails],
                 "linkedin": _canonical_linkedin(str(meta.get("linkedin_url") or "")),
                 "apollo_id": str(meta.get("apollo_id") or ""),
+                "google_contact": str(meta.get("google_contact") or "").strip(),
                 "warm_score": meta.get("warm_score"),
                 "updated": str(meta.get("updated") or ""),
+                "meta": meta,
             }
         )
     return persons
@@ -223,16 +334,28 @@ def _pick_canonical(
     return (a, b) if score(a) >= score(b) else (b, a)
 
 
-def find_duplicate_persons(wiki_root: Path) -> list[DuplicatePair]:
+def find_duplicate_persons(
+    wiki_root: Path, owner: dict[str, Any] | None = None
+) -> list[DuplicatePair]:
     """Surface HIGH-confidence duplicate-person pairs.
 
     HIGH-confidence signals (preserved from the cwc-side script):
 
     - shared ``apollo_id``
     - shared canonicalized ``linkedin_url``
+    - shared ``google_contact`` (issue #263)
     - exact-match normalized ``name`` (group size 2 or 3 — name buckets
       with 4+ wikis are dropped here as common-name false-positives,
       matching the script's MEDIUM downgrade)
+
+    When *owner* is supplied (see :func:`athenaeum.config.resolve_owner`)
+    and the canonical owner page (``uid == owner["uid"]``) is present, any
+    page that yields an :func:`owner_signal` auto-binds to that canonical
+    owner — the owner stays a singleton instead of fragmenting across
+    process-context fragments and ``user_*`` aliases (issue #263). The owner
+    pass runs first and forces the configured owner as canonical, so a
+    coincidental apollo/name signal cannot make a fragment win the merge.
+    When *owner* is ``None`` this is fully inert.
 
     The MEDIUM tier (fuzzy-name token Jaccard ≥ 0.8) is intentionally
     not surfaced through this API — that path requires human triage via
@@ -241,13 +364,22 @@ def find_duplicate_persons(wiki_root: Path) -> list[DuplicatePair]:
     persons = _load_persons(wiki_root)
     seen: dict[tuple[str, str], DuplicatePair] = {}
 
-    def record(a: dict[str, Any], b: dict[str, Any], signal: str) -> None:
+    def record(
+        a: dict[str, Any],
+        b: dict[str, Any],
+        signal: str,
+        forced_canonical: dict[str, Any] | None = None,
+    ) -> None:
         if a["uid"] == b["uid"]:
             return
         key = _pair_key(a["uid"], b["uid"])
         if key in seen:
-            return  # first signal wins (apollo > linkedin > name_exact)
-        canonical, absorbed = _pick_canonical(a, b)
+            return  # first signal wins (owner > apollo > linkedin > gc > name)
+        if forced_canonical is not None:
+            canonical = forced_canonical
+            absorbed = b if a["uid"] == forced_canonical["uid"] else a
+        else:
+            canonical, absorbed = _pick_canonical(a, b)
         seen[key] = DuplicatePair(
             canonical_uid=canonical["uid"],
             absorbed_uid=absorbed["uid"],
@@ -256,6 +388,18 @@ def find_duplicate_persons(wiki_root: Path) -> list[DuplicatePair]:
             canonical_path=str(canonical["path"]),
             absorbed_path=str(absorbed["path"]),
         )
+
+    # Owner auto-bind (issue #263) — runs FIRST so the configured owner is
+    # forced as canonical before any apollo/name signal can claim the pair.
+    if owner and owner.get("uid"):
+        canonical_owner = next((p for p in persons if p["uid"] == owner["uid"]), None)
+        if canonical_owner is not None:
+            for p in persons:
+                if p["uid"] == canonical_owner["uid"]:
+                    continue
+                signal = owner_signal(p["meta"], owner)
+                if signal:
+                    record(canonical_owner, p, signal, forced_canonical=canonical_owner)
 
     by_apollo: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for p in persons:
@@ -274,6 +418,15 @@ def find_duplicate_persons(wiki_root: Path) -> list[DuplicatePair]:
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
                 record(group[i], group[j], "linkedin_url")
+
+    by_google: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for p in persons:
+        if p["google_contact"]:
+            by_google[p["google_contact"]].append(p)
+    for group in by_google.values():
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                record(group[i], group[j], "google_contact")
 
     by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for p in persons:
@@ -701,6 +854,7 @@ __all__ = [
     "DuplicatePair",
     "MergeReport",
     "find_duplicate_persons",
+    "owner_signal",
     "merge_duplicate_persons",
     "pairs_to_yaml",
     "pairs_from_yaml",
