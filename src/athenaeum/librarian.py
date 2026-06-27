@@ -39,7 +39,7 @@ from athenaeum.clusters import (
     resolve_cluster_threshold,
     write_cluster_report,
 )
-from athenaeum.config import load_config, resolve_extra_intake_roots
+from athenaeum.config import load_config, resolve_extra_intake_roots, resolve_retire
 from athenaeum.merge import merge_clusters_to_wiki
 from athenaeum.models import (
     AutoMemoryFile,
@@ -922,6 +922,7 @@ def run(
     merge_only: bool = False,
     strict_budget: bool = False,
     batch_mode: bool | None = None,
+    retire: bool | None = None,
     projects_root: Path | None = None,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error.
@@ -955,6 +956,13 @@ def run(
     ``--batch-mode`` flag) wins over both. Off keeps the synchronous path
     untouched; dry-run always uses the synchronous (call-free) path. See
     :mod:`athenaeum.batch` for phase layout and budget semantics.
+
+    ``retire`` (issue #261) opts out of the move-then-retire pass. DEFAULT
+    ON (owner-confirmed): when ``None`` it resolves via yaml
+    ``librarian.retire`` (default on); an explicit ``False`` (e.g. from the
+    CLI ``--no-retire`` flag) wins. When off, the retire pass is skipped
+    entirely — non-contradictory raw auto-memory is neither moved into the
+    wiki nor ``git rm``'d, so the raw stays in the intake queue.
     """
     skip_entity_tiers = cluster_only or merge_only
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -992,6 +1000,18 @@ def run(
     # env > yaml > default off).
     if batch_mode is None:
         batch_mode = librarian_batch_mode(config)
+
+    # Issue #261/#259: resolve the move-then-retire opt-out (explicit arg >
+    # yaml `librarian.retire` > default ON). When off, the retire pass is
+    # skipped at both call sites below; the destructive `git rm` of raw
+    # auto-memory never runs.
+    if retire is None:
+        retire = resolve_retire(config)
+    if not retire:
+        log.info(
+            "retire pass disabled (librarian.retire / --no-retire) — raw "
+            "auto-memory will not be moved or git-removed this run"
+        )
 
     # Issue #235: a resolved budget of 0 is a valid defer-everything cap
     # (env/yaml zero — the CLI flag rejects it), but it is also the most
@@ -1035,13 +1055,15 @@ def run(
         # Issue #261 (slice B of #259): move-then-retire. Non-contradictory
         # raw is moved into its wiki entry (origin-traced footnote) and git
         # rm'd; contradictory raw is held in the queue. No-op without .git.
-        _run_retire(
-            merged_entries,
-            knowledge_root,
-            config=config,
-            dry_run=dry_run,
-            projects_root=projects_root,
-        )
+        # Skipped entirely when retire is disabled (#259 opt-out).
+        if retire:
+            _run_retire(
+                merged_entries,
+                knowledge_root,
+                config=config,
+                dry_run=dry_run,
+                projects_root=projects_root,
+            )
         # Issue #188: self-heal proposal-less open questions (a prior
         # budget-exhausted / offline run leaves raw blocks; re-resolve them
         # now that this run has budget). No-op on dry-run / offline.
@@ -1099,8 +1121,9 @@ def run(
         # merge + C4 detection. Non-contradictory raw is moved into its wiki
         # entry (origin-traced footnote) and git rm'd; contradictory raw is
         # held for human confirmation. Skipped for the cluster_only diagnostic
-        # mode and a no-op without a git repo.
-        if not cluster_only:
+        # mode, when retire is disabled (#259 opt-out), and a no-op without a
+        # git repo.
+        if retire and not cluster_only:
             _run_retire(
                 merged_entries,
                 knowledge_root,

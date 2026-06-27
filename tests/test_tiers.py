@@ -16,6 +16,7 @@ from athenaeum.models import (
     RawFile,
 )
 from athenaeum.tiers import (
+    parse_tier2_entities,
     tier1_programmatic_match,
     tier3_create,
     tier3_merge,
@@ -46,6 +47,66 @@ def _mock_client(response_text: str) -> MagicMock:
     mock_response.content = [MagicMock(text=response_text)]
     client.messages.create.return_value = mock_response
     return client
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 — owner-namespace routing (issue #263)
+# ---------------------------------------------------------------------------
+
+
+class TestTier2OwnerRouting:
+    """Drive ``parse_tier2_entities`` itself through the owner-routing branch.
+
+    The underlying ``owner.route_owner_memory`` is unit-tested separately; this
+    pins that the branch at ``tiers.py`` (~line 315) actually reclassifies an
+    owner operational/exclusion memory to ``reference`` when the parser runs.
+    """
+
+    OWNER = {"uid": "a545c038", "google_contact": "", "aliases": ["Tristan Kromer"]}
+
+    @staticmethod
+    def _payload(name: str) -> str:
+        return json.dumps(
+            [{"name": name, "entity_type": "person", "access": "internal", "tags": []}]
+        )
+
+    def test_owner_operational_memory_reclassified_to_reference(self) -> None:
+        # Classifier said "person"; owner routing steers an operational /
+        # exclusion memory to a standalone reference page.
+        results = parse_tier2_entities(
+            self._payload("user_tristan_family_relationships"),
+            "sessions/x.md",
+            ["person", "reference"],
+            [],
+            ["internal"],
+            owner=self.OWNER,
+        )
+        assert len(results) == 1
+        assert results[0].entity_type == "reference"
+
+    def test_owner_bio_memory_stays_person(self) -> None:
+        # An owner person-bio memory is left as the classifier set it.
+        results = parse_tier2_entities(
+            self._payload("user_tristan_career"),
+            "sessions/x.md",
+            ["person", "reference"],
+            [],
+            ["internal"],
+            owner=self.OWNER,
+        )
+        assert results[0].entity_type == "person"
+
+    def test_inert_when_no_owner_configured(self) -> None:
+        # Without an owner the routing branch never fires.
+        results = parse_tier2_entities(
+            self._payload("user_tristan_family_relationships"),
+            "sessions/x.md",
+            ["person", "reference"],
+            [],
+            ["internal"],
+            owner=None,
+        )
+        assert results[0].entity_type == "person"
 
 
 # ---------------------------------------------------------------------------
