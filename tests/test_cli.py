@@ -879,23 +879,85 @@ class TestRunStrictBudgetFlag:
         assert captured["strict_budget"] is True
 
 
+def _claims_knowledge(tmp_path: Path) -> Path:
+    """Knowledge dir with the SAME claim restated across two distinct entities."""
+    knowledge = tmp_path / "knowledge"
+    wiki = knowledge / "wiki"
+    wiki.mkdir(parents=True)
+    (wiki / "aaaa1111-profile.md").write_text(
+        "---\nuid: aaaa1111\ntype: auto-memory\nname: profile\n"
+        "sources:\n  - session: s1\n"
+        '    claim: "Kromatic is Tristan\'s primary venture"\n'
+        "---\nBody.\n"
+    )
+    (wiki / "bbbb2222-career.md").write_text(
+        "---\nuid: bbbb2222\ntype: auto-memory\nname: career\n"
+        "sources:\n  - session: s2\n"
+        '    claim: "Tristan\'s primary venture is Kromatic"\n'
+        "---\nBody.\n"
+    )
+    return knowledge
+
+
+def _deterministic_embed(texts: list[str]) -> list[list[float]]:
+    """Offline embedder: the two venture restatements share a vector."""
+    venture = {
+        "Kromatic is Tristan's primary venture",
+        "Tristan's primary venture is Kromatic",
+    }
+    out: list[list[float]] = []
+    for i, t in enumerate(texts):
+        out.append([1.0, 0.0] if t.strip() in venture else [0.0, float(i + 1)])
+    return out
+
+
 class TestClaims:
     """`athenaeum claims --find` — cross-entity recurring-claim detector
     (issue #272, slice 1 of #258). READ-ONLY YAML report over the wiki."""
 
-    def test_find_prints_yaml_report(
+    def test_find_groups_cross_entity_restatement(
         self,
-        knowledge_with_wiki: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         import yaml
 
-        rc = main(["claims", "--find", "--path", str(knowledge_with_wiki)])
+        # Inject a deterministic offline embedder so the run never touches
+        # chromadb / MiniLM (C7). The handler imports embed_texts at call
+        # time, so patching the module attribute is sufficient.
+        monkeypatch.setattr("athenaeum.search.embed_texts", _deterministic_embed)
+        knowledge = _claims_knowledge(tmp_path)
+
+        rc = main(["claims", "--find", "--path", str(knowledge)])
         assert rc == 0
         parsed = yaml.safe_load(capsys.readouterr().out)
-        assert "summary" in parsed
         assert parsed["summary"]["threshold"] == 0.85
-        assert "recurring_claims" in parsed
+        assert parsed["summary"]["recurring_claim_count"] == 1
+        assert parsed["summary"]["entities_scanned"] == 2
+        assert parsed["recurring_claims"][0]["entity_count"] == 2
+
+    def test_threshold_override_is_plumbed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import yaml
+
+        monkeypatch.setattr("athenaeum.search.embed_texts", _deterministic_embed)
+        knowledge = _claims_knowledge(tmp_path)
+
+        rc = main(
+            ["claims", "--find", "--path", str(knowledge), "--threshold", "0.99"]
+        )
+        assert rc == 0
+        parsed = yaml.safe_load(capsys.readouterr().out)
+        # Override reaches the report summary ...
+        assert parsed["summary"]["threshold"] == 0.99
+        # ... and is the active cutoff: the identical-vector pair (cosine 1.0)
+        # still clears 0.99, so the group survives.
+        assert parsed["summary"]["recurring_claim_count"] == 1
 
     def test_missing_wiki_returns_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

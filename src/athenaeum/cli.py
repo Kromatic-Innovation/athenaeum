@@ -641,7 +641,7 @@ def _cmd_claims(args: argparse.Namespace) -> int:
     from athenaeum.recurring_claims import (
         DEFAULT_THRESHOLD,
         extract_claim_occurrences,
-        find_recurring_claims,
+        group_recurring_claims,
         render_report,
     )
     from athenaeum.search import embed_texts
@@ -657,10 +657,13 @@ def _cmd_claims(args: argparse.Namespace) -> int:
         return 1
 
     threshold = args.threshold if args.threshold is not None else DEFAULT_THRESHOLD
-    groups = find_recurring_claims(
-        wiki_root, threshold=threshold, embedding_provider=embed_texts
+    # Scan the wiki ONCE: reuse the occurrence list for both the entity count
+    # and the grouping pass instead of re-walking the tree (C6).
+    occurrences = extract_claim_occurrences(wiki_root)
+    entities_scanned = len({o.entity_id for o in occurrences})
+    groups = group_recurring_claims(
+        occurrences, threshold=threshold, embedding_provider=embed_texts
     )
-    entities_scanned = len({o.entity_id for o in extract_claim_occurrences(wiki_root)})
     sys.stdout.write(
         render_report(groups, threshold=threshold, entities_scanned=entities_scanned)
     )
