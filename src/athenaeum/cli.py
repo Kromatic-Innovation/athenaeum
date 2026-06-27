@@ -151,6 +151,16 @@ def main(argv: list[str] | None = None) -> int:
         "env, then athenaeum.yaml librarian.batch_mode, then off.",
     )
     run_parser.add_argument(
+        "--no-retire",
+        dest="retire",
+        action="store_false",
+        default=None,
+        help="Skip the move-then-retire pass (issue #261): raw auto-memory "
+        "is neither moved into the wiki nor git-removed. Overrides the "
+        "athenaeum.yaml librarian.retire toggle (default on). See the "
+        "README 'Data lifecycle & upgrade impact' section.",
+    )
+    run_parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -721,6 +731,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         merge_only=getattr(args, "merge_only", False),
         strict_budget=args.strict_budget,
         batch_mode=args.batch_mode,
+        retire=getattr(args, "retire", None),
     )
 
 

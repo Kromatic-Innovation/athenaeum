@@ -7,8 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Slice C of #259: the nightly contradiction sweep stops scaling with corpus
-size._
+## [0.10.0] - 2026-06-27
+
+The expiring-intake-queue epic (#259) lands as four slices. `raw/auto-memory/`
+becomes a queue that drains into the wiki instead of a permanent store.
+
+> **Upgrade impact — `athenaeum run` now MOVES and DELETES raw auto-memory by
+> default (slice B, #261).** Once the librarian compiles a cluster into its
+> `wiki/auto-<topic>.md` entry and the contradiction detector runs clean, the
+> new move-then-retire pass moves each non-contradictory raw fact into the wiki
+> (as an origin-traced footnote) and **`git rm`s the raw file**. This is
+> default-on. Recovery is git-only (a provenance-snapshot commit precedes the
+> move+delete commit), so `git gc` / squash / never-pushing can lose retired
+> raw. Contradictory, degraded-verdict, and pending-confirmation clusters are
+> HELD, never deleted. Preview with `--dry-run`; disable with
+> `athenaeum run --no-retire` or `librarian.retire: false` in `athenaeum.yaml`.
+> See the README "Data lifecycle & upgrade impact" section.
+
+### Added
+
+- **Move-then-retire lifecycle for raw auto-memory (#261, slice B of #259).**
+  New `retire.py`. After the C3 merge + C4 detection, `athenaeum run` MOVES
+  non-contradictory raw facts into their canonical wiki entry (with footnotes
+  and a `retired: true` marker) and `git rm`s the raw so it stops re-entering
+  the nightly loop. **Default-on and destructive** (see the Upgrade impact
+  callout above). Contradictory clusters, degraded detector verdicts
+  (offline / API error / unparseable), and clusters whose members are
+  referenced by open `_pending_questions.md` / `_pending_merges.md` entries are
+  HELD — a delete never races a pending confirmation. The pass refuses to run
+  without a git repo (recovery is git-only): a provenance-snapshot commit
+  (commit A) precedes the combined wiki-update + raw-deletion commit (commit
+  B). `--dry-run` computes the identical plan and writes nothing. The pass is
+  opt-out via the `athenaeum run --no-retire` CLI flag or the
+  `librarian.retire` yaml toggle (default `true`); when disabled the raw is
+  neither moved nor deleted.
+- **Origin-traced source footnotes for compiled facts (#260, slice A of
+  #259).** The source schema gains `source_type`
+  (`user-stated` | `external` | `document` | `inferred`, default `inferred`)
+  and `source_ref`, rendered by `render_source_footnotes`. A new read-only
+  `transcript_verify` module verifies user-stated claims against the session
+  transcripts under `~/.claude/projects/<scope>/`, upgrading a footnote from
+  the honest `inferred` default to `user-stated` / `external` when the
+  transcript confirms it (never citing the raw `auto-memory/...` filename as
+  the ultimate source). New citation policy at
+  `policies/auto-memory-citation.md`.
+- **Owner-singleton invariant (#263, slice D of #259).** A config-driven
+  `owner` block (`config.resolve_owner`, never hardcoded in source) keeps the
+  knowledge base's owner a single canonical person instead of fragmenting
+  across commit-authorship and footnotes. Owner fragments auto-bind in
+  `dedupe.py` via uid / full-name-alias / process-context / a new
+  `google_contact` dedup join key, and owner-authored operational/exclusion
+  memories (e.g. a family-relationships list) route to a standalone
+  `reference` page via `owner.py` rather than polluting the owner bio. Entirely
+  inert when no owner is configured, so the shipped package carries no personal
+  identity.
 
 ### Changed
 

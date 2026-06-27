@@ -129,6 +129,26 @@ def resolve_owner(config: dict[str, Any] | None) -> dict[str, Any] | None:
     return {"uid": uid, "google_contact": google_contact, "aliases": aliases}
 
 
+def resolve_retire(config: dict[str, Any] | None) -> bool:
+    """Resolve the move-then-retire opt-out from yaml ``librarian.retire`` (#259).
+
+    The move-then-retire pass (issue #261) moves non-contradictory raw
+    auto-memory into the wiki and ``git rm``s it. It is DEFAULT-ON
+    (owner-confirmed): only ``librarian.retire: false`` in ``athenaeum.yaml``
+    turns it off, and the ``athenaeum run --no-retire`` CLI flag overrides to
+    off at the call site. No seed in ``_DEFAULTS`` (issue #231) — the default
+    lives here in code so it stays reachable. Non-bool yaml values fall through
+    to the default (on).
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("retire")
+            if isinstance(raw, bool):
+                return raw
+    return True
+
+
 def resolve_model(
     knob: str,
     env_var: str,
@@ -223,11 +243,17 @@ search_backend: fts5
 #   most batches finish within an hour, 24h worst case — intended for the
 #   nightly run. Precedence: --batch-mode CLI flag, then
 #   ATHENAEUM_BATCH_MODE env, then this key, then off.
+# retire: move-then-retire of raw auto-memory (issue #261). DEFAULT ON.
+#   When on, `athenaeum run` MOVES non-contradictory raw/auto-memory facts
+#   into their wiki entry and `git rm`s the raw (recovery is git-only).
+#   Set false to disable; the --no-retire CLI flag overrides to off. See
+#   README "Data lifecycle & upgrade impact".
 # librarian:
 #   cluster_threshold: 0.55
 #   cluster_output: raw/_librarian-clusters.jsonl
 #   max_files: 50
 #   batch_mode: false
+#   retire: true
 
 # Model selection (issue #232). Per knob: env var wins over the yaml key,
 # which wins over the built-in default. Values are free-form model id

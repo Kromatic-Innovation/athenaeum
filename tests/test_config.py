@@ -11,8 +11,32 @@ from athenaeum.config import (
     load_config,
     resolve_extra_intake_roots,
     resolve_owner,
+    resolve_retire,
     write_default_config,
 )
+
+
+class TestResolveRetire:
+    def test_default_on(self) -> None:
+        # Default ON (owner-confirmed): unset config / missing key stays on.
+        assert resolve_retire(None) is True
+        assert resolve_retire({}) is True
+        assert resolve_retire({"librarian": {}}) is True
+
+    def test_yaml_false_disables(self) -> None:
+        assert resolve_retire({"librarian": {"retire": False}}) is False
+
+    def test_yaml_true_enables(self) -> None:
+        assert resolve_retire({"librarian": {"retire": True}}) is True
+
+    def test_non_bool_falls_through_to_default(self) -> None:
+        # A non-bool (e.g. yaml string) must not silently disable retire.
+        assert resolve_retire({"librarian": {"retire": "no"}}) is True
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "librarian" not in _DEFAULTS
 
 
 class TestResolveOwner:

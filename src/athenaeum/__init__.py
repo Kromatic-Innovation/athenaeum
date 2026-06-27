@@ -2,17 +2,18 @@
 """Athenaeum — open source knowledge management pipeline.
 
 The Python API surface (``__all__``) is intentionally narrow and stable.
-Most new functionality in this release is delivered via CLI subcommands
+Most functionality is exercised through the CLI subcommands
 (``athenaeum people``, ``athenaeum recall``, ``athenaeum repair``,
 ``athenaeum dedupe``, ``athenaeum questions``, ``athenaeum ingest-answers``,
 etc.) — see the CLI documentation in ``README.md`` and ``athenaeum --help``
 for the full subcommand list. Internal modules (``contradictions``,
 ``merge``, ``clusters``, ``dedupe``, ``repair``, ``answers``,
-``provenance``, ``resolutions``, ``json_utils``) are importable but not part of the stable
+``provenance``, ``resolutions``, ``json_utils``, ``retire``, ``owner``,
+``transcript_verify``) are importable but not part of the stable
 public surface; their signatures may change between minor releases.
 """
 
-__version__ = "0.9.1"
+__version__ = "0.10.0"
 
 from athenaeum.init import init_knowledge_dir
 from athenaeum.librarian import discover_raw_files, process_one, rebuild_index, run

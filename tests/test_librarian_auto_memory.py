@@ -1184,6 +1184,53 @@ class TestRetireIntegrationViaRun:
         meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
         assert meta["retired"] is True
 
+    def test_no_retire_flag_skips_retire(self, retire_root: Path) -> None:
+        # Issue #259 opt-out: run(retire=False) skips the retire pass entirely
+        # — the raw is neither moved nor git-removed.
+        from athenaeum.librarian import run
+        from athenaeum.merge import AUTO_WIKI_PREFIX
+        from athenaeum.models import parse_frontmatter
+
+        rc = run(
+            raw_root=retire_root / "raw",
+            wiki_root=retire_root / "wiki",
+            knowledge_root=retire_root,
+            merge_only=True,
+            retire=False,
+        )
+        assert rc == 0
+        # Raw stays in the intake queue (no move, no git rm).
+        assert _raw_file(retire_root).exists()
+        # The merge still wrote the wiki entry, but it carries no retired marker.
+        wiki = retire_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
+        assert meta.get("retired") is not True
+
+    def test_yaml_retire_false_skips_retire(self, retire_root: Path) -> None:
+        # Issue #259 opt-out via yaml: librarian.retire: false disables the
+        # pass even though run() is called with retire=None (default resolve).
+        from athenaeum.librarian import run
+
+        (retire_root / "athenaeum.yaml").write_text(
+            "recall:\n"
+            "  extra_intake_roots:\n"
+            "    - raw/auto-memory\n"
+            "librarian:\n"
+            "  retire: false\n",
+            encoding="utf-8",
+        )
+
+        rc = run(
+            raw_root=retire_root / "raw",
+            wiki_root=retire_root / "wiki",
+            knowledge_root=retire_root,
+            merge_only=True,
+        )
+        assert rc == 0
+        # No move, no git rm — the toggle held.
+        assert _raw_file(retire_root).exists()
+
 
 def _build_two_member_root(
     tmp_path: Path,
