@@ -552,7 +552,10 @@ def _cmd_dedupe(args: argparse.Namespace) -> int:
         if not wiki_root.is_dir():
             print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
             return 1
-        pairs = find_duplicate_persons(wiki_root)
+        from athenaeum.config import load_config, resolve_owner
+
+        owner = resolve_owner(load_config(wiki_root.parent))
+        pairs = find_duplicate_persons(wiki_root, owner=owner)
         report = pairs_to_yaml(pairs)
         if args.out:
             args.out.parent.mkdir(parents=True, exist_ok=True)

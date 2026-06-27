@@ -84,6 +84,47 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
     return result
 
 
+def resolve_owner(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Resolve the workspace owner identity from config (issue #263).
+
+    The owner is the single canonical person the knowledge base belongs to.
+    Athenaeum ships to PyPI, so the owner identity must NEVER be hardcoded in
+    source — it comes entirely from ``athenaeum.yaml``::
+
+        owner:
+          uid: a545c038                          # canonical owner person UID
+          google_contact: people/c7657288...     # owner Google contact id
+          aliases: ["user_tristan", "..."]       # optional name/handle aliases
+
+    Returns a normalized dict ``{"uid", "google_contact", "aliases"}`` when at
+    least one usable field is set, else ``None``. A ``None`` return makes every
+    owner-aware behavior (auto-bind, owner join keys, ``user_*`` routing) inert
+    so the package works for any user with no owner configured. No default is
+    seeded into ``_DEFAULTS`` (issue #231) — an unset owner is genuinely empty.
+    """
+    if not isinstance(config, dict):
+        return None
+    raw = config.get("owner")
+    if not isinstance(raw, dict):
+        return None
+
+    def _clean_str(value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    uid = _clean_str(raw.get("uid"))
+    google_contact = _clean_str(raw.get("google_contact"))
+    aliases_raw = raw.get("aliases")
+    aliases: list[str] = []
+    if isinstance(aliases_raw, list):
+        aliases = [s for s in (_clean_str(a) for a in aliases_raw) if s]
+
+    if not (uid or google_contact or aliases):
+        return None  # blank/empty owner block is inert
+    return {"uid": uid, "google_contact": google_contact, "aliases": aliases}
+
+
 def resolve_model(
     knob: str,
     env_var: str,
@@ -129,6 +170,28 @@ search_backend: fts5
 # vector:
 #   provider: chromadb
 #   collection: wiki
+
+# Workspace owner identity (issue #263). Designates the single canonical
+# person this knowledge base belongs to so the librarian keeps the owner a
+# singleton instead of fragmenting across commit-authorship / footnote
+# fragments and a parallel ``user_*`` alias family. ENTIRELY OPTIONAL — when
+# unset, every owner-aware behavior (person auto-bind, owner dedup join keys,
+# ``user_*`` reference routing) is inert. Set no personal identity in source;
+# only the operator's athenaeum.yaml carries it.
+#   uid: canonical owner person UID. Owner fragments auto-bind (merge) into
+#     this page rather than persisting standalone.
+#   google_contact: owner Google contact id; two person pages sharing it are
+#     treated as duplicates.
+#   aliases: optional name/handle aliases (display names, git author emails,
+#     ``user_*`` handles). Pages whose name/handle/process-context author
+#     matches an alias auto-bind to the owner. The ``user_*`` namespace is
+#     always treated as an owner alias when an owner is configured.
+# owner:
+#   uid: a545c038
+#   google_contact: people/c765728850212863135
+#   aliases:
+#     - user_tristan
+#     - Tristan Kromer
 
 # Recall configuration.
 # extra_intake_roots: additional directories (resolved relative to the

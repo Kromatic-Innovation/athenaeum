@@ -17,11 +17,20 @@ from athenaeum.dedupe import (
     _union_list,
     find_duplicate_persons,
     merge_duplicate_persons,
+    owner_signal,
     pairs_from_yaml,
     pairs_to_yaml,
     rewrite_references,
 )
 from athenaeum.models import parse_frontmatter
+
+# Worked-example owner config (issue #263). These values are the operator's
+# instance config used here only as a test fixture — never shipped in source.
+OWNER = {
+    "uid": "a545c038",
+    "google_contact": "people/c765728850212863135",
+    "aliases": ["user_tristan", "tristan@kromatic.com", "Tristan Kromer"],
+}
 
 
 def _write_person(
@@ -120,6 +129,176 @@ class TestFindDuplicatePersons:
         for i in range(4):
             _write_person(wiki_root, uid=f"eeee000{i}", name="John Smith")
         assert find_duplicate_persons(wiki_root) == []
+
+    def test_google_contact_join_key(self, wiki_root: Path) -> None:
+        # Two person pages sharing a google_contact are duplicates even
+        # with different names and no apollo/linkedin (#263). No owner needed.
+        _write_person(
+            wiki_root,
+            uid="gggg1111",
+            name="Greg Hall",
+            extra={"google_contact": "people/c999"},
+        )
+        _write_person(
+            wiki_root,
+            uid="gggg2222",
+            name="Gregory Hall",
+            extra={"google_contact": "people/c999"},
+        )
+        pairs = find_duplicate_persons(wiki_root)
+        assert len(pairs) == 1
+        assert pairs[0].match_signal == "google_contact"
+        assert {pairs[0].canonical_uid, pairs[0].absorbed_uid} == {
+            "gggg1111",
+            "gggg2222",
+        }
+
+
+class TestOwnerSingleton:
+    """Owner auto-bind invariant (issue #263, slice D of #259)."""
+
+    def _owner_page(self, wiki_root: Path, **kw: object) -> Path:
+        return _write_person(
+            wiki_root, uid="a545c038", name="Tristan Kromer", **kw  # type: ignore[arg-type]
+        )
+
+    def test_owner_named_fragment_autobinds(self, wiki_root: Path) -> None:
+        self._owner_page(wiki_root)
+        _write_person(wiki_root, uid="frag1111", name="Tristan Kromer")
+        pairs = find_duplicate_persons(wiki_root, owner=OWNER)
+        assert len(pairs) == 1
+        assert pairs[0].canonical_uid == "a545c038"
+        assert pairs[0].absorbed_uid == "frag1111"
+        assert pairs[0].match_signal == "owner_name"
+
+    def test_process_context_fragment_autobinds(self, wiki_root: Path) -> None:
+        self._owner_page(wiki_root)
+        _write_person(
+            wiki_root,
+            uid="proc1111",
+            name="Commit Author Bot",
+            extra={"git_author": "tristan@kromatic.com"},
+        )
+        pairs = find_duplicate_persons(wiki_root, owner=OWNER)
+        assert len(pairs) == 1
+        assert pairs[0].canonical_uid == "a545c038"
+        assert pairs[0].absorbed_uid == "proc1111"
+        assert pairs[0].match_signal == "owner_process"
+
+    def test_configured_google_contact_autobinds(self, wiki_root: Path) -> None:
+        # Owner page carries no google_contact; the fragment matches the
+        # CONFIGURED owner google_contact → binds via owner_google_contact.
+        self._owner_page(wiki_root)
+        _write_person(
+            wiki_root,
+            uid="gc111111",
+            name="T. K.",
+            extra={"google_contact": "people/c765728850212863135"},
+        )
+        pairs = find_duplicate_persons(wiki_root, owner=OWNER)
+        assert len(pairs) == 1
+        assert pairs[0].canonical_uid == "a545c038"
+        assert pairs[0].match_signal == "owner_google_contact"
+
+    def test_user_alias_fragment_autobinds(self, wiki_root: Path) -> None:
+        self._owner_page(wiki_root)
+        _write_person(
+            wiki_root,
+            uid="user1111",
+            name="Some Handle",
+            extra={"aliases": ["user_tristan"]},
+        )
+        pairs = find_duplicate_persons(wiki_root, owner=OWNER)
+        assert len(pairs) == 1
+        assert pairs[0].canonical_uid == "a545c038"
+        assert pairs[0].match_signal == "owner_alias"
+
+    def test_owner_forced_canonical_beats_pick(self, wiki_root: Path) -> None:
+        # The fragment would win _pick_canonical (it has an apollo_id) but the
+        # owner pass runs first and forces the configured owner as canonical.
+        self._owner_page(wiki_root)
+        _write_person(
+            wiki_root,
+            uid="zfrag111",
+            name="Tristan Kromer",
+            apollo_id="apo-9",
+            extra={"warm_score": 99},
+        )
+        pairs = find_duplicate_persons(wiki_root, owner=OWNER)
+        assert len(pairs) == 1
+        assert pairs[0].canonical_uid == "a545c038"
+        assert pairs[0].absorbed_uid == "zfrag111"
+
+    def test_non_owner_person_not_absorbed(self, wiki_root: Path) -> None:
+        # False-positive guard: a random new person sharing nothing with the
+        # owner must NEVER bind to the owner.
+        self._owner_page(wiki_root)
+        _write_person(
+            wiki_root,
+            uid="jane1111",
+            name="Jane Doe",
+            extra={"git_author": "jane@example.com"},
+        )
+        assert find_duplicate_persons(wiki_root, owner=OWNER) == []
+
+    def test_inert_when_owner_unset(self, wiki_root: Path) -> None:
+        # Same process-context fragment, but no owner configured → no bind.
+        self._owner_page(wiki_root)
+        _write_person(
+            wiki_root,
+            uid="proc2222",
+            name="Commit Author Bot",
+            extra={"git_author": "tristan@kromatic.com"},
+        )
+        assert find_duplicate_persons(wiki_root) == []
+        assert find_duplicate_persons(wiki_root, owner=None) == []
+
+    def test_canonical_owner_missing_is_noop(self, wiki_root: Path) -> None:
+        # Owner configured but the canonical owner page is absent → cannot
+        # merge into a nonexistent page; owner binding is skipped.
+        _write_person(
+            wiki_root,
+            uid="proc3333",
+            name="Commit Author Bot",
+            extra={"git_author": "tristan@kromatic.com"},
+        )
+        assert find_duplicate_persons(wiki_root, owner=OWNER) == []
+
+    def test_autobind_merge_is_git_recoverable_provenance(
+        self, wiki_root: Path
+    ) -> None:
+        # The owner pair flows through the existing merge machinery: the
+        # absorbed uid lands in merged_from on the canonical owner page.
+        cpath = self._owner_page(wiki_root)
+        _write_person(wiki_root, uid="frag9999", name="Tristan Kromer")
+        pairs = find_duplicate_persons(wiki_root, owner=OWNER)
+        report = merge_duplicate_persons(pairs, apply=True, wiki_root=wiki_root)
+        assert report.merged == 1
+        meta, _body = parse_frontmatter(cpath.read_text(encoding="utf-8"))
+        assert "frag9999" in (meta.get("merged_from") or [])
+
+
+class TestOwnerSignal:
+    def test_inert_without_owner(self) -> None:
+        assert owner_signal({"name": "Tristan Kromer"}, None) is None
+
+    def test_uid_match(self) -> None:
+        assert owner_signal({"uid": "a545c038"}, OWNER) == "owner_uid"
+
+    def test_name_alias_match(self) -> None:
+        assert owner_signal({"name": "Tristan Kromer"}, OWNER) == "owner_name"
+
+    def test_process_field_match(self) -> None:
+        assert (
+            owner_signal({"git_author": "tristan@kromatic.com"}, OWNER)
+            == "owner_process"
+        )
+
+    def test_random_person_no_signal(self) -> None:
+        assert (
+            owner_signal({"name": "Jane Doe", "git_author": "jane@example.com"}, OWNER)
+            is None
+        )
 
 
 class TestMergePreservesFieldSources:

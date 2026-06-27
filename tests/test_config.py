@@ -10,8 +10,65 @@ import pytest
 from athenaeum.config import (
     load_config,
     resolve_extra_intake_roots,
+    resolve_owner,
     write_default_config,
 )
+
+
+class TestResolveOwner:
+    def test_none_config_is_inert(self) -> None:
+        assert resolve_owner(None) is None
+
+    def test_missing_owner_block_is_inert(self) -> None:
+        assert resolve_owner({"search_backend": "fts5"}) is None
+
+    def test_empty_owner_block_is_inert(self) -> None:
+        assert resolve_owner({"owner": {}}) is None
+        assert resolve_owner({"owner": {"uid": "", "aliases": []}}) is None
+
+    def test_non_dict_owner_is_inert(self) -> None:
+        assert resolve_owner({"owner": "a545c038"}) is None
+
+    def test_full_owner_block(self) -> None:
+        owner = resolve_owner(
+            {
+                "owner": {
+                    "uid": "a545c038",
+                    "google_contact": "people/c765728850212863135",
+                    "aliases": ["user_tristan", "Tristan Kromer"],
+                }
+            }
+        )
+        assert owner == {
+            "uid": "a545c038",
+            "google_contact": "people/c765728850212863135",
+            "aliases": ["user_tristan", "Tristan Kromer"],
+        }
+
+    def test_partial_owner_uid_only(self) -> None:
+        assert resolve_owner({"owner": {"uid": "a545c038"}}) == {
+            "uid": "a545c038",
+            "google_contact": "",
+            "aliases": [],
+        }
+
+    def test_aliases_coerced_and_blanks_dropped(self) -> None:
+        owner = resolve_owner({"owner": {"aliases": ["  user_x  ", "", None, 7]}})
+        assert owner is not None
+        assert owner["aliases"] == ["user_x", "7"]
+
+    def test_template_documents_owner(self) -> None:
+        from athenaeum.config import _DEFAULT_CONFIG_CONTENT
+
+        assert "owner:" in _DEFAULT_CONFIG_CONTENT
+        assert "google_contact" in _DEFAULT_CONFIG_CONTENT
+
+    def test_owner_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "owner" not in _DEFAULTS
+        # Unset owner stays inert through the full load path.
+        assert resolve_owner(load_config(Path("/nonexistent-knowledge-root"))) is None
 
 
 class TestLoadConfig:
