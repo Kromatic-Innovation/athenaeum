@@ -468,3 +468,52 @@ class TestResolveNotAConflictTtlDays:
         # silently become a ttl of 1 (mirrors resolve_max_per_run).
         cfg = {"contradiction": {"not_a_conflict_ttl_days": True}}
         assert resolve_not_a_conflict_ttl_days(cfg) == 0
+
+
+import logging  # noqa: E402
+
+from athenaeum.fingerprint import (  # noqa: E402
+    resolve_resolved_similarity_threshold,
+)
+
+
+class TestDeprecatedSuppressionKnobsWarn:
+    """Issue #262: the two suppression knobs are tolerated but warn once.
+
+    With retire-on-move + footnote-targeting they are moot, but a config that
+    still sets them must keep working (tolerate) and emit a deprecation
+    warning so operators can drop them.
+    """
+
+    def test_resolved_similarity_threshold_yaml_tolerated_with_warning(
+        self, caplog, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
+        fingerprint._DEPRECATED_CONFIG_WARNED.clear()
+        cfg = {"contradiction": {"resolved_similarity_threshold": 0.9}}
+        with caplog.at_level(logging.WARNING, logger="athenaeum"):
+            value = resolve_resolved_similarity_threshold(cfg)
+        # Tolerated — the configured value is still honored.
+        assert value == 0.9
+        assert "DEPRECATED" in caplog.text
+        assert "resolved_similarity_threshold" in caplog.text
+
+    def test_not_a_conflict_ttl_days_env_tolerated_with_warning(
+        self, caplog, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS", "7")
+        fingerprint._DEPRECATED_CONFIG_WARNED.clear()
+        with caplog.at_level(logging.WARNING, logger="athenaeum"):
+            value = resolve_not_a_conflict_ttl_days({})
+        assert value == 7
+        assert "DEPRECATED" in caplog.text
+        assert "not_a_conflict_ttl_days" in caplog.text
+
+    def test_default_path_does_not_warn(self, caplog, monkeypatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
+        monkeypatch.delenv("ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS", raising=False)
+        fingerprint._DEPRECATED_CONFIG_WARNED.clear()
+        with caplog.at_level(logging.WARNING, logger="athenaeum"):
+            resolve_resolved_similarity_threshold(None)
+            resolve_not_a_conflict_ttl_days(None)
+        assert "DEPRECATED" not in caplog.text

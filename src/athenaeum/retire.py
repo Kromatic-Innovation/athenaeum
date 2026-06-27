@@ -245,6 +245,37 @@ def _attach_inline_markers(
     return body
 
 
+# Issue #262 (slice C of #259): the contradiction rationales that represent a
+# genuine RESOLVED verdict worth persisting on the moved fact's footnote. A
+# plain clean move (``singleton`` / empty rationale) carries no verdict; only
+# these settled outcomes do. ``confirmation-pass-cleared`` is the merge.py
+# label for a detector over-fire that the Opus confirmation pass cleared as
+# ``not_a_conflict`` — we persist the resolver's verdict, not the internal
+# label.
+_VERDICT_RATIONALES: dict[str, str] = {
+    "confirmation-pass-cleared": "not_a_conflict",
+    "not_a_conflict": "not_a_conflict",
+    "declared-supersession": "declared-supersession",
+    "declared-refinement": "declared-refinement",
+}
+
+
+def _resolved_verdict(entry: MergedWikiEntry) -> str | None:
+    """Return the persistable resolved verdict for a moved entry, or None.
+
+    Issue #262: when a contradiction was settled (the confirmation pass
+    cleared a detector over-fire, or the members declared a
+    supersession/refinement) the resulting verdict is recorded on the wiki
+    fact's footnote so a future memory can reuse it instead of re-paying to
+    re-adjudicate. A plain clean move (no contradiction, ``singleton``)
+    returns None — there is no verdict to persist.
+    """
+    c = entry.contradiction
+    if c is None:
+        return None
+    return _VERDICT_RATIONALES.get((c.rationale or "").strip())
+
+
 def _enrich_entry(entry: MergedWikiEntry, projects_root: Path | None) -> None:
     """Upgrade footnote provenance via transcript verification + attach markers.
 
@@ -255,15 +286,30 @@ def _enrich_entry(entry: MergedWikiEntry, projects_root: Path | None) -> None:
     downgrade an already-verified source back to ``inferred`` (append-only
     provenance). Then per-fact inline markers are attached and the entry is
     flagged ``retired``.
+
+    Issue #262 (slice C of #259): every moved member also stamps the granular
+    ``claim`` text (and a resolved ``verdict``, when one exists) onto its
+    source so the wiki footnote becomes the diff target the contradiction
+    engine compares future intake against — the retired raw atom is gone.
+    Append-only: an existing ``claim`` / ``verdict`` is never overwritten.
     """
     index_map = _source_index_map(entry)
     by_key = {
         (str(src.get("session", "")), src.get("turn")): src for src in entry.sources
     }
+    verdict = _resolved_verdict(entry)
     for am in entry.resolved_members:
         if am.origin_session_id is None:
             continue
         claim = _member_claim(am.path, am.description or am.name)
+        src = by_key.get((str(am.origin_session_id), am.origin_turn))
+        if src is not None:
+            # Persist the granular diff target FIRST — independent of whether
+            # transcript verification upgrades the provenance below.
+            if claim and "claim" not in src:
+                src["claim"] = claim
+            if verdict and "verdict" not in src:
+                src["verdict"] = verdict
         stype, sref = verify_user_stated(
             am.origin_scope,
             am.origin_session_id,
@@ -275,7 +321,6 @@ def _enrich_entry(entry: MergedWikiEntry, projects_root: Path | None) -> None:
             # Unverifiable / transcript rolled off — leave the source's
             # existing (possibly already-verified) provenance untouched.
             continue
-        src = by_key.get((str(am.origin_session_id), am.origin_turn))
         if src is None:
             continue
         src["source_type"] = stype

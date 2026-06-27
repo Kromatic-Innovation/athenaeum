@@ -5,6 +5,44 @@ All notable changes to Athenaeum are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+_Slice C of #259: the nightly contradiction sweep stops scaling with corpus
+size._
+
+### Changed
+
+- **Retarget the contradiction engine from raw atoms to wiki footnotes (#262,
+  slice C of #259).** The cross-scope similarity sweep
+  (`cross_scope.cross_scope_similarity_pairs`) no longer cross-products
+  `wiki/**` against itself. A new `require_raw_side` argument (default `True`)
+  drops candidate pairs where both sides are wiki entries, so re-detection only
+  compares NEW raw intake against the matching (topically-similar) wiki entry.
+  With move-then-retire (#261) deleting the raw atom on move, this collapses the
+  nightly cost from O(corpus²) to **O(new intake + open contradictions)**: an
+  unchanged corpus with zero new intake now produces ~0 detector calls instead
+  of one per wiki-pair.
+- **Persist the granular diff target on the wiki footnote (#262).** When a fact
+  is moved into a wiki entry, `retire.py` now stamps the atomic `claim` text —
+  and a resolved `verdict`/disposition when one exists (a cleared detector
+  over-fire or a declared supersession/refinement) — onto the fact's source.
+  `merge.render_source_footnotes` renders both, and `merge._parse_one_source`
+  round-trips them through frontmatter, so a future memory has a footnote-level
+  thing to diff against now that the raw atom is gone. Both fields are optional
+  and append-only; wiki entries written before this change parse unchanged.
+
+### Deprecated
+
+- **`contradiction.resolved_similarity_threshold` (#211) and
+  `contradiction.not_a_conflict_ttl_days` (#251) are deprecated (#262).** They
+  existed only to babysit the permanent-raw design — suppressing re-detection of
+  the same raw atoms forever, or for a TTL window. With retire-on-move +
+  footnote-targeting the atom never re-enters the sweep, so both knobs are moot.
+  They are **tolerated, not removed**: a config that still sets them keeps
+  working and now emits a one-time deprecation warning
+  (`fingerprint._warn_deprecated_suppression_knob`). Remove them from
+  `athenaeum.yaml` to silence the warning; full removal is a follow-up.
+
 ## [0.9.1] - 2026-06-18
 
 ### Fixed
