@@ -186,13 +186,13 @@ def _canonical_linkedin(url: str) -> str:
 def _owner_alias_sets(owner: dict[str, Any]) -> tuple[set[str], set[str]]:
     """Project owner aliases into (normalized-name set, raw-handle set).
 
-    Aliases are matched two ways because they mix display names ("Tristan
-    Kromer") with handles/emails ("tristan@kromatic.com", "user_tristan"):
-    the normalized-name set catches name matches, the raw lowercase set
-    catches handle/email matches.
+    Aliases are matched two ways because they mix display names ("Ada
+    Lovelace") with handles/emails ("ada@example.com", "user_ada"): the
+    normalized-name set catches name matches, the raw lowercase set catches
+    handle/email matches.
 
     The normalized-name set holds only FULL names (>=2 tokens). A
-    single-token alias (e.g. ``"Tristan"``) is deliberately excluded from
+    single-token alias (e.g. ``"Ada"``) is deliberately excluded from
     name matching so it cannot auto-bind every stranger who happens to share
     that one name to the owner (misconfiguration hardening, #263). Such an
     alias still lives in the raw-handle set, where it only matches an
