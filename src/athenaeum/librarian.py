@@ -128,7 +128,7 @@ RAW_FILE_RE = re.compile(r"^(\d{8}T\d{6}Z?)-([0-9a-f]{8})\.md$", re.IGNORECASE)
 # Auto-memory file naming: <prefix>_<slug>.md where prefix is one of
 # feedback|project|reference|user|Recall. Slug is underscore-separated
 # lowercase, but the regex only constrains the prefix — typo bodies
-# (e.g. project_voltair_nanoclaw.md) must still match so C2 clustering
+# (e.g. project_foo_bar.md) must still match so C2 clustering
 # can dedupe them downstream. The ``Recall`` prefix is capitalized in
 # production (see raw/auto-memory/.../Recall_architecture.md); lowercase
 # ``recall_`` is also accepted defensively.

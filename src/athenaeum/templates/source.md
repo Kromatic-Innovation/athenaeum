@@ -13,13 +13,13 @@ tags: []
 # reference). Scalar form is `<type>:<ref>`. Structured form:
 #   source:
 #     type: manual
-#     ref: tristan
+#     ref: alice
 #     captured_at: 2026-05-08
 source: manual:user
 # `field_sources:` records per-field origin. Useful when the URL came
 # from one place but the author or published_at came from another.
 #   field_sources:
-#     author: manual:tristan
+#     author: manual:alice
 #     published_at:
 #       type: web-fetch
 #       ref: meta-tag-2026-05
