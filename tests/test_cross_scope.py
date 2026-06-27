@@ -413,6 +413,142 @@ class TestSimilaritySweep:
         assert wiki_path in paths
 
 
+class _RaisingEmbedder:
+    """Embedding provider that fails if ``fetch_embeddings`` is ever called.
+
+    Proves the zero-intake short-circuit returns BEFORE any corpus-scale
+    embedding retrieval (issue #262 / Quine #1a).
+    """
+
+    def fetch_embeddings(self, ids: Any, cache_dir: Path) -> dict[str, list[float]]:
+        raise AssertionError(
+            "fetch_embeddings must not be called on a zero-raw-intake run"
+        )
+
+
+class TestRequireRawSide:
+    """Issue #262 — the sweep no longer cross-products wiki against itself.
+
+    These are the headline cost-acceptance tests: detection now scales with
+    NEW raw intake, not with corpus size.
+    """
+
+    def _two_wiki_pages(self, tmp_path: Path) -> tuple[Path, list[Path], dict]:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True)
+        pages: list[Path] = []
+        embeds: dict[str, list[float]] = {}
+        for name in ("auto-foo.md", "auto-bar.md"):
+            p = wiki_root / name
+            p.write_text(
+                f"---\nname: {name}\ntype: auto-memory\n---\nWiki body\n",
+                encoding="utf-8",
+            )
+            pages.append(p)
+            # Near-identical vectors: would pair under the legacy cross-product.
+            embeds[name] = [0.99, 0.05] if name == "auto-foo.md" else [1.0, 0.0]
+        return wiki_root, pages, embeds
+
+    def test_unchanged_corpus_zero_new_intake_yields_zero(self, tmp_path: Path) -> None:
+        """ZERO raw intake + two near-identical wiki pages → 0 detections.
+
+        This is the cost headline: an unchanged corpus costs ~0, not
+        ~corpus-size. The two wiki pages would form a wiki-vs-wiki pair under
+        the legacy full cross-product; with ``require_raw_side`` they do not.
+        """
+        wiki_root, pages, embeds = self._two_wiki_pages(tmp_path)
+        embedder = _StubEmbedder(embeds)
+        candidates = cross_scope_similarity_pairs(
+            [],  # zero new raw intake
+            wiki_files=pages,
+            wiki_root=wiki_root,
+            extra_roots=[tmp_path / "raw" / "auto-memory"],
+            cache_dir=tmp_path / "cache",
+            threshold=0.85,
+            embedding_provider=embedder,
+        )
+        assert candidates == []
+
+    def test_zero_intake_short_circuits_before_embedding_fetch(
+        self, tmp_path: Path
+    ) -> None:
+        """Quine #1a: zero raw intake returns BEFORE any wiki embedding fetch.
+
+        The raising embedder would blow up if the corpus-scale fetch + N²
+        cosine loop ran — so passing proves the zero-intake night does no
+        corpus-scale work, not merely that it discards every pair at the end.
+        """
+        wiki_root, pages, _embeds = self._two_wiki_pages(tmp_path)
+        candidates = cross_scope_similarity_pairs(
+            [],
+            wiki_files=pages,
+            wiki_root=wiki_root,
+            extra_roots=[tmp_path / "raw" / "auto-memory"],
+            cache_dir=tmp_path / "cache",
+            threshold=0.85,
+            embedding_provider=_RaisingEmbedder(),
+        )
+        assert candidates == []
+
+    def test_legacy_full_cross_product_restored_when_opted_out(
+        self, tmp_path: Path
+    ) -> None:
+        """``require_raw_side=False`` restores the wiki-vs-wiki pair.
+
+        Proves the new default is what suppresses the wiki-pair, not a fixture
+        artifact: the same inputs DO pair when the guard is disabled.
+        """
+        wiki_root, pages, embeds = self._two_wiki_pages(tmp_path)
+        embedder = _StubEmbedder(embeds)
+        candidates = cross_scope_similarity_pairs(
+            [],
+            wiki_files=pages,
+            wiki_root=wiki_root,
+            extra_roots=[tmp_path / "raw" / "auto-memory"],
+            cache_dir=tmp_path / "cache",
+            threshold=0.85,
+            require_raw_side=False,
+            embedding_provider=embedder,
+        )
+        assert len(candidates) == 1
+
+    def test_new_intake_diffed_against_matching_wiki_not_whole_corpus(
+        self, tmp_path: Path
+    ) -> None:
+        """One new raw claim pairs with matching wiki entries, never wiki↔wiki.
+
+        With 1 raw intake + 2 wiki pages all topically similar, the legacy
+        sweep yields 3 pairs (raw-w1, raw-w2, w1-w2). The retargeted sweep
+        yields only the 2 raw-touching pairs — the new claim is diffed against
+        the matching wiki footnotes, and the settled wiki pages are not
+        re-swept against each other.
+        """
+        wiki_root, pages, embeds = self._two_wiki_pages(tmp_path)
+        raw_root = tmp_path / "raw" / "auto-memory"
+        a = _write_am(
+            raw_root / "-Users-trk-Code-foo",
+            "feedback_a.md",
+            "A body",
+            origin_scope="-Users-trk-Code-foo",
+        )
+        a_id = "auto-memory/-Users-trk-Code-foo/feedback_a.md"
+        embeds[a_id] = [0.995, 0.02]  # similar to both wiki pages
+        embedder = _StubEmbedder(embeds)
+        candidates = cross_scope_similarity_pairs(
+            [a],
+            wiki_files=pages,
+            wiki_root=wiki_root,
+            extra_roots=[raw_root],
+            cache_dir=tmp_path / "cache",
+            threshold=0.85,
+            embedding_provider=embedder,
+        )
+        # Two raw-touching pairs, zero wiki-vs-wiki.
+        assert len(candidates) == 2
+        for cand in candidates:
+            assert a.path in {cand.a_path, cand.b_path}
+
+
 # ---------------------------------------------------------------------------
 # End-to-end mode wiring through merge_clusters_to_wiki
 # ---------------------------------------------------------------------------
@@ -473,6 +609,51 @@ def _build_knowledge_root(
 
 
 class TestModeWiring:
+    def test_unchanged_corpus_zero_intake_e2e_no_detector_calls(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue #262 / Quine #1c: full nightly path in similarity mode does
+
+        zero detector work on an unchanged corpus with zero new intake.
+
+        Drives ``merge_clusters_to_wiki`` end-to-end: a populated wiki corpus
+        but no new raw intake (empty cluster JSONL). A raising embedder is
+        wired into the similarity sweep so ANY corpus-scale embedding fetch
+        would fail the test — the zero-intake guarantee holds across both the
+        no-rows early return and the ``require_raw_side`` short-circuit.
+        """
+        monkeypatch.setenv("ATHENAEUM_CROSS_SCOPE_MODE", "similarity")
+        # Populated wiki corpus, but NO raw intake (members=[] → empty JSONL).
+        root = _build_knowledge_root(tmp_path, members=[])
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True, exist_ok=True)
+        for name in ("auto-foo.md", "auto-bar.md"):
+            (wiki / name).write_text(
+                f"---\nname: {name}\ntype: auto-memory\n---\nWiki body\n",
+                encoding="utf-8",
+            )
+
+        from athenaeum import cross_scope as cs
+
+        original_pairs = cs.cross_scope_similarity_pairs
+
+        def patched_pairs(*args: Any, **kwargs: Any):
+            kwargs["embedding_provider"] = _RaisingEmbedder()
+            return original_pairs(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "athenaeum.merge.cross_scope_similarity_pairs",
+            patched_pairs,
+        )
+
+        client = _fake_client(_no_conflict_payload())
+        entries = merge_clusters_to_wiki(root, client=client, dry_run=True)
+        # No new intake → no merged entries and zero detector (Haiku) calls.
+        assert entries == []
+        assert client.messages.create.call_count == 0
+
     def test_mode_off_per_cluster_only(
         self,
         tmp_path: Path,
