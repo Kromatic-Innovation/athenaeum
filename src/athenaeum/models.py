@@ -315,7 +315,7 @@ class AutoMemoryFile:
     of the entity schema's ``uid`` / ``name``).
 
     ``origin_scope`` is the scope directory name verbatim — the full
-    path-hash identifier (e.g. ``-Users-tristankromer-Code-voltaire``) or
+    path-hash identifier (e.g. ``-Users-alice-Code-projectx``) or
     the literal ``_unscoped``. Preserving this on the record is C2/C3's
     routing key; the compile step downstream will carry it through to the
     wiki entry metadata.

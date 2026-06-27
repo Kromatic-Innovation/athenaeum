@@ -8,8 +8,8 @@ two manifestations the merge pipeline still has to catch:
 
 1. **Raw-vs-raw at merge time** — two raw entries that should be compared
    sit in different scope folders (e.g. one under
-   ``-Users-tristankromer-Code-foo`` and one under
-   ``-Users-tristankromer-Code``). The per-scope clustering never groups
+   ``-Users-alice-Code-foo`` and one under
+   ``-Users-alice-Code``). The per-scope clustering never groups
    them, so the detector never sees them.
 2. **New-intake-vs-wiki post-merge** — a new raw entry can contradict a
    fact already moved into a ``wiki/auto-*.md`` entry. After retire-on-move
@@ -188,14 +188,14 @@ def resolve_similarity_threshold(config: dict[str, Any] | None = None) -> float:
 def scope_ancestors(scope: str) -> list[str]:
     """Return ancestor scope identifiers for a path-hash scope.
 
-    Scope identifiers follow the convention ``-Users-tristankromer-Code-foo``
+    Scope identifiers follow the convention ``-Users-alice-Code-foo``
     (slashes replaced by dashes, leading dash). Ancestors are produced by
     successively dropping trailing segments. ``_unscoped`` and any scope
     not starting with ``-`` has no ancestors.
 
     Example:
-        ``-Users-tristankromer-Code-foo`` →
-        ``["-Users-tristankromer-Code", "-Users-tristankromer", "-Users"]``
+        ``-Users-alice-Code-foo`` →
+        ``["-Users-alice-Code", "-Users-alice", "-Users"]``
     """
     if not isinstance(scope, str) or not scope.startswith("-"):
         return []
