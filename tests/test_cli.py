@@ -36,44 +36,66 @@ def knowledge_with_wiki(tmp_path: Path) -> Path:
 
 class TestRebuildIndex:
     def test_builds_fts5_index(
-        self, knowledge_with_wiki: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        knowledge_with_wiki: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         cache = tmp_path / "cache"
-        rc = main([
-            "rebuild-index",
-            "--path", str(knowledge_with_wiki),
-            "--cache-dir", str(cache),
-            "--backend", "fts5",
-        ])
+        rc = main(
+            [
+                "rebuild-index",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(cache),
+                "--backend",
+                "fts5",
+            ]
+        )
         assert rc == 0
         out = capsys.readouterr().out
         assert "FTS5 index rebuilt: 2 pages" in out
         assert (cache / "wiki-index.db").exists()
 
     def test_reads_backend_from_config(
-        self, knowledge_with_wiki: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        knowledge_with_wiki: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         (knowledge_with_wiki / "athenaeum.yaml").write_text(
             "auto_recall: true\nsearch_backend: fts5\n"
         )
         cache = tmp_path / "cache"
-        rc = main([
-            "rebuild-index",
-            "--path", str(knowledge_with_wiki),
-            "--cache-dir", str(cache),
-        ])
+        rc = main(
+            [
+                "rebuild-index",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
         assert rc == 0
         assert "FTS5 index rebuilt" in capsys.readouterr().out
 
     def test_defaults_to_fts5_when_no_config(
-        self, knowledge_with_wiki: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        knowledge_with_wiki: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         cache = tmp_path / "cache"
-        rc = main([
-            "rebuild-index",
-            "--path", str(knowledge_with_wiki),
-            "--cache-dir", str(cache),
-        ])
+        rc = main(
+            [
+                "rebuild-index",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
         assert rc == 0
         assert "FTS5 index rebuilt" in capsys.readouterr().out
 
@@ -81,27 +103,39 @@ class TestRebuildIndex:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         nonexistent = tmp_path / "does-not-exist"
-        rc = main([
-            "rebuild-index",
-            "--path", str(nonexistent),
-            "--cache-dir", str(tmp_path / "cache"),
-            "--backend", "fts5",
-        ])
+        rc = main(
+            [
+                "rebuild-index",
+                "--path",
+                str(nonexistent),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "fts5",
+            ]
+        )
         assert rc == 1
         assert "Wiki directory not found" in capsys.readouterr().err
 
     def test_unknown_backend_returns_error(
-        self, knowledge_with_wiki: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        knowledge_with_wiki: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         (knowledge_with_wiki / "athenaeum.yaml").write_text(
             "auto_recall: true\nsearch_backend: nonsense\n"
         )
-        rc = main([
-            "rebuild-index",
-            "--path", str(knowledge_with_wiki),
-            "--cache-dir", str(tmp_path / "cache"),
-        ])
+        rc = main(
+            [
+                "rebuild-index",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+            ]
+        )
         assert rc == 1
         assert "Unknown search backend" in capsys.readouterr().err
 
@@ -130,6 +164,7 @@ class TestServe:
             return _FakeServer()
 
         import athenaeum.mcp_server as mcp_mod
+
         monkeypatch.setattr(mcp_mod, "create_server", _fake_create_server)
 
         rc = main(["serve", "--path", str(knowledge_with_wiki)])
@@ -153,6 +188,7 @@ class TestServe:
             return _FakeServer()
 
         import athenaeum.mcp_server as mcp_mod
+
         monkeypatch.setattr(mcp_mod, "create_server", _fake_create_server)
 
         rc = main(["serve", "--path", str(knowledge_with_wiki)])
@@ -195,9 +231,9 @@ class TestWarnIfBackendCacheMissing:
         _warn_if_backend_cache_missing("keyword", tmp_path)
         captured = capsys.readouterr()
         assert captured.out == ""
-        assert captured.err == "", (
-            "keyword backend has no on-disk cache — warning would be noise"
-        )
+        assert (
+            captured.err == ""
+        ), "keyword backend has no on-disk cache — warning would be noise"
 
     def test_fts5_missing_cache_warns(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -321,13 +357,14 @@ class TestTestMcp:
         line = next(
             line for line in captured.out.splitlines() if line.startswith(marker)
         )
-        kept_dir = Path(line[len(marker):].strip())
+        kept_dir = Path(line[len(marker) :].strip())
         try:
             assert kept_dir.is_dir()
             assert (kept_dir / "wiki" / "test-page.md").is_file()
             assert list((kept_dir / "raw" / "test-mcp").glob("*.md"))
         finally:
             import shutil
+
             shutil.rmtree(kept_dir, ignore_errors=True)
 
     def test_reports_fastmcp_missing(
@@ -354,15 +391,23 @@ class TestRecall:
     ``<score>\\t<filename>\\t<preview>``."""
 
     def test_keyword_backend_prints_tab_separated_hits(
-        self, knowledge_with_wiki: Path, tmp_path: Path,
+        self,
+        knowledge_with_wiki: Path,
+        tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        rc = main([
-            "recall", "lean startup",
-            "--path", str(knowledge_with_wiki),
-            "--cache-dir", str(tmp_path / "cache"),
-            "--backend", "keyword",
-        ])
+        rc = main(
+            [
+                "recall",
+                "lean startup",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "keyword",
+            ]
+        )
         assert rc == 0
         out = capsys.readouterr().out
         lines = [line for line in out.splitlines() if line.strip()]
@@ -376,34 +421,53 @@ class TestRecall:
         assert "Lean Startup" in preview
 
     def test_top_k_limits_output(
-        self, knowledge_with_wiki: Path, tmp_path: Path,
+        self,
+        knowledge_with_wiki: Path,
+        tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        rc = main([
-            "recall", "methodology framework",
-            "--path", str(knowledge_with_wiki),
-            "--cache-dir", str(tmp_path / "cache"),
-            "--backend", "keyword",
-            "--top-k", "1",
-        ])
+        rc = main(
+            [
+                "recall",
+                "methodology framework",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "keyword",
+                "--top-k",
+                "1",
+            ]
+        )
         assert rc == 0
         lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
         assert len(lines) <= 1
 
     def test_missing_wiki_returns_error(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
-        rc = main([
-            "recall", "anything",
-            "--path", str(tmp_path / "nope"),
-            "--cache-dir", str(tmp_path / "cache"),
-            "--backend", "keyword",
-        ])
+        rc = main(
+            [
+                "recall",
+                "anything",
+                "--path",
+                str(tmp_path / "nope"),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "keyword",
+            ]
+        )
         assert rc == 1
         assert "Wiki directory not found" in capsys.readouterr().err
 
     def test_fts5_backend_uses_prebuilt_index(
-        self, knowledge_with_wiki: Path, tmp_path: Path,
+        self,
+        knowledge_with_wiki: Path,
+        tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Recall with fts5 must use the on-disk cache the user built with
@@ -412,21 +476,32 @@ class TestRecall:
         validation harnesses reading `athenaeum.yaml: vector` would see
         wrong results."""
         cache = tmp_path / "cache"
-        rc = main([
-            "rebuild-index",
-            "--path", str(knowledge_with_wiki),
-            "--cache-dir", str(cache),
-            "--backend", "fts5",
-        ])
+        rc = main(
+            [
+                "rebuild-index",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(cache),
+                "--backend",
+                "fts5",
+            ]
+        )
         assert rc == 0
         capsys.readouterr()  # drain rebuild-index output
 
-        rc = main([
-            "recall", "lean",
-            "--path", str(knowledge_with_wiki),
-            "--cache-dir", str(cache),
-            "--backend", "fts5",
-        ])
+        rc = main(
+            [
+                "recall",
+                "lean",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(cache),
+                "--backend",
+                "fts5",
+            ]
+        )
         assert rc == 0
         out = capsys.readouterr().out
         lines = [line for line in out.splitlines() if line.strip()]
@@ -461,7 +536,7 @@ class TestIngestAnswers:
         raw.mkdir()
         (wiki / "_pending_questions.md").write_text(
             "# Pending Questions\n\n"
-            "## [2026-04-20] Entity: \"Acme Corp\" (from sessions/test.md)\n"
+            '## [2026-04-20] Entity: "Acme Corp" (from sessions/test.md)\n'
             "- [x] Question about Acme?\n"
             "**Conflict type**: principled\n"
             "**Description**: Conflicting Series info.\n"
@@ -509,20 +584,30 @@ class TestPeopleCommand:
             "current_title: CEO\n---\n\n# Olivier\n"
         )
         (wiki / "05-ghost.md").write_text(
-            "---\nuid: 05\ntype: person\nname: No-Tag Ghost\n"
-            "---\n\n# Ghost\n"
+            "---\nuid: 05\ntype: person\nname: No-Tag Ghost\n" "---\n\n# Ghost\n"
         )
         (wiki / "06-company.md").write_text(
-            "---\nuid: 06\ntype: company\nname: Pearl.com Holdings\n"
-            "---\n\n# Pearl\n"
+            "---\nuid: 06\ntype: company\nname: Pearl.com Holdings\n" "---\n\n# Pearl\n"
         )
 
     def test_company_filter_returns_pearl_employees(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         knowledge = tmp_path / "k"
         self._seed_wiki(knowledge / "wiki")
-        rc = main(["people", "--path", str(knowledge), "--company", "Pearl", "--format", "tsv"])
+        rc = main(
+            [
+                "people",
+                "--path",
+                str(knowledge),
+                "--company",
+                "Pearl",
+                "--format",
+                "tsv",
+            ]
+        )
         assert rc == 0
         out = capsys.readouterr().out
         names = [line.split("\t", 1)[0] for line in out.strip().splitlines()]
@@ -530,78 +615,142 @@ class TestPeopleCommand:
         assert "Olivier Pomel" not in names
 
     def test_tier_shorthand_filters_to_warm_a(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         knowledge = tmp_path / "k"
         self._seed_wiki(knowledge / "wiki")
-        rc = main(["people", "--path", str(knowledge), "--tier", "warm-a", "--format", "tsv"])
+        rc = main(
+            ["people", "--path", str(knowledge), "--tier", "warm-a", "--format", "tsv"]
+        )
         assert rc == 0
-        names = [line.split("\t", 1)[0] for line in capsys.readouterr().out.strip().splitlines()]
+        names = [
+            line.split("\t", 1)[0]
+            for line in capsys.readouterr().out.strip().splitlines()
+        ]
         assert set(names) == {"Lisa Contoyannis", "Andy Kurtzig"}
         assert "Michael Gutkowski" not in names
 
     def test_top_touch_sorts_by_meeting_plus_email(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         knowledge = tmp_path / "k"
         self._seed_wiki(knowledge / "wiki")
-        rc = main([
-            "people", "--path", str(knowledge),
-            "--company", "Pearl", "--top-touch", "2", "--format", "tsv",
-        ])
+        rc = main(
+            [
+                "people",
+                "--path",
+                str(knowledge),
+                "--company",
+                "Pearl",
+                "--top-touch",
+                "2",
+                "--format",
+                "tsv",
+            ]
+        )
         assert rc == 0
-        names = [line.split("\t", 1)[0] for line in capsys.readouterr().out.strip().splitlines()]
+        names = [
+            line.split("\t", 1)[0]
+            for line in capsys.readouterr().out.strip().splitlines()
+        ]
         assert names == ["Lisa Contoyannis", "Andy Kurtzig"]
 
     def test_company_excludes_non_person_types(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         knowledge = tmp_path / "k"
         self._seed_wiki(knowledge / "wiki")
-        rc = main(["people", "--path", str(knowledge), "--company", "Pearl", "--format", "tsv"])
+        rc = main(
+            [
+                "people",
+                "--path",
+                str(knowledge),
+                "--company",
+                "Pearl",
+                "--format",
+                "tsv",
+            ]
+        )
         assert rc == 0
-        names = [line.split("\t", 1)[0] for line in capsys.readouterr().out.strip().splitlines()]
+        names = [
+            line.split("\t", 1)[0]
+            for line in capsys.readouterr().out.strip().splitlines()
+        ]
         assert "Pearl.com Holdings" not in names
 
     def test_missing_wiki_returns_error(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         rc = main(["people", "--path", str(tmp_path / "nope")])
         assert rc == 1
         assert "Wiki root not found" in capsys.readouterr().err
 
     def test_title_regex_matches_role_pattern(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         knowledge = tmp_path / "k"
         self._seed_wiki(knowledge / "wiki")
-        rc = main([
-            "people", "--path", str(knowledge),
-            "--title-regex", r"CEO|EVP",
-            "--format", "tsv",
-        ])
+        rc = main(
+            [
+                "people",
+                "--path",
+                str(knowledge),
+                "--title-regex",
+                r"CEO|EVP",
+                "--format",
+                "tsv",
+            ]
+        )
         assert rc == 0
-        names = [line.split("\t", 1)[0] for line in capsys.readouterr().out.strip().splitlines()]
+        names = [
+            line.split("\t", 1)[0]
+            for line in capsys.readouterr().out.strip().splitlines()
+        ]
         assert set(names) == {
-            "Lisa Contoyannis", "Andy Kurtzig", "Michael Gutkowski", "Olivier Pomel",
+            "Lisa Contoyannis",
+            "Andy Kurtzig",
+            "Michael Gutkowski",
+            "Olivier Pomel",
         }
         assert "No-Tag Ghost" not in names
         assert "Pearl.com Holdings" not in names
 
     def test_company_regex_intersects_with_title_regex(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Find CEOs at Pearl-family companies (excluding the Datadog CEO)."""
         knowledge = tmp_path / "k"
         self._seed_wiki(knowledge / "wiki")
-        rc = main([
-            "people", "--path", str(knowledge),
-            "--title-regex", r"CEO",
-            "--company-regex", r"Pearl",
-            "--format", "tsv",
-        ])
+        rc = main(
+            [
+                "people",
+                "--path",
+                str(knowledge),
+                "--title-regex",
+                r"CEO",
+                "--company-regex",
+                r"Pearl",
+                "--format",
+                "tsv",
+            ]
+        )
         assert rc == 0
-        names = [line.split("\t", 1)[0] for line in capsys.readouterr().out.strip().splitlines()]
+        names = [
+            line.split("\t", 1)[0]
+            for line in capsys.readouterr().out.strip().splitlines()
+        ]
         assert names == ["Andy Kurtzig"]
         assert "Olivier Pomel" not in names
 
@@ -728,3 +877,98 @@ class TestRunStrictBudgetFlag:
         )
         assert rc == 0
         assert captured["strict_budget"] is True
+
+
+def _claims_knowledge(tmp_path: Path) -> Path:
+    """Knowledge dir with the SAME claim restated across two distinct entities."""
+    knowledge = tmp_path / "knowledge"
+    wiki = knowledge / "wiki"
+    wiki.mkdir(parents=True)
+    (wiki / "aaaa1111-profile.md").write_text(
+        "---\nuid: aaaa1111\ntype: auto-memory\nname: profile\n"
+        "sources:\n  - session: s1\n"
+        '    claim: "Kromatic is Tristan\'s primary venture"\n'
+        "---\nBody.\n"
+    )
+    (wiki / "bbbb2222-career.md").write_text(
+        "---\nuid: bbbb2222\ntype: auto-memory\nname: career\n"
+        "sources:\n  - session: s2\n"
+        '    claim: "Tristan\'s primary venture is Kromatic"\n'
+        "---\nBody.\n"
+    )
+    return knowledge
+
+
+def _deterministic_embed(texts: list[str]) -> list[list[float]]:
+    """Offline embedder: the two venture restatements share a vector."""
+    venture = {
+        "Kromatic is Tristan's primary venture",
+        "Tristan's primary venture is Kromatic",
+    }
+    out: list[list[float]] = []
+    for i, t in enumerate(texts):
+        out.append([1.0, 0.0] if t.strip() in venture else [0.0, float(i + 1)])
+    return out
+
+
+class TestClaims:
+    """`athenaeum claims --find` — cross-entity recurring-claim detector
+    (issue #272, slice 1 of #258). READ-ONLY YAML report over the wiki."""
+
+    def test_find_groups_cross_entity_restatement(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import yaml
+
+        # Inject a deterministic offline embedder so the run never touches
+        # chromadb / MiniLM (C7). The handler imports embed_texts at call
+        # time, so patching the module attribute is sufficient.
+        monkeypatch.setattr("athenaeum.search.embed_texts", _deterministic_embed)
+        knowledge = _claims_knowledge(tmp_path)
+
+        rc = main(["claims", "--find", "--path", str(knowledge)])
+        assert rc == 0
+        parsed = yaml.safe_load(capsys.readouterr().out)
+        assert parsed["summary"]["threshold"] == 0.85
+        assert parsed["summary"]["recurring_claim_count"] == 1
+        assert parsed["summary"]["entities_scanned"] == 2
+        assert parsed["recurring_claims"][0]["entity_count"] == 2
+
+    def test_threshold_override_is_plumbed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import yaml
+
+        monkeypatch.setattr("athenaeum.search.embed_texts", _deterministic_embed)
+        knowledge = _claims_knowledge(tmp_path)
+
+        rc = main(
+            ["claims", "--find", "--path", str(knowledge), "--threshold", "0.99"]
+        )
+        assert rc == 0
+        parsed = yaml.safe_load(capsys.readouterr().out)
+        # Override reaches the report summary ...
+        assert parsed["summary"]["threshold"] == 0.99
+        # ... and is the active cutoff: the identical-vector pair (cosine 1.0)
+        # still clears 0.99, so the group survives.
+        assert parsed["summary"]["recurring_claim_count"] == 1
+
+    def test_missing_wiki_returns_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = main(["claims", "--find", "--path", str(tmp_path / "nope")])
+        assert rc == 1
+        assert "Wiki root not found" in capsys.readouterr().err
+
+    def test_without_find_prints_usage(
+        self, knowledge_with_wiki: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = main(["claims", "--path", str(knowledge_with_wiki)])
+        assert rc == 2
+        assert "usage: athenaeum claims --find" in capsys.readouterr().err
