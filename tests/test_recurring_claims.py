@@ -43,15 +43,29 @@ _VECTORS: dict[str, list[float]] = {
 }
 
 
+# All vectors are emitted at a fixed width: the first 4 dims carry the
+# hand-assigned semantics above; the remaining ``_BUCKETS`` dims are a
+# one-hot space reserved for UNKNOWN texts. A known text is zero across the
+# bucket space; an unknown text is zero across the first 4 dims and carries a
+# single 1.0 in a hash-chosen bucket. Result: two DISTINCT unknown claims are
+# orthogonal (cosine 0, never group), and an unknown never collides with a
+# known semantic vector — a genuine FP guard, not the old all-parallel
+# ``[0,0,0,x]`` fallback whose vectors were pairwise cosine 1.0.
+_BUCKETS = 4096
+_DIM = 4 + _BUCKETS
+
+
 def _fake_embed(texts: list[str]) -> list[list[float]]:
     out: list[list[float]] = []
     for t in texts:
-        vec = _VECTORS.get(t.strip())
-        # Unknown text → unique orthogonal-ish vector so it never groups.
-        if vec is None:
+        vec = [0.0] * _DIM
+        known = _VECTORS.get(t.strip())
+        if known is not None:
+            vec[: len(known)] = list(known)
+        else:
             h = int(hashlib.sha1(t.encode("utf-8")).hexdigest(), 16)
-            vec = [0.0, 0.0, 0.0, float(1000 + (h % 9973))]
-        out.append(list(vec))
+            vec[4 + (h % _BUCKETS)] = 1.0
+        out.append(vec)
     return out
 
 
@@ -149,6 +163,13 @@ def wiki_root(tmp_path: Path) -> Path:
     # Underscore-prefixed metadata file must be ignored.
     _write(root / "_pending_questions.md", "not an entity\n")
 
+    # MEMORY.md is the per-scope table-of-contents index, NOT a memory entity.
+    # Its lines must never be mined as claims (see canonical wiki scan).
+    _write(
+        root / "MEMORY.md",
+        "# Index\n\nKromatic is Tristan's primary venture\n",
+    )
+
     return root
 
 
@@ -236,6 +257,88 @@ def test_same_entity_repeats_do_not_group(tmp_path: Path):
     )
     groups = find_recurring_claims(root, threshold=0.85, embedding_provider=_fake_embed)
     assert groups == []
+
+
+def test_memory_index_file_is_excluded(wiki_root: Path):
+    """MEMORY.md is a TOC index, not an entity — it must yield no occurrences."""
+    occ = extract_claim_occurrences(wiki_root)
+    assert all(o.entity_id != "MEMORY" for o in occ)
+    # Its TOC line duplicates a venture claim verbatim; if MEMORY.md were
+    # scanned the venture group would gain a 4th (bogus) occurrence.
+    groups = find_recurring_claims(
+        wiki_root, threshold=0.85, embedding_provider=_fake_embed
+    )
+    assert len(groups) == 1
+    assert groups[0].entity_count == 3
+
+
+def test_complete_linkage_does_not_chain_distinct_claims(tmp_path: Path):
+    """A~B and B~C but A≪C must NOT fuse A and C (single-linkage bug guard).
+
+    Vectors (padded to 4 dims): cos(A,B)=cos(B,C)=cos(25°)≈0.906 ≥ 0.85, but
+    cos(A,C)=cos(50°)≈0.643 < 0.85. Each claim lives in a DISTINCT entity, so
+    only the strictest pair may group — A and C may never share a group.
+    """
+    import math
+
+    text_a = "alpha claim about the bridge"
+    text_b = "beta claim near the middle"
+    text_c = "gamma claim far from alpha"
+    vecs = {
+        text_a: [1.0, 0.0, 0.0, 0.0],
+        text_b: [math.cos(math.radians(25)), math.sin(math.radians(25)), 0.0, 0.0],
+        text_c: [math.cos(math.radians(50)), math.sin(math.radians(50)), 0.0, 0.0],
+    }
+
+    def _embed(texts: list[str]) -> list[list[float]]:
+        return [list(vecs[t.strip()]) for t in texts]
+
+    root = tmp_path / "wiki"
+    root.mkdir()
+    for uid, name, claim in (
+        ("aaaa1111", "alpha", text_a),
+        ("bbbb2222", "beta", text_b),
+        ("cccc3333", "gamma", text_c),
+    ):
+        _write(
+            root / f"{uid}-{name}.md",
+            "---\n"
+            f"uid: {uid}\n"
+            "type: auto-memory\n"
+            f"name: {name}\n"
+            "sources:\n"
+            "  - session: s1\n"
+            f'    claim: "{claim}"\n'
+            "---\n"
+            "Body.\n",
+        )
+
+    groups = find_recurring_claims(root, threshold=0.85, embedding_provider=_embed)
+    # No group may contain BOTH the A and C claims.
+    for g in groups:
+        member_texts = {o.claim_text for o in g.occurrences}
+        assert not ({text_a, text_c} <= member_texts)
+    # Exactly one group forms (the A–B pair); C stays ungrouped.
+    assert len(groups) == 1
+    assert {o.claim_text for o in groups[0].occurrences} == {text_a, text_b}
+
+
+def test_sentence_fallback_handles_abbreviations_and_decimals(tmp_path: Path):
+    """The body splitter must not break on ``U.S.`` or a decimal like ``3.5``."""
+    root = tmp_path / "wiki"
+    root.mkdir()
+    _write(
+        root / "aaaa1111-bio.md",
+        "---\nuid: aaaa1111\ntype: entity\nname: bio\n---\n"
+        "Tristan visited the U.S. Government office. He earned 3.5 stars.\n",
+    )
+    occ = extract_claim_occurrences(root)
+    texts = {o.claim_text for o in occ}
+    assert texts == {
+        "Tristan visited the U.S. Government office",
+        "He earned 3.5 stars",
+    }
+    assert all(o.granularity == "sentence" for o in occ)
 
 
 def test_inactive_entities_are_skipped(wiki_root: Path):
