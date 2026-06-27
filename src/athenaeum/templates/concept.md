@@ -6,7 +6,7 @@ name: REPLACE ME
 aliases: []
 tags: []
 # `source:` records where THIS wiki page came from. Scalar form is
-# `<type>:<ref>` (e.g. `manual:tristan` or `book:lean-startup-ch3`).
+# `<type>:<ref>` (e.g. `manual:alice` or `book:lean-startup-ch3`).
 # Structured form:
 #   source:
 #     type: book
@@ -18,7 +18,7 @@ source: manual:user
 #   field_sources:
 #     aliases:
 #       type: manual
-#       ref: tristan
+#       ref: alice
 field_sources: {}
 ---
 

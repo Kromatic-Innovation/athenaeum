@@ -10,16 +10,16 @@ owner: ""
 repo_url: ""
 tags: []
 # `source:` records where THIS wiki page came from. Scalar form is
-# `<type>:<ref>` (e.g. `manual:tristan`). Structured form:
+# `<type>:<ref>` (e.g. `manual:alice`). Structured form:
 #   source:
 #     type: manual
-#     ref: tristan
+#     ref: alice
 #     captured_at: 2026-05-08
 source: manual:user
 # `field_sources:` records per-field origin. Keys are field names;
 # values follow the same scalar/structured forms as `source:`.
 #   field_sources:
-#     status: manual:tristan
+#     status: manual:alice
 #     repo_url:
 #       type: github
 #       ref: api-fetch-2026-05

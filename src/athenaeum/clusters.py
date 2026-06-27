@@ -51,10 +51,10 @@ log = logging.getLogger(__name__)
 # knowledge root), but we expose a default for shell/library callers.
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "athenaeum"
 
-# Default threshold — empirically tuned against the voltaire fixture
-# (test_librarian_clusters.py::TestClusterVoltaireFixture). MiniLM
+# Default threshold — empirically tuned against the near-duplicate
+# clustering fixture (see test_librarian_clusters.py). MiniLM
 # cosines on 4000-char prefixes put the typo clone at ~0.59 against the
-# anchor "project_voltaire_nanoclaw.md" and the iMessage variant at
+# anchor near-duplicate file and the iMessage variant at
 # ~0.70; unrelated singletons land at ~0.24 (sentry) and ~0.07 (user).
 # At 0.55, single-linkage pulls the typo in through the anchor while
 # leaving the singletons alone. 0.6 was too tight (typo fell out); a

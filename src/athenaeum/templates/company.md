@@ -10,7 +10,7 @@ linkedin_url: ""
 employee_count: 0
 tags: []
 # `source:` records where THIS wiki page came from. Scalar form is
-# `<type>:<ref>` (e.g. `manual:tristan` or `apollo:org-enrich-2026-05`).
+# `<type>:<ref>` (e.g. `manual:alice` or `apollo:org-enrich-2026-05`).
 # Structured form lets you attach more provenance metadata:
 #   source:
 #     type: apollo

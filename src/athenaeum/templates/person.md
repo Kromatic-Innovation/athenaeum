@@ -10,11 +10,11 @@ current_company: ""
 linkedin_url: ""
 tags: []
 # `source:` records where THIS wiki page came from. Scalar form is
-# `<type>:<ref>` (e.g. `manual:tristan` or `linkedin:export-2026-04`).
+# `<type>:<ref>` (e.g. `manual:alice` or `linkedin:export-2026-04`).
 # Structured form lets you attach more provenance metadata:
 #   source:
 #     type: manual
-#     ref: tristan
+#     ref: alice
 #     captured_at: 2026-05-08
 source: manual:user
 # `field_sources:` records where each FIELD on this page came from when

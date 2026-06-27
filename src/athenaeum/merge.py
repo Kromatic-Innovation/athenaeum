@@ -405,7 +405,7 @@ def _slug_tokens_from_filename(filename: str) -> list[str]:
     stem = filename.lower()
     if stem.endswith(".md"):
         stem = stem[:-3]
-    # Split on non-alnum so ``project_voltair_nanoclaw`` → voltair, nanoclaw.
+    # Split on non-alnum so ``project_foo_bar`` → foo, bar.
     return [t for t in _TOKEN_RE.findall(stem) if t not in _SLUG_BORING_TOKENS]
 
 
@@ -427,8 +427,8 @@ def derive_topic_slug(
        back to ``cluster_id`` sanitized to slug form.
 
     Rationale vs. LLM-picked slug: the cheap heuristic gets the
-    regression fixture right (``voltaire-nanoclaw`` from five
-    voltaire/nanoclaw files) while staying deterministic and
+    regression fixture right (the near-duplicate slug from five
+    near-duplicate files) while staying deterministic and
     testable without network. LLM polish can ride on top in C4+.
     """
     member_freq: dict[str, int] = {}
@@ -848,7 +848,7 @@ def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
     Each origin-traced source becomes one Markdown footnote definition
     carrying its ``source_type`` + ``source_ref``, matching the worked
     example's ``[^name]: **Source:** ...`` style
-    (``wiki/a545c038-tristan-kromer.md``). Labels are stable (``src-1``,
+    (``wiki/0a1b2c3d-ada-lovelace.md``). Labels are stable (``src-1``,
     ``src-2``, ...) over the deterministic deduped source order.
 
     The ULTIMATE-source rule is preserved here: the rendered ref is the

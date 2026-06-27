@@ -12,8 +12,10 @@ from pathlib import Path
 
 import pytest
 
+from athenaeum.config import resolve_google_contact_keys
 from athenaeum.dedupe import (
     DuplicatePair,
+    _merge_meta,
     _union_list,
     find_duplicate_persons,
     merge_duplicate_persons,
@@ -1093,3 +1095,85 @@ class TestRewriteReferences:
         assert sibling_c.read_text() == before_c
         assert sibling_d.read_text() == before_d
         assert absorbed.exists()
+
+
+class TestConfigDrivenGoogleContactKeys:
+    """Issue #269: extra Google-contact namespace join keys are config-driven.
+
+    The two operator-specific variant field-names that used to be hardcoded
+    in ``dedupe._GOOGLE_KEYS`` (``google_contact_kromatic`` /
+    ``google_contact_tristankromer``) are purged from source. Behavior for a
+    configured operator is preserved by threading the variant field-names in
+    from ``dedupe.google_contact_keys`` config. These worked-example values
+    live here AS A FIXTURE only.
+    """
+
+    # The exact variant field-names that were previously hardcoded in source.
+    WORKED_EXAMPLE_KEYS = ["google_contact_kromatic", "google_contact_tristankromer"]
+
+    def test_resolver_defaults_empty(self) -> None:
+        assert resolve_google_contact_keys(None) == []
+        assert resolve_google_contact_keys({}) == []
+        assert resolve_google_contact_keys({"dedupe": {}}) == []
+        assert resolve_google_contact_keys({"dedupe": {"google_contact_keys": "x"}}) == []
+
+    def test_resolver_reads_and_cleans_list(self) -> None:
+        cfg = {"dedupe": {"google_contact_keys": ["  gc_a ", "", "gc_b", None]}}
+        assert resolve_google_contact_keys(cfg) == ["gc_a", "gc_b"]
+
+    def test_configured_variant_keys_coalesce(self) -> None:
+        # Absorbed carries a variant field the canonical lacks. With the
+        # variant configured, the merge coalesces it onto canonical.
+        canonical = {"google_contact": "people/c-can", "name": "Ada Lovelace"}
+        absorbed = {
+            "google_contact": "people/c-can",
+            "google_contact_kromatic": "people/c-variant",
+            "name": "Ada Lovelace",
+        }
+        out = _merge_meta(
+            canonical, absorbed, "abs-uid", google_contact_keys=self.WORKED_EXAMPLE_KEYS
+        )
+        assert out["google_contact_kromatic"] == "people/c-variant"
+
+    def test_variant_copied_when_base_google_contact_differs(self) -> None:
+        # The special copy block: canonical and absorbed have DIFFERENT base
+        # google_contact (merged via another signal); absorbed's variant key
+        # is copied onto canonical when configured. This is the exact prior
+        # behavior of the now-removed hardcoded loop.
+        canonical = {"google_contact": "people/c-can", "name": "Ada Lovelace"}
+        absorbed = {
+            "google_contact": "people/c-abs",
+            "google_contact_tristankromer": "people/c-variant",
+            "name": "Ada Lovelace",
+        }
+        out = _merge_meta(
+            canonical, absorbed, "abs-uid", google_contact_keys=self.WORKED_EXAMPLE_KEYS
+        )
+        assert out["google_contact_tristankromer"] == "people/c-variant"
+
+    def test_generic_variant_name_works(self) -> None:
+        # The mechanism is not tied to the old literal names: any configured
+        # field-name is honored, proving the key list is genuinely generic.
+        canonical = {"google_contact": "people/c-can", "name": "Ada Lovelace"}
+        absorbed = {
+            "google_contact": "people/c-abs",
+            "google_contact_acme": "people/c-variant",
+            "name": "Ada Lovelace",
+        }
+        out = _merge_meta(
+            canonical, absorbed, "abs-uid", google_contact_keys=["google_contact_acme"]
+        )
+        assert out["google_contact_acme"] == "people/c-variant"
+
+    def test_unconfigured_variant_not_carried(self) -> None:
+        # Default (no extra keys configured, e.g. a fresh install): an
+        # unknown variant field on absorbed is NOT coalesced. No personal
+        # namespace literal is needed for the default path.
+        canonical = {"google_contact": "people/c-can", "name": "Ada Lovelace"}
+        absorbed = {
+            "google_contact": "people/c-abs",
+            "google_contact_kromatic": "people/c-variant",
+            "name": "Ada Lovelace",
+        }
+        out = _merge_meta(canonical, absorbed, "abs-uid")
+        assert "google_contact_kromatic" not in out

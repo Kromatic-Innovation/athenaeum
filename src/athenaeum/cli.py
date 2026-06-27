@@ -581,7 +581,12 @@ def _cmd_dedupe(args: argparse.Namespace) -> int:
     else:
         text = sys.stdin.read()
     pairs = pairs_from_yaml(text)
-    merge_report = merge_duplicate_persons(pairs, apply=True, wiki_root=wiki_root)
+    from athenaeum.config import load_config, resolve_google_contact_keys
+
+    gc_keys = resolve_google_contact_keys(load_config(wiki_root.parent))
+    merge_report = merge_duplicate_persons(
+        pairs, apply=True, wiki_root=wiki_root, google_contact_keys=gc_keys
+    )
     print(
         f"merged={merge_report.merged} "
         f"already_merged={merge_report.already_merged} "

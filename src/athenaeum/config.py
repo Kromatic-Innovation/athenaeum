@@ -129,6 +129,37 @@ def resolve_owner(config: dict[str, Any] | None) -> dict[str, Any] | None:
     return {"uid": uid, "google_contact": google_contact, "aliases": aliases}
 
 
+def resolve_google_contact_keys(config: dict[str, Any] | None) -> list[str]:
+    """Resolve extra Google-contact dedup join-key field-names (issue #269).
+
+    The dedupe merge always treats the generic ``google_contact`` frontmatter
+    field as a join/merge key. Some operators carry the same Google contact id
+    under additional namespace-specific field names (e.g. a separate field per
+    Google Workspace account). Those EXTRA field names are operator-specific
+    and must never be hardcoded in shipped source -- they come entirely from
+    ``athenaeum.yaml``::
+
+        dedupe:
+          google_contact_keys:
+            - google_contact_<namespace>
+
+    Returns the configured list of extra field names (the base
+    ``google_contact`` key is implicit and not included here). Returns an
+    empty list when unset -- a fresh install dedups on the generic
+    ``google_contact`` key only, with no personal namespace literal in source.
+    No seed in ``_DEFAULTS`` (issue #231).
+    """
+    if not isinstance(config, dict):
+        return []
+    section = config.get("dedupe")
+    if not isinstance(section, dict):
+        return []
+    raw = section.get("google_contact_keys")
+    if not isinstance(raw, list):
+        return []
+    return [k.strip() for k in raw if isinstance(k, str) and k.strip()]
+
+
 def resolve_retire(config: dict[str, Any] | None) -> bool:
     """Resolve the move-then-retire opt-out from yaml ``librarian.retire`` (#259).
 
@@ -219,6 +250,16 @@ search_backend: fts5
 #     - <your_user_handle>
 #     - <Your Name>
 
+# Person dedup join keys (issue #269). The merge always dedups on the
+# generic ``google_contact`` field. Operators whose contacts carry the
+# same Google contact id under additional namespace-specific field names
+# can list those EXTRA field names here so the merge coalesces them too.
+# Unset = dedup on ``google_contact`` only. Keep no personal contact
+# namespace literal in source; only the operator's athenaeum.yaml carries it.
+# dedupe:
+#   google_contact_keys:
+#     - google_contact_<namespace>
+
 # Recall configuration.
 # extra_intake_roots: additional directories (resolved relative to the
 # knowledge root) that the index build will scan recursively alongside
@@ -231,7 +272,7 @@ search_backend: fts5
 # Librarian pipeline configuration.
 # cluster_threshold: cosine cutoff for auto-memory clustering (C2,
 #   issue #196). Higher = tighter clusters; 0.55 is tuned against the
-#   voltaire/nanoclaw near-duplicate fixture.
+#   near-duplicate clustering fixture.
 # cluster_output: canonical JSONL output path (relative to knowledge
 #   root). Each run also writes a timestamped sibling and atomically
 #   replaces this path.
