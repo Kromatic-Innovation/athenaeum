@@ -517,3 +517,19 @@ class TestDeprecatedSuppressionKnobsWarn:
             resolve_resolved_similarity_threshold(None)
             resolve_not_a_conflict_ttl_days(None)
         assert "DEPRECATED" not in caplog.text
+
+    def test_warns_exactly_once_across_repeated_calls(
+        self, caplog, monkeypatch
+    ) -> None:
+        """Quine #4: the ``_DEPRECATED_CONFIG_WARNED`` guard is asserted.
+
+        Resolving the same deprecated key twice in one process warns once —
+        nightly resolves these repeatedly and must not flood the log.
+        """
+        monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
+        fingerprint._DEPRECATED_CONFIG_WARNED.clear()
+        cfg = {"contradiction": {"resolved_similarity_threshold": 0.9}}
+        with caplog.at_level(logging.WARNING, logger="athenaeum"):
+            resolve_resolved_similarity_threshold(cfg)
+            resolve_resolved_similarity_threshold(cfg)
+        assert caplog.text.count("DEPRECATED") == 1

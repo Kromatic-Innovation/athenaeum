@@ -413,6 +413,19 @@ class TestSimilaritySweep:
         assert wiki_path in paths
 
 
+class _RaisingEmbedder:
+    """Embedding provider that fails if ``fetch_embeddings`` is ever called.
+
+    Proves the zero-intake short-circuit returns BEFORE any corpus-scale
+    embedding retrieval (issue #262 / Quine #1a).
+    """
+
+    def fetch_embeddings(self, ids: Any, cache_dir: Path) -> dict[str, list[float]]:
+        raise AssertionError(
+            "fetch_embeddings must not be called on a zero-raw-intake run"
+        )
+
+
 class TestRequireRawSide:
     """Issue #262 — the sweep no longer cross-products wiki against itself.
 
@@ -453,6 +466,27 @@ class TestRequireRawSide:
             cache_dir=tmp_path / "cache",
             threshold=0.85,
             embedding_provider=embedder,
+        )
+        assert candidates == []
+
+    def test_zero_intake_short_circuits_before_embedding_fetch(
+        self, tmp_path: Path
+    ) -> None:
+        """Quine #1a: zero raw intake returns BEFORE any wiki embedding fetch.
+
+        The raising embedder would blow up if the corpus-scale fetch + N²
+        cosine loop ran — so passing proves the zero-intake night does no
+        corpus-scale work, not merely that it discards every pair at the end.
+        """
+        wiki_root, pages, _embeds = self._two_wiki_pages(tmp_path)
+        candidates = cross_scope_similarity_pairs(
+            [],
+            wiki_files=pages,
+            wiki_root=wiki_root,
+            extra_roots=[tmp_path / "raw" / "auto-memory"],
+            cache_dir=tmp_path / "cache",
+            threshold=0.85,
+            embedding_provider=_RaisingEmbedder(),
         )
         assert candidates == []
 
@@ -575,6 +609,51 @@ def _build_knowledge_root(
 
 
 class TestModeWiring:
+    def test_unchanged_corpus_zero_intake_e2e_no_detector_calls(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue #262 / Quine #1c: full nightly path in similarity mode does
+
+        zero detector work on an unchanged corpus with zero new intake.
+
+        Drives ``merge_clusters_to_wiki`` end-to-end: a populated wiki corpus
+        but no new raw intake (empty cluster JSONL). A raising embedder is
+        wired into the similarity sweep so ANY corpus-scale embedding fetch
+        would fail the test — the zero-intake guarantee holds across both the
+        no-rows early return and the ``require_raw_side`` short-circuit.
+        """
+        monkeypatch.setenv("ATHENAEUM_CROSS_SCOPE_MODE", "similarity")
+        # Populated wiki corpus, but NO raw intake (members=[] → empty JSONL).
+        root = _build_knowledge_root(tmp_path, members=[])
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True, exist_ok=True)
+        for name in ("auto-foo.md", "auto-bar.md"):
+            (wiki / name).write_text(
+                f"---\nname: {name}\ntype: auto-memory\n---\nWiki body\n",
+                encoding="utf-8",
+            )
+
+        from athenaeum import cross_scope as cs
+
+        original_pairs = cs.cross_scope_similarity_pairs
+
+        def patched_pairs(*args: Any, **kwargs: Any):
+            kwargs["embedding_provider"] = _RaisingEmbedder()
+            return original_pairs(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "athenaeum.merge.cross_scope_similarity_pairs",
+            patched_pairs,
+        )
+
+        client = _fake_client(_no_conflict_payload())
+        entries = merge_clusters_to_wiki(root, client=client, dry_run=True)
+        # No new intake → no merged entries and zero detector (Haiku) calls.
+        assert entries == []
+        assert client.messages.create.call_count == 0
+
     def test_mode_off_per_cluster_only(
         self,
         tmp_path: Path,

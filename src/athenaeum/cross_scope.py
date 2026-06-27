@@ -37,9 +37,32 @@ toggle in via ``ATHENAEUM_CROSS_SCOPE_MODE``:
   ``wiki/**`` against itself. The wiki is settled long-term memory; with
   move-then-retire the granular claim a future memory must diff against
   now lives on the wiki fact's FOOTNOTE, so re-detection only needs to
-  compare NEW raw intake against the matching wiki entry. Dropping the
-  wiki-vs-wiki term collapses the nightly cost from O(corpus²) to
-  O(new intake + open contradictions). See ``require_raw_side``.
+  compare NEW raw intake against the matching wiki entry. Concretely:
+
+  * The number of detector/adjudication (Haiku/Opus) calls collapses from
+    O(corpus²) — one per topically-similar wiki pair — to
+    O(new intake + open contradictions): only pairs with a raw side are
+    adjudicated.
+  * With ``require_raw_side`` True, a run with ZERO raw intake also
+    short-circuits the embedding fetch + N² cosine loop entirely (see the
+    early return), so a zero-intake night does no corpus-scale work at all,
+    not even retrieval.
+
+  See ``require_raw_side``.
+
+Known limitations (accepted trade-offs for this slice, per #259):
+
+- **Wiki-vs-wiki drift (#2).** Two facts that live only in the wiki (their
+  raw originals retired) and never attract a new topically-similar raw
+  intake are no longer compared against each other, so a contradiction that
+  emerges purely between two settled wiki facts will not be re-detected.
+  Accepted: re-detection is intake-driven by design (#259).
+- **Page-level retrieval granularity (#6).** Candidate retrieval embeds the
+  whole wiki PAGE, not each footnote. A new claim that contradicts a single
+  footnote buried in a large multi-fact page may not clear the page-level
+  cosine threshold and can go undetected. Accepted for this slice;
+  per-footnote embedding is a tracked follow-up ("per-footnote embedding
+  follow-up").
 
 Modes:
 
@@ -375,9 +398,12 @@ def cross_scope_similarity_pairs(
             dropped. The wiki is settled long-term memory whose granular
             diff target now lives on the fact's footnote, so re-detection
             only compares NEW raw intake against the matching wiki entry.
-            This removes the O(corpus²) wiki-vs-wiki term: an unchanged
-            corpus with zero new intake produces zero candidates. Set False
-            to restore the legacy full cross-product (raw + wiki vs all).
+            This removes the O(corpus²) wiki-vs-wiki adjudication term. When
+            there is also no raw intake at all, the function short-circuits
+            BEFORE the wiki embedding fetch + N² cosine loop (an unchanged
+            corpus with zero new intake does no corpus-scale work and
+            returns ``[]``). Set False to restore the legacy full
+            cross-product (raw + wiki vs all).
         embedding_provider: Optional override for testing. Must expose a
             ``fetch_embeddings(ids, cache_dir)`` method. Defaults to
             :class:`athenaeum.search.VectorBackend`.
@@ -398,6 +424,15 @@ def cross_scope_similarity_pairs(
         if idx is None:
             continue
         id_to_entry[idx] = (am.path, am.origin_scope)
+    # Issue #262: with ``require_raw_side`` every candidate pair must have a raw
+    # side. When there is NO raw intake at all, no pair can qualify — so
+    # short-circuit BEFORE adding wiki entries, fetching their embeddings, and
+    # running the O(N²) cosine cross-product. This makes a zero-intake night do
+    # zero corpus-scale work instead of fetching+comparing the whole wiki only
+    # to discard every pair at the end. (At this point ``id_to_entry`` holds
+    # only raw entries — wiki is added below.)
+    if require_raw_side and not id_to_entry:
+        return []
     if wiki_files and wiki_root is not None:
         for wp in wiki_files:
             idx = _wiki_indexed_id(wp, wiki_root)

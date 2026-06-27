@@ -871,6 +871,38 @@ class TestRetireNonContradictory:
         meta, _ = parse_frontmatter(text)
         assert meta["sources"][0]["claim"] == "Tristan lives in Berlin, Germany."
 
+    def test_resolved_verdict_lands_in_written_wiki_file(
+        self, retire_root: Path
+    ) -> None:
+        """Issue #262 / Quine #3b: a settled verdict reaches the wiki on disk.
+
+        Drives a REAL cleared ``ContradictionResult`` (the merge confirmation
+        pass labels an over-fire ``confirmation-pass-cleared``) through
+        ``run_retire_pass`` and asserts the resolver verdict TEXT lands in the
+        written wiki file — not just the hand-built source-dict render path.
+        """
+        from athenaeum.contradictions import ContradictionResult
+        from athenaeum.merge import AUTO_WIKI_PREFIX, merge_clusters_to_wiki
+        from athenaeum.models import parse_frontmatter
+        from athenaeum.retire import run_retire_pass
+
+        entries = merge_clusters_to_wiki(retire_root)
+        # Simulate the merge confirmation pass clearing a detector over-fire:
+        # detected=False (move-eligible) with the settled-verdict rationale.
+        entries[0].contradiction = ContradictionResult(
+            detected=False, rationale="confirmation-pass-cleared"
+        )
+
+        report = run_retire_pass(entries, retire_root)
+        assert len(report.moved) == 1
+
+        entry_file = next((retire_root / "wiki").glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        text = entry_file.read_text(encoding="utf-8")
+        # The resolver verdict (not the internal rationale label) is on disk.
+        assert "**Verdict:** not_a_conflict" in text
+        meta, _ = parse_frontmatter(text)
+        assert meta["sources"][0]["verdict"] == "not_a_conflict"
+
     def test_wiki_update_and_deletion_land_in_one_commit(
         self, retire_root: Path
     ) -> None:

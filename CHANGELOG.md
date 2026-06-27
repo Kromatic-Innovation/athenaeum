@@ -19,9 +19,12 @@ size._
   drops candidate pairs where both sides are wiki entries, so re-detection only
   compares NEW raw intake against the matching (topically-similar) wiki entry.
   With move-then-retire (#261) deleting the raw atom on move, this collapses the
-  nightly cost from O(corpus²) to **O(new intake + open contradictions)**: an
-  unchanged corpus with zero new intake now produces ~0 detector calls instead
-  of one per wiki-pair.
+  number of detector/adjudication (Haiku/Opus) calls from O(corpus²) — one per
+  topically-similar wiki pair — to **O(new intake + open contradictions)**. The
+  sweep also short-circuits before the wiki embedding fetch + N² cosine loop
+  when there is no raw intake at all, so an unchanged corpus with zero new
+  intake does no corpus-scale work and produces 0 detector calls (instead of
+  one per wiki-pair).
 - **Persist the granular diff target on the wiki footnote (#262).** When a fact
   is moved into a wiki entry, `retire.py` now stamps the atomic `claim` text —
   and a resolved `verdict`/disposition when one exists (a cleared detector
@@ -42,6 +45,19 @@ size._
   working and now emits a one-time deprecation warning
   (`fingerprint._warn_deprecated_suppression_knob`). Remove them from
   `athenaeum.yaml` to silence the warning; full removal is a follow-up.
+
+### Known limitations
+
+- **Wiki-vs-wiki drift not re-detected (#2, accepted per #259).** Two facts
+  that live only in the wiki (their raw originals retired) and that never
+  attract a new topically-similar raw intake are no longer compared against
+  each other, so a contradiction emerging purely between two settled wiki facts
+  is not re-detected. Re-detection is intake-driven by design.
+- **Page-level retrieval granularity (#6, accepted for this slice).** Candidate
+  retrieval embeds the whole wiki PAGE, not each footnote, so a new claim
+  contradicting a single footnote buried in a large multi-fact page may not
+  clear the page-level cosine threshold and can go undetected. Per-footnote
+  embedding is a tracked follow-up ("per-footnote embedding follow-up").
 
 ## [0.9.1] - 2026-06-18
 
