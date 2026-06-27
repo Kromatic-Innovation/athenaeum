@@ -264,12 +264,15 @@ def tier2_classify(
     )
     _record_usage(response, usage, model=params["model"])
 
+    from athenaeum.config import resolve_owner
+
     return parse_tier2_entities(
         response.content[0].text,
         raw.ref,
         valid_types,
         valid_tags,
         valid_access,
+        owner=resolve_owner(config),
     )
 
 
@@ -279,12 +282,18 @@ def parse_tier2_entities(
     valid_types: list[str],
     valid_tags: list[str],
     valid_access: list[str],
+    owner: dict[str, Any] | None = None,
 ) -> list[ClassifiedEntity]:
     """Parse a Tier-2 classification response into entities.
 
     Shared by the synchronous and batch transports. Malformed or missing
     JSON degrades to an empty list with a warning, exactly like the
     pre-#236 inline parsing.
+
+    When *owner* is configured (issue #263), an owner-namespace operational
+    memory (e.g. ``user_*_family_relationships``) is routed to a standalone
+    ``reference`` page rather than being classified as person-bio. Inert when
+    *owner* is ``None``.
     """
     text = text.strip()
 
@@ -306,6 +315,17 @@ def parse_tier2_entities(
         entity_type = item.get("entity_type", "reference")
         if entity_type not in valid_types:
             entity_type = "reference"
+        # Owner operational/exclusion memories route to a standalone
+        # reference page, never folded into the owner person bio (#263).
+        if owner and "reference" in valid_types:
+            from athenaeum.owner import route_owner_memory
+
+            # Conservative-by-design: act ONLY on a "reference" verdict.
+            # route_owner_memory's "person"/None results are intentionally
+            # ignored here — owner routing can steer a memory TOWARD a
+            # reference page, never away from the classifier's own choice.
+            if route_owner_memory(item["name"], owner) == "reference":
+                entity_type = "reference"
         access = item.get("access", "internal")
         if access not in valid_access:
             access = "internal"

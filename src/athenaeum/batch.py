@@ -280,9 +280,10 @@ def process_batch_run(
     submissions. See the module docstring for phase layout, budget
     semantics, and documented divergences from the synchronous loop.
     """
-    from athenaeum.config import load_config
+    from athenaeum.config import load_config, resolve_owner
     from athenaeum.librarian import tier0_passthrough
 
+    owner = resolve_owner(config)
     result = BatchRunResult()
     states: list[_FileState] = []
     t2_requests: list[BatchRequest] = []
@@ -383,7 +384,7 @@ def process_batch_run(
                 st.failed = True
                 continue
             classified = parse_tier2_entities(
-                text, st.raw.ref, valid_types, valid_tags, valid_access
+                text, st.raw.ref, valid_types, valid_tags, valid_access, owner=owner
             )
             log.info(
                 "  T2 classified %d new entities (%s)", len(classified), st.raw.ref
