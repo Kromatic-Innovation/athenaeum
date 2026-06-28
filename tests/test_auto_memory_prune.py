@@ -161,6 +161,52 @@ class TestApplyPrune:
         assert (wiki / "auto-mixed.md").exists()
         assert (wiki / "auto-but-person.md").exists()
 
+    def test_commit_is_scoped_to_kill_list(
+        self, wiki_with_auto_pages: Path
+    ) -> None:
+        # An unrelated pre-staged change must NOT be swept into the prune
+        # commit (Quine SHOULD): the commit pathspec is scoped to the
+        # kill-list deletions only.
+        knowledge_root = wiki_with_auto_pages
+        wiki = knowledge_root / "wiki"
+        unrelated = knowledge_root / "unrelated.md"
+        unrelated.write_text("pre-staged work\n", encoding="utf-8")
+        _git(knowledge_root, "add", "unrelated.md")
+
+        report = build_prune_report(
+            wiki, ephemeral_scopes=_scopes(), operational_markers=[]
+        )
+        report = apply_prune(knowledge_root, report)
+        assert report.committed is True
+
+        # The prune commit names ONLY the kill-list files.
+        names = _git(knowledge_root, "show", "--name-only", "--format=", "HEAD")
+        assert "unrelated.md" not in names.stdout
+        assert "auto-cctest-scratch.md" in names.stdout
+        # The unrelated file is still staged (uncommitted).
+        staged = _git(knowledge_root, "diff", "--cached", "--name-only")
+        assert "unrelated.md" in staged.stdout
+
+    def test_git_failure_is_clean_error_not_traceback(
+        self, wiki_with_auto_pages: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.auto_memory_prune as amp
+
+        def _boom(root: Path, *args: str) -> object:
+            raise subprocess.CalledProcessError(
+                returncode=1, cmd=["git", *args], stderr="locked index"
+            )
+
+        monkeypatch.setattr(amp, "_git", _boom)
+        knowledge_root = wiki_with_auto_pages
+        wiki = knowledge_root / "wiki"
+        report = amp.build_prune_report(
+            wiki, ephemeral_scopes=_scopes(), operational_markers=[]
+        )
+        report = amp.apply_prune(knowledge_root, report)
+        assert report.committed is False
+        assert report.errors  # routed to report.errors, no traceback
+
     def test_removal_is_git_recoverable(self, wiki_with_auto_pages: Path) -> None:
         knowledge_root = wiki_with_auto_pages
         wiki = knowledge_root / "wiki"
