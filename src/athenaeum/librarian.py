@@ -39,7 +39,14 @@ from athenaeum.clusters import (
     resolve_cluster_threshold,
     write_cluster_report,
 )
-from athenaeum.config import load_config, resolve_extra_intake_roots, resolve_retire
+from athenaeum.config import (
+    load_config,
+    resolve_ephemeral_scopes,
+    resolve_extra_intake_roots,
+    resolve_operational_markers,
+    resolve_retire,
+)
+from athenaeum.ephemeral import classify_ephemeral
 from athenaeum.merge import merge_clusters_to_wiki
 from athenaeum.models import (
     AutoMemoryFile,
@@ -171,6 +178,18 @@ def discover_auto_memory_files(
     if not roots:
         return []
 
+    # Issue #278: resolve the ephemeral/operational classifier inputs once.
+    # An ephemeral-scope OR ``ephemeral: true``-flagged intake is dropped
+    # HERE -- the cleanest choke point -- so it is never clustered or
+    # materialized into a durable ``wiki/auto-*.md`` page. Drops are logged
+    # with their reason; the raw file stays on disk (the move-then-retire
+    # pass only touches members that landed in a wiki entry), so a dropped
+    # file is simply re-evaluated (and re-dropped) idempotently next run.
+    resolved_config = config if config is not None else load_config(knowledge_root)
+    ephemeral_scopes = resolve_ephemeral_scopes(resolved_config)
+    operational_markers = resolve_operational_markers(resolved_config)
+    dropped_ephemeral = 0
+
     files: list[AutoMemoryFile] = []
     for root in roots:
         if not root.is_dir():
@@ -198,6 +217,23 @@ def discover_auto_memory_files(
                 except (OSError, UnicodeDecodeError):
                     continue
                 meta, _body = parse_frontmatter(text)
+                # Issue #278: drop ephemeral/operational intake before it can
+                # be clustered + merged into a permanent wiki entity.
+                drop_reason = classify_ephemeral(
+                    scope,
+                    meta,
+                    _body,
+                    ephemeral_scopes=ephemeral_scopes,
+                    operational_markers=operational_markers,
+                )
+                if drop_reason is not None:
+                    dropped_ephemeral += 1
+                    log.info(
+                        "auto-memory: dropping ephemeral intake %s - %s",
+                        fpath,
+                        drop_reason,
+                    )
+                    continue
                 name = str(meta.get("name", "")) if meta else ""
                 description = str(meta.get("description", "")) if meta else ""
                 origin_session_id = meta.get("originSessionId") if meta else None
@@ -267,6 +303,12 @@ def discover_auto_memory_files(
                         source_ref=source_ref,
                     )
                 )
+    if dropped_ephemeral:
+        log.info(
+            "auto-memory: dropped %d ephemeral/operational intake file(s) "
+            "before clustering (issue #278)",
+            dropped_ephemeral,
+        )
     return files
 
 

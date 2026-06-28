@@ -50,7 +50,12 @@ from typing import TYPE_CHECKING, Any
 
 from athenaeum._lint import _strip_self_reference
 from athenaeum.clusters import resolve_cluster_output_path
-from athenaeum.config import load_config, resolve_extra_intake_roots
+from athenaeum.config import (
+    load_config,
+    resolve_ephemeral_scopes,
+    resolve_extra_intake_roots,
+    resolve_operational_markers,
+)
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
 from athenaeum.cross_scope import (
     candidate_to_auto_memory_files,
@@ -61,6 +66,7 @@ from athenaeum.cross_scope import (
     resolve_cross_scope_mode,
     resolve_similarity_threshold,
 )
+from athenaeum.ephemeral import classify_ephemeral
 from athenaeum.fingerprint import (
     _member_key_str,
     _pair_text_from_passages,
@@ -668,6 +674,8 @@ def merge_cluster_row(
     *,
     extra_roots: list[Path],
     am_by_path: dict[str, AutoMemoryFile],
+    ephemeral_scopes: list[str] | None = None,
+    operational_markers: list[str] | None = None,
 ) -> MergedWikiEntry | None:
     """Build one :class:`MergedWikiEntry` from a cluster JSONL row.
 
@@ -766,6 +774,35 @@ def merge_cluster_row(
                 superseded_by=parse_superseded_by(meta if meta else None),
                 deprecated=parse_deprecated(meta if meta else None),
             )
+        # Issue #278: secondary ephemeral guard. discover_auto_memory_files
+        # already drops ephemeral intake, so the only way one reaches here is
+        # a STALE cluster JSONL row referencing a file C1 no longer discovers
+        # (the shim path above). Re-classify every resolved member so such a
+        # stray can never materialize a durable page. Reads the member's own
+        # frontmatter + body when the C1 record (which has no body) is the
+        # shim; the strong scope-glob / ``ephemeral:true`` signals fire either
+        # way. No-op when no patterns are configured.
+        if ephemeral_scopes or operational_markers:
+            try:
+                _mtext = am.path.read_text(encoding="utf-8")
+                _mmeta, _mbody = parse_frontmatter(_mtext)
+            except (OSError, UnicodeDecodeError):
+                _mmeta, _mbody = {}, ""
+            eph_reason = classify_ephemeral(
+                am.origin_scope,
+                _mmeta,
+                _mbody,
+                ephemeral_scopes=ephemeral_scopes or [],
+                operational_markers=operational_markers or [],
+            )
+            if eph_reason is not None:
+                log.info(
+                    "cluster %s: member %s is ephemeral (%s); excluding from compile",
+                    cluster_id,
+                    mp,
+                    eph_reason,
+                )
+                continue
         # Issue #191: skip members marked inactive (superseded_by / deprecated)
         # so their bodies are never composed into the wiki entry and they do
         # not contribute sources. Inactive files stay on disk for audit.
@@ -993,12 +1030,18 @@ def merge_clusters_to_wiki(
 
     am_by_path = _collect_am_by_path(auto_memory_files)
 
+    # Issue #278: resolve the secondary ephemeral guard inputs once.
+    ephemeral_scopes = resolve_ephemeral_scopes(resolved_config)
+    operational_markers = resolve_operational_markers(resolved_config)
+
     entries: list[MergedWikiEntry] = []
     for row in rows:
         entry = merge_cluster_row(
             row,
             extra_roots=extra_roots,
             am_by_path=am_by_path,
+            ephemeral_scopes=ephemeral_scopes,
+            operational_markers=operational_markers,
         )
         if entry is None:
             continue
