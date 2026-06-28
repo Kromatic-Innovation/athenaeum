@@ -10,10 +10,73 @@ import pytest
 from athenaeum.config import (
     load_config,
     resolve_extra_intake_roots,
+    resolve_min_cluster_cohesion,
+    resolve_min_cluster_cohesion_scopes,
     resolve_owner,
     resolve_retire,
     write_default_config,
 )
+
+
+class TestResolveMinClusterCohesion:
+    def test_default_off(self) -> None:
+        # Default 0.0 (off): unset config / missing key never suppresses.
+        assert resolve_min_cluster_cohesion(None) == 0.0
+        assert resolve_min_cluster_cohesion({}) == 0.0
+        assert resolve_min_cluster_cohesion({"librarian": {}}) == 0.0
+
+    def test_yaml_value_wins(self) -> None:
+        assert resolve_min_cluster_cohesion(
+            {"librarian": {"min_cluster_cohesion": 0.47}}
+        ) == pytest.approx(0.47)
+
+    def test_bool_falls_through_to_off(self) -> None:
+        # bool is an int subclass; `min_cluster_cohesion: true` must not become 1.0.
+        cfg = {"librarian": {"min_cluster_cohesion": True}}
+        assert resolve_min_cluster_cohesion(cfg) == 0.0
+
+    def test_non_numeric_and_negative_fall_through(self) -> None:
+        assert resolve_min_cluster_cohesion({"librarian": {"min_cluster_cohesion": "x"}}) == 0.0
+        assert resolve_min_cluster_cohesion({"librarian": {"min_cluster_cohesion": -0.5}}) == 0.0
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "min_cluster_cohesion" not in _DEFAULTS.get("librarian", {})
+
+
+class TestResolveMinClusterCohesionScopes:
+    def test_default_is_four(self) -> None:
+        assert resolve_min_cluster_cohesion_scopes(None) == 4
+        assert resolve_min_cluster_cohesion_scopes({"librarian": {}}) == 4
+
+    def test_yaml_value_wins(self) -> None:
+        assert (
+            resolve_min_cluster_cohesion_scopes(
+                {"librarian": {"min_cluster_cohesion_scopes": 6}}
+            )
+            == 6
+        )
+
+    def test_below_two_and_bool_fall_through(self) -> None:
+        assert (
+            resolve_min_cluster_cohesion_scopes(
+                {"librarian": {"min_cluster_cohesion_scopes": 1}}
+            )
+            == 4
+        )
+        assert (
+            resolve_min_cluster_cohesion_scopes(
+                {"librarian": {"min_cluster_cohesion_scopes": True}}
+            )
+            == 4
+        )
+        assert (
+            resolve_min_cluster_cohesion_scopes(
+                {"librarian": {"min_cluster_cohesion_scopes": "x"}}
+            )
+            == 4
+        )
 
 
 class TestResolveRetire:

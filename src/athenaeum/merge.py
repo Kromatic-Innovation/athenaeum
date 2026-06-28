@@ -54,6 +54,8 @@ from athenaeum.config import (
     load_config,
     resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
+    resolve_min_cluster_cohesion,
+    resolve_min_cluster_cohesion_scopes,
     resolve_operational_markers,
 )
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
@@ -879,6 +881,38 @@ def merge_cluster_row(
     )
 
 
+def _is_low_cohesion_cross_scope(
+    entry: MergedWikiEntry,
+    *,
+    floor: float,
+    min_scopes: int,
+) -> bool:
+    """True when *entry* matches the low-cohesion cross-scope over-cluster signature.
+
+    Issue #278. The cross-scope ``similarity`` clustering path over-clusters:
+    single-linkage chains a coherent source doc with vaguely-similar
+    operational notes from many scopes into one low-cohesion blend page. The
+    gate fires only when ALL hold:
+
+    * the floor is active (``floor > 0`` -- the feature is opt-in);
+    * the cluster's mean intra-cohesion is STRICTLY below the floor
+      (``cluster_centroid_score < floor`` -- a cluster sitting exactly at the
+      floor materializes; the boundary is inclusive-keep); and
+    * the cluster spans at least *min_scopes* distinct origin scopes (the
+      cross-scope signature).
+
+    Gating on BOTH low cohesion AND multi-scope origin is deliberate: a
+    low-cohesion SINGLE-scope cluster (legitimately diverse intake from one
+    project) and a small coherent cluster must NOT be suppressed. Singletons
+    (``cluster_centroid_score == 1.0``, one scope) never trip either arm.
+    """
+    if floor <= 0.0:
+        return False
+    if entry.cluster_centroid_score >= floor:
+        return False
+    return len(entry.origin_scopes) >= min_scopes
+
+
 def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
     """Render ``[^name]: **Source:** ...`` footnotes for a source list (#260).
 
@@ -1046,6 +1080,42 @@ def merge_clusters_to_wiki(
         if entry is None:
             continue
         entries.append(entry)
+
+    # Issue #278: cluster-cohesion floor. Refuse to materialize a low-cohesion
+    # cross-scope OVER-CLUSTER -- a single-linkage chain that blends a coherent
+    # source doc with vaguely-similar operational notes from many scopes -- into
+    # a durable wiki page. Suppressed entries are dropped from ``entries`` here,
+    # BEFORE contradiction detection and the write loop, and so never reach the
+    # returned list the retire pass walks: their raw members are left in place
+    # (NOT retired, NOT lost) for a coherent cluster to absorb on a later run.
+    # They remain in ``auto_memory_files``, so the similarity sweep (modes
+    # ``similarity``/``both``) can still detect contradictions involving them;
+    # in the DEFAULT ``ancestor`` mode only a suppressed member in an ancestor
+    # scope of a KEPT cluster is re-examined (pooled into that cluster), so a
+    # contradiction internal to a suppressed blend is not re-detected by
+    # default. The gate is default-off (floor 0.0) -- when off this loop is a
+    # no-op pass-through.
+    cohesion_floor = resolve_min_cluster_cohesion(resolved_config)
+    cohesion_min_scopes = resolve_min_cluster_cohesion_scopes(resolved_config)
+    if cohesion_floor > 0.0:
+        kept: list[MergedWikiEntry] = []
+        for entry in entries:
+            if _is_low_cohesion_cross_scope(
+                entry, floor=cohesion_floor, min_scopes=cohesion_min_scopes
+            ):
+                log.info(
+                    "merge: SUPPRESSED low-cohesion cross-scope cluster %s "
+                    "(centroid=%.4f < floor=%.4f, scopes=%d >= %d); leaving raw "
+                    "members in place (not materialized, not retired)",
+                    entry.cluster_id,
+                    entry.cluster_centroid_score,
+                    cohesion_floor,
+                    len(entry.origin_scopes),
+                    cohesion_min_scopes,
+                )
+                continue
+            kept.append(entry)
+        entries = kept
 
     # Topic-slug collisions: if two clusters derive the same slug, suffix
     # each after the first with a short cluster_id tail so filenames stay
