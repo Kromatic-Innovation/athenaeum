@@ -167,6 +167,39 @@ class TestClassifyEphemeralPage:
             is None
         )
 
+    def test_page_marker_branch_kills_on_multi_signal(self) -> None:
+        # Legit scope (so the scope branch does NOT fire) but >= 2 configured
+        # markers in name/body -> killed via the marker branch.
+        meta = {
+            "type": "auto-memory",
+            "origin_scopes": [LEGIT_SCOPE],
+            "name": "staging deploy worktree boilerplate",
+        }
+        reason = classify_ephemeral_page(
+            meta,
+            "Ran the staging deploy on the worktree again.",
+            ephemeral_scopes=self._scopes(),
+            operational_markers=["deploy", "worktree", "install-token"],
+        )
+        assert reason is not None
+        assert "operational markers" in reason
+
+    def test_page_single_marker_retained(self) -> None:
+        meta = {
+            "type": "auto-memory",
+            "origin_scopes": [LEGIT_SCOPE],
+            "name": "deploy notes",
+        }
+        assert (
+            classify_ephemeral_page(
+                meta,
+                "We deploy on Fridays.",
+                ephemeral_scopes=self._scopes(),
+                operational_markers=["deploy", "worktree", "install-token"],
+            )
+            is None
+        )
+
     def test_page_flag_authoritative(self) -> None:
         meta = {
             "type": "auto-memory",

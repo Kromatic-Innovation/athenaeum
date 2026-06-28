@@ -149,14 +149,34 @@ def apply_prune(
     if not rel_paths:
         return report
 
-    _git(knowledge_root, "rm", "--quiet", "--", *rel_paths)
-    _git(
-        knowledge_root,
-        "commit",
-        "-m",
-        f"chore(auto-memory): prune {len(rel_paths)} operational "
-        f"auto-memory page(s) (#278)",
-    )
+    # Scope BOTH the staging (git rm) and the commit to the kill-list paths
+    # (Quine SHOULD). The commit pathspec (`-- *rel_paths`) means only the
+    # kill-list deletions land even if ~/knowledge has other pre-staged
+    # changes, so an unrelated index entry can never be swept into the
+    # "prune N pages" commit under a misleading message.
+    #
+    # A git failure (pre-commit hook, locked index, ...) becomes a clean
+    # exit-1 via report.errors rather than an uncaught traceback (Quine
+    # COULD): _git uses check=True, so we route CalledProcessError here.
+    try:
+        _git(knowledge_root, "rm", "--quiet", "--", *rel_paths)
+        _git(
+            knowledge_root,
+            "commit",
+            "-m",
+            f"chore(auto-memory): prune {len(rel_paths)} operational "
+            f"auto-memory page(s) (#278)",
+            "--",
+            *rel_paths,
+        )
+    except subprocess.CalledProcessError as exc:
+        msg = (
+            "git operation failed during prune "
+            f"({' '.join(exc.cmd)!r}): {exc.stderr or exc}"
+        )
+        log.error("prune: %s", msg)
+        report.errors.append(msg)
+        return report
     report.applied = True
     report.committed = True
     log.info(

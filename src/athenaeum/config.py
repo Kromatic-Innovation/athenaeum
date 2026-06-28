@@ -192,8 +192,10 @@ _DEFAULT_EPHEMERAL_SCOPES: tuple[str, ...] = (
     "*hestia-routine*",
     "*var-folders*",
     "*private-tmp*",
-    "*-private-tmp-*",
-    "*cctest*",
+    # Anchored to the hyphenated throwaway form (`...-cctest-...`) on purpose:
+    # a bare ``*cctest*`` would also catch a legitimately-named project dir
+    # such as ``-Users-alice-Code-cctest-harness``.
+    "*-cctest-*",
 )
 
 
@@ -354,13 +356,15 @@ search_backend: fts5
 #   A raw file in a matching scope -- or one carrying an explicit
 #   `ephemeral: true` frontmatter flag -- is dropped before clustering.
 #   Setting this key REPLACES the built-in defaults
-#   (*hestia-routine*, *var-folders*, *private-tmp*, *cctest*); an empty
+#   (*hestia-routine*, *var-folders*, *private-tmp*, *-cctest-*); an empty
 #   list disables scope-based dropping. Same set drives `athenaeum
 #   auto-memory prune`.
 # operational_markers: optional lower-cased content substrings for
 #   operational families (issue #278). CONSERVATIVE: the classifier drops
 #   an intake on markers ONLY when >= 2 distinct markers are present, so a
 #   single incidental word never clobbers a legit note. DEFAULT-EMPTY.
+#   Markers are SUBSTRING-matched: avoid <=3-char markers (e.g. "ci" would
+#   match "decision"/"specific") -- prefer distinctive multi-word phrases.
 # librarian:
 #   cluster_threshold: 0.55
 #   cluster_output: raw/_librarian-clusters.jsonl
@@ -371,7 +375,7 @@ search_backend: fts5
 #     - "*hestia-routine*"
 #     - "*var-folders*"
 #     - "*private-tmp*"
-#     - "*cctest*"
+#     - "*-cctest-*"
 #   operational_markers: []
 
 # Model selection (issue #232). Per knob: env var wins over the yaml key,
