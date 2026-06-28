@@ -2345,3 +2345,255 @@ class TestNotAConflictDecay:
         # The expired backlog re-enters, but the per-run cap bounds Opus
         # calls: never more than ``cap`` resolver invocations in one run.
         assert resolver_calls["n"] <= cap
+
+
+# ---------------------------------------------------------------------------
+# Cluster-cohesion floor (issue #278)
+# ---------------------------------------------------------------------------
+
+
+def _write_cohesion_fixture(knowledge_root: Path) -> None:
+    """Synthesize four clusters spanning the cohesion-floor decision matrix.
+
+    Rows written to the canonical cluster JSONL:
+
+    * ``blend-0001`` -- LOW cohesion (0.42), 5 distinct origin scopes: the
+      cross-scope over-cluster signature. Suppressed when the floor is on.
+    * ``cohere-0001`` -- HIGH cohesion (0.88), 2 scopes: materializes.
+    * ``single-0001`` -- singleton, cohesion 1.0, 1 scope: materializes.
+    * ``lone-0001`` -- LOW cohesion (0.42) but a SINGLE scope: must NOT be
+      suppressed (the gate requires multi-scope origin).
+    """
+    am_root = knowledge_root / "raw" / "auto-memory"
+
+    # 1) Low-cohesion cross-scope over-cluster: one member per scope.
+    blend_scopes = [
+        "-auto-auth-git-staging",
+        "-auto-staging-agent-worktree",
+        "-auto-grn-staging-auth",
+        "-auto-hermes-staging",
+        "-auto-caveman-setup",
+    ]
+    blend_members: list[str] = []
+    for i, scope in enumerate(blend_scopes):
+        _write_am_file(
+            am_root / scope,
+            f"reference_blendalpha_{i}.md",
+            frontmatter_name=f"blendalpha {i}",
+            description="low-cohesion blend member",
+            origin_session_id=f"s-blend-{i}",
+            origin_turn=i,
+            body=f"Blend member {i} from {scope}.",
+        )
+        blend_members.append(f"{scope}/reference_blendalpha_{i}.md")
+
+    # 2) High-cohesion two-scope cluster.
+    cohere_members: list[str] = []
+    for i, scope in enumerate(["-auto-coherent-one", "-auto-coherent-two"]):
+        _write_am_file(
+            am_root / scope,
+            f"project_coherentbeta_{i}.md",
+            frontmatter_name=f"coherentbeta {i}",
+            description="high-cohesion member",
+            origin_session_id=f"s-cohere-{i}",
+            origin_turn=i,
+            body=f"Coherent beta member {i}.",
+        )
+        cohere_members.append(f"{scope}/project_coherentbeta_{i}.md")
+
+    # 3) Coherent single-scope singleton (centroid 1.0).
+    _write_am_file(
+        am_root / "-auto-gamma-only",
+        "project_singlegamma.md",
+        frontmatter_name="singlegamma",
+        description="singleton",
+        origin_session_id="s-gamma",
+        origin_turn=0,
+        body="Single gamma fact.",
+    )
+
+    # 4) Low-cohesion SINGLE-scope cluster (two members, one scope).
+    lone_members: list[str] = []
+    for i in range(2):
+        _write_am_file(
+            am_root / "-auto-lonescope",
+            f"project_lonescopedelta_{i}.md",
+            frontmatter_name=f"lonescopedelta {i}",
+            description="low-cohesion single-scope member",
+            origin_session_id=f"s-lone-{i}",
+            origin_turn=i,
+            body=f"Lone-scope delta member {i}.",
+        )
+        lone_members.append(f"-auto-lonescope/project_lonescopedelta_{i}.md")
+
+    _write_cluster_jsonl(
+        knowledge_root,
+        [
+            {
+                "cluster_id": "blend-0001",
+                "member_paths": blend_members,
+                "centroid_score": 0.42,
+                "rationale": "similarity; low-cohesion cross-scope blend",
+            },
+            {
+                "cluster_id": "cohere-0001",
+                "member_paths": cohere_members,
+                "centroid_score": 0.88,
+                "rationale": "cosine >= 0.55; coherent",
+            },
+            {
+                "cluster_id": "single-0001",
+                "member_paths": ["-auto-gamma-only/project_singlegamma.md"],
+                "centroid_score": 1.0,
+                "rationale": "singleton",
+            },
+            {
+                "cluster_id": "lone-0001",
+                "member_paths": lone_members,
+                "centroid_score": 0.42,
+                "rationale": "cosine >= 0.55; low-cohesion single-scope",
+            },
+        ],
+    )
+    _write_config(knowledge_root)
+
+
+_FLOOR_ON_CFG = {
+    "recall": {"extra_intake_roots": ["raw/auto-memory"]},
+    "librarian": {"min_cluster_cohesion": 0.47, "min_cluster_cohesion_scopes": 4},
+}
+_FLOOR_OFF_CFG = {"recall": {"extra_intake_roots": ["raw/auto-memory"]}}
+
+
+class TestClusterCohesionFloor:
+    """Cohesion floor suppresses low-cohesion cross-scope over-clusters (#278)."""
+
+    def _slugs_on_disk(self, knowledge_root: Path) -> set[str]:
+        wiki = knowledge_root / "wiki"
+        return {p.name for p in wiki.glob(f"{AUTO_WIKI_PREFIX}*.md")}
+
+    def test_low_cohesion_cross_scope_cluster_is_suppressed(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        knowledge_root = tmp_path / "knowledge"
+        _write_cohesion_fixture(knowledge_root)
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="athenaeum.merge"):
+            entries = merge_clusters_to_wiki(knowledge_root, config=_FLOOR_ON_CFG)
+
+        # The over-cluster is not in the returned list (so the retire pass
+        # never retires its raw) and no page is written for it.
+        cluster_ids = {e.cluster_id for e in entries}
+        assert "blend-0001" not in cluster_ids
+        slugs = self._slugs_on_disk(knowledge_root)
+        assert not any("blendalpha" in s for s in slugs)
+
+        # Raw members are left in place -- not lost, not retired.
+        am_root = knowledge_root / "raw" / "auto-memory"
+        for i in range(5):
+            scope = [
+                "-auto-auth-git-staging",
+                "-auto-staging-agent-worktree",
+                "-auto-grn-staging-auth",
+                "-auto-hermes-staging",
+                "-auto-caveman-setup",
+            ][i]
+            assert (am_root / scope / f"reference_blendalpha_{i}.md").exists()
+
+        # The suppression is logged with cluster id + centroid + scope count.
+        msgs = "\n".join(r.getMessage() for r in caplog.records)
+        assert "SUPPRESSED" in msgs
+        assert "blend-0001" in msgs
+        assert "centroid=0.4200" in msgs
+        assert "scopes=5" in msgs
+
+    def test_high_cohesion_and_single_scope_clusters_materialize(
+        self, tmp_path: Path
+    ) -> None:
+        knowledge_root = tmp_path / "knowledge"
+        _write_cohesion_fixture(knowledge_root)
+        entries = merge_clusters_to_wiki(knowledge_root, config=_FLOOR_ON_CFG)
+        cluster_ids = {e.cluster_id for e in entries}
+        # High-cohesion (0.88) and the coherent singleton (1.0) materialize.
+        assert "cohere-0001" in cluster_ids
+        assert "single-0001" in cluster_ids
+        slugs = self._slugs_on_disk(knowledge_root)
+        assert any("coherentbeta" in s for s in slugs)
+        assert any("singlegamma" in s for s in slugs)
+
+    def test_low_cohesion_single_scope_cluster_is_not_suppressed(
+        self, tmp_path: Path
+    ) -> None:
+        knowledge_root = tmp_path / "knowledge"
+        _write_cohesion_fixture(knowledge_root)
+        entries = merge_clusters_to_wiki(knowledge_root, config=_FLOOR_ON_CFG)
+        cluster_ids = {e.cluster_id for e in entries}
+        # Low cohesion (0.42) but ONE scope -> below the scope floor -> kept.
+        assert "lone-0001" in cluster_ids
+        slugs = self._slugs_on_disk(knowledge_root)
+        assert any("lonescopedelta" in s for s in slugs)
+
+    def test_floor_off_by_default_materializes_over_cluster(
+        self, tmp_path: Path
+    ) -> None:
+        knowledge_root = tmp_path / "knowledge"
+        _write_cohesion_fixture(knowledge_root)
+        # No min_cluster_cohesion configured -> default 0.0 (off) -> the
+        # over-cluster materializes exactly as before this feature.
+        entries = merge_clusters_to_wiki(knowledge_root, config=_FLOOR_OFF_CFG)
+        cluster_ids = {e.cluster_id for e in entries}
+        assert cluster_ids == {"blend-0001", "cohere-0001", "single-0001", "lone-0001"}
+        slugs = self._slugs_on_disk(knowledge_root)
+        assert any("blendalpha" in s for s in slugs)
+
+    def test_threshold_boundary_is_inclusive_keep(self, tmp_path: Path) -> None:
+        """A cluster sitting EXACTLY at the floor materializes; just below is cut."""
+        knowledge_root = tmp_path / "knowledge"
+        am_root = knowledge_root / "raw" / "auto-memory"
+        scopes = [
+            "-auto-edge-one",
+            "-auto-edge-two",
+            "-auto-edge-three",
+            "-auto-edge-four",
+        ]
+        at_members: list[str] = []
+        below_members: list[str] = []
+        for i, scope in enumerate(scopes):
+            _write_am_file(
+                am_root / scope,
+                f"reference_edgeat_{i}.md",
+                frontmatter_name=f"edgeat {i}",
+                body=f"edge-at member {i}",
+            )
+            at_members.append(f"{scope}/reference_edgeat_{i}.md")
+            _write_am_file(
+                am_root / scope,
+                f"reference_edgebelow_{i}.md",
+                frontmatter_name=f"edgebelow {i}",
+                body=f"edge-below member {i}",
+            )
+            below_members.append(f"{scope}/reference_edgebelow_{i}.md")
+        _write_cluster_jsonl(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "edge-at",
+                    "member_paths": at_members,
+                    "centroid_score": 0.47,
+                    "rationale": "exactly at floor",
+                },
+                {
+                    "cluster_id": "edge-below",
+                    "member_paths": below_members,
+                    "centroid_score": 0.46,
+                    "rationale": "just below floor",
+                },
+            ],
+        )
+        _write_config(knowledge_root)
+        entries = merge_clusters_to_wiki(knowledge_root, config=_FLOOR_ON_CFG)
+        cluster_ids = {e.cluster_id for e in entries}
+        # centroid == floor materializes (inclusive-keep); centroid < floor cut.
+        assert "edge-at" in cluster_ids
+        assert "edge-below" not in cluster_ids
