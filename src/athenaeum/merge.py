@@ -1088,9 +1088,13 @@ def merge_clusters_to_wiki(
     # BEFORE contradiction detection and the write loop, and so never reach the
     # returned list the retire pass walks: their raw members are left in place
     # (NOT retired, NOT lost) for a coherent cluster to absorb on a later run.
-    # They remain in ``auto_memory_files`` so the ancestor-pool + similarity
-    # sweep can still detect cross-scope contradictions involving them. The gate
-    # is default-off (floor 0.0) -- when off this loop is a no-op pass-through.
+    # They remain in ``auto_memory_files``, so the similarity sweep (modes
+    # ``similarity``/``both``) can still detect contradictions involving them;
+    # in the DEFAULT ``ancestor`` mode only a suppressed member in an ancestor
+    # scope of a KEPT cluster is re-examined (pooled into that cluster), so a
+    # contradiction internal to a suppressed blend is not re-detected by
+    # default. The gate is default-off (floor 0.0) -- when off this loop is a
+    # no-op pass-through.
     cohesion_floor = resolve_min_cluster_cohesion(resolved_config)
     cohesion_min_scopes = resolve_min_cluster_cohesion_scopes(resolved_config)
     if cohesion_floor > 0.0:

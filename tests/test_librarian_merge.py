@@ -2547,6 +2547,160 @@ class TestClusterCohesionFloor:
         slugs = self._slugs_on_disk(knowledge_root)
         assert any("blendalpha" in s for s in slugs)
 
+    def test_scope_count_boundary_pins_ge(self, tmp_path: Path) -> None:
+        """min_cluster_cohesion_scopes default 4: a low-cohesion 3-scope cluster
+        is KEPT, a low-cohesion 4-scope cluster is suppressed (>= boundary)."""
+        knowledge_root = tmp_path / "knowledge"
+        am_root = knowledge_root / "raw" / "auto-memory"
+        three_members: list[str] = []
+        for i in range(3):
+            scope = f"-auto-three-{i}"
+            _write_am_file(
+                am_root / scope,
+                f"reference_threecut_{i}.md",
+                frontmatter_name=f"threecut {i}",
+                body=f"three-scope member {i}",
+            )
+            three_members.append(f"{scope}/reference_threecut_{i}.md")
+        four_members: list[str] = []
+        for i in range(4):
+            scope = f"-auto-four-{i}"
+            _write_am_file(
+                am_root / scope,
+                f"reference_fourcut_{i}.md",
+                frontmatter_name=f"fourcut {i}",
+                body=f"four-scope member {i}",
+            )
+            four_members.append(f"{scope}/reference_fourcut_{i}.md")
+        _write_cluster_jsonl(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "three-scope",
+                    "member_paths": three_members,
+                    "centroid_score": 0.42,
+                    "rationale": "low cohesion, 3 scopes",
+                },
+                {
+                    "cluster_id": "four-scope",
+                    "member_paths": four_members,
+                    "centroid_score": 0.42,
+                    "rationale": "low cohesion, 4 scopes",
+                },
+            ],
+        )
+        _write_config(knowledge_root)
+        entries = merge_clusters_to_wiki(knowledge_root, config=_FLOOR_ON_CFG)
+        cluster_ids = {e.cluster_id for e in entries}
+        # 3 scopes < floor(4) -> kept; 4 scopes >= floor(4) -> suppressed.
+        assert "three-scope" in cluster_ids
+        assert "four-scope" not in cluster_ids
+
+    def test_suppressed_member_still_reachable_by_ancestor_detection(
+        self, tmp_path: Path
+    ) -> None:
+        """Load-bearing property (matches the merge.py comment): a suppressed
+        cluster's member stays in the discovered file list, so in DEFAULT
+        ``ancestor`` mode it is pooled into a KEPT cluster whose scope it is an
+        ancestor of -- and a contradiction against it still escalates.
+
+        If the suppressed member were dropped from ``auto_memory_files``, the
+        kept singleton would be a 1-member chunk, the detector would never run,
+        and no pending question would be written. So asserting the escalation
+        happens proves the member is still reachable.
+        """
+        from unittest.mock import MagicMock
+
+        knowledge_root = tmp_path / "knowledge"
+        am_root = knowledge_root / "raw" / "auto-memory"
+
+        # Kept cluster: a coherent singleton in a deep scope.
+        keep_scope = "-Users-tk-Code-proj"
+        _write_am_file(
+            am_root / keep_scope,
+            "project_deploycadence.md",
+            frontmatter_name="deploycadence keep",
+            origin_session_id="s-keep",
+            origin_turn=1,
+            body="Always deploy on Fridays.",
+        )
+        keep_ref = f"{keep_scope}/project_deploycadence.md"
+
+        # Suppressed low-cohesion cross-scope cluster. ONE member sits in an
+        # ANCESTOR scope of the kept cluster (-Users-tk-Code) and contradicts
+        # it; the other three are in unrelated scopes (4 scopes total).
+        anc_scope = "-Users-tk-Code"
+        _write_am_file(
+            am_root / anc_scope,
+            "feedback_deploycadence_v2.md",
+            frontmatter_name="deploycadence anc",
+            origin_session_id="s-anc",
+            origin_turn=2,
+            body="Never deploy on Fridays.",
+        )
+        anc_ref = f"{anc_scope}/feedback_deploycadence_v2.md"
+        blend_members = [anc_ref]
+        for i in range(3):
+            scope = f"-auto-unrelated-{i}"
+            _write_am_file(
+                am_root / scope,
+                f"reference_filler_{i}.md",
+                frontmatter_name=f"filler {i}",
+                body=f"unrelated filler {i}",
+            )
+            blend_members.append(f"{scope}/reference_filler_{i}.md")
+
+        _write_cluster_jsonl(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "keep-0001",
+                    "member_paths": [keep_ref],
+                    "centroid_score": 1.0,
+                    "rationale": "singleton",
+                },
+                {
+                    "cluster_id": "blend-0001",
+                    "member_paths": blend_members,
+                    "centroid_score": 0.42,
+                    "rationale": "low-cohesion cross-scope blend",
+                },
+            ],
+        )
+        _write_config(knowledge_root)
+
+        # Detector returns a contradiction between the kept member and the
+        # suppressed ancestor member (same client also feeds the resolver,
+        # which falls through to escalate -- mirrors the positive-path test).
+        payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            f'"members_involved": ["{keep_ref}", "{anc_ref}"], '
+            '"conflicting_passages": ['
+            '"Always deploy on Fridays.", "Never deploy on Fridays."], '
+            '"rationale": "One says always; the other says never."}'
+        )
+        response = MagicMock()
+        response.content = [MagicMock(text=payload)]
+        fake_client = MagicMock()
+        fake_client.messages.create.return_value = response
+
+        entries = merge_clusters_to_wiki(
+            knowledge_root, config=_FLOOR_ON_CFG, client=fake_client
+        )
+        cluster_ids = {e.cluster_id for e in entries}
+        assert "keep-0001" in cluster_ids
+        assert "blend-0001" not in cluster_ids
+
+        # The suppressed ancestor member was pooled into the kept singleton and
+        # the detector fired -> the kept entry is flagged and a pending question
+        # is written. This is only possible if the suppressed raw stayed in the
+        # discovered file list.
+        kept = next(e for e in entries if e.cluster_id == "keep-0001")
+        assert kept.contradictions_detected is True
+        assert (knowledge_root / "wiki" / "_pending_questions.md").exists()
+        # And the suppressed member's raw file is left in place on disk.
+        assert (am_root / anc_scope / "feedback_deploycadence_v2.md").exists()
+
     def test_threshold_boundary_is_inclusive_keep(self, tmp_path: Path) -> None:
         """A cluster sitting EXACTLY at the floor materializes; just below is cut."""
         knowledge_root = tmp_path / "knowledge"
