@@ -180,6 +180,67 @@ def resolve_retire(config: dict[str, Any] | None) -> bool:
     return True
 
 
+# Default glob patterns for inherently-throwaway auto-memory scope dirs
+# (issue #278). These live in the CONFIG LAYER on purpose: the discover /
+# prune pipeline logic carries no host-specific scope literals, it only asks
+# this resolver for the active glob set. An operator overrides or extends the
+# set via ``athenaeum.yaml`` ``librarian.ephemeral_scopes``. Patterns are
+# matched against the scope DIRECTORY NAME with :func:`fnmatch.fnmatch`.
+# No seed in ``_DEFAULTS`` (issue #231) -- the default lives here so it stays
+# reachable and a user-set key is treated as authoritative.
+_DEFAULT_EPHEMERAL_SCOPES: tuple[str, ...] = (
+    "*hestia-routine*",
+    "*var-folders*",
+    "*private-tmp*",
+    # Anchored to the hyphenated throwaway form (`...-cctest-...`) on purpose:
+    # a bare ``*cctest*`` would also catch a legitimately-named project dir
+    # such as ``-Users-alice-Code-cctest-harness``.
+    "*-cctest-*",
+)
+
+
+def resolve_ephemeral_scopes(config: dict[str, Any] | None) -> list[str]:
+    """Resolve glob patterns for throwaway auto-memory scope dirs (issue #278).
+
+    Returns the operator's ``librarian.ephemeral_scopes`` list when set
+    (authoritative -- it REPLACES the defaults so an operator owns the full
+    set), else the built-in :data:`_DEFAULT_EPHEMERAL_SCOPES`. A present-but-
+    empty list disables scope-based ephemeral classification entirely.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict) and "ephemeral_scopes" in cfg:
+            raw = cfg.get("ephemeral_scopes")
+            if isinstance(raw, list):
+                return [
+                    str(g).strip() for g in raw if isinstance(g, str) and str(g).strip()
+                ]
+    return list(_DEFAULT_EPHEMERAL_SCOPES)
+
+
+def resolve_operational_markers(config: dict[str, Any] | None) -> list[str]:
+    """Resolve content markers for operational auto-memory families (issue #278).
+
+    These are lower-cased substrings; the classifier requires a MULTI-SIGNAL
+    match (>= 2 distinct markers present) before it will drop an intake on
+    markers alone, so a single incidental word can never clobber a legit
+    architecture note. DEFAULT-EMPTY: a fresh install never classifies on
+    markers -- only the operator opts in via ``librarian.operational_markers``.
+    No seed in ``_DEFAULTS`` (issue #231).
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("operational_markers")
+            if isinstance(raw, list):
+                return [
+                    str(m).strip().lower()
+                    for m in raw
+                    if isinstance(m, str) and str(m).strip()
+                ]
+    return []
+
+
 def resolve_model(
     knob: str,
     env_var: str,
@@ -289,12 +350,33 @@ search_backend: fts5
 #   into their wiki entry and `git rm`s the raw (recovery is git-only).
 #   Set false to disable; the --no-retire CLI flag overrides to off. See
 #   README "Data lifecycle & upgrade impact".
+# ephemeral_scopes: glob patterns (matched against the auto-memory scope
+#   DIRECTORY NAME) for inherently-throwaway operational scopes whose
+#   intake must NEVER become a durable wiki/auto-*.md page (issue #278).
+#   A raw file in a matching scope -- or one carrying an explicit
+#   `ephemeral: true` frontmatter flag -- is dropped before clustering.
+#   Setting this key REPLACES the built-in defaults
+#   (*hestia-routine*, *var-folders*, *private-tmp*, *-cctest-*); an empty
+#   list disables scope-based dropping. Same set drives `athenaeum
+#   auto-memory prune`.
+# operational_markers: optional lower-cased content substrings for
+#   operational families (issue #278). CONSERVATIVE: the classifier drops
+#   an intake on markers ONLY when >= 2 distinct markers are present, so a
+#   single incidental word never clobbers a legit note. DEFAULT-EMPTY.
+#   Markers are SUBSTRING-matched: avoid <=3-char markers (e.g. "ci" would
+#   match "decision"/"specific") -- prefer distinctive multi-word phrases.
 # librarian:
 #   cluster_threshold: 0.55
 #   cluster_output: raw/_librarian-clusters.jsonl
 #   max_files: 50
 #   batch_mode: false
 #   retire: true
+#   ephemeral_scopes:
+#     - "*hestia-routine*"
+#     - "*var-folders*"
+#     - "*private-tmp*"
+#     - "*-cctest-*"
+#   operational_markers: []
 
 # Model selection (issue #232). Per knob: env var wins over the yaml key,
 # which wins over the built-in default. Values are free-form model id
