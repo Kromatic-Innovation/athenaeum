@@ -241,6 +241,65 @@ def resolve_operational_markers(config: dict[str, Any] | None) -> list[str]:
     return []
 
 
+def resolve_min_cluster_cohesion(config: dict[str, Any] | None) -> float:
+    """Resolve the cluster-cohesion floor from ``librarian.min_cluster_cohesion`` (#278).
+
+    The cross-scope ``similarity`` clustering path over-clusters: single-linkage
+    chains a coherent source doc together with vaguely-similar operational
+    session-notes from many OTHER scopes into one LOW-COHESION blend page. The
+    floor lets the merge pass refuse to materialize such a cluster into a
+    durable ``wiki/auto-*.md`` page: a cluster whose ``cluster_centroid_score``
+    (mean intra-cluster cosine) is strictly BELOW this floor AND which spans at
+    least :func:`resolve_min_cluster_cohesion_scopes` distinct origin scopes is
+    suppressed. Its raw members stay in place (not retired) for a coherent
+    cluster to pick up later.
+
+    DEFAULT 0.0 (OFF): athenaeum ships to PyPI, and the clean ~0.47 cohesion gap
+    is specific to one corpus -- a baked-in non-zero floor could suppress
+    legitimate clusters in a corpus with a different cohesion distribution.
+    Operators opt in via ``athenaeum.yaml``. No seed in ``_DEFAULTS`` (#231) so
+    the code default stays reachable. ``bool`` (an ``int`` subclass) and
+    non-numeric / negative yaml values fall through to 0.0 (off).
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("min_cluster_cohesion")
+            if raw is None or isinstance(raw, bool):
+                return 0.0
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return 0.0
+            if value > 0.0:
+                return value
+    return 0.0
+
+
+def resolve_min_cluster_cohesion_scopes(config: dict[str, Any] | None) -> int:
+    """Resolve the distinct-origin-scope floor for the cohesion gate (#278).
+
+    The cohesion floor (:func:`resolve_min_cluster_cohesion`) only suppresses a
+    cluster that ALSO spans at least this many distinct ``origin_scopes`` -- the
+    cross-scope over-cluster signature. Gating on scope count too prevents
+    false-suppression of a low-cohesion SINGLE-scope cluster (legitimately
+    diverse intake from one project) or a small 2-3 scope coherent cluster.
+
+    DEFAULT 4: observed over-clusters span 8-17 origin scopes while legitimate
+    auto-memory pages span 1-3, so a floor of 4 sits in the clean margin. No
+    seed in ``_DEFAULTS`` (#231). ``bool`` and non-int / ``< 2`` yaml values
+    fall through to the default.
+    """
+    default = 4
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("min_cluster_cohesion_scopes")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 2:
+                return raw
+    return default
+
+
 def resolve_model(
     knob: str,
     env_var: str,
@@ -365,6 +424,21 @@ search_backend: fts5
 #   single incidental word never clobbers a legit note. DEFAULT-EMPTY.
 #   Markers are SUBSTRING-matched: avoid <=3-char markers (e.g. "ci" would
 #   match "decision"/"specific") -- prefer distinctive multi-word phrases.
+# min_cluster_cohesion: cohesion floor that suppresses low-cohesion
+#   cross-scope OVER-CLUSTERS (issue #278). A cluster whose
+#   cluster_centroid_score (mean intra-cluster cosine) is strictly below
+#   this value AND which spans >= min_cluster_cohesion_scopes distinct
+#   origin scopes is NOT materialized into wiki/auto-*.md; its raw members
+#   stay in place (not retired) for a coherent cluster to absorb later.
+#   DEFAULT 0.0 (OFF) -- the ~0.47 gap that separates over-clusters
+#   (<=0.46) from coherent pages (>=0.5) is corpus-specific, so a baked-in
+#   floor could mis-suppress on a different corpus. Recommended opt-in for
+#   the reference corpus: 0.47.
+# min_cluster_cohesion_scopes: minimum distinct origin_scopes a cluster
+#   must span for the cohesion floor to apply (issue #278). DEFAULT 4 --
+#   observed over-clusters span 8-17 scopes, legitimate pages 1-3, so 4
+#   sits in the clean margin and a low-cohesion single-/few-scope cluster
+#   is never suppressed.
 # librarian:
 #   cluster_threshold: 0.55
 #   cluster_output: raw/_librarian-clusters.jsonl
@@ -377,6 +451,8 @@ search_backend: fts5
 #     - "*private-tmp*"
 #     - "*-cctest-*"
 #   operational_markers: []
+#   min_cluster_cohesion: 0.0
+#   min_cluster_cohesion_scopes: 4
 
 # Model selection (issue #232). Per knob: env var wins over the yaml key,
 # which wins over the built-in default. Values are free-form model id
