@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-29
+
+Additive public surface since 0.10.0 (which was stamped but never released): a
+read-only cross-entity claim detector, an auto-memory hygiene pass that stops
+operational session-notes from becoming permanent wiki pages, and an opt-in
+cluster-cohesion floor — plus an OSS-hygiene purge of operator identity
+literals from the shipped package.
+
+### Added
+
+- **Cross-entity recurring-claim detector — `athenaeum claims --find` (#272,
+  slice 1 of #258).** New read-only `recurring_claims` module extracts claim
+  occurrences from wiki entities (footnote source claims per #262, else a
+  body-sentence fallback), groups cross-entity restatements via an injected
+  embedding provider and pairwise cosine `>=` threshold, and renders a YAML
+  report. Group keys are stable and order-independent (mirroring
+  `fingerprint.claim_pair_fingerprint`). The new `athenaeum claims --find`
+  CLI subcommand runs the detector over the recall-index embedding provider.
+  **READ-ONLY: never mutates `wiki/`.**
+- **Ephemeral auto-memory intake classifier (#280, part 1 of #278).** New
+  `ephemeral` module with `classify_ephemeral` (raw intake) and
+  `classify_ephemeral_page` (compiled page). Precision order:
+  explicit `ephemeral: true` frontmatter flag > ephemeral-scope glob >
+  conservative multi-signal operational markers (`>= 2`, default-empty).
+  `discover_auto_memory_files` drops classified-ephemeral intake before
+  clustering (logging each drop with its reason) and `merge_cluster_row`
+  gains a secondary guard so a stale cluster row pointing at an ephemeral
+  file can never materialize a page. Two new yaml knobs under `librarian:`
+  drive it (config-resolved, no identity literals in `src/`):
+  `ephemeral_scopes` (scope glob patterns, default-empty) and
+  `operational_markers` (lower-cased content substrings, default-empty;
+  needs `>= 2` to fire). See [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md).
+- **`athenaeum auto-memory prune` CLI for existing operational pages (#280,
+  part 2 of #278).** New `auto_memory_prune` module builds a kill-list of
+  operational `wiki/auto-*.md` pages using the same classifier (not loose
+  keyword matching). `--dry-run` is the **default** (prints kill-list +
+  retained-list with reasons, exits `2` when candidates exist); `--apply`
+  `git rm`s only the listed files in one labeled commit and rebuilds the
+  recall index. Recovery is git-only.
+- **Cluster-cohesion floor for cross-scope over-clusters (#281, #278).** Two
+  default-off yaml knobs under `librarian:` suppress the
+  `similarity`-clustering path's low-cohesion blend pages (single-linkage
+  chaining a coherent doc together with vaguely-similar session-notes from
+  many other scopes): `min_cluster_cohesion` (float, default `0.0` = OFF —
+  the cutoff is corpus-specific so operators opt in; `0.47` recommended for
+  the reference corpus) and `min_cluster_cohesion_scopes` (int, default `4`).
+  A cluster is withheld only when its centroid score is strictly below the
+  floor AND it spans at least that many distinct origin scopes. Suppressed
+  clusters are dropped before contradiction detection and the write loop and
+  never reach the retire pass, so their raw members are left in place (not
+  retired, not lost) for a coherent cluster to absorb later; they remain in
+  the discovered file list so the ancestor-pool + similarity sweep still
+  detect cross-scope contradictions involving them. Each suppression logs
+  cluster id + centroid + scope count + reason.
+
+### Internal
+
+- **Purged operator identity literals from shipped `src/` (#269).** OSS-hygiene
+  pass removing personal names, usernames, and machine paths from the
+  published package source. No behavior change; the runtime owner remains
+  config-driven (#263) and inert when no owner is configured.
+
 ## [0.10.0] - 2026-06-27
 
 The expiring-intake-queue epic (#259) lands as four slices. `raw/auto-memory/`
