@@ -137,6 +137,43 @@ The `--no-retire` CLI flag overrides the yaml toggle. When disabled, raw
 auto-memory is neither moved into the wiki nor `git rm`'d; it stays in the
 intake queue and is re-examined on every run.
 
+## Maintenance & inspection commands
+
+Two subcommands operate over the compiled wiki outside the nightly `run`
+loop — one read-only, one with an opt-in destructive `--apply`:
+
+```bash
+# Read-only: find claims restated across distinct wiki entities.
+athenaeum claims --find
+athenaeum claims --find --threshold 0.9 --path ~/knowledge
+```
+
+`claims --find` is a cross-entity recurring-claim detector. It scans the
+wiki, embeds each claim via the recall-index embedding provider, and prints
+a YAML report grouping claims that recur across two or more distinct
+entities (default cosine cutoff `0.85`, override with `--threshold`). It
+**never mutates `wiki/`** — it only reports. With no embedding backend
+available it degrades to an empty report rather than failing.
+
+```bash
+# Dry-run (default): print the kill-list + retained-list, change nothing.
+athenaeum auto-memory prune
+# Apply: git rm the kill-list in one commit and rebuild the recall index.
+athenaeum auto-memory prune --apply
+```
+
+`auto-memory prune` retires operational/ephemeral `wiki/auto-*.md` pages
+(throwaway scratch scopes, install-token boilerplate, and pages flagged
+`ephemeral: true`) using the same classifier the intake gate applies.
+**Dry-run is the default**: it prints the kill-list and retained-list with
+a reason per page and exits `2` when candidates exist (a CI / sign-off
+signal), `0` when there is nothing to prune. `--apply` `git rm`s the
+kill-list in a single labeled commit and then rebuilds the recall index;
+the commit pathspec is scoped to the kill-list, so unrelated staged work is
+never swept in. Like move-then-retire, recovery is **git-only** — the
+command refuses to run outside a git repo and never hard-`unlink`s, so a
+pruned page is recoverable from history.
+
 ## MCP memory server
 
 Athenaeum ships an MCP server exposing `remember` and `recall` tools so AI
