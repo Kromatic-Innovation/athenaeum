@@ -38,6 +38,10 @@ Every default figure on this page is verified against the code under
 | Batch API mode | `--batch-mode` / `--no-batch-mode` | `ATHENAEUM_BATCH_MODE` | `librarian.batch_mode` | off | Submit tier-2/tier-3 LLM calls via the [Anthropic Messages Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing) at a 50% token discount (#236). Latency-tolerant: most batches finish within an hour, 24h worst case — intended for the nightly run. Same-page tier-3 merges stay synchronous; the budget cap is enforced at batch-assembly time (re-checked per file at phase-2 assembly and before the synchronous merges). `--no-batch-mode` forces the synchronous path even when env/yaml turn batch mode on. |
 | Cluster threshold | — | — | `librarian.cluster_threshold` | `0.55` | Cosine cutoff for auto-memory near-duplicate clustering (C2, #196). Higher = tighter clusters. |
 | Cluster output | — | — | `librarian.cluster_output` | `raw/_librarian-clusters.jsonl` | Canonical cluster JSONL path, resolved relative to the knowledge root. Each run also writes a timestamped sibling. |
+| Ephemeral scopes | — | — | `librarian.ephemeral_scopes` | `[]` | Glob patterns (matched against the auto-memory scope) whose raw intake is classified ephemeral and dropped before clustering (#280), so operational/throwaway scopes never materialize a durable `wiki/auto-*.md` page. Default-empty (off). |
+| Operational markers | — | — | `librarian.operational_markers` | `[]` | Lower-cased content substrings that, when `>= 2` are present in a raw auto-memory file, classify it as ephemeral operational boilerplate (#280). Conservative multi-signal gate; default-empty so nothing fires until an operator opts in. Lower-precedence than an explicit `ephemeral: true` frontmatter flag or an `ephemeral_scopes` match. |
+| Cluster-cohesion floor | — | — | `librarian.min_cluster_cohesion` | `0.0` | Cohesion floor that suppresses low-cohesion cross-scope over-clusters (#281). A cluster is withheld only when its `cluster_centroid_score` is strictly below this value **AND** it spans `>= min_cluster_cohesion_scopes` distinct origin scopes. Default `0.0` = OFF (the cutoff is corpus-specific); `0.47` is recommended for the reference corpus. Suppressed clusters leave their raw members in place (not retired). |
+| Cohesion-floor scope count | — | — | `librarian.min_cluster_cohesion_scopes` | `4` | Minimum distinct `origin_scope` count a low-cohesion cluster must span before the `min_cluster_cohesion` floor suppresses it (#281). Legitimate pages span 1-3 scopes and over-clusters span 8-17, so `4` is the clean margin — a low-cohesion single-/few-scope cluster is never false-suppressed. Inert while `min_cluster_cohesion` is `0.0`. |
 | Embedding cache root | — | `ATHENAEUM_CACHE_DIR` | — | `~/.cache/athenaeum` | Cache root used by the librarian's cluster pass (chromadb lives at `<dir>/wiki-vectors/`). The `recall` / `rebuild-index` commands do **not** read this var — they take `--cache-dir` (same default). |
 | API key | — | `ANTHROPIC_API_KEY` | — | (required) | Required for Tier 2/3 LLM calls. Optional with `--dry-run`, `--cluster-only`, or `--merge-only`. |
 
@@ -160,6 +164,10 @@ librarian:
   max_files: 50
   max_api_calls: 800
   batch_mode: false
+  ephemeral_scopes: []          # scope globs dropped as ephemeral intake (#280)
+  operational_markers: []       # >=2 lower-cased substrings => ephemeral (#280)
+  min_cluster_cohesion: 0.0     # 0.0 = OFF; cohesion floor (#281)
+  min_cluster_cohesion_scopes: 4  # scope-span gate for the cohesion floor (#281)
 
 models:
   classify: claude-haiku-4-5-20251001
