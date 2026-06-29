@@ -137,6 +137,12 @@ The `--no-retire` CLI flag overrides the yaml toggle. When disabled, raw
 auto-memory is neither moved into the wiki nor `git rm`'d; it stays in the
 intake queue and is re-examined on every run.
 
+> **Related destructive operation.** `athenaeum auto-memory prune --apply` is a
+> second opt-in command that `git rm`s pages (operational `wiki/auto-*.md`),
+> with the same git-only recovery story as move-then-retire. It is dry-run by
+> default — see [Maintenance & inspection commands](#maintenance--inspection-commands)
+> below.
+
 ## Maintenance & inspection commands
 
 Two subcommands operate over the compiled wiki outside the nightly `run`
