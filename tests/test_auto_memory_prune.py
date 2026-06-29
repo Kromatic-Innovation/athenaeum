@@ -161,9 +161,7 @@ class TestApplyPrune:
         assert (wiki / "auto-mixed.md").exists()
         assert (wiki / "auto-but-person.md").exists()
 
-    def test_commit_is_scoped_to_kill_list(
-        self, wiki_with_auto_pages: Path
-    ) -> None:
+    def test_commit_is_scoped_to_kill_list(self, wiki_with_auto_pages: Path) -> None:
         # An unrelated pre-staged change must NOT be swept into the prune
         # commit (Quine SHOULD): the commit pathspec is scoped to the
         # kill-list deletions only.
@@ -273,6 +271,76 @@ class TestPruneCli:
         assert "auto-cctest-scratch.md" in out
         # Nothing removed on dry-run.
         assert (wiki_with_auto_pages / "wiki" / "auto-cctest-scratch.md").exists()
+
+    def test_dry_run_no_candidates_exit_0(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Documented contract: dry-run with an empty kill-list exits 0
+        # (the candidates-exist case is the exit-2 test above).
+        from athenaeum.cli import main
+
+        knowledge_root = tmp_path / "knowledge"
+        wiki = knowledge_root / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "auto-recall-architecture.md").write_text(
+            _auto_page([LEGIT_SCOPE], name="x", body="a real durable fact"),
+            encoding="utf-8",
+        )
+        _git_init(knowledge_root)
+
+        rc = main(["auto-memory", "prune", "--path", str(knowledge_root)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "kill:     0" in out
+        # Nothing removed.
+        assert (wiki / "auto-recall-architecture.md").exists()
+
+    def test_apply_via_argv_removes_only_kill_list_and_rebuilds(
+        self,
+        wiki_with_auto_pages: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Drive the DESTRUCTIVE --apply path through main()'s argv dispatch
+        # (the module-level apply_prune is covered by TestApplyPrune; this
+        # asserts the CLI wiring git rm's only the kill-list and fires the
+        # recall-index rebuild). The rebuild is stubbed so the test stays
+        # hermetic (no chromadb / on-disk index build).
+        import athenaeum.cli as cli
+
+        rebuild_calls: list[Path] = []
+        monkeypatch.setattr(
+            cli,
+            "_rebuild_recall_index",
+            lambda knowledge_root, cfg, args: rebuild_calls.append(knowledge_root),
+        )
+
+        knowledge_root = wiki_with_auto_pages
+        wiki = knowledge_root / "wiki"
+        legit = wiki / "auto-recall-architecture.md"
+        legit_bytes = legit.read_bytes()
+
+        rc = cli.main(
+            ["auto-memory", "prune", "--apply", "--path", str(knowledge_root)]
+        )
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "APPLY" in out
+        # Only the kill-list files were git rm'd.
+        assert not (wiki / "auto-cctest-scratch.md").exists()
+        assert not (wiki / "auto-install-token.md").exists()
+        # Non-listed pages are byte-untouched.
+        assert legit.exists()
+        assert legit.read_bytes() == legit_bytes
+        assert (wiki / "auto-mixed.md").exists()
+        assert (wiki / "auto-but-person.md").exists()
+        # The recall-index rebuild fired exactly once, on the prune root.
+        assert rebuild_calls == [knowledge_root]
+        # The removal landed as a git commit (recoverable).
+        head = _git(knowledge_root, "show", "--name-only", "--format=", "HEAD")
+        assert "auto-cctest-scratch.md" in head.stdout
+        assert "auto-recall-architecture.md" not in head.stdout
 
     def test_missing_target_usage_error(
         self, capsys: pytest.CaptureFixture[str]
