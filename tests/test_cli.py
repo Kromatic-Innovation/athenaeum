@@ -972,3 +972,47 @@ class TestClaims:
         rc = main(["claims", "--path", str(knowledge_with_wiki)])
         assert rc == 2
         assert "usage: athenaeum claims --find" in capsys.readouterr().err
+
+
+class TestRunPushFlag:
+    """Issue #284: ``athenaeum run --push`` must propagate to ``librarian.run``
+    as ``push_after_run=True``, and absence of the flag must leave the value
+    at ``None`` (which the resolver then defaults to off)."""
+
+    def test_push_flag_sets_push_after_run_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import librarian
+
+        captured: dict[str, object] = {}
+
+        def fake_run(**kwargs: object) -> int:
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(librarian, "run", fake_run)
+        knowledge = tmp_path / "knowledge"
+        (knowledge / "wiki").mkdir(parents=True)
+        rc = main(["run", "--path", str(knowledge), "--push", "--dry-run"])
+        assert rc == 0
+        assert captured.get("push_after_run") is True
+
+    def test_no_push_flag_passes_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import librarian
+
+        captured: dict[str, object] = {}
+
+        def fake_run(**kwargs: object) -> int:
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(librarian, "run", fake_run)
+        knowledge = tmp_path / "knowledge"
+        (knowledge / "wiki").mkdir(parents=True)
+        rc = main(["run", "--path", str(knowledge), "--dry-run"])
+        assert rc == 0
+        # None lets the resolver default to off — explicit False would
+        # collapse a future "yaml-on, no flag" precedence.
+        assert captured.get("push_after_run") is None

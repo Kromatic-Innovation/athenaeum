@@ -44,6 +44,9 @@ from athenaeum.config import (
     resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
     resolve_operational_markers,
+    resolve_push_after_run,
+    resolve_push_branch,
+    resolve_push_remote,
     resolve_retire,
 )
 from athenaeum.ephemeral import classify_ephemeral
@@ -417,6 +420,104 @@ def git_snapshot(knowledge_root: Path, message: str) -> bool:
         check=True,
     )
     log.info("Git commit: %s", message)
+    return True
+
+
+def _maybe_push_after_run(
+    knowledge_root: Path,
+    *,
+    config: dict | None,
+    push_after_run: bool,
+    dry_run: bool,
+    head_at_start: str | None,
+) -> None:
+    """Push the knowledge repo iff the run committed at least one new commit.
+
+    Issue #284 gating: (a) explicit opt-in, (b) not a ``--dry-run``,
+    (c) HEAD moved during the run. Push failure is non-fatal — ``git_push``
+    logs a warning; the run's exit code is unchanged.
+    """
+    if not push_after_run or dry_run or head_at_start is None:
+        return
+    head_now = _capture_head(knowledge_root)
+    if head_now is None or head_now == head_at_start:
+        return
+    git_push(
+        knowledge_root,
+        remote=resolve_push_remote(config),
+        branch=resolve_push_branch(config),
+    )
+
+
+def _capture_head(knowledge_root: Path) -> str | None:
+    """Return the HEAD sha of the knowledge repo, or ``None`` if unreachable.
+
+    Used by the post-run push hook (issue #284) to detect whether the run
+    produced any commit across librarian / retire / future commit sites
+    without threading a flag through each one.
+    """
+    if not (knowledge_root / ".git").exists():
+        return None
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(knowledge_root),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def git_push(
+    knowledge_root: Path,
+    remote: str = "origin",
+    branch: str | None = None,
+) -> bool:
+    """Push the knowledge repo's current branch to *remote* (issue #284).
+
+    Returns ``True`` when the push succeeded, ``False`` otherwise. A failure
+    is logged as a clearly-marked WARNING and does NOT roll back the
+    committed run — commits remain locally and the next run's push picks
+    them up (``git push`` is idempotent). The push uses the operator's
+    ambient git credentials (credential helper / SSH); athenaeum itself
+    handles no tokens or secrets.
+
+    When *branch* is ``None``, ``git push`` defaults to the configured
+    upstream for the current branch (the conventional nightly setup).
+    Passing an explicit branch makes the refspec deterministic.
+    """
+    if not (knowledge_root / ".git").exists():
+        log.warning("No .git in %s — skipping git push", knowledge_root)
+        return False
+
+    cmd = ["git", "push", remote]
+    if branch:
+        cmd.append(branch)
+    result = subprocess.run(
+        cmd,
+        cwd=str(knowledge_root),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        # Non-fatal: surface the failure with a distinct log line so an
+        # operator (or the routine watching the run) can see exactly which
+        # remote rejected the push and why. Commits remain intact locally.
+        log.warning(
+            "athenaeum-push-failed: git push %s%s exited %d (commits "
+            "remain local; next run retries): %s",
+            remote,
+            f" {branch}" if branch else "",
+            result.returncode,
+            (result.stderr or result.stdout or "").strip(),
+        )
+        return False
+    log.info(
+        "Pushed knowledge commits to %s%s",
+        remote,
+        f" {branch}" if branch else "",
+    )
     return True
 
 
@@ -965,6 +1066,7 @@ def run(
     strict_budget: bool = False,
     batch_mode: bool | None = None,
     retire: bool | None = None,
+    push_after_run: bool | None = None,
     projects_root: Path | None = None,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error.
@@ -1005,6 +1107,18 @@ def run(
     CLI ``--no-retire`` flag) wins. When off, the retire pass is skipped
     entirely — non-contradictory raw auto-memory is neither moved into the
     wiki nor ``git rm``'d, so the raw stays in the intake queue.
+
+    ``push_after_run`` (issue #284) opts INTO a post-run ``git push`` that
+    closes the move-then-retire recovery gap on multi-machine setups. DEFAULT
+    OFF: when ``None`` it resolves via yaml ``librarian.push_after_run``
+    (default off); an explicit ``True`` (e.g. from the CLI ``--push`` flag)
+    wins. When on AND the run produced at least one new commit AND it is not
+    a ``--dry-run``, the librarian invokes ``git push`` (remote/branch from
+    ``librarian.push_remote`` / ``librarian.push_branch``, defaulting to
+    ``origin`` and the current branch's upstream). A push failure is logged
+    as a non-fatal warning — commits remain locally and the next run retries
+    (``git push`` is idempotent). Athenaeum performs no credential handling;
+    the operator's ambient git auth (credential helper / SSH) is used.
     """
     skip_entity_tiers = cluster_only or merge_only
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -1055,6 +1169,14 @@ def run(
             "auto-memory will not be moved or git-removed this run"
         )
 
+    # Issue #284: resolve the post-run push opt-in (explicit arg >
+    # yaml `librarian.push_after_run` > default OFF). Default off so a
+    # fresh install never side-effects an operator's git remote. The
+    # actual push fires after the final commit, only when the run
+    # produced at least one new commit and is not a dry-run.
+    if push_after_run is None:
+        push_after_run = resolve_push_after_run(config)
+
     # Issue #235: a resolved budget of 0 is a valid defer-everything cap
     # (env/yaml zero — the CLI flag rejects it), but it is also the most
     # likely accidental misconfiguration: every LLM tier is skipped and the
@@ -1067,6 +1189,13 @@ def run(
             "ATHENAEUM_MAX_API_CALLS / librarian.max_api_calls to a "
             "positive value if unintended"
         )
+
+    # Issue #284: capture HEAD at run-start (before ANY commit site fires)
+    # so the post-run push can detect whether the run produced any commit
+    # across librarian.git_snapshot, retire._commit_paths_if_staged, and
+    # the merge-only / cluster-only early-return paths. Per-call-site
+    # tracking would miss the commits inside the retire pass.
+    head_at_start = _capture_head(knowledge_root) if not dry_run else None
 
     # One run-level TokenUsage threaded through every phase (cluster, merge
     # incl. the C4 detector + resolver, #188 reresolve, entity tiers) so
@@ -1117,6 +1246,13 @@ def run(
             # perspective: clear a stale deferred-work manifest left by a
             # prior budget-tripped run (v0.7.3 release-gate review).
             _clear_stale_deferred_manifest(wiki_root)
+        _maybe_push_after_run(
+            knowledge_root,
+            config=config,
+            push_after_run=push_after_run,
+            dry_run=dry_run,
+            head_at_start=head_at_start,
+        )
         return 0
 
     # C1 + C2: auto-memory discovery followed by the C2 cluster pass.
@@ -1186,6 +1322,13 @@ def run(
         # cluster-only run must not preserve a stale deferred manifest.
         if not dry_run:
             _clear_stale_deferred_manifest(wiki_root)
+        _maybe_push_after_run(
+            knowledge_root,
+            config=config,
+            push_after_run=push_after_run,
+            dry_run=dry_run,
+            head_at_start=head_at_start,
+        )
         return 0
 
     raw_files = discover_raw_files(raw_root)
@@ -1197,6 +1340,13 @@ def run(
         if not dry_run:
             _clear_stale_deferred_manifest(wiki_root)
         log.info("No raw files to process. Nothing to do.")
+        _maybe_push_after_run(
+            knowledge_root,
+            config=config,
+            push_after_run=push_after_run,
+            dry_run=dry_run,
+            head_at_start=head_at_start,
+        )
         return 0
 
     total_intake = len(raw_files)
@@ -1377,6 +1527,14 @@ def run(
             f"({total_created}C {total_updated}U {total_escalated}E {len(failed_files)}F)"
         )
         git_snapshot(knowledge_root, msg)
+
+    _maybe_push_after_run(
+        knowledge_root,
+        config=config,
+        push_after_run=push_after_run,
+        dry_run=dry_run,
+        head_at_start=head_at_start,
+    )
 
     if failed_files:
         log.warning("Failed files (will retry next run): %s", ", ".join(failed_files))

@@ -116,6 +116,32 @@ squash/rebase that collapses the snapshot commits, or simply never committing
 (running on a dirty repo) / never pushing to a backup remote. If you rely on
 retired-raw recovery, keep the knowledge repo's history intact and pushed.
 
+**Pushing after every run (opt-in, issue #284).** A scheduled nightly run
+commits locally, but does not push by default — so origin silently drifts and
+the git-only recovery story only holds on the machine that ran the librarian.
+Two ways to turn on a post-run push so origin stays current:
+
+```bash
+athenaeum run --push               # one run: push after this run
+```
+
+```yaml
+# athenaeum.yaml — persistent opt-in
+librarian:
+  push_after_run: true
+  # Optional; defaults are origin + the current branch's upstream.
+  # push_remote: origin
+  # push_branch: develop
+```
+
+The `--push` CLI flag overrides the yaml toggle. When enabled, athenaeum
+invokes `git push` (using the operator's ambient git auth — credential helper
+/ SSH; no tokens or secrets are handled by athenaeum) after a successful run
+that produced at least one commit. `--dry-run` never pushes; a run with no
+new commits never pushes. A push failure is reported as a non-fatal warning
+(distinct log line `athenaeum-push-failed:`) — commits remain local and the
+next run retries (`git push` is idempotent).
+
 **`--dry-run`** computes the exact same plan and logs a structured report
 without moving, deleting, or committing anything — use it to preview what a
 run would retire.
