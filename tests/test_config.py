@@ -13,6 +13,9 @@ from athenaeum.config import (
     resolve_min_cluster_cohesion,
     resolve_min_cluster_cohesion_scopes,
     resolve_owner,
+    resolve_push_after_run,
+    resolve_push_branch,
+    resolve_push_remote,
     resolve_retire,
     write_default_config,
 )
@@ -100,6 +103,70 @@ class TestResolveRetire:
         from athenaeum.config import _DEFAULTS
 
         assert "librarian" not in _DEFAULTS
+
+
+class TestResolvePushAfterRun:
+    def test_default_off(self) -> None:
+        # Default OFF: a fresh install must never push without explicit opt-in.
+        assert resolve_push_after_run(None) is False
+        assert resolve_push_after_run({}) is False
+        assert resolve_push_after_run({"librarian": {}}) is False
+
+    def test_yaml_true_enables(self) -> None:
+        assert (
+            resolve_push_after_run({"librarian": {"push_after_run": True}}) is True
+        )
+
+    def test_yaml_false_explicit(self) -> None:
+        assert (
+            resolve_push_after_run({"librarian": {"push_after_run": False}}) is False
+        )
+
+    def test_non_bool_falls_through_to_off(self) -> None:
+        # A non-bool (e.g. yaml string) must not silently enable push.
+        assert (
+            resolve_push_after_run({"librarian": {"push_after_run": "yes"}}) is False
+        )
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "librarian" not in _DEFAULTS
+
+
+class TestResolvePushRemote:
+    def test_default_is_origin(self) -> None:
+        assert resolve_push_remote(None) == "origin"
+        assert resolve_push_remote({}) == "origin"
+        assert resolve_push_remote({"librarian": {}}) == "origin"
+
+    def test_yaml_value_wins(self) -> None:
+        assert (
+            resolve_push_remote({"librarian": {"push_remote": "backup"}}) == "backup"
+        )
+
+    def test_blank_and_non_string_fall_through(self) -> None:
+        assert resolve_push_remote({"librarian": {"push_remote": ""}}) == "origin"
+        assert resolve_push_remote({"librarian": {"push_remote": "   "}}) == "origin"
+        assert resolve_push_remote({"librarian": {"push_remote": 42}}) == "origin"
+
+
+class TestResolvePushBranch:
+    def test_default_is_none(self) -> None:
+        # ``None`` means "let `git push` use the configured upstream for the
+        # current branch" — the conventional nightly setup.
+        assert resolve_push_branch(None) is None
+        assert resolve_push_branch({}) is None
+        assert resolve_push_branch({"librarian": {}}) is None
+
+    def test_yaml_value_wins(self) -> None:
+        assert (
+            resolve_push_branch({"librarian": {"push_branch": "develop"}}) == "develop"
+        )
+
+    def test_blank_and_non_string_fall_through(self) -> None:
+        assert resolve_push_branch({"librarian": {"push_branch": ""}}) is None
+        assert resolve_push_branch({"librarian": {"push_branch": 1}}) is None
 
 
 class TestResolveOwner:
