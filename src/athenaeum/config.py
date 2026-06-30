@@ -180,6 +180,60 @@ def resolve_retire(config: dict[str, Any] | None) -> bool:
     return True
 
 
+def resolve_push_after_run(config: dict[str, Any] | None) -> bool:
+    """Resolve the post-run ``git push`` opt-in (issue #284).
+
+    Closes the move-then-retire recovery gap: a scheduled nightly ``athenaeum
+    run`` commits locally but, without this opt-in, never pushes — so the
+    git-only retired-raw recovery story only holds on the machine that ran
+    the librarian. With ``librarian.push_after_run: true`` (or the
+    ``athenaeum run --push`` CLI override), the librarian invokes ``git push``
+    after a successful run that produced at least one commit, using the
+    operator's ambient git credentials. Default OFF: no push without explicit
+    opt-in, and athenaeum itself handles no tokens/secrets. No seed in
+    ``_DEFAULTS`` (issue #231). Non-bool yaml values fall through to off.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("push_after_run")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
+def resolve_push_remote(config: dict[str, Any] | None) -> str:
+    """Resolve the post-run push remote from ``librarian.push_remote`` (#284).
+
+    Defaults to ``origin`` — the conventional name the knowledge repo's
+    remote will carry on every operator we ship to. A non-string or empty
+    yaml value falls through to the default.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("push_remote")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    return "origin"
+
+
+def resolve_push_branch(config: dict[str, Any] | None) -> str | None:
+    """Resolve the post-run push branch from ``librarian.push_branch`` (#284).
+
+    Returns ``None`` when unset (the librarian will push the knowledge repo's
+    current branch, which is what nightly schedulers expect). A non-string
+    or empty yaml value also returns ``None``.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("push_branch")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    return None
+
+
 # Default glob patterns for inherently-throwaway auto-memory scope dirs
 # (issue #278). These live in the CONFIG LAYER on purpose: the discover /
 # prune pipeline logic carries no host-specific scope literals, it only asks
