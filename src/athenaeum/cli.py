@@ -161,6 +161,19 @@ def main(argv: list[str] | None = None) -> int:
         "README 'Data lifecycle & upgrade impact' section.",
     )
     run_parser.add_argument(
+        "--push",
+        dest="push_after_run",
+        action="store_true",
+        default=None,
+        help="After a successful run that produced at least one commit, "
+        "invoke `git push` on the knowledge repo (issue #284) using the "
+        "operator's ambient git credentials. Overrides the athenaeum.yaml "
+        "librarian.push_after_run toggle (default off). No-op on --dry-run "
+        "or when the run produced no commits. A push failure is reported "
+        "as a non-fatal warning; commits remain local and the next run "
+        "retries (`git push` is idempotent).",
+    )
+    run_parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -965,6 +978,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         strict_budget=args.strict_budget,
         batch_mode=args.batch_mode,
         retire=getattr(args, "retire", None),
+        push_after_run=getattr(args, "push_after_run", None),
     )
 
 
