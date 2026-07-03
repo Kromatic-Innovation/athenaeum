@@ -152,6 +152,27 @@ def _split_blocks(text: str) -> list[str]:
         if in_fence:
             if stripped == "```":
                 in_fence = False
+                if current:
+                    current.append(line)
+                continue
+            if _HEADER_RE.match(line):
+                # A canonical block header (``## [DATE] Merge: "name"``)
+                # appearing while a fence is still "open" means a prior
+                # block's ```markdown fence was left unclosed (malformed
+                # input) — real headers never legitimately appear inside
+                # fenced draft content. Recover the boundary here instead
+                # of silently swallowing every subsequent block into the
+                # malformed one.
+                log.warning(
+                    "pending_merges: unclosed ```markdown fence before "
+                    "block header %r; recovering block boundary",
+                    line[:80],
+                )
+                in_fence = False
+                if current:
+                    blocks.append("\n".join(current).rstrip())
+                current = [line]
+                continue
             if current:
                 current.append(line)
             continue
@@ -171,6 +192,11 @@ def _split_blocks(text: str) -> list[str]:
         else:
             if current:
                 current.append(line)
+    if in_fence:
+        log.warning(
+            "pending_merges: reached end of file with an unclosed "
+            "```markdown fence in the last block; flushing anyway"
+        )
     if current:
         blocks.append("\n".join(current).rstrip())
     return [b for b in blocks if b.startswith("## ")]

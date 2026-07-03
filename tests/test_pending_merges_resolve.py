@@ -238,3 +238,120 @@ def test_split_blocks_ignores_fenced_frontmatter_and_subheadings(
 
     target = tmp_path / "fenced-merge.md"
     assert target.read_text(encoding="utf-8") == draft_body
+
+
+def test_split_blocks_fenced_draft_followed_by_second_block(tmp_path: Path) -> None:
+    """Realistic production shape: a fenced draft with embedded ``---``
+    and ``## `` content, immediately followed by another ``## Merge:``
+    block (``write_pending_merge`` always separates entries with
+    ``\\n\\n---\\n\\n``). Both blocks must parse correctly and
+    independently — the first block's fenced content must not bleed
+    into the second, and the second must not be lost (Quine review of
+    PR #291, issue #289).
+    """
+    merges = tmp_path / "_pending_merges.md"
+    src_a1 = tmp_path / "feedback_first_a.md"
+    src_b1 = tmp_path / "feedback_first_b.md"
+    src_a2 = tmp_path / "feedback_second_a.md"
+    src_b2 = tmp_path / "feedback_second_b.md"
+    for p, n in [
+        (src_a1, "first_a"),
+        (src_b1, "first_b"),
+        (src_a2, "second_a"),
+        (src_b2, "second_b"),
+    ]:
+        _write_source(p, name=n)
+
+    first_draft = (
+        "---\n"
+        "uid: fenced-first\n"
+        "---\n"
+        "\n"
+        "## Embedded subheading\n"
+        "\n"
+        "Fenced content for the first block."
+    )
+    second_draft = "Plain draft body for the second block."
+
+    write_pending_merge(
+        merges,
+        merge_target_name="fenced-first",
+        sources=[str(src_a1), str(src_b1)],
+        rationale="first block has embedded frontmatter and a subheading",
+        draft_merged_body=first_draft,
+        confidence=0.8,
+    )
+    write_pending_merge(
+        merges,
+        merge_target_name="plain-second",
+        sources=[str(src_a2), str(src_b2)],
+        rationale="second block is a plain trailing merge",
+        draft_merged_body=second_draft,
+        confidence=0.7,
+    )
+
+    from athenaeum.pending_merges import list_pending_merges, parse_pending_merges
+
+    pms = parse_pending_merges(merges)
+    assert len(pms) == 2
+    by_name = {pm.merge_target_name: pm for pm in pms}
+    assert set(by_name) == {"fenced-first", "plain-second"}
+    assert by_name["fenced-first"].draft_merged_body == first_draft
+    assert by_name["plain-second"].draft_merged_body == second_draft
+
+    listed = {item["merge_target_name"]: item for item in list_pending_merges(merges)}
+    assert len(listed) == 2
+    assert listed["fenced-first"]["draft_merged_body"] == first_draft
+    assert listed["plain-second"]["draft_merged_body"] == second_draft
+
+
+def test_split_blocks_recovers_from_unclosed_fence_before_next_block(
+    tmp_path: Path,
+) -> None:
+    """A malformed block whose ```markdown fence is never closed must not
+    silently swallow the next well-formed block. Content of the
+    malformed block can still be imperfect — the point is the second
+    block is not lost (Quine review of PR #291, issue #289).
+    """
+    merges = tmp_path / "_pending_merges.md"
+    text = (
+        "# Pending Merges\n\n"
+        '## [2026-01-01] Merge: "malformed-a"\n'
+        "- [ ] Approve this merge? Sources: a, b\n\n"
+        "**Rationale**: malformed, fence never closes\n"
+        "**Sources**:\n"
+        "- a\n"
+        "- b\n"
+        "**Confidence**: 0.50\n"
+        "**Draft**:\n"
+        "```markdown\n"
+        "unterminated draft body\n"
+        "\n"
+        "---\n\n"
+        '## [2026-01-02] Merge: "well-formed-b"\n'
+        "- [ ] Approve this merge? Sources: c, d\n\n"
+        "**Rationale**: well-formed, must still be recognized\n"
+        "**Sources**:\n"
+        "- c\n"
+        "- d\n"
+        "**Confidence**: 0.90\n"
+        "**Draft**:\n"
+        "```markdown\n"
+        "well-formed body\n"
+        "```\n"
+    )
+    merges.write_text(text, encoding="utf-8")
+
+    from athenaeum.pending_merges import _split_blocks, parse_pending_merges
+
+    blocks = _split_blocks(text)
+    assert len(blocks) == 2, f"expected 2 blocks, got {len(blocks)}: {blocks}"
+    assert 'Merge: "malformed-a"' in blocks[0]
+    assert 'Merge: "well-formed-b"' in blocks[1]
+    assert "malformed-a" not in blocks[1]
+
+    pms = parse_pending_merges(merges)
+    assert len(pms) == 2
+    by_name = {pm.merge_target_name: pm for pm in pms}
+    assert set(by_name) == {"malformed-a", "well-formed-b"}
+    assert by_name["well-formed-b"].draft_merged_body == "well-formed body"
