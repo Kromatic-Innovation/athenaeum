@@ -196,6 +196,91 @@ class TestProposeWikiPageMerges:
         merges_path = duplicate_topic_wiki / "wiki" / "_pending_merges.md"
         assert not merges_path.exists()
 
+    def test_dry_run_reflects_already_proposed_state(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        """A dry-run preview after a real run must report 0, not re-propose
+        what a real run would silently skip as already-present (Quine
+        review of #293) — otherwise the preview lies about what a real
+        run would actually do.
+        """
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        first = propose_wiki_page_merges(
+            duplicate_topic_wiki,
+            config={},
+            threshold=0.8,
+            embedding_provider=_fake_embed,
+        )
+        assert len(first) == 1
+
+        preview = propose_wiki_page_merges(
+            duplicate_topic_wiki,
+            config={},
+            threshold=0.8,
+            embedding_provider=_fake_embed,
+            dry_run=True,
+        )
+        assert preview == []
+
+    def test_resolved_merge_round_trips_full_draft_body(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        """The reader/approval path must see the SAME draft a real reviewer
+        would approve — not just that a block got appended (Quine review
+        of #293, which found the multi-source draft's ``## From ...``
+        headers were silently truncating the block before the #291 fence
+        fix). Exercises ``parse_pending_merges``/``list_pending_merges``/
+        ``resolve_merge`` end to end against a real wiki_dedupe proposal.
+        """
+        from athenaeum.models import slugify
+        from athenaeum.pending_merges import (
+            list_pending_merges,
+            parse_pending_merges,
+            resolve_merge,
+        )
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        proposals = propose_wiki_page_merges(
+            duplicate_topic_wiki,
+            config={},
+            threshold=0.8,
+            embedding_provider=_fake_embed,
+        )
+        assert len(proposals) == 1
+
+        merges_path = duplicate_topic_wiki / "wiki" / "_pending_merges.md"
+        pms = parse_pending_merges(merges_path)
+        assert len(pms) == 1
+        draft = pms[0].draft_merged_body
+        assert _BODY_A in draft
+        assert _BODY_B in draft
+        assert _BODY_C in draft
+
+        listed = list_pending_merges(merges_path)
+        assert len(listed) == 1
+        assert listed[0]["draft_merged_body"] == draft
+
+        result = resolve_merge(
+            merges_path,
+            pms[0].id,
+            "approve",
+            wiki_root=duplicate_topic_wiki / "wiki",
+        )
+        assert result["ok"] is True
+
+        target_path = (
+            duplicate_topic_wiki
+            / "wiki"
+            / f"{slugify(pms[0].merge_target_name)}.md"
+        )
+        assert target_path.is_file()
+        written = target_path.read_text(encoding="utf-8")
+        assert written  # not silently emptied
+        assert _BODY_A in written
+        assert _BODY_B in written
+        assert _BODY_C in written
+
     def test_unrelated_page_not_included(self, duplicate_topic_wiki: Path) -> None:
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
