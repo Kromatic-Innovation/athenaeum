@@ -182,3 +182,59 @@ def test_resolve_merge_approve_fails_when_target_exists(tmp_path: Path) -> None:
     assert "- [ ]" in md
     assert "- [x]" not in md
     assert "**Decision**:" not in md
+
+
+def test_split_blocks_ignores_fenced_frontmatter_and_subheadings(
+    tmp_path: Path,
+) -> None:
+    """Draft bodies with embedded ``---`` frontmatter and ``## `` headings
+    must round-trip intact — not get truncated by ``_split_blocks``
+    mistaking their contents for real block/paragraph delimiters
+    (issue #289).
+    """
+    merges = tmp_path / "_pending_merges.md"
+    src_a = tmp_path / "feedback_fence_a.md"
+    src_b = tmp_path / "feedback_fence_b.md"
+    _write_source(src_a, name="fence_a")
+    _write_source(src_b, name="fence_b")
+
+    draft_body = (
+        "---\n"
+        "uid: abc123\n"
+        "name: fenced-merge\n"
+        "---\n"
+        "\n"
+        "## A markdown subheading\n"
+        "\n"
+        "Body content that must survive the round-trip.\n"
+        "\n"
+        "## Another subheading\n"
+        "\n"
+        "More content after the second heading."
+    )
+
+    write_pending_merge(
+        merges,
+        merge_target_name="fenced-merge",
+        sources=[str(src_a), str(src_b)],
+        rationale="has embedded frontmatter and subheadings",
+        draft_merged_body=draft_body,
+        confidence=0.9,
+    )
+
+    from athenaeum.pending_merges import list_pending_merges, parse_pending_merges
+
+    pms = parse_pending_merges(merges)
+    assert len(pms) == 1
+    assert pms[0].draft_merged_body == draft_body
+
+    listed = list_pending_merges(merges)
+    assert len(listed) == 1
+    assert listed[0]["draft_merged_body"] == draft_body
+
+    pm_id = pms[0].id
+    result = resolve_merge(merges, pm_id, "approve")
+    assert result["ok"] is True, result
+
+    target = tmp_path / "fenced-merge.md"
+    assert target.read_text(encoding="utf-8") == draft_body
