@@ -298,6 +298,20 @@ def propose_wiki_page_merges(
             f"({cluster.rationale})"
         )
 
+        # Check idempotency BEFORE branching on dry_run — otherwise a
+        # dry-run preview reports proposals a real run would silently
+        # skip as already-present, which contradicts dry-run's own
+        # "what would a real run do" framing (Quine review of #293).
+        from athenaeum.pending_merges import _make_id, parse_pending_merges
+
+        existing_ids = {pm.id for pm in parse_pending_merges(merges_path)}
+        block_id = _make_id(sources, merge_target_name)
+        if block_id in existing_ids:
+            log.debug(
+                "wiki-page dedup: proposal %s already present; skipping", block_id
+            )
+            continue
+
         proposal = {
             "merge_target_name": merge_target_name,
             "sources": sources,
@@ -308,16 +322,6 @@ def propose_wiki_page_merges(
 
         if dry_run:
             proposals.append(proposal)
-            continue
-
-        from athenaeum.pending_merges import _make_id, parse_pending_merges
-
-        existing_ids = {pm.id for pm in parse_pending_merges(merges_path)}
-        block_id = _make_id(sources, merge_target_name)
-        if block_id in existing_ids:
-            log.debug(
-                "wiki-page dedup: proposal %s already present; skipping", block_id
-            )
             continue
 
         write_pending_merge(
