@@ -1211,6 +1211,24 @@ def run(
         anthropic.Anthropic(api_key=api_key, max_retries=3) if api_key else None
     )
 
+    # Issue #290: wiki-page dedup pass. Clusters compiled wiki/*.md
+    # concept/reference/principle pages against EACH OTHER (not against
+    # raw/auto-memory intake) and proposes merges via the shared
+    # wiki/_pending_merges.md sidecar. Independent of the C1-C4 auto-memory
+    # pipeline below, so it runs on every mode (full run, --cluster-only,
+    # --merge-only) whenever wiki/ exists — same cadence as the rest of
+    # the scheduled librarian pipeline. A failure here is logged and
+    # swallowed rather than aborting the run: this pass is diagnostic
+    # (it only appends human-reviewed proposals), not load-bearing for
+    # the rest of the pipeline.
+    if wiki_root.is_dir():
+        try:
+            from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+            propose_wiki_page_merges(knowledge_root, config=config, dry_run=dry_run)
+        except Exception:
+            log.exception("wiki-page dedup pass failed; continuing run")
+
     if merge_only:
         # Merge-only path skips discovery + clustering entirely; it reads
         # the canonical cluster JSONL written by a prior C2 run and
