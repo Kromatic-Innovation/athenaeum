@@ -322,20 +322,42 @@ def cluster_auto_memory_files(
     extra_roots: Sequence[Path],
     cache_dir: Path = DEFAULT_CACHE_DIR,
     threshold: float = DEFAULT_CLUSTER_THRESHOLD,
+    embeddings: dict[str, list[float]] | None = None,
 ) -> list[Cluster]:
     """Group auto-memory files into near-duplicate clusters.
 
     Args:
         files: Output of
-            :func:`athenaeum.librarian.discover_auto_memory_files`.
+            :func:`athenaeum.librarian.discover_auto_memory_files`, OR any
+            other sequence of :class:`AutoMemoryFile`-shaped records —
+            e.g. the wiki-page wrapper built by
+            :mod:`athenaeum.wiki_dedupe` (issue #290). Nothing below this
+            line branches on ``memory_type``/``origin_scope`` semantics
+            specific to raw auto-memory intake, so any caller that can
+            produce ``AutoMemoryFile`` records (or a lightweight stand-in
+            with the same ``path``/``origin_scope``/``name``/
+            ``description``/``content`` shape) gets clustering for free.
         extra_roots: The same list recall uses for index scans — needed
             to translate absolute file paths into the ``<root>/<rel>``
-            ids chromadb stores. Usually obtained via
-            :func:`athenaeum.config.resolve_extra_intake_roots`.
+            ids chromadb stores, AND to compute each cluster's relative
+            ``member_paths``. Usually obtained via
+            :func:`athenaeum.config.resolve_extra_intake_roots`, but a
+            caller with a different embedding source (see ``embeddings``
+            below) can pass whatever root it wants relative paths anchored
+            to (e.g. the wiki root).
         cache_dir: Root of the shared embedder cache (chromadb is at
-            ``<cache_dir>/wiki-vectors/``).
+            ``<cache_dir>/wiki-vectors/``). Ignored when ``embeddings`` is
+            supplied.
         threshold: Cosine similarity cutoff for single-linkage
             clustering. Defaults to :data:`DEFAULT_CLUSTER_THRESHOLD`.
+        embeddings: Optional precomputed ``{str(path): vector}`` map. When
+            supplied, the chromadb lookup + hashing-trick fallback in
+            :func:`_resolve_embeddings` is skipped entirely and this map is
+            used as-is — the caller owns embedding resolution (e.g. a
+            direct :func:`athenaeum.search.embed_texts` call keyed by
+            wiki-page path, where the raw-intake extra-root id scheme
+            doesn't apply). ``None`` (the default) preserves the original
+            chromadb-then-fallback behavior byte-for-byte.
 
     Returns:
         A list of :class:`Cluster` records. Empty input → empty list.
@@ -344,11 +366,12 @@ def cluster_auto_memory_files(
     if not files:
         return []
 
-    embeddings = _resolve_embeddings(
-        files,
-        extra_roots=list(extra_roots),
-        cache_dir=cache_dir,
-    )
+    if embeddings is None:
+        embeddings = _resolve_embeddings(
+            files,
+            extra_roots=list(extra_roots),
+            cache_dir=cache_dir,
+        )
     # Index files by the string form of their absolute path (stable and
     # unique; avoids Path equality surprises across tempdirs).
     file_ids: list[str] = [str(am.path) for am in files]
