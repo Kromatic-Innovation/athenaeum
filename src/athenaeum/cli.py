@@ -421,6 +421,38 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to the YAML report to apply (default: stdin). --apply only.",
     )
 
+    # dedupe wiki-pages — cluster compiled concept/reference/principle
+    # wiki pages against EACH OTHER (issue #290) and propose merges via
+    # the shared wiki/_pending_merges.md sidecar for human approval.
+    # Unlike `dedupe persons`, there is no --apply step here: the only
+    # side effect is an idempotent proposal append, never a direct merge.
+    dedupe_wiki_pages = dedupe_sub.add_parser(
+        "wiki-pages",
+        help="Cluster concept/reference/principle wiki pages and propose "
+        "merges for near-duplicate topics (issue #290). Writes idempotent "
+        "proposals to wiki/_pending_merges.md; --dry-run previews without "
+        "writing.",
+    )
+    dedupe_wiki_pages.add_argument(
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    dedupe_wiki_pages.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would be proposed without writing to "
+        "wiki/_pending_merges.md.",
+    )
+    dedupe_wiki_pages.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Cosine similarity cutoff (default: librarian.cluster_threshold "
+        "/ 0.55 — same threshold the raw auto-memory cluster pass uses).",
+    )
+
     # claims command — cross-entity recurring-claim detector (issue #272,
     # slice 1 of #258). READ-ONLY: scans the wiki, embeds claim texts via the
     # recall-index provider, and prints a YAML report of claims restated across
@@ -625,7 +657,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _cmd_dedupe(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum dedupe persons --find|--apply``."""
+    """Dispatch ``athenaeum dedupe persons --find|--apply`` / ``dedupe wiki-pages``."""
+    target = getattr(args, "dedupe_target", None)
+
+    if target == "wiki-pages":
+        return _cmd_dedupe_wiki_pages(args)
+
     from athenaeum.dedupe import (
         find_duplicate_persons,
         merge_duplicate_persons,
@@ -633,9 +670,12 @@ def _cmd_dedupe(args: argparse.Namespace) -> int:
         pairs_to_yaml,
     )
 
-    target = getattr(args, "dedupe_target", None)
     if target != "persons":
-        print("usage: athenaeum dedupe persons [--find | --apply] ...", file=sys.stderr)
+        print(
+            "usage: athenaeum dedupe persons [--find | --apply] ... "
+            "| athenaeum dedupe wiki-pages [--dry-run] ...",
+            file=sys.stderr,
+        )
         return 2
 
     wiki_root = (args.wiki_root or Path("~/knowledge/wiki")).expanduser().resolve()
@@ -687,6 +727,38 @@ def _cmd_dedupe(args: argparse.Namespace) -> int:
     for err in merge_report.errors:
         print(f"  ERROR: {err}", file=sys.stderr)
     return 0 if not merge_report.errors else 1
+
+
+def _cmd_dedupe_wiki_pages(args: argparse.Namespace) -> int:
+    """Dispatch ``athenaeum dedupe wiki-pages`` (issue #290).
+
+    Clusters concept/reference/principle wiki pages and proposes merges
+    for near-duplicate topics via the shared
+    ``wiki/_pending_merges.md`` sidecar. Default writes proposals
+    (idempotent — a rerun is a no-op for source sets already proposed);
+    ``--dry-run`` previews without writing.
+    """
+    from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+    knowledge_root = args.path.expanduser().resolve()
+    wiki_root = knowledge_root / "wiki"
+    if not wiki_root.is_dir():
+        print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
+        return 1
+
+    proposals = propose_wiki_page_merges(
+        knowledge_root,
+        threshold=args.threshold,
+        dry_run=args.dry_run,
+    )
+
+    if args.dry_run:
+        print(f"[DRY RUN] would propose {len(proposals)} merge(s):")
+    else:
+        print(f"Proposed {len(proposals)} new merge(s) (see wiki/_pending_merges.md):")
+    for p in proposals:
+        print(f"  - {p['merge_target_name']}: {len(p['sources'])} source(s)")
+    return 0
 
 
 def _cmd_claims(args: argparse.Namespace) -> int:
@@ -824,8 +896,10 @@ def _rebuild_recall_index(
     wiki_root = knowledge_root / "wiki"
     backend = getattr(args, "backend", None) or cfg.get("search_backend", "fts5")
     cache_dir = (
-        getattr(args, "cache_dir", None) or Path("~/.cache/athenaeum")
-    ).expanduser().resolve()
+        (getattr(args, "cache_dir", None) or Path("~/.cache/athenaeum"))
+        .expanduser()
+        .resolve()
+    )
     extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
     cache_dir.mkdir(parents=True, exist_ok=True)
     try:
