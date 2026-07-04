@@ -355,3 +355,71 @@ def test_split_blocks_recovers_from_unclosed_fence_before_next_block(
     by_name = {pm.merge_target_name: pm for pm in pms}
     assert set(by_name) == {"malformed-a", "well-formed-b"}
     assert by_name["well-formed-b"].draft_merged_body == "well-formed body"
+
+
+def test_scan_fence_state_shared_by_split_and_parse_block(tmp_path: Path) -> None:
+    """``_scan_fence_state`` is the single source of truth for fence
+    open/close transitions, used identically by ``_split_blocks`` and
+    ``_parse_block`` (issue #292).
+    """
+    from athenaeum.pending_merges import _scan_fence_state
+
+    assert _scan_fence_state("plain text", 0) == 0
+    assert _scan_fence_state("```markdown", 0) == 3
+    assert _scan_fence_state("still open", 3) == 3
+    assert _scan_fence_state("```", 3) == 0
+    # A four-backtick opener requires a four-backtick closer.
+    assert _scan_fence_state("````markdown", 0) == 4
+    assert _scan_fence_state("```", 4) == 4
+    assert _scan_fence_state("````", 4) == 0
+
+
+def test_split_blocks_nested_fence_of_different_length_survives(
+    tmp_path: Path,
+) -> None:
+    """A Draft body that embeds its own fenced snippet (e.g. documenting
+    a shell command) must not have that inner fence mistaken for the
+    outer ```markdown fence's closer, as long as the inner fence uses a
+    different backtick-run length — the documented convention (#292).
+    """
+    merges = tmp_path / "_pending_merges.md"
+    src_a = tmp_path / "feedback_nested_a.md"
+    src_b = tmp_path / "feedback_nested_b.md"
+    _write_source(src_a, name="nested_a")
+    _write_source(src_b, name="nested_b")
+
+    draft_body = (
+        "Run this to check status:\n"
+        "\n"
+        "````bash\n"
+        "echo done\n"
+        "````\n"
+        "\n"
+        "More content after the nested fence."
+    )
+
+    write_pending_merge(
+        merges,
+        merge_target_name="nested-fence-merge",
+        sources=[str(src_a), str(src_b)],
+        rationale="draft embeds a four-backtick fenced snippet",
+        draft_merged_body=draft_body,
+        confidence=0.85,
+    )
+
+    from athenaeum.pending_merges import list_pending_merges, parse_pending_merges
+
+    pms = parse_pending_merges(merges)
+    assert len(pms) == 1
+    assert pms[0].draft_merged_body == draft_body
+
+    listed = list_pending_merges(merges)
+    assert len(listed) == 1
+    assert listed[0]["draft_merged_body"] == draft_body
+
+    pm_id = pms[0].id
+    result = resolve_merge(merges, pm_id, "approve")
+    assert result["ok"] is True, result
+
+    target = tmp_path / "nested-fence-merge.md"
+    assert target.read_text(encoding="utf-8") == draft_body
