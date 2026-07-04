@@ -135,6 +135,15 @@ def tier1_programmatic_match(
 # Tier 2 — Classification (fast LLM)
 # ---------------------------------------------------------------------------
 
+# Post-filter safety net (issue #296): reject classified entity names that
+# are internal structural/placeholder labels (e.g. "Member 19", "Member a",
+# "Item 2") rather than real names. These labels are used elsewhere in the
+# pipeline (contradictions.py / resolutions.py) to disambiguate clustered
+# snippets within a single LLM call and are never meant to leave that
+# round-trip — if raw text containing one re-enters intake, the classifier
+# has no way to know it's a placeholder without this guard.
+_PLACEHOLDER_LABEL_RE = re.compile(r"^(member|person|item|entry)\s+[a-z0-9]+$", re.IGNORECASE)
+
 CLASSIFY_SYSTEM = """You are a knowledge librarian assistant. You analyze raw observation text
 and extract structured entity information.
 
@@ -154,6 +163,10 @@ Rules:
   A passing mention ("I talked to Bob") is not enough — there must be meaningful
   information worth recording.
 - Do NOT extract the same entity that's already in the "already matched" list.
+- Never extract structural or placeholder labels (e.g. "Member 1", "Member A",
+  "Item 2", "Entry B") as entities — these are internal disambiguators used
+  elsewhere in the pipeline, not real names, unless the surrounding text
+  independently corroborates a real named individual or thing.
 - For each entity, classify: name, type, tags, access level.
 - If the raw text is purely procedural (build logs, error traces, CI output)
   with no entity-worthy content, return an empty array."""
@@ -312,6 +325,14 @@ def parse_tier2_entities(
     for item in items:
         if not isinstance(item, dict) or not item.get("name"):
             continue
+        if _PLACEHOLDER_LABEL_RE.match(item["name"].strip()):
+            log.warning(
+                "Classification returned a structural/placeholder label as "
+                "an entity name, dropping: %r (source %s)",
+                item["name"],
+                ref,
+            )
+            continue
         entity_type = item.get("entity_type", "reference")
         if entity_type not in valid_types:
             entity_type = "reference"
@@ -386,6 +407,13 @@ Rules:
 - Preserve all existing content
 - Add new information in the appropriate section
 - Add footnotes for new claims, citing the source
+- Before adding a new bullet, check whether the new observation merely
+  re-confirms a fact already stated in the existing content (a repeat
+  observation, re-confirmation, or restatement with no new information).
+  If so, do NOT append a new near-duplicate bullet (e.g. "confirmed again",
+  "confirmed once more") — instead add the new source as an additional
+  footnote citation on the EXISTING bullet, or skip the addition entirely
+  if the fact is already adequately cited.
 - If the new observation contradicts existing content:
   - Factual contradiction (verifiable fact): keep the more reliable source, note the discrepancy
   - Contextual difference (opinions, preferences): capture both with context
