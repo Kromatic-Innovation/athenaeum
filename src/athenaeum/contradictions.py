@@ -151,6 +151,11 @@ def _build_user_message(members: list[AutoMemoryFile]) -> str:
     for i, am in enumerate(members, start=1):
         ref = _member_ref(am)
         snippet = _member_snippet(am)
+        # "Member N" is a scratch label scoped to this one prompt/response
+        # round-trip. If raw text containing it ever re-enters intake,
+        # tiers._PLACEHOLDER_LABEL_RE is the safety net that stops it being
+        # classified as a real entity (#296) — keep that regex in sync if
+        # this label format changes.
         lines.append(f"## Member {i}: {ref}")
         lines.append("<memory>")
         lines.append(snippet)
