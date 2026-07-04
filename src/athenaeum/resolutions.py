@@ -916,6 +916,11 @@ def _build_user_message(
     for label, am, passage in zip(labels, flagged, passages):
         source_str, field_sources = _read_member_sources(am)
         meta, body = _read_member_meta(am)
+        # "Member a/b" is a scratch label scoped to this one prompt/response
+        # round-trip. If raw text containing it ever re-enters intake,
+        # tiers._PLACEHOLDER_LABEL_RE is the safety net that stops it being
+        # classified as a real entity (#296) — keep that regex in sync if
+        # this label format changes.
         lines.append(f"## Member {label}: {am.origin_scope}/{am.path.name}")
         lines.append(f"source: {source_str}")
         # Timestamps + originSessionId — omit cleanly when absent.
