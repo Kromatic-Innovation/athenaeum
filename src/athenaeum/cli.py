@@ -326,6 +326,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Knowledge directory (default: ~/knowledge)",
     )
 
+    # ingest-merges command (issue #299) — move resolved (`[x]`) blocks out
+    # of `wiki/_pending_merges.md` into `_pending_merges_archive.md`, mirroring
+    # ingest-answers for the questions sidecar. Idempotent — safe to run from
+    # a scheduler.
+    ingest_merges_parser = subparsers.add_parser(
+        "ingest-merges",
+        help="Archive resolved pending merges from wiki/_pending_merges.md",
+    )
+    ingest_merges_parser.add_argument(
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+
     # reresolve-questions command (issue #188) — re-run the resolver on OPEN,
     # PROPOSAL-LESS pending questions so a prior cap-hit / offline escalation
     # self-heals. Budget-aware + idempotent; offline (no key) is a no-op.
@@ -614,6 +629,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ingest-answers":
         return _cmd_ingest_answers(args)
+
+    if args.command == "ingest-merges":
+        return _cmd_ingest_merges(args)
 
     if args.command == "reresolve-questions":
         return _cmd_reresolve_questions(args)
@@ -1109,6 +1127,38 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
         return 2
 
     print(f"Ingested {count} answered question(s).")
+    return 0
+
+
+def _cmd_ingest_merges(args: argparse.Namespace) -> int:
+    """Archive resolved blocks from `wiki/_pending_merges.md` (issue #299).
+
+    See :func:`athenaeum.pending_merges.ingest_resolved_merges` for the
+    semantics. Mirrors :func:`_cmd_ingest_answers`'s CLI shape.
+    """
+    from athenaeum.pending_merges import ingest_resolved_merges
+
+    target = args.path.expanduser().resolve()
+    if not target.exists():
+        print(f"Knowledge directory not found: {target}", file=sys.stderr)
+        print(
+            f"Run 'athenaeum init --path {args.path}' first, then retry.",
+            file=sys.stderr,
+        )
+        return 1
+
+    merges_path = target / "wiki" / "_pending_merges.md"
+
+    try:
+        count = ingest_resolved_merges(merges_path)
+    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+        print(
+            f"Fatal error ingesting merges ({type(exc).__name__}): {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"Archived {count} resolved merge(s).")
     return 0
 
 

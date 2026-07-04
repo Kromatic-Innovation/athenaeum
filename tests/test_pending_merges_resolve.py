@@ -357,6 +357,138 @@ def test_split_blocks_recovers_from_unclosed_fence_before_next_block(
     assert by_name["well-formed-b"].draft_merged_body == "well-formed body"
 
 
+def test_ingest_resolved_merges_archives_and_is_idempotent(tmp_path: Path) -> None:
+    """Issue #299: resolved blocks move to the archive on first run; a
+    second run with no new resolutions is a no-op (mirrors
+    ``answers.ingest_answers``'s idempotency contract).
+    """
+    from athenaeum.pending_merges import ingest_resolved_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    merges.write_text(
+        "# Pending Merges\n\n"
+        '## [2026-05-29] Merge: "resolved-one"\n'
+        "- [x] Approve this merge? Sources: a, b\n\n"
+        "**Rationale**: r\n**Sources**:\n- a\n- b\n"
+        "**Confidence**: 0.90\n**Draft**:\n```markdown\nbody\n```\n\n"
+        "**Decision**: approve\n\n"
+        "---\n\n"
+        '## [2026-06-01] Merge: "still-open"\n'
+        "- [ ] Approve this merge? Sources: c, d\n\n"
+        "**Rationale**: r2\n**Sources**:\n- c\n- d\n"
+        "**Confidence**: 0.80\n**Draft**:\n```markdown\nbody2\n```\n",
+        encoding="utf-8",
+    )
+
+    count = ingest_resolved_merges(merges)
+    assert count == 1
+
+    primary = merges.read_text(encoding="utf-8")
+    assert "resolved-one" not in primary
+    assert "still-open" in primary
+
+    archive = tmp_path / "_pending_merges_archive.md"
+    assert archive.exists()
+    assert "resolved-one" in archive.read_text(encoding="utf-8")
+
+    # Idempotent: re-running with nothing newly resolved archives nothing.
+    count_again = ingest_resolved_merges(merges)
+    assert count_again == 0
+    assert "still-open" in merges.read_text(encoding="utf-8")
+
+
+def test_ingest_resolved_merges_archives_rejected_block_with_note(
+    tmp_path: Path,
+) -> None:
+    """A ``reject``-resolved block (with a **Note**:) archives the same way
+    as an ``approve``-resolved one — the prior test only exercised approve.
+    """
+    from athenaeum.pending_merges import ingest_resolved_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    merges.write_text(
+        "# Pending Merges\n\n"
+        '## [2026-05-29] Merge: "rejected-one"\n'
+        "- [x] Approve this merge? Sources: a, b\n\n"
+        "**Rationale**: r\n**Sources**:\n- a\n- b\n"
+        "**Confidence**: 0.90\n**Draft**:\n```markdown\nbody\n```\n\n"
+        "**Decision**: reject\n"
+        "**Note**: duplicate of an unrelated topic\n",
+        encoding="utf-8",
+    )
+
+    count = ingest_resolved_merges(merges)
+    assert count == 1
+    assert "rejected-one" not in merges.read_text(encoding="utf-8")
+
+    archived = (tmp_path / "_pending_merges_archive.md").read_text(encoding="utf-8")
+    assert "rejected-one" in archived
+    assert "**Decision**: reject" in archived
+    assert "duplicate of an unrelated topic" in archived
+
+
+def test_ingest_resolved_merges_newest_archived_first(tmp_path: Path) -> None:
+    """A second run's newly-archived block is prepended above the first
+    run's archived block — the archive's documented newest-first contract.
+    """
+    from athenaeum.pending_merges import ingest_resolved_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    archive = tmp_path / "_pending_merges_archive.md"
+
+    def _resolved_block(name: str) -> str:
+        return (
+            f'## [2026-05-29] Merge: "{name}"\n'
+            "- [x] Approve this merge? Sources: a, b\n\n"
+            "**Rationale**: r\n**Sources**:\n- a\n- b\n"
+            "**Confidence**: 0.90\n**Draft**:\n```markdown\nbody\n```\n\n"
+            "**Decision**: approve\n"
+        )
+
+    merges.write_text("# Pending Merges\n\n" + _resolved_block("first-round") + "\n")
+    assert ingest_resolved_merges(merges) == 1
+
+    merges.write_text("# Pending Merges\n\n" + _resolved_block("second-round") + "\n")
+    assert ingest_resolved_merges(merges) == 1
+
+    archived_text = archive.read_text(encoding="utf-8")
+    assert archived_text.index("second-round") < archived_text.index("first-round")
+
+
+def test_resolve_merge_then_ingest_end_to_end(tmp_path: Path) -> None:
+    """Real producer→consumer contract: ``resolve_merge``'s own
+    ``_rewrite_block_resolved`` output (not a hand-crafted approximation)
+    must be exactly what ``ingest_resolved_merges`` recognizes as resolved.
+    """
+    merges = tmp_path / "_pending_merges.md"
+    src_a = tmp_path / "feedback_e2e_a.md"
+    src_b = tmp_path / "feedback_e2e_b.md"
+    _write_source(src_a, name="e2e_a")
+    _write_source(src_b, name="e2e_b")
+
+    write_pending_merge(
+        merges,
+        merge_target_name="e2e-merge",
+        sources=[str(src_a), str(src_b)],
+        rationale="end to end",
+        draft_merged_body="Merged body.",
+        confidence=0.9,
+    )
+    from athenaeum.pending_merges import parse_pending_merges
+
+    pm_id = parse_pending_merges(merges)[0].id
+    result = resolve_merge(merges, pm_id, "approve")
+    assert result["ok"] is True, result
+
+    from athenaeum.pending_merges import ingest_resolved_merges
+
+    count = ingest_resolved_merges(merges)
+    assert count == 1
+    assert "e2e-merge" not in merges.read_text(encoding="utf-8")
+    archive = tmp_path / "_pending_merges_archive.md"
+    assert "e2e-merge" in archive.read_text(encoding="utf-8")
+
+
 def test_scan_fence_state_transitions() -> None:
     """``_scan_fence_state`` is the single source of truth for fence
     open/close transitions, used identically by ``_split_blocks`` and
