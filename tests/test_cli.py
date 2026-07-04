@@ -550,6 +550,77 @@ class TestIngestAnswers:
         assert (wiki / "_pending_questions_archive.md").exists()
 
 
+class TestIngestMerges:
+    """`athenaeum ingest-merges` subcommand (issue #299).
+
+    ``ingest_resolved_merges`` existed in ``pending_merges.py`` with zero
+    callers and zero test coverage — nothing ever archived a resolved merge
+    block, which is why ``_pending_merges.md`` grew unbounded in production
+    (5MB/67K lines, 15 of 40 blocks already decided). This wires it up.
+    """
+
+    def test_missing_knowledge_dir_returns_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = main(["ingest-merges", "--path", str(tmp_path / "nope")])
+        assert rc == 1
+        assert "Knowledge directory not found" in capsys.readouterr().err
+
+    def test_noop_on_empty_pending_file(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tmp_path / "wiki").mkdir()
+        rc = main(["ingest-merges", "--path", str(tmp_path)])
+        assert rc == 0
+        assert "Archived 0" in capsys.readouterr().out
+
+    def test_archives_resolved_block(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "_pending_merges.md").write_text(
+            "# Pending Merges\n\n"
+            '## [2026-05-29] Merge: "acme-corp"\n'
+            "- [x] Approve this merge? Sources: a.md, b.md\n\n"
+            "**Rationale**: dup pages\n"
+            "**Sources**:\n- a.md\n- b.md\n"
+            "**Confidence**: 0.90\n"
+            "**Draft**:\n```markdown\nMerged body.\n```\n\n"
+            "**Decision**: approve\n"
+        )
+        rc = main(["ingest-merges", "--path", str(tmp_path)])
+        assert rc == 0
+        assert "Archived 1" in capsys.readouterr().out
+        archive = wiki / "_pending_merges_archive.md"
+        assert archive.exists()
+        assert "acme-corp" in archive.read_text(encoding="utf-8")
+        # Resolved block no longer sits in the live/primary file.
+        assert "acme-corp" not in (wiki / "_pending_merges.md").read_text(
+            encoding="utf-8"
+        )
+
+    def test_leaves_unresolved_block_in_place(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "_pending_merges.md").write_text(
+            "# Pending Merges\n\n"
+            '## [2026-06-01] Merge: "still-open"\n'
+            "- [ ] Approve this merge? Sources: c.md, d.md\n\n"
+            "**Rationale**: dup pages\n"
+            "**Sources**:\n- c.md\n- d.md\n"
+            "**Confidence**: 0.80\n"
+            "**Draft**:\n```markdown\nDraft body.\n```\n"
+        )
+        rc = main(["ingest-merges", "--path", str(tmp_path)])
+        assert rc == 0
+        assert "Archived 0" in capsys.readouterr().out
+        assert "still-open" in (wiki / "_pending_merges.md").read_text(encoding="utf-8")
+        assert not (wiki / "_pending_merges_archive.md").exists()
+
+
 class TestPeopleCommand:
     """Frontmatter-only person filter — deterministic, no LLM, no embeddings."""
 
