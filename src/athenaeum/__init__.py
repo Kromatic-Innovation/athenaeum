@@ -9,11 +9,12 @@ etc.) — see the CLI documentation in ``README.md`` and ``athenaeum --help``
 for the full subcommand list. Internal modules (``contradictions``,
 ``merge``, ``clusters``, ``dedupe``, ``repair``, ``answers``,
 ``provenance``, ``resolutions``, ``json_utils``, ``retire``, ``owner``,
-``transcript_verify``) are importable but not part of the stable
-public surface; their signatures may change between minor releases.
+``transcript_verify``, ``wiki_dedupe``) are importable but not part of
+the stable public surface; their signatures may change between minor
+releases.
 """
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 from athenaeum.init import init_knowledge_dir
 from athenaeum.librarian import discover_raw_files, process_one, rebuild_index, run
