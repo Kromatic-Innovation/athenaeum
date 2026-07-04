@@ -28,13 +28,21 @@ _WARNING_PREFIX = (
 # or plausible in raw intake. Kept as separate compiled patterns (rather
 # than one alternation) so a new shape can be added without touching the
 # others' matching logic.
+#
+# Deliberately NOT included: a bare ``resolved_at:`` frontmatter-style
+# key. `answers.py::_render_answer_raw_file` writes exactly that key on
+# every legitimately-resolved question's raw intake file (`raw/answers/
+# {ts}-{slug}.md`), which flows back through this same pipeline on the
+# next run — flagging it would label athenaeum's own honest output as an
+# unverified self-claim on every single resolved answer, which is a
+# guaranteed false positive with no adversarial signal (a real forged
+# claim gains nothing by using a frontmatter key our own writer already
+# uses innocuously). The `**Proposed resolution**:`/`**Decision**:`
+# patterns below target the actual spoofable resolver output vocabulary.
 _SELF_RESOLVING_PATTERNS: tuple[re.Pattern[str], ...] = (
     # "Human-confirmed (Tristan, 2026-07-02)" / "Agent-ratified (...)" —
     # any "<word>-confirmed/-ratified/-verified (...)" self-claim.
-    re.compile(r"\b[\w]+-(?:confirmed|ratified|verified|approved)\s*\([^)]*\)", re.IGNORECASE),
-    # A raw doc embedding the resolver's own frontmatter-style key,
-    # spoofing having already gone through resolution.
-    re.compile(r"^[ \t]*resolved_at[ \t]*:.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"\b\w+-(?:confirmed|ratified|verified|approved)\s*\([^)]*\)", re.IGNORECASE),
     # A raw doc embedding the resolver's own rendered output keys
     # (resolutions.py's render_proposal_block / pending_merges.py's
     # **Decision**:), spoofing an already-adjudicated verdict.
