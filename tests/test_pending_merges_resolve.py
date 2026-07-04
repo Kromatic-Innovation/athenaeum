@@ -357,7 +357,7 @@ def test_split_blocks_recovers_from_unclosed_fence_before_next_block(
     assert by_name["well-formed-b"].draft_merged_body == "well-formed body"
 
 
-def test_scan_fence_state_shared_by_split_and_parse_block(tmp_path: Path) -> None:
+def test_scan_fence_state_transitions() -> None:
     """``_scan_fence_state`` is the single source of truth for fence
     open/close transitions, used identically by ``_split_blocks`` and
     ``_parse_block`` (issue #292).
@@ -381,6 +381,11 @@ def test_split_blocks_nested_fence_of_different_length_survives(
     a shell command) must not have that inner fence mistaken for the
     outer ```markdown fence's closer, as long as the inner fence uses a
     different backtick-run length — the documented convention (#292).
+    This pins the convention's round-trip behavior post-refactor; the
+    #292 deliverable itself is the shared helper (previous test) that
+    keeps ``_split_blocks``/``_parse_block`` from re-diverging, not new
+    nesting capability — exact-length closing already tolerated a
+    different-length nested fence before this refactor.
     """
     merges = tmp_path / "_pending_merges.md"
     src_a = tmp_path / "feedback_nested_a.md"

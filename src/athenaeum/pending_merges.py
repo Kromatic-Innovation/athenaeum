@@ -86,9 +86,10 @@ def _scan_fence_state(line: str, fence_len: int) -> int:
     matches the opening fence's length (not CommonMark's "at least as
     many" rule). This lets a Draft body nest its own fenced snippet by
     opening it with a *different* backtick-run length than the
-    enclosing ```markdown fence (e.g. four backticks for an inner
-    example fenced with three) without prematurely closing the outer
-    fence — see the module docstring's nested-fence convention.
+    enclosing ```markdown fence (e.g. a four-backtick inner fence
+    inside the three-backtick outer fence) without prematurely closing
+    the outer fence — see the module docstring's nested-fence
+    convention.
     """
     stripped = line.strip()
     if fence_len:
