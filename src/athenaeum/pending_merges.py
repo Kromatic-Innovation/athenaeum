@@ -34,6 +34,16 @@ The human approves by:
 On the next ``athenaeum ingest-answers`` run (or a dedicated
 ``ingest-merges`` invocation), approved/rejected blocks are moved to
 ``_pending_merges_archive.md``.
+
+Nested fences in a Draft body
+------------------------------
+
+A Draft body is written between a ```` ```markdown ```` opener and a
+bare ```` ``` ```` closer (three backticks). If the draft content itself
+needs a fenced snippet (e.g. documenting a shell command), that inner
+fence MUST use a different backtick-run length than three — four
+backticks (` ```` `) by convention — so it cannot be mistaken for the
+outer fence's closer. See :func:`_scan_fence_state` (#292).
 """
 
 from __future__ import annotations
@@ -56,6 +66,39 @@ _HEADER_RE = re.compile(
     r"^## \[(?P<date>[^\]]+)\] Merge: \"" r"(?P<target>(?:[^\"\\]|\\.)*)" r"\"$"
 )
 _CHECKBOX_RE = re.compile(r"^- \[(?P<state>[ xX])\]\s*(?P<question>.*)$")
+
+# ```markdown fence-opener / bare-fence-closer, shared by _split_blocks and
+# _parse_block (#292) so the two block-boundary state machines can't diverge
+# on what counts as "inside a fenced Draft body".
+_FENCE_OPEN_RE = re.compile(r"^(?P<fence>`{3,})markdown$")
+_FENCE_CLOSE_RE = re.compile(r"^(?P<fence>`{3,})$")
+
+
+def _scan_fence_state(line: str, fence_len: int) -> int:
+    """Return the updated open-fence backtick-length after ``line``.
+
+    ``fence_len`` is the backtick count of the currently open
+    ```markdown fence, or ``0`` when no fence is open. Used identically
+    by :func:`_split_blocks` and :func:`_parse_block` so a Draft body's
+    fence boundaries are recognized the same way in both places.
+
+    A fence only closes on a bare-backtick line whose length EXACTLY
+    matches the opening fence's length (not CommonMark's "at least as
+    many" rule). This lets a Draft body nest its own fenced snippet by
+    opening it with a *different* backtick-run length than the
+    enclosing ```markdown fence (e.g. a four-backtick inner fence
+    inside the three-backtick outer fence) without prematurely closing
+    the outer fence — see the module docstring's nested-fence
+    convention.
+    """
+    stripped = line.strip()
+    if fence_len:
+        close_match = _FENCE_CLOSE_RE.match(stripped)
+        if close_match and len(close_match.group("fence")) == fence_len:
+            return 0
+        return fence_len
+    open_match = _FENCE_OPEN_RE.match(stripped)
+    return len(open_match.group("fence")) if open_match else 0
 
 
 @dataclass
@@ -139,19 +182,21 @@ def _split_blocks(text: str) -> list[str]:
 
     A block's ``**Draft**:`` field is a fenced ```` ```markdown ... ``` ````
     section whose CONTENTS may legitimately contain bare ``---`` lines
-    (YAML frontmatter) or ``## `` subheadings. While inside that fence,
-    lines are never treated as block/paragraph delimiters — they are
-    always appended as content, mirroring the fence-tracking already
-    done downstream in :func:`_parse_block`.
+    (YAML frontmatter), ``## `` subheadings, or a nested fenced snippet
+    (see the module docstring). While inside that fence, lines are never
+    treated as block/paragraph delimiters — they are always appended as
+    content. Fence tracking is shared with :func:`_parse_block` via
+    :func:`_scan_fence_state` so the two can't diverge (#292).
     """
     blocks: list[str] = []
     current: list[str] = []
-    in_fence = False
+    fence_len = 0
     for line in text.splitlines():
         stripped = line.strip()
-        if in_fence:
-            if stripped == "```":
-                in_fence = False
+        new_fence_len = _scan_fence_state(line, fence_len)
+        if fence_len:
+            if new_fence_len == 0:
+                fence_len = 0
                 if current:
                     current.append(line)
                 continue
@@ -168,7 +213,7 @@ def _split_blocks(text: str) -> list[str]:
                     "block header %r; recovering block boundary",
                     line[:80],
                 )
-                in_fence = False
+                fence_len = 0
                 if current:
                     blocks.append("\n".join(current).rstrip())
                 current = [line]
@@ -176,8 +221,8 @@ def _split_blocks(text: str) -> list[str]:
             if current:
                 current.append(line)
             continue
-        if stripped == "```markdown":
-            in_fence = True
+        if new_fence_len:
+            fence_len = new_fence_len
             if current:
                 current.append(line)
             continue
@@ -192,7 +237,7 @@ def _split_blocks(text: str) -> list[str]:
         else:
             if current:
                 current.append(line)
-    if in_fence:
+    if fence_len:
         log.warning(
             "pending_merges: reached end of file with an unclosed "
             "```markdown fence in the last block; flushing anyway"
@@ -237,20 +282,21 @@ def _parse_block(block_text: str) -> PendingMerge | None:
 
     in_sources = False
     in_draft = False
-    in_fence = False
+    fence_len = 0
 
     for raw_line in lines[cb_idx + 1 :]:
         s = raw_line.strip()
         if in_draft:
-            if not in_fence and s == "```markdown":
-                in_fence = True
-                continue
-            if in_fence and s == "```":
-                in_fence = False
-                in_draft = False
-                continue
-            if in_fence:
+            new_fence_len = _scan_fence_state(raw_line, fence_len)
+            if fence_len:
+                if new_fence_len == 0:
+                    fence_len = 0
+                    in_draft = False
+                    continue
                 draft_lines.append(raw_line)
+                continue
+            if new_fence_len:
+                fence_len = new_fence_len
                 continue
             # Fence opened with no leading marker — accept any content
             # until the next ``**Key**:`` line or block end.
@@ -277,7 +323,7 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         if s.startswith("**Draft**:"):
             in_sources = False
             in_draft = True
-            in_fence = False
+            fence_len = 0
             continue
         if s.startswith("**Decision**:"):
             in_sources = False
