@@ -188,6 +188,25 @@ entities (default cosine cutoff `0.85`, override with `--threshold`). It
 available it degrades to an empty report rather than failing.
 
 ```bash
+# Cluster compiled wiki pages against each other and propose merges.
+athenaeum dedupe wiki-pages
+athenaeum dedupe wiki-pages --dry-run --threshold 0.6
+```
+
+`dedupe wiki-pages` clusters already-compiled concept/reference/principle
+`wiki/*.md` entity pages by topic/embedding similarity (issue #290) —
+complementing the raw-intake clustering that runs during `athenaeum run`.
+True duplicates are routed through the existing `wiki/_pending_merges.md` /
+`resolve_merge` approval flow (never auto-applied). Writing a proposal is
+idempotent — rerunning for a source set already proposed is a no-op.
+`--dry-run` previews without writing; `--threshold` overrides
+`librarian.cluster_threshold` (default `0.55`, the same cutoff the raw
+auto-memory cluster pass uses). `athenaeum run` also runs this pass
+automatically whenever `wiki/` exists — there is currently no toggle to
+opt out of the run-embedded pass; failures are logged (`wiki-page dedup
+pass failed; continuing run`) and non-fatal to the run.
+
+```bash
 # Dry-run (default): print the kill-list + retained-list, change nothing.
 athenaeum auto-memory prune
 # Apply: git rm the kill-list in one commit and rebuild the recall index.
