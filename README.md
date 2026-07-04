@@ -207,6 +207,18 @@ opt out of the run-embedded pass; failures are logged (`wiki-page dedup
 pass failed; continuing run`) and non-fatal to the run.
 
 ```bash
+# Archive resolved (approved/rejected) blocks out of the live sidecar.
+athenaeum ingest-merges --path ~/knowledge
+```
+
+`resolve_merge` does **not** archive on its own — like `resolve_question`,
+it only flips the checkbox in place. Run `ingest-merges` (issue #299) to
+move every resolved block out of `wiki/_pending_merges.md` into
+`wiki/_pending_merges_archive.md` (newest-first, append-only), keeping the
+live sidecar limited to genuinely open proposals. Idempotent — safe to run
+from a scheduler.
+
+```bash
 # Dry-run (default): print the kill-list + retained-list, change nothing.
 athenaeum auto-memory prune
 # Apply: git rm the kill-list in one commit and rebuild the recall index.

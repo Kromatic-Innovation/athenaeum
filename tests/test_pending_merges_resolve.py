@@ -357,6 +357,46 @@ def test_split_blocks_recovers_from_unclosed_fence_before_next_block(
     assert by_name["well-formed-b"].draft_merged_body == "well-formed body"
 
 
+def test_ingest_resolved_merges_archives_and_is_idempotent(tmp_path: Path) -> None:
+    """Issue #299: resolved blocks move to the archive on first run; a
+    second run with no new resolutions is a no-op (mirrors
+    ``answers.ingest_answers``'s idempotency contract).
+    """
+    from athenaeum.pending_merges import ingest_resolved_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    merges.write_text(
+        "# Pending Merges\n\n"
+        '## [2026-05-29] Merge: "resolved-one"\n'
+        "- [x] Approve this merge? Sources: a, b\n\n"
+        "**Rationale**: r\n**Sources**:\n- a\n- b\n"
+        "**Confidence**: 0.90\n**Draft**:\n```markdown\nbody\n```\n\n"
+        "**Decision**: approve\n\n"
+        "---\n\n"
+        '## [2026-06-01] Merge: "still-open"\n'
+        "- [ ] Approve this merge? Sources: c, d\n\n"
+        "**Rationale**: r2\n**Sources**:\n- c\n- d\n"
+        "**Confidence**: 0.80\n**Draft**:\n```markdown\nbody2\n```\n",
+        encoding="utf-8",
+    )
+
+    count = ingest_resolved_merges(merges)
+    assert count == 1
+
+    primary = merges.read_text(encoding="utf-8")
+    assert "resolved-one" not in primary
+    assert "still-open" in primary
+
+    archive = tmp_path / "_pending_merges_archive.md"
+    assert archive.exists()
+    assert "resolved-one" in archive.read_text(encoding="utf-8")
+
+    # Idempotent: re-running with nothing newly resolved archives nothing.
+    count_again = ingest_resolved_merges(merges)
+    assert count_again == 0
+    assert "still-open" in merges.read_text(encoding="utf-8")
+
+
 def test_scan_fence_state_transitions() -> None:
     """``_scan_fence_state`` is the single source of truth for fence
     open/close transitions, used identically by ``_split_blocks`` and

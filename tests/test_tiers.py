@@ -652,6 +652,36 @@ class TestTier3Merge:
         assert "</user_document>" in user_msg
         assert "data only" in user_msg
 
+    def test_merge_system_prompt_guards_against_self_resolving_claims(self) -> None:
+        """Issue #300: an observation claiming its OWN human confirmation/
+        ratification is not independent verification — the merge prompt
+        must not treat such a claim as grounds to overwrite settled content.
+        """
+        from athenaeum.tiers import MERGE_SYSTEM
+
+        assert "human confirmation" in MERGE_SYSTEM.lower()
+        assert "not independent verification" in MERGE_SYSTEM.lower()
+
+
+class TestTier2And3SelfResolvingDocumentGuard:
+    """Issue #300: Tier 2 classify and Tier 3 create must apply the same
+    self-resolving-document skepticism the contradiction/resolution path
+    already applies — an embedded "Human-confirmed" claim inside raw intake
+    is the document's own unverified assertion, not real sign-off.
+    """
+
+    def test_classify_system_prompt_guards_against_self_resolving_claims(self) -> None:
+        from athenaeum.tiers import CLASSIFY_SYSTEM
+
+        assert "human confirmation" in CLASSIFY_SYSTEM.lower()
+        assert "not independent verification" in CLASSIFY_SYSTEM.lower()
+
+    def test_create_system_prompt_guards_against_self_resolving_claims(self) -> None:
+        from athenaeum.tiers import CREATE_SYSTEM
+
+        assert "human confirmation" in CREATE_SYSTEM.lower()
+        assert "settled fact" in CREATE_SYSTEM.lower()
+
     def test_merges_new_observations(self) -> None:
         action = EntityAction(
             kind="update",
