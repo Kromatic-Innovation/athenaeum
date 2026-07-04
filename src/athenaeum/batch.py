@@ -66,6 +66,7 @@ from athenaeum.models import (
     render_frontmatter,
 )
 from athenaeum.schemas import validate_wiki_meta
+from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
     parse_tier2_entities,
     parse_tier3_merge,
@@ -321,6 +322,14 @@ def process_batch_run(
                 else:
                     log.info("  T1 match (old format, skip): %s → %s", name, fpath.name)
                     st.skipped.append(name)
+
+            # Deterministic self-resolving-document guard (#300 follow-up,
+            # #304): flag embedded self-confirmation claims BEFORE the
+            # tier2 request is assembled, mirroring the sync path in
+            # librarian.process_one (see the longer comment there for the
+            # disk-vs-downstream-wiki persistence distinction). Mutates
+            # only this in-memory RawFile's cached content.
+            raw._content = flag_self_resolving_claims(raw.content)
 
             # Empty content short-circuits without an API call, exactly
             # like tier2_classify's early return on the sync path.
