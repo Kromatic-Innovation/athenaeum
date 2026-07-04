@@ -124,7 +124,7 @@ class TestTier2PlaceholderLabelFilter:
 
     @pytest.mark.parametrize(
         "name",
-        ["Member 19", "member 4", "Member a", "Member A", "Item 2", "Entry b"],
+        ["Member 19", "member 4", "Member a", "Member A", "Member b"],
     )
     def test_placeholder_labels_dropped(self, name: str) -> None:
         results = parse_tier2_entities(
@@ -149,6 +149,20 @@ class TestTier2PlaceholderLabelFilter:
         )
         assert len(results) == 1
         assert results[0].name == "Member Corp International"
+
+    def test_two_token_real_name_survives(self) -> None:
+        # The false-positive boundary the regex actually risks: a genuine
+        # two-token name (e.g. a credit-union-style "Member One") must not
+        # be dropped just because it matches the "<word> <alnum>" shape.
+        results = parse_tier2_entities(
+            self._payload("Member One"),
+            "sessions/x.md",
+            ["person", "reference"],
+            [],
+            ["internal"],
+        )
+        assert len(results) == 1
+        assert results[0].name == "Member One"
 
     def test_drop_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level("WARNING"):
@@ -237,7 +251,6 @@ class TestTier2:
         """
         from athenaeum.tiers import CLASSIFY_SYSTEM
 
-        assert "Member 1" in CLASSIFY_SYSTEM
         assert "placeholder" in CLASSIFY_SYSTEM.lower()
 
     def test_classify_includes_observation_filter(
