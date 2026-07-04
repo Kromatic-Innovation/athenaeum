@@ -71,6 +71,7 @@ from athenaeum.models import (
     slugify,
 )
 from athenaeum.schemas import validate_wiki_meta
+from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
     tier1_programmatic_match,
     tier2_classify,
@@ -669,6 +670,18 @@ def process_one(
             "  [DRY RUN] Raw content preview: %s", raw.content[:120].replace("\n", " ")
         )
         return result
+
+    # Deterministic self-resolving-document guard (issue #300 follow-up,
+    # #304): flag embedded self-confirmation claims BEFORE any LLM stage
+    # sees the text, so the untrusted-data boundary doesn't depend on the
+    # model choosing to notice the claim itself. Mutates only this
+    # in-memory RawFile's cached content, not the raw file on disk, so
+    # each future run re-reads the real, unflagged raw file — but the
+    # flagged text DOES persist downstream into this run's wiki writes
+    # (Tier 2's own observations, and the raw.content[:2000] fallback
+    # below), by design: the warning is meant to survive into whatever
+    # Tier 3 sees, not just the classify prompt.
+    raw._content = flag_self_resolving_claims(raw.content)
 
     # --- Tier 2: Classification ---
     classified = tier2_classify(

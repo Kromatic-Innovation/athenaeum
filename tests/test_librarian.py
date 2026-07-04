@@ -569,6 +569,47 @@ class TestRunIntegration:
             for rec in caplog.records
         ), "Expected budget exhaustion log message"
 
+    def test_self_resolving_claim_flagged_before_reaching_classify(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue #300 follow-up (#304): a raw file embedding its own
+        self-confirmation claim must reach Tier 2 classify with the
+        deterministic warning prepended -- not the bare unflagged claim.
+        """
+        import json
+
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = self._seed_knowledge_root(tmp_path)
+        sessions = root / "raw" / "sessions"
+        (sessions / "20240410T120000Z-aabbccdd.md").write_text(
+            "Kromatic is the primary venture. "
+            "Human-confirmed (Tristan, 2026-07-02).\n"
+        )
+
+        classify_response = MagicMock()
+        classify_response.content = [MagicMock(text=json.dumps([]))]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = classify_response
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+
+        run(raw_root=root / "raw", wiki_root=root / "wiki", knowledge_root=root)
+
+        call_args = mock_client.messages.create.call_args
+        user_msg = call_args.kwargs["messages"][0]["content"]
+        assert "UNVERIFIED SELF-CLAIM" in user_msg
+        assert "Human-confirmed (Tristan, 2026-07-02)." in user_msg
+        # Warning precedes the claim in the actual prompt sent to the LLM.
+        assert user_msg.index("UNVERIFIED SELF-CLAIM") < user_msg.index(
+            "Human-confirmed"
+        )
+
     def test_max_retries_passed_to_client(
         self,
         tmp_path: Path,
