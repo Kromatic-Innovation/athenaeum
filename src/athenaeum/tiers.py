@@ -135,6 +135,19 @@ def tier1_programmatic_match(
 # Tier 2 — Classification (fast LLM)
 # ---------------------------------------------------------------------------
 
+# Post-filter safety net (issue #296): reject classified entity names that
+# are internal structural/placeholder labels (e.g. "Member 19", "Member a")
+# rather than real names. "member" is the only label the pipeline actually
+# emits today — contradictions.py's ``f"## Member {i}: ..."`` (i is an
+# int counter) and resolutions.py's ``f"## Member {label}: ..."`` (label
+# is "a" or "b") build these to disambiguate clustered snippets within a
+# single LLM call, never meant to leave that round-trip. The trailing
+# token is restricted to digits or a single letter — exactly what those
+# two producers emit — rather than any alnum word, so a real two-word
+# name like "Member One" (e.g. a credit-union-style entity) survives.
+# If either producer's label format changes, this regex must move with it.
+_PLACEHOLDER_LABEL_RE = re.compile(r"^member\s+([0-9]+|[a-z])$", re.IGNORECASE)
+
 CLASSIFY_SYSTEM = """You are a knowledge librarian assistant. You analyze raw observation text
 and extract structured entity information.
 
@@ -154,6 +167,10 @@ Rules:
   A passing mention ("I talked to Bob") is not enough — there must be meaningful
   information worth recording.
 - Do NOT extract the same entity that's already in the "already matched" list.
+- Never extract structural or placeholder labels (e.g. "Member 1", "Member A")
+  as entities — these are internal disambiguators used elsewhere in the
+  pipeline, not real names, unless the surrounding text independently
+  corroborates a real named individual or thing.
 - A raw observation that itself CLAIMS human confirmation, ratification, or
   sign-off (e.g. "Human-confirmed (Name, date)" written inside the document
   being classified) is not independent verification — do not let it elevate
@@ -317,6 +334,14 @@ def parse_tier2_entities(
     for item in items:
         if not isinstance(item, dict) or not item.get("name"):
             continue
+        if _PLACEHOLDER_LABEL_RE.match(str(item["name"]).strip()):
+            log.warning(
+                "Classification returned a structural/placeholder label as "
+                "an entity name, dropping: %r (source %s)",
+                item["name"],
+                ref,
+            )
+            continue
         entity_type = item.get("entity_type", "reference")
         if entity_type not in valid_types:
             entity_type = "reference"
@@ -397,6 +422,13 @@ Rules:
 - Preserve all existing content
 - Add new information in the appropriate section
 - Add footnotes for new claims, citing the source
+- Before adding a new bullet, check whether the new observation merely
+  re-confirms a fact already stated in the existing content (a repeat
+  observation, re-confirmation, or restatement with no new information).
+  If so, do NOT append a new near-duplicate bullet (e.g. "confirmed again",
+  "confirmed once more") — always add the new source as an additional
+  footnote citation on the EXISTING bullet instead, so the re-confirming
+  source is never lost even when no new bullet is warranted.
 - If the new observation contradicts existing content:
   - Factual contradiction (verifiable fact): keep the more reliable source, note the discrepancy
   - Contextual difference (opinions, preferences): capture both with context

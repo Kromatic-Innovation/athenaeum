@@ -109,6 +109,74 @@ class TestTier2OwnerRouting:
         assert results[0].entity_type == "person"
 
 
+class TestTier2PlaceholderLabelFilter:
+    """Post-filter safety net (#296): reject structural/placeholder labels
+    ("Member N", "Member a", "Item 2") the classifier may hallucinate as
+    entity names — these are internal disambiguators from
+    contradictions.py/resolutions.py prompt-building, not real names.
+    """
+
+    @staticmethod
+    def _payload(name: str) -> str:
+        return json.dumps(
+            [{"name": name, "entity_type": "person", "access": "internal", "tags": []}]
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Member 19", "member 4", "Member a", "Member A", "Member b"],
+    )
+    def test_placeholder_labels_dropped(self, name: str) -> None:
+        results = parse_tier2_entities(
+            self._payload(name),
+            "sessions/x.md",
+            ["person", "reference"],
+            [],
+            ["internal"],
+        )
+        assert results == []
+
+    def test_real_name_containing_member_word_survives(self) -> None:
+        # "Member" as part of a real proper name (e.g. a company/product)
+        # must not be dropped — the filter is anchored to the exact
+        # "<label> <alnum>" shape, not a loose substring match.
+        results = parse_tier2_entities(
+            self._payload("Member Corp International"),
+            "sessions/x.md",
+            ["person", "reference"],
+            [],
+            ["internal"],
+        )
+        assert len(results) == 1
+        assert results[0].name == "Member Corp International"
+
+    def test_two_token_real_name_survives(self) -> None:
+        # The false-positive boundary the regex actually risks: a genuine
+        # two-token name (e.g. a credit-union-style "Member One") must not
+        # be dropped just because it matches the "<word> <alnum>" shape.
+        results = parse_tier2_entities(
+            self._payload("Member One"),
+            "sessions/x.md",
+            ["person", "reference"],
+            [],
+            ["internal"],
+        )
+        assert len(results) == 1
+        assert results[0].name == "Member One"
+
+    def test_drop_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING"):
+            results = parse_tier2_entities(
+                self._payload("Member 4"),
+                "sessions/x.md",
+                ["person", "reference"],
+                [],
+                ["internal"],
+            )
+        assert results == []
+        assert any("placeholder" in rec.message.lower() for rec in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Tier 1 — Programmatic matching
 # ---------------------------------------------------------------------------
@@ -175,6 +243,15 @@ class TestTier2:
         assert "</user_document>" in user_msg
         system_msg = call_args.kwargs["system"]
         assert "untrusted user data" in system_msg
+
+    def test_classify_system_prompt_guards_against_placeholder_labels(self) -> None:
+        """Issue #296: the classify prompt must instruct the LLM not to
+        extract structural/placeholder labels ("Member 1", "Item 2") as
+        entities — the post-filter is defense in depth, not the only guard.
+        """
+        from athenaeum.tiers import CLASSIFY_SYSTEM
+
+        assert "placeholder" in CLASSIFY_SYSTEM.lower()
 
     def test_classify_includes_observation_filter(
         self,
@@ -651,6 +728,17 @@ class TestTier3Merge:
         assert "<user_document>" in user_msg
         assert "</user_document>" in user_msg
         assert "data only" in user_msg
+
+    def test_merge_system_prompt_guards_against_duplicate_reconfirmation(self) -> None:
+        """Issue #297: the merge prompt must instruct the LLM to fold a
+        re-confirming observation into an existing bullet's footnotes (or
+        skip it) rather than appending a near-duplicate "confirmed again"
+        bullet.
+        """
+        from athenaeum.tiers import MERGE_SYSTEM
+
+        assert "re-confirm" in MERGE_SYSTEM.lower()
+        assert "near-duplicate" in MERGE_SYSTEM.lower()
 
     def test_merge_system_prompt_guards_against_self_resolving_claims(self) -> None:
         """Issue #300: an observation claiming its OWN human confirmation/
