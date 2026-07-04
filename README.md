@@ -215,8 +215,10 @@ athenaeum ingest-merges --path ~/knowledge
 it only flips the checkbox in place. Run `ingest-merges` (issue #299) to
 move every resolved block out of `wiki/_pending_merges.md` into
 `wiki/_pending_merges_archive.md` (newest-first, append-only), keeping the
-live sidecar limited to genuinely open proposals. Idempotent — safe to run
-from a scheduler.
+live sidecar limited to genuinely open proposals. Idempotent — this must
+be scheduled (or run periodically); nothing else archives resolved merges,
+which is exactly how the live file grew to 5MB/67K lines in production
+before this command existed (#299).
 
 ```bash
 # Dry-run (default): print the kill-list + retained-list, change nothing.
