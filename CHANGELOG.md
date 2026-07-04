@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-04
+
+Additive public surface since 0.11.0: wiki-page dedup clustering (existing
+compiled `wiki/` entity pages are now clustered for merge proposals, not just
+raw intake) and an opt-in post-run git push, plus the pending-merges
+fence-parsing hardening that the wiki-dedup drafts depend on.
+
+### Added
+
+- **Wiki-page clustering against each other (#290).** The merge-detection
+  pass now clusters already-compiled `wiki/*.md` entity pages by
+  topic/embedding similarity, not just `raw/auto-memory/*` intake, routing
+  true duplicates through the existing `_pending_merges.md` /
+  `resolve_merge` approval flow. New `athenaeum dedupe wiki-pages` CLI
+  subcommand runs the pass standalone; `athenaeum run` also runs it
+  automatically whenever `wiki/` exists (append-only proposals, failures
+  are logged and non-fatal).
+- **Opt-in post-run `git push` (#284).** New `librarian.push_after_run`
+  config knob (default off) pushes the librarian's commits to the
+  configured remote/branch after a run completes, closing a recovery gap
+  where processed knowledge stayed local-only. Uses the ambient git
+  credential helper — no tokens handled in-process. Failures are
+  non-fatal and logged with a greppable `athenaeum-push-failed:` prefix.
+  See [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md).
+
+### Fixed
+
+- **`pending_merges.py` fence-parsing bugs (#289, #291, #292).**
+  `_split_blocks()` now tracks fence state so `---`/`## ` lines inside a
+  fenced `**Draft**:` body (YAML frontmatter, markdown subheadings) are no
+  longer mistaken for block/paragraph delimiters, and a block whose fence
+  is left unclosed no longer swallows the next block. `_split_blocks` and
+  `_parse_block` now share one `_scan_fence_state()` helper so the two
+  can't re-diverge, and a Draft body may nest its own fenced snippet using
+  a different backtick-run length than the outer fence without
+  prematurely closing it.
+
 ## [0.11.0] - 2026-06-29
 
 Additive public surface since 0.10.0 (which was stamped but never released): a
