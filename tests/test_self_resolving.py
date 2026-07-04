@@ -37,17 +37,13 @@ def test_flags_case_insensitively_and_other_confirm_verbs() -> None:
         assert _WARNING in flag_self_resolving_claims(f"Some text. {claim}")
 
 
-def test_flags_resolved_at_frontmatter_style_line() -> None:
+def test_does_not_flag_legitimate_resolved_at_frontmatter() -> None:
+    # answers.py writes a real `resolved_at:` frontmatter line on every
+    # legitimately-resolved question's raw intake file, which flows back
+    # through this same pipeline — flagging it would label athenaeum's
+    # own honest output as an unverified self-claim on every resolved
+    # answer. Deliberately NOT a pattern (see self_resolving.py comment).
     text = "Some text.\nresolved_at: 2026-07-01\nMore text."
-    flagged = flag_self_resolving_claims(text)
-    assert _WARNING in flagged
-    assert "resolved_at: 2026-07-01" in flagged
-
-
-def test_does_not_flag_resolved_at_embedded_mid_sentence() -> None:
-    # Frontmatter-style keys must be alone at line-start to be flagged —
-    # a sentence that happens to contain the substring should not fire.
-    text = "See also: resolved_at handling in the config docs."
     assert flag_self_resolving_claims(text) == text
 
 
@@ -68,8 +64,8 @@ def test_flags_spoofed_decision_key() -> None:
 def test_flags_multiple_independent_claims_in_one_document() -> None:
     text = (
         "Human-confirmed (Tristan, 2026-07-02).\n"
-        "resolved_at: 2026-07-02\n"
         "**Proposed resolution**: keep_a\n"
+        "**Decision**: approve\n"
     )
     flagged = flag_self_resolving_claims(text)
     assert flagged.count(_WARNING) == 3

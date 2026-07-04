@@ -674,9 +674,13 @@ def process_one(
     # Deterministic self-resolving-document guard (issue #300 follow-up,
     # #304): flag embedded self-confirmation claims BEFORE any LLM stage
     # sees the text, so the untrusted-data boundary doesn't depend on the
-    # model choosing to notice the claim itself. Mutates the cached
-    # content on this in-memory RawFile only — never written back to disk,
-    # so each future run re-reads the real, unflagged raw file.
+    # model choosing to notice the claim itself. Mutates only this
+    # in-memory RawFile's cached content, not the raw file on disk, so
+    # each future run re-reads the real, unflagged raw file — but the
+    # flagged text DOES persist downstream into this run's wiki writes
+    # (Tier 2's own observations, and the raw.content[:2000] fallback
+    # below), by design: the warning is meant to survive into whatever
+    # Tier 3 sees, not just the classify prompt.
     raw._content = flag_self_resolving_claims(raw.content)
 
     # --- Tier 2: Classification ---
