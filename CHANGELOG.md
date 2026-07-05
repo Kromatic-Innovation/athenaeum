@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-07-05
+
+Bug-fix-only release: guards against a real production incident (24 bogus
+"Member N" wiki entities from internal scratch labels leaking into
+classification) plus the near-duplicate reconfirmation bullets it exposed,
+an unwired sidecar-archival command, and a self-resolving-document
+injection surface. No public API changes.
+
+### Fixed
+
+- **Tier 2 classification hallucinating placeholder-label entities
+  (#296).** `CLASSIFY_SYSTEM` guardrail plus a post-filter regex in
+  `parse_tier2_entities` reject any classified name matching the exact
+  "Member N"/"Member a" shape the pipeline's own contradiction/resolution
+  prompts use as scratch labels, with a warning log on drop.
+- **Tier 3 merge accumulating near-duplicate "confirmed again" bullets
+  (#297, #302).** `MERGE_SYSTEM` now instructs folding a re-confirming
+  observation into an existing bullet's footnotes instead of appending a
+  duplicate. The `existing_body` input cap was raised from 4,000 to
+  20,000 characters so the guard isn't blind on already-bloated pages,
+  with the merge call's output budget (`max_tokens`) raised in lockstep
+  and a `stop_reason == "max_tokens"` guard that refuses to overwrite a
+  page with a truncated response, escalating for human review instead.
+- **`_pending_merges.md` growing unbounded (#299, #303).** New
+  `athenaeum ingest-merges` CLI command archives resolved
+  (`**Decision**: approve|reject`) blocks out of the live sidecar,
+  mirroring `ingest-answers`. Wired into the nightly librarian cron sweep.
+- **Self-resolving documents bypassing pipeline judgment (#300, #304).**
+  `CLASSIFY_SYSTEM`/`CREATE_SYSTEM`/`MERGE_SYSTEM` now instruct treating
+  an embedded claim of the document's own human confirmation/ratification
+  as untrusted, not independent verification. A new deterministic
+  `athenaeum.self_resolving` pre-processing pass additionally flags such
+  claims in raw intake before Tier 2 classify sees it (both the
+  synchronous and Batch API transports), as a code-level backstop
+  independent of prompt compliance.
+
 ## [0.12.0] - 2026-07-04
 
 Additive public surface since 0.11.0: wiki-page dedup clustering (existing
