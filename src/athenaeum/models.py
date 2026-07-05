@@ -327,20 +327,28 @@ def parse_valid_until(meta: dict[str, object] | None) -> date | None:
 
 
 def validity_bound_str(meta: dict[str, object] | None, key: str) -> str:
-    """Return a raw ``valid_from`` / ``valid_until`` bound as a string, or "".
+    """Return a ``valid_from`` / ``valid_until`` bound NORMALIZED to ``YYYY-MM-DD``.
 
-    Used at :class:`AutoMemoryFile` construction to store the bound in the raw
-    string form (``str`` of a YAML-parsed ``date``, or the original string —
-    including a malformed one). Re-parsing this via :func:`valid_until_expired`
-    yields the SAME result the dict-path predicate sees on ``meta`` directly, so
-    the two predicates stay in lockstep even on a bad date (both fail-open).
+    Used at :class:`AutoMemoryFile` construction to store the bound so the
+    dataclass predicate (:meth:`AutoMemoryFile.is_inactive`, which re-parses this
+    string) reaches the SAME verdict the dict predicate
+    (:func:`is_inactive_memory`) reaches parsing the raw ``meta`` value directly.
+
+    Critically, the bound is run through the SAME :func:`_coerce_iso_date` the
+    dict path uses and re-emitted as an ISO date string, rather than a naive
+    ``str(raw)``. ``str(raw)`` diverged from the dict path on two reachable YAML
+    types: a ``datetime`` (``2026-06-30 12:00:00`` → ``str`` is not
+    ``fromisoformat``-parseable → fail-open, but the dict path ``.date()``
+    honors it) and an ``int`` (``20260630`` → ``str`` parses as a bogus date,
+    but the dict path returns ``None``). Normalizing here makes both predicates
+    parse identical text and agree on ``date``/``datetime``/``int``/``str``/
+    malformed inputs. A genuinely unparseable value normalizes to ``""``
+    (fail-open — the claim stays active), matching the dict path's ``None``.
     """
     if not meta:
         return ""
-    raw = meta.get(key)
-    if raw is None or raw == "":
-        return ""
-    return str(raw)
+    coerced = _coerce_iso_date(meta.get(key))
+    return coerced.isoformat() if coerced is not None else ""
 
 
 def valid_until_expired(
