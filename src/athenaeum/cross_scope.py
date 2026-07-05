@@ -89,6 +89,7 @@ from athenaeum.models import (
     parse_refines,
     parse_superseded_by,
     parse_supersedes,
+    validity_bound_str,
 )
 
 log = logging.getLogger(__name__)
@@ -556,6 +557,9 @@ def candidate_to_auto_memory_files(
                 supersedes=supersedes,
                 superseded_by=parse_superseded_by(meta_for_markers),
                 deprecated=parse_deprecated(meta_for_markers),
+                # Issue #308: claim-level temporal validity bounds.
+                valid_from=validity_bound_str(meta_for_markers, "valid_from"),
+                valid_until=validity_bound_str(meta_for_markers, "valid_until"),
             )
         )
     return out

@@ -68,7 +68,7 @@ from athenaeum.clusters import (
 )
 from athenaeum.config import load_config
 from athenaeum.merge import derive_topic_slug, synthesize_body
-from athenaeum.models import AutoMemoryFile, parse_frontmatter
+from athenaeum.models import AutoMemoryFile, parse_frontmatter, validity_bound_str
 from athenaeum.pending_merges import write_pending_merge
 from athenaeum.search import embed_texts
 
@@ -137,6 +137,11 @@ def discover_wiki_dedupe_candidates(wiki_root: Path) -> list[AutoMemoryFile]:
                 memory_type=page_type,
                 name=name,
                 description=description,
+                # Issue #308: populate temporal bounds for consistency with the
+                # other AutoMemoryFile construction sites and to close a latent
+                # lockstep gap should this record ever reach is_inactive().
+                valid_from=validity_bound_str(meta, "valid_from"),
+                valid_until=validity_bound_str(meta, "valid_until"),
                 _content=body,
             )
         )
