@@ -354,6 +354,45 @@ def resolve_min_cluster_cohesion_scopes(config: dict[str, Any] | None) -> int:
     return default
 
 
+def resolve_lock_timeout(config: dict[str, Any] | None) -> float:
+    """Resolve the default run-lock wait (seconds) from env > yaml > 0 (#309).
+
+    The single-machine run lock (:mod:`athenaeum.runlock`) fails fast by default
+    when another ``athenaeum run`` (or other mutating command) already holds
+    ``<knowledge_root>/.athenaeum.lock``. Operators who prefer a mutating
+    command to WAIT rather than exit — e.g. a manual run overlapping the nightly
+    cron — can set a default block window::
+
+        librarian:
+          lock_timeout: 300   # seconds; 0 = fail-fast (default)
+
+    Precedence: ``ATHENAEUM_LOCK_TIMEOUT`` env, then ``librarian.lock_timeout``
+    yaml, then ``0`` (fail-fast). The per-command ``--wait`` flag overrides this.
+    No seed in ``_DEFAULTS`` (#231) so the code default stays reachable. ``bool``
+    and non-numeric / negative values fall through to 0.0.
+    """
+    env = os.environ.get("ATHENAEUM_LOCK_TIMEOUT")
+    if env is not None:
+        try:
+            value = float(env)
+        except ValueError:
+            value = 0.0
+        return value if value > 0 else 0.0
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("lock_timeout")
+            if raw is None or isinstance(raw, bool):
+                return 0.0
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return 0.0
+            if value > 0:
+                return value
+    return 0.0
+
+
 def resolve_model(
     knob: str,
     env_var: str,

@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import anthropic
 
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.fingerprint import (
     _member_key_str,
     _pair_text_from_passages,
@@ -1005,7 +1006,7 @@ def ingest_answers(
     for pq in unanswered:
         primary_parts.append(pq.raw_block)
     primary_body = "\n\n---\n\n".join(primary_parts) + "\n"
-    pending_path.write_text(primary_body, encoding="utf-8")
+    atomic_write_text(pending_path, primary_body)
 
     # Append to archive, newest-first.
     archive_path = pending_path.parent / "_pending_questions_archive.md"
@@ -1058,7 +1059,7 @@ def ingest_answers(
     else:
         combined = "# Answered Questions\n\n" + new_section + "\n"
 
-    archive_path.write_text(combined, encoding="utf-8")
+    atomic_write_text(archive_path, combined)
 
     log.info("Ingested %d pending-question answer(s) from %s", ingested, pending_path)
     return ingested
@@ -1177,7 +1178,7 @@ def resolve_by_id(pending_path: Path, question_id: str, answer: str) -> dict:
 
     primary_parts = ["# Pending Questions", *rewritten_blocks]
     primary_body = "\n\n---\n\n".join(primary_parts) + "\n"
-    pending_path.write_text(primary_body, encoding="utf-8")
+    atomic_write_text(pending_path, primary_body)
 
     return {
         "ok": True,
