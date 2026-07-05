@@ -35,8 +35,10 @@ from athenaeum._lint import _strip_self_reference
 from athenaeum._retry import TransientAPIError
 from athenaeum.clusters import (
     cluster_auto_memory_files,
+    prune_cluster_rotations,
     resolve_cluster_output_path,
     resolve_cluster_threshold,
+    resolve_rotation_retention,
     write_cluster_report,
 )
 from athenaeum.config import (
@@ -835,6 +837,23 @@ def _run_cluster_pass(
         canonical,
         timestamped,
     )
+
+    # Prune old timestamped rotations so they don't grow unbounded (#311).
+    # Debugging artifacts only (recovery is git-based); a prune failure must
+    # never abort the run.
+    if timestamped is not None:
+        retention = resolve_rotation_retention(knowledge_root, config=resolved_config)
+        try:
+            pruned = prune_cluster_rotations(output_path, keep=retention)
+            if pruned:
+                log.info(
+                    "pruned %d old cluster rotation(s) (retention=%d)",
+                    len(pruned),
+                    retention,
+                )
+        except Exception as exc:  # noqa: BLE001 — prune must not abort the run
+            log.warning("cluster rotation prune failed (non-fatal): %s", exc)
+
     return len(clusters)
 
 
