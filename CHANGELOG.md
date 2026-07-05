@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-07-05
+
+### Added
+
+- **Single-machine run lock guards overlapping mutating runs (#309).** There
+  was no concurrency guard on `athenaeum run` (or the other mutating
+  subcommands), so a nightly cron overlapping a manual run — or two sessions —
+  could race whole-file wiki writes (lost updates), interleave block appends
+  to `wiki/_pending_questions.md` / `wiki/_pending_merges.md` (corrupt block
+  structure), double-spend the per-run API-call budget, and race the
+  move-then-retire git ops. A new `athenaeum.runlock.RunLock` acquires an
+  advisory `fcntl.flock` on `<knowledge_root>/.athenaeum.lock` (carrying the
+  holder's PID / ISO-8601 timestamp / hostname for diagnostics) at the start
+  of every mutating command: `run`, `ingest-answers`, `ingest-merges`,
+  `reresolve-questions`, `rebuild-index`, `auto-memory prune --apply`,
+  `repair --apply`, and `dedupe persons --apply` / `dedupe wiki-pages`
+  (non-`--dry-run`). Read-only commands (`status`, `recall`, `serve`) and all
+  dry-runs do NOT take the lock. Default behavior is fail-fast with a message
+  naming the holder; `--wait <seconds>` blocks for the lock. `--force` breaks
+  the lock even if a process is still holding it (logging the current holder
+  first) — for overriding a live-but-hung run; a genuinely crashed run never
+  blocks, since the kernel releases the `flock` on process death. **Scope is
+  single-machine only** — no multi-machine coordination. Non-POSIX platforms
+  without `fcntl` degrade gracefully (logged warning, no lock). A new
+  `librarian.lock_timeout` knob (env `ATHENAEUM_LOCK_TIMEOUT`, default `0` =
+  fail-fast) sets the default wait window.
+- **Atomic sidecar appends (#309).** Every append/rewrite of the
+  `_pending_questions.md` / `_pending_merges.md` sidecars (and their
+  `_archive.md` siblings) now goes through `athenaeum.atomic_io.atomic_write_text`
+  — a same-directory temp file plus `os.replace`, so a crash mid-append can
+  never leave a half-written file with corrupt `---` block structure.
+  Defense-in-depth alongside the run lock.
+
 ## [0.13.1] - 2026-07-05
 
 ### Fixed
