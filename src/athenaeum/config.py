@@ -129,6 +129,57 @@ def resolve_owner(config: dict[str, Any] | None) -> dict[str, Any] | None:
     return {"uid": uid, "google_contact": google_contact, "aliases": aliases}
 
 
+def _normalize_audience_roles(values: Any) -> set[str]:
+    """Case-fold, trim, and drop empties from an iterable of role ids (#312)."""
+    if not isinstance(values, (list, tuple, set)):
+        return set()
+    return {v.strip().lower() for v in values if isinstance(v, str) and v.strip()}
+
+
+def resolve_audience(
+    config: dict[str, Any] | None,
+    cli_value: str | None = None,
+) -> set[str] | None:
+    """Resolve the serve-time read-scope audience pin (issue #312).
+
+    Returns the role set this ``serve`` / ``recall`` process is pinned to, or
+    ``None`` for the owner / default caller (FULL access — every page,
+    untagged included). ``None`` keeps existing single-user installs unchanged.
+
+    Precedence follows the repo convention CLI > env > yaml > default:
+
+    - ``cli_value`` — the ``--audience`` flag's comma-separated value.
+    - ``ATHENAEUM_AUDIENCE`` — comma-separated env var.
+    - ``serve.audience`` — a yaml list (or comma string).
+    - ``None`` — owner, unfiltered.
+
+    An explicitly EMPTY value at any tier (blank flag, ``ATHENAEUM_AUDIENCE=``,
+    empty yaml list) resolves to ``None`` = owner: to RESTRICT a caller you must
+    name at least one non-empty role. Role ids are opaque, case-folded, and
+    whitespace-trimmed; athenaeum assigns them no meaning (they map onto the
+    operator's external RBAC). No seed in ``_DEFAULTS`` (issue #231).
+    """
+    if cli_value is not None:
+        roles = _normalize_audience_roles(cli_value.split(","))
+        return roles or None
+
+    env = os.environ.get("ATHENAEUM_AUDIENCE")
+    if env is not None:
+        roles = _normalize_audience_roles(env.split(","))
+        return roles or None
+
+    if isinstance(config, dict):
+        serve_cfg = config.get("serve")
+        if isinstance(serve_cfg, dict):
+            raw = serve_cfg.get("audience")
+            if isinstance(raw, str):
+                roles = _normalize_audience_roles(raw.split(","))
+                return roles or None
+            roles = _normalize_audience_roles(raw)
+            return roles or None
+    return None
+
+
 def resolve_google_contact_keys(config: dict[str, Any] | None) -> list[str]:
     """Resolve extra Google-contact dedup join-key field-names (issue #269).
 
@@ -505,6 +556,21 @@ search_backend: fts5
 # vector:
 #   provider: chromadb
 #   collection: wiki
+
+# Serve-time read-scope audience (issue #312). Pins the MCP `serve` process
+# (and `athenaeum recall`) to a RESTRICTED read scope so a secondary agent or
+# scheduled routine can recall operational knowledge but never PII /
+# confidential / financial pages. Values are OPAQUE role/group ids the operator
+# maps onto their external RBAC (a Microsoft AD group, an app role, a routine
+# name). A restricted caller receives a page only when it is `access: open`
+# (world-readable) OR carries an `audience:` list granting one of these roles;
+# untagged and confidential/personal pages are withheld. UNSET / empty = owner
+# = full access, so existing single-user installs are unchanged. Precedence:
+# `serve --audience` flag > ATHENAEUM_AUDIENCE env > this key > owner.
+# serve:
+#   audience:
+#     - operations
+#     - voltaire
 
 # Workspace owner identity (issue #263). Designates the single canonical
 # person this knowledge base belongs to so the librarian keeps the owner a

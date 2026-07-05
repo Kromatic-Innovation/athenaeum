@@ -15,7 +15,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from athenaeum.models import parse_frontmatter, render_frontmatter
+from athenaeum.models import (
+    is_page_authorized,
+    parse_frontmatter,
+    render_frontmatter,
+)
 from athenaeum.provenance import resolve_remember_sources
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
 
@@ -74,6 +78,7 @@ def recall_search(
     search_backend: str = "keyword",
     cache_dir: Path | None = None,
     extra_roots: list[Path] | None = None,
+    caller_audience: set[str] | None = None,
 ) -> str:
     """Search the knowledge wiki for pages relevant to *query*.
 
@@ -90,6 +95,11 @@ def recall_search(
             at build time (e.g. ``raw/auto-memory``). Used here to resolve
             hit filenames of the form ``<root_name>/<relpath>`` back to
             on-disk paths when rendering snippets.
+        caller_audience: Read-scope pin for a restricted caller (issue #312).
+            ``None`` is the owner / default caller (no filtering). A non-None
+            set restricts results to pages the caller is authorized for; the
+            predicate is applied inside the backend query (Layer B) AND
+            re-checked against fresh on-disk frontmatter at render (Layer C).
 
     Returns a formatted string of matching wiki pages with relevance scores
     and content snippets.
@@ -109,6 +119,7 @@ def recall_search(
         search_backend,
         cache_dir,
         extra_roots or [],
+        caller_audience,
     )
 
 
@@ -154,6 +165,7 @@ def _recall_via_backend(
     backend_name: str,
     cache_dir: Path | None,
     extra_roots: list[Path],
+    caller_audience: set[str] | None = None,
 ) -> str:
     """Delegate recall to a registered search backend, then format results."""
     from athenaeum.search import get_backend
@@ -166,7 +178,13 @@ def _recall_via_backend(
     effective_cache = cache_dir or Path.home() / ".cache" / "athenaeum"
 
     try:
-        hits = backend.query(query, effective_cache, n=top_k, wiki_root=wiki_root)
+        hits = backend.query(
+            query,
+            effective_cache,
+            n=top_k,
+            wiki_root=wiki_root,
+            caller_audience=caller_audience,
+        )
     except NotImplementedError as exc:
         return str(exc)
 
@@ -174,9 +192,14 @@ def _recall_via_backend(
         return f"No wiki pages matched query: {query!r}"
 
     tokens = tokenize_keyword_query(query)
-    parts: list[str] = [f"Found {len(hits)} matching pages:\n"]
 
-    for rank, (filename, name, score) in enumerate(hits, 1):
+    # Render each hit, applying Layer C (issue #312): re-check the FRESH
+    # on-disk frontmatter for a restricted caller so a stale index (a page
+    # whose audience changed since the last rebuild) cannot leak a forbidden
+    # page's title, tags, snippet, OR body. Rendered blocks are collected
+    # first so the "Found N" header counts only the authorized hits.
+    blocks: list[str] = []
+    for filename, name, score in hits:
         page_path, display_prefix = _resolve_hit_path(
             filename,
             wiki_root,
@@ -184,24 +207,41 @@ def _recall_via_backend(
         )
         body = ""
         tags: str | list = "\u2014"
+        fm: dict[str, object] = {}
+        readable = False
         if page_path is not None and page_path.is_file():
             try:
                 text = page_path.read_text(encoding="utf-8")
                 fm, body = parse_frontmatter(text)
                 name = fm.get("name", name)
                 tags = fm.get("tags", "\u2014")
+                readable = True
             except (OSError, UnicodeDecodeError):
                 pass
+
+        # Layer C fail-closed: for a restricted caller, drop the hit unless the
+        # fresh frontmatter authorizes it. If we couldn't read the file we
+        # cannot verify, so withhold. Owner (caller_audience=None) is unaffected.
+        if caller_audience is not None:
+            if not readable or not is_page_authorized(fm, caller_audience):
+                continue
 
         if isinstance(tags, list):
             tags = ", ".join(tags)
         snip = _snippet(body, tokens) if body else ""
-        parts.append(
-            f"### {rank}. {name} (score: {score:.1f})\n"
+        blocks.append(
+            f"{name} (score: {score:.1f})\n"
             f"**Path:** {display_prefix}\n"
             f"**Tags:** {tags}\n\n"
             f"{snip}\n"
         )
+
+    if not blocks:
+        return f"No wiki pages matched query: {query!r}"
+
+    parts: list[str] = [f"Found {len(blocks)} matching pages:\n"]
+    for rank, block in enumerate(blocks, 1):
+        parts.append(f"### {rank}. {block}")
 
     return "\n".join(parts)
 
@@ -371,6 +411,7 @@ def create_server(
     search_backend: str = "keyword",
     cache_dir: Path | None = None,
     extra_roots: list[Path] | None = None,
+    caller_audience: set[str] | None = None,
 ) -> "FastMCP":  # noqa: F821 — lazy import
     """Create and return a configured FastMCP server instance.
 
@@ -382,6 +423,13 @@ def create_server(
         extra_roots: Additional intake roots that were indexed alongside
             the wiki. Passed through to :func:`recall_search` so raw
             intake hits resolve to their on-disk path.
+        caller_audience: Read-scope pin for this server process (issue #312).
+            ``None`` (the default) is the owner: the ``recall`` tool returns
+            every page, preserving single-user behavior. A non-None role set
+            restricts every ``recall`` call to authorized pages only. This is
+            pinned HERE by the operator's ``athenaeum serve`` invocation — it
+            is deliberately NOT a ``recall()`` tool argument, so a restricted
+            agent cannot widen its own scope by passing a different audience.
 
     Requires ``fastmcp`` to be installed (``pip install athenaeum[mcp]``).
     """
@@ -434,6 +482,7 @@ def create_server(
             search_backend=search_backend,
             cache_dir=cache_dir,
             extra_roots=extra_roots,
+            caller_audience=caller_audience,
         )
 
     @mcp.tool()
