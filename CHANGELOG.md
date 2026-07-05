@@ -7,13 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.12.1] - 2026-07-05
+## [0.13.0] - 2026-07-05
 
-Bug-fix-only release: guards against a real production incident (24 bogus
-"Member N" wiki entities from internal scratch labels leaking into
-classification) plus the near-duplicate reconfirmation bullets it exposed,
-an unwired sidecar-archival command, and a self-resolving-document
-injection surface. No public API changes.
+Additive public surface since 0.12.0: a new `athenaeum ingest-merges` CLI
+subcommand, following the 0.12.0 precedent that a new top-level subcommand
+is a minor bump. The rest of this release guards against a real production
+incident (24 bogus "Member N" wiki entities from internal scratch labels
+leaking into classification) plus the near-duplicate reconfirmation bullets
+it exposed, and hardens against a self-resolving-document injection surface.
+
+### Added
+
+- **`athenaeum ingest-merges` CLI command (#299, #303).** Archives
+  resolved (`[x]`-checked) blocks out of the live `_pending_merges.md`
+  sidecar into `_pending_merges_archive.md`, mirroring `ingest-answers`
+  for the pending-questions sidecar. Nothing else drains this file, so
+  it must be run periodically (e.g. alongside `ingest-answers` in your
+  scheduled sweep) to bound its size — without it, decided merges never
+  leave the live file, which is exactly how it grew to 5MB/67K lines in
+  production before this command existed.
 
 ### Fixed
 
@@ -30,10 +42,6 @@ injection surface. No public API changes.
   with the merge call's output budget (`max_tokens`) raised in lockstep
   and a `stop_reason == "max_tokens"` guard that refuses to overwrite a
   page with a truncated response, escalating for human review instead.
-- **`_pending_merges.md` growing unbounded (#299, #303).** New
-  `athenaeum ingest-merges` CLI command archives resolved
-  (`**Decision**: approve|reject`) blocks out of the live sidecar,
-  mirroring `ingest-answers`. Wired into the nightly librarian cron sweep.
 - **Self-resolving documents bypassing pipeline judgment (#300, #304).**
   `CLASSIFY_SYSTEM`/`CREATE_SYSTEM`/`MERGE_SYSTEM` now instruct treating
   an embedded claim of the document's own human confirmation/ratification
