@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import TypedDict
@@ -14,6 +15,8 @@ from athenaeum.config import (
 )
 from athenaeum.librarian import discover_raw_files
 from athenaeum.models import parse_frontmatter
+
+log = logging.getLogger("athenaeum")
 
 
 class StatusInfo(TypedDict):
@@ -47,13 +50,28 @@ def scan_page_sizes(
 
     Walks the same ``wiki/*.md`` set the entity count walks — skipping
     ``_``-prefixed files and non-entity pages (no frontmatter ``name``) — and
-    measures each page's UTF-8 body length in bytes. Returns
+    measures each page's UTF-8 size (frontmatter + body) in bytes. Returns
     ``(pages_warn, pages_flag)`` where each list holds ``(filename, byte_size)``
     tuples sorted largest-first. A page whose size exceeds ``flag_bytes`` lands
     only in ``pages_flag`` (not also in ``pages_warn``); a page over
-    ``warn_bytes`` but at/under ``flag_bytes`` lands in ``pages_warn``. Purely
-    observational — it reads, measures, and reports; it never modifies or logs.
+    ``warn_bytes`` but at/under ``flag_bytes`` lands in ``pages_warn``.
+
+    Guards an inverted config: if ``flag_bytes <= warn_bytes`` (which would make
+    the flag bucket no stricter than warn and invert severity), ``flag_bytes``
+    is clamped up to ``warn_bytes`` and a single ``WARNING`` names the
+    misconfiguration. Aside from that guard it is observational — it reads,
+    measures, and reports; it never modifies any file.
     """
+    if flag_bytes <= warn_bytes:
+        log.warning(
+            "page_flag_bytes (%d) <= page_warn_bytes (%d): flag threshold "
+            "clamped up to warn; fix librarian.page_flag_bytes / "
+            "page_warn_bytes so flag > warn",
+            flag_bytes,
+            warn_bytes,
+        )
+        flag_bytes = max(flag_bytes, warn_bytes)
+
     pages_warn: list[tuple[str, int]] = []
     pages_flag: list[tuple[str, int]] = []
     if not wiki_root.exists():
