@@ -65,6 +65,13 @@ DEFAULT_CLUSTER_THRESHOLD = 0.55
 # Default output path, resolved relative to the knowledge root.
 DEFAULT_CLUSTER_OUTPUT = "raw/_librarian-clusters.jsonl"
 
+# Default number of timestamped rotation siblings to keep (issue #311).
+# Each run writes one ``<stem>-<UTC-iso>.jsonl`` rotation next to the
+# canonical report; without pruning these accumulate unbounded (~365/yr).
+# They are debugging artifacts only — recovery is git-based — so a modest
+# window is plenty. ``0`` (or negative) disables pruning entirely.
+DEFAULT_ROTATION_RETENTION = 30
+
 
 @dataclass
 class Cluster:
@@ -476,6 +483,51 @@ def write_cluster_report(
     return output_path, timestamped
 
 
+def prune_cluster_rotations(output_path: Path, *, keep: int) -> list[Path]:
+    """Delete all but the *keep* most-recent timestamped rotation siblings.
+
+    Given a canonical report path (e.g.
+    ``raw/_librarian-clusters.jsonl``), finds its timestamped rotation
+    siblings — ``<stem>-*<suffix>`` in the same directory, written by
+    :func:`write_cluster_report` — and deletes the oldest ones, keeping
+    only the ``keep`` newest. The canonical file itself never matches the
+    ``<stem>-...`` glob and is never deleted.
+
+    Rotations are named ``<stem>-%Y%m%dT%H%M%SZ<suffix>`` (fixed-width,
+    zero-padded UTC), so lexicographic filename order equals chronological
+    order — the sort is deterministic and does NOT depend on filesystem
+    mtimes.
+
+    Args:
+        output_path: The canonical (non-timestamped) report path.
+        keep: How many newest rotations to retain. ``keep <= 0`` disables
+            pruning: nothing is deleted and an empty list is returned.
+
+    Returns:
+        The list of rotation paths that were deleted (empty if none).
+    """
+    if keep <= 0:
+        return []
+
+    output_path = Path(output_path)
+    pattern = f"{output_path.stem}-*{output_path.suffix}"
+    canonical_name = output_path.name
+    rotations = sorted(
+        p
+        for p in output_path.parent.glob(pattern)
+        if p.name != canonical_name and p.is_file()
+    )
+    if len(rotations) <= keep:
+        return []
+
+    doomed = rotations[:-keep]
+    pruned: list[Path] = []
+    for path in doomed:
+        path.unlink()
+        pruned.append(path)
+    return pruned
+
+
 def resolve_cluster_output_path(
     knowledge_root: Path,
     config: dict[str, Any] | None = None,
@@ -514,3 +566,37 @@ def resolve_cluster_threshold(
         return float(value)
     except (TypeError, ValueError):
         return DEFAULT_CLUSTER_THRESHOLD
+
+
+def resolve_rotation_retention(
+    knowledge_root: Path,
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Resolve the rotation-retention window (issue #311).
+
+    Precedence: ``ATHENAEUM_ROTATION_RETENTION`` env > ``librarian.
+    rotation_retention`` yaml > :data:`DEFAULT_ROTATION_RETENTION` (30).
+    Mirrors :func:`resolve_cluster_threshold`, plus an env override in the
+    style of ``librarian_max_files`` so a scheduled deployment can tune the
+    window without editing config. A resolved value ``<= 0`` disables
+    pruning (keep all rotations). ``bool`` yaml values (an ``int`` subclass)
+    are rejected so ``rotation_retention: yes`` cannot become ``1``.
+    """
+    env = os.environ.get("ATHENAEUM_ROTATION_RETENTION")
+    if env is not None:
+        try:
+            return int(env)
+        except (TypeError, ValueError):
+            pass
+
+    if config is None:
+        from athenaeum.config import load_config
+
+        config = load_config(knowledge_root)
+    librarian_cfg = config.get("librarian")
+    if not isinstance(librarian_cfg, dict):
+        librarian_cfg = {}
+    value = librarian_cfg.get("rotation_retention")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return DEFAULT_ROTATION_RETENTION

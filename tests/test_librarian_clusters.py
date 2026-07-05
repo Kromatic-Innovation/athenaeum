@@ -60,27 +60,26 @@ def _write_config(knowledge_root: Path, threshold: float | None = None) -> None:
     """Write an athenaeum.yaml that opts into raw/auto-memory."""
     threshold_line = (
         f"\nlibrarian:\n  cluster_threshold: {threshold:.2f}\n"
-        if threshold is not None else ""
+        if threshold is not None
+        else ""
     )
     (knowledge_root / "athenaeum.yaml").write_text(
-        "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n"
-        + threshold_line,
+        "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n" + threshold_line,
         encoding="utf-8",
     )
 
 
 def _write_auto_memory_file(
-    scope_dir: Path, name: str, frontmatter_name: str, body: str,
+    scope_dir: Path,
+    name: str,
+    frontmatter_name: str,
+    body: str,
 ) -> Path:
     """Write a single auto-memory markdown file and return its path."""
     scope_dir.mkdir(parents=True, exist_ok=True)
     path = scope_dir / name
     path.write_text(
-        "---\n"
-        f"name: {frontmatter_name}\n"
-        "type: project\n"
-        "---\n"
-        f"{body}\n",
+        "---\n" f"name: {frontmatter_name}\n" "type: project\n" "---\n" f"{body}\n",
         encoding="utf-8",
     )
     return path
@@ -106,48 +105,50 @@ def voltaire_near_duplicate_root(tmp_path: Path) -> Path:
         "and ticklestick is the orchestration layer."
     )
     _write_auto_memory_file(
-        voltaire, "project_voltaire_nanoclaw.md",
+        voltaire,
+        "project_voltaire_nanoclaw.md",
         "Voltaire nanoclaw toolchain",
-        "Voltaire and nanoclaw are the ticklestick agent toolchain. "
-        + common_tail,
+        "Voltaire and nanoclaw are the ticklestick agent toolchain. " + common_tail,
     )
     _write_auto_memory_file(
-        voltaire, "project_voltaire_iMessage_channel.md",
+        voltaire,
+        "project_voltaire_iMessage_channel.md",
         "Voltaire iMessage channel",
-        "Voltaire runs the nanoclaw iMessage channel handler. "
-        + common_tail,
+        "Voltaire runs the nanoclaw iMessage channel handler. " + common_tail,
     )
     _write_auto_memory_file(
-        voltaire, "project_nanoclaw_voltaire_tickle.md",
+        voltaire,
+        "project_nanoclaw_voltaire_tickle.md",
         "Nanoclaw ticklestick voltaire",
-        "Nanoclaw and voltaire run ticklestick pipelines together. "
-        + common_tail,
+        "Nanoclaw and voltaire run ticklestick pipelines together. " + common_tail,
     )
     _write_auto_memory_file(
-        voltaire, "project_voltaire_sessions.md",
+        voltaire,
+        "project_voltaire_sessions.md",
         "Voltaire sessions",
-        "Voltaire nanoclaw session events flow through ticklestick. "
-        + common_tail,
+        "Voltaire nanoclaw session events flow through ticklestick. " + common_tail,
     )
     # Typo clone — C2 must still cluster this with the 4 above despite
     # the prefix misspelling.
     _write_auto_memory_file(
-        voltaire, "project_voltair_nanoclaw.md",
+        voltaire,
+        "project_voltair_nanoclaw.md",
         "Voltair typo",
-        "Voltair nanoclaw toolchain typo file. "
-        + common_tail,
+        "Voltair nanoclaw toolchain typo file. " + common_tail,
     )
 
     # Two unrelated singletons in another scope — must pass through as
     # size-1 clusters (no min-cluster-size filter).
     other = auto / "some-scope"
     _write_auto_memory_file(
-        other, "reference_sentry_projects.md",
+        other,
+        "reference_sentry_projects.md",
         "Sentry projects",
         "Sentry project IDs and slugs for the kromatic org.",
     )
     _write_auto_memory_file(
-        other, "user_tristan_profile.md",
+        other,
+        "user_tristan_profile.md",
         "Tristan profile",
         "Consultant, German family, values cost-consciousness.",
     )
@@ -164,12 +165,14 @@ def contradiction_root(tmp_path: Path) -> Path:
     scope = auto / "-Users-tristankromer-Code"
 
     _write_auto_memory_file(
-        scope, "feedback_prior_session_debris_v1.md",
+        scope,
+        "feedback_prior_session_debris_v1.md",
         "Prior session debris v1",
         "Commit prior-session debris directly to develop. Do not park on WIP.",
     )
     _write_auto_memory_file(
-        scope, "feedback_prior_session_debris_v2.md",
+        scope,
+        "feedback_prior_session_debris_v2.md",
         "Prior session debris v2",
         "Park prior-session debris on a WIP branch. Do not commit directly.",
     )
@@ -186,12 +189,14 @@ def singleton_pair_root(tmp_path: Path) -> Path:
     scope = auto / "scope-x"
 
     _write_auto_memory_file(
-        scope, "reference_dns_flakiness.md",
+        scope,
+        "reference_dns_flakiness.md",
         "DNS resolver flakiness",
         "macOS mDNSResponder flakes for specific hostnames under cgo resolver.",
     )
     _write_auto_memory_file(
-        scope, "user_tristan_profile.md",
+        scope,
+        "user_tristan_profile.md",
         "Tristan profile",
         "Consultant background, values thought leadership and cost-consciousness.",
     )
@@ -229,7 +234,12 @@ class TestSingleLinkage:
 
         # Graph: 0-1, 2 isolated, 3-4-5 chain
         adj: list[set[int]] = [
-            {1}, {0}, set(), {4}, {3, 5}, {4},
+            {1},
+            {0},
+            set(),
+            {4},
+            {3, 5},
+            {4},
         ]
         components = _single_linkage(adj)
         assert sorted(sorted(c) for c in components) == [[0, 1], [2], [3, 4, 5]]
@@ -242,7 +252,8 @@ class TestSingleLinkage:
 
 class TestClusterVoltaireFixture:
     def test_all_five_voltaire_files_collapse_to_one_cluster(
-        self, voltaire_near_duplicate_root: Path,
+        self,
+        voltaire_near_duplicate_root: Path,
     ) -> None:
         """THE load-bearing acceptance test: 5 voltaire/nanoclaw files → 1 cluster."""
         from athenaeum.clusters import (
@@ -264,13 +275,11 @@ class TestClusterVoltaireFixture:
 
         # Separate voltaire members from singleton members.
         voltaire_clusters = [
-            c for c in clusters
+            c
+            for c in clusters
             if any("voltair" in p or "nanoclaw" in p for p in c.member_paths)
         ]
-        singleton_clusters = [
-            c for c in clusters
-            if c not in voltaire_clusters
-        ]
+        singleton_clusters = [c for c in clusters if c not in voltaire_clusters]
 
         # LOAD-BEARING ASSERTION: exactly one voltaire cluster with all 5 files.
         assert len(voltaire_clusters) == 1, (
@@ -288,7 +297,8 @@ class TestClusterVoltaireFixture:
         assert all(len(c.member_paths) == 1 for c in singleton_clusters)
 
     def test_rationale_human_debuggable(
-        self, voltaire_near_duplicate_root: Path,
+        self,
+        voltaire_near_duplicate_root: Path,
     ) -> None:
         from athenaeum.clusters import cluster_auto_memory_files
         from athenaeum.config import resolve_extra_intake_roots
@@ -298,18 +308,19 @@ class TestClusterVoltaireFixture:
         extra_roots = resolve_extra_intake_roots(voltaire_near_duplicate_root)
         cache_dir = _build_vector_index(voltaire_near_duplicate_root, extra_roots)
         clusters = cluster_auto_memory_files(
-            files, extra_roots=extra_roots, cache_dir=cache_dir,
+            files,
+            extra_roots=extra_roots,
+            cache_dir=cache_dir,
         )
-        voltaire_cluster = next(
-            c for c in clusters if len(c.member_paths) > 1
-        )
+        voltaire_cluster = next(c for c in clusters if len(c.member_paths) > 1)
         assert "cosine" in voltaire_cluster.rationale.lower()
         assert voltaire_cluster.centroid_score > 0.0
 
 
 class TestClusterContradictionFixture:
     def test_contradictory_files_cluster_together(
-        self, contradiction_root: Path,
+        self,
+        contradiction_root: Path,
     ) -> None:
         """Same topic, opposing guidance → one cluster. C4 handles the disagreement."""
         from athenaeum.clusters import cluster_auto_memory_files
@@ -320,7 +331,9 @@ class TestClusterContradictionFixture:
         extra_roots = resolve_extra_intake_roots(contradiction_root)
         cache_dir = _build_vector_index(contradiction_root, extra_roots)
         clusters = cluster_auto_memory_files(
-            files, extra_roots=extra_roots, cache_dir=cache_dir,
+            files,
+            extra_roots=extra_roots,
+            cache_dir=cache_dir,
         )
 
         # Exactly one cluster of size 2. C2 does not care that the
@@ -331,7 +344,8 @@ class TestClusterContradictionFixture:
 
 class TestSingletonPassthrough:
     def test_two_unrelated_files_yield_two_clusters(
-        self, singleton_pair_root: Path,
+        self,
+        singleton_pair_root: Path,
     ) -> None:
         from athenaeum.clusters import cluster_auto_memory_files
         from athenaeum.config import resolve_extra_intake_roots
@@ -341,7 +355,9 @@ class TestSingletonPassthrough:
         extra_roots = resolve_extra_intake_roots(singleton_pair_root)
         cache_dir = _build_vector_index(singleton_pair_root, extra_roots)
         clusters = cluster_auto_memory_files(
-            files, extra_roots=extra_roots, cache_dir=cache_dir,
+            files,
+            extra_roots=extra_roots,
+            cache_dir=cache_dir,
         )
 
         assert len(clusters) == 2
@@ -357,7 +373,8 @@ class TestSingletonPassthrough:
 
 class TestFallbackEmbedder:
     def test_fallback_does_not_crash_without_chromadb_index(
-        self, singleton_pair_root: Path,
+        self,
+        singleton_pair_root: Path,
     ) -> None:
         """With no pre-built index, clustering falls back to hashing-trick vectors.
 
@@ -416,7 +433,10 @@ class TestClusterReportJSONL:
         assert len(rows) == 2
         for row in rows:
             assert set(row.keys()) == {
-                "cluster_id", "member_paths", "centroid_score", "rationale",
+                "cluster_id",
+                "member_paths",
+                "centroid_score",
+                "rationale",
             }
             assert isinstance(row["cluster_id"], str)
             assert isinstance(row["member_paths"], list)
@@ -453,7 +473,9 @@ class TestClusterReportJSONL:
 
 class TestClusterOnlyRun:
     def test_cluster_only_writes_report_without_tier_pipeline(
-        self, voltaire_near_duplicate_root: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        voltaire_near_duplicate_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``run(cluster_only=True)`` must write the JSONL and return 0 without LLM."""
         from athenaeum.config import resolve_extra_intake_roots
@@ -478,14 +500,16 @@ class TestClusterOnlyRun:
         # voltaire cluster + 2 singletons
         assert len(rows) >= 1
         voltaire_rows = [
-            r for r in rows
+            r
+            for r in rows
             if any("voltair" in p or "nanoclaw" in p for p in r["member_paths"])
         ]
         assert len(voltaire_rows) == 1
         assert len(voltaire_rows[0]["member_paths"]) == 5
 
     def test_cluster_only_dry_run_does_not_write_report(
-        self, voltaire_near_duplicate_root: Path,
+        self,
+        voltaire_near_duplicate_root: Path,
     ) -> None:
         from athenaeum.librarian import run
 
@@ -511,6 +535,7 @@ class TestNoParallelEmbedder:
         """Repo-wide static check: clustering MUST reuse chromadb, not add a 2nd provider."""
         import pathlib
         import re
+
         src_root = pathlib.Path(__file__).resolve().parents[1] / "src" / "athenaeum"
         # Match actual import statements only (line-leading, with optional
         # whitespace). The docstring mentioning these package names in
@@ -557,3 +582,196 @@ class TestClusterConfig:
         _write_config(tmp_path)
         out = resolve_cluster_output_path(tmp_path)
         assert out == tmp_path / "raw" / "_librarian-clusters.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# Rotation pruning / retention (issue #311)
+# ---------------------------------------------------------------------------
+
+
+def _make_rotation(dir_path: Path, stamp: str) -> Path:
+    """Create a timestamped rotation sibling and return its path."""
+    p = dir_path / f"_librarian-clusters-{stamp}.jsonl"
+    p.write_text("{}\n", encoding="utf-8")
+    return p
+
+
+class TestPruneClusterRotations:
+    # UTC timestamps chosen so lexicographic order == chronological order,
+    # exactly as ``write_cluster_report`` emits them (%Y%m%dT%H%M%SZ).
+    _STAMPS = [
+        "20260101T000000Z",
+        "20260102T000000Z",
+        "20260103T000000Z",
+        "20260104T000000Z",
+        "20260105T000000Z",
+    ]
+
+    def _seed(self, tmp_path: Path) -> Path:
+        canonical = tmp_path / "_librarian-clusters.jsonl"
+        canonical.write_text("canonical\n", encoding="utf-8")
+        for stamp in self._STAMPS:
+            _make_rotation(tmp_path, stamp)
+        return canonical
+
+    def test_keeps_n_newest_deletes_older_by_filename_order(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from athenaeum.clusters import prune_cluster_rotations
+
+        canonical = self._seed(tmp_path)
+        pruned = prune_cluster_rotations(canonical, keep=2)
+
+        # The two NEWEST rotations survive; the three oldest are pruned.
+        remaining = sorted(p.name for p in tmp_path.glob("_librarian-clusters-*.jsonl"))
+        assert remaining == [
+            "_librarian-clusters-20260104T000000Z.jsonl",
+            "_librarian-clusters-20260105T000000Z.jsonl",
+        ]
+        assert sorted(p.name for p in pruned) == [
+            "_librarian-clusters-20260101T000000Z.jsonl",
+            "_librarian-clusters-20260102T000000Z.jsonl",
+            "_librarian-clusters-20260103T000000Z.jsonl",
+        ]
+
+    def test_keep_zero_disables_pruning(self, tmp_path: Path) -> None:
+        from athenaeum.clusters import prune_cluster_rotations
+
+        canonical = self._seed(tmp_path)
+        pruned = prune_cluster_rotations(canonical, keep=0)
+
+        assert pruned == []
+        assert len(list(tmp_path.glob("_librarian-clusters-*.jsonl"))) == 5
+
+    def test_negative_keep_disables_pruning(self, tmp_path: Path) -> None:
+        from athenaeum.clusters import prune_cluster_rotations
+
+        canonical = self._seed(tmp_path)
+        assert prune_cluster_rotations(canonical, keep=-5) == []
+        assert len(list(tmp_path.glob("_librarian-clusters-*.jsonl"))) == 5
+
+    def test_canonical_file_is_never_deleted(self, tmp_path: Path) -> None:
+        from athenaeum.clusters import prune_cluster_rotations
+
+        canonical = self._seed(tmp_path)
+        # Aggressive prune: keep only 1 rotation.
+        prune_cluster_rotations(canonical, keep=1)
+        assert canonical.is_file()
+        assert canonical.read_text(encoding="utf-8") == "canonical\n"
+
+    def test_noop_when_fewer_than_keep(self, tmp_path: Path) -> None:
+        from athenaeum.clusters import prune_cluster_rotations
+
+        canonical = tmp_path / "_librarian-clusters.jsonl"
+        canonical.write_text("canonical\n", encoding="utf-8")
+        _make_rotation(tmp_path, self._STAMPS[0])
+        assert prune_cluster_rotations(canonical, keep=30) == []
+        assert len(list(tmp_path.glob("_librarian-clusters-*.jsonl"))) == 1
+
+
+class TestRotationRetentionConfig:
+    def test_default_is_30(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_ROTATION_RETENTION", raising=False)
+        from athenaeum.clusters import (
+            DEFAULT_ROTATION_RETENTION,
+            resolve_rotation_retention,
+        )
+
+        assert DEFAULT_ROTATION_RETENTION == 30
+        assert resolve_rotation_retention(tmp_path) == 30
+
+    def test_yaml_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_ROTATION_RETENTION", raising=False)
+        from athenaeum.clusters import resolve_rotation_retention
+
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  rotation_retention: 5\n",
+            encoding="utf-8",
+        )
+        assert resolve_rotation_retention(tmp_path) == 5
+
+    def test_env_beats_yaml(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from athenaeum.clusters import resolve_rotation_retention
+
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  rotation_retention: 5\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ATHENAEUM_ROTATION_RETENTION", "2")
+        assert resolve_rotation_retention(tmp_path) == 2
+
+    def test_bool_yaml_value_falls_back_to_default(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # ``rotation_retention: yes`` parses to bool True (an int subclass)
+        # and must NOT be read as a window of 1.
+        monkeypatch.delenv("ATHENAEUM_ROTATION_RETENTION", raising=False)
+        from athenaeum.clusters import resolve_rotation_retention
+
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  rotation_retention: true\n",
+            encoding="utf-8",
+        )
+        assert resolve_rotation_retention(tmp_path) == 30
+
+    def test_zero_disables_via_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_ROTATION_RETENTION", raising=False)
+        from athenaeum.clusters import resolve_rotation_retention
+
+        (tmp_path / "athenaeum.yaml").write_text(
+            "librarian:\n  rotation_retention: 0\n",
+            encoding="utf-8",
+        )
+        assert resolve_rotation_retention(tmp_path) == 0
+
+
+class TestRotationPruneNonFatal:
+    def test_prune_failure_does_not_abort_run(
+        self,
+        voltaire_near_duplicate_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A raising prune must warn but leave the run successful (rc=0)."""
+        import athenaeum.librarian as librarian_mod
+        from athenaeum.librarian import run
+
+        def _boom(*_args: object, **_kwargs: object) -> list:
+            raise OSError("simulated unlink failure")
+
+        monkeypatch.setattr(librarian_mod, "prune_cluster_rotations", _boom)
+
+        with caplog.at_level("WARNING"):
+            rc = run(
+                raw_root=voltaire_near_duplicate_root / "raw",
+                wiki_root=voltaire_near_duplicate_root / "wiki",
+                knowledge_root=voltaire_near_duplicate_root,
+                dry_run=False,
+                cluster_only=True,
+            )
+
+        assert rc == 0
+        out = voltaire_near_duplicate_root / "raw" / "_librarian-clusters.jsonl"
+        assert out.is_file()
+        assert any(
+            "cluster rotation prune failed" in rec.message for rec in caplog.records
+        )
