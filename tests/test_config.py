@@ -13,12 +13,84 @@ from athenaeum.config import (
     resolve_min_cluster_cohesion,
     resolve_min_cluster_cohesion_scopes,
     resolve_owner,
+    resolve_page_flag_bytes,
+    resolve_page_warn_bytes,
     resolve_push_after_run,
     resolve_push_branch,
     resolve_push_remote,
     resolve_retire,
     write_default_config,
 )
+
+
+class TestResolvePageWarnBytes:
+    def test_default(self) -> None:
+        assert resolve_page_warn_bytes(None) == 8192
+        assert resolve_page_warn_bytes({}) == 8192
+        assert resolve_page_warn_bytes({"librarian": {}}) == 8192
+
+    def test_yaml_value_wins(self) -> None:
+        assert resolve_page_warn_bytes({"librarian": {"page_warn_bytes": 4096}}) == 4096
+
+    def test_quoted_yaml_coerced(self) -> None:
+        assert (
+            resolve_page_warn_bytes({"librarian": {"page_warn_bytes": "4096"}}) == 4096
+        )
+
+    def test_bool_and_bad_and_nonpositive_fall_through(self) -> None:
+        assert resolve_page_warn_bytes({"librarian": {"page_warn_bytes": True}}) == 8192
+        assert (
+            resolve_page_warn_bytes({"librarian": {"page_warn_bytes": "abc"}}) == 8192
+        )
+        assert resolve_page_warn_bytes({"librarian": {"page_warn_bytes": 0}}) == 8192
+        assert resolve_page_warn_bytes({"librarian": {"page_warn_bytes": -5}}) == 8192
+
+    def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_PAGE_WARN_BYTES", "1234")
+        assert resolve_page_warn_bytes({"librarian": {"page_warn_bytes": 4096}}) == 1234
+
+    def test_bad_env_falls_through_to_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_PAGE_WARN_BYTES", "notint")
+        assert resolve_page_warn_bytes({"librarian": {"page_warn_bytes": 4096}}) == 4096
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "page_warn_bytes" not in _DEFAULTS.get("librarian", {})
+
+
+class TestResolvePageFlagBytes:
+    def test_default(self) -> None:
+        assert resolve_page_flag_bytes(None) == 16384
+        assert resolve_page_flag_bytes({}) == 16384
+        assert resolve_page_flag_bytes({"librarian": {}}) == 16384
+
+    def test_yaml_value_wins(self) -> None:
+        assert (
+            resolve_page_flag_bytes({"librarian": {"page_flag_bytes": 30000}}) == 30000
+        )
+
+    def test_bool_and_bad_and_nonpositive_fall_through(self) -> None:
+        assert (
+            resolve_page_flag_bytes({"librarian": {"page_flag_bytes": True}}) == 16384
+        )
+        assert (
+            resolve_page_flag_bytes({"librarian": {"page_flag_bytes": "abc"}}) == 16384
+        )
+        assert resolve_page_flag_bytes({"librarian": {"page_flag_bytes": 0}}) == 16384
+
+    def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_PAGE_FLAG_BYTES", "9999")
+        assert (
+            resolve_page_flag_bytes({"librarian": {"page_flag_bytes": 30000}}) == 9999
+        )
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "page_flag_bytes" not in _DEFAULTS.get("librarian", {})
 
 
 class TestResolveMinClusterCohesion:
@@ -39,8 +111,14 @@ class TestResolveMinClusterCohesion:
         assert resolve_min_cluster_cohesion(cfg) == 0.0
 
     def test_non_numeric_and_negative_fall_through(self) -> None:
-        assert resolve_min_cluster_cohesion({"librarian": {"min_cluster_cohesion": "x"}}) == 0.0
-        assert resolve_min_cluster_cohesion({"librarian": {"min_cluster_cohesion": -0.5}}) == 0.0
+        assert (
+            resolve_min_cluster_cohesion({"librarian": {"min_cluster_cohesion": "x"}})
+            == 0.0
+        )
+        assert (
+            resolve_min_cluster_cohesion({"librarian": {"min_cluster_cohesion": -0.5}})
+            == 0.0
+        )
 
     def test_not_seeded_in_defaults(self) -> None:
         from athenaeum.config import _DEFAULTS
@@ -113,20 +191,14 @@ class TestResolvePushAfterRun:
         assert resolve_push_after_run({"librarian": {}}) is False
 
     def test_yaml_true_enables(self) -> None:
-        assert (
-            resolve_push_after_run({"librarian": {"push_after_run": True}}) is True
-        )
+        assert resolve_push_after_run({"librarian": {"push_after_run": True}}) is True
 
     def test_yaml_false_explicit(self) -> None:
-        assert (
-            resolve_push_after_run({"librarian": {"push_after_run": False}}) is False
-        )
+        assert resolve_push_after_run({"librarian": {"push_after_run": False}}) is False
 
     def test_non_bool_falls_through_to_off(self) -> None:
         # A non-bool (e.g. yaml string) must not silently enable push.
-        assert (
-            resolve_push_after_run({"librarian": {"push_after_run": "yes"}}) is False
-        )
+        assert resolve_push_after_run({"librarian": {"push_after_run": "yes"}}) is False
 
     def test_not_seeded_in_defaults(self) -> None:
         from athenaeum.config import _DEFAULTS
@@ -141,9 +213,7 @@ class TestResolvePushRemote:
         assert resolve_push_remote({"librarian": {}}) == "origin"
 
     def test_yaml_value_wins(self) -> None:
-        assert (
-            resolve_push_remote({"librarian": {"push_remote": "backup"}}) == "backup"
-        )
+        assert resolve_push_remote({"librarian": {"push_remote": "backup"}}) == "backup"
 
     def test_blank_and_non_string_fall_through(self) -> None:
         assert resolve_push_remote({"librarian": {"push_remote": ""}}) == "origin"

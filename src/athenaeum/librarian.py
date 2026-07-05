@@ -1586,6 +1586,29 @@ def run(
         head_at_start=head_at_start,
     )
 
+    # Issue #310: warn-only page-size guardrail. Log a WARNING for each wiki
+    # entity page over the flag threshold so a nightly run surfaces pages that
+    # want splitting into linked sub-entities. Never fatal, never mutating —
+    # any failure here degrades to a single non-fatal note. The split-proposal
+    # workflow is explicitly out of scope (issue #310, moscow:could).
+    try:
+        from athenaeum.config import resolve_page_flag_bytes, resolve_page_warn_bytes
+        from athenaeum.status import scan_page_sizes
+
+        _pw_bytes = resolve_page_warn_bytes(config)
+        _pf_bytes = resolve_page_flag_bytes(config)
+        _, _pages_flag = scan_page_sizes(wiki_root, _pw_bytes, _pf_bytes)
+        for _name, _size in _pages_flag:
+            log.warning(
+                "oversized wiki page %s (%d bytes > flag %d): consider "
+                "splitting into linked sub-entities",
+                _name,
+                _size,
+                _pf_bytes,
+            )
+    except Exception as exc:  # noqa: BLE001 — guardrail must never break a run
+        log.warning("page-size guardrail check failed (non-fatal): %s", exc)
+
     if failed_files:
         log.warning("Failed files (will retry next run): %s", ", ".join(failed_files))
         return 1

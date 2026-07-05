@@ -393,6 +393,73 @@ def resolve_lock_timeout(config: dict[str, Any] | None) -> float:
     return 0.0
 
 
+def _resolve_positive_int_knob(
+    config: dict[str, Any] | None,
+    key: str,
+    env_var: str,
+    default: int,
+) -> int:
+    """Resolve a positive-int ``librarian.<key>`` knob (env > yaml > default).
+
+    Shared helper for the wiki page-size guardrails (issue #310). Mirrors
+    :func:`athenaeum.clusters.resolve_rotation_retention`'s precedence and
+    coercion contract: the ``env_var`` wins when it parses to a positive int,
+    otherwise the yaml key is read, otherwise *default*. ``bool`` (an ``int``
+    subclass) and non-int / ``<= 0`` values fall through so ``page_warn_bytes:
+    yes`` cannot become ``1`` and a nonsensical zero/negative byte count cannot
+    silently disable the guardrail. No seed in ``_DEFAULTS`` (issue #231).
+    """
+    env = os.environ.get(env_var)
+    if env is not None:
+        try:
+            value = int(env)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and value > 0:
+            return value
+
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get(key)
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None and value > 0:
+                    return value
+    return default
+
+
+def resolve_page_warn_bytes(config: dict[str, Any] | None) -> int:
+    """Resolve the wiki-page soft-warn size threshold in bytes (issue #310).
+
+    Precedence: ``ATHENAEUM_PAGE_WARN_BYTES`` env > ``librarian.page_warn_bytes``
+    yaml > ``8192``. A page whose UTF-8 size (frontmatter + body) exceeds this
+    is surfaced in ``status`` as a warn-level oversized page — a nudge to split,
+    never a block. See :func:`_resolve_positive_int_knob` for the coercion
+    contract.
+    """
+    return _resolve_positive_int_knob(
+        config, "page_warn_bytes", "ATHENAEUM_PAGE_WARN_BYTES", 8192
+    )
+
+
+def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
+    """Resolve the wiki-page flag-for-split size threshold in bytes (issue #310).
+
+    Precedence: ``ATHENAEUM_PAGE_FLAG_BYTES`` env > ``librarian.page_flag_bytes``
+    yaml > ``16384``. A page over this is flagged more loudly (and logged during
+    ``athenaeum run``) as one that should be broken into linked sub-entities.
+    Kept comfortably below the tier-3 merge body cap so flagging precedes any
+    hard merge-budget pressure. See :func:`_resolve_positive_int_knob`.
+    """
+    return _resolve_positive_int_knob(
+        config, "page_flag_bytes", "ATHENAEUM_PAGE_FLAG_BYTES", 16384
+    )
+
+
 def resolve_model(
     knob: str,
     env_var: str,
@@ -537,6 +604,16 @@ search_backend: fts5
 #   observed over-clusters span 8-17 scopes, legitimate pages 1-3, so 4
 #   sits in the clean margin and a low-cohesion single-/few-scope cluster
 #   is never suppressed.
+# page_warn_bytes: soft byte threshold above which a wiki entity page is
+#   reported as a WARN-level oversized page in `athenaeum status` (#310).
+#   Warn-only -- nothing is blocked or modified. Precedence:
+#   ATHENAEUM_PAGE_WARN_BYTES env, then this key, then 8192. A long page
+#   usually means poorly-factored knowledge to split into linked entities.
+# page_flag_bytes: louder byte threshold above which a page is FLAGGED for
+#   splitting -- surfaced in `status` and logged as a non-fatal WARNING
+#   during `athenaeum run` (#310). Still warn-only (the tier-3 merge body
+#   cap is separate and unchanged). Precedence: ATHENAEUM_PAGE_FLAG_BYTES
+#   env, then this key, then 16384. Keep comfortably below the merge cap.
 # librarian:
 #   cluster_threshold: 0.55
 #   cluster_output: raw/_librarian-clusters.jsonl
@@ -552,6 +629,8 @@ search_backend: fts5
 #   operational_markers: []
 #   min_cluster_cohesion: 0.0
 #   min_cluster_cohesion_scopes: 4
+#   page_warn_bytes: 8192
+#   page_flag_bytes: 16384
 
 # Model selection (issue #232). Per knob: env var wins over the yaml key,
 # which wins over the built-in default. Values are free-form model id
