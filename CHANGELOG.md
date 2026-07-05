@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-07-05
+
+### Fixed
+
+- **Cluster JSONL rotations no longer accumulate forever (#311).** Every
+  `athenaeum run` writes a timestamped `<stem>-<UTC-iso>.jsonl` rotation
+  next to the canonical cluster report; nothing pruned them, so they grew
+  unbounded (~365/yr). The cluster pass now prunes old rotations after each
+  run, keeping the newest `librarian.rotation_retention` (default **30**,
+  env `ATHENAEUM_ROTATION_RETENTION`; `0` disables). Rotations are
+  debugging artifacts, not recovery-critical — recovery is git-based.
+  Pruning sorts by the embedded UTC timestamp (deterministic, not mtime)
+  and is non-fatal: a prune failure logs a warning and the run continues.
+
 ## [0.13.0] - 2026-07-05
 
 Additive public surface since 0.12.0: a new `athenaeum ingest-merges` CLI
