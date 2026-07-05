@@ -669,6 +669,32 @@ class TestPruneClusterRotations:
         assert prune_cluster_rotations(canonical, keep=30) == []
         assert len(list(tmp_path.glob("_librarian-clusters-*.jsonl"))) == 1
 
+    def test_non_timestamp_sibling_is_ignored(self, tmp_path: Path) -> None:
+        """A stray `<stem>-backup.jsonl` matches the glob but is NOT a
+        `%Y%m%dT%H%M%SZ` rotation. It must be neither counted toward `keep`
+        nor deleted — and must not shield a real old rotation from pruning
+        (letters sort after digits, so a lexicographic sort would misplace it).
+        """
+        from athenaeum.clusters import prune_cluster_rotations
+
+        canonical = tmp_path / "_librarian-clusters.jsonl"
+        canonical.write_text("canonical\n", encoding="utf-8")
+        # Two genuine rotations + one non-timestamp sibling.
+        _make_rotation(tmp_path, "20260101T000000Z")
+        _make_rotation(tmp_path, "20260102T000000Z")
+        stray = tmp_path / "_librarian-clusters-backup.jsonl"
+        stray.write_text("not a rotation\n", encoding="utf-8")
+
+        pruned = prune_cluster_rotations(canonical, keep=1)
+
+        # Only the older of the two REAL rotations is pruned; the stray is
+        # untouched and did not count toward `keep`.
+        assert [p.name for p in pruned] == [
+            "_librarian-clusters-20260101T000000Z.jsonl"
+        ]
+        assert stray.is_file()
+        assert (tmp_path / "_librarian-clusters-20260102T000000Z.jsonl").is_file()
+
 
 class TestRotationRetentionConfig:
     def test_default_is_30(
@@ -742,6 +768,36 @@ class TestRotationRetentionConfig:
             encoding="utf-8",
         )
         assert resolve_rotation_retention(tmp_path) == 0
+
+    def test_quoted_string_value_is_coerced(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Parity with resolve_cluster_threshold's float() coercion: quoted
+        # yaml like `"5"` must resolve to 5, not silently fall back.
+        monkeypatch.delenv("ATHENAEUM_ROTATION_RETENTION", raising=False)
+        from athenaeum.clusters import resolve_rotation_retention
+
+        (tmp_path / "athenaeum.yaml").write_text(
+            'librarian:\n  rotation_retention: "5"\n',
+            encoding="utf-8",
+        )
+        assert resolve_rotation_retention(tmp_path) == 5
+
+    def test_non_numeric_string_falls_back_to_default(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_ROTATION_RETENTION", raising=False)
+        from athenaeum.clusters import resolve_rotation_retention
+
+        (tmp_path / "athenaeum.yaml").write_text(
+            'librarian:\n  rotation_retention: "lots"\n',
+            encoding="utf-8",
+        )
+        assert resolve_rotation_retention(tmp_path) == 30
 
 
 class TestRotationPruneNonFatal:

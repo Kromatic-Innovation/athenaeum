@@ -35,6 +35,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -512,10 +513,19 @@ def prune_cluster_rotations(output_path: Path, *, keep: int) -> list[Path]:
     output_path = Path(output_path)
     pattern = f"{output_path.stem}-*{output_path.suffix}"
     canonical_name = output_path.name
+    # Only genuine `%Y%m%dT%H%M%SZ` rotations are eligible. A stray sibling
+    # like `<stem>-backup<suffix>` matches the glob but sorts AFTER every
+    # `-2026…` name (letters > digits), so a pure lexicographic sort would
+    # let it evade pruning while a real recent rotation gets pruned. Restrict
+    # to the timestamp shape so the sort is over homogeneous, sortable names.
+    stamp_re = re.compile(
+        rf"^{re.escape(output_path.stem)}-\d{{8}}T\d{{6}}Z"
+        rf"{re.escape(output_path.suffix)}$"
+    )
     rotations = sorted(
         p
         for p in output_path.parent.glob(pattern)
-        if p.name != canonical_name and p.is_file()
+        if p.name != canonical_name and p.is_file() and stamp_re.match(p.name)
     )
     if len(rotations) <= keep:
         return []
@@ -597,6 +607,15 @@ def resolve_rotation_retention(
     if not isinstance(librarian_cfg, dict):
         librarian_cfg = {}
     value = librarian_cfg.get("rotation_retention")
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    return DEFAULT_ROTATION_RETENTION
+    # A Python ``bool`` is an ``int`` subclass — reject it up front so
+    # ``rotation_retention: yes`` cannot become a count of 1. Otherwise
+    # coerce via ``int(...)`` for parity with ``resolve_cluster_threshold``'s
+    # ``float(...)`` contract, so quoted yaml (``"5"``) resolves correctly.
+    if isinstance(value, bool):
+        return DEFAULT_ROTATION_RETENTION
+    try:
+        if value is None:
+            return DEFAULT_ROTATION_RETENTION
+        return int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_ROTATION_RETENTION
