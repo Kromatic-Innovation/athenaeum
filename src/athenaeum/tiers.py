@@ -441,6 +441,25 @@ Rules:
   to overwrite the existing content outright.
 - Do NOT modify YAML frontmatter — return body content only"""
 
+# Issue #302: the merge LLM can only dedupe a re-confirming observation
+# against existing content it actually receives. This must be generous
+# enough to cover an already-bloated page (the #297 incident page grew to
+# 5-10KB) — the OLD 4000-char cap silently went blind on exactly that
+# scenario, the one the #297 dedup guard was meant to protect.
+#
+# MUST stay balanced with _MERGE_MAX_TOKENS below: MERGE_SYSTEM requires
+# reproducing the ENTIRE existing body in the response (rule 1: "Preserve
+# all existing content"), so the output budget must comfortably exceed
+# what it takes to echo back existing_body[:_MAX_EXISTING_BODY_CHARS] plus
+# the merged addition — an output-truncated response is caught by the
+# stop_reason guard in parse_tier3_merge, but raising this cap without
+# raising _MERGE_MAX_TOKENS in step just moves where merges start failing.
+_MAX_EXISTING_BODY_CHARS = 20_000
+
+# ~20K chars of existing body (~5K tokens) + new content + footnotes,
+# with headroom — must stay >= _MAX_EXISTING_BODY_CHARS's token-equivalent.
+_MERGE_MAX_TOKENS = 8192
+
 MERGE_TEMPLATE = """## Existing page content
 {existing_body}
 
@@ -561,13 +580,13 @@ def tier3_merge_params(
     API assembly (issue #236).
     """
     user_msg = MERGE_TEMPLATE.format(
-        existing_body=existing_body[:4000],
+        existing_body=existing_body[:_MAX_EXISTING_BODY_CHARS],
         source_ref=source_ref,
         observations=action.observations[:3000],
     )
     return {
         "model": _get_write_model(config),
-        "max_tokens": 2048,
+        "max_tokens": _MERGE_MAX_TOKENS,
         "system": MERGE_SYSTEM,
         "messages": [{"role": "user", "content": user_msg}],
     }
@@ -593,21 +612,48 @@ def tier3_merge(
     )
     _record_usage(response, usage, model=params["model"])
 
-    return parse_tier3_merge(response.content[0].text, action, source_ref)
+    return parse_tier3_merge(
+        response.content[0].text,
+        action,
+        source_ref,
+        stop_reason=getattr(response, "stop_reason", None),
+    )
 
 
 def parse_tier3_merge(
     text: str,
     action: EntityAction,
     source_ref: str,
+    *,
+    stop_reason: str | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
     """Parse a Tier-3 merge response into (updated_body, escalation_item).
 
     Shared by the synchronous and batch transports; handles the
     ``ESCALATE:`` protocol identically to the pre-#236 inline parsing.
+
+    Issue #302: MERGE_SYSTEM requires reproducing the ENTIRE existing page
+    body in the response ("Preserve all existing content"), so a response
+    cut off by the output token budget (``stop_reason == "max_tokens"``)
+    is a truncated body, not a complete one — writing it back would
+    silently discard the tail of the page. Refuse to overwrite and
+    escalate for human review instead of returning the truncated text.
     """
     text = text.strip()
     escalation = None
+
+    if stop_reason == "max_tokens":
+        return None, EscalationItem(
+            raw_ref=source_ref,
+            entity_name=action.name,
+            conflict_type="principled",
+            description=(
+                "Tier 3 merge response was truncated (max_tokens) before "
+                "completing the full page body; refusing to overwrite to "
+                "avoid silently discarding existing content. Existing page "
+                "left unchanged pending human review."
+            ),
+        )
 
     if text.startswith("ESCALATE:"):
         parts = text.split("---", 1)
