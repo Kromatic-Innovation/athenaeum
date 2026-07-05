@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import textwrap
 from pathlib import Path
+
+import pytest
 
 from athenaeum.status import format_status, status
 
@@ -206,6 +209,51 @@ class TestPageSizeGuardrails:
         }
         out = format_status(info)  # type: ignore[arg-type]
         assert "Oversized pages (warn/flag): 0/0" in out
+
+    def test_boundary_exact_warn_not_warned(self, tmp_path: Path) -> None:
+        # Bucketing is strict `>`; a page of EXACTLY warn_bytes must NOT warn.
+        from athenaeum.status import scan_page_sizes
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        page = _entity_page("Exact Warn", "e1", 8192)
+        assert len(page.encode("utf-8")) == 8192
+        (wiki / "exactwarn.md").write_text(page)
+        warn, flag = scan_page_sizes(wiki, 8192, 16384)
+        assert not warn
+        assert not flag
+
+    def test_boundary_exact_flag_warned_not_flagged(self, tmp_path: Path) -> None:
+        # A page of EXACTLY flag_bytes is over warn (warned) but NOT over flag.
+        from athenaeum.status import scan_page_sizes
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        page = _entity_page("Exact Flag", "e2", 16384)
+        assert len(page.encode("utf-8")) == 16384
+        (wiki / "exactflag.md").write_text(page)
+        warn, flag = scan_page_sizes(wiki, 8192, 16384)
+        assert [n for n, _ in warn] == ["exactflag.md"]
+        assert not flag
+
+    def test_inverted_thresholds_clamped_and_warned(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # flag <= warn is a misconfig: clamp flag up to warn AND warn once.
+        from athenaeum.status import scan_page_sizes
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "big.md").write_text(_entity_page("Big", "e3", 20000))
+        with caplog.at_level(logging.WARNING, logger="athenaeum"):
+            warn, flag = scan_page_sizes(wiki, 16384, 8192)  # flag < warn
+        # A 20000B page exceeds the clamped flag (== warn == 16384) => flagged.
+        assert [n for n, _ in flag] == ["big.md"]
+        assert not warn
+        assert any(
+            "page_flag_bytes" in rec.message and "clamped" in rec.message
+            for rec in caplog.records
+        )
 
     def test_thresholds_honor_config(self, tmp_path: Path) -> None:
         # A tiny yaml warn threshold pulls the small page into the warn bucket.
