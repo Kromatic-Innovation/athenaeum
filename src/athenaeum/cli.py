@@ -146,6 +146,17 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("~/knowledge"),
         help="Knowledge directory (default: ~/knowledge)",
     )
+    serve_parser.add_argument(
+        "--audience",
+        type=str,
+        default=None,
+        help="Issue #312: pin this server to a restricted read scope. "
+        "Comma-separated role/group ids (e.g. 'operations,voltaire'). The "
+        "recall tool then returns only pages tagged for one of these roles "
+        "(plus 'access: open' pages); untagged/confidential/personal pages "
+        "are withheld. Unset = owner = full access. Overrides "
+        "ATHENAEUM_AUDIENCE and serve.audience in athenaeum.yaml.",
+    )
 
     # run command — execute the librarian pipeline
     run_parser = subparsers.add_parser("run", help="Run the librarian pipeline")
@@ -459,6 +470,15 @@ def main(argv: list[str] | None = None) -> int:
         choices=["keyword", "fts5", "vector"],
         default=None,
         help="Override configured backend (default: read from athenaeum.yaml)",
+    )
+    recall_parser.add_argument(
+        "--audience",
+        type=str,
+        default=None,
+        help="Issue #312: run recall under a restricted read scope. "
+        "Comma-separated role/group ids; only pages tagged for one of these "
+        "roles (or 'access: open') are returned. Unset = owner = full access. "
+        "Exercises the identical filter path as `serve --audience`.",
     )
 
     # dedupe command — find / merge duplicate person wikis
@@ -1069,7 +1089,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
-    from athenaeum.config import load_config, resolve_extra_intake_roots
+    from athenaeum.config import (
+        load_config,
+        resolve_audience,
+        resolve_extra_intake_roots,
+    )
     from athenaeum.mcp_server import create_server
 
     target = args.path.expanduser().resolve()
@@ -1086,6 +1110,17 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     cache_dir = Path("~/.cache/athenaeum").expanduser()
     extra_roots = resolve_extra_intake_roots(target, cfg)
 
+    # Issue #312: resolve the serve-time read-scope pin (CLI > env > yaml).
+    # None = owner = full access (existing single-user behavior).
+    caller_audience = resolve_audience(cfg, getattr(args, "audience", None))
+    if caller_audience is not None:
+        print(
+            "[audience] recall restricted to roles: "
+            f"{', '.join(sorted(caller_audience))} "
+            "(untagged/confidential/personal pages withheld)",
+            file=sys.stderr,
+        )
+
     # Warn on config/cache mismatch. The recall tool silently returns zero
     # hits when the configured backend's index is missing, so users with
     # `search_backend: vector` but an fts5-only cache (common when you flip
@@ -1099,6 +1134,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         search_backend=backend,
         cache_dir=cache_dir,
         extra_roots=extra_roots,
+        caller_audience=caller_audience,
     )
     try:
         server.run()
@@ -1426,8 +1462,12 @@ def _cmd_recall(args: argparse.Namespace) -> int:
     ``athenaeum.yaml`` the same way ``serve`` and ``rebuild-index`` do,
     so results match what the MCP ``recall`` tool would return.
     """
-    from athenaeum.config import load_config, resolve_extra_intake_roots
-    from athenaeum.models import parse_frontmatter
+    from athenaeum.config import (
+        load_config,
+        resolve_audience,
+        resolve_extra_intake_roots,
+    )
+    from athenaeum.models import is_page_authorized, parse_frontmatter
     from athenaeum.search import get_backend
 
     knowledge_root = args.path.expanduser().resolve()
@@ -1442,6 +1482,9 @@ def _cmd_recall(args: argparse.Namespace) -> int:
     cache_dir = (args.cache_dir or Path("~/.cache/athenaeum")).expanduser().resolve()
     extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
 
+    # Issue #312: resolve the read-scope pin (CLI > env > yaml). None = owner.
+    caller_audience = resolve_audience(cfg, getattr(args, "audience", None))
+
     try:
         backend = get_backend(backend_name)
     except KeyError as exc:
@@ -1454,6 +1497,7 @@ def _cmd_recall(args: argparse.Namespace) -> int:
             cache_dir,
             n=args.top_k,
             wiki_root=wiki_root,
+            caller_audience=caller_audience,
         )
     except NotImplementedError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -1464,13 +1508,21 @@ def _cmd_recall(args: argparse.Namespace) -> int:
     for filename, _name, score in hits:
         page_path, _display = _resolve_hit_path(filename, wiki_root, extra_roots)
         preview = ""
+        fm: dict[str, object] = {}
+        readable = False
         if page_path is not None and page_path.is_file():
             try:
                 text = page_path.read_text(encoding="utf-8")
-                _fm, body = parse_frontmatter(text)
+                fm, body = parse_frontmatter(text)
                 preview = " ".join(body.split())[:80]
+                readable = True
             except (OSError, UnicodeDecodeError):
                 pass
+        # Layer C fail-closed re-check against fresh on-disk frontmatter.
+        if caller_audience is not None and (
+            not readable or not is_page_authorized(fm, caller_audience)
+        ):
+            continue
         print(f"{score:.2f}\t{filename}\t{preview}")
 
     return 0

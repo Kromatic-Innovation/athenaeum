@@ -9,6 +9,7 @@ import pytest
 
 from athenaeum.config import (
     load_config,
+    resolve_audience,
     resolve_extra_intake_roots,
     resolve_min_cluster_cohesion,
     resolve_min_cluster_cohesion_scopes,
@@ -91,6 +92,58 @@ class TestResolvePageFlagBytes:
         from athenaeum.config import _DEFAULTS
 
         assert "page_flag_bytes" not in _DEFAULTS.get("librarian", {})
+
+
+class TestResolveAudience:
+    """Serve-time read-scope resolution, CLI > env > yaml > None (issue #312)."""
+
+    def test_default_is_none_owner(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_AUDIENCE", raising=False)
+        assert resolve_audience(None) is None
+        assert resolve_audience({}) is None
+        assert resolve_audience({"serve": {}}) is None
+
+    def test_yaml_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_AUDIENCE", raising=False)
+        assert resolve_audience(
+            {"serve": {"audience": ["Operations", "voltaire"]}}
+        ) == {
+            "operations",
+            "voltaire",
+        }
+
+    def test_yaml_comma_string(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_AUDIENCE", raising=False)
+        assert resolve_audience({"serve": {"audience": "ops, voltaire"}}) == {
+            "ops",
+            "voltaire",
+        }
+
+    def test_env_overrides_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_AUDIENCE", "marketing")
+        assert resolve_audience({"serve": {"audience": ["operations"]}}) == {
+            "marketing"
+        }
+
+    def test_cli_overrides_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_AUDIENCE", "marketing")
+        assert resolve_audience({}, "operations,voltaire") == {
+            "operations",
+            "voltaire",
+        }
+
+    def test_empty_value_is_owner(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An explicitly empty pin at any tier resolves to owner (full access).
+        monkeypatch.setenv("ATHENAEUM_AUDIENCE", "  ")
+        assert resolve_audience({"serve": {"audience": ["operations"]}}) is None
+        monkeypatch.delenv("ATHENAEUM_AUDIENCE", raising=False)
+        assert resolve_audience({}, "") is None
+        assert resolve_audience({"serve": {"audience": []}}) is None
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "serve" not in _DEFAULTS
 
 
 class TestResolveMinClusterCohesion:
