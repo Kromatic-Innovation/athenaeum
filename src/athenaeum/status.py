@@ -7,6 +7,11 @@ import subprocess
 from pathlib import Path
 from typing import TypedDict
 
+from athenaeum.config import (
+    load_config,
+    resolve_page_flag_bytes,
+    resolve_page_warn_bytes,
+)
 from athenaeum.librarian import discover_raw_files
 from athenaeum.models import parse_frontmatter
 
@@ -15,7 +20,8 @@ class StatusInfo(TypedDict):
     """Shape of the dict returned by :func:`status`.
 
     Public API — downstream tooling (dashboards, CI gates) can import this
-    for type-checked access to the status payload.
+    for type-checked access to the status payload. Keys are only ever ADDED
+    here (never renamed/removed) so existing consumers stay valid.
     """
 
     raw_pending: int
@@ -24,6 +30,52 @@ class StatusInfo(TypedDict):
     last_commit_date: str
     last_commit_message: str
     pending_questions: int
+    # Issue #310: wiki entity pages over the soft size thresholds, each a
+    # ``(filename, byte_size)`` tuple sorted largest-first. ``pages_warn`` and
+    # ``pages_flag`` are disjoint — a page over the flag threshold appears in
+    # ``pages_flag`` only.
+    pages_warn: list[tuple[str, int]]
+    pages_flag: list[tuple[str, int]]
+
+
+def scan_page_sizes(
+    wiki_root: Path,
+    warn_bytes: int,
+    flag_bytes: int,
+) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    """Bucket oversized wiki entity pages (issue #310).
+
+    Walks the same ``wiki/*.md`` set the entity count walks — skipping
+    ``_``-prefixed files and non-entity pages (no frontmatter ``name``) — and
+    measures each page's UTF-8 body length in bytes. Returns
+    ``(pages_warn, pages_flag)`` where each list holds ``(filename, byte_size)``
+    tuples sorted largest-first. A page whose size exceeds ``flag_bytes`` lands
+    only in ``pages_flag`` (not also in ``pages_warn``); a page over
+    ``warn_bytes`` but at/under ``flag_bytes`` lands in ``pages_warn``. Purely
+    observational — it reads, measures, and reports; it never modifies or logs.
+    """
+    pages_warn: list[tuple[str, int]] = []
+    pages_flag: list[tuple[str, int]] = []
+    if not wiki_root.exists():
+        return pages_warn, pages_flag
+    for fpath in sorted(wiki_root.glob("*.md")):
+        if fpath.name.startswith("_"):
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, _ = parse_frontmatter(text)
+        if not meta or not meta.get("name"):
+            continue
+        size = len(text.encode("utf-8"))
+        if size > flag_bytes:
+            pages_flag.append((fpath.name, size))
+        elif size > warn_bytes:
+            pages_warn.append((fpath.name, size))
+    pages_warn.sort(key=lambda item: item[1], reverse=True)
+    pages_flag.sort(key=lambda item: item[1], reverse=True)
+    return pages_warn, pages_flag
 
 
 def status(knowledge_root: Path) -> StatusInfo:
@@ -60,7 +112,8 @@ def status(knowledge_root: Path) -> StatusInfo:
         result = subprocess.run(
             ["git", "log", "-1", "--format=%ai|||%s"],
             cwd=str(knowledge_root),
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode == 0 and result.stdout.strip():
             parts = result.stdout.strip().split("|||", 1)
@@ -74,6 +127,13 @@ def status(knowledge_root: Path) -> StatusInfo:
         text = pq_path.read_text(encoding="utf-8")
         pending_questions = text.count("## [")
 
+    # Oversized wiki pages (issue #310). Thresholds come from config so an
+    # operator can tune them; the scan is warn-only and never mutates anything.
+    config = load_config(knowledge_root)
+    warn_bytes = resolve_page_warn_bytes(config)
+    flag_bytes = resolve_page_flag_bytes(config)
+    pages_warn, pages_flag = scan_page_sizes(wiki_root, warn_bytes, flag_bytes)
+
     return {
         "raw_pending": raw_pending,
         "entity_count": entity_count,
@@ -81,6 +141,8 @@ def status(knowledge_root: Path) -> StatusInfo:
         "last_commit_date": last_commit_date,
         "last_commit_message": last_commit_message,
         "pending_questions": pending_questions,
+        "pages_warn": pages_warn,
+        "pages_flag": pages_flag,
     }
 
 
@@ -96,6 +158,16 @@ def format_status(info: StatusInfo) -> str:
             lines.append(f"  {etype}: {info['entities_by_type'][etype]}")
 
     lines.append(f"Pending questions:    {info['pending_questions']}")
+
+    # Issue #310: oversized-page summary. Use ``.get`` so pre-#310 status
+    # dicts (missing these keys) still format cleanly.
+    pages_warn = info.get("pages_warn", [])
+    pages_flag = info.get("pages_flag", [])
+    lines.append(f"Oversized pages (warn/flag): {len(pages_warn)}/{len(pages_flag)}")
+    for name, size in pages_flag:
+        lines.append(f"  [flag] {name} ({size} bytes)")
+    for name, size in pages_warn:
+        lines.append(f"  [warn] {name} ({size} bytes)")
 
     if info["last_commit_date"]:
         lines.append(f"Last commit:          {info['last_commit_date']}")
