@@ -55,8 +55,10 @@ def _add_lock_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--force",
         action="store_true",
-        help="Break a stale run lock left by a crashed run and proceed. "
-        "Use only when no other athenaeum process is actually running.",
+        help="Break the run lock even if a process is still holding it (the "
+        "current holder is logged first) and proceed. Use ONLY when you are "
+        "certain the holder is hung or dead; never run two --force invocations "
+        "concurrently.",
     )
 
 
@@ -419,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("~/knowledge"),
         help="Knowledge directory (default: ~/knowledge)",
     )
+    _add_lock_args(reresolve_parser)
 
     # recall command — shell-accessible recall for validation harnesses
     # and operator debugging. Wraps the MCP `recall` tool so scripts and
@@ -646,6 +649,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Wiki directory (default: ~/knowledge/wiki)",
     )
+    _add_lock_args(repair_parser)
 
     # questions command — surface unresolved pending-question blocks
     from athenaeum._cmd_questions import add_questions_subparser
@@ -675,6 +679,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Override configured backend (default: read from athenaeum.yaml)",
     )
+    _add_lock_args(rebuild_parser)
 
     args = parser.parse_args(argv)
 
@@ -1324,6 +1329,9 @@ def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001
             pass
 
+    lock = _acquire_or_exit(target, args, cfg)  # issue #309
+    if isinstance(lock, int):
+        return lock
     try:
         count = reresolve_open_questions(
             pending_path, client=anthropic_client, config=cfg
@@ -1334,6 +1342,8 @@ def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    finally:
+        lock.release()
 
     if anthropic_client is None:
         print("No ANTHROPIC_API_KEY; offline — left proposal-less questions as-is.")
@@ -1364,37 +1374,45 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    if backend == "vector":
-        try:
-            count = build_vector_index(
+    # Rebuilding the index always writes — acquire the run lock so it can't
+    # race a concurrent `run` rebuilding the same index (issue #309).
+    lock = _acquire_or_exit(knowledge_root, args, cfg)
+    if isinstance(lock, int):
+        return lock
+    try:
+        if backend == "vector":
+            try:
+                count = build_vector_index(
+                    wiki_root,
+                    cache_dir,
+                    extra_roots=extra_roots,
+                )
+            except ImportError as exc:
+                print(f"Vector backend unavailable: {exc}", file=sys.stderr)
+                print("Install with: pip install athenaeum[vector]", file=sys.stderr)
+                return 1
+            print(
+                f"Vector index rebuilt: {count} pages "
+                f"(wiki + {len(extra_roots)} extra root(s))"
+            )
+            return 0
+
+        if backend == "fts5":
+            count = build_fts5_index(
                 wiki_root,
                 cache_dir,
                 extra_roots=extra_roots,
             )
-        except ImportError as exc:
-            print(f"Vector backend unavailable: {exc}", file=sys.stderr)
-            print("Install with: pip install athenaeum[vector]", file=sys.stderr)
-            return 1
-        print(
-            f"Vector index rebuilt: {count} pages "
-            f"(wiki + {len(extra_roots)} extra root(s))"
-        )
-        return 0
+            print(
+                f"FTS5 index rebuilt: {count} pages "
+                f"(wiki + {len(extra_roots)} extra root(s))"
+            )
+            return 0
 
-    if backend == "fts5":
-        count = build_fts5_index(
-            wiki_root,
-            cache_dir,
-            extra_roots=extra_roots,
-        )
-        print(
-            f"FTS5 index rebuilt: {count} pages "
-            f"(wiki + {len(extra_roots)} extra root(s))"
-        )
-        return 0
-
-    print(f"Unknown search backend: {backend}", file=sys.stderr)
-    return 1
+        print(f"Unknown search backend: {backend}", file=sys.stderr)
+        return 1
+    finally:
+        lock.release()
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:
@@ -1749,50 +1767,63 @@ def _cmd_repair(args: argparse.Namespace) -> int:
         print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
         return 1
 
-    # The legacy-source-slugs pass uses a different report shape, so it
-    # runs through a dedicated branch instead of the RepairReport pipeline.
-    if args.legacy_source_slugs:
-        return _cmd_repair_legacy_slugs(
-            wiki_root, apply=args.apply, runner=migrate_legacy_source_slugs
-        )
+    # Issue #309: --apply mutates wiki frontmatter and can race a concurrent
+    # `run`, so it takes the run lock. A dry-run reads only — no lock.
+    lock: RunLock | int | None = None
+    if args.apply:
+        from athenaeum.config import load_config
 
-    RepairFn = Callable[[Path, bool], RepairReport]
-    passes: list[tuple[str, RepairFn]]
-    if args.all:
-        passes = [
-            ("tag-indent", repair_tag_indent),
-            ("value-quoting", repair_value_quoting),
-        ]
-    elif args.tag_indent:
-        passes = [("tag-indent", repair_tag_indent)]
-    else:  # args.value_quoting (mutex group guarantees one of the four)
-        passes = [("value-quoting", repair_value_quoting)]
+        lock = _acquire_or_exit(wiki_root.parent, args, load_config(wiki_root.parent))
+        if isinstance(lock, int):
+            return lock
+    try:
+        # The legacy-source-slugs pass uses a different report shape, so it
+        # runs through a dedicated branch instead of the RepairReport pipeline.
+        if args.legacy_source_slugs:
+            return _cmd_repair_legacy_slugs(
+                wiki_root, apply=args.apply, runner=migrate_legacy_source_slugs
+            )
 
-    total_changed = 0
-    total_errors = 0
-    mode = "APPLY" if args.apply else "DRY RUN"
+        RepairFn = Callable[[Path, bool], RepairReport]
+        passes: list[tuple[str, RepairFn]]
+        if args.all:
+            passes = [
+                ("tag-indent", repair_tag_indent),
+                ("value-quoting", repair_value_quoting),
+            ]
+        elif args.tag_indent:
+            passes = [("tag-indent", repair_tag_indent)]
+        else:  # args.value_quoting (mutex group guarantees one of the four)
+            passes = [("value-quoting", repair_value_quoting)]
 
-    for name, func in passes:
-        report: RepairReport = func(wiki_root, apply=args.apply)
-        total_changed += report.files_changed
-        total_errors += len(report.errors)
-        print(f"=== repair {name} ({mode}) ===")
-        print(f"  files_scanned: {report.files_scanned}")
-        print(f"  files_changed: {report.files_changed}")
-        print(f"  errors:        {len(report.errors)}")
-        if report.changes and not args.apply:
-            for path, summary in report.changes[:20]:
-                print(f"    {path.name}: {summary}")
-            if len(report.changes) > 20:
-                print(f"    ... and {len(report.changes) - 20} more")
-        for path, err in report.errors[:20]:
-            print(f"  ERR {path.name}: {err}", file=sys.stderr)
+        total_changed = 0
+        total_errors = 0
+        mode = "APPLY" if args.apply else "DRY RUN"
 
-    if total_errors > 0:
-        return 1
-    if not args.apply and total_changed > 0:
-        return 2
-    return 0
+        for name, func in passes:
+            report: RepairReport = func(wiki_root, apply=args.apply)
+            total_changed += report.files_changed
+            total_errors += len(report.errors)
+            print(f"=== repair {name} ({mode}) ===")
+            print(f"  files_scanned: {report.files_scanned}")
+            print(f"  files_changed: {report.files_changed}")
+            print(f"  errors:        {len(report.errors)}")
+            if report.changes and not args.apply:
+                for path, summary in report.changes[:20]:
+                    print(f"    {path.name}: {summary}")
+                if len(report.changes) > 20:
+                    print(f"    ... and {len(report.changes) - 20} more")
+            for path, err in report.errors[:20]:
+                print(f"  ERR {path.name}: {err}", file=sys.stderr)
+
+        if total_errors > 0:
+            return 1
+        if not args.apply and total_changed > 0:
+            return 2
+        return 0
+    finally:
+        if lock is not None and not isinstance(lock, int):
+            lock.release()
 
 
 def _cmd_repair_legacy_slugs(

@@ -19,9 +19,16 @@ Behavior:
   age), so the caller can exit non-zero.
 * **``wait=<seconds>``** — block up to *wait* seconds (polling ``LOCK_NB``),
   then raise :class:`LockHeld` if still held.
-* **``force=True``** — break the lock: the lockfile is unlinked and re-created
-  so a fresh acquire succeeds even when a hung holder still owns the old inode.
-  Intended for stale locks left by a crashed run (:func:`is_stale`).
+* **``force=True``** — break the lock UNCONDITIONALLY: the lockfile is unlinked
+  and re-created so a fresh acquire succeeds even when another process is still
+  actively holding the ``flock`` on the old inode. Use only when you are certain
+  the holder is hung/dead — and never run two ``--force`` invocations
+  concurrently (they would both "break" and then both proceed, defeating the
+  guard). Because the kernel releases an ``flock`` the moment its holder dies, a
+  *truly* stale lock never blocks a normal acquire in the first place; ``force``
+  exists precisely to override a LIVE-but-hung holder. The current holder is
+  logged (PID + age via :func:`read_holder`) before the break so the override is
+  auditable. :func:`is_stale` is a diagnostic only and does not gate the break.
 * **No ``fcntl`` (Windows / exotic platforms)** — degrade gracefully: log a
   warning and run WITHOUT locking. The lock is a single-machine POSIX
   convenience, never a hard dependency.
@@ -150,8 +157,10 @@ def is_stale(lockfile: Path) -> bool:
     """True if *lockfile* names a PID that is no longer alive (issue #309).
 
     A crashed run leaves its metadata behind even though the kernel has already
-    released the ``flock``. ``--force`` uses this to justify breaking the lock.
-    A lockfile with no parseable PID is treated as NOT stale (conservative).
+    released the ``flock``. This is a DIAGNOSTIC only — it does not gate
+    ``--force`` (which breaks the lock unconditionally); it is used to label the
+    audit-log line and by callers that want to report staleness. A lockfile with
+    no parseable PID is treated as NOT stale (conservative).
     """
     holder = read_holder(lockfile)
     if not holder:
@@ -242,13 +251,27 @@ class RunLock:
             self._finish_acquire(fd)
             return self
 
-        # Contended. Try to break a stale/forced lock first.
+        # Contended. --force breaks the lock UNCONDITIONALLY (even a live
+        # holder). Log who we're overriding — PID + age — so it's auditable.
         if self.force:
             holder = read_holder(self.lockfile)
-            log.warning(
-                "runlock: --force breaking lock held by %s",
-                holder or "an unknown holder",
-            )
+            if holder:
+                pid = holder.get("pid", "?")
+                age = _age_str(holder.get("timestamp")) or "unknown age"
+                stale = "stale" if is_stale(self.lockfile) else "LIVE"
+                log.warning(
+                    "runlock: --force breaking %s lock held by PID %s (held %s) "
+                    "on %s",
+                    stale,
+                    pid,
+                    age,
+                    self.lockfile,
+                )
+            else:
+                log.warning(
+                    "runlock: --force breaking lock with no holder metadata on %s",
+                    self.lockfile,
+                )
             os.close(fd)
             self._break_lock()
             fd = self._open_fd()

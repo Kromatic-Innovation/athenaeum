@@ -175,6 +175,23 @@ class TestCommandWiring:
         assert rc == 0
         assert not (root / runlock.LOCKFILE_NAME).exists()
 
+    def test_reresolve_questions_acquires_lock(self, tmp_path: Path) -> None:
+        root = self._make_knowledge_dir(tmp_path)
+        # Offline (no ANTHROPIC_API_KEY) is a no-op that still takes the lock.
+        rc = main(["reresolve-questions", "--path", str(root)])
+        assert rc == 0
+        assert (root / runlock.LOCKFILE_NAME).exists()
+
+    def test_reresolve_questions_fails_fast_when_held(self, tmp_path: Path) -> None:
+        root = self._make_knowledge_dir(tmp_path)
+        holder = RunLock(root)
+        holder.acquire()
+        try:
+            rc = main(["reresolve-questions", "--path", str(root)])
+            assert rc != 0  # EXIT_LOCK_HELD
+        finally:
+            holder.release()
+
     def test_mutating_command_fails_fast_when_held(self, tmp_path: Path) -> None:
         root = self._make_knowledge_dir(tmp_path)
         holder = RunLock(root)
@@ -215,7 +232,23 @@ class TestAtomicSidecarAppends:
         leftovers = [p for p in tmp_path.iterdir() if p.name != "sidecar.md"]
         assert leftovers == []
 
-    def test_interleaved_appends_preserve_block_structure(self, tmp_path: Path) -> None:
+    def test_mode_preserved_on_rewrite_of_existing_file(self, tmp_path: Path) -> None:
+        import stat as _stat
+
+        target = tmp_path / "sidecar.md"
+        target.write_text("first\n", encoding="utf-8")
+        os.chmod(target, 0o644)
+        atomic_write_text(target, "second\n")
+        mode = _stat.S_IMODE(target.stat().st_mode)
+        # Without mode preservation, mkstemp's 0600 would narrow this to 0o600.
+        assert mode == 0o644
+
+    def test_sequential_appends_accumulate_blocks(self, tmp_path: Path) -> None:
+        # NOTE: this exercises append ACCUMULATION only (two back-to-back calls
+        # in one thread) — it does NOT test concurrency. The genuine
+        # lost-update-under-concurrency guarantee is covered by
+        # TestRunLockSerializesWriters below (the run lock, not
+        # atomic_write_text, is what prevents a lost update).
         from athenaeum.pending_merges import (
             parse_pending_merges,
             write_pending_merge,
@@ -243,3 +276,51 @@ class TestAtomicSidecarAppends:
         assert len(parsed) == 2
         names = {pm.merge_target_name for pm in parsed}
         assert names == {"Topic A", "Topic C"}
+
+
+class TestRunLockSerializesWriters:
+    """The run lock — not atomic_write_text — prevents a lost update.
+
+    Two writers each do a read-modify-write of the SAME sidecar. Each holds the
+    run lock across its whole critical section, so the lock serializes them and
+    neither can os.replace away the other's block. A deliberate sleep between
+    read and write widens the window that would lose an update without the lock;
+    we assert the serialized-under-lock property (both blocks survive), which is
+    deterministic (an unlocked repro would be flaky).
+    """
+
+    def test_two_lock_holders_do_not_lose_each_others_block(
+        self, tmp_path: Path
+    ) -> None:
+        sidecar = tmp_path / "wiki" / "_pending_questions.md"
+        sidecar.parent.mkdir(parents=True)
+        sidecar.write_text("# Pending Questions\n", encoding="utf-8")
+
+        errors: list[BaseException] = []
+
+        def _append_under_lock(marker: str) -> None:
+            try:
+                with RunLock(tmp_path, wait=10):
+                    current = sidecar.read_text(encoding="utf-8")
+                    # Widen the read-modify-write window: without the lock the
+                    # other thread's write would land here and be clobbered.
+                    time.sleep(0.2)
+                    atomic_write_text(
+                        sidecar, current.rstrip("\n") + f"\n\n---\n\n{marker}\n"
+                    )
+            except BaseException as exc:  # noqa: BLE001 - surface to main thread
+                errors.append(exc)
+
+        t1 = threading.Thread(target=_append_under_lock, args=("block-ONE",))
+        t2 = threading.Thread(target=_append_under_lock, args=("block-TWO",))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert errors == []
+        final = sidecar.read_text(encoding="utf-8")
+        # Both writers' blocks survived — the lock serialized the RMW so neither
+        # lost update occurred.
+        assert "block-ONE" in final
+        assert "block-TWO" in final
