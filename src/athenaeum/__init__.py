@@ -5,6 +5,7 @@ The Python API surface (``__all__``) is intentionally narrow and stable.
 Most functionality is exercised through the CLI subcommands
 (``athenaeum people``, ``athenaeum recall``, ``athenaeum repair``,
 ``athenaeum dedupe``, ``athenaeum questions``, ``athenaeum ingest-answers``,
+``athenaeum ingest-merges``,
 etc.) — see the CLI documentation in ``README.md`` and ``athenaeum --help``
 for the full subcommand list. Internal modules (``contradictions``,
 ``merge``, ``clusters``, ``dedupe``, ``repair``, ``answers``,
@@ -14,7 +15,7 @@ the stable public surface; their signatures may change between minor
 releases.
 """
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 from athenaeum.init import init_knowledge_dir
 from athenaeum.librarian import discover_raw_files, process_one, rebuild_index, run
