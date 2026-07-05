@@ -71,6 +71,7 @@ from athenaeum.models import (
     render_frontmatter,
     safe_source_ref,
     slugify,
+    validity_bound_str,
 )
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
@@ -307,6 +308,9 @@ def discover_auto_memory_files(
                         deprecated=parse_deprecated(meta_for_markers),
                         source_type=source_type,
                         source_ref=source_ref,
+                        # Issue #308: claim-level temporal validity bounds.
+                        valid_from=validity_bound_str(meta_for_markers, "valid_from"),
+                        valid_until=validity_bound_str(meta_for_markers, "valid_until"),
                     )
                 )
     if dropped_ephemeral:
