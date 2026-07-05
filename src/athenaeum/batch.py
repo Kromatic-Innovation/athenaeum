@@ -595,7 +595,10 @@ def process_batch_run(
                 if msg is None:
                     raise _BatchItemError(cid)
                 updated_body, esc = parse_tier3_merge(
-                    msg.content[0].text, action, st.raw.ref
+                    msg.content[0].text,
+                    action,
+                    st.raw.ref,
+                    stop_reason=getattr(msg, "stop_reason", None),
                 )
                 if esc:
                     escalations.append(esc)
