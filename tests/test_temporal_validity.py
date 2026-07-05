@@ -189,21 +189,54 @@ class TestIsInactiveDataclass:
 
 class TestLockstepParity:
     @pytest.mark.parametrize(
-        "valid_until",
+        "raw",
         [
+            # str forms
             PAST.isoformat(),
             FUTURE.isoformat(),
             ANCHOR.isoformat(),
             "",
             "garbage",
             "2026-13-40",
+            # date object (YAML parses a bare YYYY-MM-DD into one)
+            PAST,
+            FUTURE,
+            # datetime with a time component (YAML `2026-06-30 12:00:00`) —
+            # str(raw) is NOT fromisoformat-parseable, so a naive store would
+            # fail-open on the dataclass path while the dict path .date()s it.
+            datetime(2020, 6, 30, 12, 0, 0),
+            datetime(2999, 6, 30, 12, 0, 0),
+            # int (YAML `20260630`) — str(raw) parses to a bogus date on the
+            # dataclass path while the dict path returns None (active).
+            20200630,
+            20990630,
         ],
     )
-    def test_dict_and_dataclass_agree(self, valid_until: str) -> None:
-        meta = {"valid_until": valid_until} if valid_until else {}
+    def test_dict_and_dataclass_agree(self, raw: object) -> None:
+        # Build meta the way production does, and derive the dataclass field
+        # via the SAME validity_bound_str used at construction — this is the
+        # real invariant: is_inactive_memory(meta) == the dataclass verdict for
+        # a member constructed from that meta.
+        meta = {"valid_until": raw} if raw != "" else {}
         dict_verdict = is_inactive_memory(meta, as_of=ANCHOR)
-        am_verdict = _am(valid_until=valid_until).is_inactive(as_of=ANCHOR)
+        stored = validity_bound_str(meta, "valid_until")
+        am_verdict = _am(valid_until=stored).is_inactive(as_of=ANCHOR)
         assert dict_verdict == am_verdict
+
+    def test_datetime_agreement_is_not_accidental(self) -> None:
+        # Regression pin for the specific divergence Quine flagged: an expired
+        # datetime must be inactive on BOTH paths (not fail-open on one).
+        meta = {"valid_until": datetime(2020, 6, 30, 12, 0, 0)}
+        assert is_inactive_memory(meta, as_of=ANCHOR) is True
+        stored = validity_bound_str(meta, "valid_until")
+        assert _am(valid_until=stored).is_inactive(as_of=ANCHOR) is True
+
+    def test_int_agreement_is_not_accidental(self) -> None:
+        # An int valid_until is unparseable => fail-open (active) on BOTH paths.
+        meta = {"valid_until": 20200630}
+        assert is_inactive_memory(meta, as_of=ANCHOR) is False
+        stored = validity_bound_str(meta, "valid_until")
+        assert _am(valid_until=stored).is_inactive(as_of=ANCHOR) is False
 
 
 # ---------------------------------------------------------------------------
@@ -219,9 +252,25 @@ class TestValidityBoundStr:
         # Stored string reparses to the same date the dict path sees.
         assert parse_valid_until({"valid_until": stored}) == parse_valid_until(meta)
 
-    def test_malformed_preserved_for_parity(self) -> None:
+    def test_datetime_with_time_normalized_and_reparses_equal(self) -> None:
+        # The bound Quine flagged: a datetime must normalize to a bare ISO date
+        # so the stored string reparses to exactly what the dict path computes.
+        meta = {"valid_until": datetime(2026, 6, 30, 12, 0, 0)}
+        stored = validity_bound_str(meta, "valid_until")
+        assert stored == "2026-06-30"
+        assert parse_valid_until({"valid_until": stored}) == parse_valid_until(meta)
+
+    def test_int_normalizes_to_empty_fail_open(self) -> None:
+        # An int is unparseable to a date => normalized to "" (fail-open),
+        # matching the dict path's None.
+        assert validity_bound_str({"valid_until": 20260630}, "valid_until") == ""
+
+    def test_malformed_normalizes_to_empty_fail_open(self) -> None:
+        # A malformed string normalizes to "" — the stored bound reparses to
+        # None, exactly as the dict path parses the raw "not-a-date" to None.
         meta = {"valid_until": "not-a-date"}
-        assert validity_bound_str(meta, "valid_until") == "not-a-date"
+        assert validity_bound_str(meta, "valid_until") == ""
+        assert parse_valid_until({"valid_until": ""}) == parse_valid_until(meta)
 
     def test_absent_is_empty(self) -> None:
         assert validity_bound_str({}, "valid_until") == ""
@@ -309,3 +358,53 @@ class TestDiscoverRoundTripAndFilter:
         assert "expired-target" not in active_names
         assert "valid-target" in active_names
         assert "open-target" in active_names
+
+
+class TestRealRecallPath:
+    """Drive the actual recall index (FTS5), not a mock, to prove an
+    expired-``valid_until`` page is excluded from recall while a still-valid
+    one is returned. The index-build gate (``search.py`` L286) calls
+    ``is_inactive_memory`` with the default today, so past bounds are dropped.
+    """
+
+    @pytest.fixture
+    def recall_wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        # The shared term "deployment" lives in the DESCRIPTION (an indexed
+        # FTS5 field; the body is not indexed) so one query matches all three.
+        (wiki / "valid-deploy.md").write_text(
+            "---\nname: Valid Deploy Policy\ntype: reference\n"
+            "description: deployment target policy\n"
+            "valid_until: 2999-12-31\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        (wiki / "expired-deploy.md").write_text(
+            "---\nname: Expired Deploy Policy\ntype: reference\n"
+            "description: deployment target policy\n"
+            "valid_until: 2020-06-30\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        (wiki / "open-deploy.md").write_text(
+            "---\nname: Open Deploy Policy\ntype: reference\n"
+            "description: deployment target policy\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        return wiki
+
+    def test_expired_excluded_from_recall(
+        self, recall_wiki: Path, tmp_path: Path
+    ) -> None:
+        from athenaeum.search import FTS5Backend
+
+        cache = tmp_path / "cache"
+        backend = FTS5Backend()
+        # Only the two non-expired pages should be indexed.
+        count = backend.build_index(recall_wiki, cache)
+        assert count == 2
+
+        results = backend.query("deployment", cache, n=10, wiki_root=recall_wiki)
+        filenames = {r[0] for r in results}
+        assert "expired-deploy.md" not in filenames
+        assert "valid-deploy.md" in filenames
+        assert "open-deploy.md" in filenames
