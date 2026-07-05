@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-07-05
+
+### Added
+
+- **Warn-only wiki page-size guardrails (#310).** Nothing bounded or flagged
+  wiki page size; long pages blow the tier-3 merge budget (merges reproduce
+  the whole body, so token cost scales with size), crowd out other recall
+  breadcrumbs, and usually signal poorly-factored knowledge. `athenaeum
+  status` now reports entity pages over a soft **warn** threshold
+  (`librarian.page_warn_bytes`, default **8192**, env
+  `ATHENAEUM_PAGE_WARN_BYTES`) and a louder **flag** threshold
+  (`librarian.page_flag_bytes`, default **16384**, env
+  `ATHENAEUM_PAGE_FLAG_BYTES`) via new `StatusInfo` keys `pages_warn` /
+  `pages_flag` and an "Oversized pages (warn/flag): N/M" summary line.
+  `athenaeum run` logs a non-fatal `WARNING` for each flagged page. The scan
+  walks the same `wiki/*.md` set entity-counting walks (skips `_`-prefixed
+  and non-entity files) and is purely observational — nothing is ever blocked
+  or modified, and the tier-3 merge body cap is unchanged. The librarian
+  proposing splits through `_pending_merges.md` is explicitly deferred
+  (moscow:could) and NOT built here. Guidance on splitting long pages into
+  linked sub-entities added to `docs/why-athenaeum.md`; knobs documented in
+  `docs/configuration.md`.
+
 ## [0.13.2] - 2026-07-05
 
 ### Added
