@@ -266,6 +266,191 @@ def is_inactive_memory(meta: dict[str, object] | None) -> bool:
     return parse_deprecated(meta)
 
 
+# --- Audience / access scoping (issue #312) ---
+#
+# Read-scoping for secondary agents/routines. The audience model is
+# RBAC-compatible: ``audience:`` is a free-form list of opaque role/group
+# identifiers the operator aligns with an external directory (AD group, app
+# role, routine name). The pre-existing schema-validated ``access:`` field
+# (open/internal/confidential/personal) is reused as the COARSE visibility
+# default and composes with ``audience:``.
+#
+# Every helper here is FAIL-CLOSED: malformed / unparseable input yields the
+# most restrictive interpretation (audience-∅, i.e. owner-only), never
+# "public". The owner (no serve-time audience pin, ``caller_audience=None``)
+# bypasses every check and sees everything, so single-user behavior is
+# unbroken.
+
+# The ``access:`` level that maps to "world-readable by every audience".
+_ACCESS_PUBLIC = "open"
+
+# Internal sentinel token that marks a page public in the serialized index
+# audience string. It is DELIBERATELY distinct from the ``open`` access word so
+# "public" is decided ONLY by ``access == open`` at serialization time, never
+# by an ``audience:`` role literally named ``open``. ``parse_audience`` also
+# refuses this token (and the access-level words) as role ids, so no role can
+# ever produce this marker — closing the collision at the source. Exported so
+# the backends test the same marker instead of hardcoding a literal.
+AUDIENCE_PUBLIC_TOKEN = "__access_open__"
+
+# Words that are access levels / the internal public sentinel, NOT audience
+# roles. Dropped from any ``audience:`` list so a mislabeled entry can never be
+# read as a role grant (and can never forge the public marker).
+_RESERVED_AUDIENCE_ROLES: frozenset[str] = frozenset(
+    {"open", "internal", "confidential", "personal", AUDIENCE_PUBLIC_TOKEN}
+)
+
+
+def parse_access(meta: dict[str, object] | None) -> str:
+    """Return the normalized ``access:`` level, or ``""`` when absent/malformed.
+
+    Case-folded and whitespace-trimmed. A non-string value (a typo'd list or
+    mapping) returns ``""`` — which, being neither ``open`` nor a granting
+    ``audience:``, fails closed to owner-only for a restricted caller.
+    """
+    if not meta:
+        return ""
+    raw = meta.get("access")
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip().lower()
+
+
+def parse_audience(meta: dict[str, object] | None) -> list[str]:
+    """Coerce a frontmatter ``audience:`` value into a clean list of role ids.
+
+    The single normalization point for the read-scoping control (issue #312),
+    sibling to :func:`parse_refines`/:func:`parse_supersedes`. Accepts:
+
+    - ``None`` / missing key → ``[]`` (no explicit grant).
+    - ``list[str]`` of non-empty role/group identifiers → case-folded,
+      whitespace-trimmed list.
+
+    Unlike :func:`parse_refines`, this **degrades to withhold rather than
+    raise** on malformed input: a scalar ``audience:`` value, a list holding a
+    non-string / empty entry, or any other bad shape returns ``[]`` (audience-∅
+    → withheld from a restricted caller). This is the fail-closed posture the
+    security boundary requires — one bad page must not crash a scheduled recall,
+    and a malformed tag must never be read as "public". A debug breadcrumb is
+    logged so the operator can find the offending page.
+
+    Reserved words — the access-level names (``open`` / ``internal`` /
+    ``confidential`` / ``personal``) and the internal public sentinel — are NOT
+    valid role ids and are dropped: ``audience: [open]`` grants no role (public
+    is decided only by ``access: open``), so it cannot be mistaken for a
+    world-readable grant or forge the index's public marker.
+    """
+    if not meta:
+        return []
+    raw = meta.get("audience")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        log.debug(
+            "audience must be a list of role ids, got %s; withholding",
+            type(raw).__name__,
+        )
+        return []
+    out: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            log.debug(
+                "audience entries must be non-empty strings, got %r; withholding", entry
+            )
+            return []
+        role = entry.strip().lower()
+        if role in _RESERVED_AUDIENCE_ROLES:
+            log.debug(
+                "audience role %r is a reserved access-level word, not a role; "
+                "dropping",
+                role,
+            )
+            continue
+        out.append(role)
+    return out
+
+
+def effective_audience(meta: dict[str, object] | None) -> tuple[set[str], bool]:
+    """Return ``(granted_roles, is_public)`` for a page's frontmatter.
+
+    - ``is_public`` is True iff ``access: open`` (world-readable).
+    - ``granted_roles`` is the set of explicit ``audience:`` role ids. The
+      coarse ``access:`` levels ``internal``/``confidential``/``personal``
+      contribute NO roles (owner-only) unless an explicit ``audience:`` grant
+      is present — the composition rule from the design.
+
+    A page with neither ``access: open`` nor an ``audience:`` grant has
+    ``(set(), False)`` — audience-∅, withheld from every restricted caller.
+    """
+    public = parse_access(meta) == _ACCESS_PUBLIC
+    roles = set(parse_audience(meta))
+    return roles, public
+
+
+def is_page_authorized(
+    meta: dict[str, object] | None,
+    caller_audience: set[str] | None,
+) -> bool:
+    """True iff a caller pinned to ``caller_audience`` may read this page.
+
+    ``caller_audience=None`` is the owner / default caller: authorized for
+    EVERYTHING (untagged included). A non-None set is a restricted caller:
+    authorized iff the page is public (``access: open``) OR the caller holds at
+    least one role in the page's granted set. Fail-closed: an untagged or
+    malformed page has an empty granted set and is withheld from a restricted
+    caller.
+    """
+    if caller_audience is None:
+        return True
+    roles, public = effective_audience(meta)
+    if public:
+        return True
+    return bool(caller_audience & roles)
+
+
+def audience_index_string(meta: dict[str, object] | None) -> str:
+    """Serialize a page's effective audience for storage in the search index.
+
+    Returns a delimiter-anchored string so a substring/``LIKE`` test can never
+    cross a role boundary (``|ops|`` never matches ``|opsadmin|``):
+
+    - public page → ``"|__access_open__|"`` (may also include granted roles).
+      The public marker is the internal sentinel, never the ``open`` word, so a
+      role can't forge it.
+    - roles ``{a, b}`` → ``"|a|b|"`` (sorted for deterministic rebuilds).
+    - audience-∅ → ``"|"`` (empty sentinel).
+
+    Stored UNINDEXED in FTS5 (out of the BM25 term space) and as chromadb
+    metadata so Layer B can filter INSIDE each backend query.
+    """
+    roles, public = effective_audience(meta)
+    parts: list[str] = []
+    if public:
+        parts.append(AUDIENCE_PUBLIC_TOKEN)
+    parts.extend(sorted(roles))
+    if not parts:
+        return "|"
+    return "|" + "|".join(parts) + "|"
+
+
+def audience_string_authorized(
+    audience_str: str,
+    caller_audience: set[str] | None,
+) -> bool:
+    """Authorize a caller against a stored :func:`audience_index_string`.
+
+    The string-based counterpart to :func:`is_page_authorized`, used by the
+    vector backend's Python post-filter (chromadb metadata is scalar-only, so
+    the audience is stored as this delimited string and filtered here).
+    ``caller_audience=None`` (owner) is always authorized.
+    """
+    if caller_audience is None:
+        return True
+    if f"|{AUDIENCE_PUBLIC_TOKEN}|" in audience_str:
+        return True
+    return any(f"|{role}|" in audience_str for role in caller_audience)
+
+
 def render_frontmatter(meta: dict[str, object]) -> str:
     """Render a dict as a YAML frontmatter block.
 
