@@ -450,6 +450,11 @@ search_backend: fts5
 # cluster_output: canonical JSONL output path (relative to knowledge
 #   root). Each run also writes a timestamped sibling and atomically
 #   replaces this path.
+# rotation_retention: number of timestamped cluster-report rotations to
+#   keep; older ones are pruned after each run (issue #311). Rotations are
+#   debugging artifacts, not recovery-critical (recovery is git-based).
+#   Precedence: ATHENAEUM_ROTATION_RETENTION env, then this key, then 30.
+#   0 (or negative) disables pruning (keep all).
 # max_files: per-run intake batch size — stop after processing this many
 #   raw files (issue #232). Precedence: --max-files CLI flag, then
 #   ATHENAEUM_MAX_FILES env, then this key, then 50.
@@ -496,6 +501,7 @@ search_backend: fts5
 # librarian:
 #   cluster_threshold: 0.55
 #   cluster_output: raw/_librarian-clusters.jsonl
+#   rotation_retention: 30
 #   max_files: 50
 #   batch_mode: false
 #   retire: true
