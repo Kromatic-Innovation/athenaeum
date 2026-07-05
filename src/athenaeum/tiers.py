@@ -441,6 +441,13 @@ Rules:
   to overwrite the existing content outright.
 - Do NOT modify YAML frontmatter — return body content only"""
 
+# Issue #302: the merge LLM can only dedupe a re-confirming observation
+# against existing content it actually receives. This must be generous
+# enough to cover an already-bloated page (the #297 incident page grew to
+# 5-10KB) — the OLD 4000-char cap silently went blind on exactly that
+# scenario, the one the #297 dedup guard was meant to protect.
+_MAX_EXISTING_BODY_CHARS = 20_000
+
 MERGE_TEMPLATE = """## Existing page content
 {existing_body}
 
@@ -561,7 +568,7 @@ def tier3_merge_params(
     API assembly (issue #236).
     """
     user_msg = MERGE_TEMPLATE.format(
-        existing_body=existing_body[:4000],
+        existing_body=existing_body[:_MAX_EXISTING_BODY_CHARS],
         source_ref=source_ref,
         observations=action.observations[:3000],
     )

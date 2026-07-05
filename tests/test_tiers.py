@@ -750,6 +750,30 @@ class TestTier3Merge:
         assert "human confirmation" in MERGE_SYSTEM.lower()
         assert "not independent verification" in MERGE_SYSTEM.lower()
 
+    def test_merge_params_does_not_truncate_bloated_existing_body(self) -> None:
+        """Issue #302: the old 4000-char cap on existing_body went blind on
+        already-bloated pages (the #297 incident page grew to 5-10KB), so the
+        #297 dedup guard could never see content past the cap. The cap must
+        be generous enough to cover realistic bloated pages.
+        """
+        from athenaeum.tiers import tier3_merge_params
+
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Acme raised Series C in Q1 2024.",
+        )
+        existing_body = ("Confirmed again.[^1]\n" * 700) + "TAIL_MARKER"
+        assert len(existing_body) > 4000  # exceeds the old cap
+
+        params = tier3_merge_params(action, existing_body, "sessions/raw.md")
+        user_msg = params["messages"][0]["content"]
+        assert "TAIL_MARKER" in user_msg
+
     def test_merges_new_observations(self) -> None:
         action = EntityAction(
             kind="update",
