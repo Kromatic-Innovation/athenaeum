@@ -28,6 +28,7 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 | Direct network access | Via consumers' use | When wrapping the Anthropic API, requests go from the consumer's process. |
 | Local file/SQLite operations | Yes (chromadb optional extra) | SQLite schema migrations have happened in chromadb minors — hence the hold list. |
 | Build-time secret handling | At release time only | Trusted-publishing identity uses GitHub OIDC; no long-lived PyPI token. |
+| Read-scoping of recall (#312) | Yes (opt-in) | `athenaeum serve --audience <role,…>` (also `ATHENAEUM_AUDIENCE` / `serve.audience`) pins a server process to a restricted read scope so a secondary agent/routine recalls only `access: open` pages and pages whose `audience:` list grants one of its roles; untagged / `confidential` / `personal` pages fail closed (withheld). The audience is pinned by the operator at serve time, not chosen by the `recall` caller, so a restricted agent can't widen its own scope. Enforced inside each backend query (ranking/top-k) and re-checked against fresh on-disk frontmatter at render. Unset = owner = full access. This is NOT a full multi-user auth/ACL system — it is a single-owner read filter for the owner's own secondary agents. Intake-side secret/PII screening for `remember()` is tracked separately. |
 
 ## 3. Dependency-upgrade policy
 

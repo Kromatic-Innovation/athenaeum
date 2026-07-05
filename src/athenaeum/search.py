@@ -24,7 +24,14 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from athenaeum.models import is_inactive_memory, parse_frontmatter
+from athenaeum.models import (
+    AUDIENCE_PUBLIC_TOKEN,
+    audience_index_string,
+    audience_string_authorized,
+    is_inactive_memory,
+    is_page_authorized,
+    parse_frontmatter,
+)
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -69,11 +76,21 @@ class SearchBackend(Protocol):
         n: int = 5,
         exclude: set[str] | None = None,
         wiki_root: Path | None = None,
+        caller_audience: set[str] | None = None,
     ) -> list[tuple[str, str, float]]:
         """Search the index.
 
         ``wiki_root`` is used by scan-on-query backends (e.g. keyword) that
         don't maintain an on-disk index; indexed backends ignore it.
+
+        ``caller_audience`` (issue #312) pins the query to a restricted read
+        scope. ``None`` is the owner / default caller: no filtering, every
+        page (untagged included) is eligible. A non-None set restricts the
+        result to pages the caller is authorized for, with the audience
+        predicate pushed INSIDE the backend query so BM25/kNN top-k is
+        computed over permitted rows only — a forbidden page can neither
+        occupy a slot nor push a permitted page past the limit. Fail-closed:
+        untagged / malformed pages are withheld from a restricted caller.
 
         Returns a list of ``(filename, page_name, score)`` tuples,
         ordered by relevance (best first). The ``filename`` may be a
@@ -123,6 +140,16 @@ _DB_NAME = "wiki-index.db"
 # contents, not a memory. Callers who want to search index files directly
 # can do so with a filename-targeted query outside recall.
 _INTAKE_SKIP_NAMES: frozenset[str] = frozenset({"MEMORY.md"})
+
+
+def _like_escape(value: str) -> str:
+    """Escape SQL ``LIKE`` wildcards in an audience role id (issue #312).
+
+    Role ids are operator-controlled, but a stray ``%`` / ``_`` in a role would
+    turn the delimiter-anchored ``LIKE`` predicate into an unintended wildcard.
+    Escaped with a backslash to pair with ``ESCAPE '\\'`` in the query.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _extract_frontmatter_fields(text: str) -> tuple[str, str, str, str]:
@@ -237,13 +264,15 @@ class FTS5Backend:
             db_path.unlink()
 
         conn = sqlite3.connect(str(db_path))
+        # Issue #312: ``audience`` is UNINDEXED so it stays out of the BM25
+        # term space (no ranking pollution) while remaining filterable in SQL.
         conn.execute(
             "CREATE VIRTUAL TABLE wiki USING fts5"
-            "(filename, name, tags, aliases, description, "
+            "(filename, name, tags, aliases, description, audience UNINDEXED, "
             'tokenize="porter unicode61")'
         )
 
-        rows: list[tuple[str, str, str, str, str]] = []
+        rows: list[tuple[str, str, str, str, str, str]] = []
         for indexed_name, path in _scan_all_entries(wiki_root, extra_roots):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")[:2000]
@@ -264,9 +293,12 @@ class FTS5Backend:
                 # indexed_name) so recall results show a clean title.
                 name = path.stem
 
-            rows.append((indexed_name, name, tags, aliases, description))
+            # Issue #312: store each page's effective audience (delimited,
+            # anchored) so Layer B can filter inside the query.
+            audience = audience_index_string(meta)
+            rows.append((indexed_name, name, tags, aliases, description, audience))
 
-        conn.executemany("INSERT INTO wiki VALUES (?,?,?,?,?)", rows)
+        conn.executemany("INSERT INTO wiki VALUES (?,?,?,?,?,?)", rows)
         conn.commit()
         conn.close()
         return len(rows)
@@ -279,6 +311,7 @@ class FTS5Backend:
         n: int = 5,
         exclude: set[str] | None = None,
         wiki_root: Path | None = None,
+        caller_audience: set[str] | None = None,
     ) -> list[tuple[str, str, float]]:
         """Query the FTS5 index. Returns ``(filename, name, score)`` triples."""
         del wiki_root  # FTS5 reads the pre-built index, not the wiki files
@@ -306,13 +339,33 @@ class FTS5Backend:
             exclude_clause = f" AND filename NOT IN ({placeholders})"
             params = list(exclude)
 
+        # Issue #312 — Layer B: push the audience predicate INTO the WHERE,
+        # BEFORE ``ORDER BY rank LIMIT``, so the BM25 top-k is selected from
+        # permitted rows only. A forbidden page can neither occupy a slot nor
+        # push a permitted page past the LIMIT. ``caller_audience=None`` (owner)
+        # adds no predicate — every page is eligible. Each role is a
+        # delimiter-anchored, LIKE-escaped, parameterized clause so ``|ops|``
+        # never matches ``|opsadmin|`` and role ids can't inject SQL.
+        audience_clause = ""
+        audience_params: list[str] = []
+        if caller_audience is not None:
+            # Public marker first (the internal sentinel, escaped so its
+            # underscores aren't treated as LIKE wildcards), then one anchored,
+            # escaped, parameterized clause per caller role.
+            like_clauses = [r"audience LIKE ? ESCAPE '\'"]
+            audience_params.append(f"%|{_like_escape(AUDIENCE_PUBLIC_TOKEN)}|%")
+            for role in sorted(caller_audience):
+                like_clauses.append(r"audience LIKE ? ESCAPE '\'")
+                audience_params.append(f"%|{_like_escape(role)}|%")
+            audience_clause = " AND (" + " OR ".join(like_clauses) + ")"
+
         conn = sqlite3.connect(str(db_path))
         try:
             cursor = conn.execute(
                 f"SELECT filename, name, rank FROM wiki "
-                f"WHERE wiki MATCH ? {exclude_clause} "
+                f"WHERE wiki MATCH ? {exclude_clause}{audience_clause} "
                 f"ORDER BY rank LIMIT ?",
-                [fts_query, *params, n],
+                [fts_query, *params, *audience_params, n],
             )
             return [(row[0], row[1], row[2]) for row in cursor.fetchall()]
         except sqlite3.OperationalError:
@@ -404,9 +457,19 @@ class VectorBackend:
             if not name:
                 name = path.stem
 
+            # Issue #312 — Layer A: store the effective audience so the query
+            # can pre-filter neighbors. chromadb metadata is scalar-only (no
+            # list values), so the audience is stored as the same delimited
+            # string as FTS5 and filtered in Python at query time (Layer B).
             ids.append(indexed_name)
             documents.append(text)
-            metadatas.append({"name": name, "filename": indexed_name})
+            metadatas.append(
+                {
+                    "name": name,
+                    "filename": indexed_name,
+                    "audience": audience_index_string(meta),
+                }
+            )
 
         # chromadb batches internally but has a max batch size
         batch_size = 5000
@@ -428,6 +491,7 @@ class VectorBackend:
         n: int = 5,
         exclude: set[str] | None = None,
         wiki_root: Path | None = None,
+        caller_audience: set[str] | None = None,
     ) -> list[tuple[str, str, float]]:
         """Query the chromadb collection with semantic search."""
         del wiki_root  # Vector reads the pre-built chromadb collection
@@ -458,7 +522,8 @@ class VectorBackend:
             )
             return []
 
-        if collection.count() == 0:
+        count = collection.count()
+        if count == 0:
             return []
 
         # Build where filter for exclusions
@@ -468,9 +533,25 @@ class VectorBackend:
         elif exclude and len(exclude) > 1:
             where = {"filename": {"$nin": list(exclude)}}
 
+        # Issue #312 — Layer B (vector): chromadb metadata is scalar-only, so
+        # there is no native substring/list-membership operator to express the
+        # audience predicate as a ``where``. Instead OVER-FETCH — for a
+        # restricted caller fetch the full ordered neighbor list — then filter
+        # in Python and re-truncate to ``n``. Because we fetch every neighbor,
+        # no permitted page can be starved out of the top-k by forbidden
+        # neighbors ranking above it. ``caller_audience=None`` (owner) keeps the
+        # original cheap ``min(n, count)`` fetch. Layer C (mcp_server) re-checks
+        # fresh on-disk frontmatter as the backstop.
+        # NOTE (perf): for a restricted caller this is a full-collection kNN
+        # (n_results == count) — O(collection) per query — deliberately, so a
+        # forbidden-heavy corpus can never starve a permitted page out of the
+        # returned top-k. Fine for a personal knowledge base; revisit with a
+        # bounded over-fetch + retry only if this ever dominates recall latency.
+        fetch_n = count if caller_audience is not None else min(n, count)
+
         results = collection.query(
             query_texts=[query],
-            n_results=min(n, collection.count()),
+            n_results=fetch_n,
             where=where,
         )
 
@@ -478,9 +559,15 @@ class VectorBackend:
         if results["ids"] and results["ids"][0]:
             for i, doc_id in enumerate(results["ids"][0]):
                 meta = results["metadatas"][0][i] if results["metadatas"] else {}
+                if caller_audience is not None:
+                    audience_str = str(meta.get("audience", "|"))
+                    if not audience_string_authorized(audience_str, caller_audience):
+                        continue
                 name = meta.get("name", doc_id.replace(".md", ""))
                 distance = results["distances"][0][i] if results["distances"] else 0.0
                 hits.append((doc_id, name, distance))
+                if len(hits) >= n:
+                    break
 
         return hits
 
@@ -613,6 +700,7 @@ class KeywordBackend:
         n: int = 5,
         exclude: set[str] | None = None,
         wiki_root: Path | None = None,
+        caller_audience: set[str] | None = None,
     ) -> list[tuple[str, str, float]]:
         """Score every non-underscore wiki page and return the top-n hits."""
         del cache_dir
@@ -642,6 +730,11 @@ class KeywordBackend:
             fm, body = parse_frontmatter(text)
             # Issue #191: skip inactive members (superseded_by / deprecated).
             if is_inactive_memory(fm):
+                continue
+            # Issue #312 — Layer B (keyword): authorize BEFORE scoring so a
+            # forbidden page never enters ``scored`` and cannot occupy a top-n
+            # slot. Owner (caller_audience=None) is authorized for everything.
+            if not is_page_authorized(fm, caller_audience):
                 continue
             score = score_keyword_page(tokens, fm, body)
             if score > 0:

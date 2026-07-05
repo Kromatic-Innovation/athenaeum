@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-07-05
+
+### Added
+
+- **Audience-scoped recall — fail-closed read access for secondary agents
+  (#312).** The MCP `recall` tool and the FTS5/vector/keyword recall index
+  previously exposed the WHOLE wiki to any caller, with no read scoping. A
+  scheduled routine (e.g. a Voltaire-style email-drafting agent) that needs
+  operational knowledge could also read the owner's PII / client-confidential /
+  financial pages. Recall is now scopeable to a restricted **audience** pinned
+  by the operator at `serve` time, NOT chosen by the caller:
+
+  - **Model.** A new `audience:` frontmatter list holds opaque role/group
+    identifiers the operator maps onto an external RBAC (an Active Directory
+    group, an app role, a routine name). The pre-existing schema-validated
+    `access:` field (`open`/`internal`/`confidential`/`personal`) is reused as
+    the coarse default: `access: open` is world-readable to every audience;
+    `internal`/`confidential`/`personal` are owner-only unless an explicit
+    `audience:` grant is present. Effective audience = roles-from-access ∪
+    explicit `audience[]`.
+  - **Serve-pinned, never caller-chosen.** `athenaeum serve --audience
+    <role>[,<role>…]` (also `ATHENAEUM_AUDIENCE` env and `serve.audience` yaml,
+    resolved CLI > env > yaml > owner) pins the server process. The `recall`
+    tool takes NO audience argument, so a restricted agent cannot widen its own
+    scope. No pin = owner = full access (untagged included) — existing
+    single-user behavior is byte-for-byte unchanged.
+  - **Fail-closed.** For a restricted caller, untagged pages, malformed or
+    unparseable `audience:`/`access:`, and frontmatter parse errors all resolve
+    to withheld (never "public"). One bad page degrades to withhold, never
+    raises, so a scheduled recall can't be crashed by a typo.
+  - **Three enforcement layers close every leak class.** (A) each page's
+    effective audience is stored in the index at build time — an UNINDEXED FTS5
+    column (kept out of the BM25 term space) and chromadb metadata. (B) the
+    audience predicate is pushed INSIDE each backend query (FTS5 `WHERE` before
+    `ORDER BY rank LIMIT`; chromadb over-fetch-then-filter; keyword authorize
+    before scoring) so BM25/kNN top-k is computed over permitted rows only — a
+    forbidden page can neither occupy a slot nor starve a permitted page. (C) a
+    defense-in-depth re-check at the single render funnel re-reads fresh on-disk
+    frontmatter, so a stale index (a page re-classified since the last rebuild)
+    cannot leak a forbidden page's title, tags, snippet, OR body.
+  - `athenaeum recall --audience` exercises the identical filter path for shell
+    harnesses and tests.
+
+  Intake-side secret/PII screening for `remember()` writes is deliberately
+  split into its own issue — it is a distinct write-time mechanism with its own
+  policy and failure modes.
+
 ## [0.13.3] - 2026-07-05
 
 ### Added
