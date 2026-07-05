@@ -1,0 +1,311 @@
+"""Tests for claim-level temporal validity (issue #308, slice 1).
+
+Covers the ``valid_from:`` / ``valid_until:`` frontmatter fields and the
+shared upper-bound predicate wired into BOTH inactive-memory checks:
+
+- :func:`athenaeum.models.is_inactive_memory` (dict path, used by recall).
+- :meth:`athenaeum.models.AutoMemoryFile.is_inactive` (dataclass path, used
+  by the C3 merge compile).
+
+Slice 1 is the frontmatter + read-filter foundation: the resolver does NOT
+yet auto-stamp ``valid_until`` (slice 2) and there is no ``--as-of`` CLI view
+(slice 3, for which the predicate already accepts an ``as_of`` parameter).
+
+Determinism note: every temporal assertion passes an EXPLICIT ``as_of`` so a
+claim's active/inactive verdict does not flip between today's test runs. One
+test asserts the default really is :func:`date.today`.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from athenaeum.models import (
+    AutoMemoryFile,
+    is_inactive_memory,
+    parse_valid_from,
+    parse_valid_until,
+    valid_until_expired,
+    validity_bound_str,
+)
+
+PAST = date(2020, 1, 1)
+FUTURE = date(2999, 12, 31)
+ANCHOR = date(2026, 7, 5)  # explicit "today" for deterministic as_of tests
+
+
+# ---------------------------------------------------------------------------
+# Parsers — parse_valid_from / parse_valid_until
+# ---------------------------------------------------------------------------
+
+
+class TestParsers:
+    def test_parses_iso_string(self) -> None:
+        assert parse_valid_from({"valid_from": "2026-04-01"}) == date(2026, 4, 1)
+        assert parse_valid_until({"valid_until": "2026-06-30"}) == date(2026, 6, 30)
+
+    def test_parses_yaml_date_object(self) -> None:
+        # YAML auto-parses a bare ``YYYY-MM-DD`` scalar into a datetime.date.
+        assert parse_valid_until({"valid_until": date(2026, 6, 30)}) == date(
+            2026, 6, 30
+        )
+
+    def test_datetime_reduced_to_date(self) -> None:
+        # datetime subclasses date; slice 1 is date-resolution, so a time
+        # component is dropped to a bare date (avoids date-vs-datetime compare).
+        val = parse_valid_until({"valid_until": datetime(2026, 6, 30, 12, 0, 0)})
+        assert val == date(2026, 6, 30)
+        assert type(val) is date
+
+    def test_absent_is_none(self) -> None:
+        assert parse_valid_from(None) is None
+        assert parse_valid_until({}) is None
+        assert parse_valid_until({"valid_until": ""}) is None
+
+    def test_malformed_is_none_fail_open(self) -> None:
+        assert parse_valid_until({"valid_until": "not-a-date"}) is None
+        assert parse_valid_until({"valid_until": "2026-13-99"}) is None
+        assert parse_valid_until({"valid_until": [1, 2, 3]}) is None
+
+
+# ---------------------------------------------------------------------------
+# valid_until_expired — the shared upper-bound helper
+# ---------------------------------------------------------------------------
+
+
+class TestValidUntilExpired:
+    def test_past_is_expired(self) -> None:
+        assert valid_until_expired({"valid_until": PAST.isoformat()}, as_of=ANCHOR)
+
+    def test_future_is_not_expired(self) -> None:
+        assert not valid_until_expired(
+            {"valid_until": FUTURE.isoformat()}, as_of=ANCHOR
+        )
+
+    def test_inclusive_last_valid_date(self) -> None:
+        # valid_until is the LAST valid date (inclusive): on that day, active.
+        assert not valid_until_expired(
+            {"valid_until": ANCHOR.isoformat()}, as_of=ANCHOR
+        )
+        # The day after, inactive.
+        assert valid_until_expired(
+            {"valid_until": ANCHOR.isoformat()}, as_of=ANCHOR + timedelta(days=1)
+        )
+
+    def test_absent_upper_bound_never_expires(self) -> None:
+        assert not valid_until_expired({}, as_of=ANCHOR)
+        assert not valid_until_expired(None, as_of=ANCHOR)
+
+    def test_malformed_never_expires_fail_open(self) -> None:
+        assert not valid_until_expired({"valid_until": "garbage"}, as_of=ANCHOR)
+
+    def test_default_as_of_is_today(self) -> None:
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        assert valid_until_expired({"valid_until": yesterday})
+        assert not valid_until_expired({"valid_until": tomorrow})
+
+
+# ---------------------------------------------------------------------------
+# is_inactive_memory (dict path) — the recall predicate
+# ---------------------------------------------------------------------------
+
+
+class TestIsInactiveMemoryDict:
+    def test_past_valid_until_is_inactive(self) -> None:
+        assert is_inactive_memory({"valid_until": PAST.isoformat()}, as_of=ANCHOR)
+
+    def test_future_valid_until_is_active(self) -> None:
+        assert not is_inactive_memory({"valid_until": FUTURE.isoformat()}, as_of=ANCHOR)
+
+    def test_absent_is_active_open_interval(self) -> None:
+        assert not is_inactive_memory({"name": "x"}, as_of=ANCHOR)
+
+    def test_malformed_is_active_fail_open(self) -> None:
+        assert not is_inactive_memory({"valid_until": "nope"}, as_of=ANCHOR)
+
+    def test_valid_from_alone_does_not_gate(self) -> None:
+        # Slice 1 keys ONLY on valid_until; a past valid_from is not inactive.
+        assert not is_inactive_memory({"valid_from": PAST.isoformat()}, as_of=ANCHOR)
+
+    def test_superseded_still_inactive_regardless_of_dates(self) -> None:
+        # The #191 disjuncts are unchanged and independent of #308.
+        assert is_inactive_memory(
+            {"superseded_by": "winner", "valid_until": FUTURE.isoformat()},
+            as_of=ANCHOR,
+        )
+        assert is_inactive_memory(
+            {"deprecated": True, "valid_until": FUTURE.isoformat()}, as_of=ANCHOR
+        )
+
+    def test_as_of_rewind(self) -> None:
+        # A claim expired relative to today but active as-of a past date.
+        meta = {"valid_until": "2026-03-01"}
+        assert is_inactive_memory(meta, as_of=date(2026, 6, 1))  # after -> inactive
+        assert not is_inactive_memory(meta, as_of=date(2026, 2, 1))  # before -> active
+
+
+# ---------------------------------------------------------------------------
+# AutoMemoryFile.is_inactive (dataclass path) — the C3 compile predicate
+# ---------------------------------------------------------------------------
+
+
+def _am(**kw: object) -> AutoMemoryFile:
+    return AutoMemoryFile(
+        path=Path("raw/auto-memory/_unscoped/project_x.md"),
+        origin_scope="_unscoped",
+        memory_type="project",
+        name="x",
+        **kw,
+    )
+
+
+class TestIsInactiveDataclass:
+    def test_past_valid_until_is_inactive(self) -> None:
+        assert _am(valid_until=PAST.isoformat()).is_inactive(as_of=ANCHOR)
+
+    def test_future_valid_until_is_active(self) -> None:
+        assert not _am(valid_until=FUTURE.isoformat()).is_inactive(as_of=ANCHOR)
+
+    def test_absent_is_active(self) -> None:
+        assert not _am().is_inactive(as_of=ANCHOR)
+
+    def test_malformed_is_active_fail_open(self) -> None:
+        assert not _am(valid_until="garbage").is_inactive(as_of=ANCHOR)
+
+    def test_superseded_marker_still_wins(self) -> None:
+        assert _am(superseded_by="winner", valid_until=FUTURE.isoformat()).is_inactive(
+            as_of=ANCHOR
+        )
+
+
+# ---------------------------------------------------------------------------
+# Lockstep parity — dict and dataclass predicates must agree
+# ---------------------------------------------------------------------------
+
+
+class TestLockstepParity:
+    @pytest.mark.parametrize(
+        "valid_until",
+        [
+            PAST.isoformat(),
+            FUTURE.isoformat(),
+            ANCHOR.isoformat(),
+            "",
+            "garbage",
+            "2026-13-40",
+        ],
+    )
+    def test_dict_and_dataclass_agree(self, valid_until: str) -> None:
+        meta = {"valid_until": valid_until} if valid_until else {}
+        dict_verdict = is_inactive_memory(meta, as_of=ANCHOR)
+        am_verdict = _am(valid_until=valid_until).is_inactive(as_of=ANCHOR)
+        assert dict_verdict == am_verdict
+
+
+# ---------------------------------------------------------------------------
+# validity_bound_str — raw storage preserves parity even on bad dates
+# ---------------------------------------------------------------------------
+
+
+class TestValidityBoundStr:
+    def test_str_from_yaml_date_reparses_equal(self) -> None:
+        meta = {"valid_until": date(2026, 6, 30)}
+        stored = validity_bound_str(meta, "valid_until")
+        assert stored == "2026-06-30"
+        # Stored string reparses to the same date the dict path sees.
+        assert parse_valid_until({"valid_until": stored}) == parse_valid_until(meta)
+
+    def test_malformed_preserved_for_parity(self) -> None:
+        meta = {"valid_until": "not-a-date"}
+        assert validity_bound_str(meta, "valid_until") == "not-a-date"
+
+    def test_absent_is_empty(self) -> None:
+        assert validity_bound_str({}, "valid_until") == ""
+        assert validity_bound_str(None, "valid_from") == ""
+
+
+# ---------------------------------------------------------------------------
+# Round-trip + real compile-filter path via discover_auto_memory_files
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def temporal_root(tmp_path: Path) -> Path:
+    """A knowledge root with three auto-memory members:
+
+    - ``valid`` — future ``valid_until`` (active),
+    - ``expired`` — past ``valid_until`` (inactive by default),
+    - ``open`` — no validity bounds (active, backward-compat).
+    """
+    knowledge_root = tmp_path / "knowledge"
+    auto = knowledge_root / "raw" / "auto-memory"
+    scope = auto / "_unscoped"
+    scope.mkdir(parents=True)
+    (knowledge_root / "athenaeum.yaml").write_text(
+        "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
+        encoding="utf-8",
+    )
+
+    (scope / "project_valid_target.md").write_text(
+        "---\nname: valid-target\ntype: project\n"
+        "valid_from: 2026-01-01\nvalid_until: 2999-12-31\n---\nStill valid.\n",
+        encoding="utf-8",
+    )
+    (scope / "project_expired_target.md").write_text(
+        "---\nname: expired-target\ntype: project\n"
+        "valid_from: 2020-01-01\nvalid_until: 2020-06-30\n---\nExpired.\n",
+        encoding="utf-8",
+    )
+    (scope / "project_open_target.md").write_text(
+        "---\nname: open-target\ntype: project\n---\nNo bounds.\n",
+        encoding="utf-8",
+    )
+    return knowledge_root
+
+
+class TestDiscoverRoundTripAndFilter:
+    def test_fields_round_trip_into_dataclass(self, temporal_root: Path) -> None:
+        from athenaeum.librarian import discover_auto_memory_files
+
+        files = discover_auto_memory_files(temporal_root)
+        by_name = {f.path.name: f for f in files}
+        valid = by_name["project_valid_target.md"]
+        assert valid.valid_from == "2026-01-01"
+        assert valid.valid_until == "2999-12-31"
+        expired = by_name["project_expired_target.md"]
+        assert expired.valid_until == "2020-06-30"
+        open_page = by_name["project_open_target.md"]
+        assert open_page.valid_from == ""
+        assert open_page.valid_until == ""
+
+    def test_discovery_leaves_bytes_unchanged(self, temporal_root: Path) -> None:
+        # Tier0/C1 discovery is read-only: the raw member is byte-for-byte
+        # preserved on disk (the round-trip contract).
+        from athenaeum.librarian import discover_auto_memory_files
+
+        member = (
+            temporal_root
+            / "raw"
+            / "auto-memory"
+            / "_unscoped"
+            / "project_valid_target.md"
+        )
+        before = member.read_bytes()
+        discover_auto_memory_files(temporal_root)
+        assert member.read_bytes() == before
+
+    def test_compile_filter_excludes_expired(self, temporal_root: Path) -> None:
+        # Drive the REAL compile filter: the same list comprehension C3 uses
+        # in merge.py (``[am for am in files if not am.is_inactive()]``).
+        from athenaeum.librarian import discover_auto_memory_files
+
+        files = discover_auto_memory_files(temporal_root)
+        active = [am for am in files if not am.is_inactive(as_of=ANCHOR)]
+        active_names = {am.name for am in active}
+        assert "expired-target" not in active_names
+        assert "valid-target" in active_names
+        assert "open-target" in active_names

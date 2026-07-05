@@ -93,6 +93,7 @@ from athenaeum.models import (
     render_frontmatter,
     safe_source_ref,
     slugify,
+    validity_bound_str,
 )
 from athenaeum.pending_merges import write_pending_merge
 from athenaeum.resolutions import (
@@ -775,6 +776,9 @@ def merge_cluster_row(
                 # Issue #191: non-destructive inactive markers.
                 superseded_by=parse_superseded_by(meta if meta else None),
                 deprecated=parse_deprecated(meta if meta else None),
+                # Issue #308: claim-level temporal validity bounds.
+                valid_from=validity_bound_str(meta if meta else None, "valid_from"),
+                valid_until=validity_bound_str(meta if meta else None, "valid_until"),
             )
         # Issue #278: secondary ephemeral guard. discover_auto_memory_files
         # already drops ephemeral intake, so the only way one reaches here is

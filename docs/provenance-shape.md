@@ -477,7 +477,75 @@ ingest; downstream tooling (a future lint pass) can surface them.
 
 ---
 
-## 8. Implementation issue mapping
+## 8. Claim-level temporal validity (`valid_from` / `valid_until`)
+
+Issue #308 (slice 1). Two optional frontmatter fields on auto-memory members
+declare the real-world window over which a claim is true. They sit alongside
+`source:` / `field_sources:` / `refines:` / `supersedes:` and round-trip through
+tier0 passthrough byte-for-byte (same contract as §3 and §7).
+
+### 8.1 Shape and semantics
+
+Both are optional ISO-8601 **dates** (`YYYY-MM-DD`, no time component in slice 1):
+
+```yaml
+---
+type: project
+name: deploy-target
+valid_from: 2026-04-01     # optional; open lower bound when absent
+valid_until: 2026-06-30    # optional; open upper bound (still valid) when absent
+source_type: user-stated
+source_ref: <session>:<turn>
+---
+```
+
+- A claim is valid over the window `[valid_from, valid_until]`. Both bounds are
+  optional. `valid_until` is the **last date the claim was valid (inclusive)**;
+  a claim is inactive when `as_of > valid_until`.
+- **Orthogonal to `source:`.** `source_type` / `source_ref` (#260) answer *where
+  the claim came from* and *when it was ingested*; `valid_from` / `valid_until`
+  answer *over what real-world window the claim is true*. This is the bi-temporal
+  split (ingestion time vs. valid time) — they sit **beside** `source:`, never
+  inside it.
+- **Augments, does not replace, `superseded_by` / `deprecated` (#191).** Those
+  remain the pointer (who won) and the both-stale flag; `valid_until` is the
+  interval close. Slice 1 only makes the READER honor a `valid_until` a human or
+  a future resolver sets; the resolver does not yet auto-stamp intervals.
+
+### 8.2 Default-open interval (backward compatibility)
+
+**Rule: absent `valid_until` ⇒ open upper bound ⇒ the claim is currently valid
+(active).** Every existing page has no `valid_from` / `valid_until`, so no
+existing file changes visibility — no migration, no backfill. The field
+transitions organically as humans (or a future resolver, slice 2) close
+intervals. This mirrors §2.3's "no forced upgrade, legacy shape loadable
+forever" stance.
+
+A **malformed / unparseable** date **fails OPEN**: it is logged and treated as
+absent (the claim stays active). Silently hiding a claim on a bad date is worse
+than keeping it visible for a knowledge base — same "must not crash the nightly
+compile" contract as `coerce_source_type`.
+
+### 8.3 Currently-valid-by-default filter
+
+Recall and the C3 compile filter to **currently-valid claims by default**. The
+single shared helper `models.valid_until_expired(meta, as_of=None)` (default
+`as_of = date.today()`) is wired into BOTH inactive predicates so they stay in
+lockstep:
+
+- `is_inactive_memory(meta, as_of=None)` (dict path — recall's three `search.py`
+  gates, `recurring_claims.py`) gains a third disjunct: inactive if
+  `superseded_by` OR `deprecated` (as before) OR `valid_until` in the past.
+- `AutoMemoryFile.is_inactive(as_of=None)` (dataclass path — the C3 compile in
+  `merge.py`) delegates the same temporal check to the same helper.
+
+Because every live-knowledge read already routes through those predicates, the
+past-`valid_until` disjunct filters expired claims everywhere with no call-site
+changes. The `as_of` parameter is designed in now so slice 3's `--as-of DATE`
+view is plumbing, not a predicate rewrite — but the CLI flag is NOT built in
+slice 1.
+
+## 9. Implementation issue mapping
 
 | Section | Issue | What the issue implements |
 |---------|-------|---------------------------|
@@ -485,3 +553,4 @@ ingest; downstream tooling (a future lint pass) can surface them.
 | §3 tier0 byte-for-byte | (no issue — already invariant) | Existing tier0 passthrough already satisfies the rule. Add a regression test asserting per-value shape round-trips. |
 | §4 MCP `remember(sources=...)` | #96 | Replace the bare-dict heuristic with the `_source`/`_field_sources` wrapper keys; update docstring + integration test. |
 | §5 legacy slug migration | #97 | `athenaeum repair --legacy-source-slugs` with dry-run/apply, the fixed mapping table, and post-migration validation. |
+| §8 claim-level temporal validity | #308 | Slice 1: `valid_from` / `valid_until` parse + round-trip; shared `valid_until_expired` helper; currently-valid-by-default filter. Slice 2 (resolver interval-close) and slice 3 (`--as-of`) deferred. |
