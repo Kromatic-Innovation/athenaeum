@@ -56,6 +56,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter, render_frontmatter, slugify
 
 log = logging.getLogger(__name__)
@@ -403,7 +404,7 @@ def write_pending_merge(
     else:
         merges_path.parent.mkdir(parents=True, exist_ok=True)
         combined = "# Pending Merges\n\n" + block + "\n"
-    merges_path.write_text(combined, encoding="utf-8")
+    atomic_write_text(merges_path, combined)
     return block
 
 
@@ -631,7 +632,7 @@ def resolve_merge(
 
     primary_parts = ["# Pending Merges", *rewritten]
     primary_body = "\n\n---\n\n".join(primary_parts) + "\n"
-    merges_path.write_text(primary_body, encoding="utf-8")
+    atomic_write_text(merges_path, primary_body)
 
     response: dict = {
         "ok": True,
@@ -675,10 +676,7 @@ def ingest_resolved_merges(merges_path: Path) -> int:
         return 0
 
     primary_parts = ["# Pending Merges", *remaining]
-    merges_path.write_text(
-        "\n\n---\n\n".join(primary_parts) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_text(merges_path, "\n\n---\n\n".join(primary_parts) + "\n")
 
     existing_archive = ""
     if archive_path.exists():
@@ -699,5 +697,5 @@ def ingest_resolved_merges(merges_path: Path) -> int:
             )
     else:
         combined = "# Archived Merges\n\n" + new_section + "\n"
-    archive_path.write_text(combined, encoding="utf-8")
+    atomic_write_text(archive_path, combined)
     return len(archived)

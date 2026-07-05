@@ -21,6 +21,7 @@ from typing import Any
 import anthropic
 
 from athenaeum._retry import with_retry
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import resolve_model
 from athenaeum.fingerprint import (
     _member_key_str,
@@ -1482,12 +1483,12 @@ def tier4_escalate(
             new_content = existing_text.rstrip() + "\n\n---\n\n" + new_section_text
         else:
             new_content = "# Pending Questions\n\n" + new_section_text
-        pending_path.write_text(new_content + "\n", encoding="utf-8")
+        atomic_write_text(pending_path, new_content + "\n")
     elif file_merges:
         # Only file-merges happened — rewrite existing text in place.
-        pending_path.write_text(
+        atomic_write_text(
+            pending_path,
             existing_text if existing_text.endswith("\n") else existing_text + "\n",
-            encoding="utf-8",
         )
 
     log.info(
@@ -1815,7 +1816,7 @@ def reresolve_open_questions(
             (replacement.rstrip("\n")) if replacement is not None else pq.raw_block
         )
     primary_body = "\n\n---\n\n".join(primary_parts) + "\n"
-    pending_path.write_text(primary_body, encoding="utf-8")
+    atomic_write_text(pending_path, primary_body)
 
     # Archive dropped (not_a_conflict) blocks — preserve the audit trail rather
     # than silently delete (mirrors ingest_answers' archive append, newest-first).
@@ -1871,4 +1872,4 @@ def _append_dropped_to_archive(pending_path: Path, blocks: list[str]) -> None:
             combined = new_section + "\n\n---\n\n" + existing.lstrip("\n")
     else:
         combined = "# Answered Questions\n\n" + new_section + "\n"
-    archive_path.write_text(combined.rstrip("\n") + "\n", encoding="utf-8")
+    atomic_write_text(archive_path, combined.rstrip("\n") + "\n")
