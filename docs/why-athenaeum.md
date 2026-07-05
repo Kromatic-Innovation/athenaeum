@@ -299,6 +299,28 @@ Between the notetaker and the librarian, important context lands in memory
 even when the agent isn't paying attention, and it lands in a form we can
 audit and improve over time.
 
+### 5. The wiki is a graph, not a document store
+
+Because entities are first-class and reference each other, the right unit of
+knowledge is a small, well-factored page linked to its neighbours — not a long
+essay that tries to hold everything. A page that keeps growing is usually two
+or three entities that got merged by accident: a project page that swallowed
+its people, its decisions, and its meeting notes. Split it into linked
+sub-entities and let the references carry the connections.
+
+Oversized pages hurt in three concrete ways: they blow the tier-3 merge budget
+(every merge reproduces the whole body, so token cost scales with size), they
+eat reader context on recall (a long page crowds out other breadcrumbs), and
+they read as poorly-factored knowledge that no one wants to maintain.
+
+Athenaeum flags this for you rather than enforcing it. `athenaeum status`
+reports pages over a soft **warn** threshold (`librarian.page_warn_bytes`,
+default 8192 bytes) and a louder **flag** threshold
+(`librarian.page_flag_bytes`, default 16384 bytes); `athenaeum run` logs a
+non-fatal warning for flagged pages. Nothing is ever blocked or split
+automatically — the guardrail is a nudge to break the page into linked
+entities by hand. See [configuration.md](configuration.md) for the knobs.
+
 ## Key takeaways
 
 Three things we learned running this in production:

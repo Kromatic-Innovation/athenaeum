@@ -717,3 +717,103 @@ class TestRunIntegration:
 
         # run() returns 1 when any files failed (partial failure)
         assert exit_code == 1
+
+    def _write_oversized_entity(self, root: Path) -> str:
+        """Drop an oversized (>flag) wiki entity page; return its filename."""
+        name = "bigbig01-big-page.md"
+        header = (
+            "---\n"
+            "uid: bigbig01\n"
+            "type: person\n"
+            "name: Big Page\n"
+            "access: internal\n"
+            "---\n\n"
+            "# Big Page\n\n"
+        )
+        (root / "wiki" / name).write_text(header + "x" * 20000)
+        return name
+
+    def test_flag_page_warns_nonfatally(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Issue #310: run() logs one WARNING per flagged page (non-fatal)."""
+        import logging
+
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = self._seed_knowledge_root(tmp_path)
+        page_name = self._write_oversized_entity(root)
+
+        # Empty classification => trivial processing; run reaches the end block.
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = MagicMock(
+            content=[MagicMock(text="[]")]
+        )
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-key")
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+
+        exit_code = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+        )
+
+        assert exit_code == 0
+        flag_warnings = [
+            rec
+            for rec in caplog.records
+            if "oversized wiki page" in rec.message and page_name in rec.message
+        ]
+        assert len(flag_warnings) == 1, (
+            "expected exactly one oversized-page WARNING for the flagged page, "
+            f"got {[r.message for r in caplog.records]}"
+        )
+
+    def test_page_size_scan_error_is_swallowed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Issue #310: a scan failure must never break a run (non-fatal degrade)."""
+        import logging
+
+        import anthropic as anthropic_mod
+
+        import athenaeum.status as status_mod
+        from athenaeum.librarian import run
+
+        root = self._seed_knowledge_root(tmp_path)
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = MagicMock(
+            content=[MagicMock(text="[]")]
+        )
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-key")
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("scan blew up")
+
+        # run() does a function-local import of scan_page_sizes, so patching
+        # the attribute on the module is picked up at call time.
+        monkeypatch.setattr(status_mod, "scan_page_sizes", _boom)
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+
+        exit_code = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+        )
+
+        # The run completes (does not raise, returns 0) and logs the degrade.
+        assert exit_code == 0
+        assert any(
+            "page-size guardrail check failed" in rec.message for rec in caplog.records
+        ), "expected non-fatal degrade warning when the scan raises"
