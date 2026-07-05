@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-07-05
+
+### Added
+
+- **Claim-level temporal validity — `valid_from` / `valid_until` foundation
+  (#308, slice 1).** Supersession was a flat boolean tombstone
+  (`superseded_by` / `deprecated`) that cannot say *when* a fact stopped being
+  true or answer "what did we believe on date X". This slice adds optional
+  ISO-8601 date frontmatter — `valid_from:` / `valid_until:` — declaring the
+  real-world window over which a claim is true, beside (not inside) the
+  `source:` ingestion-time provenance (the bi-temporal split).
+
+  - **Model + parse.** New `parse_valid_from` / `parse_valid_until` parsers and
+    a single shared `valid_until_expired(meta, as_of=None)` helper in
+    `models.py`; `AutoMemoryFile` gains `valid_from` / `valid_until` fields that
+    round-trip through tier0 discovery byte-for-byte. `superseded_by` /
+    `deprecated` are AUGMENTED, not replaced — they keep the winner pointer and
+    both-stale flag; `valid_until` is the interval close.
+  - **One predicate, two callers in lockstep.** The shared helper is wired into
+    BOTH `is_inactive_memory(meta, as_of=None)` (dict path — recall) and
+    `AutoMemoryFile.is_inactive(as_of=None)` (dataclass path — C3 compile) as a
+    third disjunct, so recall and the compile can never disagree. Every
+    live-knowledge read already routes through those predicates, so
+    expired-`valid_until` claims are filtered **by default, everywhere**, with no
+    call-site changes.
+  - **Default-open interval (non-breaking).** Absent `valid_until` ⇒ open upper
+    bound ⇒ still valid, so every existing page stays active — no migration, no
+    backfill. A malformed/unparseable date **fails open** (logged, treated as
+    active) rather than silently hiding a page.
+  - **`as_of` designed in, `--as-of` not built.** The predicate takes an `as_of`
+    parameter (default `date.today()`) so a later `--as-of DATE` view (slice 3)
+    is plumbing, not a rewrite. Deferred: resolver auto-stamping `valid_until` on
+    supersession (slice 2), the `--as-of` CLI (slice 3), per-claim validity
+    (slice 4). Documented in `docs/provenance-shape.md` §8.
+
 ## [0.13.4] - 2026-07-05
 
 ### Added

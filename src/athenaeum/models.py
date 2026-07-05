@@ -7,6 +7,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -250,20 +251,148 @@ def parse_deprecated(meta: dict[str, object] | None) -> bool:
     return bool(dep)
 
 
-def is_inactive_memory(meta: dict[str, object] | None) -> bool:
+# --- Claim-level temporal validity (issue #308, slice 1) ---
+#
+# ``valid_from:`` / ``valid_until:`` are optional ISO-8601 date frontmatter
+# fields declaring the real-world window over which a claim is true. They sit
+# BESIDE ``source:`` provenance (which answers *where/when ingested*, not *over
+# what window valid*) — the bi-temporal split from Zep/Graphiti. Slice 1 only
+# makes the READER honor a ``valid_until`` set by a human or a future resolver;
+# the resolver does not yet auto-stamp intervals (slice 2), and there is no
+# ``--as-of`` view yet (slice 3, for which the predicate already takes an
+# ``as_of`` parameter). See ``docs/provenance-shape.md`` §9.
+
+
+def _coerce_iso_date(value: object) -> date | None:
+    """Coerce a frontmatter value to a :class:`datetime.date`, or ``None``.
+
+    Fail-OPEN (issue #308): a missing, empty, or UNPARSEABLE value returns
+    ``None`` (treated as an open bound / no constraint), mirroring
+    :func:`coerce_source_type`'s "must not crash the nightly compile" contract.
+    Silently dropping a page on a bad date is worse than keeping it visible for
+    a knowledge base, so a malformed date is logged and treated as absent.
+
+    Accepts a real :class:`datetime.date` (YAML auto-parses a bare
+    ``YYYY-MM-DD`` scalar into one) or an ISO-8601 ``YYYY-MM-DD`` string
+    (e.g. a quoted date). Anything else => ``None`` + a debug breadcrumb.
+    """
+    if value is None or value == "":
+        return None
+    # ``datetime`` subclasses ``date`` — reduce to a bare date so a later
+    # ``as_of`` (a ``date``) comparison never hits the date-vs-datetime
+    # TypeError. Slice 1 is date-resolution; any time component is dropped.
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError:
+            log.debug(
+                "temporal-validity: unparseable ISO date %r; treating as open "
+                "(fail-open, claim stays active)",
+                value,
+            )
+            return None
+    log.debug(
+        "temporal-validity: non-date value %r for a validity bound; treating "
+        "as open (fail-open, claim stays active)",
+        value,
+    )
+    return None
+
+
+def parse_valid_from(meta: dict[str, object] | None) -> date | None:
+    """Return the frontmatter ``valid_from`` as a date, or ``None`` (open lower bound).
+
+    Fail-open: missing / unparseable => ``None`` (valid since always). Not part
+    of the slice-1 inactive predicate (which keys on ``valid_until`` only), but
+    parsed for round-trip and future not-yet-valid handling.
+    """
+    if not meta:
+        return None
+    return _coerce_iso_date(meta.get("valid_from"))
+
+
+def parse_valid_until(meta: dict[str, object] | None) -> date | None:
+    """Return the frontmatter ``valid_until`` as a date, or ``None`` (open upper bound).
+
+    Fail-open: missing / unparseable => ``None`` (open interval, still valid).
+    ``valid_until`` is the LAST date the claim was valid (inclusive).
+    """
+    if not meta:
+        return None
+    return _coerce_iso_date(meta.get("valid_until"))
+
+
+def validity_bound_str(meta: dict[str, object] | None, key: str) -> str:
+    """Return a ``valid_from`` / ``valid_until`` bound NORMALIZED to ``YYYY-MM-DD``.
+
+    Used at :class:`AutoMemoryFile` construction to store the bound so the
+    dataclass predicate (:meth:`AutoMemoryFile.is_inactive`, which re-parses this
+    string) reaches the SAME verdict the dict predicate
+    (:func:`is_inactive_memory`) reaches parsing the raw ``meta`` value directly.
+
+    Critically, the bound is run through the SAME :func:`_coerce_iso_date` the
+    dict path uses and re-emitted as an ISO date string, rather than a naive
+    ``str(raw)``. ``str(raw)`` diverged from the dict path on two reachable YAML
+    types: a ``datetime`` (``2026-06-30 12:00:00`` → ``str`` is not
+    ``fromisoformat``-parseable → fail-open, but the dict path ``.date()``
+    honors it) and an ``int`` (``20260630`` → ``str`` parses as a bogus date,
+    but the dict path returns ``None``). Normalizing here makes both predicates
+    parse identical text and agree on ``date``/``datetime``/``int``/``str``/
+    malformed inputs. A genuinely unparseable value normalizes to ``""``
+    (fail-open — the claim stays active), matching the dict path's ``None``.
+    """
+    if not meta:
+        return ""
+    coerced = _coerce_iso_date(meta.get(key))
+    return coerced.isoformat() if coerced is not None else ""
+
+
+def valid_until_expired(
+    meta: dict[str, object] | None, as_of: date | None = None
+) -> bool:
+    """True when ``valid_until`` is strictly in the past relative to ``as_of``.
+
+    The single shared upper-bound predicate wired into BOTH
+    :func:`is_inactive_memory` (dict path, recall) and
+    :meth:`AutoMemoryFile.is_inactive` (dataclass path, C3 compile) so they stay
+    in lockstep. ``as_of`` defaults to :func:`date.today` — pass an explicit
+    date (slice 3's ``--as-of``) to rewind the view. Open upper bound (absent /
+    malformed ``valid_until``) => ``False`` (still valid). Inclusive last-valid
+    date: inactive iff ``as_of > valid_until``.
+    """
+    until = parse_valid_until(meta)
+    if until is None:
+        return False
+    return (as_of or date.today()) > until
+
+
+def is_inactive_memory(
+    meta: dict[str, object] | None, as_of: date | None = None
+) -> bool:
     """True when a memory file is marked inactive and must not surface as a live claim.
 
-    Inactive == frontmatter declares EITHER a non-empty ``superseded_by``
-    (keep_a/keep_b loser, issue #191) OR a truthy ``deprecated`` flag
-    (deprecate_both, issue #191). Inactive members are preserved on disk
-    for audit but are skipped by recall (search index) and by the C3 merge
-    compile so their claims drop out of the live wiki.
+    Inactive == frontmatter declares ANY of: a non-empty ``superseded_by``
+    (keep_a/keep_b loser, issue #191), a truthy ``deprecated`` flag
+    (deprecate_both, issue #191), OR a ``valid_until`` in the past relative to
+    ``as_of`` (claim-level temporal validity, issue #308). Inactive members are
+    preserved on disk for audit but are skipped by recall (search index) and by
+    the C3 merge compile so their claims drop out of the live wiki.
+
+    ``as_of`` defaults to today; the past-``valid_until`` disjunct filters
+    expired claims by default. An absent or malformed ``valid_until`` is an open
+    interval (fail-open — the claim stays active).
     """
     if not meta:
         return False
     if parse_superseded_by(meta):
         return True
-    return parse_deprecated(meta)
+    if parse_deprecated(meta):
+        return True
+    return valid_until_expired(meta, as_of)
 
 
 # --- Audience / access scoping (issue #312) ---
@@ -537,6 +666,14 @@ class AutoMemoryFile:
     # own ``raw/auto-memory/...`` name. Empty when unestablished.
     source_type: str = DEFAULT_SOURCE_TYPE
     source_ref: str = ""
+    # Issue #308 (slice 1): claim-level temporal validity. Both are the RAW
+    # frontmatter string form (``YYYY-MM-DD`` or "" when absent) so the
+    # dataclass predicate re-parses to the SAME date as the dict predicate
+    # sees — keeping :meth:`is_inactive` in lockstep with
+    # :func:`is_inactive_memory`. ``valid_until`` is the last date the claim was
+    # valid (inclusive); absent => open interval (still valid).
+    valid_from: str = ""
+    valid_until: str = ""
     _content: str | None = field(default=None, repr=False)
 
     @property
@@ -550,9 +687,20 @@ class AutoMemoryFile:
         """Short reference for footnotes — scope/filename."""
         return f"{self.origin_scope}/{self.path.name}"
 
-    def is_inactive(self) -> bool:
-        """True when this member carries a #191 inactive marker."""
-        return bool(self.superseded_by) or self.deprecated
+    def is_inactive(self, as_of: date | None = None) -> bool:
+        """True when this member is inactive (#191 marker OR expired #308 validity).
+
+        Mirrors :func:`is_inactive_memory` on the dataclass path (C3 compile):
+        inactive iff a ``superseded_by`` pointer or ``deprecated`` flag is set,
+        OR ``valid_until`` is in the past relative to ``as_of`` (default today).
+        Delegates the temporal check to the shared :func:`valid_until_expired`
+        helper — fed the raw ``valid_until`` string — so the two predicates
+        cannot drift. An absent/malformed ``valid_until`` is an open interval
+        (fail-open, stays active).
+        """
+        if self.superseded_by or self.deprecated:
+            return True
+        return valid_until_expired({"valid_until": self.valid_until}, as_of)
 
     def supersedes_names(self) -> list[str]:
         """Return just the ``name`` keys from :attr:`supersedes` records."""
