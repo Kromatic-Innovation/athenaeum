@@ -6,7 +6,10 @@ import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from athenaeum.runlock import RunLock
 
 
 def _positive_int(value: str) -> int:
@@ -24,6 +27,64 @@ def _positive_int(value: str) -> int:
     if ivalue <= 0:
         raise argparse.ArgumentTypeError(f"must be a positive integer (got {value!r})")
     return ivalue
+
+
+#: Exit code returned when a mutating command cannot acquire the run lock
+#: (issue #309). Non-zero so cron / alerting sees the contention; distinct
+#: from the generic error (1) and dry-run-found (2) codes some commands use.
+EXIT_LOCK_HELD = 75
+
+
+def _add_lock_args(parser: argparse.ArgumentParser) -> None:
+    """Add the shared run-lock ``--wait`` / ``--force`` flags (issue #309).
+
+    Mutating commands acquire an exclusive lock on
+    ``<knowledge_root>/.athenaeum.lock`` so overlapping runs (nightly cron +
+    manual) don't race wiki writes, sidecar appends, or the API-call budget.
+    """
+    group = parser.add_argument_group("run lock (single-machine, issue #309)")
+    group.add_argument(
+        "--wait",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Block up to SECONDS for the run lock instead of failing fast. "
+        "Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml "
+        "librarian.lock_timeout, then 0 (fail fast).",
+    )
+    group.add_argument(
+        "--force",
+        action="store_true",
+        help="Break a stale run lock left by a crashed run and proceed. "
+        "Use only when no other athenaeum process is actually running.",
+    )
+
+
+def _acquire_or_exit(
+    knowledge_root: Path,
+    args: argparse.Namespace,
+    config: dict[str, Any] | None = None,
+) -> "RunLock | int":
+    """Acquire the run lock or return :data:`EXIT_LOCK_HELD` (issue #309).
+
+    Returns an acquired :class:`~athenaeum.runlock.RunLock` on success (the
+    caller must ``release()`` it, ideally in a ``finally``), or the
+    :data:`EXIT_LOCK_HELD` exit code after printing the holder to stderr.
+    The ``--wait`` flag overrides the resolved default timeout.
+    """
+    from athenaeum.config import resolve_lock_timeout
+    from athenaeum.runlock import LockHeld, RunLock
+
+    wait = getattr(args, "wait", None)
+    if wait is None:
+        wait = resolve_lock_timeout(config)
+    lock = RunLock(knowledge_root, wait=wait, force=getattr(args, "force", False))
+    try:
+        lock.acquire()
+    except LockHeld as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_LOCK_HELD
+    return lock
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -193,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         "JSONL from the last C2 run and emit wiki/auto-*.md entries. "
         "Skips discovery, clustering, and the entity tier pipeline.",
     )
+    _add_lock_args(run_parser)
 
     # test-mcp command — smoke-test the MCP memory setup without a session
     test_mcp_parser = subparsers.add_parser(
@@ -325,6 +387,7 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("~/knowledge"),
         help="Knowledge directory (default: ~/knowledge)",
     )
+    _add_lock_args(ingest_answers_parser)
 
     # ingest-merges command (issue #299) — move resolved (`[x]`) blocks out
     # of `wiki/_pending_merges.md` into `_pending_merges_archive.md`, mirroring
@@ -340,6 +403,7 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("~/knowledge"),
         help="Knowledge directory (default: ~/knowledge)",
     )
+    _add_lock_args(ingest_merges_parser)
 
     # reresolve-questions command (issue #188) — re-run the resolver on OPEN,
     # PROPOSAL-LESS pending questions so a prior cap-hit / offline escalation
@@ -435,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Path to the YAML report to apply (default: stdin). --apply only.",
     )
+    _add_lock_args(dedupe_persons)
 
     # dedupe wiki-pages — cluster compiled concept/reference/principle
     # wiki pages against EACH OTHER (issue #290) and propose merges via
@@ -467,6 +532,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Cosine similarity cutoff (default: librarian.cluster_threshold "
         "/ 0.55 — same threshold the raw auto-memory cluster pass uses).",
     )
+    _add_lock_args(dedupe_wiki_pages)
 
     # claims command — cross-entity recurring-claim detector (issue #272,
     # slice 1 of #258). READ-ONLY: scans the wiki, embeds claim texts via the
@@ -537,6 +603,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Override the recall index backend for the rebuild "
         "(default: read from athenaeum.yaml). --apply only.",
     )
+    _add_lock_args(prune_parser)
 
     # repair command — frontmatter YAML repair tools (tag-indent, value-quoting)
     repair_parser = subparsers.add_parser(
@@ -722,7 +789,7 @@ def _cmd_dedupe(args: argparse.Namespace) -> int:
             sys.stdout.write(report)
         return 0
 
-    # --apply
+    # --apply (mutating): acquire the single-machine run lock (issue #309).
     if args.from_path:
         text = args.from_path.read_text(encoding="utf-8")
     else:
@@ -730,10 +797,17 @@ def _cmd_dedupe(args: argparse.Namespace) -> int:
     pairs = pairs_from_yaml(text)
     from athenaeum.config import load_config, resolve_google_contact_keys
 
-    gc_keys = resolve_google_contact_keys(load_config(wiki_root.parent))
-    merge_report = merge_duplicate_persons(
-        pairs, apply=True, wiki_root=wiki_root, google_contact_keys=gc_keys
-    )
+    cfg = load_config(wiki_root.parent)
+    lock = _acquire_or_exit(wiki_root.parent, args, cfg)
+    if isinstance(lock, int):
+        return lock
+    try:
+        gc_keys = resolve_google_contact_keys(cfg)
+        merge_report = merge_duplicate_persons(
+            pairs, apply=True, wiki_root=wiki_root, google_contact_keys=gc_keys
+        )
+    finally:
+        lock.release()
     print(
         f"merged={merge_report.merged} "
         f"already_merged={merge_report.already_merged} "
@@ -764,11 +838,24 @@ def _cmd_dedupe_wiki_pages(args: argparse.Namespace) -> int:
         print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
         return 1
 
-    proposals = propose_wiki_page_merges(
-        knowledge_root,
-        threshold=args.threshold,
-        dry_run=args.dry_run,
-    )
+    # Issue #309: --dry-run writes nothing, so it does NOT take the lock. The
+    # proposal-append path (default) mutates wiki/_pending_merges.md → locked.
+    lock: RunLock | int | None = None
+    if not args.dry_run:
+        from athenaeum.config import load_config
+
+        lock = _acquire_or_exit(knowledge_root, args, load_config(knowledge_root))
+        if isinstance(lock, int):
+            return lock
+    try:
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            threshold=args.threshold,
+            dry_run=args.dry_run,
+        )
+    finally:
+        if lock is not None and not isinstance(lock, int):
+            lock.release()
 
     if args.dry_run:
         print(f"[DRY RUN] would propose {len(proposals)} merge(s):")
@@ -882,19 +969,26 @@ def _cmd_auto_memory_prune(args: argparse.Namespace) -> int:
             return 1
         return 2 if report.kill else 0
 
-    # --apply
-    report = apply_prune(knowledge_root, report)
-    for err in report.errors:
-        print(f"  ERR {err}", file=sys.stderr)
-    if report.errors:
-        return 1
+    # --apply (mutating): acquire the single-machine run lock (issue #309).
+    # The dry-run path above returns before here and never takes the lock.
+    lock = _acquire_or_exit(knowledge_root, args, cfg)
+    if isinstance(lock, int):
+        return lock
+    try:
+        report = apply_prune(knowledge_root, report)
+        for err in report.errors:
+            print(f"  ERR {err}", file=sys.stderr)
+        if report.errors:
+            return 1
 
-    if report.committed:
-        print(f"\n  pruned {len(report.kill)} page(s); committed.")
-        _rebuild_recall_index(knowledge_root, cfg, args)
-    else:
-        print("\n  nothing pruned.")
-    return 0
+        if report.committed:
+            print(f"\n  pruned {len(report.kill)} page(s); committed.")
+            _rebuild_recall_index(knowledge_root, cfg, args)
+        else:
+            print("\n  nothing pruned.")
+        return 0
+    finally:
+        lock.release()
 
 
 def _rebuild_recall_index(
@@ -1058,20 +1152,47 @@ def _cmd_run(args: argparse.Namespace) -> int:
     raw_root = args.raw_root or (knowledge_root / "raw")
     wiki_root = args.wiki_root or (knowledge_root / "wiki")
 
-    return run(
-        raw_root=raw_root,
-        wiki_root=wiki_root,
-        knowledge_root=knowledge_root,
-        dry_run=args.dry_run,
-        max_files=args.max_files,
-        max_api_calls=args.max_api_calls,
-        cluster_only=getattr(args, "cluster_only", False),
-        merge_only=getattr(args, "merge_only", False),
-        strict_budget=args.strict_budget,
-        batch_mode=args.batch_mode,
-        retire=getattr(args, "retire", None),
-        push_after_run=getattr(args, "push_after_run", None),
-    )
+    # Issue #309: a --dry-run reads nothing mutating, so it does NOT take the
+    # single-machine run lock. A real run acquires it so overlapping runs
+    # (nightly cron + manual) don't race wiki writes or the API-call budget.
+    if args.dry_run:
+        return run(
+            raw_root=raw_root,
+            wiki_root=wiki_root,
+            knowledge_root=knowledge_root,
+            dry_run=args.dry_run,
+            max_files=args.max_files,
+            max_api_calls=args.max_api_calls,
+            cluster_only=getattr(args, "cluster_only", False),
+            merge_only=getattr(args, "merge_only", False),
+            strict_budget=args.strict_budget,
+            batch_mode=args.batch_mode,
+            retire=getattr(args, "retire", None),
+            push_after_run=getattr(args, "push_after_run", None),
+        )
+
+    from athenaeum.config import load_config
+
+    lock = _acquire_or_exit(knowledge_root, args, load_config(knowledge_root))
+    if isinstance(lock, int):
+        return lock
+    try:
+        return run(
+            raw_root=raw_root,
+            wiki_root=wiki_root,
+            knowledge_root=knowledge_root,
+            dry_run=args.dry_run,
+            max_files=args.max_files,
+            max_api_calls=args.max_api_calls,
+            cluster_only=getattr(args, "cluster_only", False),
+            merge_only=getattr(args, "merge_only", False),
+            strict_budget=args.strict_budget,
+            batch_mode=args.batch_mode,
+            retire=getattr(args, "retire", None),
+            push_after_run=getattr(args, "push_after_run", None),
+        )
+    finally:
+        lock.release()
 
 
 def _cmd_ingest_answers(args: argparse.Namespace) -> int:
@@ -1115,6 +1236,9 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001
             pass
 
+    lock = _acquire_or_exit(target, args, cfg)  # issue #309
+    if isinstance(lock, int):
+        return lock
     try:
         count = ingest_answers(
             pending_path, raw_root, client=anthropic_client, config=cfg
@@ -1125,6 +1249,8 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    finally:
+        lock.release()
 
     print(f"Ingested {count} answered question(s).")
     return 0
@@ -1149,6 +1275,11 @@ def _cmd_ingest_merges(args: argparse.Namespace) -> int:
 
     merges_path = target / "wiki" / "_pending_merges.md"
 
+    from athenaeum.config import load_config
+
+    lock = _acquire_or_exit(target, args, load_config(target))  # issue #309
+    if isinstance(lock, int):
+        return lock
     try:
         count = ingest_resolved_merges(merges_path)
     except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
@@ -1157,6 +1288,8 @@ def _cmd_ingest_merges(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    finally:
+        lock.release()
 
     print(f"Archived {count} resolved merge(s).")
     return 0

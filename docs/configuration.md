@@ -45,6 +45,7 @@ Every default figure on this page is verified against the code under
 | Cohesion-floor scope count | — | — | `librarian.min_cluster_cohesion_scopes` | `4` | Minimum distinct `origin_scope` count a low-cohesion cluster must span before the `min_cluster_cohesion` floor suppresses it (#281). Legitimate pages span 1-3 scopes and over-clusters span 8-17, so `4` is the clean margin — a low-cohesion single-/few-scope cluster is never false-suppressed. Inert while `min_cluster_cohesion` is `0.0`. |
 | Embedding cache root | — | `ATHENAEUM_CACHE_DIR` | — | `~/.cache/athenaeum` | Cache root used by the librarian's cluster pass (chromadb lives at `<dir>/wiki-vectors/`). The `recall` / `rebuild-index` commands do **not** read this var — they take `--cache-dir` (same default). |
 | Post-run git push | `--push` | — | `librarian.push_after_run` | off | Push the knowledge repo to its remote after a successful run that produced at least one commit (#284). Closes the move-then-retire recovery gap on multi-machine setups: without it, scheduled nightly runs commit locally but origin silently drifts. Uses the operator's ambient git auth (credential helper / SSH); athenaeum handles no tokens or secrets. `--dry-run` never pushes; a run with no new commits never pushes; a push failure is a non-fatal warning (`athenaeum-push-failed:`) and the next run retries. Remote/branch come from `librarian.push_remote` (default `origin`) and `librarian.push_branch` (default: current branch's upstream). |
+| Run-lock wait | `--wait` | `ATHENAEUM_LOCK_TIMEOUT` | `librarian.lock_timeout` | `0` | Default seconds a mutating command blocks for the single-machine run lock before failing (#309). `0` = fail-fast (name the holder, exit non-zero). The `--wait` flag overrides per-invocation. See the run-lock note below. |
 | API key | — | `ANTHROPIC_API_KEY` | — | (required) | Required for Tier 2/3 LLM calls. Optional with `--dry-run`, `--cluster-only`, or `--merge-only`. |
 
 > **Design decision — CLI rejects `0`, env/yaml accept it.** The
@@ -60,6 +61,37 @@ Path and mode flags on `athenaeum run` (CLI-only): `--raw-root` and
 `--wiki-root` (default under the knowledge root), `--knowledge-root` /
 `--path` (default `~/knowledge`), `--dry-run`, `--cluster-only`,
 `--merge-only`, `--verbose`.
+
+### Run lock (single-machine concurrency guard, #309)
+
+Every **mutating** command acquires an exclusive advisory
+[`fcntl.flock`](https://man7.org/linux/man-pages/man2/flock.2.html) on
+`<knowledge_root>/.athenaeum.lock` at startup, so overlapping runs (a nightly
+cron overlapping a manual invocation, or two editor sessions) cannot race
+whole-file wiki writes, interleave block appends to the `_pending_*.md`
+sidecars, double-spend the API-call budget, or race the move-then-retire git
+ops. The lockfile records the holder's PID, an ISO-8601 timestamp, and the
+hostname for diagnostics.
+
+- **Locked commands:** `run`, `ingest-answers`, `ingest-merges`,
+  `auto-memory prune --apply`, `dedupe persons --apply`, and
+  `dedupe wiki-pages` (non-`--dry-run`).
+- **Never locked:** `status`, `recall`, `serve`, and every `--dry-run`
+  (they don't mutate the knowledge base).
+- **Default** — fail fast with a message naming the holder (PID + age) and a
+  non-zero exit.
+- **`--wait <seconds>`** — block up to the timeout for the lock, then fail if
+  still held. Default from `librarian.lock_timeout` / `ATHENAEUM_LOCK_TIMEOUT`
+  (`0` = fail-fast).
+- **`--force`** — break a **stale** lock left by a crashed run (detected via
+  the recorded PID) and proceed. Use only when no other athenaeum process is
+  actually running.
+
+**Scope is single-machine only.** `flock` is advisory and unreliable across
+network filesystems, so this guard makes no attempt at multi-machine
+coordination (use `librarian.push_after_run` + a single scheduler host for
+multi-machine setups). On non-POSIX platforms without `fcntl`, the lock
+degrades gracefully: a warning is logged and the command runs unlocked.
 
 ## Models
 
@@ -171,6 +203,7 @@ librarian:
   operational_markers: []       # >=2 lower-cased substrings => ephemeral (#280)
   min_cluster_cohesion: 0.0     # 0.0 = OFF; cohesion floor (#281)
   min_cluster_cohesion_scopes: 4  # scope-span gate for the cohesion floor (#281)
+  lock_timeout: 0               # run-lock wait seconds; 0 = fail-fast (#309)
 
 models:
   classify: claude-haiku-4-5-20251001
