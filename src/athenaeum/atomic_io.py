@@ -18,6 +18,7 @@ this is defense-in-depth against a crash mid-append.
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -27,10 +28,21 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
 
     Creates the parent directory if needed. On any failure before the rename,
     the temp file is cleaned up and the original *path* is left untouched.
+
+    When *path* already exists, its permission bits are preserved: ``mkstemp``
+    creates the temp file ``0600``, which would otherwise silently narrow the
+    target's mode on every rewrite, so we ``chmod`` the temp to match the
+    existing target before the rename.
     """
     path = Path(path)
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
+
+    existing_mode: int | None = None
+    try:
+        existing_mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        pass
 
     fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=parent)
     tmp_path = Path(tmp_name)
@@ -39,6 +51,9 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
+        # Preserve the target's existing permission bits (mkstemp made us 0600).
+        if existing_mode is not None:
+            os.chmod(tmp_path, existing_mode)
         os.replace(tmp_path, path)
     except BaseException:
         try:

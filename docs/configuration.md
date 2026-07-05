@@ -74,8 +74,9 @@ ops. The lockfile records the holder's PID, an ISO-8601 timestamp, and the
 hostname for diagnostics.
 
 - **Locked commands:** `run`, `ingest-answers`, `ingest-merges`,
-  `auto-memory prune --apply`, `dedupe persons --apply`, and
-  `dedupe wiki-pages` (non-`--dry-run`).
+  `reresolve-questions`, `rebuild-index`, `auto-memory prune --apply`,
+  `repair --apply`, `dedupe persons --apply`, and `dedupe wiki-pages`
+  (non-`--dry-run`).
 - **Never locked:** `status`, `recall`, `serve`, and every `--dry-run`
   (they don't mutate the knowledge base).
 - **Default** — fail fast with a message naming the holder (PID + age) and a
@@ -83,9 +84,12 @@ hostname for diagnostics.
 - **`--wait <seconds>`** — block up to the timeout for the lock, then fail if
   still held. Default from `librarian.lock_timeout` / `ATHENAEUM_LOCK_TIMEOUT`
   (`0` = fail-fast).
-- **`--force`** — break a **stale** lock left by a crashed run (detected via
-  the recorded PID) and proceed. Use only when no other athenaeum process is
-  actually running.
+- **`--force`** — break the lock **even if a process is still holding it** (the
+  current holder is logged first for an audit trail) and proceed. Use ONLY when
+  you are certain the holder is hung or dead, and never run two `--force`
+  invocations concurrently. Note: because the kernel releases an `flock` the
+  moment its holder dies, a genuinely crashed run never blocks a normal acquire
+  — `--force` exists to override a live-but-hung holder.
 
 **Scope is single-machine only.** `flock` is advisory and unreliable across
 network filesystems, so this guard makes no attempt at multi-machine
