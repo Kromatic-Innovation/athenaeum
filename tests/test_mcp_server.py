@@ -230,6 +230,15 @@ class TestRecallMetadataLines:
         assert len(lines) == 2
         assert lines[1].startswith("**Status:**")
 
+    def test_out_of_vocab_source_type_omitted(self) -> None:
+        # A typo'd / out-of-vocabulary source_type is not in SOURCE_TYPES and
+        # must omit the Source segment, same as the "inferred" default. Pins
+        # the "absent/typo'd -> omit" contract the PR body claims.
+        assert _recall_metadata_lines({"source_type": "usr-stated"}) == []
+        assert _recall_metadata_lines(
+            {"source_type": "usr-stated", "source_ref": "usr-stated:2026-04-10"}
+        ) == []
+
 
 class TestRecallHeaderRendering:
     """Integration tests exercising the rendered recall output (#325)."""
@@ -312,6 +321,29 @@ class TestRecallHeaderRendering:
         )
         result = recall_search(wiki, "migrations terse")
         assert "**Tags:** plain\n\n" in result
+
+    def test_withheld_contested_page_leaks_no_status(self, tmp_path: Path) -> None:
+        # Safety lock (#325 raison d'etre): a restricted caller must not see a
+        # withheld page's Status line. The Layer-C fail-closed `continue` runs
+        # BEFORE the metadata header is built; this pins that ordering so a
+        # future refactor moving the header build above the withhold cannot
+        # leak a contested (or any) page's existence to an unauthorized caller.
+        wiki = self._wiki(tmp_path)
+        (wiki / "secret_dispute.md").write_text(
+            "---\n"
+            "name: Secret dispute\n"
+            "tags:\n  - contested\n"
+            "status: contradiction-flagged\n"
+            "---\n\n"
+            "A restricted, disputed fact about the secret roadmap.\n"
+        )
+        # Untagged for access -> empty grant set -> fail-closed withheld from
+        # any restricted (non-owner) caller.
+        result = recall_search(
+            wiki, "secret roadmap dispute", caller_audience={"secondary"}
+        )
+        assert "**Status:**" not in result
+        assert "Secret dispute" not in result
 
 
 # ---------------------------------------------------------------------------
