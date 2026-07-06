@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.12] - 2026-07-06
+
+### Changed
+
+- **Librarian: hardened the #337 interrupt guard (post-#338 review).** The
+  writing phase (batch/sync branch through the terminal commit) is now
+  wrapped in `try/finally`, so the SIGTERM/SIGINT handlers are restored on
+  **every** exit path — normal, interrupt, or an exception from
+  `rebuild_index` / the terminal `git_snapshot` — and can never outlive the
+  run for an in-process caller. Documented that the partial-commit message's
+  file count is tracked only by the synchronous loop: a batch-mode interrupt
+  still commits any pages already written (clean tree) but reports `0
+  file(s)` (accurate batch-interrupt accounting is #236-adjacent and out of
+  scope). No behavior change on the normal or synchronous-interrupt paths.
+
 ## [0.13.11] - 2026-07-06
 
 ### Changed

@@ -66,12 +66,18 @@ def _seed_knowledge_root(tmp_path: Path, n_files: int = 3) -> Path:
     return root
 
 
-def _writing_process_one_factory(wiki_root: Path, *, interrupt_on: int | None = None):
+def _writing_process_one_factory(
+    wiki_root: Path,
+    *,
+    interrupt_on: int | None = None,
+    sig: int = signal.SIGTERM,
+):
     """A ``process_one`` stand-in that writes one wiki page per file.
 
-    When *interrupt_on* is set, it sends SIGTERM to its own process right
-    after writing that Nth page — simulating a wall-clock timeout arriving
-    mid-run, after the page is on disk but before the run commits.
+    When *interrupt_on* is set, it sends *sig* (default SIGTERM) to its own
+    process right after writing that Nth page — simulating a wall-clock
+    timeout (SIGTERM) or a manual Ctrl-C (SIGINT) arriving mid-run, after the
+    page is on disk but before the run commits.
     """
     state = {"n": 0}
 
@@ -80,7 +86,7 @@ def _writing_process_one_factory(wiki_root: Path, *, interrupt_on: int | None = 
         page = wiki_root / f"entity-{state['n']}.md"
         page.write_text(f"# Entity {state['n']}\nfrom {raw.ref}\n", encoding="utf-8")
         if interrupt_on is not None and state["n"] == interrupt_on:
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), sig)
         return SimpleNamespace(created=[page.name], updated=[], escalated=[], skipped=[])
 
     return fake_process_one
@@ -111,27 +117,32 @@ def _log_subjects(root: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "sig",
+    [signal.SIGTERM, signal.SIGINT],
+    ids=["sigterm-timeout", "sigint-ctrl-c"],
+)
 def test_interrupt_commits_partial_progress_and_exits_124(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sig: int
 ) -> None:
     root = _seed_knowledge_root(tmp_path, n_files=3)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
     monkeypatch.setattr(
         "athenaeum.librarian.process_one",
-        _writing_process_one_factory(root / "wiki", interrupt_on=2),
+        _writing_process_one_factory(root / "wiki", interrupt_on=2, sig=sig),
     )
 
     # Safety net: if run() ever regresses and fails to install its own
-    # SIGTERM handler, this sentinel turns the self-sent SIGTERM into a
-    # clean AssertionError instead of killing the whole pytest process
-    # (a bare SIGTERM has default disposition = terminate).
+    # handler, this sentinel turns the self-sent signal into a clean
+    # AssertionError instead of killing the whole pytest process (a bare
+    # SIGTERM/SIGINT would otherwise terminate/abort it).
     def _sentinel(signum: int, frame: object) -> None:
         raise AssertionError(
-            "run() did not install a SIGTERM handler (issue #337 regression)"
+            f"run() did not install a signal {signum} handler (issue #337 regression)"
         )
 
-    prev = signal.signal(signal.SIGTERM, _sentinel)
+    prev = signal.signal(sig, _sentinel)
     try:
         with pytest.raises(SystemExit) as excinfo:
             run(
@@ -142,7 +153,7 @@ def test_interrupt_commits_partial_progress_and_exits_124(
                 install_signal_handlers=True,
             )
     finally:
-        signal.signal(signal.SIGTERM, prev)
+        signal.signal(sig, prev)
 
     # Exit code matches coreutils `timeout` so the pre-dawn sweep still
     # records timed_out=true.
@@ -180,6 +191,13 @@ def test_normal_completion_is_unchanged(
         _writing_process_one_factory(root / "wiki"),
     )
 
+    # A normal opt-in run must also RESTORE the process-wide handlers it
+    # installed (issue #337) — not just install them. Capturing before/after
+    # proves the terminal-commit restore path fires, so the handler never
+    # outlives the run.
+    term_before = signal.getsignal(signal.SIGTERM)
+    int_before = signal.getsignal(signal.SIGINT)
+
     rc = run(
         raw_root=root / "raw",
         wiki_root=root / "wiki",
@@ -189,6 +207,8 @@ def test_normal_completion_is_unchanged(
     )
 
     assert rc == 0
+    assert signal.getsignal(signal.SIGTERM) is term_before
+    assert signal.getsignal(signal.SIGINT) is int_before
     subjects = _log_subjects(root)
     # No behavior change: exactly one terminal commit, no partial-run commit.
     assert "librarian: partial run" not in subjects
