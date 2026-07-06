@@ -1246,10 +1246,9 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
     LLM-backed proposer (issue #210). When the key is absent or client
     construction fails, the annotation fallback is used instead.
     """
-    import os
-
     from athenaeum.answers import ingest_answers
     from athenaeum.config import load_config
+    from athenaeum.provider import build_llm_client
 
     target = args.path.expanduser().resolve()
     if not target.exists():
@@ -1265,17 +1264,16 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
 
     cfg = load_config(target)
 
-    # Issue #210: build an Anthropic client when the key is available so
-    # free-text answers trigger the LLM-backed source-edit proposer.
-    # Fail gracefully (None) on any import or construction error.
+    # Issue #210/#330: build the LLM client via the provider seam so free-text
+    # answers trigger the LLM-backed source-edit proposer. Returns None for the
+    # ``api`` backend with no ANTHROPIC_API_KEY (offline annotation fallback);
+    # returns the subscription CLI client for ``claude-cli``. Fail gracefully
+    # (None) on any construction error.
     anthropic_client = None
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        try:
-            import anthropic as _anthropic
-
-            anthropic_client = _anthropic.Anthropic()
-        except Exception:  # noqa: BLE001
-            pass
+    try:
+        anthropic_client = build_llm_client(cfg)
+    except Exception:  # noqa: BLE001
+        pass
 
     lock = _acquire_or_exit(target, args, cfg)  # issue #309
     if isinstance(lock, int):
@@ -1343,9 +1341,8 @@ def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
     client from ``ANTHROPIC_API_KEY`` (``None`` when absent — offline is a
     no-op), and delegates to :func:`athenaeum.tiers.reresolve_open_questions`.
     """
-    import os
-
     from athenaeum.config import load_config
+    from athenaeum.provider import build_llm_client
     from athenaeum.tiers import reresolve_open_questions
 
     target = args.path.expanduser().resolve()
@@ -1356,14 +1353,14 @@ def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
     pending_path = target / "wiki" / "_pending_questions.md"
     cfg = load_config(target)
 
+    # Issue #330: construct via the provider seam (api key -> SDK client;
+    # claude-cli -> subscription CLI client; None when the api backend has no
+    # key, preserving the offline no-op below).
     anthropic_client = None
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        try:
-            import anthropic as _anthropic
-
-            anthropic_client = _anthropic.Anthropic()
-        except Exception:  # noqa: BLE001
-            pass
+    try:
+        anthropic_client = build_llm_client(cfg)
+    except Exception:  # noqa: BLE001
+        pass
 
     lock = _acquire_or_exit(target, args, cfg)  # issue #309
     if isinstance(lock, int):

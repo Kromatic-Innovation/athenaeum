@@ -112,6 +112,67 @@ is configured separately under `resolve:`.
 | Topic extractor | `ATHENAEUM_TOPIC_MODEL` | `models.topic` | `claude-haiku-4-5-20251001` | `athenaeum query-topics` recall query rewriting. |
 | Resolver | `ATHENAEUM_RESOLVE_MODEL` | `resolve.model` | `claude-opus-4-7` | Contradiction resolver (proposes a winner once the detector flags a conflict). |
 
+## LLM provider selection (#330)
+
+Athenaeum's librarian pipeline talks to Claude through a single **provider
+seam** (`athenaeum.provider.build_llm_client`). Two backends ship:
+
+| Knob | Env var | YAML key | Default | Used by |
+|---|---|---|---|---|
+| LLM provider | — | `ATHENAEUM_LLM_PROVIDER` | `llm.provider` | `api` | Selects the LLM backend for the librarian compile path (tiers, contradiction detector, resolver). `api` = the Anthropic SDK; `claude-cli` = the operator's ambient Claude Code subscription login. An unrecognized value is a hard error (no silent fallback). |
+| CLI binary | — | `ATHENAEUM_CLAUDE_CLI_BIN` | — | `claude` | Override the `claude` executable used by the `claude-cli` backend (editable installs / non-PATH locations). |
+| CLI timeout | — | `ATHENAEUM_CLAUDE_CLI_TIMEOUT` | — | `300` (s) | Per-call subprocess timeout for the `claude-cli` backend. A timeout is treated as a **transient** error (retried via `with_retry`). |
+
+### `api` (default)
+
+Wraps `anthropic.Anthropic(...)` verbatim: every request parameter — including
+`cache_control` prompt-caching breakpoints (#230) and the Messages Batch API
+(#236) — passes through unchanged. Requires `ANTHROPIC_API_KEY` (see below).
+Behavior is byte-for-byte identical to pre-#330 releases.
+
+### `claude-cli` (subscription)
+
+Drives your logged-in Claude Code via
+`claude -p --system-prompt <sys> --model <id> --output-format json`, billing
+the LLM work to your Claude **subscription** rather than a per-token API bill.
+Athenaeum performs **no credential handling** — it relies on your ambient
+`claude` login exactly as the post-run `git push` (#284) relies on your ambient
+git auth. Enable it with:
+
+```yaml
+llm:
+  provider: claude-cli
+```
+
+or `ATHENAEUM_LLM_PROVIDER=claude-cli athenaeum run …`.
+
+Constraints and semantics:
+
+- **No API key needed.** The `ANTHROPIC_API_KEY` requirement is waived for
+  `claude-cli`; the run authenticates via your Claude Code login.
+- **`cache_control` is stripped.** Caching breakpoints do not apply to the CLI
+  transport (they are preserved untouched on the `api` backend).
+- **`max_tokens` is advisory.** The CLI has no per-request output-token flag;
+  the model applies its own cap.
+- **The tier prompt does not inherit Claude Code's persona.** `--system-prompt`
+  fully replaces the default agent persona with athenaeum's tier prompt.
+- **Rate limits / timeouts degrade gracefully.** A subscription rate-limit, a
+  transient CLI error, or a subprocess timeout maps to
+  `_retry.TransientAPIError`, so the existing `with_retry` backoff handles it;
+  the single-machine run lock + resume make reruns safe.
+- **Cost is subscription-covered ($0).** Token COUNTS from the CLI JSON
+  envelope are still recorded per model in the run's `TokenUsage` and appear in
+  the run summary, but `estimated_cost_usd` reports **$0** — the subscription
+  already paid for them.
+- **Batch mode is API-only.** `claude-cli` + batch mode
+  (`ATHENAEUM_BATCH_MODE` / `librarian.batch_mode` / `--batch-mode`) is a loud
+  startup error, not a silent fallback: the Messages Batch API has no CLI
+  equivalent. Use `api` for batch runs.
+- **Recall hot path stays on `api`.** The per-turn recall query-topic extractor
+  (`athenaeum.query_topics`, a ~3 s hot-path budget) is intentionally left on
+  the direct Anthropic SDK and gated on `ANTHROPIC_API_KEY`; it is unaffected
+  by `ATHENAEUM_LLM_PROVIDER`.
+
 ## Contradiction detection and resolver
 
 Detection knobs live under the `contradiction:` yaml block; resolver knobs
