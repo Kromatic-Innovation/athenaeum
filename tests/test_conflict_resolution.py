@@ -30,6 +30,8 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from athenaeum.contradictions import (
     ContradictionResult,
     _build_user_message,
@@ -60,10 +62,15 @@ from athenaeum.models import (
     EntityIndex,
     RawFile,
     parse_frontmatter,
+    parse_valid_until,
     render_frontmatter,
     validity_windows_disjoint,
 )
-from athenaeum.resolutions import propose_resolution
+from athenaeum.resolutions import (
+    ResolutionProposal,
+    enact_resolution,
+    propose_resolution,
+)
 from athenaeum.tiers import tier3_create, tier3_merge, tier3_write
 
 # ---------------------------------------------------------------------------
@@ -1094,9 +1101,7 @@ class TestDisjointValidityDetectorShortCircuit:
         assert entries[0].contradiction is not None
         assert entries[0].contradiction.rationale == "disjoint-validity"
         assert not (root / "wiki" / "_pending_questions.md").exists()
-        assert any(
-            "disjoint-validity" in rec.message for rec in caplog.records
-        )
+        assert any("disjoint-validity" in rec.message for rec in caplog.records)
 
 
 class TestDisjointValidityResolverSynthetic:
@@ -1248,3 +1253,179 @@ class TestScopeHeaderRendering:
         am = self._am_on_disk(tmp_path, "m.md")
         msg = _build_user_message([am])
         assert "scope:" not in msg
+
+
+# ---------------------------------------------------------------------------
+# #308 slice 2 — resolver interval-close on temporal supersession
+# ---------------------------------------------------------------------------
+#
+# `enact_resolution` stamps the LOSER's `valid_until` in ADDITION to the
+# existing supersession mark when a resolution establishes a TEMPORAL
+# supersession. Arithmetic: `loser.valid_until = winner.valid_from` (inclusive
+# last-valid date, same boundary day — see the BOUNDARY RECONCILIATION note in
+# resolutions.py: this makes the pair non-disjoint at the boundary by design,
+# acceptable because the loser is also `superseded_by` and hence inactive).
+# Winner without a `valid_from` falls back to the resolution date (today).
+# Only ever CLOSES, never widens. These tests pin the EXACT stamped value.
+
+
+def _iclose_member(
+    path: Path,
+    name: str,
+    *,
+    valid_from: str | None = None,
+    valid_until: str | None = None,
+    created: str | None = None,
+    body: str = "the claim",
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fm = [f"name: {name}", "type: feedback"]
+    if valid_from is not None:
+        fm.append(f"valid_from: {valid_from}")
+    if valid_until is not None:
+        fm.append(f"valid_until: {valid_until}")
+    if created is not None:
+        fm.append(f"created: {created}")
+    path.write_text(
+        "---\n" + "\n".join(fm) + "\n---\n\n" + body + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _iclose_proposal(action: str) -> ResolutionProposal:
+    winner = {"keep_a": "a", "keep_b": "b"}.get(action, "neither")
+    return ResolutionProposal(
+        recommended_winner=winner,  # type: ignore[arg-type]
+        action=action,  # type: ignore[arg-type]
+        rationale=f"test-{action}",
+        confidence=1.0,
+        source_precedence_used=["a:user > b:unsourced"],
+    )
+
+
+class TestIntervalCloseSlice2:
+    def test_keep_a_closes_loser_b_to_winner_valid_from(self, tmp_path: Path) -> None:
+        a = _iclose_member(tmp_path / "a.md", "Winner A", valid_from="2026-06-01")
+        b = _iclose_member(tmp_path / "b.md", "Loser B")
+        ret = enact_resolution(_iclose_proposal("keep_a"), [a, b])
+        assert ret == b
+        meta_b, _ = parse_frontmatter(b.read_text(encoding="utf-8"))
+        # Interval closed at the winner's valid_from, EXACT value.
+        assert meta_b["valid_until"] == "2026-06-01"
+        # Interval-close AUGMENTS, does not replace, the supersession mark.
+        assert meta_b["superseded_by"] == "Winner A"
+        # Winner untouched; nothing deleted.
+        meta_a, _ = parse_frontmatter(a.read_text(encoding="utf-8"))
+        assert "valid_until" not in meta_a
+        assert a.exists() and b.exists()
+
+    def test_keep_b_closes_loser_a_to_winner_valid_from(self, tmp_path: Path) -> None:
+        a = _iclose_member(tmp_path / "a.md", "Loser A")
+        b = _iclose_member(tmp_path / "b.md", "Winner B", valid_from="2026-07-15")
+        ret = enact_resolution(_iclose_proposal("keep_b"), [a, b])
+        assert ret == a
+        meta_a, _ = parse_frontmatter(a.read_text(encoding="utf-8"))
+        assert meta_a["valid_until"] == "2026-07-15"
+        assert meta_a["superseded_by"] == "Winner B"
+
+    def test_keep_a_winner_without_valid_from_falls_back_to_today(
+        self, tmp_path: Path
+    ) -> None:
+        a = _iclose_member(tmp_path / "a.md", "Winner A")  # no valid_from
+        b = _iclose_member(tmp_path / "b.md", "Loser B")
+        enact_resolution(_iclose_proposal("keep_a"), [a, b])
+        meta_b, _ = parse_frontmatter(b.read_text(encoding="utf-8"))
+        assert meta_b["valid_until"] == date.today().isoformat()
+        assert meta_b["superseded_by"] == "Winner A"
+
+    def test_keep_a_never_widens_existing_tighter_bound(self, tmp_path: Path) -> None:
+        # Loser already ends 2026-01-01; winner's valid_from is LATER. A
+        # resolution must not EXTEND validity — keep the earlier bound.
+        a = _iclose_member(tmp_path / "a.md", "Winner A", valid_from="2026-06-01")
+        b = _iclose_member(tmp_path / "b.md", "Loser B", valid_until="2026-01-01")
+        enact_resolution(_iclose_proposal("keep_a"), [a, b])
+        meta_b, _ = parse_frontmatter(b.read_text(encoding="utf-8"))
+        assert meta_b["valid_until"] == "2026-01-01"
+
+    def test_keep_a_widens_nothing_but_tightens_looser_bound(
+        self, tmp_path: Path
+    ) -> None:
+        # Loser ends 2026-12-31 but the winner took over 2026-06-01 — the close
+        # TIGHTENS to the earlier winner boundary.
+        a = _iclose_member(tmp_path / "a.md", "Winner A", valid_from="2026-06-01")
+        b = _iclose_member(tmp_path / "b.md", "Loser B", valid_until="2026-12-31")
+        enact_resolution(_iclose_proposal("keep_a"), [a, b])
+        meta_b, _ = parse_frontmatter(b.read_text(encoding="utf-8"))
+        assert meta_b["valid_until"] == "2026-06-01"
+
+    def test_not_a_conflict_snapshot_closes_older_by_valid_from(
+        self, tmp_path: Path
+    ) -> None:
+        older = _iclose_member(tmp_path / "a.md", "Old Snap", valid_from="2026-01-01")
+        newer = _iclose_member(tmp_path / "b.md", "New Snap", valid_from="2026-05-01")
+        ret = enact_resolution(_iclose_proposal("not_a_conflict"), [older, newer])
+        assert ret == older
+        meta_old, _ = parse_frontmatter(older.read_text(encoding="utf-8"))
+        meta_new, _ = parse_frontmatter(newer.read_text(encoding="utf-8"))
+        # OLDER closes at the NEWER's lower bound; newer is untouched.
+        assert meta_old["valid_until"] == "2026-05-01"
+        assert "valid_until" not in meta_new
+
+    def test_not_a_conflict_snapshot_orders_by_ingestion_when_no_valid_from(
+        self, tmp_path: Path
+    ) -> None:
+        # No valid_from on either side → order by created (ingestion); boundary is the
+        # newer's ingestion date (it has no valid_from either).
+        a = _iclose_member(tmp_path / "a.md", "First", created="2026-02-10")
+        b = _iclose_member(tmp_path / "b.md", "Second", created="2026-04-20")
+        ret = enact_resolution(_iclose_proposal("not_a_conflict"), [a, b])
+        assert ret == a
+        meta_a, _ = parse_frontmatter(a.read_text(encoding="utf-8"))
+        assert meta_a["valid_until"] == "2026-04-20"
+
+    def test_not_a_conflict_no_ordering_signal_does_not_stamp(
+        self, tmp_path: Path
+    ) -> None:
+        # No valid_from, no ingestion date → no reliable ordering → no stamp.
+        a = _iclose_member(tmp_path / "a.md", "A")
+        b = _iclose_member(tmp_path / "b.md", "B")
+        assert enact_resolution(_iclose_proposal("not_a_conflict"), [a, b]) is None
+        meta_a, _ = parse_frontmatter(a.read_text(encoding="utf-8"))
+        meta_b, _ = parse_frontmatter(b.read_text(encoding="utf-8"))
+        assert "valid_until" not in meta_a
+        assert "valid_until" not in meta_b
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "correct_a",
+            "correct_b",
+            "forget_a",
+            "forget_b",
+            "deprecate_both",
+            "retain_both_with_context",
+            "merge",
+            "propose_merge",
+        ],
+    )
+    def test_non_supersession_actions_do_not_stamp_valid_until(
+        self, action: str, tmp_path: Path
+    ) -> None:
+        a = _iclose_member(tmp_path / "a.md", "A", valid_from="2026-06-01")
+        b = _iclose_member(tmp_path / "b.md", "B", valid_from="2026-06-01")
+        enact_resolution(_iclose_proposal(action), [a, b])
+        # Whichever files survive must NOT have gained a valid_until: these
+        # verdicts are WRONG-claim / both-stale, not valid-then-replaced.
+        for p in (a, b):
+            if p.exists():
+                meta, _ = parse_frontmatter(p.read_text(encoding="utf-8"))
+                assert "valid_until" not in meta
+
+    def test_stamped_value_reparses_as_the_pinned_date(self, tmp_path: Path) -> None:
+        # Lock the round-trip: the stored string parses back to the exact date.
+        a = _iclose_member(tmp_path / "a.md", "Winner A", valid_from="2026-06-01")
+        b = _iclose_member(tmp_path / "b.md", "Loser B")
+        enact_resolution(_iclose_proposal("keep_a"), [a, b])
+        meta_b, _ = parse_frontmatter(b.read_text(encoding="utf-8"))
+        assert parse_valid_until(meta_b) == date(2026, 6, 1)

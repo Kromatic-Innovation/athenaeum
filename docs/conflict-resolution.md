@@ -281,6 +281,46 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 
 ---
 
+## 10. Resolver interval-close on temporal supersession (issue #308 slice 2)
+
+- **Files:** `src/athenaeum/resolutions.py` (`enact_resolution` and the
+  `_close_interval` / `_sequential_snapshot_close` / `_member_ingestion_date`
+  helpers), reusing `models.parse_valid_from` / `models._coerce_iso_date`.
+- **Trigger:** a resolution establishes a **temporal supersession** — the loser
+  is *valid-then-replaced* history, not a wrong/transient claim. `enact_resolution`
+  stamps the loser's `valid_until` in ADDITION to the existing supersession mark
+  (§8 provenance-shape: "Augments, does not replace, `superseded_by` /
+  `deprecated`"), so the loser stays `superseded_by` the winner and is filtered
+  by `is_inactive_memory`.
+- **Which verdicts close an interval:**
+  - `keep_a` / `keep_b` — close the loser at the **winner's `valid_from`** when
+    known, else the **resolution date** (`date.today()`). Enacted via the
+    existing #191 marking branch, now augmented with the close.
+  - Sequential-snapshot `not_a_conflict` — two dated snapshots (older → newer);
+    the **older** member closes at the newer's lower bound. Ordering: `valid_from`,
+    else ingestion date (`created_at` → `updated_at`); **no reliable ordering
+    signal ⇒ no stamp**. Deliberately NOT in `ENACTING_ACTIONS` — the merge-pass
+    suppress/drop routing is byte-identical; the close fires only when a caller
+    routes the pair through `enact_resolution`.
+  - **Never** for `correct_*` / `forget_*` (loser was WRONG), `deprecate_both`
+    (both stale), `retain_both_with_context`, `merge`, `propose_merge`.
+- **Only-close-never-widen:** if the loser already carries an EARLIER
+  `valid_until`, it is preserved; a resolution must not EXTEND validity. The
+  stored value is the inclusive last-valid date (`YYYY-MM-DD`).
+- **Boundary reconciliation with §9 / #324:** `validity_windows_disjoint` uses a
+  STRICT `<` on the inclusive `valid_until`, so `loser.valid_until =
+  winner.valid_from` leaves the pair **non-disjoint at the boundary day by
+  design** (they share that day). Safe because the loser is also `superseded_by`
+  and hence inactive — it never re-surfaces regardless of the one-day overlap. No
+  minus-one-day is subtracted (§8 specifies none).
+- **Provenance behavior:** best-effort frontmatter write via
+  `_mark_member_frontmatter`; a read/write error is logged and swallowed
+  (enactment must never crash the merge pass). Winner file is never mutated.
+- **Follow-up (#329):** generalizes this interval-close to non-time scopes
+  (org/locale) via `scope_*` resolver actions.
+
+---
+
 ## Comparison matrix — who wins on each field type
 
 | Resolver | Scalar (truthy/either) | Scalar (always) | List | Numeric | Date | Body | Provenance (`field_sources`) |

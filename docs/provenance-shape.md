@@ -509,15 +509,16 @@ source_ref: <session>:<turn>
   inside it.
 - **Augments, does not replace, `superseded_by` / `deprecated` (#191).** Those
   remain the pointer (who won) and the both-stale flag; `valid_until` is the
-  interval close. Slice 1 only makes the READER honor a `valid_until` a human or
-  a future resolver sets; the resolver does not yet auto-stamp intervals.
+  interval close. As of **slice 2** the resolver auto-stamps this interval on a
+  temporal supersession (see §8.4) — the `superseded_by` mark and the
+  `valid_until` close are written together, the close never replacing the mark.
 
 ### 8.2 Default-open interval (backward compatibility)
 
 **Rule: absent `valid_until` ⇒ open upper bound ⇒ the claim is currently valid
 (active).** Every existing page has no `valid_from` / `valid_until`, so no
 existing file changes visibility — no migration, no backfill. The field
-transitions organically as humans (or a future resolver, slice 2) close
+transitions organically as humans or the resolver (slice 2, §8.4) close
 intervals. This mirrors §2.3's "no forced upgrade, legacy shape loadable
 forever" stance.
 
@@ -545,6 +546,46 @@ changes. The `as_of` parameter is designed in now so slice 3's `--as-of DATE`
 view is plumbing, not a predicate rewrite — but the CLI flag is NOT built in
 slice 1.
 
+### 8.4 Resolver interval-close (slice 2)
+
+**Slice 2 (#308) makes `resolutions.enact_resolution` auto-stamp the loser's
+`valid_until` when a resolution establishes a TEMPORAL supersession** — the
+loser is *valid-then-replaced* history, not a wrong claim. The stamp AUGMENTS,
+never replaces, the existing mark (§8.1): the loser stays `superseded_by` the
+winner and is still filtered by `is_inactive_memory`.
+
+Which verdicts trigger a close:
+
+- **`keep_a` / `keep_b`** — the loser is valid-then-replaced. Its interval
+  closes at the **winner's `valid_from`** when known, else at the **resolution
+  date** (`date.today()`).
+- **Sequential-snapshot `not_a_conflict`** — two dated snapshots of the same
+  fact (older → newer). The **older** member's interval closes at the newer's
+  lower bound. Ordering is by `valid_from`, else ingestion date (`created_at` →
+  `updated_at`); with **no reliable ordering signal, nothing is stamped**. This
+  verdict is deliberately NOT in `ENACTING_ACTIONS`, so the merge-pass
+  suppress/drop routing is unchanged — the close fires only when a caller routes
+  the pair through `enact_resolution`.
+- **Do NOT close** for `correct_*` / `forget_*` (loser was WRONG, never validly
+  true), `deprecate_both` (both stale), `retain_both_with_context`, `merge`,
+  `propose_merge`.
+
+**Value & only-close-never-widen.** The stamped value is the inclusive
+last-valid date (`YYYY-MM-DD`; a claim is inactive iff `as_of > valid_until`,
+§8.1). If the loser already carries an EARLIER `valid_until`, it is preserved —
+a resolution must not EXTEND validity; only the earlier of (existing, new bound)
+is kept.
+
+**Boundary reconciliation with #324.** `models.validity_windows_disjoint` uses a
+STRICT `<` on the inclusive `valid_until`, so a loser ending on date X and a
+winner starting on date X SHARE day X and are **not** disjoint. Stamping
+`loser.valid_until = winner.valid_from` therefore leaves the pair non-disjoint
+at the boundary day **by design** — no minus-one-day is subtracted (§8 does not
+specify one). This is safe because the superseded loser is ALSO marked
+`superseded_by` and hence inactive: it never re-surfaces as a live claim
+regardless of the one-day window overlap. The exact stamped value is pinned by
+`tests/test_conflict_resolution.py::TestIntervalCloseSlice2`.
+
 ## 9. Implementation issue mapping
 
 | Section | Issue | What the issue implements |
@@ -553,4 +594,4 @@ slice 1.
 | §3 tier0 byte-for-byte | (no issue — already invariant) | Existing tier0 passthrough already satisfies the rule. Add a regression test asserting per-value shape round-trips. |
 | §4 MCP `remember(sources=...)` | #96 | Replace the bare-dict heuristic with the `_source`/`_field_sources` wrapper keys; update docstring + integration test. |
 | §5 legacy slug migration | #97 | `athenaeum repair --legacy-source-slugs` with dry-run/apply, the fixed mapping table, and post-migration validation. |
-| §8 claim-level temporal validity | #308 | Slice 1: `valid_from` / `valid_until` parse + round-trip; shared `valid_until_expired` helper; currently-valid-by-default filter. Slice 2 (resolver interval-close) and slice 3 (`--as-of`) deferred. |
+| §8 claim-level temporal validity | #308 | Slice 1: `valid_from` / `valid_until` parse + round-trip; shared `valid_until_expired` helper; currently-valid-by-default filter. **Slice 2 (shipped): resolver interval-close (§8.4) — `enact_resolution` stamps the loser's `valid_until` on `keep_a`/`keep_b` and sequential-snapshot `not_a_conflict`, only-close-never-widen.** Slice 3 (`--as-of`) deferred. #329 generalizes the close to non-time scopes. |

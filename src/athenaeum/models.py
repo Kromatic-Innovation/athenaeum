@@ -256,11 +256,12 @@ def parse_deprecated(meta: dict[str, object] | None) -> bool:
 # ``valid_from:`` / ``valid_until:`` are optional ISO-8601 date frontmatter
 # fields declaring the real-world window over which a claim is true. They sit
 # BESIDE ``source:`` provenance (which answers *where/when ingested*, not *over
-# what window valid*) — the bi-temporal split from Zep/Graphiti. Slice 1 only
-# makes the READER honor a ``valid_until`` set by a human or a future resolver;
-# the resolver does not yet auto-stamp intervals (slice 2), and there is no
-# ``--as-of`` view yet (slice 3, for which the predicate already takes an
-# ``as_of`` parameter). See ``docs/provenance-shape.md`` §9.
+# what window valid*) — the bi-temporal split from Zep/Graphiti. Slice 1 makes
+# the READER honor a ``valid_until`` set by a human or the resolver; slice 2
+# (shipped) has the resolver auto-stamp the interval on a temporal supersession
+# (``resolutions.enact_resolution`` — see ``docs/provenance-shape.md`` §8.4).
+# There is no ``--as-of`` view yet (slice 3, for which the predicate already
+# takes an ``as_of`` parameter). See ``docs/provenance-shape.md`` §8.
 
 
 def _coerce_iso_date(value: object) -> date | None:
