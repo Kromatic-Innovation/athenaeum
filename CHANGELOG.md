@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.11] - 2026-07-06
+
+### Changed
+
+- **Librarian: a timeout-killed run no longer strands its compile output
+  (#337).** The pre-dawn sweep bounds the librarian with a wall-clock
+  `timeout` (SIGTERM, then KILL after a grace). Previously a timeout landing
+  between the start-of-run `pre-processing snapshot` commit and the terminal
+  `librarian: processed N file(s)` commit left every wiki page written so far
+  as an **uncommitted** working tree — silently absorbed by the *next* run's
+  `git add -A` snapshot under a misleading "pre-processing snapshot" message.
+  The CLI `athenaeum run` now installs a SIGTERM/SIGINT handler for the
+  writing phase that commits the partial progress with a distinct, greppable
+  message — `librarian: partial run (interrupted after N file(s), …CUE F)` —
+  and exits `124` (matching coreutils `timeout`). **Interrupt-commit
+  contract:** an interrupted run leaves the knowledge tree clean and its
+  work attributed to a `partial run` commit, not the next run's snapshot.
+  A normally-completing run is unchanged (still exactly one `processed N
+  file(s)` commit). The handler is opt-in (CLI-only) so in-process callers
+  (the MCP server, tests) keep their own signal handling. Newly relevant
+  under the `claude-cli` backend (#330), whose per-call subprocess latency
+  makes timeouts more frequent.
+
 ## [0.13.10] - 2026-07-06
 
 ### Added
