@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.6] - 2026-07-06
+
+> **Versioning note (pre-1.0 convention).** Additive features that do **not**
+> add a new top-level CLI subcommand ship as **PATCH** bumps before 1.0; a new
+> top-level subcommand is a MINOR bump. So the `### Added` sections in
+> 0.13.1–0.13.5 (new flags/knobs, no new subcommand) are patches by policy,
+> not oversight. The public `__all__` remains the stability surface.
+
+### Documentation
+
+- **Surface `serve --audience` where operators wire up agents.** The
+  audience-scoped read access added in 0.13.4 (#312) was documented only in
+  `docs/configuration.md` / `docs/security-posture.md`. The README "MCP memory
+  server" section now shows `athenaeum serve --audience`, states the default is
+  full-wiki-readable, and clarifies it is a single-owner read filter (not a
+  multi-user ACL). `SECURITY.md` gains a matching Scope bullet so a vetting
+  engineer greps the canonical security file and finds it.
+
 ## [0.13.5] - 2026-07-05
 
 ### Added
