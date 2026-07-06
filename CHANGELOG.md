@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.8] - 2026-07-06
+
+### Added
+
+- **Detector skips disjoint-validity pairs; scope header in member snippets
+  (#324).** Two claims whose validity windows are DISJOINT (A true through
+  March, B true from April) are sequential states of the world and cannot
+  conflict — yet the C4 detector kept re-flagging them every compile, wasting a
+  Haiku call and re-queuing already-answered pending questions. A shared
+  `models.validity_windows_disjoint(meta_a, meta_b)` predicate (windows are
+  disjoint iff one side's inclusive `valid_until` ends strictly before the
+  other's `valid_from` begins; missing/malformed bounds fail open to "open →
+  overlap → detect") now drives four new guards:
+  - **Pre-detection short-circuit (merge.py).** When every undeclared pair in a
+    cluster is pairwise-disjoint, the detector LLM call is skipped entirely and
+    the cluster records `detected=False` with rationale `disjoint-validity` —
+    mirroring the declared-relationship short-circuit (#167). The
+    similarity-sweep path skips disjoint pairs the same way.
+  - **Post-detection guard (merge.py).** An otherwise-overlapping cluster can
+    still have the detector flag a specific disjoint pair; that verdict is
+    downgraded to `detected=False` (rationale `disjoint-validity`) BEFORE the
+    escalation / pending-question write.
+  - **Resolver synthetic (resolutions.py).** A flagged pair with disjoint
+    windows that reaches the resolver returns `not_a_conflict` at confidence 1.0
+    with no Opus call, checked before the declared-winner short-circuit.
+  - **Scope header in member snippets (contradictions.py).** The detector prompt
+    now renders a single TRUSTED `scope:` line per member (`valid: <from> →
+    <until> · source: <source_type> · updated: <date>`, each segment omitted
+    when absent/default) OUTSIDE the untrusted `<memory>` block, and the system
+    prompt marks it as trusted temporal/provenance metadata. This lets the
+    detector reason about temporal context for windows that DO overlap.
+
 ## [0.13.7] - 2026-07-06
 
 ### Added

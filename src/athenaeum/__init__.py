@@ -15,7 +15,7 @@ the stable public surface; their signatures may change between minor
 releases.
 """
 
-__version__ = "0.13.7"
+__version__ = "0.13.8"
 
 from athenaeum.init import init_knowledge_dir
 from athenaeum.librarian import discover_raw_files, process_one, rebuild_index, run
