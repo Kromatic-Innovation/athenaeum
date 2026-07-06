@@ -426,6 +426,9 @@ yaml key, and CLI flag with its code default and precedence chain — lives in
 | `ANTHROPIC_API_KEY` | Yes (unless `--dry-run`) | API key for Tier 2/3 LLM calls |
 | `ATHENAEUM_CLASSIFY_MODEL` | No | Override Tier 2 model. Precedence: env > `models.classify` in `athenaeum.yaml` > default `claude-haiku-4-5-20251001` |
 | `ATHENAEUM_WRITE_MODEL` | No | Override Tier 3 model. Precedence: env > `models.write` in `athenaeum.yaml` > default `claude-sonnet-4-6` |
+| `ATHENAEUM_LLM_PROVIDER` | No | LLM backend for the compile path: `api` (default, metered Anthropic API) or `claude-cli` (run the librarian on a Claude Code **subscription** via the `claude` binary, no API key). Precedence: env > `llm.provider` in `athenaeum.yaml` > `api`. Batch mode is API-only. See [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md) → "LLM provider selection" |
+| `ATHENAEUM_CLAUDE_CLI_BIN` | No | Path or name of the `claude` binary for the `claude-cli` provider (default: `claude`, resolved on `PATH`) |
+| `ATHENAEUM_CLAUDE_CLI_TIMEOUT` | No | Per-call timeout in seconds for the `claude-cli` subprocess (default: `300`) |
 | `ATHENAEUM_RESOLVE_MODEL` | No | Override the contradiction-resolver model (default: `claude-opus-4-7`) |
 | `ATHENAEUM_RESOLVE_MAX_PER_RUN` | No | Cap resolver calls per ingest run (default: `250`, raised from 50 in #187) |
 | `ATHENAEUM_MAX_API_CALLS` | No | Run-level API call budget for `athenaeum run`. Precedence: `--max-api-calls` CLI flag > env > `librarian.max_api_calls` in `athenaeum.yaml` > default `800`. Env `0` is valid and defers the entire intake (writes `wiki/_deferred_work.md` and logs the DEGRADED summary); the CLI flag rejects `0` |
