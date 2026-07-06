@@ -1530,157 +1530,168 @@ def run(
             log.debug("librarian: interrupt-commit guard skipped (not main thread)")
             _prev_handlers = []
 
-    if batch_mode and dry_run:
-        log.info(
-            "Batch mode requested but --dry-run makes no API calls — "
-            "using the synchronous dry-run path"
-        )
+    # Issue #337: the interrupt handler installed above stays active through
+    # the terminal commit; the `finally` restores it on EVERY exit path
+    # (normal, interrupt, or an exception from `rebuild_index` / the terminal
+    # `git_snapshot`), so it can never outlive the run for an in-process
+    # caller. A no-op when no handler was installed (dry-run / not opt-in /
+    # not the main thread).
+    try:
+        if batch_mode and dry_run:
+            log.info(
+                "Batch mode requested but --dry-run makes no API calls — "
+                "using the synchronous dry-run path"
+            )
 
-    if batch_mode and not dry_run and client is not None:
-        # Issue #236: phased fan-out via the Messages Batch API. The
-        # synchronous loop below is untouched when the flag is off.
-        from athenaeum.batch import process_batch_run
+        if batch_mode and not dry_run and client is not None:
+            # Issue #236: phased fan-out via the Messages Batch API. The
+            # synchronous loop below is untouched when the flag is off.
+            # Issue #337 note: `processed_count` is incremented only by the
+            # synchronous loop, so an interrupt during a BATCH run reports
+            # "0 file(s)" in the partial-commit message even though any pages
+            # already written are still committed by the handler's
+            # `git_snapshot` (git add -A) — the tree stays clean. Accurate
+            # batch-interrupt accounting is #236-adjacent and out of scope
+            # for #337 (batch mode is API-only and off for the nightly run).
+            from athenaeum.batch import process_batch_run
 
-        log.info("Batch mode: tier-2/tier-3 calls via the Messages Batch API")
-        outcome = process_batch_run(
-            raw_files,
-            index,
-            wiki_root,
-            client,
-            valid_types,
-            valid_tags,
-            valid_access,
-            usage=usage,
-            config=config,
-            max_api_calls=max_api_calls,
-        )
-        total_created = outcome.created
-        total_updated = outcome.updated
-        total_escalated = outcome.escalated
-        total_skipped = outcome.skipped
-        failed_files = outcome.failed_refs
-        deferred_refs = outcome.deferred_refs
-    else:
-        for i, raw in enumerate(raw_files):
-            if not dry_run and usage.api_calls >= max_api_calls:
-                log.warning(
-                    "API call budget exhausted (%d/%d) — stopping early",
-                    usage.api_calls,
-                    max_api_calls,
-                )
-                # Issue #220: everything from here on is deferred to the next
-                # run — record it so the manifest + summary can surface it.
-                deferred_refs = [r.ref for r in raw_files[i:]]
-                break
+            log.info("Batch mode: tier-2/tier-3 calls via the Messages Batch API")
+            outcome = process_batch_run(
+                raw_files,
+                index,
+                wiki_root,
+                client,
+                valid_types,
+                valid_tags,
+                valid_access,
+                usage=usage,
+                config=config,
+                max_api_calls=max_api_calls,
+            )
+            total_created = outcome.created
+            total_updated = outcome.updated
+            total_escalated = outcome.escalated
+            total_skipped = outcome.skipped
+            failed_files = outcome.failed_refs
+            deferred_refs = outcome.deferred_refs
+        else:
+            for i, raw in enumerate(raw_files):
+                if not dry_run and usage.api_calls >= max_api_calls:
+                    log.warning(
+                        "API call budget exhausted (%d/%d) — stopping early",
+                        usage.api_calls,
+                        max_api_calls,
+                    )
+                    # Issue #220: everything from here on is deferred to the
+                    # next run — record it so the manifest + summary surface it.
+                    deferred_refs = [r.ref for r in raw_files[i:]]
+                    break
 
-            log.info("Processing: %s", raw.ref)
-            try:
-                result = process_one(
-                    raw,
-                    index,
-                    wiki_root,
-                    client,
-                    valid_types,
-                    valid_tags,
-                    valid_access,
-                    dry_run=dry_run,
-                    usage=usage,
-                    config=config,
-                )
-            except TransientAPIError as exc:
-                # Issue #193: the Anthropic API was overloaded (429/529) and
-                # the bounded retry was exhausted. Defer to the next run
-                # exactly like a malformed-file failure, but log it distinctly
-                # so health reporting can tell "API was overloaded" (transient)
-                # apart from "this file is broken" (malformed).
-                log.error(
-                    "Gave up after %d retries (transient API overload) %s: %s",
-                    exc.attempts,
-                    raw.ref,
-                    type(exc.last_error).__name__,
-                )
-                failed_files.append(raw.ref)
-                continue
-            except Exception:
-                log.exception("Failed to process %s", raw.ref)
-                failed_files.append(raw.ref)
-                continue
+                log.info("Processing: %s", raw.ref)
+                try:
+                    result = process_one(
+                        raw,
+                        index,
+                        wiki_root,
+                        client,
+                        valid_types,
+                        valid_tags,
+                        valid_access,
+                        dry_run=dry_run,
+                        usage=usage,
+                        config=config,
+                    )
+                except TransientAPIError as exc:
+                    # Issue #193: the Anthropic API was overloaded (429/529)
+                    # and the bounded retry was exhausted. Defer to the next
+                    # run exactly like a malformed-file failure, but log it
+                    # distinctly so health reporting can tell "API was
+                    # overloaded" (transient) apart from "this file is broken".
+                    log.error(
+                        "Gave up after %d retries (transient API overload) %s: %s",
+                        exc.attempts,
+                        raw.ref,
+                        type(exc.last_error).__name__,
+                    )
+                    failed_files.append(raw.ref)
+                    continue
+                except Exception:
+                    log.exception("Failed to process %s", raw.ref)
+                    failed_files.append(raw.ref)
+                    continue
 
-            total_created += len(result.created)
-            total_updated += len(result.updated)
-            total_escalated += len(result.escalated)
-            total_skipped += len(result.skipped)
+                total_created += len(result.created)
+                total_updated += len(result.updated)
+                total_escalated += len(result.escalated)
+                total_skipped += len(result.skipped)
 
+                if not dry_run:
+                    raw.path.unlink()
+                    log.info("  Deleted: %s", raw.path)
+                    processed_count += 1
+
+        # Issue #220: a budget-tripped run must be visibly DEGRADED, not
+        # "Done". Exit code stays 0 (not a crash — the deferred files are
+        # picked up by the next run), but the summary line is machine-
+        # greppable and a manifest records exactly what was deferred. A clean
+        # run clears any stale manifest left by a previous tripped run.
+        if deferred_refs:
+            manifest_path = _write_deferred_manifest(
+                wiki_root,
+                deferred_refs,
+                api_calls=usage.api_calls,
+                budget=max_api_calls,
+                beyond_window=beyond_window,
+                failed_refs=failed_files,
+            )
+            log.warning(
+                "Done (DEGRADED — budget exhausted): %d created, %d updated, "
+                "%d escalated, %d skipped, %d failed, %d deferred (manifest: %s)",
+                total_created,
+                total_updated,
+                total_escalated,
+                total_skipped,
+                len(failed_files),
+                len(deferred_refs) + beyond_window,
+                manifest_path,
+            )
+        else:
             if not dry_run:
-                raw.path.unlink()
-                log.info("  Deleted: %s", raw.path)
-                processed_count += 1
+                _clear_stale_deferred_manifest(wiki_root)
+            log.info(
+                "Done: %d created, %d updated, %d escalated, %d skipped, %d failed",
+                total_created,
+                total_updated,
+                total_escalated,
+                total_skipped,
+                len(failed_files),
+            )
+        if usage.api_calls > 0:
+            log.info(
+                "Token usage: %d API calls, %d input + %d output = %d total"
+                " (cache: %d written, %d read) (~$%.4f estimated)",
+                usage.api_calls,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.total_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+                usage.estimated_cost_usd,
+            )
 
-    # Issue #220: a budget-tripped run must be visibly DEGRADED, not "Done".
-    # Exit code stays 0 (not a crash — the deferred files are picked up by
-    # the next run), but the summary line is machine-greppable and a manifest
-    # records exactly what was deferred. A clean run clears any stale
-    # manifest left by a previous tripped run.
-    if deferred_refs:
-        manifest_path = _write_deferred_manifest(
-            wiki_root,
-            deferred_refs,
-            api_calls=usage.api_calls,
-            budget=max_api_calls,
-            beyond_window=beyond_window,
-            failed_refs=failed_files,
-        )
-        log.warning(
-            "Done (DEGRADED — budget exhausted): %d created, %d updated, "
-            "%d escalated, %d skipped, %d failed, %d deferred (manifest: %s)",
-            total_created,
-            total_updated,
-            total_escalated,
-            total_skipped,
-            len(failed_files),
-            len(deferred_refs) + beyond_window,
-            manifest_path,
-        )
-    else:
+        if not dry_run and (total_created > 0 or total_updated > 0):
+            rebuild_index(wiki_root)
+
         if not dry_run:
-            _clear_stale_deferred_manifest(wiki_root)
-        log.info(
-            "Done: %d created, %d updated, %d escalated, %d skipped, %d failed",
-            total_created,
-            total_updated,
-            total_escalated,
-            total_skipped,
-            len(failed_files),
-        )
-    if usage.api_calls > 0:
-        log.info(
-            "Token usage: %d API calls, %d input + %d output = %d total"
-            " (cache: %d written, %d read) (~$%.4f estimated)",
-            usage.api_calls,
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.total_tokens,
-            usage.cache_creation_input_tokens,
-            usage.cache_read_input_tokens,
-            usage.estimated_cost_usd,
-        )
-
-    if not dry_run and (total_created > 0 or total_updated > 0):
-        rebuild_index(wiki_root)
-
-    if not dry_run:
-        msg = (
-            f"librarian: processed {len(raw_files) - len(deferred_refs)} file(s) "
-            f"({total_created}C {total_updated}U {total_escalated}E {len(failed_files)}F)"
-        )
-        git_snapshot(knowledge_root, msg)
-
-    # Issue #337: the writing phase is done and committed — restore any
-    # interrupt handlers so they don't outlive the run (a no-op when none
-    # were installed, e.g. dry-run or an in-process caller).
-    for _s, _prev in _prev_handlers:
-        signal.signal(_s, _prev)
-    _prev_handlers = []
+            msg = (
+                f"librarian: processed {len(raw_files) - len(deferred_refs)} file(s) "
+                f"({total_created}C {total_updated}U {total_escalated}E {len(failed_files)}F)"
+            )
+            git_snapshot(knowledge_root, msg)
+    finally:
+        for _s, _prev in _prev_handlers:
+            signal.signal(_s, _prev)
+        _prev_handlers = []
 
     _maybe_push_after_run(
         knowledge_root,
