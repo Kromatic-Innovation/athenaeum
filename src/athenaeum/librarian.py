@@ -25,9 +25,12 @@ from __future__ import annotations
 import logging
 import os
 import re
+import signal
 import subprocess
+import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import anthropic
 
@@ -1110,6 +1113,7 @@ def run(
     retire: bool | None = None,
     push_after_run: bool | None = None,
     projects_root: Path | None = None,
+    install_signal_handlers: bool = False,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error.
 
@@ -1480,6 +1484,51 @@ def run(
     total_skipped = 0
     failed_files: list[str] = []
     deferred_refs: list[str] = []
+    processed_count = 0
+
+    # Issue #337: a wall-clock timeout (the pre-dawn sweep's `timeout`, which
+    # SIGTERMs then, after a grace, KILLs) would otherwise kill the run
+    # between the pre-processing snapshot above and the terminal
+    # `processed N file(s)` commit below, stranding every wiki page written
+    # so far as an uncommitted tree for the NEXT run's `git add -A` snapshot
+    # to absorb under a misleading "pre-processing snapshot" message. Install
+    # a SIGTERM/SIGINT handler for the writing phase that commits the partial
+    # progress with a distinct, greppable message and exits 124 (matching
+    # coreutils `timeout`). A normally-completing run restores the handlers
+    # right after the terminal commit and commits exactly once, unchanged.
+    # Opt-in (CLI-only via `install_signal_handlers`) so in-process callers
+    # (the MCP server, tests) never have their signal handling hijacked.
+    _prev_handlers: list[tuple[int, Any]] = []
+
+    def _commit_partial_and_exit(signum: int, _frame: Any) -> None:
+        log.warning(
+            "librarian: interrupted by signal %d after %d file(s) — "
+            "committing partial progress (issue #337)",
+            signum,
+            processed_count,
+        )
+        # Restore first so a second signal during the commit can't recurse
+        # into this handler.
+        for _s, _prev in _prev_handlers:
+            signal.signal(_s, _prev)
+        git_snapshot(
+            knowledge_root,
+            f"librarian: partial run (interrupted after {processed_count} "
+            f"file(s), {total_created}C {total_updated}U {total_escalated}E "
+            f"{len(failed_files)}F)",
+        )
+        sys.exit(124)
+
+    if install_signal_handlers and not dry_run:
+        try:
+            for _s in (signal.SIGTERM, signal.SIGINT):
+                _prev_handlers.append((_s, signal.signal(_s, _commit_partial_and_exit)))
+        except ValueError:
+            # Not the main thread (e.g. an in-process caller) — signal
+            # handlers can't be installed here. Skip the guard rather than
+            # fail an otherwise-valid run.
+            log.debug("librarian: interrupt-commit guard skipped (not main thread)")
+            _prev_handlers = []
 
     if batch_mode and dry_run:
         log.info(
@@ -1565,6 +1614,7 @@ def run(
             if not dry_run:
                 raw.path.unlink()
                 log.info("  Deleted: %s", raw.path)
+                processed_count += 1
 
     # Issue #220: a budget-tripped run must be visibly DEGRADED, not "Done".
     # Exit code stays 0 (not a crash — the deferred files are picked up by
@@ -1624,6 +1674,13 @@ def run(
             f"({total_created}C {total_updated}U {total_escalated}E {len(failed_files)}F)"
         )
         git_snapshot(knowledge_root, msg)
+
+    # Issue #337: the writing phase is done and committed — restore any
+    # interrupt handlers so they don't outlive the run (a no-op when none
+    # were installed, e.g. dry-run or an in-process caller).
+    for _s, _prev in _prev_handlers:
+        signal.signal(_s, _prev)
+    _prev_handlers = []
 
     _maybe_push_after_run(
         knowledge_root,

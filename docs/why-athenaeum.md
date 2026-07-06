@@ -229,7 +229,12 @@ The librarian is a tiered compilation pipeline that runs _outside_ any agent
 session. Agents can only _add_ to raw intake. They cannot overwrite or delete
 what's already there, and they cannot write to the wiki itself. The librarian
 is the only process that edits wiki pages, and it snapshots the wiki to git
-before every run — a bad merge is a `git revert` away.
+before every run — a bad merge is a `git revert` away. If a run is cut short
+by a wall-clock timeout (the nightly sweep bounds it), the librarian commits
+what it finished as a `partial run` commit before exiting rather than leaving
+it uncommitted for the next run to absorb — so the knowledge tree is always
+clean between runs and every run's work is attributed to its own commit
+(issue #337).
 
 - **Tier 1 — programmatic.** Normalization, dedup, formatting.
 - **Tier 2 — fast LLM.** Classification. Is this about a known entity, or a new one? Routes the observation.
