@@ -259,6 +259,26 @@ every session:
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
 ```
 
+**Scoped read access (secondary agents).** By default `athenaeum serve`
+exposes the **whole wiki** to `recall` — the owner sees everything. If you
+wire a secondary/scheduled agent (e.g. an email-drafting routine) to this
+server, pin it to a restricted audience so it can reach operational pages but
+never your PII / client-confidential / financial ones:
+
+```bash
+# This server process may only recall pages an "ops" audience is allowed to read.
+athenaeum serve --path ~/knowledge --audience ops
+```
+
+The audience is pinned by the operator at serve time and cannot be widened by
+the caller. Pages carry `access:` (`open`/`internal`/`confidential`/`personal`)
+and/or an `audience:` role list; untagged pages fail **closed** for a restricted
+audience (owner still sees them). This is a single-owner read filter, not a
+multi-user ACL. See
+[`docs/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/security-posture.md)
+and [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md)
+for the frontmatter model and the fail-closed enforcement.
+
 Example round-trip:
 
 > **User:** Tristan's partner is Amanda; they met at Stanford GSB.
