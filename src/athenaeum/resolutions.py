@@ -1689,11 +1689,13 @@ def _member_frontmatter(path: Path) -> dict[str, Any]:
 def _member_ingestion_date(meta: dict[str, Any]) -> date | None:
     """Best-available ingestion timestamp for snapshot ordering.
 
-    Prefers ``created_at`` then ``updated_at``; each coerced with the shared
+    Prefers ``created`` then ``updated`` (the keys compiled entities actually
+    emit; raw members often carry neither, in which case this returns ``None``
+    and the snapshot close conservatively does not fire); each coerced with the shared
     fail-open :func:`athenaeum.models._coerce_iso_date` (handles YAML
     date/datetime scalars and ISO strings; malformed => ``None``).
     """
-    for key in ("created_at", "updated_at"):
+    for key in ("created", "updated"):
         coerced = _coerce_iso_date(meta.get(key))
         if coerced is not None:
             return coerced
