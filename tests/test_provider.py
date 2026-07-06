@@ -122,6 +122,27 @@ class TestResolveProvider:
 # ---------------------------------------------------------------------------
 
 
+class TestPreflightProvider:
+    def test_api_never_probes(self):
+        from athenaeum.provider import preflight_provider
+
+        assert preflight_provider("api") is None
+
+    def test_claude_cli_missing_binary_returns_error(self, monkeypatch):
+        import athenaeum.provider as prov
+
+        monkeypatch.setattr(prov.shutil, "which", lambda _b: None)
+        monkeypatch.setattr(prov.os.path, "exists", lambda _b: False)
+        msg = prov.preflight_provider("claude-cli")
+        assert msg is not None and "not found" in msg.lower()
+
+    def test_claude_cli_present_binary_returns_none(self, monkeypatch):
+        import athenaeum.provider as prov
+
+        monkeypatch.setattr(prov.shutil, "which", lambda _b: "/usr/bin/claude")
+        assert prov.preflight_provider("claude-cli") is None
+
+
 class TestBuildLLMClient:
     def test_api_without_key_returns_none(self, monkeypatch):
         monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)

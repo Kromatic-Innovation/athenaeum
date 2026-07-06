@@ -76,6 +76,7 @@ from athenaeum.models import (
 from athenaeum.provider import (
     ProviderConfigError,
     build_llm_client,
+    preflight_provider,
     resolve_provider,
 )
 from athenaeum.schemas import validate_wiki_meta
@@ -1172,6 +1173,13 @@ def run(
         provider = resolve_provider(config)
     except ProviderConfigError as exc:
         log.error("%s", exc)
+        return 1
+
+    # Issue #330: fail loudly at startup if the claude-cli binary is missing,
+    # instead of silently deferring every file to an rc-0 no-op run.
+    preflight_err = preflight_provider(provider)
+    if preflight_err:
+        log.error("%s", preflight_err)
         return 1
 
     # The ANTHROPIC_API_KEY requirement applies ONLY to the ``api`` backend.

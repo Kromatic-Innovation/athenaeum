@@ -121,7 +121,7 @@ seam** (`athenaeum.provider.build_llm_client`). Two backends ship:
 |---|---|---|---|---|
 | LLM provider | — | `ATHENAEUM_LLM_PROVIDER` | `llm.provider` | `api` | Selects the LLM backend for the librarian compile path (tiers, contradiction detector, resolver). `api` = the Anthropic SDK; `claude-cli` = the operator's ambient Claude Code subscription login. An unrecognized value is a hard error (no silent fallback). |
 | CLI binary | — | `ATHENAEUM_CLAUDE_CLI_BIN` | — | `claude` | Override the `claude` executable used by the `claude-cli` backend (editable installs / non-PATH locations). |
-| CLI timeout | — | `ATHENAEUM_CLAUDE_CLI_TIMEOUT` | — | `300` (s) | Per-call subprocess timeout for the `claude-cli` backend. A timeout is treated as a **transient** error (retried via `with_retry`). |
+| CLI timeout | — | `ATHENAEUM_CLAUDE_CLI_TIMEOUT` | — | `300` (s) | Per-call subprocess timeout for the `claude-cli` backend. A timeout is treated as a **transient** error — not retried in-run; the affected file is deferred to the next run. |
 
 ### `api` (default)
 
@@ -152,14 +152,28 @@ Constraints and semantics:
   `claude-cli`; the run authenticates via your Claude Code login.
 - **`cache_control` is stripped.** Caching breakpoints do not apply to the CLI
   transport (they are preserved untouched on the `api` backend).
-- **`max_tokens` is advisory.** The CLI has no per-request output-token flag;
-  the model applies its own cap.
+- **`max_tokens` is advisory (possible truncation on very large merges).** The
+  CLI has no per-request output-token flag; the model applies its own cap. A
+  tier-3 merge over an unusually large page could therefore truncate its JSON
+  answer, which the lenient extractor then rejects → that file degrades to a
+  fallback / deferral rather than a bad write. Split oversized pages (see the
+  page-size knobs above) if this bites.
 - **The tier prompt does not inherit Claude Code's persona.** `--system-prompt`
-  fully replaces the default agent persona with athenaeum's tier prompt.
+  fully replaces the default agent persona with athenaeum's tier prompt, and the
+  subprocess runs from a neutral cwd so a project `CLAUDE.md` / `.mcp.json`
+  cannot perturb it. (A user-global `~/.claude/CLAUDE.md` and user-level MCP
+  servers can still load; keep those lean if you use this backend.)
+- **A missing / mistyped `claude` binary fails loudly at startup.** The
+  `claude-cli` provider probes for its binary before any work and exits rc 1
+  with a clear message if it is absent — it never silently no-ops. (A logged-OUT
+  CLI still surfaces per-file at call time.)
 - **Rate limits / timeouts degrade gracefully.** A subscription rate-limit, a
   transient CLI error, or a subprocess timeout maps to
-  `_retry.TransientAPIError`, so the existing `with_retry` backoff handles it;
-  the single-machine run lock + resume make reruns safe.
+  `_retry.TransientAPIError`. Unlike the api backend's SDK transients this is
+  NOT retried in-run — it is caught downstream as a give-up and the affected
+  file is **deferred to the next run**; the single-machine run lock + resume
+  make that pickup safe. (Under sustained rate-limiting the CLI backend defers
+  files a nightly run would otherwise complete — acceptable at nightly cadence.)
 - **Cost is subscription-covered ($0).** Token COUNTS from the CLI JSON
   envelope are still recorded per model in the run's `TokenUsage` and appear in
   the run summary, but `estimated_cost_usd` reports **$0** — the subscription

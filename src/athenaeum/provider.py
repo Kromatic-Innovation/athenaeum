@@ -37,9 +37,11 @@ Known constraints (implemented here / at the call sites, documented in
   ``estimated_cost_usd`` reports ``$0`` for a subscription run (the caller sets
   :attr:`TokenUsage.subscription_covered`).
 * **Rate-limit / transient CLI failures map to
-  :class:`athenaeum._retry.TransientAPIError`** so the existing ``with_retry``
-  path (and the resolver/detector fall-back) handles subscription rate limits;
-  the run-lock + resume already make reruns safe.
+  :class:`athenaeum._retry.TransientAPIError`.** ``with_retry`` catches only the
+  Anthropic SDK transient types, NOT this one — so a CLI transient is not
+  retried in-run: it propagates and is caught downstream as a give-up (the
+  affected file is deferred), and the single-machine run-lock + resume make the
+  next run pick it up safely.
 """
 
 from __future__ import annotations
@@ -102,6 +104,30 @@ def resolve_provider(config: dict[str, Any] | None) -> str:
             f"valid values are: {', '.join(VALID_PROVIDERS)}"
         )
     return value
+
+
+def preflight_provider(provider: str) -> str | None:
+    """Return a startup error message if PROVIDER cannot run, else ``None``.
+
+    Issue #330. The ``claude-cli`` backend authenticates via an ambient
+    ``claude`` login and has no API-key check, so a missing / mistyped binary
+    would otherwise fail per-file at call time — the run would exit rc 0 having
+    silently deferred every file and printed no token summary. This probe makes
+    that misconfiguration fail LOUDLY at startup (rc 1), matching the ``api``
+    backend's missing-key behavior. Only the binary's PRESENCE is checked (a
+    real auth check would spend a subscription call); a logged-OUT CLI still
+    surfaces per-file at call time.
+    """
+    if provider == "claude-cli":
+        binary = os.environ.get("ATHENAEUM_CLAUDE_CLI_BIN") or "claude"
+        if shutil.which(binary) is None and not os.path.exists(binary):
+            return (
+                f"claude-cli provider selected but the {binary!r} binary was not "
+                "found on PATH. Install Claude Code and log in (or set "
+                "ATHENAEUM_CLAUDE_CLI_BIN). The provider is explicit — there is "
+                "no silent fallback to the api backend."
+            )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -291,8 +317,10 @@ class ClaudeCliClient:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            # A timeout is transient — surface it so with_retry backs off and
-            # the resolver/detector fall-back paths degrade gracefully.
+            # A timeout is transient — surface it as TransientAPIError so it is
+            # caught downstream as a give-up and the affected file is deferred to
+            # the next run (run-lock + resume make that safe); the
+            # resolver/detector fall-back paths degrade gracefully meanwhile.
             raise TransientAPIError(1, exc) from exc
         except OSError as exc:  # spawn failure (permissions, ENOENT race)
             raise RuntimeError(f"failed to invoke claude CLI: {exc}") from exc

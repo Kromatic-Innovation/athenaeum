@@ -48,6 +48,11 @@ class TestBatchCliConflict:
         root = _seed_root(tmp_path)
         monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        # Make the binary probe pass deterministically (CI has no `claude`), so
+        # the BATCH guard is what fires — not the missing-binary preflight.
+        import athenaeum.provider as prov
+
+        monkeypatch.setattr(prov.shutil, "which", lambda _b: "/usr/bin/claude")
         caplog.set_level(logging.ERROR, logger="athenaeum")
 
         rc = run(
@@ -71,6 +76,11 @@ class TestClaudeCliWaivesApiKey:
         root = _seed_root(tmp_path)
         monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        # Binary probe passes deterministically (CI has no `claude`); we are
+        # exercising the api-key WAIVER, not the binary preflight.
+        import athenaeum.provider as prov
+
+        monkeypatch.setattr(prov.shutil, "which", lambda _b: "/usr/bin/claude")
 
         # No raw files to process → the run completes cleanly (rc 0) WITHOUT
         # tripping the api-key guard that would fire for the ``api`` backend.
@@ -80,3 +90,30 @@ class TestClaudeCliWaivesApiKey:
             knowledge_root=root,
         )
         assert rc == 0
+
+
+class TestClaudeCliMissingBinaryPreflight:
+    def test_missing_binary_fails_loudly_at_startup(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Issue #330: a claude-cli run with no `claude` binary must fail loudly
+        # (rc 1) at startup, not silently defer every file to an rc-0 no-op.
+        root = _seed_root(tmp_path)
+        monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        import athenaeum.provider as prov
+
+        monkeypatch.setattr(prov.shutil, "which", lambda _b: None)
+        monkeypatch.setattr(prov.os.path, "exists", lambda _b: False)
+        caplog.set_level(logging.ERROR, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+        )
+        assert rc == 1
+        assert any("not found" in r.getMessage().lower() for r in caplog.records)

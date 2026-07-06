@@ -23,12 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     login via `claude -p --system-prompt <sys> --model <id> --output-format
     json`. No credential handling (same ambient-auth stance as the git-push
     path, #284). The adapter mirrors `client.messages.create(**params)` so the
-    four call sites (`tiers`, `contradictions`, `resolutions`, `query_topics`)
-    are unchanged.
+    compile-path call sites (`tiers`, `contradictions`, `resolutions`) are
+    unchanged; the recall-time `query_topics` preprocessor stays on the `api`
+    path by design (a per-recall subprocess would add seconds to every query).
   Constraints: `cache_control` is stripped on the CLI path (preserved on
   `api`); CLI rate-limit / timeout / transient exits map to
-  `_retry.TransientAPIError` so the existing `with_retry` path handles
-  subscription rate limits; batch mode is **API-only** and `claude-cli` +
+  `_retry.TransientAPIError` — caught downstream as a give-up so the affected
+  file is deferred to the next run (not retried in-run); a missing `claude`
+  binary fails loudly at startup; batch mode is **API-only** and `claude-cli` +
   `ATHENAEUM_BATCH_MODE` is a loud startup error (no silent fallback); and
   `claude-cli` token COUNTS are still recorded in `TokenUsage` while
   `estimated_cost_usd` reports **$0** (subscription-covered). See
