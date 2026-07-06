@@ -81,6 +81,46 @@ Override path via `ATHENAEUM_OP_KEY_PATH`. The fetched key is cached in `~/.cach
 | LLM extraction returns `[]` every time | `set -a` / `set +a` missing around `source config.env` — var not exported to child process |
 | `athenaeum query-topics` hangs | 3s timeout should kick in; if not, check `ATHENAEUM_PYTHON` points to an env with the athenaeum CLI |
 
+## Recall hit header (provenance/context) — #325
+
+Each `recall` hit renders a compact metadata header so a consuming agent can
+judge a fact's **trust and currency without opening the page**. The header is
+built at render time from the hit's FRESH on-disk frontmatter (the same `fm`
+dict the #312 Layer-C audience re-check already reads — no index change, no
+reindex), and sits between the `**Tags:**` line and the snippet:
+
+```
+Deploy target (score: 12.3)
+**Path:** wiki/deploy-target.md
+**Source:** user-stated (2026-04-10) · **Updated:** 2026-06-30 · **Valid:** 2026-04-01 → open
+**Status:** contradiction-flagged (see _pending_questions.md)
+
+<snippet>
+```
+
+Fields:
+
+| Field | Source frontmatter | Rendered when |
+|---|---|---|
+| `**Source:**` | `source_type` + the date part of `source_ref` (falling back to `created`) | `source_type` is a non-default, in-vocabulary origin (`user-stated` / `external` / `document`). The default `inferred` — and an absent/typo'd value — render nothing. |
+| `**Updated:**` | `updated` (date part) | `updated` is present. |
+| `**Valid:**` | `valid_from` → `valid_until` (via the shared `validity_bound_str` renderer; `open` for a missing bound) | EITHER `valid_from` or `valid_until` is present. |
+| `**Status:**` | `status: contradiction-flagged` OR `contradictions_detected: true` | the page is contradiction-flagged. Points the reader at `_pending_questions.md`. |
+
+`Source:`/`Updated:`/`Valid:` share ONE `·`-joined line; `Status:` is a second
+line. Header is capped at ~2 lines per hit.
+
+**Omit-at-default rule.** Every field is omitted at its default, so an
+uncontested, unscoped page adds at most one extra line (usually just
+`**Updated:**`). A page with NONE of source/updated/valid/status renders
+exactly the pre-#325 output — `**Tags:**`, blank line, snippet — with no blank
+metadata line. There is never an empty `**Source:**`/`**Valid:**` segment.
+
+**Why the `Status:` line is load-bearing.** Silently returning one side of a
+contradiction-flagged pair — with no signal that the fact is disputed — is the
+exact failure this header prevents. The `Status:` line is the reader's cue to
+consult the pending-question queue before trusting the snippet.
+
 ## Load-bearing invariants
 
 Do not simplify any of these without reading this page and the related commit history. Every one of them is a **silent failure mode** — no exception, no log, just degraded recall quality. The "What breaks" column is what forces a future reviewer to think twice before deleting the guard.
