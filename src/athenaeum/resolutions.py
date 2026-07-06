@@ -1015,12 +1015,16 @@ def _resolve_flagged_pair(
     callers gate on ``len(...) >= 2``.
     """
     flagged: list[AutoMemoryFile] = []
+    used: set[int] = set()
     for ref in detector_result.members_involved:
-        for am in members:
+        ref_tail = ref.rsplit("/", 1)[-1]
+        for i, am in enumerate(members):
+            if i in used:
+                continue
             tag = f"{am.origin_scope}/{am.path.name}"
-            if tag == ref or tag.endswith("/" + ref.rsplit("/", 1)[-1]):
-                if am not in flagged:
-                    flagged.append(am)
+            if tag == ref or tag.endswith("/" + ref_tail):
+                flagged.append(am)
+                used.add(i)
                 break
     return flagged
 
@@ -1091,14 +1095,7 @@ def _declared_winner(
     # flagged — masking real conflicts.
     if len(detector_result.members_involved) < 2:
         return None
-    flagged: list[AutoMemoryFile] = []
-    for ref in detector_result.members_involved:
-        for am in members:
-            tag = f"{am.origin_scope}/{am.path.name}"
-            if tag == ref or tag.endswith("/" + ref.rsplit("/", 1)[-1]):
-                if am not in flagged:
-                    flagged.append(am)
-                break
+    flagged = _resolve_flagged_pair(detector_result, members)
     if len(flagged) < 2:
         return None
     a, b = flagged[0], flagged[1]

@@ -875,6 +875,60 @@ def _two_member_validity_root(
     return knowledge_root
 
 
+def _three_member_validity_root(tmp_path: Path) -> Path:
+    """A knowledge root with one 3-member cluster: a disjoint A/B pair plus a
+    C with an open window overlapping both. The cluster is NOT pairwise-disjoint
+    so the pre-filter does NOT fire and the detector RUNS — exercising the
+    Part-2 post-detection guard (a flagged disjoint pair is downgraded)."""
+    knowledge_root = tmp_path / "knowledge"
+    scope_name = "-Users-tristankromer-Code"
+    scope = knowledge_root / "raw" / "auto-memory" / scope_name
+    _write_validity_am(
+        scope,
+        "feedback_pricing_early.md",
+        name="Pricing early",
+        body="Our price is $50 per month.",
+        valid_until="2027-03-31",
+    )
+    _write_validity_am(
+        scope,
+        "feedback_pricing_later.md",
+        name="Pricing later",
+        body="Our price is $70 per month.",
+        valid_from="2027-04-01",
+    )
+    _write_validity_am(
+        scope,
+        "feedback_pricing_note.md",
+        name="Pricing note",
+        body="Pricing is reviewed each quarter.",
+    )
+    out = knowledge_root / "raw" / "_librarian-clusters.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(
+            {
+                "cluster_id": "pricing-0001",
+                "member_paths": [
+                    f"{scope_name}/feedback_pricing_early.md",
+                    f"{scope_name}/feedback_pricing_later.md",
+                    f"{scope_name}/feedback_pricing_note.md",
+                ],
+                "centroid_score": 0.62,
+                "rationale": "cosine >= 0.55; shares tokens: price, per, month",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (knowledge_root / "athenaeum.yaml").write_text(
+        "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
+        encoding="utf-8",
+    )
+    return knowledge_root
+
+
 class TestValidityWindowsDisjointPredicate:
     """Part 0: the shared ``validity_windows_disjoint`` predicate (#324)."""
 
@@ -995,6 +1049,54 @@ class TestDisjointValidityDetectorShortCircuit:
         fake_client.messages.create.return_value = response
         merge_clusters_to_wiki(root, client=fake_client)
         fake_client.messages.create.assert_called()
+
+    def test_three_member_cluster_downgrades_detected_disjoint_pair(
+        self,
+        tmp_path: Path,
+        caplog,
+    ) -> None:
+        """Part 2: a cluster with an overlapping pair still reaches the detector;
+        when the detector flags the DISJOINT pair, the post-guard downgrades to
+        not-detected (rationale ``disjoint-validity``) and writes no pending
+        question."""
+        root = _three_member_validity_root(tmp_path)
+        scope_name = "-Users-tristankromer-Code"
+        fake_client = MagicMock()
+        response = MagicMock()
+        response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {
+                        "detected": True,
+                        "conflict_type": "factual",
+                        "members_involved": [
+                            f"{scope_name}/feedback_pricing_early.md",
+                            f"{scope_name}/feedback_pricing_later.md",
+                        ],
+                        "conflicting_passages": [
+                            "$50 per month",
+                            "$70 per month",
+                        ],
+                        "rationale": "price differs",
+                    }
+                )
+            )
+        ]
+        fake_client.messages.create.return_value = response
+        with caplog.at_level(logging.INFO, logger="athenaeum.merge"):
+            entries = merge_clusters_to_wiki(root, client=fake_client)
+        # Detector DID run (cluster is not pairwise-disjoint)...
+        fake_client.messages.create.assert_called()
+        # ...but the flagged pair is disjoint, so the entry is downgraded and
+        # no pending question is written.
+        assert len(entries) == 1
+        assert entries[0].contradictions_detected is False
+        assert entries[0].contradiction is not None
+        assert entries[0].contradiction.rationale == "disjoint-validity"
+        assert not (root / "wiki" / "_pending_questions.md").exists()
+        assert any(
+            "disjoint-validity" in rec.message for rec in caplog.records
+        )
 
 
 class TestDisjointValidityResolverSynthetic:
