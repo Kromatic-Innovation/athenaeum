@@ -68,6 +68,7 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
     slugify,
+    validity_windows_disjoint,
 )
 
 if TYPE_CHECKING:
@@ -1001,6 +1002,65 @@ def _build_user_message(
     return "\n".join(lines)
 
 
+def _resolve_flagged_pair(
+    detector_result: ContradictionResult,
+    members: list[AutoMemoryFile],
+) -> list[AutoMemoryFile]:
+    """Resolve the detector's flagged ``members_involved`` refs to member records.
+
+    Shared by :func:`_disjoint_validity_verdict` and :func:`_declared_winner`.
+    Matches each ref against ``"<origin_scope>/<filename>"`` (exact or trailing
+    filename), preserving the detector's ``a``/``b`` order and refusing to reuse
+    a member for two refs. Returns the matched records (0, 1, or 2 entries);
+    callers gate on ``len(...) >= 2``.
+    """
+    flagged: list[AutoMemoryFile] = []
+    for ref in detector_result.members_involved:
+        for am in members:
+            tag = f"{am.origin_scope}/{am.path.name}"
+            if tag == ref or tag.endswith("/" + ref.rsplit("/", 1)[-1]):
+                if am not in flagged:
+                    flagged.append(am)
+                break
+    return flagged
+
+
+def _disjoint_validity_verdict(
+    detector_result: ContradictionResult,
+    members: list[AutoMemoryFile],
+) -> ResolutionProposal | None:
+    """Return a synthetic ``not_a_conflict`` when the flagged pair is disjoint.
+
+    Issue #324. Two claims whose validity windows never overlap are sequential
+    states of the world (A valid through March, B valid from April) and cannot
+    contradict — a flagged pair that still reaches the resolver with disjoint
+    windows is resolved WITHOUT an Opus call at confidence 1.0. Sibling to
+    :func:`_declared_winner`; wired in FIRST so a disjoint pair short-circuits
+    even before the declared-relationship check.
+
+    The flagged pair is resolved from ``members_involved`` exactly as
+    :func:`_declared_winner` does. Fewer than two resolved members (the
+    detector's 0/1-echo) => ``None`` (fall through to the declared/LLM path).
+    """
+    if len(detector_result.members_involved) < 2:
+        return None
+    flagged = _resolve_flagged_pair(detector_result, members)
+    if len(flagged) < 2:
+        return None
+    a, b = flagged[0], flagged[1]
+    a_meta = {"valid_from": a.valid_from, "valid_until": a.valid_until}
+    b_meta = {"valid_from": b.valid_from, "valid_until": b.valid_until}
+    if validity_windows_disjoint(a_meta, b_meta):
+        return ResolutionProposal(
+            recommended_winner="neither",
+            action="not_a_conflict",
+            rationale="disjoint validity windows (sequential states, not a conflict)",
+            confidence=1.0,
+            source_precedence_used=[],
+        )
+    return None
+
+
 def _declared_winner(
     detector_result: ContradictionResult,
     members: list[AutoMemoryFile],
@@ -1225,6 +1285,16 @@ def propose_resolution(
         return _fallback("detector-not-detected")
     if not members:
         return _fallback("no-members")
+
+    # Issue #324: a flagged pair with DISJOINT validity windows is two
+    # sequential states of the world (A true through March, B true from
+    # April) — not a conflict. Resolve as ``not_a_conflict`` at confidence
+    # 1.0 without an Opus call. Checked FIRST, before the declared-
+    # relationship short-circuit, so it also covers a disjoint pair that
+    # happens to carry a declaration.
+    disjoint = _disjoint_validity_verdict(detector_result, members)
+    if disjoint is not None:
+        return disjoint
 
     # Lane 1 / #167: declared supersession short-circuits the LLM call.
     # If one flagged member's ``supersedes`` names the other, the

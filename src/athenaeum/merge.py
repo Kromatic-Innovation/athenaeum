@@ -94,6 +94,7 @@ from athenaeum.models import (
     safe_source_ref,
     slugify,
     validity_bound_str,
+    validity_windows_disjoint,
 )
 from athenaeum.pending_merges import write_pending_merge
 from athenaeum.resolutions import (
@@ -226,6 +227,90 @@ def _filter_declared_pairs(
         return [], None
     pruned = [m for m, keep in zip(members, has_undeclared_partner) if keep]
     return pruned, None
+
+
+def _am_validity_meta(am: "AutoMemoryFile") -> dict[str, str]:
+    """Return an :class:`AutoMemoryFile`'s validity bounds as a meta dict (#324).
+
+    Mirrors :meth:`AutoMemoryFile.is_inactive`, which feeds the stored raw
+    ``valid_until`` string back through the dict predicate — so the disjoint
+    check re-parses the SAME normalized bounds the inactive predicate sees and
+    the two cannot drift.
+    """
+    return {"valid_from": am.valid_from, "valid_until": am.valid_until}
+
+
+def _all_pairs_disjoint(members: list["AutoMemoryFile"]) -> bool:
+    """True when EVERY pair among ``members`` has disjoint validity windows (#324).
+
+    Two claims whose validity windows never overlap are sequential states of the
+    world (A valid through March, B valid from April) and cannot contradict.
+    When the whole cluster is pairwise-disjoint the detector LLM call is skipped
+    entirely (mirroring the declared-relationship short-circuit). ANY pair with
+    an overlapping or open window returns ``False`` so detection proceeds —
+    matching the fail-open posture of
+    :func:`athenaeum.models.validity_windows_disjoint`. Fewer than two members
+    => ``False`` (nothing to short-circuit; the singleton path handles that).
+    """
+    if len(members) < 2:
+        return False
+    for i in range(len(members)):
+        for j in range(i + 1, len(members)):
+            if not validity_windows_disjoint(
+                _am_validity_meta(members[i]), _am_validity_meta(members[j])
+            ):
+                return False
+    return True
+
+
+def _members_from_result(
+    result: ContradictionResult,
+    members: list["AutoMemoryFile"],
+) -> list["AutoMemoryFile"]:
+    """Resolve the detector's ``members_involved`` refs back to member records.
+
+    Matching mirrors :func:`_order_member_paths` /
+    :func:`athenaeum.resolutions._declared_winner`: a member matches a ref when
+    ``"<origin_scope>/<filename>"`` equals the ref or shares its trailing
+    filename component. Returns the matched records in the detector's flagged
+    ``a``/``b`` order; unmatched refs are dropped.
+    """
+    matched: list[AutoMemoryFile] = []
+    used: set[int] = set()
+    for ref in result.members_involved:
+        ref_tail = ref.rsplit("/", 1)[-1]
+        for i, am in enumerate(members):
+            if i in used:
+                continue
+            tag = f"{am.origin_scope}/{am.path.name}"
+            if tag == ref or tag.endswith("/" + ref_tail):
+                matched.append(am)
+                used.add(i)
+                break
+    return matched
+
+
+def _detected_pair_disjoint(
+    result: ContradictionResult,
+    members: list["AutoMemoryFile"],
+) -> bool:
+    """True when the detector's two flagged members have disjoint windows (#324).
+
+    Post-detection guard for the overlapping-cluster case: the pre-filter
+    (:func:`_all_pairs_disjoint`) only fires when the WHOLE cluster is
+    pairwise-disjoint, but a cluster with some overlapping pairs can still have
+    the detector flag a SPECIFIC disjoint pair. Guards for the 0/1-member echo
+    the detector sometimes returns — fewer than two resolved members => ``False``
+    (no downgrade, the escalation proceeds).
+    """
+    if not result.detected:
+        return False
+    matched = _members_from_result(result, members)
+    if len(matched) < 2:
+        return False
+    return validity_windows_disjoint(
+        _am_validity_meta(matched[0]), _am_validity_meta(matched[1])
+    )
 
 
 def _order_member_paths(
@@ -1477,12 +1562,39 @@ def merge_clusters_to_wiki(
                     rationale="declared-pruned-to-singleton",
                 )
                 continue
+            # Issue #324: skip the detector when EVERY undeclared pair is
+            # validity-disjoint — sequential states of the world cannot
+            # conflict. Mirrors the declared-pair short-circuit above: no
+            # Haiku call, no escalation, already-settled pairs stay settled.
+            if _all_pairs_disjoint(filtered):
+                _record_pair_keys(chunk)
+                log.info(
+                    "contradictions: skipping detector for disjoint-validity "
+                    "cluster of %d member(s)",
+                    len(filtered),
+                )
+                result = ContradictionResult(
+                    detected=False, rationale="disjoint-validity"
+                )
+                continue
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
             result = detect_contradictions(
                 filtered, client, config=resolved_config, usage=usage
             )
+            # Issue #324: post-detection guard — an otherwise-overlapping
+            # cluster can still have the detector flag a SPECIFIC disjoint
+            # pair. Downgrade to not-detected BEFORE the escalation/pending-
+            # question write so the settled pair is never re-queued.
+            if _detected_pair_disjoint(result, filtered):
+                log.info(
+                    "contradictions: downgrading detected pair to "
+                    "disjoint-validity (no escalation)"
+                )
+                result = ContradictionResult(
+                    detected=False, rationale="disjoint-validity"
+                )
             _record_pair_keys(chunk)
             if result.detected and aggregate is None:
                 proposal = _maybe_propose(result, filtered)
@@ -1546,6 +1658,10 @@ def merge_clusters_to_wiki(
             # declared-supersession pair never reaches the detector.
             _filtered, declared = _filter_declared_pairs(list(pair))
             if declared is not None and not _filtered:
+                continue
+            # Issue #324: skip validity-disjoint similarity pairs too — a
+            # 2-member disjoint pair is settled and must not reach Haiku.
+            if _all_pairs_disjoint(list(pair)):
                 continue
             haiku_calls += 1
             if usage is not None and client is not None:
