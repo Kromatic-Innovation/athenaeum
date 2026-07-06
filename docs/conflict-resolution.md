@@ -222,6 +222,63 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 > in cwc#235 / athenaeum#112 and now live in the cwc personal toolkit.
 > See cwc/scripts/knowledge-librarian/ for their current home.
 
+## 9. Disjoint temporal validity — sequential states are not conflicts (issue #324)
+
+- **Files:** `src/athenaeum/models.py` (`validity_windows_disjoint`),
+  `src/athenaeum/merge.py` (`_all_pairs_disjoint`, `_detected_pair_disjoint`),
+  `src/athenaeum/resolutions.py` (`_disjoint_validity_verdict`),
+  `src/athenaeum/contradictions.py` (`_member_scope_header`).
+- **Trigger:** Two claims carry `valid_from` / `valid_until` frontmatter (#308
+  slice 1) whose windows do not overlap in time — e.g. A is true through
+  2026-03-31 and B is true from 2026-04-01. These are *sequential states of the
+  world*, not a contradiction, but the cheap C4 detector (which strips
+  frontmatter) cannot see the windows and re-flags them every compile.
+- **Shared predicate:** `validity_windows_disjoint(meta_a, meta_b)` parses each
+  side with the fail-open `parse_valid_from` / `parse_valid_until`. Windows are
+  disjoint **iff** one side has a CLOSED upper bound ending strictly before the
+  other side's lower bound: `a_until is not None and b_from is not None and
+  a_until < b_from` (or the symmetric `b_until < a_from`). `valid_until` is the
+  INCLUSIVE last-valid date, so the comparison is strict `<` — a window ending
+  2026-04-01 and one starting 2026-04-01 SHARE that day and are NOT disjoint. A
+  missing or malformed bound coerces to `None` (open) and therefore OVERLAPS by
+  default (fail-open → detection proceeds).
+- **Resolution rules (four surfaces):**
+  1. **Pre-detection short-circuit (`merge.py`).** In the primary detector loop,
+     after `_filter_declared_pairs` prunes declared pairs, if
+     `_all_pairs_disjoint(filtered)` (EVERY surviving pair disjoint; any
+     overlapping/open pair falls through), the Haiku call is skipped and the
+     cluster records `ContradictionResult(detected=False,
+     rationale="disjoint-validity")`. The similarity-sweep path applies the same
+     skip per 2-member pair. Mirrors the declared-relationship short-circuit
+     (§ #167).
+  2. **Post-detection guard (`merge.py`).** When the cluster is only partially
+     disjoint the detector still runs, and may flag a specific disjoint pair.
+     `_detected_pair_disjoint(result, filtered)` re-checks the two flagged
+     members (guarding for the detector's 0/1-member echo) and downgrades to
+     `detected=False, rationale="disjoint-validity"` BEFORE the escalation /
+     pending-question write.
+  3. **Resolver synthetic (`resolutions.py`).** If a flagged disjoint pair still
+     reaches `propose_resolution`, `_disjoint_validity_verdict` returns
+     `not_a_conflict` at `confidence=1.0` with NO Opus call — checked FIRST,
+     before the declared-winner short-circuit.
+  4. **Scope header (`contradictions.py`).** `_member_scope_header` renders a
+     single TRUSTED `scope:` line per member (`valid: <from> → <until> · source:
+     <source_type> · updated: <date>`, each segment omitted at its default)
+     OUTSIDE the untrusted `<memory>` block. `_DETECT_SYSTEM` marks it as trusted
+     temporal/provenance metadata so the detector can reason about overlapping
+     windows too. The memory BODY stays untrusted inside `<memory>` tags.
+- **Provenance behavior:** None of the four surfaces mutate frontmatter or
+  bodies. The `disjoint-validity` rationale is recorded on the in-memory
+  `ContradictionResult` / `ResolutionProposal` only.
+- **Known edge cases:**
+  - Both bounds absent on either side ⇒ open window ⇒ never disjoint ⇒ detection
+    proceeds (a claim with no window is treated as always-valid).
+  - Touching boundary (A `valid_until = B valid_from`) ⇒ shares that inclusive
+    day ⇒ NOT disjoint.
+  - A cluster > 2 is short-circuited only when EVERY pair is disjoint; one
+    overlapping pair sends the whole (declared-pruned) remainder to the detector,
+    where the post-guard still catches any individually-flagged disjoint pair.
+
 ---
 
 ## Comparison matrix — who wins on each field type
@@ -233,7 +290,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 | `tier3_merge` | LLM-decided per the prompt's three-class taxonomy | LLM | LLM | LLM | `updated`: today | LLM | unchanged |
 | `tier3_write` | (delegates to merge/create) | (delegates) | (delegates) | (delegates) | `updated`: today | (delegates) | unchanged |
 | `merge.py` cluster merge | n/a | n/a | sources: `(session,turn)`-dedupe; origin_scopes: union | n/a | n/a | concat with paragraph-dedupe | n/a |
-| `contradictions.py` | DETECT-ONLY — never resolves | — | — | — | — | — | — |
+| `contradictions.py` | DETECT-ONLY — never resolves (disjoint-validity pairs skip the LLM entirely, §9) | — | — | — | — | — | — |
 | `dedupe._perform_merge` | canonical wins if truthy | canonical wins | union (canonical first) | max | max (lex ISO) | canonical + appended absorbed | canonical wins per key; absorbed-only keys carried forward |
 
 **Lock semantics:** every cell above MUST stay accurate. A future PR that

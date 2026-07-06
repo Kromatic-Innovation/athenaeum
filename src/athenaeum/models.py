@@ -395,6 +395,43 @@ def is_inactive_memory(
     return valid_until_expired(meta, as_of)
 
 
+def validity_windows_disjoint(
+    meta_a: dict[str, object] | None, meta_b: dict[str, object] | None
+) -> bool:
+    """True when two claims' validity windows cannot overlap in time (issue #324).
+
+    Two claims are DISJOINT — sequential states of the world that cannot
+    contradict (A true through March, B true from April) — iff one side has a
+    CLOSED upper bound (``valid_until``) ending strictly before the other side's
+    lower bound (``valid_from``) begins::
+
+        a_until is not None and b_from is not None and a_until < b_from
+        # OR the symmetric
+        b_until is not None and a_from is not None and b_until < a_from
+
+    ``valid_until`` is the INCLUSIVE last-valid date, so the comparison is strict
+    ``<``: A ending 2026-03-31 and B starting 2026-04-01 → ``03-31 < 04-01`` →
+    disjoint; A ending 2026-04-01 and B starting 2026-04-01 → they share that
+    day → NOT disjoint.
+
+    Each bound is parsed with the fail-open :func:`parse_valid_from` /
+    :func:`parse_valid_until`: a missing OR malformed value coerces to ``None``
+    (an open bound). Open bounds overlap by default, so a claim with no window —
+    or a malformed one — is never disjoint from anything (detection proceeds).
+    This is the fail-open posture the contradiction detector needs; no separate
+    malformed handling is added here because ``parse_*`` already does it.
+    """
+    a_from = parse_valid_from(meta_a)
+    a_until = parse_valid_until(meta_a)
+    b_from = parse_valid_from(meta_b)
+    b_until = parse_valid_until(meta_b)
+    if a_until is not None and b_from is not None and a_until < b_from:
+        return True
+    if b_until is not None and a_from is not None and b_until < a_from:
+        return True
+    return False
+
+
 # --- Audience / access scoping (issue #312) ---
 #
 # Read-scoping for secondary agents/routines. The audience model is
