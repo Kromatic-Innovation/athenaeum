@@ -936,6 +936,14 @@ class TokenUsage:
     # the blended rate for the untagged remainder. Excluded from ``repr``
     # to keep run-summary logging concise.
     per_model: dict[str, dict[str, int]] = field(default_factory=dict, repr=False)
+    # Subscription-covered flag (issue #330). When the run is served by the
+    # ``claude-cli`` provider, the operator's Claude Code SUBSCRIPTION pays for
+    # the tokens — there is no per-token API bill. Token COUNTS still
+    # accumulate (and appear in the run summary) exactly as for the API
+    # backend, but ``estimated_cost_usd`` reports $0 rather than pricing the
+    # tokens at list rates. Set once at run start by the caller that resolved
+    # the provider; defaults False so the API backend is unchanged.
+    subscription_covered: bool = False
 
     def _tag_model(
         self,
@@ -1127,7 +1135,14 @@ class TokenUsage:
 
         Caveat: untagged/unknown-model traffic is still only approximated
         at the blended rate; it cannot be attributed to a specific model.
+
+        Subscription-covered runs (issue #330 ``claude-cli`` backend) short-
+        circuit to $0: the operator's Claude Code subscription pays for the
+        tokens, so pricing them at API list rates would be wrong. The token
+        COUNTS remain in the accumulators and the run summary.
         """
+        if self.subscription_covered:
+            return 0.0
         total = 0.0
         # Per-model tagged share at each model's own rates.
         tagged = {

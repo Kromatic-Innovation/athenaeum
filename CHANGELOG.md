@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.10] - 2026-07-06
+
+### Added
+
+- **LLM provider seam + `claude-cli` subscription backend (#330).** A new
+  `athenaeum.provider` module centralizes LLM client construction behind
+  `build_llm_client(config)` and `resolve_provider(config)` (env
+  `ATHENAEUM_LLM_PROVIDER` > yaml `llm.provider` > `api`). Two first-party
+  backends:
+  - `api` (default): wraps `anthropic.Anthropic(...)` verbatim — params pass
+    through **unchanged**, so prompt caching (#230), the Messages Batch API
+    (#236), retries, and cost accounting are byte-for-byte identical to before.
+  - `claude-cli`: drives the operator's ambient Claude Code **subscription**
+    login via `claude -p --system-prompt <sys> --model <id> --output-format
+    json`. No credential handling (same ambient-auth stance as the git-push
+    path, #284). The adapter mirrors `client.messages.create(**params)` so the
+    compile-path call sites (`tiers`, `contradictions`, `resolutions`) are
+    unchanged; the recall-time `query_topics` preprocessor stays on the `api`
+    path by design (a per-recall subprocess would add seconds to every query).
+  Constraints: `cache_control` is stripped on the CLI path (preserved on
+  `api`); CLI rate-limit / timeout / transient exits map to
+  `_retry.TransientAPIError` — caught downstream as a give-up so the affected
+  file is deferred to the next run (not retried in-run); a missing `claude`
+  binary fails loudly at startup; batch mode is **API-only** and `claude-cli` +
+  `ATHENAEUM_BATCH_MODE` is a loud startup error (no silent fallback); and
+  `claude-cli` token COUNTS are still recorded in `TokenUsage` while
+  `estimated_cost_usd` reports **$0** (subscription-covered). See
+  `docs/configuration.md` → "LLM provider selection (#330)".
+
 ## [0.13.9] - 2026-07-06
 
 ### Added
