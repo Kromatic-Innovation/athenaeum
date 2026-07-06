@@ -56,6 +56,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -64,8 +65,10 @@ from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     AutoMemoryFile,
     TokenUsage,
+    _coerce_iso_date,
     cache_usage_counts,
     parse_frontmatter,
+    parse_valid_from,
     render_frontmatter,
     slugify,
     validity_windows_disjoint,
@@ -1646,6 +1649,105 @@ def _read_member_name(path: Path) -> str:
     return path.stem
 
 
+# ---------------------------------------------------------------------------
+# Interval-close (#308 slice 2): stamp a temporal-supersession loser's
+# ``valid_until`` in ADDITION to the ``superseded_by`` / snapshot mark.
+# ---------------------------------------------------------------------------
+#
+# Slice 1 (#308) shipped the ``valid_from`` / ``valid_until`` fields + the
+# reader-side inactive predicate but left the resolver unable to auto-stamp
+# intervals. Slice 2 closes that gap: when a resolution establishes a TEMPORAL
+# supersession — the loser was VALID-THEN-REPLACED history, not WRONG — the
+# loser's interval is closed at the winner's ``valid_from`` (the moment the
+# replacement took over), else at the resolution date. This AUGMENTS, never
+# replaces, the ``superseded_by`` pointer (§8 provenance-shape): the loser is
+# still marked superseded_by the winner and is still filtered from the live
+# compile/recall by :func:`athenaeum.models.is_inactive_memory`.
+#
+# BOUNDARY RECONCILIATION with #324 (`validity_windows_disjoint`): that helper
+# uses a STRICT ``<`` on the INCLUSIVE ``valid_until``, so a loser ending on
+# date X and a winner starting on date X SHARE day X and are NOT disjoint.
+# Stamping ``loser.valid_until = winner.valid_from`` therefore makes the pair
+# non-disjoint at the boundary day BY DESIGN — the loser is ALSO marked
+# ``superseded_by`` (and hence inactive), so it never re-surfaces as a live
+# claim regardless. We keep the inclusive last-valid-date contract (§8.1: a
+# claim is inactive iff ``as_of > valid_until``) and do NOT subtract a day; §8
+# does not specify minus-one-day arithmetic. Only ever CLOSE, never widen: an
+# existing (tighter/earlier) ``valid_until`` on the loser is preserved.
+
+
+def _member_frontmatter(path: Path) -> dict[str, Any]:
+    """Return a member file's parsed frontmatter dict (empty on any read error)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    meta, _ = parse_frontmatter(text)
+    return dict(meta) if isinstance(meta, dict) else {}
+
+
+def _member_ingestion_date(meta: dict[str, Any]) -> date | None:
+    """Best-available ingestion timestamp for snapshot ordering.
+
+    Prefers ``created`` then ``updated`` (the keys compiled entities actually
+    emit; raw members often carry neither, in which case this returns ``None``
+    and the snapshot close conservatively does not fire); each coerced with the shared
+    fail-open :func:`athenaeum.models._coerce_iso_date` (handles YAML
+    date/datetime scalars and ISO strings; malformed => ``None``).
+    """
+    for key in ("created", "updated"):
+        coerced = _coerce_iso_date(meta.get(key))
+        if coerced is not None:
+            return coerced
+    return None
+
+
+def _close_interval(loser_path: Path, new_bound: date) -> bool:
+    """Stamp ``loser.valid_until`` = min(existing, ``new_bound``); never widens.
+
+    Only-close-never-widen (§8 / #308 slice 2): a resolution must not EXTEND a
+    claim's validity. If the loser already carries an EARLIER ``valid_until``,
+    it is preserved; otherwise ``new_bound`` is written (inclusive last-valid
+    date, ``YYYY-MM-DD``). Best-effort — delegates the write to
+    :func:`_mark_member_frontmatter`, which swallows file errors.
+    """
+    existing = _coerce_iso_date(_member_frontmatter(loser_path).get("valid_until"))
+    bound = existing if (existing is not None and existing < new_bound) else new_bound
+    return _mark_member_frontmatter(loser_path, "valid_until", bound.isoformat())
+
+
+def _sequential_snapshot_close(
+    a_path: Path, b_path: Path
+) -> tuple[Path | None, date | None]:
+    """Resolve ``(older_member, newer_boundary)`` for a two-snapshot pair.
+
+    Ordering signal priority (#308 slice 2):
+
+    1. Both sides carry a (distinct) ``valid_from`` → order by it; the newer's
+       ``valid_from`` is the boundary the older interval closes at.
+    2. Else both sides carry a (distinct) ingestion date (``created_at`` then
+       ``updated_at``) → order by it; the boundary is the newer's ``valid_from``
+       when present, else the newer's ingestion date.
+    3. No reliable ordering signal (missing/equal on both axes) → ``(None,
+       None)`` and the caller does NOT stamp.
+    """
+    a_meta = _member_frontmatter(a_path)
+    b_meta = _member_frontmatter(b_path)
+    a_from = parse_valid_from(a_meta)
+    b_from = parse_valid_from(b_meta)
+    if a_from is not None and b_from is not None and a_from != b_from:
+        return (a_path, b_from) if a_from < b_from else (b_path, a_from)
+    a_ing = _member_ingestion_date(a_meta)
+    b_ing = _member_ingestion_date(b_meta)
+    if a_ing is not None and b_ing is not None and a_ing != b_ing:
+        if a_ing < b_ing:
+            older, newer_from, newer_ing = a_path, b_from, b_ing
+        else:
+            older, newer_from, newer_ing = b_path, a_from, a_ing
+        return older, (newer_from or newer_ing)
+    return None, None
+
+
 def enact_resolution(
     proposal: ResolutionProposal,
     member_paths: list[Path] | list[str] | None,
@@ -1663,6 +1765,16 @@ def enact_resolution(
       preserved, file kept). ``deprecate_both`` sets ``deprecated: true``
       on BOTH members. No file is deleted; the marker makes the member
       inactive so recall + the C3 compile skip it.
+    * INTERVAL-CLOSE (#308 slice 2) — a temporal supersession also stamps
+      the loser's ``valid_until``, AUGMENTING (never replacing) the mark:
+      ``keep_a`` / ``keep_b`` close the superseded loser's interval at the
+      winner's ``valid_from`` (else the resolution date); a ``not_a_conflict``
+      verdict over two dated SNAPSHOTS closes the OLDER member's interval at
+      the newer's lower bound. Only ever closes, never widens. See the
+      BOUNDARY RECONCILIATION note above :func:`_member_frontmatter`.
+      ``not_a_conflict`` is NOT in :data:`ENACTING_ACTIONS`, so the pipeline
+      suppress/drop routing is unchanged — the snapshot close fires only when
+      a caller routes the pair here directly.
 
     Args:
         proposal: The resolver verdict. Only :class:`ResolutionProposal`
@@ -1676,10 +1788,12 @@ def enact_resolution(
     Returns:
         For delete actions, the :class:`Path` that was deleted. For
         ``keep_a`` / ``keep_b``, the LOSER :class:`Path` that was marked
-        ``superseded_by``. For ``deprecate_both``, BOTH members are marked
-        as a side effect but only ``member_paths[0]`` is returned. ``None``
-        when nothing was enacted (non-enacting action, missing/short member
-        list, or a file operation failed).
+        ``superseded_by`` (and interval-closed). For ``deprecate_both``, BOTH
+        members are marked as a side effect but only ``member_paths[0]`` is
+        returned. For a ``not_a_conflict`` snapshot pair, the OLDER member
+        :class:`Path` whose interval was closed. ``None`` when nothing was
+        enacted (non-enacting action with no snapshot ordering, missing/short
+        member list, or a file operation failed).
 
     Safety: a missing target file is tolerated (already gone == success
     for a delete), and an :class:`OSError` on unlink/write is logged and
@@ -1706,12 +1820,31 @@ def enact_resolution(
         loser_path = Path(member_paths[loser_idx])
         winner_name = _read_member_name(winner_path)
         if _mark_member_frontmatter(loser_path, "superseded_by", winner_name):
-            log.info(
-                "resolutions: enacted %s — marked %s superseded_by %r",
-                action,
-                loser_path,
-                winner_name,
+            # #308 slice 2: interval-close AUGMENTS the superseded_by mark. The
+            # loser was VALID-THEN-REPLACED, so its interval ends where the
+            # winner took over — the winner's ``valid_from`` when known, else
+            # the resolution date (today). Only-close-never-widen. See the
+            # BOUNDARY RECONCILIATION note above _member_frontmatter.
+            close_at = (
+                parse_valid_from(_member_frontmatter(winner_path)) or date.today()
             )
+            if _close_interval(loser_path, close_at):
+                log.info(
+                    "resolutions: enacted %s — marked %s superseded_by %r "
+                    "and closed valid_until<=%s",
+                    action,
+                    loser_path,
+                    winner_name,
+                    close_at.isoformat(),
+                )
+            else:
+                log.info(
+                    "resolutions: enacted %s — marked %s superseded_by %r "
+                    "(interval-close write skipped)",
+                    action,
+                    loser_path,
+                    winner_name,
+                )
             return loser_path
         return None
 
@@ -1733,6 +1866,35 @@ def enact_resolution(
                 action,
             )
             return Path(member_paths[0])
+        return None
+
+    # --- Sequential-snapshot interval-close branch (#308 slice 2) ---
+    # A ``not_a_conflict`` verdict over two DATED SNAPSHOTS of the same fact
+    # (older -> newer) is a TEMPORAL supersession: close the OLDER member's
+    # interval at the newer's lower bound. This is deliberately NOT added to
+    # :data:`ENACTING_ACTIONS` — the merge.py suppress path (and the reresolve
+    # heal pass) still DROP a not_a_conflict escalation byte-identically; the
+    # close fires only when a caller routes the flagged pair through
+    # ``enact_resolution`` directly. Ordering is determined by ``valid_from``,
+    # else ingestion date; with no reliable ordering signal nothing is stamped
+    # (return ``None``). #329 will generalize this to non-time scopes.
+    if action == SUPPRESS_ACTION:
+        if not member_paths or len(member_paths) < 2:
+            return None
+        older, bound = _sequential_snapshot_close(
+            Path(member_paths[0]), Path(member_paths[1])
+        )
+        if older is None or bound is None:
+            return None
+        if _close_interval(older, bound):
+            log.info(
+                "resolutions: enacted %s interval-close — %s valid_until<=%s "
+                "(older snapshot superseded by newer)",
+                action,
+                older,
+                bound.isoformat(),
+            )
+            return older
         return None
 
     # --- Destructive delete branch (#166) ---

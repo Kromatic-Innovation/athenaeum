@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.9] - 2026-07-06
+
+### Added
+
+- **Resolver interval-close on temporal supersession (#308 slice 2).** When a
+  resolution establishes a TEMPORAL supersession — the loser is
+  *valid-then-replaced* history, not a wrong claim —
+  `resolutions.enact_resolution` now stamps the loser's `valid_until` in
+  ADDITION to the existing `superseded_by` mark (the close augments, never
+  replaces, the mark; §8.4 of `docs/provenance-shape.md`). Triggers:
+  - `keep_a` / `keep_b` close the loser at the **winner's `valid_from`** when
+    known, else the **resolution date** (`date.today()`).
+  - Sequential-snapshot `not_a_conflict` closes the **older** member's interval
+    at the newer's lower bound (ordering by `valid_from`, else ingestion date;
+    no reliable ordering signal ⇒ no stamp). Deliberately NOT added to
+    `ENACTING_ACTIONS`, so the merge-pass suppress/drop routing is unchanged.
+  - Never closes for `correct_*` / `forget_*` / `deprecate_both` /
+    `retain_both_with_context` / `merge` / `propose_merge`.
+  **Only-close-never-widen:** an existing earlier `valid_until` is preserved.
+  **Boundary reconciliation with #324:** `validity_windows_disjoint` uses a
+  strict `<` on the inclusive `valid_until`, so `loser.valid_until =
+  winner.valid_from` leaves the pair non-disjoint at the shared boundary day by
+  design — safe because the superseded loser is also inactive via
+  `is_inactive_memory`. No minus-one-day is subtracted. Exact stamped value
+  pinned by `tests/test_conflict_resolution.py::TestIntervalCloseSlice2`.
+  Follow-up #329 generalizes the close to non-time scopes (org/locale).
+
 ## [0.13.8] - 2026-07-06
 
 ### Added
