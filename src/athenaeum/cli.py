@@ -1231,6 +1231,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             batch_mode=args.batch_mode,
             retire=getattr(args, "retire", None),
             push_after_run=getattr(args, "push_after_run", None),
+            install_signal_handlers=True,
         )
     finally:
         lock.release()
