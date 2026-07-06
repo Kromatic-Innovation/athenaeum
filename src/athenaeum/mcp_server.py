@@ -11,14 +11,18 @@ Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from athenaeum.models import (
+    DEFAULT_SOURCE_TYPE,
+    SOURCE_TYPES,
     is_page_authorized,
     parse_frontmatter,
     render_frontmatter,
+    validity_bound_str,
 )
 from athenaeum.provenance import resolve_remember_sources
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
@@ -158,6 +162,90 @@ def _resolve_hit_path(
     return None, filename
 
 
+# Matches the FIRST ISO-8601 date (YYYY-MM-DD) embedded anywhere in a value.
+# ``source_ref`` values are colon-delimited (``api:apollo:2026-05-09``) and
+# ``created``/``updated`` may be a full timestamp (``2026-06-30T12:00:00``);
+# both cases carry the date as a leading substring of one segment.
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _date_part(value: object) -> str:
+    """Return the first ``YYYY-MM-DD`` date found in ``value``, or ``""``.
+
+    Accepts a ``str`` (possibly a colon-delimited ``source_ref`` or an ISO
+    timestamp) or a ``date``/``datetime`` (whose ``isoformat`` starts with the
+    date). Anything without a recognizable date yields ``""`` so the caller can
+    omit the parenthetical rather than render a bare/garbage token.
+    """
+    if value in (None, ""):
+        return ""
+    match = _ISO_DATE_RE.search(str(value))
+    return match.group(0) if match else ""
+
+
+def _recall_metadata_lines(fm: dict[str, object]) -> list[str]:
+    """Build the compact provenance/context header for one recall hit (#325).
+
+    Returns 0-2 markdown lines inserted between the ``**Tags:**`` line and the
+    snippet so a consuming agent can judge trust/currency WITHOUT opening the
+    page:
+
+    - Line 1 (``·``-joined): ``**Source:**`` (``source_type`` + the date part
+      of ``source_ref``/``created``), ``**Updated:**`` (from ``updated``), and
+      ``**Valid:**`` (``<from> → <until>``, ``open`` for a missing bound). Each
+      segment is OMITTED at its default — a ``source_type`` of ``inferred`` (or
+      absent), an empty ``updated``, and an absent validity window each render
+      nothing, so an uncontested/unscoped page adds at most this one line.
+    - Line 2 (only when set): ``**Status:**`` pointing at the pending-question
+      queue when the page is contradiction-flagged. This is the load-bearing
+      case — silently returning one side of a disputed pair is the failure
+      this header prevents.
+
+    When none of source/updated/valid/status apply the list is empty and the
+    caller renders exactly the pre-#325 output (no blank metadata line).
+    """
+    segments: list[str] = []
+
+    # Source: only for a non-default, in-vocabulary origin. ``inferred`` (the
+    # honest fallback) and absent/typo'd values are treated as default → omit.
+    source_type = fm.get("source_type")
+    if (
+        isinstance(source_type, str)
+        and source_type in SOURCE_TYPES
+        and source_type != DEFAULT_SOURCE_TYPE
+    ):
+        date = _date_part(fm.get("source_ref")) or _date_part(fm.get("created"))
+        segments.append(
+            f"**Source:** {source_type} ({date})"
+            if date
+            else f"**Source:** {source_type}"
+        )
+
+    updated = _date_part(fm.get("updated"))
+    if updated:
+        segments.append(f"**Updated:** {updated}")
+
+    # Valid: only when the page actually carries a validity window. Reuse the
+    # shared bound renderer so the header agrees with the temporal predicates.
+    if fm.get("valid_from") or fm.get("valid_until"):
+        vfrom = validity_bound_str(fm, "valid_from") or "open"
+        vuntil = validity_bound_str(fm, "valid_until") or "open"
+        segments.append(f"**Valid:** {vfrom} → {vuntil}")
+
+    lines: list[str] = []
+    if segments:
+        lines.append(" · ".join(segments))
+
+    status = fm.get("status")
+    contested = (isinstance(status, str) and status == "contradiction-flagged") or bool(
+        fm.get("contradictions_detected")
+    )
+    if contested:
+        lines.append("**Status:** contradiction-flagged (see _pending_questions.md)")
+
+    return lines
+
+
 def _recall_via_backend(
     wiki_root: Path,
     query: str,
@@ -229,10 +317,18 @@ def _recall_via_backend(
         if isinstance(tags, list):
             tags = ", ".join(tags)
         snip = _snippet(body, tokens) if body else ""
+        # Issue #325: compact provenance/context header from the FRESH
+        # on-disk frontmatter (same ``fm`` the Layer-C re-read populated).
+        # Each field omits at its default, so an uncontested/unscoped page
+        # stays nearly as terse as before; a contradiction-flagged page
+        # surfaces a Status line pointing at the pending-question queue.
+        meta_lines = _recall_metadata_lines(fm)
+        meta_block = "".join(f"{line}\n" for line in meta_lines)
         blocks.append(
             f"{name} (score: {score:.1f})\n"
             f"**Path:** {display_prefix}\n"
-            f"**Tags:** {tags}\n\n"
+            f"**Tags:** {tags}\n"
+            f"{meta_block}\n"
             f"{snip}\n"
         )
 

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.7] - 2026-07-06
+
+### Added
+
+- **Provenance/context header on `recall` hits (#325).** Each recall hit now
+  renders a compact metadata header between its `**Tags:**` line and snippet so
+  a consuming agent can judge a fact's trust and currency without opening the
+  page: a `·`-joined `**Source:**` (`source_type` + the date part of
+  `source_ref`/`created`) · `**Updated:**` · `**Valid:**` (`<from> → <until>`,
+  `open` for a missing bound) line, plus a `**Status:**` line pointing at
+  `_pending_questions.md` when the page is contradiction-flagged. Every field is
+  omitted at its default, so an uncontested, unscoped page adds at most one
+  extra line and a page with none of the fields renders exactly the prior
+  output. Pure render-time formatting from the fresh on-disk frontmatter the
+  Layer-C audience re-check already reads — no index schema change, no reindex.
+
 ## [0.13.6] - 2026-07-06
 
 > **Versioning note (pre-1.0 convention).** Additive features that do **not**
