@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.13] - 2026-07-06
+
+### Documentation
+
+- **Surface the `claude-cli` subscription backend in the top-level docs
+  (#336).** The README environment-variable table now documents
+  `ATHENAEUM_LLM_PROVIDER` (`api` | `claude-cli`, default `api`) plus
+  `ATHENAEUM_CLAUDE_CLI_BIN` and `ATHENAEUM_CLAUDE_CLI_TIMEOUT`, pointing to
+  `docs/configuration.md` → "LLM provider selection" as the source of truth.
+  `SECURITY.md`'s scope section now names the `claude-cli` subprocess backend
+  — argv-list construction (no shell interpolation), ambient Claude Code auth
+  (no credential handling), and neutral-cwd invocation. Docs-only; no code or
+  behavior change (the provider seam shipped in #330 / v0.13.10).
+
 ## [0.13.12] - 2026-07-06
 
 ### Changed
