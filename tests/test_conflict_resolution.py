@@ -24,11 +24,16 @@ Naming convention: ``test_<resolver>_<scenario>_<expected_winner>``.
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
 from athenaeum.contradictions import (
+    ContradictionResult,
+    _build_user_message,
+    _member_scope_header,
     detect_contradictions,
 )
 from athenaeum.dedupe import (
@@ -43,8 +48,10 @@ from athenaeum.dedupe import (
 )
 from athenaeum.librarian import tier0_passthrough
 from athenaeum.merge import (
+    AUTO_WIKI_PREFIX,
     dedupe_sources,
     merge_cluster_row,
+    merge_clusters_to_wiki,
     synthesize_body,
 )
 from athenaeum.models import (
@@ -54,7 +61,9 @@ from athenaeum.models import (
     RawFile,
     parse_frontmatter,
     render_frontmatter,
+    validity_windows_disjoint,
 )
+from athenaeum.resolutions import propose_resolution
 from athenaeum.tiers import tier3_create, tier3_merge, tier3_write
 
 # ---------------------------------------------------------------------------
@@ -773,3 +782,469 @@ class TestDedupePerformMerge:
         report2 = merge_duplicate_persons([pair], apply=True)
         assert report2.already_merged == 1
         assert report2.merged == 0
+
+
+# ---------------------------------------------------------------------------
+# 9. Disjoint temporal validity — sequential states are not conflicts (#324)
+# ---------------------------------------------------------------------------
+#
+# Doc: docs/conflict-resolution.md § 9. Two claims whose validity windows do
+# not overlap describe sequential states of the world and cannot contradict.
+# Windows use FUTURE dates so neither member is filtered as expired-inactive
+# (#308) — the disjointness itself, not staleness, is what these assert.
+
+
+def _write_validity_am(
+    scope: Path,
+    filename: str,
+    *,
+    name: str,
+    body: str,
+    valid_from: str = "",
+    valid_until: str = "",
+    source_type: str = "",
+    updated: str = "",
+) -> Path:
+    """Write an auto-memory file carrying optional validity/provenance frontmatter."""
+    scope.mkdir(parents=True, exist_ok=True)
+    path = scope / filename
+    lines = ["---", f"name: {name}", "type: feedback"]
+    if valid_from:
+        lines.append(f"valid_from: {valid_from}")
+    if valid_until:
+        lines.append(f"valid_until: {valid_until}")
+    if source_type:
+        lines.append(f"source_type: {source_type}")
+    if updated:
+        lines.append(f"updated: {updated}")
+    lines.append("---")
+    path.write_text("\n".join(lines) + "\n" + body + "\n", encoding="utf-8")
+    return path
+
+
+def _two_member_validity_root(
+    tmp_path: Path,
+    *,
+    a_valid_until: str = "",
+    a_valid_from: str = "",
+    b_valid_from: str = "",
+    b_valid_until: str = "",
+) -> Path:
+    """A knowledge root with one 2-member cluster whose members carry windows."""
+    knowledge_root = tmp_path / "knowledge"
+    scope_name = "-Users-tristankromer-Code"
+    scope = knowledge_root / "raw" / "auto-memory" / scope_name
+    _write_validity_am(
+        scope,
+        "feedback_pricing_early.md",
+        name="Pricing early",
+        body="Our price is $50 per month.",
+        valid_from=a_valid_from,
+        valid_until=a_valid_until,
+    )
+    _write_validity_am(
+        scope,
+        "feedback_pricing_later.md",
+        name="Pricing later",
+        body="Our price is $70 per month.",
+        valid_from=b_valid_from,
+        valid_until=b_valid_until,
+    )
+    out = knowledge_root / "raw" / "_librarian-clusters.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(
+            {
+                "cluster_id": "pricing-0001",
+                "member_paths": [
+                    f"{scope_name}/feedback_pricing_early.md",
+                    f"{scope_name}/feedback_pricing_later.md",
+                ],
+                "centroid_score": 0.62,
+                "rationale": "cosine >= 0.55; shares tokens: price, per, month",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (knowledge_root / "athenaeum.yaml").write_text(
+        "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
+        encoding="utf-8",
+    )
+    return knowledge_root
+
+
+def _three_member_validity_root(tmp_path: Path) -> Path:
+    """A knowledge root with one 3-member cluster: a disjoint A/B pair plus a
+    C with an open window overlapping both. The cluster is NOT pairwise-disjoint
+    so the pre-filter does NOT fire and the detector RUNS — exercising the
+    Part-2 post-detection guard (a flagged disjoint pair is downgraded)."""
+    knowledge_root = tmp_path / "knowledge"
+    scope_name = "-Users-tristankromer-Code"
+    scope = knowledge_root / "raw" / "auto-memory" / scope_name
+    _write_validity_am(
+        scope,
+        "feedback_pricing_early.md",
+        name="Pricing early",
+        body="Our price is $50 per month.",
+        valid_until="2027-03-31",
+    )
+    _write_validity_am(
+        scope,
+        "feedback_pricing_later.md",
+        name="Pricing later",
+        body="Our price is $70 per month.",
+        valid_from="2027-04-01",
+    )
+    _write_validity_am(
+        scope,
+        "feedback_pricing_note.md",
+        name="Pricing note",
+        body="Pricing is reviewed each quarter.",
+    )
+    out = knowledge_root / "raw" / "_librarian-clusters.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(
+            {
+                "cluster_id": "pricing-0001",
+                "member_paths": [
+                    f"{scope_name}/feedback_pricing_early.md",
+                    f"{scope_name}/feedback_pricing_later.md",
+                    f"{scope_name}/feedback_pricing_note.md",
+                ],
+                "centroid_score": 0.62,
+                "rationale": "cosine >= 0.55; shares tokens: price, per, month",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (knowledge_root / "athenaeum.yaml").write_text(
+        "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
+        encoding="utf-8",
+    )
+    return knowledge_root
+
+
+class TestValidityWindowsDisjointPredicate:
+    """Part 0: the shared ``validity_windows_disjoint`` predicate (#324)."""
+
+    def test_closed_upper_before_open_lower_is_disjoint(self) -> None:
+        a = {"valid_until": "2026-03-31"}
+        b = {"valid_from": "2026-04-01"}
+        assert validity_windows_disjoint(a, b) is True
+
+    def test_symmetric_ordering_is_disjoint(self) -> None:
+        # b ends before a begins — the symmetric branch.
+        a = {"valid_from": "2026-04-01"}
+        b = {"valid_until": "2026-03-31"}
+        assert validity_windows_disjoint(a, b) is True
+
+    def test_touching_boundary_shares_day_not_disjoint(self) -> None:
+        # valid_until is the INCLUSIVE last-valid day, so a window ending
+        # 2026-04-01 and one starting 2026-04-01 share that day.
+        a = {"valid_until": "2026-04-01"}
+        b = {"valid_from": "2026-04-01"}
+        assert validity_windows_disjoint(a, b) is False
+
+    def test_both_open_windows_overlap_not_disjoint(self) -> None:
+        assert validity_windows_disjoint({}, {}) is False
+
+    def test_malformed_both_fail_open_not_disjoint(self) -> None:
+        # parse_* coerces garbage to None (open) — never disjoint.
+        a = {"valid_until": "not-a-date"}
+        b = {"valid_from": "garbage"}
+        assert validity_windows_disjoint(a, b) is False
+
+    def test_open_upper_bound_overlaps(self) -> None:
+        # a has only a lower bound (open upper) → cannot end before b begins.
+        a = {"valid_from": "2026-01-01"}
+        b = {"valid_from": "2026-06-01"}
+        assert validity_windows_disjoint(a, b) is False
+
+
+class TestDisjointValidityDetectorShortCircuit:
+    """Parts 1 & 2: merge.py pre-filter and post-guard (#324)."""
+
+    def test_disjoint_two_member_cluster_skips_detector(
+        self,
+        tmp_path: Path,
+        caplog,
+    ) -> None:
+        """Case (a): A.valid_until < B.valid_from → NO detector LLM call, no
+        pending question, and a logged ``disjoint-validity`` rationale."""
+        root = _two_member_validity_root(
+            tmp_path,
+            a_valid_until="2026-08-31",
+            b_valid_from="2026-09-01",
+        )
+        fake_client = MagicMock()
+        with caplog.at_level(logging.INFO, logger="athenaeum.merge"):
+            entries = merge_clusters_to_wiki(root, client=fake_client)
+        # No detector call at all.
+        fake_client.messages.create.assert_not_called()
+        assert len(entries) == 1
+        assert entries[0].contradictions_detected is False
+        assert entries[0].contradiction is not None
+        assert entries[0].contradiction.rationale == "disjoint-validity"
+        wiki = root / "wiki"
+        # No escalation side-effect.
+        assert not (wiki / "_pending_questions.md").exists()
+        meta, _ = parse_frontmatter(
+            next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md")).read_text(encoding="utf-8")
+        )
+        assert meta["contradictions_detected"] is False
+        assert "status" not in meta
+        # Rationale is logged like the declared-pair short-circuit.
+        assert any("disjoint-validity" in rec.message for rec in caplog.records)
+
+    def test_overlapping_windows_still_run_detector(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Case (b): overlapping windows behave exactly as today — the
+        detector runs (``messages.create`` IS called)."""
+        root = _two_member_validity_root(
+            tmp_path,
+            a_valid_until="2026-09-30",
+            b_valid_from="2026-08-01",
+        )
+        fake_client = MagicMock()
+        response = MagicMock()
+        response.content = [
+            MagicMock(
+                text=(
+                    '{"detected": false, "conflict_type": null, '
+                    '"members_involved": [], "conflicting_passages": [], '
+                    '"rationale": "same price restated"}'
+                )
+            )
+        ]
+        fake_client.messages.create.return_value = response
+        entries = merge_clusters_to_wiki(root, client=fake_client)
+        fake_client.messages.create.assert_called()
+        assert len(entries) == 1
+        assert entries[0].contradictions_detected is False
+
+    def test_open_windows_still_run_detector(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Both windows absent (open) → overlap by default → detector runs."""
+        root = _two_member_validity_root(tmp_path)  # no bounds on either side
+        fake_client = MagicMock()
+        response = MagicMock()
+        response.content = [
+            MagicMock(
+                text=(
+                    '{"detected": false, "conflict_type": null, '
+                    '"members_involved": [], "conflicting_passages": [], '
+                    '"rationale": "no conflict"}'
+                )
+            )
+        ]
+        fake_client.messages.create.return_value = response
+        merge_clusters_to_wiki(root, client=fake_client)
+        fake_client.messages.create.assert_called()
+
+    def test_three_member_cluster_downgrades_detected_disjoint_pair(
+        self,
+        tmp_path: Path,
+        caplog,
+    ) -> None:
+        """Part 2: a cluster with an overlapping pair still reaches the detector;
+        when the detector flags the DISJOINT pair, the post-guard downgrades to
+        not-detected (rationale ``disjoint-validity``) and writes no pending
+        question."""
+        root = _three_member_validity_root(tmp_path)
+        scope_name = "-Users-tristankromer-Code"
+        fake_client = MagicMock()
+        response = MagicMock()
+        response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {
+                        "detected": True,
+                        "conflict_type": "factual",
+                        "members_involved": [
+                            f"{scope_name}/feedback_pricing_early.md",
+                            f"{scope_name}/feedback_pricing_later.md",
+                        ],
+                        "conflicting_passages": [
+                            "$50 per month",
+                            "$70 per month",
+                        ],
+                        "rationale": "price differs",
+                    }
+                )
+            )
+        ]
+        fake_client.messages.create.return_value = response
+        with caplog.at_level(logging.INFO, logger="athenaeum.merge"):
+            entries = merge_clusters_to_wiki(root, client=fake_client)
+        # Detector DID run (cluster is not pairwise-disjoint)...
+        fake_client.messages.create.assert_called()
+        # ...but the flagged pair is disjoint, so the entry is downgraded and
+        # no pending question is written.
+        assert len(entries) == 1
+        assert entries[0].contradictions_detected is False
+        assert entries[0].contradiction is not None
+        assert entries[0].contradiction.rationale == "disjoint-validity"
+        assert not (root / "wiki" / "_pending_questions.md").exists()
+        assert any(
+            "disjoint-validity" in rec.message for rec in caplog.records
+        )
+
+
+class TestDisjointValidityResolverSynthetic:
+    """Part 3: resolutions._disjoint_validity_verdict (#324)."""
+
+    def _am(
+        self,
+        tmp_path: Path,
+        filename: str,
+        *,
+        valid_from: str = "",
+        valid_until: str = "",
+    ) -> AutoMemoryFile:
+        path = tmp_path / filename
+        path.write_text("---\nname: x\ntype: feedback\n---\nbody\n", encoding="utf-8")
+        return AutoMemoryFile(
+            path=path,
+            origin_scope="scope-x",
+            memory_type="feedback",
+            name=filename.replace(".md", ""),
+            valid_from=valid_from,
+            valid_until=valid_until,
+        )
+
+    def test_disjoint_pair_resolves_not_a_conflict_without_llm(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        a = self._am(tmp_path, "a.md", valid_until="2026-03-31")
+        b = self._am(tmp_path, "b.md", valid_from="2026-04-01")
+        detector = ContradictionResult(
+            detected=True,
+            conflict_type="factual",
+            members_involved=["scope-x/a.md", "scope-x/b.md"],
+            conflicting_passages=["price $50", "price $70"],
+            rationale="stated different prices",
+        )
+        fake_client = MagicMock()
+        proposal = propose_resolution(detector, [a, b], fake_client)
+        # No Opus call — the synthetic verdict short-circuits.
+        fake_client.messages.create.assert_not_called()
+        assert proposal.action == "not_a_conflict"
+        assert proposal.recommended_winner == "neither"
+        assert proposal.confidence == 1.0
+
+    def test_overlapping_pair_falls_through_to_llm(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        a = self._am(tmp_path, "a.md", valid_until="2026-09-30")
+        b = self._am(tmp_path, "b.md", valid_from="2026-08-01")
+        detector = ContradictionResult(
+            detected=True,
+            conflict_type="factual",
+            members_involved=["scope-x/a.md", "scope-x/b.md"],
+            conflicting_passages=["price $50", "price $70"],
+            rationale="stated different prices",
+        )
+        fake_client = MagicMock()
+        fake_client.messages.create.return_value = MagicMock(
+            content=[
+                MagicMock(
+                    text=(
+                        '{"recommended_winner": "a", "action": "keep_a", '
+                        '"confidence": 0.8, "rationale": "newer", '
+                        '"source_precedence_used": []}'
+                    )
+                )
+            ]
+        )
+        proposal = propose_resolution(detector, [a, b], fake_client)
+        # Overlapping → the LLM path runs.
+        fake_client.messages.create.assert_called_once()
+        assert proposal.action == "keep_a"
+
+
+class TestScopeHeaderRendering:
+    """Part 4: contradictions._member_scope_header / _build_user_message (#324)."""
+
+    def _am_on_disk(
+        self,
+        tmp_path: Path,
+        filename: str,
+        *,
+        valid_from: str = "",
+        valid_until: str = "",
+        source_type: str = "",
+        updated: str = "",
+    ) -> AutoMemoryFile:
+        path = _write_validity_am(
+            tmp_path,
+            filename,
+            name="probe",
+            body="Some memory body text.",
+            valid_from=valid_from,
+            valid_until=valid_until,
+            source_type=source_type,
+            updated=updated,
+        )
+        return AutoMemoryFile(
+            path=path,
+            origin_scope="scope-x",
+            memory_type="feedback",
+            name="probe",
+        )
+
+    def test_full_header_renders_all_segments(self, tmp_path: Path) -> None:
+        am = self._am_on_disk(
+            tmp_path,
+            "m.md",
+            valid_from="2026-04-01",
+            valid_until="2026-06-30",
+            source_type="user-stated",
+            updated="2026-06-30",
+        )
+        header = _member_scope_header(am)
+        assert header == (
+            "valid: 2026-04-01 → 2026-06-30 · source: user-stated · updated: 2026-06-30"
+        )
+
+    def test_open_upper_bound_uses_open_token(self, tmp_path: Path) -> None:
+        am = self._am_on_disk(tmp_path, "m.md", valid_from="2026-04-01")
+        assert _member_scope_header(am) == "valid: 2026-04-01 → open"
+
+    def test_no_metadata_yields_empty_header(self, tmp_path: Path) -> None:
+        # Default source_type (inferred) + no window + no updated → no line.
+        am = self._am_on_disk(tmp_path, "m.md")
+        assert _member_scope_header(am) == ""
+
+    def test_scope_line_is_outside_memory_block(self, tmp_path: Path) -> None:
+        am = self._am_on_disk(
+            tmp_path,
+            "m.md",
+            valid_from="2026-04-01",
+            valid_until="2026-06-30",
+        )
+        msg = _build_user_message([am])
+        lines = msg.splitlines()
+        scope_idx = next(i for i, ln in enumerate(lines) if ln.startswith("scope:"))
+        memory_idx = next(i for i, ln in enumerate(lines) if ln == "<memory>")
+        # The trusted scope header precedes the untrusted <memory> block.
+        assert scope_idx < memory_idx
+        assert "valid: 2026-04-01 → 2026-06-30" in lines[scope_idx]
+
+    def test_default_source_and_no_window_adds_no_scope_line(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        am = self._am_on_disk(tmp_path, "m.md")
+        msg = _build_user_message([am])
+        assert "scope:" not in msg
