@@ -698,6 +698,20 @@ search_backend: fts5
 #   page_warn_bytes: 8192
 #   page_flag_bytes: 16384
 
+# LLM provider selection (issue #330). Chooses the backend the librarian
+# compile path (tiers, contradiction detector, resolver) talks to.
+#   api (default): the Anthropic SDK. Requires ANTHROPIC_API_KEY; params
+#     (incl. prompt caching and the Batch API) pass through unchanged.
+#   claude-cli: the operator's ambient Claude Code SUBSCRIPTION login, via
+#     `claude -p --system-prompt ... --output-format json`. No API key and no
+#     credential handling (same ambient-auth stance as the git-push path).
+#     cache_control is stripped; batch mode is NOT supported (loud error);
+#     token counts are recorded but estimated_cost_usd reports $0
+#     (subscription-covered). Precedence: env ATHENAEUM_LLM_PROVIDER > this
+#     key > api. See docs/configuration.md "LLM provider selection".
+# llm:
+#   provider: api
+
 # Model selection (issue #232). Per knob: env var wins over the yaml key,
 # which wins over the built-in default. Values are free-form model id
 # strings passed to the Anthropic SDK.
