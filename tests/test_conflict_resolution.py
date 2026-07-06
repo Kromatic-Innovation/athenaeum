@@ -1275,7 +1275,7 @@ def _iclose_member(
     *,
     valid_from: str | None = None,
     valid_until: str | None = None,
-    created_at: str | None = None,
+    created: str | None = None,
     body: str = "the claim",
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1284,8 +1284,8 @@ def _iclose_member(
         fm.append(f"valid_from: {valid_from}")
     if valid_until is not None:
         fm.append(f"valid_until: {valid_until}")
-    if created_at is not None:
-        fm.append(f"created_at: {created_at}")
+    if created is not None:
+        fm.append(f"created: {created}")
     path.write_text(
         "---\n" + "\n".join(fm) + "\n---\n\n" + body + "\n",
         encoding="utf-8",
@@ -1375,10 +1375,10 @@ class TestIntervalCloseSlice2:
     def test_not_a_conflict_snapshot_orders_by_ingestion_when_no_valid_from(
         self, tmp_path: Path
     ) -> None:
-        # No valid_from on either side → order by created_at; boundary is the
+        # No valid_from on either side → order by created (ingestion); boundary is the
         # newer's ingestion date (it has no valid_from either).
-        a = _iclose_member(tmp_path / "a.md", "First", created_at="2026-02-10")
-        b = _iclose_member(tmp_path / "b.md", "Second", created_at="2026-04-20")
+        a = _iclose_member(tmp_path / "a.md", "First", created="2026-02-10")
+        b = _iclose_member(tmp_path / "b.md", "Second", created="2026-04-20")
         ret = enact_resolution(_iclose_proposal("not_a_conflict"), [a, b])
         assert ret == a
         meta_a, _ = parse_frontmatter(a.read_text(encoding="utf-8"))
@@ -1398,7 +1398,16 @@ class TestIntervalCloseSlice2:
 
     @pytest.mark.parametrize(
         "action",
-        ["correct_a", "correct_b", "forget_a", "forget_b", "deprecate_both"],
+        [
+            "correct_a",
+            "correct_b",
+            "forget_a",
+            "forget_b",
+            "deprecate_both",
+            "retain_both_with_context",
+            "merge",
+            "propose_merge",
+        ],
     )
     def test_non_supersession_actions_do_not_stamp_valid_until(
         self, action: str, tmp_path: Path
