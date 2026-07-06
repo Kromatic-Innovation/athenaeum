@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum.mcp_server import (
+    _recall_metadata_lines,
     _score_page,
     _snippet,
     _tokenize_query,
@@ -158,6 +159,159 @@ class TestRecall:
         # top_k > _MAX_TOP_K should be silently capped
         result = recall_search(wiki_dir, "Acme", top_k=1_000_000)
         assert "Acme Corp" in result
+
+
+# ---------------------------------------------------------------------------
+# Recall provenance/context header (issue #325)
+# ---------------------------------------------------------------------------
+
+
+class TestRecallMetadataLines:
+    """Unit tests for the per-hit metadata header builder."""
+
+    def test_full_header_single_line(self) -> None:
+        lines = _recall_metadata_lines(
+            {
+                "source_type": "user-stated",
+                "source_ref": "user-stated:2026-04-10",
+                "updated": "2026-06-30",
+                "valid_from": "2026-04-01",
+            }
+        )
+        assert lines == [
+            "**Source:** user-stated (2026-04-10) · "
+            "**Updated:** 2026-06-30 · **Valid:** 2026-04-01 → open"
+        ]
+
+    def test_valid_until_only_uses_open_lower_bound(self) -> None:
+        # (a) a page with valid_until shows its window, open on the missing bound.
+        lines = _recall_metadata_lines({"valid_until": "2026-05-01"})
+        assert lines == ["**Valid:** open → 2026-05-01"]
+
+    def test_source_from_created_when_ref_dateless(self) -> None:
+        # (d) source_type + created date renders the Source line.
+        lines = _recall_metadata_lines(
+            {"source_type": "document", "created": "2026-02-14T09:00:00"}
+        )
+        assert lines == ["**Source:** document (2026-02-14)"]
+
+    def test_inferred_source_omitted(self) -> None:
+        # Default source_type ("inferred") must not render a Source segment.
+        lines = _recall_metadata_lines({"source_type": "inferred"})
+        assert lines == []
+
+    def test_no_fields_yields_no_lines(self) -> None:
+        assert _recall_metadata_lines({}) == []
+
+    def test_contradiction_flagged_status(self) -> None:
+        # (b) a contradiction-flagged page shows the Status line.
+        lines = _recall_metadata_lines({"status": "contradiction-flagged"})
+        assert lines == [
+            "**Status:** contradiction-flagged (see _pending_questions.md)"
+        ]
+
+    def test_contradictions_detected_flag_triggers_status(self) -> None:
+        lines = _recall_metadata_lines({"contradictions_detected": True})
+        assert lines == [
+            "**Status:** contradiction-flagged (see _pending_questions.md)"
+        ]
+
+    def test_status_capped_at_two_lines(self) -> None:
+        lines = _recall_metadata_lines(
+            {
+                "source_type": "external",
+                "source_ref": "https://example.com",
+                "updated": "2026-06-30",
+                "valid_from": "2026-01-01",
+                "valid_until": "2026-12-31",
+                "status": "contradiction-flagged",
+            }
+        )
+        assert len(lines) == 2
+        assert lines[1].startswith("**Status:**")
+
+
+class TestRecallHeaderRendering:
+    """Integration tests exercising the rendered recall output (#325)."""
+
+    def _wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        return wiki
+
+    def test_valid_until_window_rendered(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        (wiki / "deploy_target.md").write_text(
+            "---\n"
+            "name: Deploy target\n"
+            "tags:\n  - infra\n"
+            "valid_from: '2026-04-01'\n"
+            "valid_until: '2026-12-31'\n"
+            "---\n\n"
+            "The deploy target is the staging cluster.\n"
+        )
+        result = recall_search(wiki, "deploy target")
+        assert "**Valid:** 2026-04-01 → 2026-12-31" in result
+
+    def test_contradiction_flagged_status_rendered(self, tmp_path: Path) -> None:
+        wiki = self._wiki(tmp_path)
+        (wiki / "disputed_fact.md").write_text(
+            "---\n"
+            "name: Disputed fact\n"
+            "tags:\n  - contested\n"
+            "status: contradiction-flagged\n"
+            "---\n\n"
+            "This disputed fact has two conflicting sides.\n"
+        )
+        result = recall_search(wiki, "disputed fact")
+        assert "**Status:** contradiction-flagged (see _pending_questions.md)" in result
+
+    def test_plain_page_no_spurious_metadata(self, tmp_path: Path) -> None:
+        # (c) a plain page renders at most one extra metadata line and no
+        # spurious blank Source:/Valid: segments.
+        wiki = self._wiki(tmp_path)
+        (wiki / "plain_note.md").write_text(
+            "---\n"
+            "name: Plain note\n"
+            "tags:\n  - misc\n"
+            "updated: '2024-04-06'\n"
+            "---\n\n"
+            "A plain note about the widget pipeline.\n"
+        )
+        result = recall_search(wiki, "widget pipeline")
+        assert "**Updated:** 2024-04-06" in result
+        assert "**Source:**" not in result
+        assert "**Valid:**" not in result
+        assert "**Status:**" not in result
+
+    def test_source_line_rendered(self, tmp_path: Path) -> None:
+        # (d) a page with source_type + created shows the Source line.
+        wiki = self._wiki(tmp_path)
+        (wiki / "sourced_fact.md").write_text(
+            "---\n"
+            "name: Sourced fact\n"
+            "tags:\n  - traced\n"
+            "source_type: user-stated\n"
+            "source_ref: 'user-stated:2026-04-10'\n"
+            "---\n\n"
+            "A user-stated fact about the roadmap.\n"
+        )
+        result = recall_search(wiki, "roadmap fact")
+        assert "**Source:** user-stated (2026-04-10)" in result
+
+    def test_bare_page_matches_pre_325_shape(self, tmp_path: Path) -> None:
+        # A page with none of source/updated/valid/status renders the original
+        # Tags-then-blank-then-snippet shape (no blank metadata line inserted).
+        wiki = self._wiki(tmp_path)
+        (wiki / "terse.md").write_text(
+            "---\n"
+            "name: Terse page\n"
+            "tags:\n  - plain\n"
+            "---\n\n"
+            "A terse page about migrations.\n"
+        )
+        result = recall_search(wiki, "migrations terse")
+        assert "**Tags:** plain\n\n" in result
 
 
 # ---------------------------------------------------------------------------
