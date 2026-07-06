@@ -73,6 +73,11 @@ from athenaeum.models import (
     slugify,
     validity_bound_str,
 )
+from athenaeum.provider import (
+    ProviderConfigError,
+    build_llm_client,
+    resolve_provider,
+)
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
@@ -1158,7 +1163,21 @@ def run(
     """
     skip_entity_tiers = cluster_only or merge_only
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key and not dry_run and not skip_entity_tiers:
+    config = load_config(knowledge_root)
+
+    # Issue #330: resolve the active LLM provider (env ATHENAEUM_LLM_PROVIDER >
+    # yaml llm.provider > api). A misconfigured value raises — surface it as a
+    # clean run failure rather than a traceback.
+    try:
+        provider = resolve_provider(config)
+    except ProviderConfigError as exc:
+        log.error("%s", exc)
+        return 1
+
+    # The ANTHROPIC_API_KEY requirement applies ONLY to the ``api`` backend.
+    # The ``claude-cli`` backend authenticates via the operator's ambient
+    # Claude Code subscription login and needs no key (issue #330).
+    if provider == "api" and not api_key and not dry_run and not skip_entity_tiers:
         log.error("ANTHROPIC_API_KEY not set (required unless dry_run=True)")
         return 1
 
@@ -1176,8 +1195,6 @@ def run(
         )
         return 1
 
-    config = load_config(knowledge_root)
-
     # Issue #220: resolve the run-level API call budget (explicit arg >
     # env > yaml > default).
     if max_api_calls is None:
@@ -1192,6 +1209,19 @@ def run(
     # env > yaml > default off).
     if batch_mode is None:
         batch_mode = librarian_batch_mode(config)
+
+    # Issue #330: batch mode is API-only — the Messages Batch API is an
+    # Anthropic-endpoint feature with no ``claude`` CLI equivalent. Reject the
+    # combination LOUDLY at startup rather than silently falling back to the
+    # api backend or silently dropping the batch request.
+    if batch_mode and provider == "claude-cli":
+        log.error(
+            "batch mode (ATHENAEUM_BATCH_MODE / librarian.batch_mode / "
+            "--batch-mode) is incompatible with the claude-cli provider: the "
+            "Messages Batch API is Anthropic-endpoint-only. Use provider=api "
+            "for batch runs, or disable batch mode for the subscription backend."
+        )
+        return 1
 
     # Issue #261/#259: resolve the move-then-retire opt-out (explicit arg >
     # yaml `librarian.retire` > default ON). When off, the retire pass is
@@ -1239,13 +1269,18 @@ def run(
     # increment the counter; the entity-tier loop below is the enforcement
     # point that defers remaining intake when the budget is spent.
     usage = TokenUsage()
+    if provider == "claude-cli":
+        # Subscription pays for the tokens (issue #330): counts still
+        # accumulate and appear in the run summary, but estimated_cost_usd
+        # reports $0 instead of pricing them at API list rates.
+        usage.subscription_covered = True
 
-    # Build the shared Anthropic client early so both the entity tiers and
-    # the C4 contradiction detector can share it. ``None`` when the key is
-    # unset; detector degrades deterministically in that case.
-    merge_client: anthropic.Anthropic | None = (
-        anthropic.Anthropic(api_key=api_key, max_retries=3) if api_key else None
-    )
+    # Build the shared LLM client early (issue #330 provider seam) so both the
+    # entity tiers and the C4 contradiction detector can share it. ``None`` for
+    # the api backend when the key is unset (detector degrades deterministically);
+    # for claude-cli it is the subscription CLI adapter. ``max_retries=3``
+    # preserves the pre-#330 api-backend construction byte-for-byte.
+    merge_client = build_llm_client(config, api_key=api_key, max_retries=3)
 
     # Issue #290: wiki-page dedup pass. Clusters compiled wiki/*.md
     # concept/reference/principle pages against EACH OTHER (not against
