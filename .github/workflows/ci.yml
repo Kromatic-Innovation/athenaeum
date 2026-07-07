@@ -3,12 +3,19 @@ name: CI
 # Third-party actions pinned to full commit SHAs for supply-chain hygiene.
 # Semver-tag comment after each pin records the release the SHA maps to at
 # pin time. Keep in sync with release.yml pins.
+#
+# CI runs on develop only (PR + push). `main` never runs its own CI: it is
+# fast-forward-promoted from develop by promote-main.yml, which re-verifies
+# the required check-runs on the promoted SHA before pushing the ref update.
+# Since `main`'s tip is always the same commit SHA that develop already
+# tested, an independent main-triggered run would be a pure duplicate of
+# the develop run (code-workspace-config#900 CI-bill audit).
 
 on:
   push:
-    branches: [main, develop]
+    branches: [develop]
   pull_request:
-    branches: [main, develop]
+    branches: [develop]
 
 jobs:
   test:
