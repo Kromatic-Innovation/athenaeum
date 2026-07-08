@@ -9,15 +9,22 @@ from types import SimpleNamespace
 import pytest
 
 from athenaeum.models import (
+    AI_ATTRIBUTED_SOURCE_TYPES,
+    SOURCE_TYPES,
     AutoMemoryFile,
     EntityAction,
     EntityIndex,
     WikiEntity,
+    asserter_identity_key,
+    coerce_source_type,
     generate_uid,
     is_inactive_memory,
     load_schema_list,
+    parse_asserter,
     parse_deprecated,
     parse_frontmatter,
+    parse_model,
+    parse_on_behalf_of,
     parse_superseded_by,
     render_frontmatter,
     slugify,
@@ -734,3 +741,235 @@ class TestAutoMemoryFileInactive:
             deprecated=True,
         )
         assert am.is_inactive() is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #326 — channel split, model recording, IdP-compatible asserter identity
+# ---------------------------------------------------------------------------
+#
+# Locks `docs/provenance-shape.md` §10 — the two new source_type values and
+# the new claim-level frontmatter fields (`model`, `on_behalf_of`,
+# `asserter`) round-trip through AutoMemoryFile / WikiEntity, and the
+# asserter identity key is derived from (iss, sub) — with the Microsoft
+# Entra pairwise-sub trap handled via (iss, "entra", tid, oid). ``email``
+# is a display snapshot; changing it never orphans the identity.
+
+
+class TestChannelSplitSourceTypes:
+    def test_new_channel_values_are_legal(self) -> None:
+        # #326: two new values on the coarse source_type vocabulary.
+        assert "agent-observed" in SOURCE_TYPES
+        assert "model-prior" in SOURCE_TYPES
+
+    def test_existing_source_types_preserved(self) -> None:
+        # Locked #260 values must survive the extension.
+        assert "user-stated" in SOURCE_TYPES
+        assert "inferred" in SOURCE_TYPES
+        assert "external" in SOURCE_TYPES
+        assert "document" in SOURCE_TYPES
+
+    def test_coerce_source_type_accepts_new_values(self) -> None:
+        assert coerce_source_type("agent-observed") == "agent-observed"
+        assert coerce_source_type("model-prior") == "model-prior"
+
+    def test_ai_attributed_set_lists_the_three_ai_channels(self) -> None:
+        # `AI_ATTRIBUTED_SOURCE_TYPES` is the set write-paths consult to
+        # decide whether a `model:` annotation is expected.
+        assert AI_ATTRIBUTED_SOURCE_TYPES == frozenset(
+            {"agent-observed", "inferred", "model-prior"}
+        )
+
+    def test_coerce_unknown_still_downgrades_to_inferred(self) -> None:
+        # Fail-open contract preserved: an out-of-vocab value → inferred.
+        assert coerce_source_type("wishful-thinking") == "inferred"
+
+
+class TestParseModel:
+    def test_missing_returns_empty_string(self) -> None:
+        assert parse_model(None) == ""
+        assert parse_model({}) == ""
+        assert parse_model({"model": None}) == ""
+
+    def test_string_value_returned_stripped(self) -> None:
+        assert parse_model({"model": "  claude-opus-4-7  "}) == "claude-opus-4-7"
+
+    def test_non_string_returns_empty(self) -> None:
+        # Fail-open: a typo'd list or int returns "" rather than raising.
+        assert parse_model({"model": 42}) == ""
+        assert parse_model({"model": ["claude-opus-4-7"]}) == ""
+
+
+class TestParseOnBehalfOf:
+    def test_missing_returns_empty(self) -> None:
+        assert parse_on_behalf_of(None) == ""
+        assert parse_on_behalf_of({}) == ""
+
+    def test_string_value_stripped(self) -> None:
+        assert parse_on_behalf_of({"on_behalf_of": "  alice  "}) == "alice"
+
+    def test_non_string_returns_empty(self) -> None:
+        assert parse_on_behalf_of({"on_behalf_of": 42}) == ""
+
+
+class TestParseAsserter:
+    def test_missing_returns_empty_dict(self) -> None:
+        assert parse_asserter(None) == {}
+        assert parse_asserter({}) == {}
+        assert parse_asserter({"asserter": None}) == {}
+
+    def test_non_dict_returns_empty_dict(self) -> None:
+        # Fail-open on a corruption signal.
+        assert parse_asserter({"asserter": "not-a-dict"}) == {}
+        assert parse_asserter({"asserter": 42}) == {}
+
+    def test_round_trip_verbatim(self) -> None:
+        # The parser normalizes for read-side consumers but must NOT drop
+        # correctly-typed fields — round-trip fidelity beats normalization.
+        block = {
+            "type": "person",
+            "iss": "https://accounts.google.com",
+            "sub": "1076...",
+            "email": "alice@example.com",
+            "name": "Alice Example",
+            "provider_ids": {"entra_oid": "o1", "entra_tid": "t1"},
+        }
+        assert parse_asserter({"asserter": block}) == block
+
+    def test_non_string_keys_dropped(self) -> None:
+        # YAML shouldn't produce non-string keys, but if it does they're
+        # dropped rather than raising — same fail-open discipline.
+        block = {"type": "person", "iss": "x", "sub": "y"}
+        block_with_bad_key: dict = {**block, 42: "junk"}  # type: ignore[dict-item]
+        assert parse_asserter({"asserter": block_with_bad_key}) == block
+
+
+class TestAsserterIdentityKey:
+    def test_empty_returns_empty_tuple(self) -> None:
+        assert asserter_identity_key(None) == ()
+        assert asserter_identity_key({}) == ()
+
+    def test_standard_google_key_is_iss_and_sub(self) -> None:
+        # Locked: Google/Okta/most OIDC providers key on (iss, sub).
+        assert asserter_identity_key(
+            {"iss": "https://accounts.google.com", "sub": "1076..."}
+        ) == ("https://accounts.google.com", "1076...")
+
+    def test_email_change_does_not_orphan_identity(self) -> None:
+        # ACCEPTANCE CRITERION 2 (issue #326): an asserter block keyed on
+        # iss+sub round-trips; email change does not orphan the identity.
+        before = {
+            "iss": "https://accounts.google.com",
+            "sub": "1076...",
+            "email": "alice@example.com",
+        }
+        after = {
+            "iss": "https://accounts.google.com",
+            "sub": "1076...",
+            "email": "alice.new@example.com",  # renamed
+            "name": "Alice New",
+        }
+        assert asserter_identity_key(before) == asserter_identity_key(after)
+
+    def test_entra_pairwise_sub_ignored_when_tid_oid_present(self) -> None:
+        # Microsoft Entra's `sub` is pairwise per app (OIDC-Core §8.1);
+        # the identity key must NOT use it when the stable per-tenant
+        # (tid, oid) pair is available. Two apps' pairwise `sub` values
+        # for the same user must map to the same key.
+        app_a = {
+            "iss": "https://login.microsoftonline.com/tenant/",
+            "sub": "pairwise-A",
+            "provider_ids": {"entra_tid": "t1", "entra_oid": "o1"},
+        }
+        app_b = {
+            "iss": "https://login.microsoftonline.com/tenant/",
+            "sub": "pairwise-B",  # different app, different sub
+            "provider_ids": {"entra_tid": "t1", "entra_oid": "o1"},
+        }
+        assert asserter_identity_key(app_a) == asserter_identity_key(app_b)
+        assert asserter_identity_key(app_a) == (
+            "https://login.microsoftonline.com/tenant/",
+            "entra",
+            "t1",
+            "o1",
+        )
+
+    def test_entra_falls_back_to_sub_when_provider_ids_missing(self) -> None:
+        # A caller who didn't populate provider_ids gets the standard
+        # (iss, sub) key — degrades gracefully rather than returning ().
+        got = asserter_identity_key(
+            {"iss": "https://login.microsoftonline.com/t/", "sub": "s"}
+        )
+        assert got == ("https://login.microsoftonline.com/t/", "s")
+
+    def test_no_iss_returns_empty(self) -> None:
+        # A key requires iss. Without one there's no durable anchor.
+        assert asserter_identity_key({"sub": "1076"}) == ()
+
+    def test_no_sub_and_no_provider_ids_returns_empty(self) -> None:
+        assert asserter_identity_key({"iss": "https://example.com"}) == ()
+
+    def test_single_user_local_issuer(self) -> None:
+        # Single-user mode degrades to `iss: local, sub: <owner>` per
+        # design lock §10.3.
+        assert asserter_identity_key({"iss": "local", "sub": "tristan"}) == (
+            "local",
+            "tristan",
+        )
+
+
+class TestWikiEntityChannelSplitRoundTrip:
+    def test_render_emits_new_fields_when_set(self) -> None:
+        # #326: WikiEntity's `model`, `on_behalf_of`, `asserter` render
+        # into frontmatter only when set — legacy entities without them
+        # produce byte-identical output.
+        we = WikiEntity(
+            uid="mp001",
+            type="concept",
+            name="training-prior-guess",
+            source_type="model-prior",
+            source_ref="claude-opus-4-7:prior",
+            model="claude-opus-4-7",
+            on_behalf_of="alice",
+            asserter={"iss": "local", "sub": "alice"},
+        )
+        rendered = we.render()
+        assert "source_type: model-prior" in rendered
+        assert "model: claude-opus-4-7" in rendered
+        assert "on_behalf_of: alice" in rendered
+        assert "asserter:" in rendered
+        assert "iss: local" in rendered
+
+    def test_render_omits_new_fields_when_absent(self) -> None:
+        # Absence must produce a clean render — legacy entities have no
+        # `model` / `on_behalf_of` / `asserter` frontmatter keys.
+        we = WikiEntity(uid="p001", type="person", name="Alice")
+        rendered = we.render()
+        assert "model:" not in rendered
+        assert "on_behalf_of:" not in rendered
+        assert "asserter:" not in rendered
+
+
+class TestAutoMemoryFileChannelSplitDefaults:
+    def test_defaults_are_empty(self, tmp_path: Path) -> None:
+        # Legacy files without the new fields must construct cleanly.
+        am = AutoMemoryFile(
+            path=tmp_path / "m.md", origin_scope="s", memory_type="feedback"
+        )
+        assert am.model == ""
+        assert am.on_behalf_of == ""
+        assert am.asserter == {}
+
+    def test_carries_new_fields(self, tmp_path: Path) -> None:
+        am = AutoMemoryFile(
+            path=tmp_path / "m.md",
+            origin_scope="s",
+            memory_type="feedback",
+            source_type="model-prior",
+            model="claude-opus-4-7",
+            on_behalf_of="alice",
+            asserter={"iss": "local", "sub": "alice"},
+        )
+        assert am.source_type == "model-prior"
+        assert am.model == "claude-opus-4-7"
+        assert am.on_behalf_of == "alice"
+        assert asserter_identity_key(am.asserter) == ("local", "alice")

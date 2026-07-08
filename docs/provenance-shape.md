@@ -586,7 +586,174 @@ specify one). This is safe because the superseded loser is ALSO marked
 regardless of the one-day window overlap. The exact stamped value is pinned by
 `tests/test_conflict_resolution.py::TestIntervalCloseSlice2`.
 
-## 9. Implementation issue mapping
+## 10. Channel split, model recording, IdP-compatible asserter identity
+
+Issue #326. Extends `source_type` (#260) — which collapsed three materially
+different AI channels into `inferred`, recorded nothing about WHICH model
+asserted a claim, and had no person identity for `user-stated` beyond a
+session ref — with a channel split, a `model:` recording field, and an
+IdP-compatible `asserter:` block. Round-trips through tier0 byte-for-byte
+via the existing `WikiBase.model_config = ConfigDict(extra="allow")` path;
+no schema tightening.
+
+### 10.1 Channel split — extend the `source_type` vocabulary
+
+The `source_type` vocabulary gains two values (see
+`models.SOURCE_TYPES`):
+
+| value | meaning |
+|---|---|
+| `user-stated` | human utterance in a session (unchanged from #260) |
+| `agent-observed` | **new** — AI derived it from in-session artifacts (file contents, tool output); verifiable against the transcript |
+| `inferred` | AI leap without artifact backing (unchanged; stays the coercion default) |
+| `model-prior` | **new** — asserted from training-data knowledge with no session evidence |
+| `external` / `document` | unchanged (external citation / permanent document) |
+
+`coerce_source_type` keeps its fail-open contract: a typo / unknown value
+downgrades to `inferred` with a debug breadcrumb; missing/None passes
+through to `inferred` quietly (legacy pages).
+
+**Resolver precedence.** In the source-precedence taxonomy exposed to
+the resolver LLM (`_RESOLVE_SYSTEM` in `resolutions.py`),
+`model-prior:<model-id>` ranks BELOW `script:<slug>` — a pipeline slug
+at least names a repeatable in-tree process; a training prior names
+only the model that guessed, and dates from that model's cutoff.
+`unsourced` remains the last tier. The full ranking becomes:
+
+1. `user:<conversation-ref>` (highest)
+2. `linkedin:<username>` / `twitter:<username>`
+3. `api:apollo` / `api:<vendor>`
+4. `wikipedia:<page>`
+5. `claude:tier3-...`
+6. `script:<slug>`
+7. **`model-prior:<model-id>` (new — issue #326)**
+8. `unsourced` / empty (lowest)
+
+Lock discipline: any change to this taxonomy MUST update
+`docs/conflict-resolution.md` (which cross-links to this section) AND
+the corresponding test in `tests/test_conflict_resolution.py` in the
+same change.
+
+### 10.2 Model recording
+
+AI-attributed claims (`source_type` in
+`models.AI_ATTRIBUTED_SOURCE_TYPES` — `agent-observed`, `inferred`,
+`model-prior`) SHOULD carry a top-level `model:` frontmatter field with
+the model-id that asserted them:
+
+```yaml
+---
+type: feedback
+name: caching-strategy-guess
+source_type: model-prior
+model: claude-opus-4-7            # optional but SHOULD be set for AI channels
+on_behalf_of: alice               # optional W3C PROV actedOnBehalfOf principal
+---
+```
+
+Optional at the schema level (fail-open — a missing `model:` is not a
+validation failure); RECOMMENDED at the write path so downstream
+audits can trace a stale `model-prior` claim to a specific model
+cutoff. `on_behalf_of:` names the responsible human principal (model
+asserted, human accountable) and is also optional.
+
+### 10.3 Asserter identity for humans — enterprise-IdP compatible
+
+`user-stated` claims MAY carry an `asserter:` block naming the human
+who made the claim. Keys on the OIDC-guaranteed stable pair
+(`iss`, `sub`) with the Microsoft Entra pairwise-`sub` trap handled:
+
+```yaml
+asserter:
+  type: person                              # person | software_agent | organization
+  iss: "https://accounts.google.com"        # durable key part 1 (verbatim from token)
+  sub: "1076..."                            # durable key part 2
+  provider_ids:                             # optional per-provider extras
+    entra_oid: "..."                        # Entra's stable per-tenant object id
+    entra_tid: "..."                        # Entra's tenant id
+  email: user@example.com                   # display snapshot; NEVER a key
+  name: "Alice Example"                     # display snapshot; NEVER a key
+```
+
+Semantics (locked by `models.asserter_identity_key`):
+
+- **Standard branch (Google, Okta, most OIDC providers):** identity key
+  is `(iss, sub)`. `email` and `name` are display-only snapshots — an
+  email change does NOT orphan the identity, since the key is unchanged.
+- **Microsoft Entra branch:** Entra's `sub` claim is PAIRWISE per app
+  (OIDC-Core §8.1 — a client sees a DIFFERENT `sub` for the same user
+  in a different app), so `sub` is UNUSABLE as a cross-app identity
+  anchor. When `provider_ids.entra_tid` and `provider_ids.entra_oid`
+  are both set, the identity key becomes `(iss, "entra", tid, oid)`
+  and `sub` is IGNORED.
+- **Single-user / degraded:** `iss: local`, `sub: <configured-owner>`
+  is a valid identity for single-user deployments.
+- **No durable identifier extractable:** identity key is `()`; the
+  caller should treat that as "no identity declared" and fall back to
+  owner-only defaults.
+
+Maps to SCIM (RFC 7643) for future provisioning correlation:
+`type: person` ≙ SCIM `User`; `type: organization` ≙ SCIM `Group` (via
+tenant); `provider_ids.entra_*` are the Entra-tenant Object identifiers
+SCIM already uses.
+
+Google's own docs are explicit: never key on email. This lock exists so
+we can't drift toward the tempting-but-broken shortcut.
+
+### 10.4 MCP `remember(sources=...)` surface
+
+The MCP `remember` tool's `sources=` argument accepts the new
+channel-split payloads via additional wrapper keys alongside the
+pre-existing `_source` and `_field_sources` (§4):
+
+```python
+remember(text="...", sources={
+    # SourceRef surface (from §4) — unchanged
+    "_source": "user-stated:session-abc#turn-5",
+
+    # Channel-split extras (issue #326)
+    "_source_type": "user-stated",                  # coarse channel
+    "_source_ref":  "session-abc#turn-5",           # ULTIMATE reference
+    "_model":       "claude-opus-4-7",              # AI model-id (optional)
+    "_on_behalf_of": "alice",                       # human principal (optional)
+    "_asserter": {                                  # IdP identity for user-stated
+        "type": "person",
+        "iss":  "https://accounts.google.com",
+        "sub":  "1076...",
+        "email": "alice@example.com",
+    },
+})
+```
+
+Every extra is OPTIONAL; provide only the ones the caller can honestly
+attest to. Validation stays fail-open (matches
+`coerce_source_type`'s "must not crash the nightly compile" contract):
+a typo'd `_source_type` downgrades to `inferred` on read; a
+non-dict `_asserter` is rejected loudly (it's a corruption signal, not
+a normal input path). Extras land as frontmatter keys with the same
+name as the wrapper key minus its leading underscore
+(`_source_type` → `source_type`, `_asserter` → `asserter`, etc.) so
+the read-side parsers (`models.parse_asserter`,
+`models.coerce_source_type`, `models.parse_model`) find them.
+
+### 10.5 What this doc does NOT decide
+
+- **Rendering `model:` / `asserter:` into the resolver's per-member
+  passages.** Issue #326 does the source-precedence prompt update,
+  but the resolver already receives each member's frontmatter dict — a
+  future lane can surface `model:` / `asserter:` in the rendered
+  passage without a lock change.
+- **Auto-detecting the asserter from an ambient identity provider.**
+  The MCP server does not read OIDC tokens from the environment; the
+  caller supplies the `_asserter` block. A future middleware lane
+  (deferred) can populate it automatically.
+- **Preserving asserter identity across a rename of the display email.**
+  The identity key doesn't change; but there is no separate index that
+  maps old email → new email. This is deliberately out of scope —
+  `email` is a snapshot for humans reading the frontmatter, not a
+  lookup key.
+
+## 11. Implementation issue mapping
 
 | Section | Issue | What the issue implements |
 |---------|-------|---------------------------|
@@ -595,3 +762,4 @@ regardless of the one-day window overlap. The exact stamped value is pinned by
 | §4 MCP `remember(sources=...)` | #96 | Replace the bare-dict heuristic with the `_source`/`_field_sources` wrapper keys; update docstring + integration test. |
 | §5 legacy slug migration | #97 | `athenaeum repair --legacy-source-slugs` with dry-run/apply, the fixed mapping table, and post-migration validation. |
 | §8 claim-level temporal validity | #308 | Slice 1: `valid_from` / `valid_until` parse + round-trip; shared `valid_until_expired` helper; currently-valid-by-default filter. **Slice 2 (shipped): resolver interval-close (§8.4) — `enact_resolution` stamps the loser's `valid_until` on `keep_a`/`keep_b` and sequential-snapshot `not_a_conflict`, only-close-never-widen.** Slice 3 (`--as-of`) deferred. #329 generalizes the close to non-time scopes. |
+| §10 channel split + model + asserter | #326 | Extend `SOURCE_TYPES` with `agent-observed` and `model-prior`; add `model:` / `on_behalf_of:` / `asserter:` claim-level frontmatter fields; extend `remember(sources=...)` with `_source_type` / `_source_ref` / `_model` / `_on_behalf_of` / `_asserter` wrapper keys; drop `model-prior:<model-id>` into the resolver's precedence taxonomy below `script:`. |

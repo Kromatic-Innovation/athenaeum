@@ -8,6 +8,7 @@ from athenaeum.provenance import (
     SourceRef,
     parse_per_value_field_sources,
     parse_source,
+    resolve_remember_extras,
     resolve_remember_sources,
     validate_field_sources,
     validate_source_value,
@@ -327,3 +328,72 @@ class TestResolveRememberSources:
     def test_invalid_inner_source_rejected(self) -> None:
         with pytest.raises(ValueError):
             resolve_remember_sources({"_source": "Has-Uppercase"})
+
+
+class TestResolveRememberExtras:
+    """Channel-split extras on ``remember(sources=...)`` (issue #326).
+
+    Locks §10 in ``docs/provenance-shape.md`` — the ``_source_type`` /
+    ``_source_ref`` / ``_model`` / ``_on_behalf_of`` / ``_asserter``
+    wrappers extract into frontmatter keys under their sans-underscore
+    names. Same fail-open discipline as ``resolve_remember_sources``.
+    """
+
+    def test_none_and_scalar_return_empty(self) -> None:
+        assert resolve_remember_extras(None) == {}
+        assert resolve_remember_extras("api:apollo:2026-05-09") == {}
+
+    def test_empty_dict_returns_empty_extras(self) -> None:
+        # An empty dict is rejected by resolve_remember_sources, but this
+        # helper is validation-only for the extras subset. If the caller
+        # gave us an empty dict, no extras is a reasonable interpretation.
+        assert resolve_remember_extras({"_source": "api:apollo"}) == {}
+
+    def test_source_type_and_ref_extracted(self) -> None:
+        extras = resolve_remember_extras(
+            {"_source_type": "model-prior", "_source_ref": "claude-opus-4-7:prior"}
+        )
+        assert extras == {
+            "source_type": "model-prior",
+            "source_ref": "claude-opus-4-7:prior",
+        }
+
+    def test_model_and_on_behalf_of_extracted(self) -> None:
+        extras = resolve_remember_extras(
+            {"_model": "claude-opus-4-7", "_on_behalf_of": "alice"}
+        )
+        assert extras == {"model": "claude-opus-4-7", "on_behalf_of": "alice"}
+
+    def test_asserter_block_extracted_verbatim(self) -> None:
+        asserter = {
+            "type": "person",
+            "iss": "https://accounts.google.com",
+            "sub": "1076",
+            "email": "alice@example.com",
+        }
+        extras = resolve_remember_extras({"_asserter": asserter})
+        # Verbatim carry — the read-side parser normalizes on load, not
+        # here; round-trip fidelity beats normalization at the boundary.
+        assert extras == {"asserter": asserter}
+
+    def test_asserter_must_be_dict(self) -> None:
+        with pytest.raises(ValueError, match="_asserter"):
+            resolve_remember_extras({"_asserter": "not-a-dict"})
+
+    def test_source_type_and_asserter_via_resolve_remember_sources_validated(
+        self,
+    ) -> None:
+        # `resolve_remember_sources` accepts the new wrapper keys AND
+        # validates them (asserter must be a dict). Extras aren't in the
+        # returned tuple but the validation gate fires.
+        ws, fs = resolve_remember_sources(
+            {"_source_type": "model-prior", "_source_ref": "claude:prior"}
+        )
+        assert ws is None
+        assert fs is None
+        with pytest.raises(ValueError, match="_asserter"):
+            resolve_remember_sources({"_asserter": "not-a-dict"})
+
+    def test_unknown_wrapper_key_still_rejected(self) -> None:
+        with pytest.raises(ValueError, match="_field_sources|_asserter|_source"):
+            resolve_remember_sources({"_source": "api:x:y", "_bogus": "junk"})

@@ -249,6 +249,44 @@ def validate_field_sources(value: Any) -> Any:
     return value
 
 
+# Wrapper keys accepted by :func:`resolve_remember_sources` /
+# :func:`resolve_remember_extras`. The originals (`_source`, `_field_sources`)
+# hit the SourceRef surface; the extras (issue #326) inject frontmatter
+# keys on the raw file that carry channel/model/asserter provenance beside
+# the SourceRef.
+_REMEMBER_WIKI_SOURCE_KEYS = frozenset({"_source", "_field_sources"})
+_REMEMBER_EXTRA_KEYS = frozenset(
+    {"_source_type", "_source_ref", "_model", "_on_behalf_of", "_asserter"}
+)
+_REMEMBER_ALLOWED_KEYS = _REMEMBER_WIKI_SOURCE_KEYS | _REMEMBER_EXTRA_KEYS
+
+# Maps a wrapper key (e.g. ``"_source_type"``) to the frontmatter key it
+# writes (e.g. ``"source_type"``). Extras are injected under these names
+# by :func:`athenaeum.mcp_server._inject_provenance_frontmatter` so the
+# read-side parsers (:func:`athenaeum.models.parse_asserter` etc.) find
+# them.
+_REMEMBER_EXTRA_KEY_MAP: dict[str, str] = {
+    "_source_type": "source_type",
+    "_source_ref": "source_ref",
+    "_model": "model",
+    "_on_behalf_of": "on_behalf_of",
+    "_asserter": "asserter",
+}
+
+
+def _reject_bad_remember_dict(keys: set[str]) -> None:
+    """Raise the standard ValueError for a malformed remember(sources=...) dict."""
+    raise ValueError(
+        "MCP remember(sources=...) bare-dict shape removed. "
+        'Use {"_source": ...} for wiki-level, '
+        '{"_field_sources": {<field>: <source>}} for per-field, or '
+        "one of the channel-split extras "
+        '(`_source_type`, `_source_ref`, `_model`, `_on_behalf_of`, `_asserter`). '
+        "See docs/provenance-shape.md §4 / §10. "
+        f"Got keys: {sorted(keys)!r}"
+    )
+
+
 def resolve_remember_sources(
     sources: Any,
 ) -> tuple[Any, dict | None]:
@@ -259,21 +297,32 @@ def resolve_remember_sources(
     "structured single-source" vs "per-field map" is REMOVED. Callers
     must use explicit wrapper keys for structured input.
 
-    Three accepted shapes:
+    Accepted shapes:
 
     - ``None`` → ``(None, None)``.
     - ``str`` (e.g. ``"api:apollo:2026-05-09"``) → wiki-level scalar;
       returns ``(<scalar>, None)``.
-    - ``dict`` containing only ``_source`` and/or ``_field_sources`` →
-      returns ``(<wiki_source>, <field_sources_map>)``.
+    - ``dict`` containing any combination of the following wrapper keys:
 
-    Any bare dict (no wrapper keys) raises :class:`ValueError` directing
-    the caller to wrap. Any other type raises :class:`TypeError`.
+      * ``_source`` — wiki-level scalar/structured SourceRef.
+      * ``_field_sources`` — per-field ``{<field>: <source>}`` map.
+      * ``_source_type`` / ``_source_ref`` — origin-traced provenance
+        (issue #260 channel classification + ultimate reference).
+      * ``_model`` / ``_on_behalf_of`` / ``_asserter`` — channel-split
+        extras (issue #326; see :func:`resolve_remember_extras`).
+
+    Any bare dict (no wrapper keys) or unknown key raises
+    :class:`ValueError`. Any other type raises :class:`TypeError`.
 
     Returns:
         ``(wiki_source, field_sources_map)`` — either entry may be
         ``None``. ``wiki_source`` is the validated scalar/structured
         source; ``field_sources_map`` is the validated per-field dict.
+
+    Note: the channel-split extras validated here are NOT returned in
+    this tuple — callers wanting them use :func:`resolve_remember_extras`
+    on the same input. Split from this function to preserve the pre-#326
+    two-tuple return.
     """
     if sources is None:
         return None, None
@@ -281,16 +330,10 @@ def resolve_remember_sources(
         validate_source_value(sources)
         return sources, None
     if isinstance(sources, dict):
-        allowed = {"_source", "_field_sources"}
         keys = set(sources.keys())
-        unknown = keys - allowed
+        unknown = keys - _REMEMBER_ALLOWED_KEYS
         if unknown or not keys:
-            raise ValueError(
-                "MCP remember(sources=...) bare-dict shape removed. "
-                'Use {"_source": ...} for wiki-level or '
-                '{"_field_sources": {<field>: <source>}} for per-field. '
-                "See docs/provenance-shape.md §4."
-            )
+            _reject_bad_remember_dict(keys)
         wiki_source: Any = None
         field_sources_map: dict | None = None
         if "_source" in sources:
@@ -304,12 +347,69 @@ def resolve_remember_sources(
                 )
             validate_field_sources(fs)
             field_sources_map = fs
+        # Validate extras here too so a malformed asserter is caught at
+        # the boundary. The values themselves are returned by
+        # :func:`resolve_remember_extras`; this call is validation-only.
+        _validate_remember_extras(sources)
         return wiki_source, field_sources_map
     raise TypeError(
         f"`sources` must be str, dict, or None; got {type(sources).__name__}. "
-        'Use {"_source": ...} or {"_field_sources": {...}} for structured input. '
-        "See docs/provenance-shape.md §4."
+        'Use {"_source": ...}, {"_field_sources": {...}}, or the channel-split '
+        "extras (`_source_type`/`_source_ref`/`_model`/`_on_behalf_of`/`_asserter`) "
+        "for structured input. See docs/provenance-shape.md §4 / §10."
     )
+
+
+def _validate_remember_extras(sources: dict[str, Any]) -> None:
+    """Validate the channel-split extras on a ``remember(sources=...)`` dict.
+
+    Fail-open at the schema layer (matches ``coerce_source_type``): a
+    non-string ``_source_type`` is passed through — read-side
+    :func:`athenaeum.models.coerce_source_type` will downgrade it to
+    ``inferred``. The tight-schema check is on ``_asserter`` which must
+    be a dict when present (or ``None`` to explicitly clear).
+    """
+    asserter = sources.get("_asserter")
+    if asserter is not None and not isinstance(asserter, dict):
+        raise ValueError(
+            f"_asserter must be a dict, got {type(asserter).__name__}"
+        )
+
+
+def resolve_remember_extras(sources: Any) -> dict[str, Any]:
+    """Return the channel-split extras to inject as frontmatter (issue #326).
+
+    Extracts the ``_source_type`` / ``_source_ref`` / ``_model`` /
+    ``_on_behalf_of`` / ``_asserter`` wrapper keys from a
+    ``remember(sources=...)`` dict and returns them keyed by the
+    frontmatter names they write into (``source_type``, ``source_ref``,
+    ``model``, ``on_behalf_of``, ``asserter``).
+
+    - ``sources is None`` → ``{}``.
+    - ``sources`` is a bare scalar (str) → ``{}`` — the scalar
+      shorthand is a SourceRef, not an extras carrier.
+    - ``sources`` is a dict → the extras subset, keyed for frontmatter
+      injection.
+
+    Malformed values raise :class:`ValueError` — same discipline as
+    :func:`resolve_remember_sources`. Callers who want to be robust
+    against a malformed extras block should catch and log; the MCP
+    server surfaces the error to the caller.
+    """
+    if sources is None or isinstance(sources, str):
+        return {}
+    if not isinstance(sources, dict):
+        raise TypeError(
+            f"`sources` must be str, dict, or None; got {type(sources).__name__}"
+        )
+    # Re-validate here so a caller that skips resolve_remember_sources
+    # still gets the asserter-must-be-dict check.
+    _validate_remember_extras(sources)
+    extras: dict[str, Any] = {}
+    for wrapper_key, fm_key in _REMEMBER_EXTRA_KEY_MAP.items():
+        if wrapper_key in sources:
+            extras[fm_key] = sources[wrapper_key]
+    return extras
 
 
 __all__ = [
@@ -319,4 +419,5 @@ __all__ = [
     "validate_source_value",
     "validate_field_sources",
     "resolve_remember_sources",
+    "resolve_remember_extras",
 ]

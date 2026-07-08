@@ -1429,3 +1429,102 @@ class TestIntervalCloseSlice2:
         enact_resolution(_iclose_proposal("keep_a"), [a, b])
         meta_b, _ = parse_frontmatter(b.read_text(encoding="utf-8"))
         assert parse_valid_until(meta_b) == date(2026, 6, 1)
+
+
+# ---------------------------------------------------------------------------
+# Section 11 — resolver source-precedence taxonomy (issue #326)
+# ---------------------------------------------------------------------------
+#
+# `docs/conflict-resolution.md` §11 (and `docs/provenance-shape.md` §10.1)
+# lock the taxonomy the resolver LLM applies when a keep_a/keep_b decision
+# names a winner. Issue #326 added `model-prior:<model-id>` BELOW
+# `script:<slug>` — a training prior is unverifiable and silently stale, a
+# pipeline slug at least names a repeatable in-tree process. These tests pin
+# both the ordering AND the presence of the new tier in the prompt so a
+# regression here surfaces immediately.
+
+
+class TestSourcePrecedenceTaxonomyChannelSplit:
+    def test_model_prior_appears_between_script_and_unsourced(self) -> None:
+        # Read the prompt via the resolver's public module so a rename of
+        # the private constant is caught. The taxonomy is a numbered list
+        # inside `_RESOLVE_SYSTEM`; we pin the tier IDs.
+        from athenaeum.resolutions import _RESOLVE_SYSTEM
+
+        prompt = _RESOLVE_SYSTEM
+        # The taxonomy block is delimited by the section title.
+        assert "SOURCE-PRECEDENCE TAXONOMY" in prompt
+
+        script_pos = prompt.find("6. script:")
+        model_prior_pos = prompt.find("7. model-prior:")
+        unsourced_pos = prompt.find("8. unsourced")
+
+        assert script_pos != -1, "tier 6 script:<slug> missing"
+        assert model_prior_pos != -1, "tier 7 model-prior:<model-id> missing (issue #326)"
+        assert unsourced_pos != -1, "tier 8 unsourced moved when model-prior was inserted"
+
+        # Ordering is highest-to-lowest, so script comes BEFORE model-prior
+        # which comes BEFORE unsourced.
+        assert script_pos < model_prior_pos < unsourced_pos
+
+    def test_prompt_explains_model_prior_ranks_below_script(self) -> None:
+        # Not just the number — the RATIONALE matters. If we ever pull the
+        # rank without keeping the reason, humans reading the prompt would
+        # lose the "why below script" context.
+        from athenaeum.resolutions import _RESOLVE_SYSTEM
+
+        assert "training-data" in _RESOLVE_SYSTEM
+        assert "cutoff" in _RESOLVE_SYSTEM
+
+    def test_source_types_includes_new_channels(self) -> None:
+        # The coarse source_type vocabulary MUST carry the two new values
+        # from #326 alongside the pre-existing four (#260). Locked here so
+        # a future revert would fail the lock test in addition to the
+        # dedicated models test — belt-and-braces for the design-lock.
+        from athenaeum.models import SOURCE_TYPES
+
+        assert "agent-observed" in SOURCE_TYPES
+        assert "model-prior" in SOURCE_TYPES
+        assert "user-stated" in SOURCE_TYPES
+        assert "inferred" in SOURCE_TYPES
+        assert "external" in SOURCE_TYPES
+        assert "document" in SOURCE_TYPES
+
+    def test_model_prior_source_type_round_trips_tier0(self, tmp_path: Path) -> None:
+        # Acceptance criterion 1 (issue #326): a claim written with
+        # `source_type: model-prior` + `model:` round-trips tier0
+        # byte-for-byte. tier0_passthrough is a schema-eligibility gate;
+        # anything that passes is rendered verbatim except for
+        # created/updated stamping.
+        raw = tmp_path / "raw" / "session" / "20260701T120000Z-abcd1234.md"
+        raw.parent.mkdir(parents=True)
+        raw.write_text(
+            "---\n"
+            "uid: mp001\n"
+            "type: concept\n"
+            "name: caching-strategy-guess\n"
+            "source_type: model-prior\n"
+            "source_ref: claude-opus-4-7:training-prior\n"
+            "model: claude-opus-4-7\n"
+            "---\n\n"
+            "The claim body.\n",
+            encoding="utf-8",
+        )
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        rf = RawFile(
+            path=raw, source="session", timestamp="20260701T120000Z", uuid8="abcd1234"
+        )
+        index = EntityIndex(wiki)
+        result = tier0_passthrough(rf, index, wiki, ["concept"])
+        assert result is not None
+        # Read the written wiki page and confirm the channel-split fields
+        # survived byte-for-byte. tier0 always stamps `updated:` (§1); it
+        # does not touch anything else. The `source_type`, `source_ref`,
+        # and `model` fields must be preserved on the written page.
+        written = next(wiki.glob("*.md"))
+        meta_out, body_out = parse_frontmatter(written.read_text(encoding="utf-8"))
+        assert meta_out["source_type"] == "model-prior"
+        assert meta_out["source_ref"] == "claude-opus-4-7:training-prior"
+        assert meta_out["model"] == "claude-opus-4-7"
+        assert body_out.strip() == "The claim body."
