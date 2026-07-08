@@ -321,6 +321,35 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 
 ---
 
+## 11. Resolver source-precedence taxonomy — channel split (issue #326)
+
+- **File:** [`src/athenaeum/resolutions.py`](https://github.com/Kromatic-Innovation/athenaeum/blob/develop/src/athenaeum/resolutions.py)
+  — the `_RESOLVE_SYSTEM` prompt's `SOURCE-PRECEDENCE TAXONOMY` block.
+- **Trigger:** the resolver LLM applies this taxonomy when a
+  keep_a/keep_b/correct_a/correct_b decision needs to name a winner and
+  the two sides carry different `source:` shorthand types.
+- **Resolution rule (unchanged for existing tiers):** the taxonomy is
+  ordered highest-to-lowest; ties break by newer source date. The tiers
+  are the SourceRef `<type>:<ref>` shorthand's type component (`user:`,
+  `linkedin:`, `api:`, `wikipedia:`, `claude:`, `script:`, `model-prior:`,
+  `unsourced`).
+- **Change:** issue #326 introduces a NEW tier `model-prior:<model-id>`
+  ranked BELOW `script:<slug>` (tier 7 of 8; `unsourced` moves to tier 8).
+  Rationale is locked in `docs/provenance-shape.md` §10.1 — a training
+  prior is unverifiable and silently stale past the model cutoff, while
+  a pipeline slug at least names a repeatable in-tree process.
+- **Cross-reference:** the channel-split source_type vocabulary (with
+  the parallel `agent-observed` and `model-prior` claim-level values)
+  is locked in `docs/provenance-shape.md` §10; the two docs cross-link
+  so a future change to either the vocabulary OR the precedence rank
+  updates both plus `tests/test_conflict_resolution.py` in the same
+  change (Section 11 test class).
+- **Provenance behavior:** the taxonomy is enforced at PROMPT time only
+  — no deterministic winner-picker runs in-process. The LLM's returned
+  `source_precedence_used` field records the comparison it used.
+
+---
+
 ## Comparison matrix — who wins on each field type
 
 | Resolver | Scalar (truthy/either) | Scalar (always) | List | Numeric | Date | Body | Provenance (`field_sources`) |
