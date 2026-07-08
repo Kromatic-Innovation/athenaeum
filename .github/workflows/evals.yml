@@ -10,24 +10,22 @@ name: Evals
 # Regular CI (ci.yml) is on `develop` only, so this workflow does NOT
 # collide with it: they trigger on distinct refs.
 #
-# Credential: this suite runs on the Claude Code SUBSCRIPTION backend
-# (ATHENAEUM_LLM_PROVIDER=claude-cli, issue #330) — the same $0 path the
-# nightly compile uses — NOT the paid Anthropic Messages API. The
-# subscription OAuth token is pulled from 1Password at run time via
-# `1password/load-secrets-action` (mirroring promote-main.yml), so no raw
-# Anthropic key is ever stored as a GitHub secret. The token lives at
-# `op://Infrastructure/claude-code-oauth-token/credential`; the existing
-# `OP_SERVICE_ACCOUNT_TOKEN` repo secret (already used by promote-main.yml)
+# Credential: the Anthropic API key is pulled from 1Password at run time
+# via `1password/load-secrets-action` (mirroring promote-main.yml), so no
+# raw Anthropic key is stored as a GitHub secret. The key lives at
+# `op://Infrastructure/anthropic-api-key/credential`; the existing org
+# secret `OP_SERVICE_ACCOUNT_TOKEN` (already used by promote-main.yml)
 # reads the Infrastructure vault.
 #
 # Until that op item exists the load step is a no-op (continue-on-error)
-# and the harness cleanly skips every eval case — the recorded-fixture
+# and the harness cleanly skips every eval case (no ANTHROPIC_API_KEY →
+# build_live_client returns None → pytest.skip). The recorded-fixture
 # replay tests under tests/test_recorded_fixtures.py still run in the
 # regular develop-CI suite with zero network. Regular CI is unaffected.
 #
-# GitHub-published actions are SHA-pinned (mirroring ci.yml); the two
-# vendor actions that mirror promote-main.yml's op flow (load-secrets,
-# setup-node) are tag-pinned to match that file's established convention.
+# GitHub-published actions are SHA-pinned (mirroring ci.yml); the
+# load-secrets action is tag-pinned to match promote-main.yml's
+# established op convention.
 
 on:
   workflow_dispatch:
@@ -65,35 +63,24 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Set up Node.js (for the Claude Code CLI)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install the Claude Code CLI
-        # The claude-cli provider shells out to `claude -p` (src/athenaeum/
-        # provider.py). The binary must be on PATH; auth is ambient via the
-        # CLAUDE_CODE_OAUTH_TOKEN exported by the load-secrets step below.
-        run: npm install -g @anthropic-ai/claude-code
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,vector]"
           pip install pyyaml
 
-      - name: Load Claude Code subscription token from 1Password
+      - name: Load Anthropic API key from 1Password
         # No-op until the op item exists / OP_SERVICE_ACCOUNT_TOKEN is set —
         # continue-on-error keeps the workflow green-skips rather than
         # crashing, preserving the "mergeable before provisioning" property.
-        id: op-token
+        id: op-key
         continue-on-error: true
         uses: 1password/load-secrets-action@v4
         with:
           export-env: true
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          CLAUDE_CODE_OAUTH_TOKEN: op://Infrastructure/claude-code-oauth-token/credential
+          ANTHROPIC_API_KEY: op://Infrastructure/anthropic-api-key/credential
 
       - name: Run eval suite
         env:
@@ -102,15 +89,8 @@ jobs:
           # for the follow-up commit. Push-to-main runs do NOT record.
           ATHENAEUM_EVAL_RECORD: ${{ github.event.inputs.record == 'true' && '1' || '0' }}
         run: |
-          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-            # Token not provisioned yet: leave the provider unset so the
-            # harness falls through to the api backend, finds no
-            # ANTHROPIC_API_KEY, and skips every eval case cleanly.
-            echo "::warning::CLAUDE_CODE_OAUTH_TOKEN not set — eval suite will skip (subscription backend unconfigured)"
-          else
-            # Subscription backend ($0): route every eval LLM call through
-            # the operator's Claude Code login via `claude -p`.
-            export ATHENAEUM_LLM_PROVIDER=claude-cli
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::warning::ANTHROPIC_API_KEY not set (op item not provisioned) — eval suite will skip"
           fi
           pytest tests/evals/ -m eval -v --tb=short \
             --eval-summary=eval-summary.json

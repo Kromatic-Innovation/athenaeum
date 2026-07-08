@@ -86,12 +86,11 @@ git commit -m "evals: re-record fixtures after prompt edit"
 
 ## Build prerequisites
 
-- CI runs on the **Claude Code subscription** backend ($0), not the paid
-  API. `evals.yml` pulls the subscription OAuth token from 1Password
-  (`op://Infrastructure/claude-code-oauth-token/credential`, read with the
-  existing `OP_SERVICE_ACCOUNT_TOKEN` repo secret) and selects
-  `ATHENAEUM_LLM_PROVIDER=claude-cli`. Until that op item is provisioned
-  the load step is a no-op and the harness skips every eval case cleanly;
-  the workflow is dispatch/main-push only, so it cannot break develop CI.
+- CI pulls `ANTHROPIC_API_KEY` from 1Password at run time
+  (`op://Infrastructure/anthropic-api-key/credential`, read with the
+  existing org `OP_SERVICE_ACCOUNT_TOKEN` secret) — no raw key is stored
+  as a GitHub secret. Until that op item is provisioned the load step is a
+  no-op and the harness skips every eval case cleanly; the workflow is
+  dispatch/main-push only, so it cannot break develop CI.
 - Fixtures are safe to commit (synthetic-input only, per the content
   policy above).
