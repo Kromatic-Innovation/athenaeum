@@ -1,0 +1,160 @@
+# Resolver golden set (issue #331)
+#
+# Same synthetic Meridian Advisory scenario as the detector set — invented
+# consultancy, no live-knowledge content.
+#
+# Cases feed a hand-authored ContradictionResult (as if the Haiku detector
+# had already flagged the pair) into propose_resolution() with a real Opus
+# call. We assert on ACTION CLASS, NOT rationale text.
+#
+# Coverage matches the acceptance criteria:
+#   - pass       (not_a_conflict): refinement + restatement
+#   - contradict (keep_*):         dated supersession picks a winner
+#   - escalate   (disambiguation): undated mutually-exclusive facts
+#
+# Case authoring rules (so the LLM call actually fires):
+#   - NO valid_from/valid_until frontmatter — that triggers the disjoint-
+#     validity short-circuit before the LLM ever sees the pair.
+#   - NO ``supersedes:`` or ``refines:`` frontmatter — declared
+#     relationships short-circuit too.
+# The body text is where sequential-snapshot / supersession signal must
+# live so the resolver has to reason about it.
+
+- id: refinement_editor_general_and_csv
+  outcome_class: pass
+  expected:
+    action_class: not_a_conflict
+  detector:
+    conflict_type: prescriptive
+    rationale: "Both prescribe a docs tool for Meridian consulting projects."
+    passages:
+      - "The consulting team uses Notion for all client-facing project docs."
+      - "Client-facing project CSVs live in Google Sheets, not Notion."
+  members:
+    - filename: feedback_docs_notion.md
+      body: "The consulting team uses Notion for all client-facing project docs."
+      frontmatter:
+        name: docs-tool-notion
+        type: feedback
+        source_type: user-stated
+        source_ref: "session-2026-02-01"
+        updated: "2026-02-01"
+    - filename: feedback_docs_csv_exception.md
+      body: >-
+        Client-facing project CSVs live in Google Sheets, not Notion — this is
+        the CSV-only exception to the general Notion-for-docs rule.
+      frontmatter:
+        name: docs-tool-csv-exception
+        type: feedback
+        source_type: user-stated
+        source_ref: "session-2026-02-04"
+        updated: "2026-02-04"
+
+- id: restatement_pto_days
+  outcome_class: pass
+  expected:
+    action_class: not_a_conflict
+  detector:
+    conflict_type: factual
+    rationale: "Two statements about the firm's PTO policy."
+    passages:
+      - "The firm's PTO policy is 25 days per year plus UK bank holidays."
+      - "PTO is 25 days annually (bank holidays are on top)."
+  members:
+    - filename: reference_pto_days.md
+      body: "The firm's PTO policy is 25 days per year plus UK bank holidays."
+      frontmatter:
+        name: pto-days
+        type: reference
+        source_type: user-stated
+        source_ref: "session-2026-01-05"
+        updated: "2026-01-05"
+    - filename: reference_pto_restatement.md
+      body: "PTO is 25 days annually (bank holidays are on top)."
+      frontmatter:
+        name: pto-restatement
+        type: reference
+        source_type: user-stated
+        source_ref: "session-2026-01-08"
+        updated: "2026-01-08"
+
+- id: dated_supersession_hosting
+  outcome_class: contradict
+  expected:
+    action_class: keep_pick_winner
+  detector:
+    conflict_type: factual
+    rationale: "Two claims about Meridian's client-portal hosting provider."
+    passages:
+      - "As of 2026-02, Meridian's client portal is hosted on Heroku."
+      - "As of 2026-05, Meridian's client portal moved to Fly.io — Heroku is retired."
+  members:
+    - filename: project_hosting_heroku.md
+      body: >-
+        As of 2026-02, Meridian's client portal is hosted on Heroku. Owner Priya
+        signed the invoice on 2026-02-10.
+      frontmatter:
+        name: hosting-heroku
+        type: project
+        source_type: user-stated
+        source_ref: "session-2026-02-10"
+        updated: "2026-02-10"
+    - filename: project_hosting_fly.md
+      body: >-
+        As of 2026-05, Meridian's client portal moved to Fly.io — Heroku is
+        retired. This is a decision, not a rollback plan; the Heroku account
+        was cancelled 2026-05-20.
+      frontmatter:
+        name: hosting-fly
+        type: project
+        source_type: user-stated
+        source_ref: "session-2026-05-15"
+        updated: "2026-05-20"
+
+- id: undated_office_address
+  outcome_class: escalate
+  expected:
+    action_class: disambiguation
+  detector:
+    conflict_type: factual
+    rationale: "Two mutually-exclusive claims about the office address."
+    passages:
+      - "Meridian's office is at 14 Kingsway, WeWork floor 3."
+      - "Meridian's office is at 220 Regent Street, suite 5B."
+  members:
+    - filename: reference_office_wework.md
+      body: "Meridian's office is at 14 Kingsway, WeWork floor 3."
+      frontmatter:
+        name: office-address-wework
+        type: reference
+        source_type: inferred
+    - filename: reference_office_regent.md
+      body: "Meridian's office is at 220 Regent Street, suite 5B."
+      frontmatter:
+        name: office-address-regent
+        type: reference
+        source_type: inferred
+
+- id: undated_budget_approver
+  outcome_class: escalate
+  expected:
+    action_class: disambiguation
+  detector:
+    conflict_type: factual
+    rationale: "Two mutually-exclusive claims about who approves discretionary spend."
+    passages:
+      - "Discretionary spend over 500 GBP requires Priya's sign-off."
+      - "Discretionary spend over 500 GBP requires Amir's sign-off."
+  members:
+    - filename: reference_budget_priya.md
+      body: "Discretionary spend over 500 GBP requires Priya's sign-off."
+      frontmatter:
+        name: budget-approver-priya
+        type: reference
+        source_type: inferred
+    - filename: reference_budget_amir.md
+      body: "Discretionary spend over 500 GBP requires Amir's sign-off."
+      frontmatter:
+        name: budget-approver-amir
+        type: reference
+        source_type: inferred
