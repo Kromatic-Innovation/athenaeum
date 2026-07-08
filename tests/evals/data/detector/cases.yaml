@@ -1,0 +1,239 @@
+# Detector golden set (issue #331)
+#
+# Synthetic scenario: "Meridian Advisory", a fictional 12-person consultancy.
+# Every case is invented — nothing here is drawn from a live knowledge tree.
+#
+# Each case is a cluster of 2 auto-memory snippets fed to
+# detect_contradictions(). ``outcome_class`` is one of {pass, contradict,
+# escalate} — the three classes required by the acceptance criteria.
+#
+# For scoring we assert on ``expected.detected`` (bool) and, when
+# ``expected.conflict_type`` is set, that the reported type matches. We do
+# NOT assert on rationale text.
+#
+# Frontmatter fields translate to fields on the AutoMemoryFile record so the
+# detector prompt renders the same TRUSTED scope line real intake produces
+# (source_type, source_ref, valid_from/valid_until, updated).
+
+- id: standup_time
+  outcome_class: contradict
+  expected:
+    detected: true
+    conflict_type: factual
+  members:
+    - filename: feedback_standup_9am.md
+      body: "Meridian's daily standup is at 9:00 AM sharp every weekday."
+      frontmatter:
+        name: standup-time
+        type: feedback
+        source_type: user-stated
+        source_ref: "session-2026-03-01"
+        updated: "2026-03-01"
+    - filename: feedback_standup_930.md
+      body: "The standup starts at 9:30 — we moved it from 9:00 last week."
+      frontmatter:
+        name: standup-time-updated
+        type: feedback
+        source_type: user-stated
+        source_ref: "session-2026-03-05"
+        updated: "2026-03-05"
+
+- id: invoice_cadence_refinement
+  outcome_class: pass
+  expected:
+    detected: false
+  members:
+    - filename: project_invoice_general.md
+      body: "Client invoices at Meridian go out on the 1st of every month."
+      frontmatter:
+        name: invoice-general
+        type: project
+        source_type: user-stated
+        source_ref: "session-2026-02-10"
+        updated: "2026-02-10"
+    - filename: project_invoice_acme_refinement.md
+      body: >-
+        Invoices for the Acme retainer specifically go out on the 15th to
+        line up with their finance cycle — this is a documented exception
+        to the general 1st-of-the-month rule.
+      frontmatter:
+        name: invoice-acme-exception
+        type: project
+        source_type: user-stated
+        source_ref: "session-2026-02-14"
+        updated: "2026-02-14"
+
+- id: deploy_target_sequential_snapshot
+  outcome_class: pass
+  expected:
+    detected: false
+  members:
+    - filename: project_deploy_march.md
+      body: "Meridian's internal client-portal deploys to staging.meridian.example."
+      frontmatter:
+        name: portal-deploy-march
+        type: project
+        source_type: user-stated
+        source_ref: "session-2026-03-15"
+        updated: "2026-03-15"
+        valid_from: "2026-03-01"
+        valid_until: "2026-04-30"
+    - filename: project_deploy_may.md
+      body: "Meridian's client-portal deploys to prod.meridian.example."
+      frontmatter:
+        name: portal-deploy-may
+        type: project
+        source_type: user-stated
+        source_ref: "session-2026-05-02"
+        updated: "2026-05-02"
+        valid_from: "2026-05-01"
+
+- id: office_address_undated
+  outcome_class: escalate
+  expected:
+    detected: true
+    conflict_type: factual
+  members:
+    - filename: reference_office_wework.md
+      body: "Meridian's office is at 14 Kingsway, WeWork floor 3."
+      frontmatter:
+        name: office-address-wework
+        type: reference
+        source_type: inferred
+    - filename: reference_office_regent.md
+      body: "Meridian's office is at 220 Regent Street, suite 5B."
+      frontmatter:
+        name: office-address-regent
+        type: reference
+        source_type: inferred
+
+- id: expense_reimbursement_receipts
+  outcome_class: contradict
+  expected:
+    detected: true
+    conflict_type: prescriptive
+  members:
+    - filename: feedback_receipts_required.md
+      body: "All expenses must have a receipt attached before reimbursement."
+      frontmatter:
+        name: expense-receipt-rule
+        type: feedback
+        source_type: user-stated
+        source_ref: "session-2026-01-20"
+        updated: "2026-01-20"
+    - filename: feedback_receipts_below_25.md
+      body: "Expenses under 25 GBP need no receipt — just log them in Airtable."
+      frontmatter:
+        name: expense-small-rule
+        type: feedback
+        source_type: user-stated
+        source_ref: "session-2026-01-22"
+        updated: "2026-01-22"
+
+- id: client_owner_meridian_pass_1
+  outcome_class: pass
+  expected:
+    detected: false
+  members:
+    - filename: reference_owner_meridian.md
+      body: "Priya Shah is the client lead for the Meridian retainer at our firm."
+      frontmatter:
+        name: owner-meridian
+        type: reference
+        source_type: user-stated
+        source_ref: "session-2026-04-01"
+        updated: "2026-04-01"
+    - filename: reference_owner_meridian_alias.md
+      body: "The Meridian account is owned by Priya (client lead)."
+      frontmatter:
+        name: owner-meridian-alias
+        type: reference
+        source_type: user-stated
+        source_ref: "session-2026-04-03"
+        updated: "2026-04-03"
+
+- id: tool_choice_editor
+  outcome_class: contradict
+  expected:
+    detected: true
+    conflict_type: prescriptive
+  members:
+    - filename: feedback_editor_notion.md
+      body: "The consulting team uses Notion for all client-facing project docs."
+      frontmatter:
+        name: docs-tool-notion
+        type: feedback
+        source_type: user-stated
+        source_ref: "session-2026-02-01"
+        updated: "2026-02-01"
+    - filename: feedback_editor_gdocs.md
+      body: "All client-facing project docs live in Google Docs, not Notion."
+      frontmatter:
+        name: docs-tool-gdocs
+        type: feedback
+        source_type: user-stated
+        source_ref: "session-2026-02-06"
+        updated: "2026-02-06"
+
+- id: meeting_cadence_different_scenarios
+  outcome_class: pass
+  expected:
+    detected: false
+  members:
+    - filename: project_client_weekly.md
+      body: "Meridian holds a weekly Wednesday sync with each active client."
+      frontmatter:
+        name: client-weekly-sync
+        type: project
+        source_type: user-stated
+        source_ref: "session-2026-03-10"
+        updated: "2026-03-10"
+    - filename: project_internal_monthly.md
+      body: "The Meridian internal all-hands is monthly, first Friday."
+      frontmatter:
+        name: internal-monthly
+        type: project
+        source_type: user-stated
+        source_ref: "session-2026-03-10"
+        updated: "2026-03-10"
+
+- id: budget_approver_undated
+  outcome_class: escalate
+  expected:
+    detected: true
+    conflict_type: factual
+  members:
+    - filename: reference_budget_priya.md
+      body: "Discretionary spend over 500 GBP requires Priya's sign-off."
+      frontmatter:
+        name: budget-approver-priya
+        type: reference
+        source_type: inferred
+    - filename: reference_budget_amir.md
+      body: "Discretionary spend over 500 GBP requires Amir's sign-off."
+      frontmatter:
+        name: budget-approver-amir
+        type: reference
+        source_type: inferred
+
+- id: pto_policy_restatement
+  outcome_class: pass
+  expected:
+    detected: false
+  members:
+    - filename: reference_pto_days.md
+      body: "The firm's PTO policy is 25 days per year plus UK bank holidays."
+      frontmatter:
+        name: pto-days
+        type: reference
+        source_type: user-stated
+        source_ref: "session-2026-01-05"
+        updated: "2026-01-05"
+    - filename: reference_pto_restatement.md
+      body: "PTO is 25 days annually (bank holidays are on top)."
+      frontmatter:
+        name: pto-restatement
+        type: reference
+        source_type: user-stated
+        source_ref: "session-2026-01-08"
+        updated: "2026-01-08"

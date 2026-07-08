@@ -96,8 +96,14 @@ testpaths = ["tests"]
 # vanilla `pytest` invocation doesn't pull in pytest-benchmark. Run them
 # explicitly with `pytest tests/benchmarks/ --benchmark-only` (cli paths
 # override `--ignore`). See tests/benchmarks/test_search_bench.py.
-addopts = "--ignore=tests/benchmarks"
+#
+# `eval` tests (tests/evals/) are DESELECTED by default via `-m "not eval"`
+# so the regular contributor / CI suite never hits the network — the eval
+# suite runs ONLY via evals.yml (workflow_dispatch or push:main) which
+# invokes `pytest -m eval tests/evals/`. See tests/evals/README.md.
+addopts = "--ignore=tests/benchmarks -m 'not eval'"
 markers = [
     "regression: contract regression tests pinning resolver outputs against canonical fixtures",
     "live: opt-in live-LLM tests; require ATHENAEUM_LIVE_TESTS=1 and ANTHROPIC_API_KEY",
+    "eval: live-API eval suite under tests/evals/; deselected by default (see evals.yml)",
 ]

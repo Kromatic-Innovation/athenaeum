@@ -28,6 +28,10 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+# Eval-suite summary artifact (issue #331) — emitted at repo root by
+# tests/evals/conftest.py at session teardown; uploaded by evals.yml but
+# never committed.
+eval-summary.json
 
 # Distribution
 *.tar.gz

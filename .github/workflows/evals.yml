@@ -1,0 +1,93 @@
+name: Evals
+
+# Live-API eval suite (issue #331). Triggers:
+#   * workflow_dispatch — on-demand, optionally with `record=true` to
+#     persist raw response bodies to tests/fixtures/recorded/ (a follow-up
+#     PR then commits the drift).
+#   * push to `main` only — the release path; a red eval here is visible
+#     without blocking the develop-CI flow.
+#
+# Regular CI (ci.yml) is on `develop` only, so this workflow does NOT
+# collide with it: they trigger on distinct refs.
+#
+# ANTHROPIC_API_KEY is the ONLY new secret. It gates the eval run only —
+# the recorded-fixture replay tests under tests/test_recorded_fixtures.py
+# run in the regular develop-CI suite with zero network. Until an admin
+# adds the secret to the repo, this workflow's dispatch stays red; regular
+# CI is unaffected.
+#
+# Third-party actions pinned to full commit SHAs, mirroring ci.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      record:
+        description: "Persist responses to tests/fixtures/recorded/ (opens a follow-up PR to commit)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+  push:
+    branches: [main]
+
+# Stacked main-pushes must not accumulate spend — cancel any in-flight
+# run when a newer commit lands. Dispatch runs share the group so an
+# accidental double-dispatch also collapses to one run.
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    name: Live-API eval suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,vector]"
+          pip install pyyaml
+
+      - name: Run eval suite
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # ``ATHENAEUM_EVAL_RECORD`` toggles the `--record` mode inside the
+          # harness so a workflow_dispatch with record=true seeds fixtures
+          # for the follow-up commit. Push-to-main runs do NOT record.
+          ATHENAEUM_EVAL_RECORD: ${{ github.event.inputs.record == 'true' && '1' || '0' }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "::warning::ANTHROPIC_API_KEY not set — eval suite will skip"
+          fi
+          pytest tests/evals/ -m eval -v --tb=short \
+            --eval-summary=eval-summary.json
+
+      - name: Upload eval summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: eval-summary
+          path: eval-summary.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload recorded fixtures (record mode only)
+        if: ${{ github.event.inputs.record == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: recorded-fixtures
+          path: tests/fixtures/recorded/
+          if-no-files-found: warn
+          retention-days: 30
