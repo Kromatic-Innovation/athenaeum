@@ -1,0 +1,69 @@
+# Recall sidecar golden set (issue #331)
+#
+# Each case:
+#  - ``prompt`` runs through ``query_topics.extract_topics`` (the live LLM
+#    call), then the extracted topics are joined into a keyword query and
+#    passed through ``recall_search`` against the fixture wiki.
+#  - ``expected.hits`` names page uids (uid frontmatter) that must appear
+#    in the recall output — for the "pass" cases, at least one; for the
+#    "escalate" case, at least three DISTINCT pages so multiple candidates
+#    surface rather than one confident wrong answer.
+#  - ``expected.contradiction_flag`` (bool) is checked against the #325
+#    provenance header: when true, the recall output must contain
+#    ``**Status:** contradiction-flagged`` for the expected page.
+
+- id: owner_meridian
+  outcome_class: pass
+  prompt: "who owns the Meridian account?"
+  expected:
+    hits:
+      - rec-owner-meridian-account
+    contradiction_flag: false
+
+- id: pto_policy
+  outcome_class: pass
+  prompt: "what is the firm's PTO policy?"
+  expected:
+    hits:
+      - rec-pto
+    contradiction_flag: false
+
+- id: budget_approver_contradict
+  outcome_class: contradict
+  prompt: "who signs off on discretionary spend over 500 GBP?"
+  expected:
+    hits:
+      - rec-budget-approver
+    contradiction_flag: true
+
+- id: ambiguous_policy_escalate
+  outcome_class: escalate
+  prompt: "what's our policy?"
+  # Deliberately ambiguous — the right behavior is to surface MULTIPLE
+  # candidates (Expense, PTO, Notion, Google-Sheets, Budget, Meeting-cadence
+  # are all "policy" pages), not one confident wrong answer. We assert on
+  # distinct-page count, not on a specific hit.
+  expected:
+    hits: []
+    min_distinct_pages: 3
+    contradiction_flag: false
+
+- id: bluewater_terms_proper_noun
+  outcome_class: pass
+  # The topic extractor is what rescues "Bluewater" from the meta-
+  # instruction verb "quote... verbatim". A pure alphabetical-keyword
+  # extractor would drop the proper noun entirely — this case regresses
+  # exactly that failure mode.
+  prompt: "quote the Bluewater retainer terms verbatim"
+  expected:
+    hits:
+      - rec-client-bluewater
+    contradiction_flag: false
+
+- id: office_address_contradict
+  outcome_class: contradict
+  prompt: "where is our office?"
+  expected:
+    hits:
+      - rec-office-address
+    contradiction_flag: true

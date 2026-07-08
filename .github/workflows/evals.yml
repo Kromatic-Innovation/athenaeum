@@ -1,0 +1,114 @@
+name: Evals
+
+# Live-API eval suite (issue #331). Triggers:
+#   * workflow_dispatch — on-demand, optionally with `record=true` to
+#     persist raw response bodies to tests/fixtures/recorded/ (a follow-up
+#     PR then commits the drift).
+#   * push to `main` only — the release path; a red eval here is visible
+#     without blocking the develop-CI flow.
+#
+# Regular CI (ci.yml) is on `develop` only, so this workflow does NOT
+# collide with it: they trigger on distinct refs.
+#
+# Credential: the Anthropic API key is pulled from 1Password at run time
+# via `1password/load-secrets-action` (mirroring promote-main.yml), so no
+# raw Anthropic key is stored as a GitHub secret. The key lives at
+# `op://Infrastructure/anthropic-api-key/credential`; the existing org
+# secret `OP_SERVICE_ACCOUNT_TOKEN` (already used by promote-main.yml)
+# reads the Infrastructure vault.
+#
+# Until that op item exists the load step is a no-op (continue-on-error)
+# and the harness cleanly skips every eval case (no ANTHROPIC_API_KEY →
+# build_live_client returns None → pytest.skip). The recorded-fixture
+# replay tests under tests/test_recorded_fixtures.py still run in the
+# regular develop-CI suite with zero network. Regular CI is unaffected.
+#
+# GitHub-published actions are SHA-pinned (mirroring ci.yml); the
+# load-secrets action is tag-pinned to match promote-main.yml's
+# established op convention.
+
+on:
+  workflow_dispatch:
+    inputs:
+      record:
+        description: "Persist responses to tests/fixtures/recorded/ (opens a follow-up PR to commit)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+  push:
+    branches: [main]
+
+# Stacked main-pushes must not accumulate spend — cancel any in-flight
+# run when a newer commit lands. Dispatch runs share the group so an
+# accidental double-dispatch also collapses to one run.
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    name: Live-API eval suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,vector]"
+          pip install pyyaml
+
+      - name: Load Anthropic API key from 1Password
+        # No-op until the op item exists / OP_SERVICE_ACCOUNT_TOKEN is set —
+        # continue-on-error keeps the workflow green-skips rather than
+        # crashing, preserving the "mergeable before provisioning" property.
+        id: op-key
+        continue-on-error: true
+        uses: 1password/load-secrets-action@v4
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ANTHROPIC_API_KEY: op://Infrastructure/anthropic-api-key/credential
+
+      - name: Run eval suite
+        env:
+          # ``ATHENAEUM_EVAL_RECORD`` toggles the `--record` mode inside the
+          # harness so a workflow_dispatch with record=true seeds fixtures
+          # for the follow-up commit. Push-to-main runs do NOT record.
+          ATHENAEUM_EVAL_RECORD: ${{ github.event.inputs.record == 'true' && '1' || '0' }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::warning::ANTHROPIC_API_KEY not set (op item not provisioned) — eval suite will skip"
+          fi
+          pytest tests/evals/ -m eval -v --tb=short \
+            --eval-summary=eval-summary.json
+
+      - name: Upload eval summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: eval-summary
+          path: eval-summary.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload recorded fixtures (record mode only)
+        if: ${{ github.event.inputs.record == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: recorded-fixtures
+          path: tests/fixtures/recorded/
+          if-no-files-found: warn
+          retention-days: 30
