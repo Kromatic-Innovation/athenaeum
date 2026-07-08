@@ -24,7 +24,7 @@ from athenaeum.models import (
     render_frontmatter,
     validity_bound_str,
 )
-from athenaeum.provenance import resolve_remember_sources
+from athenaeum.provenance import resolve_remember_extras, resolve_remember_sources
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
 
 log = logging.getLogger(__name__)
@@ -381,6 +381,35 @@ def remember_write(
                    {"_field_sources": {"current_title": "api:apollo:2026-05-09",
                                        "linkedin_url":  "linkedin:alice"}}
 
+            4. Channel-split extras (issue #326) — the dict form may
+               include any of these wrapper keys alongside ``_source`` /
+               ``_field_sources``, and each is stamped as the matching
+               frontmatter key on the raw file:
+
+               * ``_source_type`` → coarse channel classification, one
+                 of :data:`athenaeum.models.SOURCE_TYPES`
+                 (``user-stated`` / ``agent-observed`` / ``external`` /
+                 ``document`` / ``inferred`` / ``model-prior``). Read-side
+                 fail-open via ``coerce_source_type``.
+               * ``_source_ref`` → ULTIMATE reference (session-id+turn,
+                 URL, or document path). NEVER a raw ``auto-memory/...``
+                 filename — the read side rejects those.
+               * ``_model`` → model-id string for AI-attributed
+                 channels (``agent-observed`` / ``inferred`` /
+                 ``model-prior``). Optional; when set, downstream
+                 audits can trace a stale claim to a specific
+                 model cutoff.
+               * ``_on_behalf_of`` → W3C PROV ``actedOnBehalfOf``
+                 principal name — the responsible human when a model
+                 asserted on their behalf.
+               * ``_asserter`` → IdP-compatible identity block for
+                 ``user-stated`` claims (see
+                 ``docs/provenance-shape.md`` §10). Keyed on
+                 (``iss``, ``sub``) with a Microsoft Entra
+                 (``entra_tid``, ``entra_oid``) branch. ``email`` is
+                 display-only — an email change does NOT orphan the
+                 identity.
+
             ``None`` (default) — stamps ``source: claude:inferred`` and
             emits a server-side warning.
 
@@ -409,6 +438,7 @@ def remember_write(
         if sources is None:
             wiki_source: str | dict | None = _DEFAULT_INFERRED_SOURCE
             field_sources_map: dict | None = None
+            extras: dict = {}
             log.warning(
                 "remember(): no `sources` supplied; defaulting "
                 "wiki-level source to %r. Caller should declare a "
@@ -417,6 +447,7 @@ def remember_write(
             )
         else:
             wiki_source, field_sources_map = resolve_remember_sources(sources)
+            extras = resolve_remember_extras(sources)
     except ValueError as exc:
         return f"Error: invalid `sources`: {exc}"
     except TypeError as exc:
@@ -455,7 +486,7 @@ def remember_write(
         return f"Error: file already exists at {filepath}. This should not happen."
 
     final_content = _inject_provenance_frontmatter(
-        content, wiki_source, field_sources_map
+        content, wiki_source, field_sources_map, extras
     )
     filepath.write_text(final_content, encoding="utf-8")
     return f"Saved to {filepath}"
@@ -465,18 +496,24 @@ def _inject_provenance_frontmatter(
     content: str,
     wiki_source: str | dict | None,
     field_sources_map: dict | None,
+    extras: dict | None = None,
 ) -> str:
-    """Stamp ``source`` / ``field_sources`` into the raw file's frontmatter.
+    """Stamp ``source`` / ``field_sources`` / channel-split extras into frontmatter.
 
     If ``content`` already has a YAML frontmatter block, the provenance
     keys are merged into it (caller-supplied values win on conflict). If
     not, a new frontmatter block is prepended. Either way, the keys land
     at the END of the block so existing key ordering is preserved.
 
-    No-op when both arguments are ``None`` — used for ``sources=None``
-    after the default-inferred-source path has supplied ``wiki_source``.
+    ``extras`` (issue #326) is the channel-split payload keyed for
+    frontmatter injection (``source_type`` / ``source_ref`` / ``model``
+    / ``on_behalf_of`` / ``asserter``) — the on-disk names the read-side
+    parsers (``models.parse_asserter`` etc.) look for.
+
+    No-op when all inputs are absent — used for ``sources=None`` after
+    the default-inferred-source path has supplied ``wiki_source``.
     """
-    if wiki_source is None and field_sources_map is None:
+    if wiki_source is None and field_sources_map is None and not extras:
         return content
 
     meta, body = parse_frontmatter(content)
@@ -486,6 +523,9 @@ def _inject_provenance_frontmatter(
         meta["source"] = wiki_source
     if field_sources_map is not None:
         meta["field_sources"] = field_sources_map
+    if extras:
+        for k, v in extras.items():
+            meta[k] = v
 
     if has_frontmatter:
         return render_frontmatter(meta) + body

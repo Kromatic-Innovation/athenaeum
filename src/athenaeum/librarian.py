@@ -66,8 +66,11 @@ from athenaeum.models import (
     WikiEntity,
     coerce_source_type,
     load_schema_list,
+    parse_asserter,
     parse_deprecated,
     parse_frontmatter,
+    parse_model,
+    parse_on_behalf_of,
     parse_refines,
     parse_superseded_by,
     parse_supersedes,
@@ -317,6 +320,10 @@ def discover_auto_memory_files(
                         deprecated=parse_deprecated(meta_for_markers),
                         source_type=source_type,
                         source_ref=source_ref,
+                        # Issue #326: channel-split provenance annotations.
+                        model=parse_model(meta_for_markers),
+                        on_behalf_of=parse_on_behalf_of(meta_for_markers),
+                        asserter=parse_asserter(meta_for_markers),
                         # Issue #308: claim-level temporal validity bounds.
                         valid_from=validity_bound_str(meta_for_markers, "valid_from"),
                         valid_until=validity_bound_str(meta_for_markers, "valid_until"),

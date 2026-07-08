@@ -28,13 +28,46 @@ def generate_uid() -> str:
 
 # --- Origin-traced source provenance (issue #260, slice A of #259) ---
 
-# The four legal ``source_type`` values for an origin-traced citation. The
+# The legal ``source_type`` values for an origin-traced citation. The
 # librarian must cite the ULTIMATE source of a fact — the user, an external
 # URL, a permanent document, or (when nothing can be established) an honest
 # ``inferred``. It must NEVER cite the raw ``auto-memory/...`` filename as the
 # source. See ``policies/auto-memory-citation.md``.
+#
+# Channel split (issue #326): three AI provenance channels were previously
+# collapsed under ``inferred``. They are now distinguished:
+#
+#   ``user-stated``     — human utterance in a session.
+#   ``agent-observed``  — AI derived it from in-session artifacts (file
+#                         contents, tool output). Verifiable against the
+#                         transcript, unlike ``model-prior``.
+#   ``inferred``        — AI leap without artifact backing. Stays the
+#                         fail-open default via :func:`coerce_source_type`.
+#   ``model-prior``     — asserted from training-data knowledge with no
+#                         session evidence. Unverifiable and silently stale
+#                         past the model cutoff — ranks BELOW ``script:`` in
+#                         the resolver's source-precedence taxonomy.
+#   ``external``        — externally cited (URL, third-party record).
+#   ``document``        — permanent document (PDF, spec, contract).
 SOURCE_TYPES: frozenset[str] = frozenset(
-    {"user-stated", "external", "document", "inferred"}
+    {
+        "user-stated",
+        "agent-observed",
+        "external",
+        "document",
+        "inferred",
+        "model-prior",
+    }
+)
+
+# The three AI-attributed channels. All three carry a ``model:`` claim
+# annotation (per issue #326) — a `model-prior` without a model is
+# untraceable to a cutoff date; an `agent-observed` without a model
+# cannot be cross-checked against a specific model's known reasoning
+# quirks. Callers should stamp ``model:`` when writing these channels;
+# validation stays fail-open (the field is optional at the schema level).
+AI_ATTRIBUTED_SOURCE_TYPES: frozenset[str] = frozenset(
+    {"agent-observed", "inferred", "model-prior"}
 )
 
 # Default when origin cannot be established. ``inferred`` is the honest
@@ -97,6 +130,190 @@ def safe_source_ref(candidate: object, fallback: str) -> str:
             fallback,
         )
     return fallback
+
+
+# --- Model recording + asserter identity (issue #326) ---
+#
+# AI-attributed claims (`agent-observed`, `inferred`, `model-prior`) carry a
+# ``model:`` model-id string so provenance audits can trace a stale claim to a
+# specific model cutoff. Human-attributed claims (`user-stated`) carry an
+# ``asserter:`` block naming WHICH person made the claim in a way that survives
+# email changes and organizational IdP swaps. Both fields are OPTIONAL and
+# validated fail-open — a malformed value logs a breadcrumb and returns the
+# empty/default form, matching :func:`coerce_source_type`'s "must not crash the
+# nightly compile" contract.
+#
+# Asserter identity keys on the OIDC-guaranteed stable pair (``iss`` + ``sub``).
+# Microsoft Entra's ``sub`` claim is PAIRWISE per app (RFC 9068 / OIDC-Core §8.1
+# — a client that sees ``sub=X`` for a user in app A gets a DIFFERENT ``sub``
+# for the same user in app B). Entra's stable per-tenant identity is
+# (``tid``, ``oid``) instead — so an Entra asserter stores those under
+# ``provider_ids`` and the identity-key derivation prefers them. Google, Okta,
+# and every OIDC provider that respects the spec-recommended stable-``sub`` are
+# keyed on (``iss``, ``sub``). ``email`` is a display snapshot — NEVER a key.
+
+
+def parse_model(meta: dict[str, object] | None) -> str:
+    """Return the frontmatter ``model:`` model-id, or ``""`` when absent/malformed.
+
+    A model-id is a free-form string (e.g. ``"claude-opus-4-7"``,
+    ``"gpt-5-2026-06-01"``). Fail-open: a non-string value returns ``""``
+    rather than raising — the claim is still parseable, the model
+    attribution is just missing.
+    """
+    if not meta:
+        return ""
+    raw = meta.get("model")
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        log.debug(
+            "model: expected string model-id, got %r (%s); treating as absent",
+            raw,
+            type(raw).__name__,
+        )
+        return ""
+    return raw.strip()
+
+
+def parse_on_behalf_of(meta: dict[str, object] | None) -> str:
+    """Return the frontmatter ``on_behalf_of:`` principal name, or ``""``.
+
+    W3C PROV ``actedOnBehalfOf`` — names the responsible human principal
+    when a model asserted a claim on their behalf (model asserted, human
+    accountable). Fail-open: a non-string value returns ``""``.
+    """
+    if not meta:
+        return ""
+    raw = meta.get("on_behalf_of")
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        log.debug(
+            "on_behalf_of: expected string principal name, got %r (%s); "
+            "treating as absent",
+            raw,
+            type(raw).__name__,
+        )
+        return ""
+    return raw.strip()
+
+
+# Legal ``asserter.type`` values. Aligns with W3C PROV's Agent taxonomy
+# (Person / SoftwareAgent / Organization) so future SCIM (RFC 7643)
+# provisioning can correlate directly.
+ASSERTER_TYPES: frozenset[str] = frozenset(
+    {"person", "software_agent", "organization"}
+)
+
+
+def parse_asserter(meta: dict[str, object] | None) -> dict[str, object]:
+    """Return the frontmatter ``asserter:`` block, or ``{}`` when absent/malformed.
+
+    Shape (issue #326):
+
+    .. code-block:: yaml
+
+        asserter:
+          type: person                        # person | software_agent | organization
+          iss: "https://accounts.google.com"  # OIDC issuer (durable key part 1)
+          sub: "1076..."                      # OIDC subject (durable key part 2)
+          provider_ids:                       # optional per-provider extras
+            entra_oid: "..."
+            entra_tid: "..."
+          email: user@example.com             # display snapshot; NEVER a key
+          name: "Alice Example"               # display snapshot; NEVER a key
+
+    Fail-open: a non-dict value returns ``{}``. Individual sub-fields with
+    non-string values are dropped rather than raising — the goal is a
+    round-trip guarantee for the identity fields that were correctly
+    typed, not a strict schema gate.
+
+    Round-trip fidelity is on the WRITE path (:meth:`WikiEntity.render` /
+    :meth:`AutoMemoryFile.is_inactive` etc. carry the dict verbatim) —
+    this parser normalizes for READ-side consumers (identity key
+    derivation, email-change detection). Unknown keys pass through
+    untouched so future extensions round-trip.
+    """
+    if not meta:
+        return {}
+    raw = meta.get("asserter")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        log.debug(
+            "asserter: expected mapping, got %r (%s); treating as absent",
+            raw,
+            type(raw).__name__,
+        )
+        return {}
+    normalized: dict[str, object] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str):
+            log.debug("asserter: non-string key %r dropped", k)
+            continue
+        normalized[k] = v
+    a_type = normalized.get("type")
+    if isinstance(a_type, str) and a_type and a_type not in ASSERTER_TYPES:
+        log.debug(
+            "asserter: type %r not in %s; kept for round-trip but"
+            " identity-key derivation may skip provider-specific fields",
+            a_type,
+            sorted(ASSERTER_TYPES),
+        )
+    return normalized
+
+
+def asserter_identity_key(asserter: dict[str, object] | None) -> tuple[str, ...]:
+    """Derive the durable identity key from an ``asserter`` block.
+
+    Returns a tuple of ``(iss, sub)`` — or, when Microsoft Entra
+    ``provider_ids`` are present, ``(iss, "entra", tid, oid)``. The Entra
+    branch handles the Entra ``sub``-is-pairwise-per-app trap: the OIDC
+    ``sub`` is not stable across apps for the same user, so we key on the
+    tenant-scoped object id instead.
+
+    Returns ``()`` when no durable identifier can be derived — a caller
+    that keys memories by asserter should treat that as "no identity
+    declared" and fall back to owner-only defaults.
+
+    Key rules (locked by ``docs/provenance-shape.md`` §10):
+
+    - Empty / non-dict asserter → ``()``.
+    - Entra branch: ``iss`` set AND ``provider_ids`` carries a non-empty
+      ``entra_tid`` + ``entra_oid`` → ``(iss, "entra", tid, oid)``. The
+      ``sub`` value is IGNORED (pairwise per app).
+    - Standard branch: non-empty ``iss`` AND non-empty ``sub`` →
+      ``(iss, sub)``.
+    - Anything else → ``()``.
+
+    ``email`` is NEVER part of the key — a Google/Okta/Entra user who
+    changes their email keeps the same identity key. That's the whole
+    point of keying on the OIDC-durable pair.
+    """
+    if not isinstance(asserter, dict) or not asserter:
+        return ()
+    iss = asserter.get("iss")
+    if not isinstance(iss, str) or not iss.strip():
+        return ()
+    iss = iss.strip()
+
+    provider_ids = asserter.get("provider_ids")
+    if isinstance(provider_ids, dict):
+        tid = provider_ids.get("entra_tid")
+        oid = provider_ids.get("entra_oid")
+        if (
+            isinstance(tid, str)
+            and tid.strip()
+            and isinstance(oid, str)
+            and oid.strip()
+        ):
+            return (iss, "entra", tid.strip(), oid.strip())
+
+    sub = asserter.get("sub")
+    if isinstance(sub, str) and sub.strip():
+        return (iss, sub.strip())
+    return ()
 
 
 def slugify(name: str) -> str:
@@ -704,6 +921,18 @@ class AutoMemoryFile:
     # own ``raw/auto-memory/...`` name. Empty when unestablished.
     source_type: str = DEFAULT_SOURCE_TYPE
     source_ref: str = ""
+    # Issue #326: channel-split provenance annotations. All three are
+    # optional and empty by default so legacy auto-memory files round-trip
+    # unchanged. ``model`` is the model-id for AI-attributed claims
+    # (``agent-observed`` / ``inferred`` / ``model-prior``). ``on_behalf_of``
+    # is the responsible human principal (W3C PROV
+    # ``actedOnBehalfOf`` — model asserted, human accountable).
+    # ``asserter`` is the IdP-compatible identity block for the human
+    # who made a ``user-stated`` claim (or ``{}`` when absent). Identity
+    # keys on (``iss``, ``sub``) via :func:`asserter_identity_key`.
+    model: str = ""
+    on_behalf_of: str = ""
+    asserter: dict[str, object] = field(default_factory=dict)
     # Issue #308 (slice 1): claim-level temporal validity. Both are the RAW
     # frontmatter string form (``YYYY-MM-DD`` or "" when absent) so the
     # dataclass predicate re-parses to the SAME date as the dict predicate
@@ -780,6 +1009,13 @@ class WikiEntity:
     # only when set.
     source_type: str | None = None
     source_ref: str | None = None
+    # Issue #326: channel-split provenance annotations. All three are
+    # optional and rendered into frontmatter only when set — legacy
+    # entities without them round-trip byte-for-byte unchanged. See the
+    # matching fields on :class:`AutoMemoryFile` for semantics.
+    model: str | None = None
+    on_behalf_of: str | None = None
+    asserter: dict[str, object] | None = None
 
     @property
     def filename(self) -> str:
@@ -811,6 +1047,12 @@ class WikiEntity:
             meta["source_type"] = self.source_type
         if self.source_ref is not None:
             meta["source_ref"] = self.source_ref
+        if self.model is not None:
+            meta["model"] = self.model
+        if self.on_behalf_of is not None:
+            meta["on_behalf_of"] = self.on_behalf_of
+        if self.asserter is not None:
+            meta["asserter"] = self.asserter
         return render_frontmatter(meta) + "\n" + self.body
 
 
