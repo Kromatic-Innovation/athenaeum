@@ -440,7 +440,11 @@ SOURCE-PRECEDENCE TAXONOMY (highest to lowest):
 4. wikipedia:<page> — consensus public source.
 5. claude:tier3-... — LLM-generated. Subordinate to any human/external source.
 6. script:<slug> — pipeline-generated, no upstream evidence.
-7. unsourced / empty — always loses to any sourced claim.
+7. model-prior:<model-id> — asserted from training-data knowledge with no
+   session evidence. Unverifiable and silently stale past the model cutoff,
+   so ranks BELOW ``script:`` — a pipeline slug at least names a repeatable
+   in-tree process; a training prior names only the model that guessed.
+8. unsourced / empty — always loses to any sourced claim.
 
 TIE-BREAK: when two claims sit at the same precedence tier, prefer the
 NEWER source date.
