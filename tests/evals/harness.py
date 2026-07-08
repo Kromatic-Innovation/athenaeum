@@ -421,8 +421,10 @@ def build_live_client() -> Any:
     Routes through :func:`athenaeum.provider.build_llm_client` so the
     ``ATHENAEUM_LLM_PROVIDER=claude-cli`` env var makes a local eval run
     subscription-covered ($0 metered) — the same seam #330 wired for the
-    production call sites. CI runs stay on the ``api`` backend via the
-    ``ANTHROPIC_API_KEY`` repo secret.
+    production call sites. CI (``evals.yml``) runs on this ``claude-cli``
+    subscription backend too, with ``CLAUDE_CODE_OAUTH_TOKEN`` sourced from
+    1Password; the ``api`` backend + ``ANTHROPIC_API_KEY`` remains a
+    fallback for anyone who prefers the metered path.
     """
     from athenaeum.provider import build_llm_client
 
