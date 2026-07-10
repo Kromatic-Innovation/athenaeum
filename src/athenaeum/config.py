@@ -539,6 +539,65 @@ def resolve_model(
     return default
 
 
+def resolve_screening(config: dict[str, Any] | None) -> dict[str, dict[str, str]]:
+    """Resolve intake-screening settings for ``remember()`` (issue #320).
+
+    Returns ``{"medical": {"action", "access"}}``. This first slice screens
+    only the ``medical`` category; the action is one of ``off`` (default) /
+    ``label_restrict``. Precedence per the module convention (env > yaml >
+    default, no seed in ``_DEFAULTS`` so the code default stays reachable):
+    ``ATHENAEUM_SCREEN_MEDICAL`` env > ``screening.medical.action`` yaml >
+    ``off``.
+
+    Raises :class:`athenaeum.screening.ScreeningConfigError` on an invalid or
+    unsupported setting (unknown action, ``drop`` on medical, or a bad access
+    level) so a mis-configured operator gets a clear signal at serve time
+    rather than a silent no-op. ``label_restrict`` is inert until content
+    actually matches, so an ``off``/unset install never touches intake.
+    """
+    from athenaeum.screening import (
+        _ACCESS_RANK,
+        VALID_MEDICAL_ACTIONS,
+        ScreeningConfigError,
+    )
+
+    action = "off"
+    access = "personal"
+    if isinstance(config, dict):
+        screening = config.get("screening")
+        if isinstance(screening, dict):
+            medical = screening.get("medical")
+            if isinstance(medical, dict):
+                raw_action = medical.get("action")
+                if isinstance(raw_action, str) and raw_action.strip():
+                    action = raw_action.strip().lower()
+                raw_access = medical.get("access")
+                if isinstance(raw_access, str) and raw_access.strip():
+                    access = raw_access.strip().lower()
+
+    env = os.environ.get("ATHENAEUM_SCREEN_MEDICAL")
+    if env is not None and env.strip():
+        action = env.strip().lower()
+
+    if action not in VALID_MEDICAL_ACTIONS:
+        raise ScreeningConfigError(
+            f"screening.medical.action={action!r} is invalid; expected one of "
+            f"{VALID_MEDICAL_ACTIONS}."
+        )
+    if action == "drop":
+        raise ScreeningConfigError(
+            "screening.medical.action='drop' is not supported (medical is "
+            "label-first); use label_restrict or off."
+        )
+    if access not in _ACCESS_RANK:
+        raise ScreeningConfigError(
+            f"screening.medical.access={access!r} is not a valid access level; "
+            f"expected one of {tuple(_ACCESS_RANK)}."
+        )
+
+    return {"medical": {"action": action, "access": access}}
+
+
 _DEFAULT_CONFIG_CONTENT = """\
 # Athenaeum sidecar configuration
 # See https://github.com/Kromatic-Innovation/athenaeum for docs.
@@ -571,6 +630,21 @@ search_backend: fts5
 #   audience:
 #     - operations
 #     - voltaire
+
+# Intake screening at remember() time (issue #320). The write-side complement
+# to #312's read-time scoping: classifies sensitive raw intake and stamps a
+# read-time `access:` label BEFORE the append-only write, so recall never
+# surfaces regulated content to a restricted caller. UNSET / empty = no
+# screening (existing installs unchanged). This first slice screens `medical`
+# only. Action values: `label_restrict` (store but stamp `access:`, default
+# `personal`), `off` (skip). `drop` is reserved for future pure-secret
+# categories and is rejected as a config error here (medical is label-first,
+# never dropped). Per-category action precedence:
+# ATHENAEUM_SCREEN_MEDICAL env > this file > default (off).
+# screening:
+#   medical:
+#     action: label_restrict   # label_restrict | off   (default: off)
+#     access: personal         # access level stamped when action=label_restrict
 
 # Workspace owner identity (issue #263). Designates the single canonical
 # person this knowledge base belongs to so the librarian keeps the owner a

@@ -66,6 +66,7 @@ from athenaeum.models import (
     WikiEntity,
     coerce_source_type,
     load_schema_list,
+    parse_access,
     parse_asserter,
     parse_deprecated,
     parse_frontmatter,
@@ -651,6 +652,17 @@ def process_one(
     """
     result = ProcessingResult(raw_file=raw)
 
+    # Sticky intake access (issue #320 §5): an `access:` stamped on the raw
+    # file at remember() time by the intake screener is CALLER-AUTHORITATIVE —
+    # it must survive compile onto the wiki page, not be re-guessed by the LLM
+    # tiers (which classify access from scratch and can drop or widen it). Read
+    # it from the ORIGINAL content before the self-resolving-claims mutation
+    # below touches raw._content. Tier 0 already honors raw `access:` verbatim;
+    # this pins the same guarantee onto the Tier-2/3 LLM path for the unstructured
+    # medical notes that never reach Tier 0. Empty when the raw carries none.
+    raw_meta, _ = parse_frontmatter(raw.content)
+    sticky_access = parse_access(raw_meta)
+
     # --- Tier 0: passthrough for pre-structured raw-intake ---
     # When upstream producers already emit valid wiki-schema frontmatter,
     # promote verbatim without LLM classification. Preserves custom
@@ -718,6 +730,17 @@ def process_one(
         config=config,
     )
     log.info("  T2 classified %d new entities", len(classified))
+
+    # Enforce the sticky intake access (issue #320 §5) on every NEW entity the
+    # LLM created from this raw: the screener's label is authoritative and is
+    # never downgraded — take the more restrictive of (raw label, LLM guess).
+    # Scoped to new entities only; a merge into a pre-existing page (below) does
+    # not relabel that page from this one raw file.
+    if sticky_access:
+        from athenaeum.screening import more_restrictive
+
+        for c in classified:
+            c.access = more_restrictive(c.access, sticky_access)
 
     # Build actions
     actions: list[EntityAction] = []

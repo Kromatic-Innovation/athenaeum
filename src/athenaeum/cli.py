@@ -1093,6 +1093,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         load_config,
         resolve_audience,
         resolve_extra_intake_roots,
+        resolve_screening,
     )
     from athenaeum.mcp_server import create_server
 
@@ -1121,6 +1122,24 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    # Issue #320: resolve intake screening (env > yaml > off). Fails fast with
+    # a clear message on a mis-set screening block rather than serving with a
+    # silently inert classifier.
+    from athenaeum.screening import ScreeningConfigError
+
+    try:
+        screening = resolve_screening(cfg)
+    except ScreeningConfigError as exc:
+        print(f"[screening] invalid configuration: {exc}", file=sys.stderr)
+        return 1
+    if screening["medical"]["action"] != "off":
+        print(
+            "[screening] medical intake → "
+            f"{screening['medical']['action']} "
+            f"(access: {screening['medical']['access']})",
+            file=sys.stderr,
+        )
+
     # Warn on config/cache mismatch. The recall tool silently returns zero
     # hits when the configured backend's index is missing, so users with
     # `search_backend: vector` but an fts5-only cache (common when you flip
@@ -1135,6 +1154,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         cache_dir=cache_dir,
         extra_roots=extra_roots,
         caller_audience=caller_audience,
+        screening=screening,
     )
     try:
         server.run()
