@@ -349,6 +349,7 @@ def remember_write(
     *,
     wiki_root: Path | None = None,
     sources: str | dict | None = None,
+    screening: dict | None = None,
 ) -> str:
     """Save a piece of knowledge to the raw intake directory.
 
@@ -485,8 +486,19 @@ def remember_write(
     if filepath.exists():
         return f"Error: file already exists at {filepath}. This should not happen."
 
+    # Intake screening (issue #320): classify sensitive content and resolve the
+    # read-time `access:` label (#312) to stamp BEFORE the single append-only
+    # write below. The screener only inspects `content`; the body bytes are
+    # never mutated (label-first, consistent with the write-once raw/ contract).
+    try:
+        from athenaeum.screening import screen_intake
+
+        screened_access = screen_intake(content, screening)
+    except ValueError as exc:
+        return f"Error: invalid `screening` config: {exc}"
+
     final_content = _inject_provenance_frontmatter(
-        content, wiki_source, field_sources_map, extras
+        content, wiki_source, field_sources_map, extras, screened_access=screened_access
     )
     filepath.write_text(final_content, encoding="utf-8")
     return f"Saved to {filepath}"
@@ -497,6 +509,7 @@ def _inject_provenance_frontmatter(
     wiki_source: str | dict | None,
     field_sources_map: dict | None,
     extras: dict | None = None,
+    screened_access: str | None = None,
 ) -> str:
     """Stamp ``source`` / ``field_sources`` / channel-split extras into frontmatter.
 
@@ -513,7 +526,12 @@ def _inject_provenance_frontmatter(
     No-op when all inputs are absent — used for ``sources=None`` after
     the default-inferred-source path has supplied ``wiki_source``.
     """
-    if wiki_source is None and field_sources_map is None and not extras:
+    if (
+        wiki_source is None
+        and field_sources_map is None
+        and not extras
+        and not screened_access
+    ):
         return content
 
     meta, body = parse_frontmatter(content)
@@ -526,6 +544,15 @@ def _inject_provenance_frontmatter(
     if extras:
         for k, v in extras.items():
             meta[k] = v
+    if screened_access:
+        # Stamp the screener's read-time access label (issue #320). Never
+        # downgrade an access the caller already set on the content — take the
+        # more restrictive of the two (issue #312 rank).
+        from athenaeum.screening import more_restrictive
+
+        existing_access = meta.get("access")
+        existing = existing_access if isinstance(existing_access, str) else ""
+        meta["access"] = more_restrictive(existing, screened_access)
 
     if has_frontmatter:
         return render_frontmatter(meta) + body
@@ -548,6 +575,7 @@ def create_server(
     cache_dir: Path | None = None,
     extra_roots: list[Path] | None = None,
     caller_audience: set[str] | None = None,
+    screening: dict | None = None,
 ) -> "FastMCP":  # noqa: F821 — lazy import
     """Create and return a configured FastMCP server instance.
 
@@ -566,6 +594,13 @@ def create_server(
             pinned HERE by the operator's ``athenaeum serve`` invocation — it
             is deliberately NOT a ``recall()`` tool argument, so a restricted
             agent cannot widen its own scope by passing a different audience.
+        screening: Resolved intake-screening config (issue #320) from
+            :func:`athenaeum.config.resolve_screening`. ``None`` (default) =
+            no screening — every ``remember`` write is unclassified, preserving
+            existing behavior. When set, sensitive intake is auto-labeled with
+            a read-time ``access:`` level before the append-only write. Pinned
+            HERE (not a ``remember()`` tool argument) so a caller cannot
+            disable its own screening.
 
     Requires ``fastmcp`` to be installed (``pip install athenaeum[mcp]``).
     """
@@ -659,7 +694,12 @@ def create_server(
             Confirmation message with the file path.
         """
         return remember_write(
-            raw_root, content, source, wiki_root=wiki_root, sources=sources
+            raw_root,
+            content,
+            source,
+            wiki_root=wiki_root,
+            sources=sources,
+            screening=screening,
         )
 
     @mcp.tool()
