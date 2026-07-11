@@ -687,6 +687,13 @@ def main(argv: list[str] | None = None) -> int:
         "`script:<slug>` form (issue #97 / design-lock §5).",
     )
     repair_mode.add_argument(
+        "--backfill-sources",
+        action="store_true",
+        help="Re-classify memories whose source was DEFAULTED to "
+        "`claude:inferred` against their origin transcript (issue #328): "
+        "user-stated / agent-observed upgrades, else confirm inferred.",
+    )
+    repair_mode.add_argument(
         "--all",
         action="store_true",
         help="Run all repair passes in sequence (tag-indent then value-quoting).",
@@ -701,6 +708,26 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Wiki directory (default: ~/knowledge/wiki)",
+    )
+    repair_parser.add_argument(
+        "--knowledge-root",
+        type=Path,
+        default=None,
+        help="Knowledge root for --backfill-sources (default: ~/knowledge); "
+        "auto-memory is read from <root>/raw/auto-memory.",
+    )
+    repair_parser.add_argument(
+        "--projects-root",
+        type=Path,
+        default=None,
+        help="Transcript root for --backfill-sources " "(default: ~/.claude/projects).",
+    )
+    repair_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="--backfill-sources: cap memories acted on per run (bounded "
+        "resumable batch). Idempotency makes the resume implicit.",
     )
     _add_lock_args(repair_parser)
 
@@ -2285,6 +2312,11 @@ def _cmd_repair(args: argparse.Namespace) -> int:
         repair_value_quoting,
     )
 
+    # Source-backfill (issue #328) reads the scope-indexed auto-memory tree, not
+    # the wiki, so it branches BEFORE the wiki_root resolution below.
+    if getattr(args, "backfill_sources", False):
+        return _cmd_repair_backfill_sources(args)
+
     wiki_root = (args.wiki_root or Path("~/knowledge/wiki")).expanduser().resolve()
     if not wiki_root.is_dir():
         print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
@@ -2340,6 +2372,77 @@ def _cmd_repair(args: argparse.Namespace) -> int:
                 print(f"  ERR {path.name}: {err}", file=sys.stderr)
 
         if total_errors > 0:
+            return 1
+        if not args.apply and total_changed > 0:
+            return 2
+        return 0
+    finally:
+        if lock is not None and not isinstance(lock, int):
+            lock.release()
+
+
+def _cmd_repair_backfill_sources(args: argparse.Namespace) -> int:
+    """Run the #328 source-backfill pass over the auto-memory tree.
+
+    Exit codes:
+        0 — clean run (zero upgrades, OR ``--apply`` succeeded with no errors).
+        1 — errors encountered (read/parse/write/validation failures), or the
+            auto-memory root was not found.
+        2 — dry-run found memories that WOULD be upgraded (CI gate signal).
+    """
+    from athenaeum.config import load_config, resolve_owner_asserter
+    from athenaeum.repair import backfill_sources
+
+    knowledge_root = (args.knowledge_root or Path("~/knowledge")).expanduser().resolve()
+    auto_memory_root = knowledge_root / "raw" / "auto-memory"
+    if not auto_memory_root.is_dir():
+        print(f"Auto-memory root not found: {auto_memory_root}", file=sys.stderr)
+        return 1
+
+    projects_root = (
+        args.projects_root.expanduser().resolve() if args.projects_root else None
+    )
+    cfg = load_config(knowledge_root)
+    asserter = resolve_owner_asserter(cfg)
+
+    # --apply mutates frontmatter and can race a concurrent `run`, so it takes
+    # the run lock (issue #309). A dry-run reads only — no lock.
+    lock: RunLock | int | None = None
+    if args.apply:
+        lock = _acquire_or_exit(knowledge_root, args, cfg)
+        if isinstance(lock, int):
+            return lock
+    try:
+        report = backfill_sources(
+            auto_memory_root,
+            projects_root=projects_root,
+            apply=args.apply,
+            asserter=asserter,
+            limit=args.limit,
+        )
+        mode = "APPLY" if args.apply else "DRY RUN"
+        print(f"=== repair backfill-sources ({mode}) ===")
+        print(f"  files_scanned:      {report.files_scanned}")
+        print(f"  user-stated:        {report.user_stated}")
+        print(f"  agent-observed:     {report.agent_observed}")
+        print(f"  confirmed-inferred: {report.confirmed_inferred}")
+        print(f"  skipped:            {len(report.skips)}")
+        if report.changes and not args.apply:
+            for path, summary in report.changes[:20]:
+                print(f"    {path.name}: {summary}")
+            if len(report.changes) > 20:
+                print(f"    ... and {len(report.changes) - 20} more")
+        for path, reason in report.skips[:20]:
+            print(f"  SKIP {path.name}: {reason}", file=sys.stderr)
+        for path, err in report.errors[:20]:
+            print(f"  ERR {path.name}: {err}", file=sys.stderr)
+        if report.resume_after:
+            print(f"  resume_after:       {report.resume_after}")
+
+        total_changed = (
+            report.user_stated + report.agent_observed + report.confirmed_inferred
+        )
+        if report.errors:
             return 1
         if not args.apply and total_changed > 0:
             return 2

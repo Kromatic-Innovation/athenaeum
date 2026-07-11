@@ -1455,21 +1455,40 @@ class TestSourcePrecedenceTaxonomyChannelSplit:
         # The taxonomy block is delimited by the section title.
         assert "SOURCE-PRECEDENCE TAXONOMY" in prompt
 
-        script_pos = prompt.find("6. script:")
-        model_prior_pos = prompt.find("7. model-prior:")
-        unsourced_pos = prompt.find("8. unsourced")
+        # Issue #328 inserted agent-observed at rank 5, shifting the AI/pipeline
+        # tiers down by one: script 6→7, model-prior 7→8, unsourced 8→9.
+        script_pos = prompt.find("7. script:")
+        model_prior_pos = prompt.find("8. model-prior:")
+        unsourced_pos = prompt.find("9. unsourced")
 
-        assert script_pos != -1, "tier 6 script:<slug> missing"
+        assert script_pos != -1, "tier 7 script:<slug> missing"
         assert (
             model_prior_pos != -1
-        ), "tier 7 model-prior:<model-id> missing (issue #326)"
-        assert (
-            unsourced_pos != -1
-        ), "tier 8 unsourced moved when model-prior was inserted"
+        ), "tier 8 model-prior:<model-id> missing (issue #326)"
+        assert unsourced_pos != -1, "tier 9 unsourced moved unexpectedly (issue #328)"
 
         # Ordering is highest-to-lowest, so script comes BEFORE model-prior
         # which comes BEFORE unsourced.
         assert script_pos < model_prior_pos < unsourced_pos
+
+    def test_agent_observed_ranks_below_wikipedia_above_claude_tier3(self) -> None:
+        # Issue #328 lock: agent-observed sits BELOW external/consensus sources
+        # (wikipedia) and ABOVE claude:tier3/inferred. A tool-result-grounded
+        # claim outranks an unsupported LLM leap but never a curated authority.
+        from athenaeum.resolutions import _RESOLVE_SYSTEM
+
+        prompt = _RESOLVE_SYSTEM
+        wikipedia_pos = prompt.find("4. wikipedia:")
+        agent_observed_pos = prompt.find("5. agent-observed:")
+        claude_pos = prompt.find("6. claude:")
+
+        assert wikipedia_pos != -1, "tier 4 wikipedia:<page> missing"
+        assert (
+            agent_observed_pos != -1
+        ), "tier 5 agent-observed:<model>:<session-ref> missing (issue #328)"
+        assert claude_pos != -1, "tier 6 claude:tier3 missing after #328 shift"
+
+        assert wikipedia_pos < agent_observed_pos < claude_pos
 
     def test_prompt_explains_model_prior_ranks_below_script(self) -> None:
         # Not just the number — the RATIONALE matters. If we ever pull the

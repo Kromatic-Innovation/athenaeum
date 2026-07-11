@@ -332,13 +332,26 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 - **Resolution rule (unchanged for existing tiers):** the taxonomy is
   ordered highest-to-lowest; ties break by newer source date. The tiers
   are the SourceRef `<type>:<ref>` shorthand's type component (`user:`,
-  `linkedin:`, `api:`, `wikipedia:`, `claude:`, `script:`, `model-prior:`,
-  `unsourced`).
-- **Change:** issue #326 introduces a NEW tier `model-prior:<model-id>`
-  ranked BELOW `script:<slug>` (tier 7 of 8; `unsourced` moves to tier 8).
-  Rationale is locked in `docs/provenance-shape.md` §10.1 — a training
-  prior is unverifiable and silently stale past the model cutoff, while
-  a pipeline slug at least names a repeatable in-tree process.
+  `linkedin:`, `api:`, `wikipedia:`, `agent-observed:`, `claude:`,
+  `script:`, `model-prior:`, `unsourced`).
+- **Change (#326):** issue #326 introduced a NEW tier `model-prior:<model-id>`
+  ranked BELOW `script:<slug>`. Rationale is locked in
+  `docs/provenance-shape.md` §10.1 — a training prior is unverifiable and
+  silently stale past the model cutoff, while a pipeline slug at least names
+  a repeatable in-tree process.
+- **Change (#328):** issue #328 inserts a NEW tier
+  `agent-observed:<model>:<session-ref>` at **rank 5** — BELOW
+  `wikipedia:<page>` (it is not a curated authority) and ABOVE
+  `claude:tier3`/inferred (it is grounded in a real in-session artifact the
+  agent READ — file contents or tool output — verifiable against the
+  transcript, not an unsupported leap). This shifts `claude:`→6, `script:`→7,
+  `model-prior:`→8, `unsourced`→9. The tier is written by the
+  `repair --backfill-sources` pass (issue #328) when it re-classifies a
+  memory whose source was DEFAULTED to `claude:inferred` and finds the claim
+  in a tool-result block. This is a §10.1 LOCK-DISCIPLINE change — the
+  taxonomy in `resolutions.py` (`_RESOLVE_SYSTEM`), the
+  `tests/data/resolve_system.txt` snapshot, and the Section 11 test class in
+  `tests/test_conflict_resolution.py` are updated together.
 - **Cross-reference:** the channel-split source_type vocabulary (with
   the parallel `agent-observed` and `model-prior` claim-level values)
   is locked in `docs/provenance-shape.md` §10; the two docs cross-link
