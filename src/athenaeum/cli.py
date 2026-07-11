@@ -5,11 +5,27 @@ import argparse
 import logging
 import sys
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
+
+
+def _iso_date(value: str) -> date:
+    """Argparse type for an ISO-8601 ``YYYY-MM-DD`` ``--as-of`` date (issue #308).
+
+    Unlike the fail-open frontmatter date parse, an operator explicitly
+    requesting an as-of view with a malformed date gets a loud parse error
+    rather than a silent today-view.
+    """
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid ISO date (expected YYYY-MM-DD): {value!r}"
+        ) from None
 
 
 def _positive_int(value: str) -> int:
@@ -480,6 +496,19 @@ def main(argv: list[str] | None = None) -> int:
         "roles (or 'access: open') are returned. Unset = owner = full access. "
         "Exercises the identical filter path as `serve --audience`.",
     )
+    recall_parser.add_argument(
+        "--as-of",
+        dest="as_of",
+        type=_iso_date,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Issue #308: temporal 'as-of' view. Return the wiki as it stood on "
+        "this date — pages outside their [valid_from, valid_until] window then "
+        "are excluded; a fact valid then but expired now is included. Builds a "
+        "throwaway as-of index in a scratch cache dir (indexed backends) or "
+        "filters at query time (keyword); the live index is untouched. Unset = "
+        "today.",
+    )
 
     # dedupe command — find / merge duplicate person wikis
     dedupe_parser = subparsers.add_parser(
@@ -707,6 +736,18 @@ def main(argv: list[str] | None = None) -> int:
             "changed/added/deleted delta (issue #348). Use for seeding or "
             "after an embedding-model change; default is incremental."
         ),
+    )
+    rebuild_parser.add_argument(
+        "--as-of",
+        dest="as_of",
+        type=_iso_date,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Issue #308: build an as-of index reflecting the wiki as it stood "
+        "on this date (pages outside their [valid_from, valid_until] window then "
+        "are excluded). Always a full build; point --cache-dir at a scratch "
+        "directory so the live index is not overwritten, then "
+        "`recall --cache-dir <that>`. Unset = today (the normal live index).",
     )
     _add_lock_args(rebuild_parser)
 
@@ -1442,7 +1483,13 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
     include_globs, exclude_globs = resolve_index_globs(cfg)
     embedding_model = resolve_embedding_model(cfg)
     incremental = not getattr(args, "full", False)
-    mode = "full" if not incremental else "incremental"
+
+    # Issue #308: an as-of index reflects a past date's validity windows and is
+    # always a FULL build (a historical snapshot has no manifest to diff), so it
+    # reports "full" regardless of the incremental default.
+    as_of = getattr(args, "as_of", None)
+    as_of_note = f" as of {as_of.isoformat()}" if as_of is not None else ""
+    mode = "full" if (not incremental or as_of is not None) else "incremental"
 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1462,13 +1509,14 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
                     include_globs=include_globs,
                     exclude_globs=exclude_globs,
                     embedding_model=embedding_model,
+                    as_of=as_of,
                 )
             except ImportError as exc:
                 print(f"Vector backend unavailable: {exc}", file=sys.stderr)
                 print("Install with: pip install athenaeum[vector]", file=sys.stderr)
                 return 1
             print(
-                f"Vector index rebuilt ({mode}): {count} pages "
+                f"Vector index rebuilt{as_of_note} ({mode}): {count} pages "
                 f"(wiki + {len(extra_roots)} extra root(s))"
             )
             return 0
@@ -1481,9 +1529,10 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
                 incremental=incremental,
                 include_globs=include_globs,
                 exclude_globs=exclude_globs,
+                as_of=as_of,
             )
             print(
-                f"FTS5 index rebuilt ({mode}): {count} pages "
+                f"FTS5 index rebuilt{as_of_note} ({mode}): {count} pages "
                 f"(wiki + {len(extra_roots)} extra root(s))"
             )
             return 0
@@ -1510,7 +1559,11 @@ def _cmd_recall(args: argparse.Namespace) -> int:
         resolve_audience,
         resolve_extra_intake_roots,
     )
-    from athenaeum.models import is_page_authorized, parse_frontmatter
+    from athenaeum.models import (
+        is_inactive_memory,
+        is_page_authorized,
+        parse_frontmatter,
+    )
     from athenaeum.search import get_backend
 
     knowledge_root = args.path.expanduser().resolve()
@@ -1534,13 +1587,33 @@ def _cmd_recall(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
+    # Issue #308: an as-of view queries the wiki as it stood on a past date.
+    # Indexed backends (fts5/vector) filter at BUILD time, so we build a
+    # THROWAWAY as-of index in a scratch cache dir and query that — the live
+    # index at ``cache_dir`` is never touched. The keyword backend scans on
+    # query and honors ``as_of`` directly; a scratch build is a cheap no-op for
+    # it. ``as_of`` is passed to ``query`` too so keyword filters at query time.
+    as_of = getattr(args, "as_of", None)
+    query_cache = cache_dir
+    if as_of is not None:
+        query_cache = cache_dir / "_asof" / as_of.isoformat()
+        query_cache.mkdir(parents=True, exist_ok=True)
+        try:
+            backend.build_index(
+                wiki_root, query_cache, extra_roots=extra_roots, as_of=as_of
+            )
+        except ImportError as exc:
+            print(f"As-of index build failed: {exc}", file=sys.stderr)
+            return 1
+
     try:
         hits = backend.query(
             args.query,
-            cache_dir,
+            query_cache,
             n=args.top_k,
             wiki_root=wiki_root,
             caller_audience=caller_audience,
+            as_of=as_of,
         )
     except NotImplementedError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -1565,6 +1638,11 @@ def _cmd_recall(args: argparse.Namespace) -> int:
         if caller_audience is not None and (
             not readable or not is_page_authorized(fm, caller_audience)
         ):
+            continue
+        # Issue #308: temporal backstop — drop any hit outside its validity
+        # window relative to ``as_of`` (default today), so the CLI output stays
+        # consistent with the requested view regardless of backend build state.
+        if readable and is_inactive_memory(fm, as_of):
             continue
         print(f"{score:.2f}\t{filename}\t{preview}")
 

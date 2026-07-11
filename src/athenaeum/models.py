@@ -202,9 +202,7 @@ def parse_on_behalf_of(meta: dict[str, object] | None) -> str:
 # Legal ``asserter.type`` values. Aligns with W3C PROV's Agent taxonomy
 # (Person / SoftwareAgent / Organization) so future SCIM (RFC 7643)
 # provisioning can correlate directly.
-ASSERTER_TYPES: frozenset[str] = frozenset(
-    {"person", "software_agent", "organization"}
-)
+ASSERTER_TYPES: frozenset[str] = frozenset({"person", "software_agent", "organization"})
 
 
 def parse_asserter(meta: dict[str, object] | None) -> dict[str, object]:
@@ -477,8 +475,12 @@ def parse_deprecated(meta: dict[str, object] | None) -> bool:
 # the READER honor a ``valid_until`` set by a human or the resolver; slice 2
 # (shipped) has the resolver auto-stamp the interval on a temporal supersession
 # (``resolutions.enact_resolution`` — see ``docs/provenance-shape.md`` §8.4).
-# There is no ``--as-of`` view yet (slice 3, for which the predicate already
-# takes an ``as_of`` parameter). See ``docs/provenance-shape.md`` §8.
+# Slice 3 (this change) threads the ``as_of`` parameter out to an operator-facing
+# ``--as-of DATE`` recall view (``search.build_index`` / ``query`` + the CLI
+# ``recall`` / ``rebuild-index`` commands) — a read-only historical rewind
+# through the upper bound + #191 tombstones. The lower bound (``valid_from``)
+# stays ungated (it would collide with #324's disjoint detector — see
+# :func:`is_inactive_memory`). See ``docs/provenance-shape.md`` §8.
 
 
 def _coerce_iso_date(value: object) -> date | None:
@@ -524,9 +526,11 @@ def _coerce_iso_date(value: object) -> date | None:
 def parse_valid_from(meta: dict[str, object] | None) -> date | None:
     """Return the frontmatter ``valid_from`` as a date, or ``None`` (open lower bound).
 
-    Fail-open: missing / unparseable => ``None`` (valid since always). Not part
-    of the slice-1 inactive predicate (which keys on ``valid_until`` only), but
-    parsed for round-trip and future not-yet-valid handling.
+    Fail-open: missing / unparseable => ``None`` (valid since always). Parsed for
+    round-trip and for #324's disjoint-validity comparison
+    (:func:`validity_windows_disjoint`), but deliberately NOT part of the
+    ``is_inactive_memory`` active predicate — see that function for why the lower
+    bound stays ungated.
     """
     if not meta:
         return None
@@ -603,6 +607,15 @@ def is_inactive_memory(
     ``as_of`` defaults to today; the past-``valid_until`` disjunct filters
     expired claims by default. An absent or malformed ``valid_until`` is an open
     interval (fail-open — the claim stays active).
+
+    Note the predicate keys on the UPPER bound only. The lower bound
+    (``valid_from``) is intentionally NOT gated here: issue #324's
+    disjoint-validity detector short-circuit relies on a future-dated member
+    (``valid_from`` after today) remaining active so a sequential/disjoint pair
+    can form — a not-yet-valid claim is a recorded FUTURE state, not a hidden
+    one. Slice 3's ``as_of`` rewind therefore views history through the upper
+    bound and the #191 tombstones (both honored below), which is where the
+    supersession-as-interval value lives.
     """
     if not meta:
         return False
@@ -963,7 +976,8 @@ class AutoMemoryFile:
         Delegates the temporal check to the shared :func:`valid_until_expired`
         helper — fed the raw ``valid_until`` string — so the two predicates
         cannot drift. An absent/malformed ``valid_until`` is an open interval
-        (fail-open, stays active).
+        (fail-open, stays active). The lower bound (``valid_from``) is
+        intentionally not gated — see :func:`is_inactive_memory`.
         """
         if self.superseded_by or self.deprecated:
             return True

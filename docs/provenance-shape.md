@@ -501,7 +501,9 @@ source_ref: <session>:<turn>
 
 - A claim is valid over the window `[valid_from, valid_until]`. Both bounds are
   optional. `valid_until` is the **last date the claim was valid (inclusive)**;
-  a claim is inactive when `as_of > valid_until`.
+  a claim is inactive when `as_of > valid_until`. The **active predicate keys on
+  the upper bound only** — `valid_from` is parsed and round-tripped, and feeds
+  #324's disjoint-window comparison, but does NOT gate activeness (§8.3).
 - **Orthogonal to `source:`.** `source_type` / `source_ref` (#260) answer *where
   the claim came from* and *when it was ingested*; `valid_from` / `valid_until`
   answer *over what real-world window the claim is true*. This is the bi-temporal
@@ -542,9 +544,46 @@ lockstep:
 
 Because every live-knowledge read already routes through those predicates, the
 past-`valid_until` disjunct filters expired claims everywhere with no call-site
-changes. The `as_of` parameter is designed in now so slice 3's `--as-of DATE`
-view is plumbing, not a predicate rewrite — but the CLI flag is NOT built in
-slice 1.
+changes.
+
+**Upper bound only — `valid_from` stays ungated.** The active predicate keys on
+`valid_until`, NOT `valid_from`. Gating on the lower bound would hide a
+future-dated claim, which collides with §7.3 / #324: the disjoint-validity
+detector short-circuit relies on a member whose `valid_from` is after today
+staying **active** so a sequential (disjoint) pair can form — a not-yet-valid
+claim is a recorded FUTURE state, not a hidden one. Slice 3's as-of rewind
+therefore views history through the upper bound and the #191 tombstones, which is
+exactly where the supersession-as-interval value lives (the slice-2 resolver
+closes intervals by stamping `valid_until`).
+
+### 8.5 As-of view (slice 3)
+
+The `as_of` parameter — designed in at slice 1 — is now threaded out to an
+operator-facing **as-of view** that answers *"what did we believe on DATE?"*.
+It is **read-only**: no resolver decision, no wiki mutation. Two surfaces:
+
+- **`athenaeum recall <query> --as-of YYYY-MM-DD`.** Returns the wiki as it stood
+  on that date. Indexed backends (fts5/vector) filter at BUILD time, so recall
+  builds a **throwaway as-of index** under `<cache-dir>/_asof/<date>/` and queries
+  that — the live index is never touched. The `keyword` backend scans on query
+  and honors `as_of` directly. A final temporal backstop re-checks each hit's
+  fresh on-disk frontmatter against `as_of`, so the printed view is exact
+  regardless of backend build state.
+- **`athenaeum rebuild-index --as-of YYYY-MM-DD --cache-dir <scratch>`.** Builds a
+  persistent as-of index in a scratch dir (`search.build_index(..., as_of=...)` on
+  all backends; the `build_fts5_index` / `build_vector_index` convenience wrappers
+  accept an ISO string). Point `--cache-dir` at a scratch path so the live index
+  is not overwritten, then `recall --cache-dir <scratch>`.
+
+The as-of rewind operates through the **upper bound** (`valid_until`) and the
+#191 tombstones: a claim valid on DATE but expired now is **included** (its
+`valid_until` had not yet passed on DATE). Because `valid_from` is ungated
+(§8.3), a claim not yet valid on DATE is NOT excluded by this view — that is the
+deliberate cost of keeping #324's disjoint detector working, and the
+supersession-as-interval value (slice-2 `valid_until` closes) is unaffected. The
+MCP `recall` tool and the C3 *compile* view stay at today (default `as_of`) — a
+compile-as-of would write a historical view over the live wiki, so it is deferred
+to a later slice.
 
 ### 8.4 Resolver interval-close (slice 2)
 
