@@ -926,3 +926,53 @@ the read-side parsers (`models.parse_asserter`,
 | §8 claim-level temporal validity | #308 | Slice 1: `valid_from` / `valid_until` parse + round-trip; shared `valid_until_expired` helper; currently-valid-by-default filter. **Slice 2 (shipped): resolver interval-close (§8.4) — `enact_resolution` stamps the loser's `valid_until` on `keep_a`/`keep_b` and sequential-snapshot `not_a_conflict`, only-close-never-widen.** Slice 3 (`--as-of`) deferred. #329 generalizes the close to non-time scopes. |
 | §9 multi-dimensional scoped claims | #329 | Buildable subset: `scope: {org, locale}` poset (trees) + time, versioned tree config (`scope.org`/`scope.locale`), three-way `scope_comparison` verdict (DISJOINT / OVERRIDE / OVERLAP) wired into `resolutions._scope_verdict_proposal`, and `scope_a`/`scope_b` resolver actions (time-dimension narrowing enactment). **Deferred (ADR):** time-nesting OVERRIDE, org/locale coordinate pinning enactment, recall `serve --scope` filter, team/multi-tenant scope-identity (#314). |
 | §10 channel split + model + asserter | #326 | Extend `SOURCE_TYPES` with `agent-observed` and `model-prior`; add `model:` / `on_behalf_of:` / `asserter:` claim-level frontmatter fields; extend `remember(sources=...)` with `_source_type` / `_source_ref` / `_model` / `_on_behalf_of` / `_asserter` wrapper keys; drop `model-prior:<model-id>` into the resolver's precedence taxonomy below `script:`. |
+| §12 claim kind + opinion attribution | #327 | Add `claim_kind:` (`fact`/`observation`/`opinion`/`decision`/`policy`/`definition`) classified once at intake (`claim_kind.classify_claim_kind`, tier2-style), round-tripped by tier0; add `compare_asserters` (`same`/`different`/`unknown`) over the §10.3 identity key; add the `attribute_both` resolver action + `_stance_attribution_verdict` short-circuit + detector `stance` conflict type. An opinion is NEVER resolved by precedence; unknown asserter → keep-both fallback. |
+
+## 12. Claim kind + opinion attribution (`claim_kind:`, `attribute_both`)
+
+**Status: locked, implemented (issue #327).** Adds an EPISTEMIC classification
+orthogonal to `source_type`, and an asserter-comparison rule so evaluative
+claims are never resolved by source precedence.
+
+### 12.1 `claim_kind:` frontmatter field
+
+One of `fact | observation | opinion | decision | policy | definition`.
+Classified ONCE at intake by a cheap LLM pass (`claim_kind.classify_claim_kind`,
+same pattern / model knob as tier2 classification), stored in frontmatter, and
+round-tripped byte-for-byte by tier0 passthrough (§3). **Absent / unrecognized
+→ `""` (unclassified), fail-open** via `models.parse_claim_kind` — an
+unclassified claim keeps pre-#327 behavior. `claim_kind` classifies the SHAPE
+of the claim (is it evaluative?); `source_type` classifies its ORIGIN channel.
+The two are independent.
+
+### 12.2 Asserter comparison — `same` / `different` / `unknown`
+
+`models.compare_asserters(a, b)` reuses the §10.3 OIDC-durable
+`asserter_identity_key` and returns:
+
+- **`unknown`** when EITHER side yields an empty identity key. This is the
+  COMMON case — a Claude session carries no OIDC identity. Identity is
+  CAPTURED only when a caller/`remember()` supplies an `_asserter` block; it is
+  NEVER fabricated from a transcript.
+- **`same`** — both keys non-empty and equal (email change does not matter).
+- **`different`** — both keys non-empty and unequal.
+
+### 12.3 `attribute_both` resolver action + `stance` routing
+
+For an evaluative pair (both `claim_kind: opinion`, or detector
+`conflict_type: stance` with neither side an explicit non-opinion kind),
+`resolutions._stance_attribution_verdict` short-circuits WITHOUT an Opus call:
+
+- **different** asserters → `attribute_both` (keep both, explicit attribution).
+- **unknown** asserter on either side → **`attribute_both` (REQUIRED keep-both
+  fallback)** — never supersede or delete an opinion by precedence when
+  identity is missing.
+- **same** asserter + a distinguishing date → supersession (keep the newer);
+  undated → `attribute_both`.
+
+`attribute_both` is non-destructive: `enact_resolution` stamps
+`attributed: true` on BOTH members (both stay active; each keeps its own
+`asserter:` block). It is in `ENACTING_ACTIONS`, orientation-agnostic
+(`flip_action` → `None`), auto-apply threshold 0.90. `merge._emit_escalation`
+drops the pending-question escalation for `attribute_both`, so the pair never
+re-queues to the human. Full behavior lock: `docs/conflict-resolution.md` §13.

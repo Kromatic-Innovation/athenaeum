@@ -314,6 +314,90 @@ def asserter_identity_key(asserter: dict[str, object] | None) -> tuple[str, ...]
     return ()
 
 
+# --- Claim kind (issue #327) ---
+#
+# ``claim_kind`` classifies a claim by its EPISTEMIC shape, orthogonal to
+# ``source_type`` (which classifies its ORIGIN channel). Classified once at
+# intake by a cheap LLM pass (see :mod:`athenaeum.claim_kind`), stored in
+# frontmatter, and round-tripped byte-for-byte by tier0 passthrough. It routes
+# the resolver: an ``opinion`` pair is EVALUATIVE and must not be resolved by
+# source precedence — two people may hold different, both-valid opinions — so
+# the resolver keeps both with explicit attribution (``attribute_both``) rather
+# than picking a precedence winner. The other kinds keep today's behavior.
+#
+#   ``fact``        — a verifiable state of the world ("develop tip is SHA abc").
+#   ``observation`` — a first-hand report of something seen/measured.
+#   ``opinion``     — an evaluative stance / preference / judgment. EVALUATIVE:
+#                     different asserters may legitimately disagree.
+#   ``decision``    — a timestamped choice with audit value (a pivot, a
+#                     deprecation).
+#   ``policy``      — a durable prescriptive rule ("always merge green PRs").
+#   ``definition``  — a naming/terminology fixing ("X means Y").
+#
+# Absent / unrecognized => ``""`` (unclassified). Fail-open: an unclassified
+# claim behaves exactly as it did before #327 (the resolver's stance
+# short-circuit does not fire; the LLM path decides as before).
+CLAIM_KINDS: frozenset[str] = frozenset(
+    {"fact", "observation", "opinion", "decision", "policy", "definition"}
+)
+
+# The evaluative claim kind — exported so the resolver / detector can branch on
+# it without re-typing the literal. An ``opinion`` pair routes to
+# ``attribute_both`` rather than a precedence winner.
+OPINION_CLAIM_KIND = "opinion"
+
+
+def parse_claim_kind(meta: dict[str, object] | None) -> str:
+    """Return the frontmatter ``claim_kind:`` value, or ``""`` when absent/invalid.
+
+    Fail-open (issue #327): a missing key, a non-string value, or a value
+    outside :data:`CLAIM_KINDS` all resolve to ``""`` (unclassified) rather
+    than raising — an unrecognized claim_kind must never crash the compile,
+    and an unclassified claim keeps pre-#327 behavior. An out-of-vocabulary
+    non-empty value logs a breadcrumb (typo / stale schema); absent/empty
+    stays quiet (the ordinary legacy path).
+    """
+    if not meta:
+        return ""
+    raw = meta.get("claim_kind")
+    if raw is None or raw == "":
+        return ""
+    if isinstance(raw, str) and raw in CLAIM_KINDS:
+        return raw
+    log.debug(
+        "claim_kind: ignoring unrecognized value %r (not in %s); "
+        "treating as unclassified",
+        raw,
+        sorted(CLAIM_KINDS),
+    )
+    return ""
+
+
+def compare_asserters(
+    a: dict[str, object] | None,
+    b: dict[str, object] | None,
+) -> str:
+    """Compare two ``asserter:`` blocks → ``"same"`` / ``"different"`` / ``"unknown"``.
+
+    Issue #327. Uses :func:`asserter_identity_key` (the OIDC-durable
+    ``(iss, sub)`` / Entra ``(iss, "entra", tid, oid)`` key) so an email
+    change never re-classifies two claims as different asserters.
+
+    - ``"unknown"`` when EITHER side yields an empty identity key (no durable
+      identifier declared). This is the COMMON case for Claude-session
+      intake, which carries no OIDC identity. The resolver's opinion path
+      treats ``"unknown"`` as the keep-both fallback — it NEVER supersedes or
+      deletes an opinion by precedence when identity is missing (#327).
+    - ``"same"`` when both keys are non-empty and equal.
+    - ``"different"`` when both keys are non-empty and unequal.
+    """
+    key_a = asserter_identity_key(a)
+    key_b = asserter_identity_key(b)
+    if not key_a or not key_b:
+        return "unknown"
+    return "same" if key_a == key_b else "different"
+
+
 def slugify(name: str) -> str:
     """Convert a name to a filesystem-safe slug."""
     slug = name.lower().strip()
@@ -946,6 +1030,13 @@ class AutoMemoryFile:
     model: str = ""
     on_behalf_of: str = ""
     asserter: dict[str, object] = field(default_factory=dict)
+    # Issue #327: epistemic claim kind, classified once at intake by a cheap
+    # LLM pass (:mod:`athenaeum.claim_kind`). One of :data:`CLAIM_KINDS` or ""
+    # (unclassified). Routes the resolver's opinion-attribution short-circuit:
+    # an ``opinion`` pair keeps BOTH sides with explicit attribution rather
+    # than being resolved by source precedence. Empty by default so legacy /
+    # unclassified members round-trip unchanged and keep pre-#327 behavior.
+    claim_kind: str = ""
     # Issue #308 (slice 1): claim-level temporal validity. Both are the RAW
     # frontmatter string form (``YYYY-MM-DD`` or "" when absent) so the
     # dataclass predicate re-parses to the SAME date as the dict predicate

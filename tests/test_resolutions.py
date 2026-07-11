@@ -98,6 +98,159 @@ def _detected(
 
 
 # ---------------------------------------------------------------------------
+# Issue #327 — opinion attribution short-circuit
+# ---------------------------------------------------------------------------
+
+
+def _write_opinion_member(
+    scope_dir: Path,
+    filename: str,
+    body: str,
+    *,
+    claim_kind: str = "opinion",
+    asserter: dict | None = None,
+    valid_from: str | None = None,
+    origin_scope: str = "scope-x",
+) -> AutoMemoryFile:
+    """Write a raw member file and return the matching AutoMemoryFile record.
+
+    Mirrors the librarian loader: ``claim_kind`` / ``asserter`` / ``valid_from``
+    are set both in the on-disk frontmatter and on the returned record so the
+    resolver's deterministic stance guard (which reads the record attributes,
+    and the file for date ordering) sees a consistent view.
+    """
+    scope_dir.mkdir(parents=True, exist_ok=True)
+    path = scope_dir / filename
+    fm: list[str] = ["---", "name: probe", "type: feedback"]
+    if claim_kind:
+        fm.append(f"claim_kind: {claim_kind}")
+    if valid_from:
+        fm.append(f"valid_from: {valid_from}")
+    if asserter:
+        fm.append("asserter:")
+        for k, v in asserter.items():
+            fm.append(f"  {k}: {v}")
+    fm.append("---")
+    path.write_text("\n".join(fm) + "\n" + body + "\n", encoding="utf-8")
+    return AutoMemoryFile(
+        path=path,
+        origin_scope=origin_scope,
+        memory_type="feedback",
+        name="probe",
+        claim_kind=claim_kind,
+        asserter=dict(asserter) if asserter else {},
+        valid_from=valid_from or "",
+    )
+
+
+class TestOpinionAttribution:
+    """The deterministic opinion-attribution short-circuit (#327)."""
+
+    _ALICE = {"iss": "https://accounts.google.com", "sub": "alice-1", "name": "Alice"}
+    _BOB = {"iss": "https://accounts.google.com", "sub": "bob-2", "name": "Bob"}
+
+    def test_different_asserters_attribute_both(self, tmp_path: Path) -> None:
+        scope = tmp_path / "s"
+        a = _write_opinion_member(scope, "a.md", "Tabs win.", asserter=self._ALICE)
+        b = _write_opinion_member(scope, "b.md", "Spaces win.", asserter=self._BOB)
+        # client=None proves this is deterministic — no LLM needed.
+        prop = propose_resolution(
+            _detected([a, b], conflict_type="stance"), [a, b], None
+        )
+        assert prop.action == "attribute_both"
+        assert prop.recommended_winner == "neither"
+        assert prop.confidence == 1.0
+
+    def test_unknown_asserter_keeps_both_fallback(self, tmp_path: Path) -> None:
+        # The COMMON case: no OIDC identity on either side. MUST keep both —
+        # never supersede/delete an opinion by precedence when identity missing.
+        scope = tmp_path / "s"
+        a = _write_opinion_member(scope, "a.md", "Tabs win.")  # no asserter
+        b = _write_opinion_member(scope, "b.md", "Spaces win.")  # no asserter
+        prop = propose_resolution(
+            _detected([a, b], conflict_type="stance"), [a, b], None
+        )
+        assert prop.action == "attribute_both"
+        assert prop.recommended_winner == "neither"
+
+    def test_one_side_unknown_asserter_keeps_both(self, tmp_path: Path) -> None:
+        scope = tmp_path / "s"
+        a = _write_opinion_member(scope, "a.md", "Tabs win.", asserter=self._ALICE)
+        b = _write_opinion_member(scope, "b.md", "Spaces win.")  # unknown
+        prop = propose_resolution(_detected([a, b]), [a, b], None)
+        assert prop.action == "attribute_both"
+
+    def test_same_asserter_dated_supersedes_newer(self, tmp_path: Path) -> None:
+        scope = tmp_path / "s"
+        a = _write_opinion_member(
+            scope, "a.md", "Tabs win.", asserter=self._ALICE, valid_from="2026-01-01"
+        )
+        b = _write_opinion_member(
+            scope, "b.md", "Spaces win.", asserter=self._ALICE, valid_from="2026-06-01"
+        )
+        prop = propose_resolution(_detected([a, b]), [a, b], None)
+        # Same asserter changed their mind — keep the newer (b).
+        assert prop.action == "keep_b"
+        assert prop.recommended_winner == "b"
+
+    def test_same_asserter_undated_keeps_both(self, tmp_path: Path) -> None:
+        scope = tmp_path / "s"
+        a = _write_opinion_member(scope, "a.md", "Tabs win.", asserter=self._ALICE)
+        b = _write_opinion_member(scope, "b.md", "Spaces win.", asserter=self._ALICE)
+        prop = propose_resolution(_detected([a, b]), [a, b], None)
+        # No distinguishing date → cannot order → keep both rather than guess.
+        assert prop.action == "attribute_both"
+
+    def test_explicit_non_opinion_kind_blocks_attribution(self, tmp_path: Path) -> None:
+        # One side explicitly a FACT → not an opinion pair. Guard must NOT fire;
+        # with client=None this falls through to the deterministic fallback.
+        scope = tmp_path / "s"
+        a = _write_opinion_member(
+            scope, "a.md", "The tip is abc.", claim_kind="fact", asserter=self._ALICE
+        )
+        b = _write_opinion_member(scope, "b.md", "Spaces win.", asserter=self._BOB)
+        prop = propose_resolution(
+            _detected([a, b], conflict_type="stance"), [a, b], None
+        )
+        assert prop.action == "retain_both_with_context"
+
+    def test_unclassified_non_stance_does_not_fire(self, tmp_path: Path) -> None:
+        # Fail-open: no claim_kind AND a plain factual detector verdict → the
+        # guard does not engage (pre-#327 behavior), falling to the fallback.
+        scope = tmp_path / "s"
+        a = _write_opinion_member(scope, "a.md", "x", claim_kind="")
+        b = _write_opinion_member(scope, "b.md", "y", claim_kind="")
+        prop = propose_resolution(
+            _detected([a, b], conflict_type="factual"), [a, b], None
+        )
+        assert prop.action == "retain_both_with_context"
+
+    def test_both_opinion_fires_even_without_stance_routing(
+        self, tmp_path: Path
+    ) -> None:
+        # claim_kind opinion on both sides is sufficient even if the cheap
+        # detector labeled it factual/prescriptive.
+        scope = tmp_path / "s"
+        a = _write_opinion_member(scope, "a.md", "Tabs.", asserter=self._ALICE)
+        b = _write_opinion_member(scope, "b.md", "Spaces.", asserter=self._BOB)
+        prop = propose_resolution(
+            _detected([a, b], conflict_type="prescriptive"), [a, b], None
+        )
+        assert prop.action == "attribute_both"
+
+    def test_deterministic_idempotent_never_requeues(self, tmp_path: Path) -> None:
+        # Re-running the resolver on the same pair yields the SAME verdict with
+        # no LLM call — the "never re-queue" property at the resolver level.
+        scope = tmp_path / "s"
+        a = _write_opinion_member(scope, "a.md", "Tabs.", asserter=self._ALICE)
+        b = _write_opinion_member(scope, "b.md", "Spaces.", asserter=self._BOB)
+        det = _detected([a, b], conflict_type="stance")
+        first = propose_resolution(det, [a, b], None)
+        second = propose_resolution(det, [a, b], None)
+        assert first.action == second.action == "attribute_both"
+
+
+# ---------------------------------------------------------------------------
 # Worked example
 # ---------------------------------------------------------------------------
 

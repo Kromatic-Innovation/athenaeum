@@ -17,6 +17,7 @@ from athenaeum.models import (
     WikiEntity,
     asserter_identity_key,
     coerce_source_type,
+    compare_asserters,
     generate_uid,
     is_inactive_memory,
     load_schema_list,
@@ -973,3 +974,48 @@ class TestAutoMemoryFileChannelSplitDefaults:
         assert am.model == "claude-opus-4-7"
         assert am.on_behalf_of == "alice"
         assert asserter_identity_key(am.asserter) == ("local", "alice")
+
+
+# ---------------------------------------------------------------------------
+# Issue #327 — asserter comparison helper (same / different / unknown)
+# ---------------------------------------------------------------------------
+
+
+class TestCompareAsserters:
+    _ALICE = {"iss": "https://accounts.google.com", "sub": "alice-1", "name": "Alice"}
+    _ALICE_NEW_EMAIL = {
+        "iss": "https://accounts.google.com",
+        "sub": "alice-1",
+        "email": "alice@new.example",
+    }
+    _BOB = {"iss": "https://accounts.google.com", "sub": "bob-2", "name": "Bob"}
+
+    def test_same_identity_key(self) -> None:
+        # Same (iss, sub) → "same" even though email/name differ (email is
+        # never part of the key).
+        assert compare_asserters(self._ALICE, self._ALICE_NEW_EMAIL) == "same"
+
+    def test_different_identity_keys(self) -> None:
+        assert compare_asserters(self._ALICE, self._BOB) == "different"
+
+    def test_missing_identity_is_unknown(self) -> None:
+        # Either side with no durable key → "unknown" (the common
+        # Claude-session case — no OIDC identity).
+        assert compare_asserters(self._ALICE, {}) == "unknown"
+        assert compare_asserters(None, self._BOB) == "unknown"
+        assert compare_asserters({}, {}) == "unknown"
+        # An asserter with only a display name (no iss/sub) has no key.
+        assert compare_asserters(self._ALICE, {"name": "Carol"}) == "unknown"
+
+    def test_entra_pairwise_sub_keyed_on_oid(self) -> None:
+        entra = {
+            "iss": "https://login.microsoftonline.com/t/v2.0",
+            "sub": "app-scoped-1",
+            "provider_ids": {"entra_tid": "tid-9", "entra_oid": "oid-9"},
+        }
+        entra_other_app = {
+            "iss": "https://login.microsoftonline.com/t/v2.0",
+            "sub": "app-scoped-2",  # different pairwise sub, same person
+            "provider_ids": {"entra_tid": "tid-9", "entra_oid": "oid-9"},
+        }
+        assert compare_asserters(entra, entra_other_app) == "same"

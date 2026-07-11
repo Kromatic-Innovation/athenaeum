@@ -2751,3 +2751,126 @@ class TestClusterCohesionFloor:
         # centroid == floor materializes (inclusive-keep); centroid < floor cut.
         assert "edge-at" in cluster_ids
         assert "edge-below" not in cluster_ids
+
+
+# ---------------------------------------------------------------------------
+# Issue #327 — opinion pair kept-both-with-attribution (never re-queues)
+# ---------------------------------------------------------------------------
+
+
+def _write_opinion_am_file(
+    scope_dir: Path,
+    filename: str,
+    *,
+    name: str,
+    body: str,
+    asserter: dict[str, str] | None = None,
+) -> Path:
+    """Write an auto-memory file with claim_kind: opinion + optional asserter."""
+    scope_dir.mkdir(parents=True, exist_ok=True)
+    path = scope_dir / filename
+    lines = ["---", f"name: {name}", "type: feedback", "claim_kind: opinion"]
+    if asserter:
+        lines.append("asserter:")
+        for k, v in asserter.items():
+            lines.append(f"  {k}: {v}")
+    lines.append("---")
+    path.write_text("\n".join(lines) + "\n" + body + "\n", encoding="utf-8")
+    return path
+
+
+class TestOpinionAttributionMerge:
+    """End-to-end: an evaluative pair keeps both members and never re-queues."""
+
+    def _opinion_root(self, tmp_path: Path, *, asserters: bool) -> Path:
+        knowledge_root = tmp_path / "knowledge"
+        scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        a_ass = {"iss": "https://accounts.google.com", "sub": "alice-1"}
+        b_ass = {"iss": "https://accounts.google.com", "sub": "bob-2"}
+        _write_opinion_am_file(
+            scope,
+            "feedback_tabs_opinion.md",
+            name="Tabs opinion",
+            body="Tabs are better than spaces for indentation.",
+            asserter=a_ass if asserters else None,
+        )
+        _write_opinion_am_file(
+            scope,
+            "feedback_spaces_opinion.md",
+            name="Spaces opinion",
+            body="Spaces are better than tabs for indentation.",
+            asserter=b_ass if asserters else None,
+        )
+        _write_cluster_jsonl(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "op-0001",
+                    "member_paths": [
+                        "-Users-tristankromer-Code/feedback_tabs_opinion.md",
+                        "-Users-tristankromer-Code/feedback_spaces_opinion.md",
+                    ],
+                    "centroid_score": 0.62,
+                    "rationale": "cosine >= 0.55; shares tokens: tabs, spaces",
+                },
+            ],
+        )
+        _write_config(knowledge_root)
+        return knowledge_root
+
+    def _stance_detector_client(self) -> "object":
+        from unittest.mock import MagicMock
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "stance", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_tabs_opinion.md", '
+            '"-Users-tristankromer-Code/feedback_spaces_opinion.md"], '
+            '"conflicting_passages": ['
+            '"Tabs are better than spaces for indentation.", '
+            '"Spaces are better than tabs for indentation."], '
+            '"rationale": "Opposing evaluative preferences."}'
+        )
+        client = MagicMock()
+        resp = MagicMock()
+        resp.content = [MagicMock(text=detector_payload)]
+        # Only the detector should be called — the resolver short-circuits
+        # deterministically on the opinion pair (no second call).
+        client.messages.create.return_value = resp
+        return client
+
+    def test_different_asserters_keep_both_no_pending_question(
+        self, tmp_path: Path
+    ) -> None:
+        root = self._opinion_root(tmp_path, asserters=True)
+        client = self._stance_detector_client()
+        entries = merge_clusters_to_wiki(root, client=client)
+        assert len(entries) == 1
+        # Not a live contradiction — entry is not flagged.
+        assert entries[0].contradictions_detected is False
+
+        wiki = root / "wiki"
+        # Never re-queues: no human-facing pending question.
+        assert not (wiki / "_pending_questions.md").exists()
+
+        # Both members stay active on disk, each stamped attributed: true.
+        scope = root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        for fname in ("feedback_tabs_opinion.md", "feedback_spaces_opinion.md"):
+            path = scope / fname
+            assert path.exists()
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+            assert meta.get("attributed") is True
+            assert "superseded_by" not in meta
+            assert "deprecated" not in meta
+
+    def test_unknown_asserter_fallback_keeps_both(self, tmp_path: Path) -> None:
+        # The common case: no OIDC identity. Fallback still keeps both and
+        # never re-queues.
+        root = self._opinion_root(tmp_path, asserters=False)
+        client = self._stance_detector_client()
+        entries = merge_clusters_to_wiki(root, client=client)
+        assert entries[0].contradictions_detected is False
+        assert not (root / "wiki" / "_pending_questions.md").exists()
+        scope = root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        for fname in ("feedback_tabs_opinion.md", "feedback_spaces_opinion.md"):
+            assert (scope / fname).exists()

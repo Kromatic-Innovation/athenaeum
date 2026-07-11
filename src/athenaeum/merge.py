@@ -98,10 +98,12 @@ from athenaeum.models import (
 )
 from athenaeum.pending_merges import write_pending_merge
 from athenaeum.resolutions import (
+    ATTRIBUTE_BOTH_ACTION,
     PROPOSE_MERGE_ACTION,
     SUPPRESS_ACTION,
     MergeProposal,
     ResolutionProposal,
+    enact_resolution,
     propose_resolution,
     render_proposal_block,
     resolve_max_per_run,
@@ -1466,6 +1468,25 @@ def merge_clusters_to_wiki(
                 entry.cluster_id,
             )
             return
+        # Opinion-attribution verdict (#327): BOTH sides are evaluative
+        # opinions kept-both-with-attribution. Like the suppress/refines
+        # short-circuit, this is NOT a human-facing conflict — both stay
+        # active, each attributed to its asserter — so ENACT the non-
+        # destructive attribution stamp and DROP the pending-question
+        # escalation. The pair never re-queues to the human; a re-detected
+        # opinion pair hits the deterministic stance short-circuit again next
+        # run (cheap, no Opus call) and is dropped identically.
+        if proposal is not None and proposal.action == ATTRIBUTE_BOTH_ACTION:
+            member_paths = _order_member_paths(result, members)
+            if member_paths:
+                enact_resolution(proposal, member_paths)
+            log.info(
+                "contradictions: opinion pair kept-both-with-attribution for "
+                "cluster %s (resolver verdict attribute_both); escalation "
+                "dropped, both members stay active",
+                entry.cluster_id,
+            )
+            return
         # Mutating single-side verdicts (#166 follow-up): correct_a /
         # correct_b (the losing side was WRONG — remove its claim) and
         # forget_a / forget_b (one side is transient — delete it cleanly).
@@ -1683,6 +1704,12 @@ def merge_clusters_to_wiki(
                     suppressed = True
                 elif proposal is not None and proposal.action == PROPOSE_MERGE_ACTION:
                     # Lane 3: routed to _pending_merges.md, not a contradiction.
+                    suppressed = True
+                elif proposal is not None and proposal.action == ATTRIBUTE_BOTH_ACTION:
+                    # Issue #327: an opinion pair kept-both-with-attribution is
+                    # not a live contradiction — leave `aggregate` unset so the
+                    # wiki entry is not tagged contradiction-flagged (the
+                    # escalation is dropped in _emit_escalation).
                     suppressed = True
                 else:
                     aggregate = result

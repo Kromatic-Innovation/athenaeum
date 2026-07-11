@@ -409,6 +409,67 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 
 ---
 
+## 13. Opinion attribution — evaluative claims are never resolved by precedence (issue #327)
+
+- **Files:** `src/athenaeum/models.py` (`CLAIM_KINDS`, `parse_claim_kind`,
+  `compare_asserters`, `AutoMemoryFile.claim_kind`); `src/athenaeum/claim_kind.py`
+  (intake-time classifier `classify_claim_kind` / `stamp_claim_kind`);
+  `src/athenaeum/resolutions.py` (`_stance_attribution_verdict` short-circuit,
+  `attribute_both` action, `enact_resolution` attribution stamp);
+  `src/athenaeum/contradictions.py` (`stance` conflict type);
+  `src/athenaeum/merge.py` (`_emit_escalation` attribute_both drop path).
+- **Companion tests:** `tests/test_claim_kind.py` (classify + tier0 round-trip +
+  fail-open), `tests/test_models.py::TestCompareAsserters`,
+  `tests/test_resolutions.py::TestOpinionAttribution`,
+  `tests/test_conflict_resolution.py::TestOpinionAttributionLock`,
+  `tests/test_librarian_merge.py::TestOpinionAttributionMerge`, plus the
+  `ENACTING_ACTIONS` lock in `tests/test_enact_resolution.py`.
+- **`claim_kind` (epistemic shape).** Orthogonal to `source_type` (origin
+  channel). One of `fact | observation | opinion | decision | policy |
+  definition`, classified ONCE at intake by a cheap LLM pass (tier2-style,
+  routed through the `models.classify` knob), stored in frontmatter, and
+  round-tripped byte-for-byte by tier0 passthrough. **Absent → unclassified
+  (`""`), fail-open** — the stance short-circuit does not fire and the pair
+  resolves exactly as pre-#327.
+- **Asserter comparison.** `compare_asserters(a, b)` reuses the OIDC-durable
+  `asserter_identity_key` (§10 of `provenance-shape.md`) and returns
+  **`same` / `different` / `unknown`**. `unknown` when EITHER side has no
+  durable identity — the common case, since a Claude session carries no OIDC
+  identity. Identity is CAPTURED when a caller/`remember()` supplies an
+  `_asserter` block (issue #326); it is NEVER fabricated from a transcript.
+- **`_stance_attribution_verdict` short-circuit** (deterministic, **no Opus
+  call**). Engages when BOTH sides carry `claim_kind: opinion`, OR the detector
+  routed the pair as `conflict_type: stance` AND neither side is EXPLICITLY a
+  non-opinion kind. Then, by asserter comparison:
+  - **different** (both known, distinct) → `attribute_both`, confidence 1.0.
+    Both stay active with explicit attribution.
+  - **unknown** (missing identity on either side) → `attribute_both`,
+    confidence 1.0. **REQUIRED fallback** — an opinion is NEVER superseded or
+    deleted by precedence when identity is missing.
+  - **same** + a distinguishing date → supersession (`keep_a`/`keep_b`, keep the
+    newer), as with any dated same-author update.
+  - **same** + undated → `attribute_both` (cannot order; keep both).
+  If EITHER side is explicitly `fact`/`decision`/`policy`/`observation`/
+  `definition`, the guard returns `None` and the normal precedence path runs —
+  an opinion-vs-fact pair is not an attribution case.
+- **Wiring.** `propose_resolution` calls `_stance_attribution_verdict` right
+  after the declared-relationship check (an explicit `supersedes` still wins)
+  and before the LLM path. `merge._emit_escalation` treats `attribute_both`
+  like the suppress/refines short-circuit: it enacts the non-destructive
+  attribution stamp and **drops** the pending-question escalation, so the pair
+  **never re-queues** to the human. Both members stay **active** (no
+  `superseded_by`/`deprecated`; each keeps its own `asserter:` block). A
+  re-detected pair hits the deterministic guard again next run (cheap, no Opus
+  call) and is dropped identically.
+- **`attribute_both` action.** Added to `ENACTING_ACTIONS`; enactment stamps
+  `attributed: true` on BOTH members (non-destructive — nothing deleted or
+  retired). Orientation-AGNOSTIC (symmetric), so `flip_action` returns `None`
+  (applied unchanged, like `deprecate_both`). Auto-apply threshold 0.90 (the
+  deterministic guard emits confidence 1.0; the threshold matters only for an
+  LLM-returned `attribute_both`).
+
+---
+
 ## Comparison matrix — who wins on each field type
 
 | Resolver | Scalar (truthy/either) | Scalar (always) | List | Numeric | Date | Body | Provenance (`field_sources`) |
