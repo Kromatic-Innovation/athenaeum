@@ -20,10 +20,19 @@
 # The body text is where sequential-snapshot / supersession signal must
 # live so the resolver has to reason about it.
 
+# TAXONOMY DECISION (issue #345, WS1 ground-truth audit): a general
+# PREFERENCE rule + a narrower explicit exception is a canonical
+# `propose_merge` pair, NOT `not_a_conflict`. The resolver system prompt's
+# propose_merge section names the near-identical "subl for code, Numbers for
+# CSVs" pattern explicitly, and the not_a_conflict refinement bullet says such
+# a pair "Often this should ALSO become a propose_merge". Both members are
+# `type: feedback` doc-tooling preferences, so consolidating them into one
+# canonical memory is the intended outcome. The prior `not_a_conflict`
+# expectation was the mislabel; the resolver was right (reproduced 4/4 live).
 - id: refinement_editor_general_and_csv
-  outcome_class: pass
+  outcome_class: merge
   expected:
-    action_class: not_a_conflict
+    action_class: propose_merge
   detector:
     conflict_type: prescriptive
     rationale: "Both prescribe a docs tool for Meridian consulting projects."
@@ -78,21 +87,31 @@
         source_ref: "session-2026-01-08"
         updated: "2026-01-08"
 
-- id: dated_supersession_hosting
+# DECISION conflict (NOT a text-declared supersession, NOT dated FACT
+# snapshots). The two members disagree about which platform hosts the
+# portal; the newer member records a migration DECISION but does NOT say
+# "Heroku is retired/superseded/cancelled" — so the resolver must PICK the
+# winner by recency/decision precedence (→ keep_b) rather than reading a
+# resolution already declared in the text. Authoring rule (issue #345): a
+# body that says "X is retired" fires the not_a_conflict "supersession
+# declared in the text" rule, and "as of <date>, X" framing fires the
+# sequential-snapshot FACT rule — both defensibly yield not_a_conflict.
+# Neither is the intended keep_pick_winner outcome, so both are avoided here.
+- id: decision_conflict_hosting_migration
   outcome_class: contradict
   expected:
     action_class: keep_pick_winner
   detector:
-    conflict_type: factual
-    rationale: "Two claims about Meridian's client-portal hosting provider."
+    conflict_type: prescriptive
+    rationale: "Conflicting claims about which platform hosts Meridian's client portal."
     passages:
-      - "As of 2026-02, Meridian's client portal is hosted on Heroku."
-      - "As of 2026-05, Meridian's client portal moved to Fly.io — Heroku is retired."
+      - "Meridian's client portal runs on Heroku."
+      - "Meridian migrated the client portal to Fly.io."
   members:
     - filename: project_hosting_heroku.md
       body: >-
-        As of 2026-02, Meridian's client portal is hosted on Heroku. Owner Priya
-        signed the invoice on 2026-02-10.
+        Meridian's client portal runs on Heroku. Priya approved the Heroku
+        hosting plan and signed the invoice on 2026-02-10.
       frontmatter:
         name: hosting-heroku
         type: project
@@ -101,9 +120,8 @@
         updated: "2026-02-10"
     - filename: project_hosting_fly.md
       body: >-
-        As of 2026-05, Meridian's client portal moved to Fly.io — Heroku is
-        retired. This is a decision, not a rollback plan; the Heroku account
-        was cancelled 2026-05-20.
+        Meridian migrated the client portal to Fly.io. The engineering team
+        completed the cutover on 2026-05-20 for better regional latency.
       frontmatter:
         name: hosting-fly
         type: project
@@ -158,3 +176,103 @@
         name: budget-approver-amir
         type: reference
         source_type: inferred
+
+# --- Cases added in issue #345 (WS3) to give the floor >= 2-case slack ---
+# Enlarges the set from 5 -> 8 so no single hard case sinks the whole layer.
+# Two cases per action class (not_a_conflict, keep_pick_winner,
+# disambiguation, propose_merge). Still 100% synthetic Meridian Advisory.
+
+# not_a_conflict via the sequential-snapshot FACT rule (two dated snapshots
+# of an evolving headcount — NOT a conflict; the older is simply stale).
+- id: sequential_snapshot_headcount
+  outcome_class: pass
+  expected:
+    action_class: not_a_conflict
+  detector:
+    conflict_type: factual
+    rationale: "Two dated snapshots of Meridian's headcount."
+    passages:
+      - "As of 2026-01, Meridian has 18 staff."
+      - "As of 2026-06, Meridian has 27 staff."
+  members:
+    - filename: reference_headcount_jan.md
+      body: "As of 2026-01, Meridian has 18 staff across two offices."
+      frontmatter:
+        name: headcount-jan
+        type: reference
+        source_type: user-stated
+        source_ref: "session-2026-01-15"
+        updated: "2026-01-15"
+    - filename: reference_headcount_jun.md
+      body: "As of 2026-06, Meridian has 27 staff across three offices."
+      frontmatter:
+        name: headcount-jun
+        type: reference
+        source_type: user-stated
+        source_ref: "session-2026-06-15"
+        updated: "2026-06-15"
+
+# keep_pick_winner via SOURCE PRECEDENCE (not recency). Two mutually-exclusive
+# claims about the same attribute where ONE side is user-stated and the other
+# is an unsourced inference — precedence decides (user > unsourced), so the
+# resolver picks the winner rather than escalating a disambiguation question.
+- id: precedence_user_over_unsourced_contact
+  outcome_class: contradict
+  expected:
+    action_class: keep_pick_winner
+  detector:
+    conflict_type: factual
+    rationale: "Two claims about Northwind's primary contact; one user-stated, one inferred."
+    passages:
+      - "The primary contact at client Northwind is Sam Reyes."
+      - "The primary contact at client Northwind is Dana Okoro."
+  members:
+    - filename: reference_contact_inferred.md
+      body: "The primary contact at client Northwind is Sam Reyes."
+      frontmatter:
+        name: northwind-contact-inferred
+        type: reference
+        source_type: inferred
+    - filename: reference_contact_user.md
+      body: >-
+        The primary contact at client Northwind is Dana Okoro — Priya confirmed
+        this directly in the 2026-05 account review.
+      frontmatter:
+        name: northwind-contact-user
+        type: reference
+        source_type: user-stated
+        source: "user:session-2026-05-12"
+        source_ref: "session-2026-05-12"
+        updated: "2026-05-12"
+
+# propose_merge via a second general+exception PREFERENCE pair (distinct domain
+# from the docs-tool case so the set covers the shape without duplicating it).
+- id: propose_merge_ticketing_general_and_exception
+  outcome_class: merge
+  expected:
+    action_class: propose_merge
+  detector:
+    conflict_type: prescriptive
+    rationale: "Both prescribe where Meridian tracks work items."
+    passages:
+      - "The team tracks all engineering work in Linear."
+      - "Support-desk bug reports are logged in Zendesk, not Linear."
+  members:
+    - filename: feedback_tickets_linear.md
+      body: "The team tracks all engineering work in Linear."
+      frontmatter:
+        name: tickets-linear
+        type: feedback
+        source_type: user-stated
+        source_ref: "session-2026-03-02"
+        updated: "2026-03-02"
+    - filename: feedback_tickets_zendesk_exception.md
+      body: >-
+        Support-desk bug reports are logged in Zendesk, not Linear — this is the
+        support-intake exception to the general Linear-for-engineering rule.
+      frontmatter:
+        name: tickets-zendesk-exception
+        type: feedback
+        source_type: user-stated
+        source_ref: "session-2026-03-06"
+        updated: "2026-03-06"
