@@ -20,11 +20,14 @@ __version__ = "0.13.13"
 from athenaeum.init import init_knowledge_dir
 from athenaeum.librarian import (
     IngestResult,
+    SessionEndResult,
     discover_raw_files,
     ingest,
     process_one,
     rebuild_index,
+    reindex,
     run,
+    session_end,
 )
 from athenaeum.models import (
     ClassifiedEntity,
@@ -48,6 +51,7 @@ __all__ = [
     "IngestResult",
     "ProcessingResult",
     "RawFile",
+    "SessionEndResult",
     "WikiEntity",
     "discover_raw_files",
     "generate_uid",
@@ -56,7 +60,9 @@ __all__ = [
     "parse_frontmatter",
     "process_one",
     "rebuild_index",
+    "reindex",
     "render_frontmatter",
     "run",
+    "session_end",
     "slugify",
 ]
