@@ -629,6 +629,17 @@ def _parse_one_source(raw: Any, fallback_scope: str) -> dict[str, Any] | None:
         verdict = raw.get("verdict")
         if verdict is not None and str(verdict).strip():
             entry["verdict"] = str(verdict)
+        # Issue #308 (slice 4): carry per-claim temporal validity through the
+        # compiled source record so a claim's window round-trips byte-for-byte
+        # through a render + reparse (same contract as claim/verdict above).
+        # Bounds are normalized to ``YYYY-MM-DD`` via ``validity_bound_str``;
+        # an unparseable value coerces to ``""`` (dropped — open bound).
+        vf = validity_bound_str(raw, "valid_from")
+        if vf:
+            entry["valid_from"] = vf
+        vu = validity_bound_str(raw, "valid_until")
+        if vu:
+            entry["valid_until"] = vu
         return entry
     if isinstance(raw, str):
         return {
@@ -669,6 +680,49 @@ def _am_as_implicit_source(am: AutoMemoryFile) -> dict[str, Any] | None:
     return entry
 
 
+def _stamp_member_validity(src: dict[str, Any], am: AutoMemoryFile) -> None:
+    """Stamp a member's temporal validity window onto its compiled source (#308 slice 4).
+
+    Per-claim (vs per-page) compiled validity: each raw member IS one claim,
+    and its ``valid_from`` / ``valid_until`` window travels WITH the claim into
+    the compiled entry's per-source record — rather than the whole compiled
+    page being a single valid/invalid unit. All sources a member cites share
+    the member's window (the window belongs to the claim, applied to each of
+    its citations).
+
+    Only-fill-never-override: a bound the source ALREADY declares (a future
+    explicit per-source window) is left untouched; the member value fills only
+    an absent bound. ``am.valid_from`` / ``am.valid_until`` are already the
+    normalized ``YYYY-MM-DD`` strings (``validity_bound_str`` at construction),
+    ``""`` for an open/malformed bound — which is skipped, adding no key.
+    """
+    if am.valid_from and not src.get("valid_from"):
+        src["valid_from"] = am.valid_from
+    if am.valid_until and not src.get("valid_until"):
+        src["valid_until"] = am.valid_until
+
+
+def _validity_window_phrase(src: dict[str, Any]) -> str:
+    """Human-readable validity window for a compiled source, or ``""`` (#308 slice 4).
+
+    Renders the per-claim window carried on the source dict:
+
+    - both bounds  => ``"2026-04-01 to 2026-12-31"``
+    - lower only   => ``"from 2026-04-01"``
+    - upper only   => ``"until 2026-12-31"``
+    - neither      => ``""`` (open interval — the footnote omits the clause)
+    """
+    vf = str(src.get("valid_from") or "").strip()
+    vu = str(src.get("valid_until") or "").strip()
+    if vf and vu:
+        return f"{vf} to {vu}"
+    if vf:
+        return f"from {vf}"
+    if vu:
+        return f"until {vu}"
+    return ""
+
+
 def dedupe_sources(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Dedupe on ``(session, turn)``. First occurrence wins.
 
@@ -683,6 +737,11 @@ def dedupe_sources(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     (session, turn) with *different* provenance collapse to the FIRST one
     (input order). Callers that want the verified provenance to win must
     order the verified entry first before deduping.
+
+    This first-wins rule extends to the #308-slice-4 ``valid_from`` /
+    ``valid_until`` window: two citations of the same (session, turn) keep the
+    first entry's window. In practice both come from the same raw member and
+    carry the same window, so the collapse is loss-free.
     """
     seen: set[tuple[str, Any]] = set()
     out: list[dict[str, Any]] = []
@@ -934,10 +993,14 @@ def merge_cluster_row(
             for s in sources_raw:
                 parsed = _parse_one_source(s, am.origin_scope)
                 if parsed is not None:
+                    # Issue #308 (slice 4): the member's temporal validity window
+                    # travels with each claim it cites into the compiled entry.
+                    _stamp_member_validity(parsed, am)
                     raw_sources.append(parsed)
         else:
             implicit = _am_as_implicit_source(am)
             if implicit is not None:
+                _stamp_member_validity(implicit, am)
                 raw_sources.append(implicit)
 
     deduped = dedupe_sources(raw_sources)
@@ -1023,6 +1086,11 @@ def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
     contradiction engine now compares new memories against THIS, not the
     retired raw atom. Both are optional; pre-slice-C sources render exactly
     as before.
+
+    Issue #308 (slice 4): when a source carries a per-claim temporal validity
+    window (``valid_from`` / ``valid_until``, stamped from the contributing
+    member), a ``— **Valid:** <window>`` clause is appended. Optional — a
+    source with no window (open interval) renders exactly as before.
     """
     lines: list[str] = []
     for i, src in enumerate(sources, 1):
@@ -1043,6 +1111,11 @@ def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
         verdict = src.get("verdict")
         if verdict is not None and str(verdict).strip():
             text += f" — **Verdict:** {str(verdict).strip()}"
+        # Issue #308 (slice 4): per-claim compiled validity window. Optional —
+        # a source with no window (open interval) renders exactly as before.
+        window = _validity_window_phrase(src)
+        if window:
+            text += f" — **Valid:** {window}"
         lines.append(f"[^src-{i}]: {text}")
     if not lines:
         return ""

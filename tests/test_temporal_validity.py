@@ -616,3 +616,256 @@ class TestBoundRoundTrip:
         assert am.valid_until == "2026-06-30"
         for as_of in (date(2026, 4, 1), date(2026, 6, 1), date(2026, 8, 1)):
             assert am.is_inactive(as_of=as_of) == is_inactive_memory(meta, as_of=as_of)
+
+
+# ---------------------------------------------------------------------------
+# Slice 4 — per-claim (vs per-page) compiled validity
+# ---------------------------------------------------------------------------
+
+
+def _write_member(
+    scope_dir: Path,
+    filename: str,
+    *,
+    session: str,
+    turn: int,
+    body: str,
+    valid_from: str = "",
+    valid_until: str = "",
+) -> Path:
+    """Write a raw auto-memory member with sources[] + optional validity bounds."""
+    scope_dir.mkdir(parents=True, exist_ok=True)
+    path = scope_dir / filename
+    lines = [
+        "---",
+        "name: deploy-target",
+        "type: project",
+        f"originSessionId: {session}",
+        f"originTurn: {turn}",
+    ]
+    if valid_from:
+        lines.append(f"valid_from: {valid_from}")
+    if valid_until:
+        lines.append(f"valid_until: {valid_until}")
+    lines += [
+        "sources:",
+        f"  - session: {session}",
+        f"    turn: {turn}",
+        "---",
+        body,
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+class TestPerClaimCompiledValiditySlice4:
+    """Issue #308 slice 4 — a claim's validity window travels into the compiled entry."""
+
+    # -- _stamp_member_validity: only-fill-never-override -------------------
+
+    def test_stamp_fills_absent_bounds_from_member(self) -> None:
+        from athenaeum.merge import _stamp_member_validity
+
+        src: dict[str, object] = {"session": "s", "turn": 1}
+        am = _am(valid_from="2026-04-01", valid_until="2026-06-30")
+        _stamp_member_validity(src, am)
+        assert src["valid_from"] == "2026-04-01"
+        assert src["valid_until"] == "2026-06-30"
+
+    def test_stamp_does_not_override_explicit_source_bound(self) -> None:
+        from athenaeum.merge import _stamp_member_validity
+
+        src: dict[str, object] = {"valid_from": "2025-01-01"}
+        am = _am(valid_from="2026-04-01", valid_until="2026-06-30")
+        _stamp_member_validity(src, am)
+        # Explicit source lower bound preserved; only the absent upper is filled.
+        assert src["valid_from"] == "2025-01-01"
+        assert src["valid_until"] == "2026-06-30"
+
+    def test_stamp_open_member_adds_no_key(self) -> None:
+        from athenaeum.merge import _stamp_member_validity
+
+        src: dict[str, object] = {"session": "s"}
+        _stamp_member_validity(src, _am())  # no bounds
+        assert "valid_from" not in src
+        assert "valid_until" not in src
+
+    # -- _validity_window_phrase -------------------------------------------
+
+    def test_window_phrase_both_bounds(self) -> None:
+        from athenaeum.merge import _validity_window_phrase
+
+        phrase = _validity_window_phrase(
+            {"valid_from": "2026-04-01", "valid_until": "2026-06-30"}
+        )
+        assert phrase == "2026-04-01 to 2026-06-30"
+
+    def test_window_phrase_lower_only(self) -> None:
+        from athenaeum.merge import _validity_window_phrase
+
+        assert (
+            _validity_window_phrase({"valid_from": "2026-04-01"}) == "from 2026-04-01"
+        )
+
+    def test_window_phrase_upper_only(self) -> None:
+        from athenaeum.merge import _validity_window_phrase
+
+        assert (
+            _validity_window_phrase({"valid_until": "2026-06-30"}) == "until 2026-06-30"
+        )
+
+    def test_window_phrase_open_is_empty(self) -> None:
+        from athenaeum.merge import _validity_window_phrase
+
+        assert _validity_window_phrase({"session": "s"}) == ""
+
+    # -- _parse_one_source round-trip --------------------------------------
+
+    def test_parse_one_source_carries_bounds(self) -> None:
+        from athenaeum.merge import _parse_one_source
+
+        parsed = _parse_one_source(
+            {
+                "session": "abc",
+                "turn": 2,
+                "valid_from": "2026-04-01",
+                "valid_until": "2026-06-30",
+            },
+            "scope",
+        )
+        assert parsed is not None
+        assert parsed["valid_from"] == "2026-04-01"
+        assert parsed["valid_until"] == "2026-06-30"
+
+    def test_parse_one_source_malformed_bound_dropped(self) -> None:
+        from athenaeum.merge import _parse_one_source
+
+        parsed = _parse_one_source(
+            {"session": "abc", "turn": 2, "valid_until": "garbage"}, "scope"
+        )
+        assert parsed is not None
+        assert "valid_until" not in parsed  # fail-open: unparseable → no key
+
+    def test_parse_one_source_no_bounds_omits_keys(self) -> None:
+        from athenaeum.merge import _parse_one_source
+
+        parsed = _parse_one_source({"session": "abc", "turn": 2}, "scope")
+        assert parsed is not None
+        assert "valid_from" not in parsed
+        assert "valid_until" not in parsed
+
+    # -- footnote rendering ------------------------------------------------
+
+    def test_footnote_renders_validity_window(self) -> None:
+        from athenaeum.merge import render_source_footnotes
+
+        footnotes = render_source_footnotes(
+            [
+                {
+                    "session": "abc",
+                    "turn": 2,
+                    "source_type": "user-stated",
+                    "source_ref": "abc#turn2",
+                    "valid_from": "2026-04-01",
+                    "valid_until": "2026-06-30",
+                }
+            ]
+        )
+        assert "**Valid:** 2026-04-01 to 2026-06-30" in footnotes
+
+    def test_footnote_without_window_unchanged(self) -> None:
+        from athenaeum.merge import render_source_footnotes
+
+        footnotes = render_source_footnotes(
+            [{"session": "abc", "turn": 2, "source_type": "user-stated"}]
+        )
+        assert "**Valid:**" not in footnotes
+        assert "[^src-1]:" in footnotes
+
+    # -- full frontmatter round-trip ---------------------------------------
+
+    def test_bounds_round_trip_through_frontmatter(self) -> None:
+        from athenaeum.merge import (
+            MergedWikiEntry,
+            _parse_one_source,
+            render_merged_entry,
+        )
+        from athenaeum.models import parse_frontmatter
+
+        entry = MergedWikiEntry(
+            topic_slug="t",
+            cluster_id="c-1",
+            cluster_centroid_score=1.0,
+            contradictions_detected=False,
+            sources=[
+                {
+                    "session": "abc",
+                    "turn": 2,
+                    "source_type": "user-stated",
+                    "source_ref": "abc#turn2",
+                    "valid_from": "2026-04-01",
+                    "valid_until": "2026-06-30",
+                }
+            ],
+            body="Body.\n",
+        )
+        out = render_merged_entry(entry)
+        meta, _ = parse_frontmatter(out)
+        reparsed = _parse_one_source(meta["sources"][0], "scope")
+        assert reparsed is not None
+        assert reparsed["valid_from"] == "2026-04-01"
+        assert reparsed["valid_until"] == "2026-06-30"
+
+    # -- integration: merge_cluster_row stamps the member window -----------
+
+    def test_merge_cluster_row_stamps_member_window_onto_sources(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.merge import merge_cluster_row, render_source_footnotes
+
+        root = tmp_path / "raw" / "auto-memory"
+        scope = root / "proj"
+        _write_member(
+            scope,
+            "deploy_target.md",
+            session="sess-1",
+            turn=1,
+            body="Deploy target is us-east-1.",
+            valid_from="2026-04-01",
+            valid_until="2099-12-31",  # future upper → member stays active
+        )
+        row = {
+            "cluster_id": "c-1",
+            "member_paths": ["proj/deploy_target.md"],
+            "centroid_score": 1.0,
+        }
+        entry = merge_cluster_row(row, extra_roots=[root], am_by_path={})
+        assert entry is not None
+        assert len(entry.sources) == 1
+        assert entry.sources[0]["valid_from"] == "2026-04-01"
+        assert entry.sources[0]["valid_until"] == "2099-12-31"
+        footnotes = render_source_footnotes(entry.sources)
+        assert "**Valid:** 2026-04-01 to 2099-12-31" in footnotes
+
+    def test_expired_member_still_dropped_no_regression(self, tmp_path: Path) -> None:
+        """Slice-1/3 page-level filter is unchanged: an expired member is dropped whole."""
+        from athenaeum.merge import merge_cluster_row
+
+        root = tmp_path / "raw" / "auto-memory"
+        scope = root / "proj"
+        _write_member(
+            scope,
+            "old_target.md",
+            session="sess-old",
+            turn=1,
+            body="Deploy target was eu-west-1.",
+            valid_until="2020-01-01",  # past upper → inactive, excluded from compile
+        )
+        row = {
+            "cluster_id": "c-2",
+            "member_paths": ["proj/old_target.md"],
+            "centroid_score": 1.0,
+        }
+        # Only member is inactive → whole row skipped (no live claim to compile).
+        assert merge_cluster_row(row, extra_roots=[root], am_by_path={}) is None
