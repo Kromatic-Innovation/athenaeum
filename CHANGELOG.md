@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-11
+
+### Changed — behavior
+
+- **Resolver source-precedence taxonomy expanded 7 → 9 tiers (#328).** A new
+  `agent-observed:<model>:<session-ref>` tier is inserted at **rank 5** (below
+  `wikipedia`, above `claude:`), which re-ranks the lower tiers
+  (`claude:` → 6, `script:` → 7, `model-prior:` → 8, `unsourced` → 9). Conflict
+  resolutions that compare claims across these tiers can therefore reach a
+  **different winner than in 0.13.x**. The change to the taxonomy itself is
+  additive (no field removed); the behavior change is in ranking.
+- **`repair --backfill-sources` rewrites the `source:` scalar of existing
+  DEFAULTED `claude:inferred` memories (#328).** With `--apply`, claims whose
+  origin transcript shows the user stated them are lifted to `user:<ref>`
+  (tier 1) and claims derived from in-session artifacts to
+  `agent-observed:<...>` (tier 5). This raises their precedence, so **future
+  resolutions over pre-existing data can change outcome.** Dry-run by default;
+  only `DEFAULTED` inferred claims are touched; idempotent (a confirmed claim
+  gets `inferred_verified: true` and is never re-examined).
+- **Opinions no longer lose to precedence (#327).** Pairs classified
+  `claim_kind: opinion` with different (or unknown) asserters resolve to the
+  new `attribute_both` action — both stay active, neither is superseded.
+  Same-asserter dated opinions still supersede (newer wins). This changes the
+  outcome of opinion-vs-opinion conflicts that previously picked a precedence
+  winner.
+
+### Added
+
+- **Incremental indexing for both search backends (#348).** Whole-file
+  content-hash diffing rebuilds only changed/new/deleted pages; an unchanged
+  corpus is a sub-second no-op instead of a full re-embed. Adds `--full` and a
+  config seam for the embedding model (default `all-MiniLM-L6-v2` unchanged).
+- **On-demand `athenaeum ingest` / `athenaeum reindex` (`--incremental|--full`) (#349)**
+  — change-gated compile + index with one-line JSON summaries, single-flight.
+- **`athenaeum session-end` for cross-agent same-day recall (#350).** A
+  change-gated compile-then-index entrypoint: a `remember` written in one
+  session becomes recallable in another after that session ends, without
+  waiting for the nightly librarian. No-op when nothing changed.
+- **`claim_kind` classification + `attribute_both` resolver action (#327)**,
+  including asserter-identity comparison (`same` / `different` / `unknown`)
+  with a keep-both fallback when identity is unavailable.
+- **`repair --backfill-sources` (#328)** — re-classify DEFAULTED
+  `claude:inferred` provenance from origin transcripts to `user-stated`,
+  `agent-observed`, or confirmed-inferred.
+- **Scoped claims: org/locale dimensions + three-way overlap verdict (#329)**
+  (DISJOINT / OVERRIDE / OVERLAP), disjoint scopes short-circuit to
+  not-a-conflict without an LLM call.
+- **Temporal `recall --as-of <date>` view and per-claim compiled validity (#308).**
+  A historical read-time view over validity windows, and per-source validity
+  stamped into compiled entries.
+- **`athenaeum serve` honors `KNOWLEDGE_RAW_PATH` / `KNOWLEDGE_WIKI_PATH` (#355)**
+  — each env var overrides its root individually; otherwise falls back to
+  `<path>/raw|wiki`. Makes athenaeum's MCP server a drop-in for the standalone
+  local knowledge server.
+
+### Fixed
+
+- **Resolver aggregate eval floor recalibrated + JSON-repair retry (#345).**
+  Two mislabeled golden fixtures corrected, the golden set enlarged 5 → 8, the
+  floor re-derived with slack, and `propose_resolution` now retries once with a
+  strict-JSON reminder when the first response has no parseable JSON object.
+
+
 ## [0.13.13] - 2026-07-06
 
 ### Documentation
