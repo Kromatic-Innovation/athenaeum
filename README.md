@@ -319,6 +319,19 @@ every session:
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
 ```
 
+**Custom raw/wiki locations.** The raw and wiki roots default to
+`<path>/raw` and `<path>/wiki`. To point them at independent locations —
+for example a read-only mounted wiki, or an existing config that predates
+this command — set `KNOWLEDGE_RAW_PATH` and/or `KNOWLEDGE_WIKI_PATH`; each
+overrides its root individually while `--path` remains where `athenaeum.yaml`
+and extra intake roots resolve:
+
+```bash
+KNOWLEDGE_RAW_PATH=/data/knowledge/raw \
+KNOWLEDGE_WIKI_PATH=/data/knowledge/wiki \
+  athenaeum serve --path ~/knowledge
+```
+
 **Scoped read access (secondary agents).** By default `athenaeum serve`
 exposes the **whole wiki** to `recall` — the owner sees everything. If you
 wire a secondary/scheduled agent (e.g. an email-drafting routine) to this

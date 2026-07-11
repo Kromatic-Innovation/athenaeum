@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import os
 import sys
 from collections.abc import Callable
 from datetime import date
@@ -160,7 +161,10 @@ def main(argv: list[str] | None = None) -> int:
         "--path",
         type=Path,
         default=Path("~/knowledge"),
-        help="Knowledge directory (default: ~/knowledge)",
+        help="Knowledge directory (default: ~/knowledge). The raw/wiki roots "
+        "default to <path>/raw and <path>/wiki; the KNOWLEDGE_RAW_PATH / "
+        "KNOWLEDGE_WIKI_PATH environment variables override them individually "
+        "(drop-in parity with the legacy knowledge-mcp server, issue #355).",
     )
     serve_parser.add_argument(
         "--audience",
@@ -1291,6 +1295,25 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_serve_roots(target: Path) -> tuple[Path, Path]:
+    """Resolve the raw/wiki roots for ``athenaeum serve``.
+
+    Defaults to ``<target>/raw`` and ``<target>/wiki``. When set, the
+    ``KNOWLEDGE_RAW_PATH`` / ``KNOWLEDGE_WIKI_PATH`` environment variables
+    override the respective root INDEPENDENTLY. This preserves drop-in parity
+    with the legacy standalone ``knowledge-mcp`` server this command supersedes
+    (issue #355): an existing MCP config (or ``start.sh``) that pins those env
+    vars keeps working unchanged after the cwc copy is removed. ``--path`` is
+    still where config (``athenaeum.yaml``) and extra intake roots resolve, so
+    the common case (both under ``~/knowledge``) is unaffected.
+    """
+    raw_env = os.environ.get("KNOWLEDGE_RAW_PATH")
+    wiki_env = os.environ.get("KNOWLEDGE_WIKI_PATH")
+    raw_root = Path(raw_env).expanduser().resolve() if raw_env else target / "raw"
+    wiki_root = Path(wiki_env).expanduser().resolve() if wiki_env else target / "wiki"
+    return raw_root, wiki_root
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     from athenaeum.config import (
         load_config,
@@ -1301,8 +1324,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     from athenaeum.mcp_server import create_server
 
     target = args.path.expanduser().resolve()
-    raw_root = target / "raw"
-    wiki_root = target / "wiki"
+    raw_root, wiki_root = _resolve_serve_roots(target)
 
     if not target.exists():
         print(f"Knowledge directory not found: {target}")

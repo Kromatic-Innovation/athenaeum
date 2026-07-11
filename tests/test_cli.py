@@ -217,6 +217,66 @@ class TestServe:
         assert rc == 0
         assert captured["search_backend"] == "fts5"
 
+    def test_serve_honors_knowledge_path_env_vars(
+        self, knowledge_with_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #355: KNOWLEDGE_RAW_PATH / KNOWLEDGE_WIKI_PATH override the
+        raw/wiki roots individually so `athenaeum serve` is a drop-in
+        replacement for the legacy standalone knowledge-mcp server, whose
+        MCP config pins those env vars."""
+        alt_raw = knowledge_with_wiki / "alt-raw"
+        alt_wiki = knowledge_with_wiki / "alt-wiki"
+        alt_raw.mkdir()
+        alt_wiki.mkdir()
+        monkeypatch.setenv("KNOWLEDGE_RAW_PATH", str(alt_raw))
+        monkeypatch.setenv("KNOWLEDGE_WIKI_PATH", str(alt_wiki))
+
+        captured: dict[str, object] = {}
+
+        class _FakeServer:
+            def run(self) -> None:
+                raise KeyboardInterrupt
+
+        def _fake_create_server(**kwargs: object) -> _FakeServer:
+            captured.update(kwargs)
+            return _FakeServer()
+
+        import athenaeum.mcp_server as mcp_mod
+
+        monkeypatch.setattr(mcp_mod, "create_server", _fake_create_server)
+
+        rc = main(["serve", "--path", str(knowledge_with_wiki)])
+        assert rc == 0
+        assert captured["raw_root"] == alt_raw.resolve()
+        assert captured["wiki_root"] == alt_wiki.resolve()
+
+    def test_serve_env_vars_absent_uses_path_derived_roots(
+        self, knowledge_with_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without the env vars, raw/wiki derive from --path (unchanged
+        default behavior)."""
+        monkeypatch.delenv("KNOWLEDGE_RAW_PATH", raising=False)
+        monkeypatch.delenv("KNOWLEDGE_WIKI_PATH", raising=False)
+
+        captured: dict[str, object] = {}
+
+        class _FakeServer:
+            def run(self) -> None:
+                raise KeyboardInterrupt
+
+        def _fake_create_server(**kwargs: object) -> _FakeServer:
+            captured.update(kwargs)
+            return _FakeServer()
+
+        import athenaeum.mcp_server as mcp_mod
+
+        monkeypatch.setattr(mcp_mod, "create_server", _fake_create_server)
+
+        rc = main(["serve", "--path", str(knowledge_with_wiki)])
+        assert rc == 0
+        assert captured["raw_root"] == knowledge_with_wiki / "raw"
+        assert captured["wiki_root"] == knowledge_with_wiki / "wiki"
+
     def test_serve_missing_path_renders_path_in_message(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
