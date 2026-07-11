@@ -676,10 +676,15 @@ def main(argv: list[str] | None = None) -> int:
 
     add_questions_subparser(subparsers)
 
-    # rebuild-index command — rebuild the search index out-of-band
+    # reindex command (issue #349) — rebuild the search index out-of-band.
+    # ``rebuild-index`` is kept as a back-compat alias for the #348 spelling;
+    # both dispatch to the identical handler (no duplicated index engine).
     rebuild_parser = subparsers.add_parser(
-        "rebuild-index",
-        help="Rebuild the search index (FTS5 or vector, per config)",
+        "reindex",
+        aliases=["rebuild-index"],
+        help="Rebuild the search index (FTS5 or vector, per config). "
+        "--incremental (default) applies only the #348 hash-diff delta; "
+        "--full rebuilds from scratch.",
     )
     rebuild_parser.add_argument(
         "--path",
@@ -699,7 +704,16 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Override configured backend (default: read from athenaeum.yaml)",
     )
-    rebuild_parser.add_argument(
+    reindex_mode = rebuild_parser.add_mutually_exclusive_group()
+    reindex_mode.add_argument(
+        "--incremental",
+        action="store_true",
+        help=(
+            "Apply only the changed/added/deleted hash-diff delta (issue "
+            "#348). This is the DEFAULT; the flag makes it explicit."
+        ),
+    )
+    reindex_mode.add_argument(
         "--full",
         action="store_true",
         help=(
@@ -709,6 +723,67 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     _add_lock_args(rebuild_parser)
+
+    # ingest command (issue #349) — on-demand compile of new/changed raw
+    # intake into the wiki. The manual escape hatch that makes a just-
+    # remembered fact recallable now, decoupled from the nightly `run`.
+    ingest_parser = subparsers.add_parser(
+        "ingest",
+        help="Compile new/changed raw intake into the wiki on demand "
+        "(issue #349). --incremental (default) compiles only files new/"
+        "changed since the last ingest; --full recompiles.",
+    )
+    ingest_parser.add_argument(
+        "--path",
+        "--knowledge-root",
+        dest="path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge). "
+        "--knowledge-root is an alias, matching `run`.",
+    )
+    ingest_mode = ingest_parser.add_mutually_exclusive_group()
+    ingest_mode.add_argument(
+        "--incremental",
+        dest="incremental",
+        action="store_true",
+        default=None,
+        help="Compile only raw files new/changed since the last successful "
+        "ingest (tracked via a content-hash stamp). This is the DEFAULT.",
+    )
+    ingest_mode.add_argument(
+        "--full",
+        dest="incremental",
+        action="store_false",
+        help="Recompile all pending raw intake, ignoring the ingest stamp.",
+    )
+    ingest_parser.add_argument(
+        "--session",
+        type=str,
+        default=None,
+        help="Scope the new/changed detection to one originSessionId "
+        "(the SessionEnd use-case, issue #350).",
+    )
+    ingest_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory holding the ingest stamp manifest "
+        "(default: ~/.cache/athenaeum)",
+    )
+    ingest_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run the compile without writing files, committing, or "
+        "updating the ingest stamp.",
+    )
+    ingest_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable debug logging",
+    )
+    _add_lock_args(ingest_parser)
 
     args = parser.parse_args(argv)
 
@@ -737,8 +812,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "reresolve-questions":
         return _cmd_reresolve_questions(args)
 
-    if args.command == "rebuild-index":
+    if args.command in ("reindex", "rebuild-index"):
         return _cmd_rebuild_index(args)
+
+    if args.command == "ingest":
+        return _cmd_ingest(args)
 
     if args.command == "recall":
         return _cmd_recall(args)
@@ -1415,7 +1493,35 @@ def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _reindex_summary(
+    command: str,
+    backend: str,
+    mode: str,
+    pages: int,
+    t0: float,
+    exit_code: int,
+) -> None:
+    """Print the one-line JSON reindex summary (issue #349, counts+duration)."""
+    import json
+    import time
+
+    print(
+        json.dumps(
+            {
+                "command": command,
+                "backend": backend,
+                "mode": mode,
+                "pages": pages,
+                "duration_ms": int((time.monotonic() - t0) * 1000),
+                "exit_code": exit_code,
+            }
+        )
+    )
+
+
 def _cmd_rebuild_index(args: argparse.Namespace) -> int:
+    import time
+
     from athenaeum.config import (
         load_config,
         resolve_embedding_model,
@@ -1423,6 +1529,11 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
         resolve_index_globs,
     )
     from athenaeum.search import build_fts5_index, build_vector_index
+
+    # Issue #349: `reindex` is the canonical name; `rebuild-index` is a
+    # back-compat alias routed here. Report whichever the user invoked.
+    command = getattr(args, "command", "reindex") or "reindex"
+    t0 = time.monotonic()
 
     knowledge_root = args.path.expanduser().resolve()
     wiki_root = knowledge_root / "wiki"
@@ -1466,11 +1577,13 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
             except ImportError as exc:
                 print(f"Vector backend unavailable: {exc}", file=sys.stderr)
                 print("Install with: pip install athenaeum[vector]", file=sys.stderr)
+                _reindex_summary(command, backend, mode, 0, t0, 1)
                 return 1
             print(
                 f"Vector index rebuilt ({mode}): {count} pages "
                 f"(wiki + {len(extra_roots)} extra root(s))"
             )
+            _reindex_summary(command, backend, mode, count, t0, 0)
             return 0
 
         if backend == "fts5":
@@ -1486,12 +1599,82 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
                 f"FTS5 index rebuilt ({mode}): {count} pages "
                 f"(wiki + {len(extra_roots)} extra root(s))"
             )
+            _reindex_summary(command, backend, mode, count, t0, 0)
             return 0
 
         print(f"Unknown search backend: {backend}", file=sys.stderr)
+        _reindex_summary(command, backend, mode, 0, t0, 1)
         return 1
     finally:
         lock.release()
+
+
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    """On-demand compile of new/changed raw intake (issue #349).
+
+    Thin CLI wrapper over :func:`athenaeum.librarian.ingest` — the single
+    reusable incremental-ingest engine the SessionEnd path (#350) also calls.
+    Acquires the shared run lock (single-flight, #309) around the compile,
+    prints a one-line JSON summary (counts + duration), and exits non-zero
+    when the underlying compile fails.
+    """
+    import json
+
+    from athenaeum.config import load_config
+    from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, ingest
+
+    logging.basicConfig(
+        level=logging.DEBUG if getattr(args, "verbose", False) else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    knowledge_root = (
+        args.path.expanduser().resolve() if args.path else DEFAULT_KNOWLEDGE_ROOT
+    )
+    raw_root = knowledge_root / "raw"
+    wiki_root = knowledge_root / "wiki"
+    # Default incremental: neither flag → None → True; --full → False.
+    incremental = True if args.incremental is None else args.incremental
+
+    cfg = load_config(knowledge_root)
+
+    # Issue #309 single-flight: a real compile mutates wiki/ and shares the
+    # nightly-run lock. A --dry-run reads only, so it does not take the lock.
+    lock: RunLock | int | None = None
+    if not args.dry_run:
+        lock = _acquire_or_exit(knowledge_root, args, cfg)
+        if isinstance(lock, int):
+            return lock
+    try:
+        result = ingest(
+            raw_root=raw_root,
+            wiki_root=wiki_root,
+            knowledge_root=knowledge_root,
+            incremental=incremental,
+            session=args.session,
+            cache_dir=args.cache_dir,
+            config=cfg,
+            dry_run=args.dry_run,
+            install_signal_handlers=not args.dry_run,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
+        print(
+            json.dumps(
+                {
+                    "command": "ingest",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "exit_code": 1,
+                }
+            )
+        )
+        return 1
+    finally:
+        if lock is not None and not isinstance(lock, int):
+            lock.release()
+
+    print(json.dumps(result.summary()))
+    return result.exit_code
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:

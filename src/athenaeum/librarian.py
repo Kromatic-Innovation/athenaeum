@@ -22,12 +22,16 @@ Environment:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
 import signal
 import subprocess
 import sys
+import time
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1767,3 +1771,234 @@ def run(
         return 1
 
     return 0
+
+
+# ---------------------------------------------------------------------------
+# On-demand ingest (issue #349) — manual/escape-hatch compile of new/changed
+# raw intake, with a content-hash stamp manifest so an incremental run is a
+# fast no-op when nothing has changed since the last successful ingest. The
+# SessionEnd path (issue #350) reuses `ingest()` directly.
+# ---------------------------------------------------------------------------
+
+#: Stamp-manifest filename recording the raw-intake content hashes seen by the
+#: last successful ingest. Lives in the cache dir alongside the #348 index
+#: manifests (kept out of the knowledge git repo). Shape mirrors the search
+#: manifests: ``{"version": 1, "hashes": {relpath: sha256}}``.
+INGEST_MANIFEST_NAME = "ingest-manifest.json"
+
+
+@dataclass
+class IngestResult:
+    """Summary of an :func:`ingest` invocation (issue #349).
+
+    ``new_or_changed`` is the count of raw files added/changed versus the
+    last ingest stamp (scoped to ``session`` when given). ``compiled`` is the
+    number of raw files actually consumed (compiled into the wiki and removed
+    from the intake queue) this run. ``noop`` is True when an incremental run
+    found nothing new and skipped the compile entirely. ``exit_code``
+    propagates the underlying compile's exit status.
+    """
+
+    mode: str
+    new_or_changed: int
+    compiled: int
+    noop: bool
+    exit_code: int
+    duration_ms: int
+    session: str | None = None
+
+    def summary(self) -> dict[str, object]:
+        """One-line JSON-serializable summary (counts + duration)."""
+        data: dict[str, object] = {
+            "command": "ingest",
+            "mode": self.mode,
+            "new_or_changed": self.new_or_changed,
+            "compiled": self.compiled,
+            "noop": self.noop,
+            "duration_ms": self.duration_ms,
+            "exit_code": self.exit_code,
+        }
+        if self.session is not None:
+            data["session"] = self.session
+        return data
+
+
+def _resolve_cache_dir(cache_dir: Path | None) -> Path:
+    """Resolve the athenaeum cache dir (arg > env > ``~/.cache/athenaeum``)."""
+    if cache_dir is not None:
+        return Path(cache_dir).expanduser()
+    return Path(
+        os.environ.get("ATHENAEUM_CACHE_DIR") or (Path.home() / ".cache" / "athenaeum")
+    ).expanduser()
+
+
+def _raw_hash_snapshot(
+    raw_root: Path,
+    knowledge_root: Path,
+    *,
+    session: str | None = None,
+) -> dict[str, str]:
+    """Map ``relpath -> sha256`` for every raw intake ``*.md`` under *raw_root*.
+
+    Keys are POSIX paths relative to *knowledge_root* so the stamp manifest is
+    stable regardless of the absolute checkout location. ``.gitkeep`` and
+    per-scope ``MEMORY.md`` index files are skipped — they are not intake.
+    When *session* is given, only files whose frontmatter ``originSessionId``
+    matches are included (the per-session incremental gate #350 needs).
+    Unreadable files are skipped.
+    """
+    snapshot: dict[str, str] = {}
+    if not raw_root.exists():
+        return snapshot
+    for fpath in sorted(raw_root.rglob("*.md")):
+        if not fpath.is_file():
+            continue
+        if fpath.name == ".gitkeep" or fpath.name in _AUTO_MEMORY_SKIP_NAMES:
+            continue
+        try:
+            data = fpath.read_bytes()
+        except OSError:
+            continue
+        if session is not None:
+            meta, _ = parse_frontmatter(data.decode("utf-8", errors="replace"))
+            if str((meta or {}).get("originSessionId") or "") != session:
+                continue
+        try:
+            rel = fpath.relative_to(knowledge_root).as_posix()
+        except ValueError:
+            rel = str(fpath)
+        snapshot[rel] = hashlib.sha256(data).hexdigest()
+    return snapshot
+
+
+def _load_ingest_manifest(path: Path) -> dict[str, str] | None:
+    """Load the ingest stamp's ``relpath -> hash`` map.
+
+    Returns ``None`` when the manifest is absent/unreadable/malformed (no
+    prior successful ingest — the incremental gate must NOT no-op), or the
+    ``{relpath: hash}`` map (possibly empty) when a stamp exists.
+    """
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    hashes = data.get("hashes")
+    if isinstance(hashes, dict):
+        return {str(k): str(v) for k, v in hashes.items()}
+    return {}
+
+
+def _write_ingest_manifest(path: Path, hashes: dict[str, str]) -> None:
+    """Atomically write the ingest stamp manifest (temp file + rename)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "hashes": hashes}
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(path)
+
+
+def ingest(
+    raw_root: Path = DEFAULT_RAW_ROOT,
+    wiki_root: Path = DEFAULT_WIKI_ROOT,
+    knowledge_root: Path = DEFAULT_KNOWLEDGE_ROOT,
+    *,
+    incremental: bool = True,
+    session: str | None = None,
+    cache_dir: Path | None = None,
+    config: dict[str, object] | None = None,
+    dry_run: bool = False,
+    **run_kwargs: Any,
+) -> IngestResult:
+    """Compile new/changed raw intake into the wiki on demand (issue #349).
+
+    The on-demand counterpart to the nightly :func:`run`: an agent (or the
+    operator, via ``athenaeum ingest``) forces freshly-``remember``ed raw
+    files through the librarian compile step so the knowledge becomes
+    recallable *now*, decoupled from the nightly cadence. Issue #350's
+    SessionEnd hook reuses this exact function — it is the single reusable
+    incremental-ingest engine; the CLI is a thin wrapper.
+
+    ``incremental`` (default) diffs the current raw-intake set against a
+    content-hash stamp manifest (``<cache_dir>/ingest-manifest.json``,
+    mirroring the #348 index manifest). When a prior stamp exists and nothing
+    is new or changed, it returns a fast no-op WITHOUT invoking the heavy
+    compile. ``incremental=False`` (``--full``) always recompiles. ``session``
+    scopes the new/changed detection to one ``originSessionId``.
+
+    ``tier0_passthrough`` structured raw compiles with no LLM cost — the
+    underlying :func:`run` routes pre-structured intake (uid/type/name) through
+    Tier 0, which never calls the model.
+
+    The compile itself delegates to :func:`run` (extra keyword arguments are
+    forwarded verbatim, e.g. ``install_signal_handlers=True`` from the CLI).
+    On a nonzero compile the stamp manifest is left UNTOUCHED so the next run
+    retries; a ``dry_run`` never stamps.
+    """
+    start = time.monotonic()
+    if config is None:
+        config = load_config(knowledge_root)
+    manifest_path = _resolve_cache_dir(cache_dir) / INGEST_MANIFEST_NAME
+    mode = "incremental" if incremental else "full"
+
+    # Snapshot the raw intake BEFORE compiling (keyed relpath -> hash). The
+    # session-scoped view drives the new/changed gate; the unscoped view drives
+    # both the stamp we persist and the consumed-file (``compiled``) count.
+    before = _raw_hash_snapshot(raw_root, knowledge_root, session=session)
+    before_all = (
+        before if session is None else _raw_hash_snapshot(raw_root, knowledge_root)
+    )
+
+    stored = _load_ingest_manifest(manifest_path)
+    baseline = stored or {}
+    added = [k for k in before if k not in baseline]
+    changed = [k for k, h in before.items() if k in baseline and baseline[k] != h]
+    new_or_changed = len(added) + len(changed)
+
+    # Incremental fast no-op: a prior stamp exists and nothing is new/changed.
+    # Never invoke the compile — and leave the stamp untouched. Rewriting it
+    # here would let a session-scoped no-op absorb OTHER sessions' still-pending
+    # files as "seen" (they were never compiled). The stamp only grows when a
+    # real compile runs and actually processes every pending file.
+    if incremental and stored is not None and new_or_changed == 0:
+        return IngestResult(
+            mode=mode,
+            new_or_changed=0,
+            compiled=0,
+            noop=True,
+            exit_code=0,
+            duration_ms=int((time.monotonic() - start) * 1000),
+            session=session,
+        )
+
+    exit_code = run(
+        raw_root=raw_root,
+        wiki_root=wiki_root,
+        knowledge_root=knowledge_root,
+        dry_run=dry_run,
+        **run_kwargs,
+    )
+
+    after_all = _raw_hash_snapshot(raw_root, knowledge_root)
+    compiled = len(set(before_all) - set(after_all))
+
+    # Stamp the pre-compile snapshot on a clean, non-dry run: everything we
+    # just processed is now "seen". Consumed (deleted) files stay recorded —
+    # harmless, and it keeps a re-run with no new intake a fast no-op. Files
+    # that appeared mid-run are absent here, so they correctly surface as
+    # ``added`` next run. A failed compile leaves the stamp untouched (retry).
+    if exit_code == 0 and not dry_run:
+        _write_ingest_manifest(manifest_path, before_all)
+
+    return IngestResult(
+        mode=mode,
+        new_or_changed=new_or_changed,
+        compiled=compiled,
+        noop=False,
+        exit_code=exit_code,
+        duration_ms=int((time.monotonic() - start) * 1000),
+        session=session,
+    )
