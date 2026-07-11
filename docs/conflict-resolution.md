@@ -316,8 +316,9 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 - **Provenance behavior:** best-effort frontmatter write via
   `_mark_member_frontmatter`; a read/write error is logged and swallowed
   (enactment must never crash the merge pass). Winner file is never mutated.
-- **Follow-up (#329):** generalizes this interval-close to non-time scopes
-  (org/locale) via `scope_*` resolver actions.
+- **Follow-up (#329):** generalized this interval-close to non-time scopes
+  (org/locale) via the three-way scope verdict + `scope_*` resolver actions —
+  see Section 12.
 
 ---
 
@@ -347,6 +348,64 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 - **Provenance behavior:** the taxonomy is enforced at PROMPT time only
   — no deterministic winner-picker runs in-process. The LLM's returned
   `source_precedence_used` field records the comparison it used.
+
+---
+
+## 12. Scoped claims — three-way overlap verdict + scope-edit actions (issue #329)
+
+- **Files:** `src/athenaeum/scoped_claims.py` (poset model + verdict);
+  `src/athenaeum/resolutions.py` (`_scope_verdict_proposal` short-circuit,
+  `scope_a` / `scope_b` actions, `_narrow_scope_interval` enactment);
+  `src/athenaeum/contradictions.py` (`_member_scope_header` org/locale segment).
+- **Companion tests:** `tests/test_scoped_claims.py` (poset, verdict, resolver
+  short-circuit, enactment) plus the `ENACTING_ACTIONS` lock in
+  `tests/test_enact_resolution.py`.
+- **Model.** #308 gave claims a TIME dimension; #329 generalizes to a small
+  **product poset** over `{org, locale, time}`. Each dimension has TOP =
+  *unscoped*; org/locale are **trees** (`kromatic/platform ⊑ kromatic`;
+  `en-US ⊑ en`), time is **intervals under inclusion**. The org/locale tree is a
+  **versioned config** (`scope.org` / `scope.locale` node lists in
+  `athenaeum.yaml`); a value **not** in the tree normalizes to *unscoped* and
+  logs a breadcrumb — authors may not mint scope values (the Cyc-microtheory
+  lesson), and the fail-open direction is toward detection.
+- **Three-way verdict** (`scope_comparison`, replaces binary conflict/no-conflict):
+  - **DISJOINT** — the componentwise meet is empty in some dimension (incomparable
+    org/locale subtrees, or disjoint time windows). The contexts never co-apply
+    → `not_a_conflict`, confidence 1.0, **no Opus call**. Generalizes Section 9's
+    disjoint-time pre-filter.
+  - **OVERRIDE** — one context is strictly below the other in the **org/locale
+    trees**: the specific claim is an exception carving out its region; the
+    general claim governs the remainder. Both stay active → `not_a_conflict`,
+    confidence 1.0 (defeasible specificity — the false positive that every
+    org-rule/team-exception pair would otherwise become).
+  - **OVERLAP** — same-context or incomparable-but-overlapping → the scope path
+    returns `None` and the pair falls through to the declared / LLM resolver as a
+    genuine contradiction.
+- **Wiring.** `propose_resolution` calls `_scope_verdict_proposal` right after the
+  #324 disjoint-time check and before the declared-relationship + LLM paths. On a
+  fresh install with **no `scope:` config** the org/locale coordinates normalize
+  to unscoped, so the verdict reduces to time-only and returns `None` for anything
+  Section 9 did not already catch — **no default-behavior change**.
+- **Scope-edit actions `scope_a` / `scope_b`.** NARROW the named side's scope until
+  the meet is empty, converting an apparent contradiction into two durably-true
+  **scoped** claims that never re-enter detection. BOTH members stay **active** —
+  unlike `keep_*` (retire loser), `correct_*` / `forget_*` (delete). Enactment
+  (`enact_resolution`) narrows the **TIME** dimension: closes the named side's
+  `valid_until` to the day BEFORE the other side's `valid_from` (strict-`<`
+  disjoint, minus-one-day so both stay live — contrast Section 10's boundary-day
+  share, which relies on `superseded_by` for inactivity). Only-close-never-widen.
+  Added to `ENACTING_ACTIONS` + `flip_action`; auto-apply threshold 0.90.
+- **Deliberately deferred (design-only, to the #329 ADR):**
+  - **Time-interval NESTING does not trigger OVERRIDE** — only org/locale
+    tree-specificity does. Section 9/#308 shipped a semantic where nested-but-
+    overlapping time windows still reach the resolver; auto-promoting a
+    sub-interval to a silent override would change that, so it is left to the ADR.
+  - **Org/locale coordinate PINNING enactment** — `scope_*` narrows only the time
+    dimension. Pinning an org/locale coordinate as the narrowing edit needs the
+    caller-context write path; when the pair has no time boundary, `scope_*`
+    no-ops (escalates to the human) rather than guessing a coordinate.
+  - **Recall `serve --scope` caller-context filter/ranking** and the broader
+    team/multi-tenant scope-IDENTITY system (#314) are out of scope.
 
 ---
 

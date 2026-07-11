@@ -586,6 +586,92 @@ specify one). This is safe because the superseded loser is ALSO marked
 regardless of the one-day window overlap. The exact stamped value is pinned by
 `tests/test_conflict_resolution.py::TestIntervalCloseSlice2`.
 
+## 9. Multi-dimensional scoped claims (`scope: {org, locale}` + time)
+
+Issue #329 (buildable subset of the design pass). Generalizes §8's TIME
+dimension to a small **product poset** over `{org, locale, time}`. Two claims
+can BOTH be true when separated by organizational scope, specificity, or locale;
+the detector/resolver represents that so scope-separated claims stop surfacing as
+false contradictions. Lives in `src/athenaeum/scoped_claims.py`; the resolver
+short-circuit + `scope_*` actions in `resolutions.py`.
+
+### 9.1 Shape
+
+```yaml
+---
+type: reference
+name: deploy-policy
+valid_from: 2026-04-01        # TIME dimension (§8, #308) — unchanged
+scope:
+  org: kromatic/platform      # node in the versioned org tree; absent = org-wide
+  locale: en-US               # absent = everywhere
+---
+```
+
+- `scope:` is an optional nested block. `org` / `locale` are single string
+  coordinates; the time dimension stays the top-level `valid_from` / `valid_until`
+  from §8. All optional and round-trip through tier0 byte-for-byte (§3 contract).
+- Each dimension is a **poset with TOP = unscoped** (absent coordinate). `org` /
+  `locale` are **trees** — a descendant node ⊑ its ancestor
+  (`kromatic/platform ⊑ kromatic`; `en-US ⊑ en`), "lower" = more specific = smaller
+  region. Time is **intervals under inclusion**. The **meet** (region
+  intersection) is componentwise: interval intersection for time, "lower-if-
+  comparable, else empty" for the trees.
+
+### 9.2 Versioned tree config — authors may not mint scope values
+
+The org/locale node sets are a small **versioned config** in `athenaeum.yaml`:
+
+```yaml
+scope:
+  org:    [kromatic, kromatic/platform, kromatic/marketing]
+  locale: [en, en-US, de-DE]
+```
+
+A coordinate value **not in the tree** normalizes to *unscoped* (TOP) with a
+debug breadcrumb — the hard lesson from Cyc's microtheory proliferation. This
+**fails open toward detection**: a typo adds no constraint rather than silently
+carving a phantom scope that could hide a claim. No `_DEFAULTS` seed (#231): a
+fresh install has empty trees, so every declared org/locale value is inert and
+single-user behavior is unchanged.
+
+### 9.3 Three-way overlap verdict
+
+`scoped_claims.scope_comparison` replaces the binary conflict/no-conflict split
+(wired into `resolutions._scope_verdict_proposal`, before the declared/LLM path):
+
+- **DISJOINT** — empty meet in some dimension → `not_a_conflict` (conf 1.0, no
+  Opus call). Generalizes §8/#324's disjoint-time pre-filter to org/locale.
+- **OVERRIDE** — one context strictly below the other in the **org/locale trees**
+  → `not_a_conflict` (conf 1.0): the specific claim is an exception, the general
+  claim governs the remainder, **both stay active** (defeasible specificity).
+- **OVERLAP** — same-context or incomparable-but-overlapping → falls through to
+  the resolver as a genuine contradiction.
+
+**Deferred (ADR).** Time-interval NESTING does **not** trigger OVERRIDE — only
+org/locale tree-specificity does — so §8/#324's shipped "nested time still reaches
+the resolver" semantic is preserved. Whether a bounded-time exception should
+override an always-valid claim is left to the #329 ADR.
+
+### 9.4 Scope-edit resolver actions (`scope_a` / `scope_b`)
+
+NARROW the named side's scope until the meet is empty, converting an apparent
+contradiction into two durably-true **scoped** claims that never re-enter
+detection. BOTH members stay **active** — the minimal-information-loss choice,
+preferred over `keep_*` (retires the loser) / `correct_*` / `forget_*` (delete)
+whenever both sides were true somewhere/somewhen.
+
+Enactment (`enact_resolution`) narrows the **TIME** dimension: closes the named
+side's `valid_until` to the day BEFORE the other side's `valid_from` (strict-`<`
+disjoint, **minus one day** so both stay live — unlike §8.4's boundary-day share,
+which relies on `superseded_by` for inactivity). Only-close-never-widen. Org/locale
+coordinate PINNING is deferred to the ADR; when the pair has no time boundary,
+`scope_*` no-ops (escalates to the human) rather than guessing a coordinate. In
+`ENACTING_ACTIONS` + `flip_action`; auto-apply threshold 0.90.
+
+The broader team/multi-tenant scope-IDENTITY system and the recall
+`serve --scope` caller-context filter are out of scope (#314), deferred design.
+
 ## 10. Channel split, model recording, IdP-compatible asserter identity
 
 Issue #326. Extends `source_type` (#260) — which collapsed three materially
@@ -762,4 +848,5 @@ the read-side parsers (`models.parse_asserter`,
 | §4 MCP `remember(sources=...)` | #96 | Replace the bare-dict heuristic with the `_source`/`_field_sources` wrapper keys; update docstring + integration test. |
 | §5 legacy slug migration | #97 | `athenaeum repair --legacy-source-slugs` with dry-run/apply, the fixed mapping table, and post-migration validation. |
 | §8 claim-level temporal validity | #308 | Slice 1: `valid_from` / `valid_until` parse + round-trip; shared `valid_until_expired` helper; currently-valid-by-default filter. **Slice 2 (shipped): resolver interval-close (§8.4) — `enact_resolution` stamps the loser's `valid_until` on `keep_a`/`keep_b` and sequential-snapshot `not_a_conflict`, only-close-never-widen.** Slice 3 (`--as-of`) deferred. #329 generalizes the close to non-time scopes. |
+| §9 multi-dimensional scoped claims | #329 | Buildable subset: `scope: {org, locale}` poset (trees) + time, versioned tree config (`scope.org`/`scope.locale`), three-way `scope_comparison` verdict (DISJOINT / OVERRIDE / OVERLAP) wired into `resolutions._scope_verdict_proposal`, and `scope_a`/`scope_b` resolver actions (time-dimension narrowing enactment). **Deferred (ADR):** time-nesting OVERRIDE, org/locale coordinate pinning enactment, recall `serve --scope` filter, team/multi-tenant scope-identity (#314). |
 | §10 channel split + model + asserter | #326 | Extend `SOURCE_TYPES` with `agent-observed` and `model-prior`; add `model:` / `on_behalf_of:` / `asserter:` claim-level frontmatter fields; extend `remember(sources=...)` with `_source_type` / `_source_ref` / `_model` / `_on_behalf_of` / `_asserter` wrapper keys; drop `model-prior:<model-id>` into the resolver's precedence taxonomy below `script:`. |

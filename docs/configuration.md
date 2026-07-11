@@ -208,6 +208,28 @@ under `resolve:`. Pipeline walkthrough:
 | Full-body token cap | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | `resolve.full_body_token_cap` | `1500` | Per-side body cap for the resolver's full-body context (#168), ~4 chars/token. Must be a positive integer; zero/negative raise — set a large value to effectively disable truncation. |
 | Tier-4 escalation dedup | `ATHENAEUM_TIER4_DEDUP` | — | `true` | Dedupe `_pending_questions.md` escalations by source-memory pair (#157). Set `false`/`0`/`no`/`off` to restore the legacy always-append behavior. |
 
+### Scoped-claim tree (`scope:`, #329)
+
+The org/locale scope dimensions (issue #329) read a small **versioned tree** of
+the values a claim's `scope: {org, locale}` frontmatter may declare. A value NOT
+listed here normalizes to *unscoped* (adds no constraint) with a debug
+breadcrumb — authors may not mint scope values (the Cyc-microtheory lesson), and
+the fail-open direction is toward detection. There is **no default** (no
+`_DEFAULTS` seed, #231): a fresh install has empty trees, so scope frontmatter is
+inert and single-user behavior is unchanged until the operator opts in.
+
+```yaml
+scope:
+  org:    [kromatic, kromatic/platform, kromatic/marketing]  # "/"-separated tree
+  locale: [en, en-US, de-DE]                                 # "-"-separated tree
+```
+
+Nodes form a poset by path-prefix (`kromatic/platform ⊑ kromatic`;
+`en-US ⊑ en`). The three-way overlap verdict (DISJOINT / OVERRIDE / OVERLAP) and
+the `scope_a` / `scope_b` resolver actions are documented in
+`docs/conflict-resolution.md` §12 and `docs/provenance-shape.md` §9. The recall
+`serve --scope` caller-context filter is deferred design (#314).
+
 ## Recall and search
 
 | Knob | CLI flag | Env var | YAML key | Default | What it does |

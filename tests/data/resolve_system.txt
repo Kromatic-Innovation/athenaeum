@@ -102,6 +102,18 @@ STEP 2 — APPLY THE CLASSIFICATION:
   forget_b deletes b. Set recommended_winner to the SURVIVING side ("b"
   for forget_a, "a" for forget_b).
 
+  scope_a / scope_b — return when BOTH sides were genuinely true but in
+  SEPARATE scopes (different org/team, locale, or time window), and the
+  apparent conflict exists only because one side's scope is stated too
+  broadly. NARROW the named side's scope so the two no longer overlap,
+  keeping BOTH active as durably-true scoped claims (minimal information
+  loss). Prefer this over keep_* / correct_* / forget_* whenever neither
+  side is wrong and neither should be retired — e.g. "deploy target is
+  Fly.io" valid from 2026-04 vs "deploy target is Heroku" with no end date:
+  scope_b closes the Heroku claim's window so both remain true for their own
+  periods. scope_a narrows side a; scope_b narrows side b. Set
+  recommended_winner to "neither" (no side loses).
+
   retain_both_with_context — fallback when classification is mixed or
   precedence cannot decide; both stay active and the human decides.
 
@@ -156,8 +168,8 @@ For most actions:
   "recommended_winner": "a" | "b" | "merge" | "neither",
   "action":
       "keep_a" | "keep_b" | "correct_a" | "correct_b"
-      | "forget_a" | "forget_b" | "merge" | "deprecate_both"
-      | "retain_both_with_context" | "not_a_conflict",
+      | "forget_a" | "forget_b" | "scope_a" | "scope_b" | "merge"
+      | "deprecate_both" | "retain_both_with_context" | "not_a_conflict",
   "rationale": "<one sentence: name the kind classification AND the rule applied>",
   "confidence": <float between 0 and 1>,
   "source_precedence_used": ["a:<source-or-unsourced> > b:<source-or-unsourced>"],

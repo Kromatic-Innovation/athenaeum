@@ -56,7 +56,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -73,6 +73,7 @@ from athenaeum.models import (
     slugify,
     validity_windows_disjoint,
 )
+from athenaeum.scoped_claims import ScopeTree, ScopeVerdict, scope_comparison
 
 if TYPE_CHECKING:
     import anthropic
@@ -137,6 +138,13 @@ DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION: dict[str, float] = {
     "correct_b": 0.95,
     "forget_a": 0.95,
     "forget_b": 0.95,
+    # Issue #329: scope-edit verdicts. NON-destructive — both members stay
+    # active; the named side's scope is NARROWED (its time interval closed)
+    # until the meet is empty, so the pair never re-enters detection. Aligned
+    # with the 0.90 record/mark bar (below the 0.95 destructive-delete bar):
+    # a bounded window is reversible and loses no claim.
+    "scope_a": 0.90,
+    "scope_b": 0.90,
 }
 # Sentinel set of actions that never auto-apply regardless of threshold.
 # Belt-and-suspenders: Lane 3's ``_emit_escalation`` already routes
@@ -200,6 +208,16 @@ ResolverAction = Literal[
     # analogue; ``forget_a`` / ``forget_b`` drop exactly one member.
     "forget_a",
     "forget_b",
+    # Scope-edit verdicts (issue #329): NARROW the named side's scope until the
+    # meet with the other side is empty, converting an apparent contradiction
+    # into two durably-true SCOPED claims that never re-enter detection. Both
+    # members stay ACTIVE (unlike keep_*/correct_*/forget_*, which retire or
+    # delete a side) — minimal information loss; preferred when both sides were
+    # true somewhere/somewhen. The buildable enactment narrows the TIME
+    # dimension (closes ``valid_until`` just before the other side's
+    # ``valid_from``); org/locale coordinate pinning is deferred to the #329 ADR.
+    "scope_a",
+    "scope_b",
 ]
 
 _VALID_WINNERS: frozenset[str] = frozenset(("a", "b", "merge", "neither"))
@@ -216,6 +234,8 @@ _VALID_ACTIONS: frozenset[str] = frozenset(
         "correct_b",
         "forget_a",
         "forget_b",
+        "scope_a",
+        "scope_b",
     )
 )
 
@@ -241,6 +261,12 @@ FORGET_B_ACTION = "forget_b"
 KEEP_A_ACTION = "keep_a"
 KEEP_B_ACTION = "keep_b"
 DEPRECATE_BOTH_ACTION = "deprecate_both"
+# Scope-edit verdicts (#329) — non-destructive scope narrowing. Both members
+# stay active; the named side's validity interval is closed until the two
+# contexts no longer overlap. Exported so :mod:`merge`, :mod:`tiers`, and tests
+# can reference them without re-typing the literals.
+SCOPE_A_ACTION = "scope_a"
+SCOPE_B_ACTION = "scope_b"
 
 
 @dataclass
@@ -410,6 +436,18 @@ STEP 2 — APPLY THE CLASSIFICATION:
   forget_b deletes b. Set recommended_winner to the SURVIVING side ("b"
   for forget_a, "a" for forget_b).
 
+  scope_a / scope_b — return when BOTH sides were genuinely true but in
+  SEPARATE scopes (different org/team, locale, or time window), and the
+  apparent conflict exists only because one side's scope is stated too
+  broadly. NARROW the named side's scope so the two no longer overlap,
+  keeping BOTH active as durably-true scoped claims (minimal information
+  loss). Prefer this over keep_* / correct_* / forget_* whenever neither
+  side is wrong and neither should be retired — e.g. "deploy target is
+  Fly.io" valid from 2026-04 vs "deploy target is Heroku" with no end date:
+  scope_b closes the Heroku claim's window so both remain true for their own
+  periods. scope_a narrows side a; scope_b narrows side b. Set
+  recommended_winner to "neither" (no side loses).
+
   retain_both_with_context — fallback when classification is mixed or
   precedence cannot decide; both stay active and the human decides.
 
@@ -464,8 +502,8 @@ For most actions:
   "recommended_winner": "a" | "b" | "merge" | "neither",
   "action":
       "keep_a" | "keep_b" | "correct_a" | "correct_b"
-      | "forget_a" | "forget_b" | "merge" | "deprecate_both"
-      | "retain_both_with_context" | "not_a_conflict",
+      | "forget_a" | "forget_b" | "scope_a" | "scope_b" | "merge"
+      | "deprecate_both" | "retain_both_with_context" | "not_a_conflict",
   "rationale": "<one sentence: name the kind classification AND the rule applied>",
   "confidence": <float between 0 and 1>,
   "source_precedence_used": ["a:<source-or-unsourced> > b:<source-or-unsourced>"],
@@ -1088,6 +1126,68 @@ def _disjoint_validity_verdict(
     return None
 
 
+def _scope_verdict_proposal(
+    detector_result: ContradictionResult,
+    members: list[AutoMemoryFile],
+    config: dict[str, Any] | None = None,
+) -> ResolutionProposal | None:
+    """Return a synthetic verdict from the #329 three-way scope comparison.
+
+    Generalizes :func:`_disjoint_validity_verdict` (time-only, #324) to the
+    full org/locale/time poset. Resolves the flagged pair, parses each side's
+    :class:`~athenaeum.scoped_claims.ScopeCoordinate` against the config's
+    scope tree, and maps the three-way verdict to a proposal WITHOUT an Opus
+    call:
+
+    - DISJOINT (empty meet in some dimension) → ``not_a_conflict`` (conf 1.0):
+      the contexts never co-apply, so the claims cannot contradict.
+    - OVERRIDE (one context strictly below the other in the org/locale trees)
+      → ``not_a_conflict`` (conf 1.0): the specific claim is an exception; both
+      stay active. This is the false-positive that every org-rule/team-exception
+      pair would otherwise become.
+    - OVERLAP (same-context or incomparable-but-overlapping) → ``None`` (fall
+      through to the declared/LLM path — a genuine contradiction).
+
+    Fewer than two resolved members → ``None``. On a fresh install with no
+    ``scope:`` config the org/locale coordinates normalize to unscoped, so this
+    reduces to the time-only behavior and returns ``None`` for anything the
+    #324 pre-filter did not already catch — no default-behavior change.
+    """
+    if len(detector_result.members_involved) < 2:
+        return None
+    flagged = _resolve_flagged_pair(detector_result, members)
+    if len(flagged) < 2:
+        return None
+    tree = ScopeTree.from_config(config)
+    a_coord = tree.coordinate(_member_frontmatter(flagged[0].path))
+    b_coord = tree.coordinate(_member_frontmatter(flagged[1].path))
+    cmp = scope_comparison(a_coord, b_coord, tree)
+    if cmp.verdict is ScopeVerdict.DISJOINT:
+        return ResolutionProposal(
+            recommended_winner="neither",
+            action="not_a_conflict",
+            rationale=(
+                "disjoint scope (org/locale/time regions do not overlap; "
+                "the claims never co-apply)"
+            ),
+            confidence=1.0,
+            source_precedence_used=[],
+        )
+    if cmp.verdict is ScopeVerdict.OVERRIDE:
+        return ResolutionProposal(
+            recommended_winner="neither",
+            action="not_a_conflict",
+            rationale=(
+                f"scope override: the more-specific claim ({cmp.specific}) carves "
+                "an exception; the general claim governs the remainder — both "
+                "stay active"
+            ),
+            confidence=1.0,
+            source_precedence_used=[],
+        )
+    return None
+
+
 def _declared_winner(
     detector_result: ContradictionResult,
     members: list[AutoMemoryFile],
@@ -1315,6 +1415,17 @@ def propose_resolution(
     disjoint = _disjoint_validity_verdict(detector_result, members)
     if disjoint is not None:
         return disjoint
+
+    # Issue #329: the three-way scope comparison generalizes the disjoint-time
+    # pre-filter to the org/locale/time poset. A DISJOINT meet or an org/locale
+    # OVERRIDE (specific exception carving out its region) resolves as
+    # ``not_a_conflict`` at confidence 1.0 without an Opus call — both members
+    # stay active. Runs before the declared-relationship + LLM paths. On a
+    # fresh install with no ``scope:`` config this is a no-op beyond what #324
+    # already caught.
+    scoped = _scope_verdict_proposal(detector_result, members, config)
+    if scoped is not None:
+        return scoped
 
     # Lane 1 / #167: declared supersession short-circuits the LLM call.
     # If one flagged member's ``supersedes`` names the other, the
@@ -1615,10 +1726,22 @@ _ENACT_MARK_ACTIONS: frozenset[str] = frozenset(
     set(_ENACT_KEEP_WINNER_LOSER) | {DEPRECATE_BOTH_ACTION}
 )
 
+# Issue #329: scope-edit verdicts NARROW the named side (index → the side whose
+# validity interval is closed) so the two contexts no longer overlap. Both
+# members stay active — no delete, no superseded_by/deprecated mark.
+_ENACT_SCOPE_NARROW_INDEX: dict[str, int] = {
+    SCOPE_A_ACTION: 0,  # scope_a → narrow side a
+    SCOPE_B_ACTION: 1,  # scope_b → narrow side b
+}
+
 # Exported so callers / tests can ask "does this action mutate state?" without
-# re-deriving the set. Union of the destructive delete actions (#166) and the
-# non-destructive marking actions (#191).
-ENACTING_ACTIONS: frozenset[str] = frozenset(_ENACT_DELETE_INDEX) | _ENACT_MARK_ACTIONS
+# re-deriving the set. Union of the destructive delete actions (#166), the
+# non-destructive marking actions (#191), and the scope-narrow actions (#329).
+ENACTING_ACTIONS: frozenset[str] = (
+    frozenset(_ENACT_DELETE_INDEX)
+    | _ENACT_MARK_ACTIONS
+    | frozenset(_ENACT_SCOPE_NARROW_INDEX)
+)
 
 # Issue #199: orientation-flip map. The claim-pair fingerprint is
 # ORDER-INDEPENDENT (it sorts the two normalized claims before hashing), so a
@@ -1638,6 +1761,8 @@ _FLIP_ACTION: dict[str, str] = {
     KEEP_B_ACTION: KEEP_A_ACTION,
     FORGET_A_ACTION: FORGET_B_ACTION,
     FORGET_B_ACTION: FORGET_A_ACTION,
+    SCOPE_A_ACTION: SCOPE_B_ACTION,
+    SCOPE_B_ACTION: SCOPE_A_ACTION,
 }
 
 
@@ -1768,6 +1893,31 @@ def _close_interval(loser_path: Path, new_bound: date) -> bool:
     existing = _coerce_iso_date(_member_frontmatter(loser_path).get("valid_until"))
     bound = existing if (existing is not None and existing < new_bound) else new_bound
     return _mark_member_frontmatter(loser_path, "valid_until", bound.isoformat())
+
+
+def _narrow_scope_interval(target_path: Path, other_path: Path) -> Path | None:
+    """Narrow ``target``'s TIME scope until it no longer overlaps ``other`` (#329).
+
+    The buildable enactment of the scope-edit verdicts: close the named side's
+    ``valid_until`` to the day BEFORE the other side's ``valid_from`` so the two
+    validity windows become disjoint (``target_until < other_from``, the strict
+    ``<`` from :func:`validity_windows_disjoint`). Unlike the keep_*/snapshot
+    close, NO ``superseded_by`` mark is written — BOTH members stay active, each
+    now valid over a narrower, non-overlapping window.
+
+    Requires the other side to carry a ``valid_from`` lower bound (the boundary
+    to close against). When it does not, org/locale coordinate pinning would be
+    needed instead — that is deferred to the #329 ADR — so this returns ``None``
+    (nothing narrowed; the pair escalates to the human). Only-close-never-widen
+    via :func:`_close_interval`.
+    """
+    other_from = parse_valid_from(_member_frontmatter(other_path))
+    if other_from is None:
+        return None
+    new_bound = other_from - timedelta(days=1)
+    if _close_interval(target_path, new_bound):
+        return target_path
+    return None
 
 
 def _sequential_snapshot_close(
@@ -1920,6 +2070,40 @@ def enact_resolution(
                 action,
             )
             return Path(member_paths[0])
+        return None
+
+    # --- Scope-narrow branch (#329) ---
+    # scope_a / scope_b NARROW the named side's validity window until it no
+    # longer overlaps the other side — both members stay ACTIVE (no delete, no
+    # superseded_by/deprecated mark). Requires the other side to carry a
+    # ``valid_from`` boundary to close against; org/locale coordinate pinning is
+    # deferred to the #329 ADR, so a pair with no time boundary no-ops (return
+    # ``None`` → escalate to the human).
+    scope_idx = _ENACT_SCOPE_NARROW_INDEX.get(action)
+    if scope_idx is not None:
+        if not member_paths or len(member_paths) < 2:
+            log.warning(
+                "resolutions: cannot enact %s — need 2 member_paths (got %d)",
+                action,
+                0 if not member_paths else len(member_paths),
+            )
+            return None
+        target_path = Path(member_paths[scope_idx])
+        other_path = Path(member_paths[1 - scope_idx])
+        narrowed = _narrow_scope_interval(target_path, other_path)
+        if narrowed is not None:
+            log.info(
+                "resolutions: enacted %s — narrowed %s validity to end before "
+                "the other side's window (both stay active)",
+                action,
+                narrowed,
+            )
+            return narrowed
+        log.info(
+            "resolutions: enact %s — no time boundary to narrow against "
+            "(org/locale pinning deferred to #329 ADR); nothing enacted",
+            action,
+        )
         return None
 
     # --- Sequential-snapshot interval-close branch (#308 slice 2) ---
