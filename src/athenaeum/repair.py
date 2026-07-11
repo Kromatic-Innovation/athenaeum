@@ -31,6 +31,8 @@ from pathlib import Path
 
 import yaml
 
+from athenaeum.atomic_io import atomic_write_text
+
 
 @dataclass
 class RepairReport:
@@ -378,6 +380,290 @@ def migrate_legacy_source_slugs(
             continue
         report.rewrites_applied += 1
         report.changes.append((path, f"{slug} -> {typed}"))
+
+    return report
+
+
+# ---------------------------------------------------------------------------
+# 4. Source backfill — re-classify DEFAULTED ``claude:inferred`` (issue #328)
+
+# The scalar that :func:`athenaeum.mcp_server.remember` stamps when a caller
+# supplies no ``sources`` (mirrors ``mcp_server._DEFAULT_INFERRED_SOURCE``).
+# Only memories carrying EXACTLY this defaulted scalar are candidates — a
+# caller-declared source is never second-guessed.
+_DEFAULTED_INFERRED_SOURCE = "claude:inferred"
+
+# Idempotency marker written on the confirm-inferred path (§3 of the #328
+# lock). A boolean; presence means "already re-examined, no support found" so
+# the pass skips the memory on every subsequent run WITHOUT changing precedence.
+_INFERRED_VERIFIED_KEY = "inferred_verified"
+
+
+@dataclass
+class BackfillReport:
+    """Result of a ``repair --backfill-sources`` scan/apply pass (issue #328).
+
+    Attributes:
+        files_scanned: total ``*.md`` intake files inspected.
+        user_stated: memories upgraded to ``user-stated`` (source scalar
+            rewritten to ``user:<ref>``; resolver tier 1).
+        agent_observed: memories upgraded to ``agent-observed`` (source scalar
+            rewritten to ``agent-observed:<model>:<ref>``).
+        confirmed_inferred: memories confirmed ``inferred`` (idempotency
+            marker ``inferred_verified: true`` stamped; precedence unchanged).
+        changes: ``(path, summary)`` per proposed/applied upgrade.
+        skips: ``(path, reason)`` for candidates deliberately not touched
+            (missing origin session, transcript unavailable, ...).
+        errors: ``(path, error-message)`` for read/parse/write failures.
+        resume_after: when a ``limit`` cut the batch short, the scope-relative
+            path of the last memory acted on — a follow-up run continues past
+            it (idempotency makes the resume implicit).
+    """
+
+    files_scanned: int = 0
+    user_stated: int = 0
+    agent_observed: int = 0
+    confirmed_inferred: int = 0
+    changes: list[tuple[Path, str]] = field(default_factory=list)
+    skips: list[tuple[Path, str]] = field(default_factory=list)
+    errors: list[tuple[Path, str]] = field(default_factory=list)
+    resume_after: str | None = None
+
+
+def _iter_auto_memory_files(auto_memory_root: Path):
+    """Yield ``<auto_memory_root>/<scope>/*.md`` intake files, skipping ``_*``.
+
+    Auto-memory is scope-indexed (``raw/auto-memory/<scope>/<name>.md``), so the
+    parent directory name IS the origin scope (and the transcript scope). Files
+    beginning with ``_`` (sidecars) are skipped, matching the wiki convention.
+    """
+    for path in sorted(auto_memory_root.glob("*/*.md")):
+        if path.name.startswith("_"):
+            continue
+        yield path
+
+
+def _yaml_scalar_literal(value: str) -> str:
+    """Render *value* as a YAML scalar RHS, single-quoting when unsafe as plain.
+
+    Source scalars (``user:...``, ``agent-observed:...``) and refs
+    (``<session>#turn<N>``) carry ``:`` / ``#`` that YAML would otherwise
+    misparse, so they are single-quoted (with ``'`` doubled). Bare model ids
+    stay plain.
+    """
+    special = set(":#")
+    if (
+        value == ""
+        or value != value.strip()
+        or any(c in special for c in value)
+        or value[0] in "!&*[]{}>|@`\"'%,"
+    ):
+        return "'" + value.replace("'", "''") + "'"
+    return value
+
+
+def _set_frontmatter_scalar(fm: str, key: str, value_literal: str) -> str:
+    """Replace the top-level ``key:`` line's value, or append the key.
+
+    Only the single ``key:`` line is rewritten; every other line is preserved
+    byte-for-byte (the ``repair --legacy-source-slugs`` discipline). ``fm`` is
+    the frontmatter body WITHOUT the ``---`` fences and without a trailing
+    newline (as returned by :func:`_split_frontmatter`). The anchored
+    ``^key:`` match never touches an indented (nested) key of the same name.
+    """
+    pattern = re.compile(rf"^{re.escape(key)}:.*$", re.MULTILINE)
+    replacement = f"{key}: {value_literal}"
+    new_fm, n = pattern.subn(lambda _m: replacement, fm, count=1)
+    if n:
+        return new_fm
+    sep = "\n" if fm else ""
+    return fm + sep + replacement
+
+
+def _extract_claim(meta: dict, body: str) -> str:
+    """Return the claim text to match: ``name``/``title``, else first body line.
+
+    The #328 lock fixes THE CLAIM = title/name, falling back to the first
+    non-frontmatter line when neither frontmatter key is present.
+    """
+    for key in ("name", "title"):
+        val = meta.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    for line in body.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def backfill_sources(
+    auto_memory_root: Path,
+    *,
+    projects_root: Path | None = None,
+    apply: bool = False,
+    asserter: dict[str, object] | None = None,
+    limit: int | None = None,
+) -> BackfillReport:
+    """Re-classify DEFAULTED ``claude:inferred`` memories against transcripts.
+
+    For each auto-memory whose ``source:`` scalar is EXACTLY the defaulted
+    ``claude:inferred`` (and which has not already been confirmed via
+    ``inferred_verified``), locate the origin transcript via ``originSessionId``
+    (+ ``originTurn``) in the scope-indexed directory and match THE CLAIM
+    (``name``/``title``, fallback first body line) as a normalized substring:
+
+    1. **User said it → ``user-stated``.** Rewrite the ``source:`` scalar to
+       ``user:<session>#turn<N>`` (resolver tier 1) and set
+       ``source_type: user-stated`` / ``source_ref``. ``on_behalf_of`` is
+       populated from *asserter* ONLY when it yields a durable identity key
+       (transcripts carry no OIDC identity, so this is usually absent).
+    2. **Derived from a tool-result artifact → ``agent-observed``.** Rewrite the
+       scalar to ``agent-observed:<model>:<session-ref>`` (``model`` omitted
+       when the transcript carries none) and set
+       ``source_type: agent-observed`` / ``source_ref`` / ``model``.
+    3. **No support found → confirm inferred.** Stamp
+       ``inferred_verified: true`` (idempotency marker; precedence unchanged).
+
+    Only provenance keys are touched — the body and all other frontmatter lines
+    are preserved byte-for-byte. Idempotent: an already-upgraded memory (scalar
+    no longer ``claude:inferred``) or a confirmed one (``inferred_verified``)
+    is skipped. A missing/rolled-off transcript is SKIPPED with a logged reason
+    (never guessed). ``dry-run`` (``apply=False``) records proposals and writes
+    nothing. ``limit`` bounds the number of memories acted on per run for a
+    resumable batch.
+    """
+    from athenaeum.models import asserter_identity_key
+    from athenaeum.provenance import parse_source
+    from athenaeum.transcript_verify import classify_backfill_claim
+
+    report = BackfillReport()
+    if not auto_memory_root.is_dir():
+        report.errors.append((auto_memory_root, "auto-memory root not found"))
+        return report
+
+    # Owner asserter → on_behalf_of principal name, but ONLY when it carries a
+    # durable OIDC identity key (§10 discipline: no key ⇒ no identity claim).
+    on_behalf_of = ""
+    if asserter and asserter_identity_key(asserter):
+        name = asserter.get("name")
+        if isinstance(name, str) and name.strip():
+            on_behalf_of = name.strip()
+
+    acted = 0
+    for path in _iter_auto_memory_files(auto_memory_root):
+        report.files_scanned += 1
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            report.errors.append((path, f"read_error: {exc}"))
+            continue
+        parts = _split_frontmatter(text)
+        if parts is None:
+            continue
+        fm, body = parts
+        try:
+            meta = yaml.safe_load(fm)
+        except yaml.YAMLError as exc:
+            report.errors.append((path, f"unparseable_frontmatter: {str(exc)[:80]}"))
+            continue
+        if not isinstance(meta, dict):
+            continue
+
+        # Candidate gate + idempotency: only the DEFAULTED scalar, and never a
+        # memory already confirmed inferred.
+        if meta.get("source") != _DEFAULTED_INFERRED_SOURCE:
+            continue
+        if meta.get(_INFERRED_VERIFIED_KEY) is True:
+            continue
+
+        session_id = str(meta.get("originSessionId") or "").strip()
+        if not session_id:
+            report.skips.append((path, "no-origin-session"))
+            continue
+        turn_raw = meta.get("originTurn")
+        try:
+            turn = int(turn_raw) if turn_raw is not None else None
+        except (TypeError, ValueError):
+            turn = None
+        scope = path.parent.name
+        claim = _extract_claim(meta, body)
+
+        result = classify_backfill_claim(
+            scope, session_id, turn=turn, claim=claim, projects_root=projects_root
+        )
+        if result.channel == "unavailable":
+            report.skips.append((path, "transcript-unavailable"))
+            continue
+
+        # Build the surgical frontmatter edit for this channel.
+        new_source: str | None
+        if result.channel == "user-stated":
+            new_source = f"user:{result.ref}"
+            new_fm = _set_frontmatter_scalar(
+                fm, "source", _yaml_scalar_literal(new_source)
+            )
+            new_fm = _set_frontmatter_scalar(new_fm, "source_type", "user-stated")
+            new_fm = _set_frontmatter_scalar(
+                new_fm, "source_ref", _yaml_scalar_literal(result.ref)
+            )
+            if on_behalf_of:
+                new_fm = _set_frontmatter_scalar(
+                    new_fm, "on_behalf_of", _yaml_scalar_literal(on_behalf_of)
+                )
+            summary = f"user-stated: source -> {new_source}"
+        elif result.channel == "agent-observed":
+            if result.model:
+                new_source = f"agent-observed:{result.model}:{result.ref}"
+            else:
+                new_source = f"agent-observed:{result.ref}"
+            new_fm = _set_frontmatter_scalar(
+                fm, "source", _yaml_scalar_literal(new_source)
+            )
+            new_fm = _set_frontmatter_scalar(new_fm, "source_type", "agent-observed")
+            new_fm = _set_frontmatter_scalar(
+                new_fm, "source_ref", _yaml_scalar_literal(result.ref)
+            )
+            if result.model:
+                new_fm = _set_frontmatter_scalar(
+                    new_fm, "model", _yaml_scalar_literal(result.model)
+                )
+            summary = f"agent-observed: source -> {new_source}"
+        else:  # confirm inferred
+            new_source = None
+            new_fm = _set_frontmatter_scalar(fm, _INFERRED_VERIFIED_KEY, "true")
+            summary = "confirm-inferred: inferred_verified: true"
+
+        # Validate the rewrite parses (and the new source scalar is legal)
+        # before recording/writing — mirror the legacy-slug safeguard.
+        try:
+            reparsed = yaml.safe_load(new_fm)
+            if not isinstance(reparsed, dict):
+                raise ValueError("frontmatter no longer a mapping")
+            if new_source is not None and parse_source(new_source) is None:
+                raise ValueError("rewritten source failed to parse")
+        except (yaml.YAMLError, ValueError) as exc:
+            report.errors.append((path, f"validation_failed: {str(exc)[:80]}"))
+            continue
+
+        if result.channel == "user-stated":
+            report.user_stated += 1
+        elif result.channel == "agent-observed":
+            report.agent_observed += 1
+        else:
+            report.confirmed_inferred += 1
+        report.changes.append((path, summary))
+
+        if apply:
+            try:
+                atomic_write_text(path, "---\n" + new_fm + "\n---\n" + body)
+            except OSError as exc:
+                report.errors.append((path, f"write_error: {exc}"))
+                continue
+
+        acted += 1
+        if limit is not None and acted >= limit:
+            report.resume_after = f"{scope}/{path.name}"
+            break
 
     return report
 
