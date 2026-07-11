@@ -99,6 +99,8 @@ class TestEnactResolutionUnit:
         # not deleting) alongside the original four delete actions.
         # #329: scope_a/scope_b joined (non-destructive scope narrowing — both
         # members stay active).
+        # #327: attribute_both joined (non-destructive opinion attribution —
+        # both members stay active, each marked `attributed: true`).
         assert ENACTING_ACTIONS == frozenset(
             {
                 "forget_a",
@@ -110,8 +112,26 @@ class TestEnactResolutionUnit:
                 "deprecate_both",
                 "scope_a",
                 "scope_b",
+                "attribute_both",
             }
         )
+
+    def test_attribute_both_marks_both_members_active(self, tmp_path: Path) -> None:
+        # #327: attribute_both is non-destructive — stamps `attributed: true`
+        # on BOTH members, deletes neither, and both survive on disk.
+        from athenaeum.models import parse_frontmatter
+
+        a = _make_member(tmp_path, "a.md", "---\nname: a\n---\nTabs win.\n")
+        b = _make_member(tmp_path, "b.md", "---\nname: b\n---\nSpaces win.\n")
+        returned = enact_resolution(_proposal("attribute_both", confidence=1.0), [a, b])
+        assert returned == a  # convention: returns member_paths[0]
+        assert a.exists() and b.exists()
+        for path in (a, b):
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+            assert meta.get("attributed") is True
+            # Not made inactive — no superseded_by / deprecated marker.
+            assert "superseded_by" not in meta
+            assert "deprecated" not in meta
 
     def test_forget_a_deletes_side_a(self, tmp_path: Path) -> None:
         a = _make_member(tmp_path, "a.md")

@@ -515,4 +515,8 @@ class TestModuleConstants:
             # 0.90 record/mark bar, below the 0.95 destructive-delete bar.
             "scope_a": 0.90,
             "scope_b": 0.90,
+            # Issue #327: attribute_both keeps BOTH opinion members active with
+            # explicit attribution (non-destructive), aligned with the 0.90
+            # record/mark bar.
+            "attribute_both": 0.90,
         }

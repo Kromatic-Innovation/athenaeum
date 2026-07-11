@@ -65,11 +65,13 @@ DEFAULT_CONTRADICTION_MODEL = "claude-haiku-4-5-20251001"
 # even for 10-member clusters.
 PER_MEMBER_BODY_CHARS = 800
 
-# Conflict taxonomy -- kept to the two categories the wiki/review queue
-# consumers branch on (factual vs prescriptive). "Principled" contradictions
-# from Tier 3 stay in the tiers.py escalation path; this module is
-# auto-memory-specific.
-ConflictType = Literal["factual", "prescriptive"]
+# Conflict taxonomy -- the categories the wiki/review queue consumers branch
+# on. ``factual`` vs ``prescriptive`` are the original two; ``stance`` (issue
+# #327) routes an EVALUATIVE (opinion) pair to the resolver's opinion-
+# attribution short-circuit instead of a precedence winner. "Principled"
+# contradictions from Tier 3 stay in the tiers.py escalation path; this module
+# is auto-memory-specific.
+ConflictType = Literal["factual", "prescriptive", "stance"]
 
 
 @dataclass
@@ -94,6 +96,13 @@ A contradiction is ONE of:
   "X is in city A" vs "X is in city B").
 - prescriptive: two snippets give opposing guidance for the same situation
   (e.g. "always commit directly" vs "never commit directly, always park on WIP").
+- stance: two snippets express opposing EVALUATIVE opinions / judgments /
+  tastes on which reasonable people can disagree and both be right (e.g.
+  "tabs are better than spaces" vs "spaces are better than tabs", or "the
+  onboarding flow is great" vs "the onboarding flow is clunky"). Use `stance`
+  ONLY for evaluative viewpoints — NOT for a factual disagreement (that is
+  `factual`) and NOT for opposing instructions the agent must follow (that is
+  `prescriptive`).
 
 NOT contradictions:
 - Two snippets that differ in wording but say the same thing.
@@ -113,7 +122,7 @@ after) and are NOT a contradiction.
 Return STRICT JSON with this shape. No markdown fence, no prose:
 {
   "detected": true|false,
-  "conflict_type": "factual" | "prescriptive" | null,
+  "conflict_type": "factual" | "prescriptive" | "stance" | null,
   "members_involved": ["<path1>", "<path2>"],
   "conflicting_passages": ["<exact snippet text 1>", "<exact snippet text 2>"],
   "rationale": "<one sentence explaining why>"
@@ -282,7 +291,7 @@ def _parse_response(
         )
 
     conflict_type_raw = payload.get("conflict_type")
-    if conflict_type_raw not in ("factual", "prescriptive"):
+    if conflict_type_raw not in ("factual", "prescriptive", "stance"):
         log.warning(
             "contradictions: detector returned invalid conflict_type %r; "
             "treating as not-detected",

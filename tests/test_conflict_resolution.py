@@ -1460,8 +1460,12 @@ class TestSourcePrecedenceTaxonomyChannelSplit:
         unsourced_pos = prompt.find("8. unsourced")
 
         assert script_pos != -1, "tier 6 script:<slug> missing"
-        assert model_prior_pos != -1, "tier 7 model-prior:<model-id> missing (issue #326)"
-        assert unsourced_pos != -1, "tier 8 unsourced moved when model-prior was inserted"
+        assert (
+            model_prior_pos != -1
+        ), "tier 7 model-prior:<model-id> missing (issue #326)"
+        assert (
+            unsourced_pos != -1
+        ), "tier 8 unsourced moved when model-prior was inserted"
 
         # Ordering is highest-to-lowest, so script comes BEFORE model-prior
         # which comes BEFORE unsourced.
@@ -1528,3 +1532,87 @@ class TestSourcePrecedenceTaxonomyChannelSplit:
         assert meta_out["source_ref"] == "claude-opus-4-7:training-prior"
         assert meta_out["model"] == "claude-opus-4-7"
         assert body_out.strip() == "The claim body."
+
+
+# ---------------------------------------------------------------------------
+# 13. Opinion attribution — evaluative pairs never resolved by precedence (#327)
+# ---------------------------------------------------------------------------
+#
+# Locks the deterministic opinion-attribution short-circuit: an evaluative
+# (opinion / detector-`stance`) pair is kept-both-with-attribution WITHOUT an
+# Opus call. An opinion is never superseded or deleted by source precedence;
+# an unknown asserter (the common Claude-session case) is the required
+# keep-both fallback.
+
+
+class TestOpinionAttributionLock:
+    def _am(
+        self,
+        tmp_path: Path,
+        filename: str,
+        *,
+        asserter: dict | None = None,
+        claim_kind: str = "opinion",
+    ) -> AutoMemoryFile:
+        scope = tmp_path / "scope-x"
+        scope.mkdir(parents=True, exist_ok=True)
+        path = scope / filename
+        lines = ["---", "name: " + filename.replace(".md", ""), "type: feedback"]
+        if claim_kind:
+            lines.append(f"claim_kind: {claim_kind}")
+        if asserter:
+            lines.append("asserter:")
+            for k, v in asserter.items():
+                lines.append(f"  {k}: {v}")
+        lines.append("---")
+        path.write_text("\n".join(lines) + "\nBody.\n", encoding="utf-8")
+        return AutoMemoryFile(
+            path=path,
+            origin_scope="scope-x",
+            memory_type="feedback",
+            name=filename.replace(".md", ""),
+            claim_kind=claim_kind,
+            asserter=dict(asserter) if asserter else {},
+        )
+
+    def _detector(self) -> ContradictionResult:
+        return ContradictionResult(
+            detected=True,
+            conflict_type="stance",
+            members_involved=["scope-x/a.md", "scope-x/b.md"],
+            conflicting_passages=["Tabs win.", "Spaces win."],
+            rationale="opposing evaluative preferences",
+        )
+
+    def test_different_asserters_attribute_both_no_llm(self, tmp_path: Path) -> None:
+        a = self._am(tmp_path, "a.md", asserter={"iss": "g", "sub": "alice"})
+        b = self._am(tmp_path, "b.md", asserter={"iss": "g", "sub": "bob"})
+        fake_client = MagicMock()
+        proposal = propose_resolution(self._detector(), [a, b], fake_client)
+        fake_client.messages.create.assert_not_called()
+        assert proposal.action == "attribute_both"
+        assert proposal.recommended_winner == "neither"
+        assert proposal.confidence == 1.0
+
+    def test_unknown_asserter_keep_both_fallback_no_llm(self, tmp_path: Path) -> None:
+        a = self._am(tmp_path, "a.md")  # no asserter identity
+        b = self._am(tmp_path, "b.md")
+        fake_client = MagicMock()
+        proposal = propose_resolution(self._detector(), [a, b], fake_client)
+        fake_client.messages.create.assert_not_called()
+        assert proposal.action == "attribute_both"
+
+    def test_attribute_both_enactment_keeps_both_active(self, tmp_path: Path) -> None:
+        a = self._am(tmp_path, "a.md", asserter={"iss": "g", "sub": "alice"})
+        b = self._am(tmp_path, "b.md", asserter={"iss": "g", "sub": "bob"})
+        proposal = ResolutionProposal(
+            recommended_winner="neither",
+            action="attribute_both",
+            rationale="opinion pair",
+            confidence=1.0,
+        )
+        enact_resolution(proposal, [a.path, b.path])
+        assert a.path.exists() and b.path.exists()
+        for am in (a, b):
+            meta, _ = parse_frontmatter(am.path.read_text(encoding="utf-8"))
+            assert meta.get("attributed") is True
