@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from athenaeum import search as search_module
 from athenaeum.search import (
     FTS5Backend,
     SearchBackend,
@@ -76,7 +77,9 @@ class TestFTS5Backend:
         # _index.md should be excluded
         assert count == 3
 
-    def test_build_index_creates_cache_dir(self, wiki_with_pages: Path, tmp_path: Path) -> None:
+    def test_build_index_creates_cache_dir(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
         cache = tmp_path / "nonexistent" / "cache"
         backend = FTS5Backend()
         backend.build_index(wiki_with_pages, cache)
@@ -95,9 +98,7 @@ class TestFTS5Backend:
         count = backend.build_index(wiki_with_pages, cache)
         assert count == 4
 
-    def test_query_finds_match(
-        self, wiki_with_pages: Path, tmp_path: Path
-    ) -> None:
+    def test_query_finds_match(self, wiki_with_pages: Path, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         backend = FTS5Backend()
         backend.build_index(wiki_with_pages, cache)
@@ -106,18 +107,14 @@ class TestFTS5Backend:
         filenames = [r[0] for r in results]
         assert "lean-startup.md" in filenames
 
-    def test_query_no_match(
-        self, wiki_with_pages: Path, tmp_path: Path
-    ) -> None:
+    def test_query_no_match(self, wiki_with_pages: Path, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         backend = FTS5Backend()
         backend.build_index(wiki_with_pages, cache)
         results = backend.query("xyznonexistent", cache)
         assert results == []
 
-    def test_query_respects_limit(
-        self, wiki_with_pages: Path, tmp_path: Path
-    ) -> None:
+    def test_query_respects_limit(self, wiki_with_pages: Path, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         backend = FTS5Backend()
         backend.build_index(wiki_with_pages, cache)
@@ -131,7 +128,8 @@ class TestFTS5Backend:
         backend = FTS5Backend()
         backend.build_index(wiki_with_pages, cache)
         results = backend.query(
-            "lean startup methodology", cache,
+            "lean startup methodology",
+            cache,
             exclude={"lean-startup.md"},
         )
         filenames = [r[0] for r in results]
@@ -163,9 +161,7 @@ class TestFTS5Backend:
         results = backend.query("the and they have been", cache)
         assert results == []
 
-    def test_returns_tuples(
-        self, wiki_with_pages: Path, tmp_path: Path
-    ) -> None:
+    def test_returns_tuples(self, wiki_with_pages: Path, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         backend = FTS5Backend()
         backend.build_index(wiki_with_pages, cache)
@@ -235,9 +231,7 @@ class TestVectorBackend:
         # Garbage was replaced, not merged
         assert not (vector_dir / "stray-file.bin").exists()
 
-    def test_query_finds_match(
-        self, wiki_with_pages: Path, tmp_path: Path
-    ) -> None:
+    def test_query_finds_match(self, wiki_with_pages: Path, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         backend = VectorBackend()
         backend.build_index(wiki_with_pages, cache)
@@ -246,9 +240,7 @@ class TestVectorBackend:
         filenames = [r[0] for r in results]
         assert "lean-startup.md" in filenames
 
-    def test_query_semantic_match(
-        self, wiki_with_pages: Path, tmp_path: Path
-    ) -> None:
+    def test_query_semantic_match(self, wiki_with_pages: Path, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         backend = VectorBackend()
         backend.build_index(wiki_with_pages, cache)
@@ -258,9 +250,7 @@ class TestVectorBackend:
         filenames = [r[0] for r in results]
         assert "lean-startup.md" in filenames
 
-    def test_query_respects_limit(
-        self, wiki_with_pages: Path, tmp_path: Path
-    ) -> None:
+    def test_query_respects_limit(self, wiki_with_pages: Path, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         backend = VectorBackend()
         backend.build_index(wiki_with_pages, cache)
@@ -274,7 +264,8 @@ class TestVectorBackend:
         backend = VectorBackend()
         backend.build_index(wiki_with_pages, cache)
         results = backend.query(
-            "lean startup methodology", cache,
+            "lean startup methodology",
+            cache,
             exclude={"lean-startup.md"},
         )
         filenames = [r[0] for r in results]
@@ -286,9 +277,7 @@ class TestVectorBackend:
         backend = VectorBackend()
         assert backend.query("anything", cache) == []
 
-    def test_returns_tuples(
-        self, wiki_with_pages: Path, tmp_path: Path
-    ) -> None:
+    def test_returns_tuples(self, wiki_with_pages: Path, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         backend = VectorBackend()
         backend.build_index(wiki_with_pages, cache)
@@ -357,7 +346,9 @@ class TestFTS5ExtraRoots:
         wiki, auto_memory = wiki_and_auto_memory
         cache = tmp_path / "cache"
         count = FTS5Backend().build_index(
-            wiki, cache, extra_roots=[auto_memory],
+            wiki,
+            cache,
+            extra_roots=[auto_memory],
         )
         # wiki: 1, scope_a feedback: 1, _unscoped: 1 = 3
         assert count == 3
@@ -374,8 +365,7 @@ class TestFTS5ExtraRoots:
         filenames = [r[0] for r in results]
         # Indexed as <root_name>/<relpath_posix>
         assert (
-            "auto-memory/-Users-tristankromer-Code/"
-            "feedback_develop_first_flow.md"
+            "auto-memory/-Users-tristankromer-Code/" "feedback_develop_first_flow.md"
         ) in filenames
 
     def test_memory_index_excluded(
@@ -401,10 +391,7 @@ class TestFTS5ExtraRoots:
         backend.build_index(wiki, cache, extra_roots=[auto_memory])
         results = backend.query("bayesian prompt prompting", cache, n=5)
         filenames = [r[0] for r in results]
-        assert any(
-            "_unscoped/feedback_bayesian_is_a_prompt.md" in f
-            for f in filenames
-        )
+        assert any("_unscoped/feedback_bayesian_is_a_prompt.md" in f for f in filenames)
 
     def test_non_markdown_skipped(
         self, wiki_and_auto_memory: tuple[Path, Path], tmp_path: Path
@@ -418,9 +405,7 @@ class TestFTS5ExtraRoots:
         # If the JSONL slipped in, count would be 4
         assert count == 3
 
-    def test_missing_extra_root_does_not_raise(
-        self, tmp_path: Path
-    ) -> None:
+    def test_missing_extra_root_does_not_raise(self, tmp_path: Path) -> None:
         """A missing extra root is silently dropped, not fatal."""
         wiki = tmp_path / "wiki"
         wiki.mkdir()
@@ -428,7 +413,9 @@ class TestFTS5ExtraRoots:
         cache = tmp_path / "cache"
         missing = tmp_path / "does-not-exist"
         count = FTS5Backend().build_index(
-            wiki, cache, extra_roots=[missing],
+            wiki,
+            cache,
+            extra_roots=[missing],
         )
         assert count == 1
 
@@ -466,7 +453,9 @@ class TestVectorExtraRoots:
         wiki, auto_memory = wiki_and_auto_memory
         cache = tmp_path / "cache"
         count = VectorBackend().build_index(
-            wiki, cache, extra_roots=[auto_memory],
+            wiki,
+            cache,
+            extra_roots=[auto_memory],
         )
         assert count == 3
 
@@ -479,10 +468,7 @@ class TestVectorExtraRoots:
         backend.build_index(wiki, cache, extra_roots=[auto_memory])
         results = backend.query("develop first flow", cache, n=5)
         filenames = [r[0] for r in results]
-        assert any(
-            f.endswith("feedback_develop_first_flow.md")
-            for f in filenames
-        )
+        assert any(f.endswith("feedback_develop_first_flow.md") for f in filenames)
 
     def test_memory_index_excluded(
         self, wiki_and_auto_memory: tuple[Path, Path], tmp_path: Path
@@ -610,9 +596,11 @@ class TestHybridRescueClasses:
             "this is the failure class vector embedding alone misses."
         )
         # And it must rank ahead of the distractor.
-        assert filenames.index("return-path.md") < filenames.index(
-            "migration-path.md"
-        ) if "migration-path.md" in filenames else True
+        assert (
+            filenames.index("return-path.md") < filenames.index("migration-path.md")
+            if "migration-path.md" in filenames
+            else True
+        )
 
     def test_vector_rescues_semantic_no_overlap(
         self, rescue_wiki: Path, tmp_path: Path
@@ -622,9 +610,7 @@ class TestHybridRescueClasses:
         """
         cache = tmp_path / "cache"
         VectorBackend().build_index(rescue_wiki, cache)
-        results = VectorBackend().query(
-            "iterative feedback loops", cache, n=3
-        )
+        results = VectorBackend().query("iterative feedback loops", cache, n=3)
         filenames = [r[0] for r in results]
         assert "innovation-accounting.md" in filenames, (
             "Vector must surface the semantic neighbour even when the "
@@ -643,9 +629,7 @@ class TestHybridRescueClasses:
         """
         cache = tmp_path / "cache"
         FTS5Backend().build_index(rescue_wiki, cache)
-        results = FTS5Backend().query(
-            "iterative feedback loops", cache, n=3
-        )
+        results = FTS5Backend().query("iterative feedback loops", cache, n=3)
         filenames = [r[0] for r in results]
         assert "innovation-accounting.md" not in filenames
 
@@ -667,9 +651,7 @@ class TestHybridRescueClassesExtraRoot:
         pytest.importorskip("chromadb")
 
     @pytest.fixture
-    def rescue_wiki_and_auto_memory(
-        self, tmp_path: Path
-    ) -> tuple[Path, Path]:
+    def rescue_wiki_and_auto_memory(self, tmp_path: Path) -> tuple[Path, Path]:
         """Mirror of ``TestHybridRescueClasses.rescue_wiki`` but with the
         rescue targets relocated to ``raw/auto-memory/<scope>/``.
 
@@ -741,10 +723,7 @@ class TestHybridRescueClassesExtraRoot:
         FTS5Backend().build_index(wiki, cache, extra_roots=[auto_memory])
         results = FTS5Backend().query("Return Path", cache, n=3)
         filenames = [r[0] for r in results]
-        expected = (
-            "auto-memory/-Users-tristankromer-Code/"
-            "feedback_return_path.md"
-        )
+        expected = "auto-memory/-Users-tristankromer-Code/" "feedback_return_path.md"
         assert expected in filenames, (
             "FTS5 must surface the proper-noun entity on a short query "
             "when the doc lives in an extra intake root — same rescue "
@@ -752,9 +731,7 @@ class TestHybridRescueClassesExtraRoot:
         )
         # And must rank ahead of the wiki distractor.
         if "migration-path.md" in filenames:
-            assert filenames.index(expected) < filenames.index(
-                "migration-path.md"
-            )
+            assert filenames.index(expected) < filenames.index("migration-path.md")
 
     def test_vector_rescues_semantic_no_overlap_in_extra_root(
         self,
@@ -767,19 +744,408 @@ class TestHybridRescueClassesExtraRoot:
         """
         wiki, auto_memory = rescue_wiki_and_auto_memory
         cache = tmp_path / "cache"
-        VectorBackend().build_index(
-            wiki, cache, extra_roots=[auto_memory]
-        )
-        results = VectorBackend().query(
-            "iterative feedback loops", cache, n=3
-        )
+        VectorBackend().build_index(wiki, cache, extra_roots=[auto_memory])
+        results = VectorBackend().query("iterative feedback loops", cache, n=3)
         filenames = [r[0] for r in results]
         expected = (
-            "auto-memory/-Users-tristankromer-Code/"
-            "feedback_innovation_accounting.md"
+            "auto-memory/-Users-tristankromer-Code/" "feedback_innovation_accounting.md"
         )
         assert expected in filenames, (
             "Vector must surface the semantic neighbour on a zero-overlap "
             "query when the doc lives in an extra intake root — same "
             "rescue class as wiki-rooted docs."
         )
+
+
+# ---------------------------------------------------------------------------
+# Incremental indexing (issue #348) — whole-file hash diff for both backends
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def delta_spy(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Capture the ``(added, changed, removed)`` delta of the last rebuild.
+
+    Both backends route the incremental delta through the module-level
+    ``_compute_delta``; spying there is backend-agnostic. It is only invoked
+    on the incremental path (a seeded manifest + live index), so the seed
+    build leaves ``captured`` empty and the second build populates it.
+    """
+    captured: dict = {}
+    orig = search_module._compute_delta
+
+    def spy(current_hashes, stored_hashes):  # type: ignore[no-untyped-def]
+        added, changed, removed = orig(current_hashes, stored_hashes)
+        captured["added"] = added
+        captured["changed"] = changed
+        captured["removed"] = removed
+        return added, changed, removed
+
+    monkeypatch.setattr(search_module, "_compute_delta", spy)
+    return captured
+
+
+def _write_page(
+    wiki: Path, fname: str, *, name: str, body: str, extra_fm: str = ""
+) -> None:
+    """Write a wiki page with the given frontmatter name/body."""
+    fm = f"name: {name}\n"
+    if extra_fm:
+        fm += extra_fm if extra_fm.endswith("\n") else extra_fm + "\n"
+    (wiki / fname).write_text(f"---\n{fm}---\n\n{body}\n")
+
+
+class TestFTS5Incremental:
+    """Hash-diff coverage for the FTS5 backend: add/update/delete/no-op."""
+
+    @pytest.fixture
+    def seeded(self, wiki_with_pages: Path, tmp_path: Path) -> tuple[Path, Path]:
+        cache = tmp_path / "cache"
+        # Seed build writes the manifest; subsequent builds go incremental.
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        assert (cache / "fts5-manifest.json").is_file()
+        return wiki_with_pages, cache
+
+    def test_noop_touches_nothing(
+        self,
+        seeded: tuple[Path, Path],
+        delta_spy: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        wiki, cache = seeded
+        # Also spy the row-builder: on a no-op it must never be called.
+        rows_built = {"n": 0}
+        orig_row = FTS5Backend._row_for
+
+        def counting_row(name, path, text, meta):  # type: ignore[no-untyped-def]
+            rows_built["n"] += 1
+            return orig_row(name, path, text, meta)
+
+        monkeypatch.setattr(FTS5Backend, "_row_for", staticmethod(counting_row))
+
+        count = FTS5Backend().build_index(wiki, cache)
+        assert delta_spy["added"] == []
+        assert delta_spy["changed"] == []
+        assert delta_spy["removed"] == []
+        assert rows_built["n"] == 0  # zero inserts on a no-op
+        assert count == 3
+
+    def test_add_new_page(self, seeded: tuple[Path, Path], delta_spy: dict) -> None:
+        wiki, cache = seeded
+        _write_page(
+            wiki,
+            "growth-loops.md",
+            name="Growth Loops",
+            body="Compounding acquisition loops for startups.",
+        )
+        count = FTS5Backend().build_index(wiki, cache)
+        assert delta_spy["added"] == ["growth-loops.md"]
+        assert delta_spy["changed"] == []
+        assert delta_spy["removed"] == []
+        assert count == 4
+        results = FTS5Backend().query("growth loops compounding", cache)
+        assert "growth-loops.md" in [r[0] for r in results]
+
+    def test_update_body(self, seeded: tuple[Path, Path], delta_spy: dict) -> None:
+        wiki, cache = seeded
+        # Same frontmatter, different body → whole-file hash changes.
+        (wiki / "acme-corp.md").write_text(
+            "---\n"
+            "name: Acme Corp\n"
+            "tags: [client, fintech]\n"
+            "description: Enterprise client in financial services\n"
+            "---\n\n"
+            "Acme Corp pivoted to a quantum cryptography product line.\n"
+        )
+        count = FTS5Backend().build_index(wiki, cache)
+        # A whole-file hash change re-indexes even when the change is in the
+        # body (FTS5 indexes frontmatter only, so the query surface is
+        # unchanged here — the point is the differ never MISSES the edit).
+        assert delta_spy["changed"] == ["acme-corp.md"]
+        assert delta_spy["added"] == []
+        assert delta_spy["removed"] == []
+        assert count == 3  # replace, not accrete
+        # The page is still present and findable via its frontmatter.
+        results = FTS5Backend().query("acme fintech", cache)
+        assert "acme-corp.md" in [r[0] for r in results]
+
+    def test_update_frontmatter_only(
+        self, seeded: tuple[Path, Path], delta_spy: dict
+    ) -> None:
+        """A frontmatter-only edit (body byte-identical) must re-index.
+
+        The whole-file hash covers frontmatter, so an audience/tag/name
+        change is caught where a body-only hash would miss it (#312).
+        """
+        wiki, cache = seeded
+        # Body identical to the fixture; only the tags line changes.
+        (wiki / "customer-development.md").write_text(
+            "---\n"
+            "name: Customer Development\n"
+            "tags: [methodology, customers, sales]\n"
+            "description: Steve Blank's customer development process\n"
+            "---\n\n"
+            "Customer development is a four-step framework for startups.\n"
+        )
+        count = FTS5Backend().build_index(wiki, cache)
+        assert delta_spy["changed"] == ["customer-development.md"]
+        assert delta_spy["added"] == []
+        assert delta_spy["removed"] == []
+        assert count == 3
+
+    def test_delete_page(self, seeded: tuple[Path, Path], delta_spy: dict) -> None:
+        wiki, cache = seeded
+        (wiki / "acme-corp.md").unlink()
+        count = FTS5Backend().build_index(wiki, cache)
+        assert delta_spy["removed"] == ["acme-corp.md"]
+        assert delta_spy["added"] == []
+        assert delta_spy["changed"] == []
+        assert count == 2
+        # Deleted page must disappear from recall.
+        results = FTS5Backend().query("acme fintech", cache)
+        assert "acme-corp.md" not in [r[0] for r in results]
+
+    def test_flip_inactive_is_a_delete(
+        self, seeded: tuple[Path, Path], delta_spy: dict
+    ) -> None:
+        """A page that flips to inactive (deprecated) drops from the index."""
+        wiki, cache = seeded
+        (wiki / "acme-corp.md").write_text(
+            "---\n"
+            "name: Acme Corp\n"
+            "tags: [client, fintech]\n"
+            "description: Enterprise client in financial services\n"
+            "deprecated: true\n"
+            "---\n\n"
+            "Acme Corp is a fintech company.\n"
+        )
+        count = FTS5Backend().build_index(wiki, cache)
+        assert delta_spy["removed"] == ["acme-corp.md"]
+        assert count == 2
+        results = FTS5Backend().query("acme fintech", cache)
+        assert "acme-corp.md" not in [r[0] for r in results]
+
+    def test_full_flag_rebuilds_from_scratch(self, seeded: tuple[Path, Path]) -> None:
+        """``incremental=False`` wipes and rebuilds (seed / reindex --full)."""
+        wiki, cache = seeded
+        _write_page(
+            wiki,
+            "extra.md",
+            name="Extra",
+            body="An extra page body.",
+        )
+        count = FTS5Backend().build_index(wiki, cache, incremental=False)
+        assert count == 4
+        results = FTS5Backend().query("extra page body", cache)
+        assert "extra.md" in [r[0] for r in results]
+
+
+class TestVectorIncremental:
+    """Hash-diff coverage for the vector backend: add/update/delete/no-op."""
+
+    @pytest.fixture(autouse=True)
+    def _require_chromadb(self) -> None:
+        pytest.importorskip("chromadb")
+
+    @pytest.fixture
+    def seeded(self, wiki_with_pages: Path, tmp_path: Path) -> tuple[Path, Path]:
+        cache = tmp_path / "cache"
+        VectorBackend().build_index(wiki_with_pages, cache)
+        assert (cache / "vector-manifest.json").is_file()
+        return wiki_with_pages, cache
+
+    def test_noop_reembeds_nothing(
+        self,
+        seeded: tuple[Path, Path],
+        delta_spy: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        wiki, cache = seeded
+        # Spy the embed/add path: on a no-op it must never be called.
+        added_records = {"n": 0}
+        orig_add = VectorBackend._add_records
+
+        def counting_add(self, collection, records):  # type: ignore[no-untyped-def]
+            added_records["n"] += len(records)
+            return orig_add(self, collection, records)
+
+        monkeypatch.setattr(VectorBackend, "_add_records", counting_add)
+
+        count = VectorBackend().build_index(wiki, cache)
+        assert delta_spy["added"] == []
+        assert delta_spy["changed"] == []
+        assert delta_spy["removed"] == []
+        assert added_records["n"] == 0  # zero re-embeds on a no-op
+        assert count == 3
+
+    def test_add_new_page(self, seeded: tuple[Path, Path], delta_spy: dict) -> None:
+        wiki, cache = seeded
+        _write_page(
+            wiki,
+            "growth-loops.md",
+            name="Growth Loops",
+            body="Compounding acquisition loops for startups.",
+        )
+        count = VectorBackend().build_index(wiki, cache)
+        assert delta_spy["added"] == ["growth-loops.md"]
+        assert delta_spy["removed"] == []
+        assert count == 4
+        results = VectorBackend().query("compounding acquisition loops", cache)
+        assert "growth-loops.md" in [r[0] for r in results]
+
+    def test_update_body(self, seeded: tuple[Path, Path], delta_spy: dict) -> None:
+        wiki, cache = seeded
+        (wiki / "acme-corp.md").write_text(
+            "---\n"
+            "name: Acme Corp\n"
+            "tags: [client, fintech]\n"
+            "description: Enterprise client in financial services\n"
+            "---\n\n"
+            "Acme Corp pivoted to a quantum cryptography product line.\n"
+        )
+        count = VectorBackend().build_index(wiki, cache)
+        assert delta_spy["changed"] == ["acme-corp.md"]
+        assert delta_spy["added"] == []
+        assert delta_spy["removed"] == []
+        assert count == 3  # replace, not accrete
+
+    def test_update_frontmatter_only(
+        self, seeded: tuple[Path, Path], delta_spy: dict
+    ) -> None:
+        wiki, cache = seeded
+        # Body byte-identical; only frontmatter tags change.
+        (wiki / "customer-development.md").write_text(
+            "---\n"
+            "name: Customer Development\n"
+            "tags: [methodology, customers, sales]\n"
+            "description: Steve Blank's customer development process\n"
+            "---\n\n"
+            "Customer development is a four-step framework for startups.\n"
+        )
+        count = VectorBackend().build_index(wiki, cache)
+        assert delta_spy["changed"] == ["customer-development.md"]
+        assert delta_spy["added"] == []
+        assert delta_spy["removed"] == []
+        assert count == 3
+
+    def test_delete_page(self, seeded: tuple[Path, Path], delta_spy: dict) -> None:
+        wiki, cache = seeded
+        (wiki / "acme-corp.md").unlink()
+        count = VectorBackend().build_index(wiki, cache)
+        assert delta_spy["removed"] == ["acme-corp.md"]
+        assert delta_spy["added"] == []
+        assert delta_spy["changed"] == []
+        assert count == 2
+        results = VectorBackend().query("fintech financial services", cache, n=5)
+        assert "acme-corp.md" not in [r[0] for r in results]
+
+    def test_flip_inactive_is_a_delete(
+        self, seeded: tuple[Path, Path], delta_spy: dict
+    ) -> None:
+        wiki, cache = seeded
+        (wiki / "acme-corp.md").write_text(
+            "---\n"
+            "name: Acme Corp\n"
+            "tags: [client, fintech]\n"
+            "description: Enterprise client in financial services\n"
+            "deprecated: true\n"
+            "---\n\n"
+            "Acme Corp is a fintech company.\n"
+        )
+        count = VectorBackend().build_index(wiki, cache)
+        assert delta_spy["removed"] == ["acme-corp.md"]
+        assert count == 2
+
+    def test_full_flag_rebuilds_from_scratch(self, seeded: tuple[Path, Path]) -> None:
+        wiki, cache = seeded
+        _write_page(
+            wiki,
+            "extra.md",
+            name="Extra",
+            body="An extra page body.",
+        )
+        count = VectorBackend().build_index(wiki, cache, incremental=False)
+        assert count == 4
+
+    def test_embedding_model_swap_forces_full_rebuild(
+        self,
+        seeded: tuple[Path, Path],
+        delta_spy: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A different configured model must re-embed the whole corpus.
+
+        The alternate EF is stubbed (no real model download) so the seam is
+        exercised without a heavy embed. The manifest records the model, so
+        a mismatch bypasses the incremental path entirely (no delta call).
+        """
+        wiki, cache = seeded
+
+        # Stub the alternate embedding function so no model is downloaded.
+        monkeypatch.setattr(VectorBackend, "_embedding_function", lambda self: None)
+        backend = VectorBackend(embedding_model="some-other-model")
+        count = backend.build_index(wiki, cache)
+        # Model changed → full rebuild, so the delta spy was never invoked.
+        assert "added" not in delta_spy
+        assert count == 3
+        # Manifest now records the swapped model.
+        import json
+
+        manifest = json.loads((cache / "vector-manifest.json").read_text())
+        assert manifest["embedding_model"] == "some-other-model"
+
+
+class TestIndexGlobs:
+    """Corpus-scoping include/exclude globs (issue #348 COULD)."""
+
+    def test_exclude_glob_skips_matching_pages(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        count = FTS5Backend().build_index(
+            wiki_with_pages, cache, exclude_globs=["acme-*.md"]
+        )
+        assert count == 2  # acme-corp.md excluded
+        results = FTS5Backend().query("acme fintech", cache)
+        assert "acme-corp.md" not in [r[0] for r in results]
+
+    def test_include_glob_restricts_to_matching_pages(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        count = FTS5Backend().build_index(
+            wiki_with_pages, cache, include_globs=["lean-*.md"]
+        )
+        assert count == 1  # only lean-startup.md
+        results = FTS5Backend().query("lean startup methodology", cache)
+        assert [r[0] for r in results] == ["lean-startup.md"]
+
+    def test_default_indexes_everything(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        count = FTS5Backend().build_index(wiki_with_pages, cache)
+        assert count == 3  # no globs → index-all
+
+
+class TestIncrementalHelpers:
+    """Unit coverage for the shared hash-diff helpers."""
+
+    def test_compute_delta(self) -> None:
+        current = {"a.md": "h1", "b.md": "h2new", "c.md": "h3"}
+        stored = {"a.md": "h1", "b.md": "h2old", "d.md": "h4"}
+        added, changed, removed = search_module._compute_delta(current, stored)
+        assert added == ["c.md"]
+        assert changed == ["b.md"]
+        assert removed == ["d.md"]
+
+    def test_passes_globs_default(self) -> None:
+        assert search_module._passes_globs("x.md", None, None) is True
+
+    def test_passes_globs_include(self) -> None:
+        assert search_module._passes_globs("lean.md", ["lean*"], None) is True
+        assert search_module._passes_globs("acme.md", ["lean*"], None) is False
+
+    def test_passes_globs_exclude(self) -> None:
+        assert search_module._passes_globs("acme.md", None, ["acme*"]) is False
+        assert search_module._passes_globs("lean.md", None, ["acme*"]) is True

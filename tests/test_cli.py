@@ -55,7 +55,7 @@ class TestRebuildIndex:
         )
         assert rc == 0
         out = capsys.readouterr().out
-        assert "FTS5 index rebuilt: 2 pages" in out
+        assert "FTS5 index rebuilt (incremental): 2 pages" in out
         assert (cache / "wiki-index.db").exists()
 
     def test_reads_backend_from_config(
@@ -79,6 +79,28 @@ class TestRebuildIndex:
         )
         assert rc == 0
         assert "FTS5 index rebuilt" in capsys.readouterr().out
+
+    def test_full_flag_reports_full_mode(
+        self,
+        knowledge_with_wiki: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        cache = tmp_path / "cache"
+        rc = main(
+            [
+                "rebuild-index",
+                "--path",
+                str(knowledge_with_wiki),
+                "--cache-dir",
+                str(cache),
+                "--backend",
+                "fts5",
+                "--full",
+            ]
+        )
+        assert rc == 0
+        assert "FTS5 index rebuilt (full):" in capsys.readouterr().out
 
     def test_defaults_to_fts5_when_no_config(
         self,
@@ -1019,9 +1041,7 @@ class TestClaims:
         monkeypatch.setattr("athenaeum.search.embed_texts", _deterministic_embed)
         knowledge = _claims_knowledge(tmp_path)
 
-        rc = main(
-            ["claims", "--find", "--path", str(knowledge), "--threshold", "0.99"]
-        )
+        rc = main(["claims", "--find", "--path", str(knowledge), "--threshold", "0.99"])
         assert rc == 0
         parsed = yaml.safe_load(capsys.readouterr().out)
         # Override reaches the report summary ...

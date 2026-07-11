@@ -16,11 +16,14 @@ Shell hook scripts can call the module-level convenience functions
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -48,6 +51,9 @@ class SearchBackend(Protocol):
         cache_dir: Path,
         *,
         extra_roots: Iterable[Path] | None = None,
+        incremental: bool = True,
+        include_globs: Iterable[str] | None = None,
+        exclude_globs: Iterable[str] | None = None,
     ) -> int:
         """Build or rebuild the search index.
 
@@ -63,8 +69,23 @@ class SearchBackend(Protocol):
                 ``raw/auto-memory/`` intake tree, but accepts any
                 directory. Files named ``MEMORY.md`` (per-scope index
                 files) and non-``.md`` files are skipped.
+            incremental: When ``True`` (default) and a prior manifest
+                exists, diff each page's whole-file content hash against
+                the stored manifest and apply only the delta — add new
+                pages, re-index changed pages, delete removed pages
+                (issue #348). A no-op rebuild then touches nothing and
+                returns in sub-second time regardless of corpus size.
+                When ``False`` (seeding, ``reindex --full``), wipe and
+                rebuild from scratch. No prior manifest also forces a full
+                build.
+            include_globs / exclude_globs: Optional corpus-scoping globs
+                matched against the indexed name (issue #348 COULD). The
+                default (``None`` / ``None``) indexes everything — the
+                Apollo contact wikis are legitimate name-recall targets and
+                must stay indexed by default. This is a footprint/relevance
+                knob, not the CPU fix.
 
-        Returns the total number of pages indexed across all roots.
+        Returns the total number of pages in the index across all roots.
         """
         ...
 
@@ -241,8 +262,170 @@ def _scan_all_entries(
     yield from _iter_extra_root_entries(extra_roots)
 
 
+# ---------------------------------------------------------------------------
+# Incremental indexing helpers (issue #348)
+# ---------------------------------------------------------------------------
+#
+# Both indexed backends persist a per-page WHOLE-FILE content hash in a JSON
+# sidecar manifest next to their index artifact. On rebuild they diff the
+# current files against the stored hashes and apply only the delta — add
+# new, re-index changed, delete removed. Hashing the whole file (frontmatter
+# + body) means a frontmatter-only change (e.g. issue #312 audience) is
+# caught just as a body edit is; a body-only hash would miss it. Inactive
+# memories (issue #191) are filtered out BEFORE hashing, so a page that flips
+# to inactive drops out of the manifest and is treated as a deletion.
+
+# Manifest sidecar filenames (co-located with each backend's index artifact).
+_FTS5_MANIFEST = "fts5-manifest.json"
+_VECTOR_MANIFEST = "vector-manifest.json"
+
+# Default embedding model (issue #315 slice). Kept as the documented default;
+# the one-time seed re-embed that incremental seeding requires is the natural
+# opportunity to evaluate a stronger model (see VectorBackend).
+# TODO(#315): when seeding the hash-indexed collection from scratch, evaluate a
+# stronger embedding model here and record the eval result before changing the
+# default — the seed re-embed is paid once, so it is the cheap moment to swap.
+DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+
+def _passes_globs(
+    indexed_name: str,
+    include_globs: Iterable[str] | None,
+    exclude_globs: Iterable[str] | None,
+) -> bool:
+    """Return True if ``indexed_name`` survives the include/exclude globs.
+
+    Default (both ``None``) indexes everything. ``include_globs`` is an
+    allow-list (the name must match at least one); ``exclude_globs`` is a
+    deny-list applied after. Globs match the indexed name — the bare
+    filename for wiki entries or ``<root_name>/<relpath>`` for extra roots.
+    """
+    if include_globs:
+        include = list(include_globs)
+        if include and not any(fnmatch(indexed_name, g) for g in include):
+            return False
+    if exclude_globs:
+        for g in exclude_globs:
+            if fnmatch(indexed_name, g):
+                return False
+    return True
+
+
+def _scan_indexed_records(
+    wiki_root: Path,
+    extra_roots: Iterable[Path] | None,
+    *,
+    include_globs: Iterable[str] | None = None,
+    exclude_globs: Iterable[str] | None = None,
+) -> Iterator[tuple[str, Path, str, str, dict[str, Any]]]:
+    """Yield ``(indexed_name, path, content_hash, text, meta)`` per active page.
+
+    ``content_hash`` is the sha256 of the whole file (frontmatter + body).
+    ``text`` is the full decoded file (callers truncate as needed for the
+    index document). Inactive memories are filtered here so they are absent
+    from both index and manifest — the incremental differ then treats an
+    active→inactive flip as a deletion. Unreadable files are skipped.
+    """
+    include = list(include_globs) if include_globs else None
+    exclude = list(exclude_globs) if exclude_globs else None
+    for indexed_name, path in _scan_all_entries(wiki_root, extra_roots):
+        if not _passes_globs(indexed_name, include, exclude):
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        content_hash = hashlib.sha256(data).hexdigest()
+        text = data.decode("utf-8", errors="replace")
+        meta, _ = parse_frontmatter(text)
+        # Issue #191: inactive members never enter the index or the manifest.
+        if is_inactive_memory(meta):
+            continue
+        yield indexed_name, path, content_hash, text, meta
+
+
+def _compute_delta(
+    current_hashes: dict[str, str],
+    stored_hashes: dict[str, str],
+) -> tuple[list[str], list[str], list[str]]:
+    """Return ``(added, changed, removed)`` indexed-name lists.
+
+    ``added``: present now, absent from the manifest.
+    ``changed``: present in both, whole-file hash differs.
+    ``removed``: in the manifest, absent now (deleted or gone inactive).
+    """
+    added = [k for k in current_hashes if k not in stored_hashes]
+    changed = [
+        k
+        for k, h in current_hashes.items()
+        if k in stored_hashes and stored_hashes[k] != h
+    ]
+    removed = [k for k in stored_hashes if k not in current_hashes]
+    return added, changed, removed
+
+
+def _load_manifest(path: Path) -> dict[str, Any] | None:
+    """Load a manifest sidecar, or ``None`` when absent/unreadable/malformed."""
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _manifest_hashes(manifest: dict[str, Any] | None) -> dict[str, str]:
+    """Extract the ``{indexed_name: hash}`` map from a loaded manifest."""
+    if not manifest:
+        return {}
+    hashes = manifest.get("hashes")
+    if isinstance(hashes, dict):
+        return {str(k): str(v) for k, v in hashes.items()}
+    return {}
+
+
+def _write_manifest(
+    path: Path,
+    hashes: dict[str, str],
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Atomically write the manifest sidecar (temp file + rename)."""
+    payload: dict[str, Any] = {"version": 1, "hashes": hashes}
+    if extra:
+        payload.update(extra)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(path)
+
+
 class FTS5Backend:
     """SQLite FTS5 full-text search with BM25 ranking and porter stemming."""
+
+    # SQL fragments shared by the full and incremental build paths.
+    _CREATE_SQL = (
+        "CREATE VIRTUAL TABLE IF NOT EXISTS wiki USING fts5"
+        "(filename, name, tags, aliases, description, audience UNINDEXED, "
+        'tokenize="porter unicode61")'
+    )
+    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?)"
+
+    @staticmethod
+    def _row_for(
+        indexed_name: str, path: Path, text: str, meta: dict[str, Any]
+    ) -> tuple[str, str, str, str, str, str]:
+        """Build the FTS5 row tuple for one page."""
+        name, tags, aliases, description = _extract_frontmatter_fields(text)
+        if not name:
+            # For extra-root entries use the leaf stem (not the prefixed
+            # indexed_name) so recall results show a clean title.
+            name = path.stem
+        # Issue #312: store each page's effective audience (delimited,
+        # anchored) so Layer B can filter inside the query.
+        audience = audience_index_string(meta)
+        return (indexed_name, name, tags, aliases, description, audience)
 
     def build_index(
         self,
@@ -250,58 +433,81 @@ class FTS5Backend:
         cache_dir: Path,
         *,
         extra_roots: Iterable[Path] | None = None,
+        incremental: bool = True,
+        include_globs: Iterable[str] | None = None,
+        exclude_globs: Iterable[str] | None = None,
     ) -> int:
         """Scan wiki + extra intake roots and build an FTS5 index.
 
-        See :meth:`SearchBackend.build_index` for the extra-root contract.
-        Wiki entries are indexed with a bare filename; extra-root entries
-        with ``<root_name>/<relpath>`` so the caller can disambiguate.
+        See :meth:`SearchBackend.build_index` for the full contract. Wiki
+        entries are indexed with a bare filename; extra-root entries with
+        ``<root_name>/<relpath>``. Incremental by default (issue #348):
+        only added/changed/removed pages are touched, keyed off a whole-file
+        content-hash manifest sidecar.
         """
-        db_path = cache_dir / _DB_NAME
         cache_dir.mkdir(parents=True, exist_ok=True)
+        db_path = cache_dir / _DB_NAME
+        manifest_path = cache_dir / _FTS5_MANIFEST
 
-        if db_path.exists():
-            db_path.unlink()
+        current = list(
+            _scan_indexed_records(
+                wiki_root,
+                extra_roots,
+                include_globs=include_globs,
+                exclude_globs=exclude_globs,
+            )
+        )
+        current_hashes = {name: h for name, _p, h, _t, _m in current}
+
+        stored = _load_manifest(manifest_path) if incremental else None
+        # Incremental only when we have BOTH a prior manifest and a live DB;
+        # otherwise seed with a clean full rebuild.
+        do_incremental = incremental and stored is not None and db_path.is_file()
+
+        if not do_incremental:
+            if db_path.exists():
+                db_path.unlink()
+            conn = sqlite3.connect(str(db_path))
+            try:
+                conn.execute(self._CREATE_SQL)
+                rows = [
+                    self._row_for(name, path, text, meta)
+                    for name, path, _h, text, meta in current
+                ]
+                conn.executemany(self._INSERT_SQL, rows)
+                conn.commit()
+            finally:
+                conn.close()
+            _write_manifest(manifest_path, current_hashes)
+            return len(rows)
+
+        # Incremental path — diff and apply only the delta.
+        stored_hashes = _manifest_hashes(stored)
+        added, changed, removed = _compute_delta(current_hashes, stored_hashes)
 
         conn = sqlite3.connect(str(db_path))
-        # Issue #312: ``audience`` is UNINDEXED so it stays out of the BM25
-        # term space (no ranking pollution) while remaining filterable in SQL.
-        conn.execute(
-            "CREATE VIRTUAL TABLE wiki USING fts5"
-            "(filename, name, tags, aliases, description, audience UNINDEXED, "
-            'tokenize="porter unicode61")'
-        )
-
-        rows: list[tuple[str, str, str, str, str, str]] = []
-        for indexed_name, path in _scan_all_entries(wiki_root, extra_roots):
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")[:2000]
-            except OSError:
-                continue
-
-            # Issue #191: skip inactive members (superseded_by / deprecated)
-            # so they never surface in recall. Frontmatter is at the top of
-            # the file, so the truncated read above is sufficient.
-            meta, _ = parse_frontmatter(text)
-            if is_inactive_memory(meta):
-                continue
-
-            name, tags, aliases, description = _extract_frontmatter_fields(text)
-
-            if not name:
-                # For extra-root entries use the leaf stem (not the prefixed
-                # indexed_name) so recall results show a clean title.
-                name = path.stem
-
-            # Issue #312: store each page's effective audience (delimited,
-            # anchored) so Layer B can filter inside the query.
-            audience = audience_index_string(meta)
-            rows.append((indexed_name, name, tags, aliases, description, audience))
-
-        conn.executemany("INSERT INTO wiki VALUES (?,?,?,?,?,?)", rows)
-        conn.commit()
-        conn.close()
-        return len(rows)
+        try:
+            conn.execute(self._CREATE_SQL)  # defensive: table may predate a wipe
+            to_delete = removed + changed
+            if to_delete:
+                conn.executemany(
+                    "DELETE FROM wiki WHERE filename = ?",
+                    [(k,) for k in to_delete],
+                )
+            reindex = set(added) | set(changed)
+            if reindex:
+                rows = [
+                    self._row_for(name, path, text, meta)
+                    for name, path, _h, text, meta in current
+                    if name in reindex
+                ]
+                conn.executemany(self._INSERT_SQL, rows)
+            conn.commit()
+            total = int(conn.execute("SELECT count(*) FROM wiki").fetchone()[0])
+        finally:
+            conn.close()
+        _write_manifest(manifest_path, current_hashes)
+        return total
 
     def query(
         self,
@@ -386,8 +592,26 @@ class VectorBackend:
     """Semantic search via chromadb with local embeddings.
 
     Requires ``pip install athenaeum[vector]`` (chromadb).
-    Uses the default ``all-MiniLM-L6-v2`` embedding model.
+    Uses the default ``all-MiniLM-L6-v2`` embedding model unless an
+    alternate model name is passed (issue #315 config seam).
     """
+
+    # Text length used both as the embedded document and as the batch cap.
+    _DOC_LIMIT = 4000
+    _BATCH_SIZE = 5000
+
+    def __init__(self, embedding_model: str | None = None) -> None:
+        """Construct the backend.
+
+        ``embedding_model`` (issue #315 seam) selects the sentence-transformer
+        model. ``None`` and the documented default ``all-MiniLM-L6-v2`` both
+        use chromadb's built-in default embedding function unchanged — the
+        default is NOT changed here. A non-default name is only honored if
+        chromadb's sentence-transformer EF can load it; the manifest records
+        the model so swapping it forces a one-time full re-embed (the eval
+        opportunity noted at DEFAULT_EMBEDDING_MODEL).
+        """
+        self.embedding_model = embedding_model or DEFAULT_EMBEDDING_MODEL
 
     def _get_chromadb(self) -> Any:
         try:
@@ -400,69 +624,51 @@ class VectorBackend:
                 "Install with: pip install athenaeum[vector]"
             ) from exc
 
-    def build_index(
-        self,
-        wiki_root: Path,
-        cache_dir: Path,
-        *,
-        extra_roots: Iterable[Path] | None = None,
-    ) -> int:
-        """Build a chromadb collection from wiki + extra intake roots.
+    def _embedding_function(self) -> Any | None:
+        """Return the chromadb embedding function, or ``None`` for the default.
 
-        See :meth:`SearchBackend.build_index` for the extra-root contract.
+        The default model uses chromadb's built-in EF (``None``) so behavior
+        is byte-for-byte unchanged. A non-default model constructs a
+        SentenceTransformer EF; if that import/construction fails we fall
+        back to the default rather than crashing the rebuild.
         """
-        chromadb = self._get_chromadb()
+        if self.embedding_model == DEFAULT_EMBEDDING_MODEL:
+            return None
+        try:
+            from chromadb.utils import embedding_functions
 
-        vector_dir = cache_dir / _VECTOR_DIR
-        # Nuke any prior on-disk state before opening a PersistentClient.
-        # chromadb's SQLite metadata and the rust binding's collection store
-        # can desync (stale UUIDs, corrupt sqlite, partial writes), causing
-        # create_collection to return a Collection whose UUID the rust layer
-        # then reports as non-existent on the first .add(). A full wipe on
-        # each rebuild is the simplest robust reset — see issue #32.
-        if vector_dir.exists():
-            shutil.rmtree(vector_dir)
-        vector_dir.mkdir(parents=True, exist_ok=True)
+            return embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=self.embedding_model
+            )
+        except Exception:  # pragma: no cover - optional-model fallback
+            import logging
 
-        # chromadb caches PersistentClient systems per-path at the module
-        # level. When rebuild runs in a long-lived process (or the same
-        # interpreter invoked it before) a cached system will still know
-        # about the old "wiki" collection after we rmtree'd the dir,
-        # causing create_collection to fail with "already exists". Clear
-        # the cache so the new PersistentClient sees a fresh filesystem.
-        from chromadb.api.client import SharedSystemClient
+            logging.getLogger(__name__).warning(
+                "embedding model %r unavailable; falling back to default %r",
+                self.embedding_model,
+                DEFAULT_EMBEDDING_MODEL,
+            )
+            return None
 
-        SharedSystemClient.clear_system_cache()
-
-        client = chromadb.PersistentClient(path=str(vector_dir))
-        collection = client.create_collection(_VECTOR_COLLECTION)
-
+    def _add_records(
+        self,
+        collection: Any,
+        records: list[tuple[str, Path, str, str, dict[str, Any]]],
+    ) -> None:
+        """Embed and add a batch of scanned records to the collection."""
         ids: list[str] = []
         documents: list[str] = []
         metadatas: list[dict[str, str]] = []
-
-        for indexed_name, path in _scan_all_entries(wiki_root, extra_roots):
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")[:4000]
-            except OSError:
-                continue
-
-            # Issue #191: skip inactive members (superseded_by / deprecated).
-            meta, _ = parse_frontmatter(text)
-            if is_inactive_memory(meta):
-                continue
-
+        for indexed_name, path, _h, text, meta in records:
             name, _tags, _aliases, _description = _extract_frontmatter_fields(text)
-
             if not name:
                 name = path.stem
-
             # Issue #312 — Layer A: store the effective audience so the query
-            # can pre-filter neighbors. chromadb metadata is scalar-only (no
-            # list values), so the audience is stored as the same delimited
-            # string as FTS5 and filtered in Python at query time (Layer B).
+            # can pre-filter neighbors. chromadb metadata is scalar-only, so
+            # the audience is stored as the same delimited string as FTS5 and
+            # filtered in Python at query time (Layer B).
             ids.append(indexed_name)
-            documents.append(text)
+            documents.append(text[: self._DOC_LIMIT])
             metadatas.append(
                 {
                     "name": name,
@@ -470,18 +676,118 @@ class VectorBackend:
                     "audience": audience_index_string(meta),
                 }
             )
-
-        # chromadb batches internally but has a max batch size
-        batch_size = 5000
-        for i in range(0, len(ids), batch_size):
-            end = min(i + batch_size, len(ids))
+        for i in range(0, len(ids), self._BATCH_SIZE):
+            end = min(i + self._BATCH_SIZE, len(ids))
             collection.add(
                 ids=ids[i:end],
                 documents=documents[i:end],
                 metadatas=metadatas[i:end],
             )
 
-        return len(ids)
+    def build_index(
+        self,
+        wiki_root: Path,
+        cache_dir: Path,
+        *,
+        extra_roots: Iterable[Path] | None = None,
+        incremental: bool = True,
+        include_globs: Iterable[str] | None = None,
+        exclude_globs: Iterable[str] | None = None,
+    ) -> int:
+        """Build a chromadb collection from wiki + extra intake roots.
+
+        See :meth:`SearchBackend.build_index` for the full contract.
+        Incremental by default (issue #348): only added/changed/removed
+        pages are (re-)embedded, keyed off a whole-file content-hash
+        manifest sidecar. A no-op rebuild re-embeds nothing.
+        """
+        chromadb = self._get_chromadb()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        vector_dir = cache_dir / _VECTOR_DIR
+        manifest_path = cache_dir / _VECTOR_MANIFEST
+
+        current = list(
+            _scan_indexed_records(
+                wiki_root,
+                extra_roots,
+                include_globs=include_globs,
+                exclude_globs=exclude_globs,
+            )
+        )
+        current_hashes = {name: h for name, _p, h, _t, _m in current}
+
+        stored = _load_manifest(manifest_path) if incremental else None
+        stored_model = stored.get("embedding_model") if stored else None
+        # Incremental only when we have a prior manifest, a live collection
+        # dir, AND the SAME embedding model — a model swap must re-embed all.
+        do_incremental = (
+            incremental
+            and stored is not None
+            and vector_dir.is_dir()
+            and stored_model == self.embedding_model
+        )
+
+        # chromadb caches PersistentClient systems per-path at the module
+        # level. Clear it so a fresh client sees the true on-disk state
+        # (avoids stale-collection "already exists" desync — see issue #32).
+        from chromadb.api.client import SharedSystemClient
+
+        SharedSystemClient.clear_system_cache()
+
+        if do_incremental:
+            try:
+                client = chromadb.PersistentClient(path=str(vector_dir))
+                collection = client.get_collection(
+                    _VECTOR_COLLECTION,
+                    embedding_function=self._embedding_function(),
+                )
+            except Exception:
+                # Corrupt / missing collection despite a manifest — fall back
+                # to a clean full rebuild rather than accreting a bad delta.
+                do_incremental = False
+
+        if not do_incremental:
+            # Full (re)build — nuke any prior on-disk state before opening a
+            # PersistentClient. chromadb's SQLite metadata and the rust
+            # binding's collection store can desync; a full wipe is the
+            # simplest robust reset (issue #32).
+            if vector_dir.exists():
+                shutil.rmtree(vector_dir)
+            vector_dir.mkdir(parents=True, exist_ok=True)
+            SharedSystemClient.clear_system_cache()
+            client = chromadb.PersistentClient(path=str(vector_dir))
+            collection = client.create_collection(
+                _VECTOR_COLLECTION,
+                embedding_function=self._embedding_function(),
+            )
+            self._add_records(collection, current)
+            _write_manifest(
+                manifest_path,
+                current_hashes,
+                {"embedding_model": self.embedding_model},
+            )
+            return len(current)
+
+        # Incremental path — diff and apply only the delta.
+        stored_hashes = _manifest_hashes(stored)
+        added, changed, removed = _compute_delta(current_hashes, stored_hashes)
+
+        to_delete = removed + changed
+        if to_delete:
+            collection.delete(ids=to_delete)
+        reindex = set(added) | set(changed)
+        if reindex:
+            self._add_records(
+                collection,
+                [rec for rec in current if rec[0] in reindex],
+            )
+        total = int(collection.count())
+        _write_manifest(
+            manifest_path,
+            current_hashes,
+            {"embedding_model": self.embedding_model},
+        )
+        return total
 
     def query(
         self,
@@ -670,14 +976,19 @@ class KeywordBackend:
         cache_dir: Path,
         *,
         extra_roots: Iterable[Path] | None = None,
+        incremental: bool = True,
+        include_globs: Iterable[str] | None = None,
+        exclude_globs: Iterable[str] | None = None,
     ) -> int:
         """No-op: the keyword backend rescans on every query.
 
         Returns a count that includes wiki entries + extra-root entries
         (``MEMORY.md`` and non-``.md`` files excluded) so status checks
-        see a comparable number to the indexed backends.
+        see a comparable number to the indexed backends. The ``incremental``
+        / glob knobs are accepted for Protocol parity but inert here — there
+        is no persisted index to diff or scope.
         """
-        del cache_dir
+        del cache_dir, incremental, include_globs, exclude_globs
         count = sum(
             1
             for p in wiki_root.rglob("*.md")
@@ -777,18 +1088,26 @@ def build_fts5_index(
     cache_dir: str | Path,
     *,
     extra_roots: Iterable[str | Path] | None = None,
+    incremental: bool = True,
+    include_globs: Iterable[str] | None = None,
+    exclude_globs: Iterable[str] | None = None,
 ) -> int:
     """Build an FTS5 index. Callable from shell hooks via ``python3 -c``.
 
     ``extra_roots`` accepts the same list as
     :meth:`FTS5Backend.build_index` (additional intake directories
     scanned recursively, e.g. ``~/knowledge/raw/auto-memory``).
+    ``incremental`` (default ``True``, issue #348) applies only the
+    add/change/delete delta; pass ``False`` to force a full rebuild.
     """
     roots = [Path(r) for r in extra_roots] if extra_roots else None
     return FTS5Backend().build_index(
         Path(wiki_root),
         Path(cache_dir),
         extra_roots=roots,
+        incremental=incremental,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
     )
 
 
@@ -808,17 +1127,27 @@ def build_vector_index(
     cache_dir: str | Path,
     *,
     extra_roots: Iterable[str | Path] | None = None,
+    incremental: bool = True,
+    include_globs: Iterable[str] | None = None,
+    exclude_globs: Iterable[str] | None = None,
+    embedding_model: str | None = None,
 ) -> int:
     """Build a chromadb vector index. Callable from shell hooks.
 
     ``extra_roots`` accepts the same list as
-    :meth:`VectorBackend.build_index`.
+    :meth:`VectorBackend.build_index`. ``incremental`` (default ``True``,
+    issue #348) re-embeds only the delta. ``embedding_model`` (issue #315
+    seam) defaults to ``all-MiniLM-L6-v2`` — the documented default is not
+    changed here; swapping it forces a one-time full re-embed.
     """
     roots = [Path(r) for r in extra_roots] if extra_roots else None
-    return VectorBackend().build_index(
+    return VectorBackend(embedding_model=embedding_model).build_index(
         Path(wiki_root),
         Path(cache_dir),
         extra_roots=roots,
+        incremental=incremental,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
     )
 
 
