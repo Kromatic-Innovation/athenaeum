@@ -625,6 +625,43 @@ specify one). This is safe because the superseded loser is ALSO marked
 regardless of the one-day window overlap. The exact stamped value is pinned by
 `tests/test_conflict_resolution.py::TestIntervalCloseSlice2`.
 
+### 8.6 Per-claim compiled validity (slice 4)
+
+Slices 1–3 carry `valid_from` / `valid_until` on **raw members** and filter
+them at the member (page) grain: an expired member is dropped whole from recall
+and from the C3 compile (`is_inactive_memory` / `AutoMemoryFile.is_inactive`).
+Slice 4 pushes validity **into the compiled entry**, per claim rather than per
+page.
+
+**The claim is the member; its window travels with it into the entry.** A C3
+compile blends many raw members (each one claim) into one wiki entry whose
+`sources:` list is the per-claim provenance record (§3, §7; #262 already carries
+per-source `claim` / `verdict`). Slice 4 stamps each surviving member's
+`valid_from` / `valid_until` onto the source records that member contributes
+(`merge._stamp_member_validity`), so the compiled entry records **which window
+each claim is valid over**, instead of the whole page being one valid/invalid
+unit. All sources a member cites share that member's window (the window belongs
+to the claim, applied to each of its citations).
+
+- **Only-fill-never-override.** A bound the source already declares (a future
+  explicit per-source window) is preserved; the member value fills only an
+  absent bound. An open/malformed member bound (`""`) adds no key.
+- **Round-trips like `claim` / `verdict`.** `valid_from` / `valid_until` serialize
+  into the entry's frontmatter `sources:` list and re-parse through
+  `_parse_one_source` byte-for-byte (bounds normalized via `validity_bound_str`).
+- **Rendered for humans.** `render_source_footnotes` appends a
+  `— **Valid:** <window>` clause (`X to Y` / `from X` / `until Y`); a source with
+  no window renders exactly as before (back-compat).
+- **No new page-level filter, no regression to slices 1–3.** Members are still
+  filtered whole by `is_inactive` BEFORE sources are built, so a compiled entry
+  only ever carries currently-active (or future-dated, §8.3) claims; slice 4
+  surfaces each surviving claim's window (e.g. a still-active claim's
+  `valid_from`, or a future `valid_until`) without changing what is compiled.
+  The #324 disjoint detector and the slice-2 resolver interval-close are
+  untouched — they operate on raw members, upstream of the compile.
+
+Pinned by `tests/test_temporal_validity.py::TestPerClaimCompiledValiditySlice4`.
+
 ## 9. Multi-dimensional scoped claims (`scope: {org, locale}` + time)
 
 Issue #329 (buildable subset of the design pass). Generalizes §8's TIME
