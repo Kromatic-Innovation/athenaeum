@@ -786,15 +786,57 @@ only the model that guessed, and dates from that model's cutoff.
 2. `linkedin:<username>` / `twitter:<username>`
 3. `api:apollo` / `api:<vendor>`
 4. `wikipedia:<page>`
-5. `claude:tier3-...`
-6. `script:<slug>`
-7. **`model-prior:<model-id>` (new — issue #326)**
-8. `unsourced` / empty (lowest)
+5. **`agent-observed:<model>:<session-ref>` (new — issue #328)**
+6. `claude:tier3-...`
+7. `script:<slug>`
+8. **`model-prior:<model-id>` (new — issue #326)**
+9. `unsourced` / empty (lowest)
+
+`agent-observed` (issue #328) ranks BELOW `wikipedia:<page>` — it is not
+a curated public authority — but ABOVE `claude:tier3`/inferred: it is
+grounded in a real in-session artifact the agent READ (file contents or
+tool output), verifiable against the transcript, not an unsupported
+leap. It is written by the `repair --backfill-sources` pass when it
+re-classifies a DEFAULTED `claude:inferred` memory and finds the claim
+in a tool-result block; the scalar becomes
+`agent-observed:<model>:<session-ref>` (the `<model>` segment is omitted
+when the transcript carries none).
 
 Lock discipline: any change to this taxonomy MUST update
-`docs/conflict-resolution.md` (which cross-links to this section) AND
-the corresponding test in `tests/test_conflict_resolution.py` in the
+`docs/conflict-resolution.md` (which cross-links to this section), the
+`_RESOLVE_SYSTEM` prompt + its `tests/data/resolve_system.txt` snapshot,
+AND the corresponding test in `tests/test_conflict_resolution.py` in the
 same change.
+
+### 10.1a Source backfill — `repair --backfill-sources` (issue #328)
+
+A memory written through `remember()` with no `sources` gets the
+DEFAULTED scalar `source: claude:inferred` (`mcp_server._DEFAULT_INFERRED_SOURCE`).
+The `repair --backfill-sources` pass re-examines each such memory against
+its origin transcript (located via `originSessionId` + `originTurn`,
+scope = the auto-memory parent dir) and matches THE CLAIM (`name`/`title`,
+fallback first non-frontmatter line) as a normalized substring:
+
+1. **User said it → `user-stated`.** The `source:` scalar is rewritten to
+   `user:<session>#turn<N>` (resolver tier 1 — precedence keys on the
+   `source:` SCALAR, not `source_type`) and `source_type: user-stated` /
+   `source_ref` are set. `on_behalf_of` is populated from the owner's
+   configured `asserter` (§10.3) ONLY when it yields a durable identity
+   key; transcripts carry no OIDC identity, so it is usually absent.
+2. **Derived from a tool-result artifact → `agent-observed`.** The scalar
+   is rewritten to `agent-observed:<model>:<session-ref>` (tier 5 above)
+   and `source_type: agent-observed` / `source_ref` / `model` are set.
+3. **No support found → confirm inferred.** A boolean
+   `inferred_verified: true` marker is stamped; precedence is UNCHANGED.
+   The marker makes the pass idempotent — a confirmed memory is skipped on
+   every subsequent run, as is any already-upgraded memory (its scalar is
+   no longer `claude:inferred`).
+
+The pass touches ONLY provenance keys (body + all other frontmatter lines
+are byte-for-byte preserved, per the §3 tier0 discipline), runs under the
+#309 run lock on `--apply`, writes atomically (`atomic_io`), and SKIPS
+(never guesses) when the transcript is missing/rolled off. Dry-run
+(default) prints per-memory proposed upgrades and writes nothing.
 
 ### 10.2 Model recording
 

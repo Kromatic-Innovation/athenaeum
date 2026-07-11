@@ -135,6 +135,28 @@ def resolve_owner(config: dict[str, Any] | None) -> dict[str, Any] | None:
     return {"uid": uid, "google_contact": google_contact, "aliases": aliases}
 
 
+def resolve_owner_asserter(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the owner's OIDC ``asserter`` identity block, or ``None`` (#328).
+
+    Read from ``owner.asserter`` in ``athenaeum.yaml``. Used by
+    ``repair --backfill-sources`` to stamp ``on_behalf_of`` on a
+    ``user-stated`` upgrade WHEN a durable identity is configured. Transcripts
+    carry no OIDC identity, so an unset block leaves ``on_behalf_of`` absent
+    (the #327 fallback). Returns the raw dict unchanged for
+    :func:`athenaeum.models.asserter_identity_key` to key on; a non-dict or
+    empty block is inert.
+    """
+    if not isinstance(config, dict):
+        return None
+    owner = config.get("owner")
+    if not isinstance(owner, dict):
+        return None
+    asserter = owner.get("asserter")
+    if isinstance(asserter, dict) and asserter:
+        return asserter
+    return None
+
+
 def _normalize_audience_roles(values: Any) -> set[str]:
     """Case-fold, trim, and drop empties from an iterable of role ids (#312)."""
     if not isinstance(values, (list, tuple, set)):

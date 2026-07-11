@@ -163,13 +163,18 @@ SOURCE-PRECEDENCE TAXONOMY (highest to lowest):
 2. linkedin:<username> / twitter:<username> — user-curated public profile.
 3. api:apollo / api:<vendor> — third-party authoritative source.
 4. wikipedia:<page> — consensus public source.
-5. claude:tier3-... — LLM-generated. Subordinate to any human/external source.
-6. script:<slug> — pipeline-generated, no upstream evidence.
-7. model-prior:<model-id> — asserted from training-data knowledge with no
+5. agent-observed:<model>:<session-ref> — an AI derived it from an in-session
+   artifact it READ (file contents, tool output), verifiable against the
+   transcript. Ranks BELOW external/consensus sources (it is not a curated
+   authority) but ABOVE ``claude:tier3``/inferred — it is grounded in a real
+   artifact the agent read, not an unsupported leap.
+6. claude:tier3-... — LLM-generated. Subordinate to any human/external source.
+7. script:<slug> — pipeline-generated, no upstream evidence.
+8. model-prior:<model-id> — asserted from training-data knowledge with no
    session evidence. Unverifiable and silently stale past the model cutoff,
    so ranks BELOW ``script:`` — a pipeline slug at least names a repeatable
    in-tree process; a training prior names only the model that guessed.
-8. unsourced / empty — always loses to any sourced claim.
+9. unsourced / empty — always loses to any sourced claim.
 
 TIE-BREAK: when two claims sit at the same precedence tier, prefer the
 NEWER source date.
