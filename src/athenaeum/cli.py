@@ -699,6 +699,15 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Override configured backend (default: read from athenaeum.yaml)",
     )
+    rebuild_parser.add_argument(
+        "--full",
+        action="store_true",
+        help=(
+            "Wipe and fully rebuild instead of applying only the "
+            "changed/added/deleted delta (issue #348). Use for seeding or "
+            "after an embedding-model change; default is incremental."
+        ),
+    )
     _add_lock_args(rebuild_parser)
 
     args = parser.parse_args(argv)
@@ -1407,7 +1416,12 @@ def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
 
 
 def _cmd_rebuild_index(args: argparse.Namespace) -> int:
-    from athenaeum.config import load_config, resolve_extra_intake_roots
+    from athenaeum.config import (
+        load_config,
+        resolve_embedding_model,
+        resolve_extra_intake_roots,
+        resolve_index_globs,
+    )
     from athenaeum.search import build_fts5_index, build_vector_index
 
     knowledge_root = args.path.expanduser().resolve()
@@ -1425,6 +1439,10 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
         backend = cfg.get("search_backend", "fts5")
 
     extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
+    include_globs, exclude_globs = resolve_index_globs(cfg)
+    embedding_model = resolve_embedding_model(cfg)
+    incremental = not getattr(args, "full", False)
+    mode = "full" if not incremental else "incremental"
 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1440,13 +1458,17 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
                     wiki_root,
                     cache_dir,
                     extra_roots=extra_roots,
+                    incremental=incremental,
+                    include_globs=include_globs,
+                    exclude_globs=exclude_globs,
+                    embedding_model=embedding_model,
                 )
             except ImportError as exc:
                 print(f"Vector backend unavailable: {exc}", file=sys.stderr)
                 print("Install with: pip install athenaeum[vector]", file=sys.stderr)
                 return 1
             print(
-                f"Vector index rebuilt: {count} pages "
+                f"Vector index rebuilt ({mode}): {count} pages "
                 f"(wiki + {len(extra_roots)} extra root(s))"
             )
             return 0
@@ -1456,9 +1478,12 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
                 wiki_root,
                 cache_dir,
                 extra_roots=extra_roots,
+                incremental=incremental,
+                include_globs=include_globs,
+                exclude_globs=exclude_globs,
             )
             print(
-                f"FTS5 index rebuilt: {count} pages "
+                f"FTS5 index rebuilt ({mode}): {count} pages "
                 f"(wiki + {len(extra_roots)} extra root(s))"
             )
             return 0

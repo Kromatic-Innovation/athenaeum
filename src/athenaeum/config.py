@@ -24,6 +24,12 @@ _DEFAULTS: dict[str, Any] = {
     "search_backend": "fts5",
     "vector": {
         "provider": "chromadb",
+        # Issue #315 seam: the embedding model. Kept at the documented
+        # default; incremental seeding (issue #348) is the one-time re-embed
+        # that makes evaluating a stronger model cheap. Do NOT change this
+        # default without a recorded eval — swapping it forces a full
+        # re-embed of the whole corpus.
+        "embedding_model": "all-MiniLM-L6-v2",
         "collection": "wiki",
     },
     "recall": {
@@ -875,3 +881,52 @@ def resolve_extra_intake_roots(
         else:
             logger.warning("extra_intake_root not found: %s", candidate)
     return resolved
+
+
+def _resolve_glob_list(config: dict[str, Any] | None, key: str) -> list[str] | None:
+    """Read a ``recall.<key>`` list of glob strings (issue #348).
+
+    Returns ``None`` when unset (the default — index everything) so callers
+    can pass it straight through to the search backend, which treats ``None``
+    as "no scoping". Non-string / blank entries are dropped.
+    """
+    if not isinstance(config, dict):
+        return None
+    recall_cfg = config.get("recall") or {}
+    raw = recall_cfg.get(key)
+    if not isinstance(raw, list):
+        return None
+    globs = [g for g in raw if isinstance(g, str) and g.strip()]
+    return globs or None
+
+
+def resolve_index_globs(
+    config: dict[str, Any] | None,
+) -> tuple[list[str] | None, list[str] | None]:
+    """Resolve ``(include_globs, exclude_globs)`` for corpus scoping (issue #348).
+
+    COULD-tier footprint/relevance knob. Default (unset) returns
+    ``(None, None)`` — index everything — because the Apollo contact wikis
+    are legitimate name-recall targets and must stay indexed by default.
+    """
+    return (
+        _resolve_glob_list(config, "include_globs"),
+        _resolve_glob_list(config, "exclude_globs"),
+    )
+
+
+def resolve_embedding_model(config: dict[str, Any] | None) -> str | None:
+    """Resolve the configured vector embedding model (issue #315 seam).
+
+    Returns ``None`` when unset so the VectorBackend uses its documented
+    default (``all-MiniLM-L6-v2``) unchanged.
+    """
+    if not isinstance(config, dict):
+        return None
+    vector_cfg = config.get("vector") or {}
+    if not isinstance(vector_cfg, dict):
+        return None
+    model = vector_cfg.get("embedding_model")
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    return None
