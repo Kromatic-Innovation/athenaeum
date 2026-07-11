@@ -102,7 +102,40 @@ so it is a fast no-op when nothing has changed. `tier0_passthrough`
 pre-structured intake compiles with **no LLM cost**. `reindex` is the canonical
 name; `rebuild-index` remains as a back-compat alias for the exact same
 command. The reusable engine lives at `athenaeum.librarian.ingest` (the
-SessionEnd hook, issue #350, calls it directly).
+SessionEnd path, issue #350, calls it directly).
+
+### Cross-agent same-day recall — `session-end` (issue #350)
+
+`remember` writes only to `raw/`; `recall` reads only the compiled `wiki/`
+index; the librarian that compiles `raw/`→`wiki/` runs **nightly**. Without
+intervention a memory written by one agent at 10:00 is invisible to every other
+agent until the next nightly run — a ~24h gap. `athenaeum session-end` closes it
+by composing the two on-demand steps above into **one change-gated command** the
+SessionEnd hook (and the nightly-after-librarian path) invokes:
+
+```bash
+athenaeum session-end                     # incremental ingest + reindex (DEFAULT)
+athenaeum session-end --session <id>      # scope new/changed detection to one session
+athenaeum session-end --full              # force a full recompile + full index rebuild
+athenaeum session-end --dry-run           # compile-check only; no writes, no reindex
+```
+
+Both steps are change-gated so an idle SessionEnd is cheap:
+
+1. **Incremental `ingest`** of this session's new/changed raw intake — a fast
+   no-op (zero LLM) when nothing is new; `tier0` structured entries compile with
+   no model cost.
+2. **Then `reindex`**, but *only when the compile actually ran* and succeeded.
+   An **idle SessionEnd (no new raw) does no LLM work and no reindex**; a failed
+   compile never indexes a half-built wiki; a `--dry-run` touches nothing.
+
+The result is a memory `remember`ed in session A becoming recallable — as a
+fully-resolved wiki entry — in session B the moment A ends, no waiting for the
+nightly librarian. It is single-flight (shares the `run` lock, #309) and prints
+a one-line JSON summary nesting the ingest counts plus the reindex page count.
+The reusable engine is `athenaeum.librarian.session_end`; the CLI is a thin
+wrapper. The hook that fires this at SessionEnd lives in the workspace config
+(cwc#1084) — this repo ships the command it calls.
 
 ## Data lifecycle & upgrade impact
 

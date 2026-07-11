@@ -826,6 +826,78 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_lock_args(ingest_parser)
 
+    # session-end command (issue #350) — the change-gated compile-then-index
+    # composition the cwc SessionEnd hook and the nightly-after-librarian path
+    # invoke as ONE command: incremental `ingest` of this session's new raw,
+    # then (only when the compile actually ran) an incremental `reindex` so the
+    # freshly-compiled wiki pages become recallable. An idle SessionEnd is a
+    # fast no-op with zero LLM cost and no reindex.
+    session_end_parser = subparsers.add_parser(
+        "session-end",
+        help="Change-gated ingest + reindex for SessionEnd (issue #350): "
+        "compile this session's new raw intake, then refresh the index — a "
+        "fast no-op (no LLM, no reindex) when nothing changed.",
+    )
+    session_end_parser.add_argument(
+        "--path",
+        "--knowledge-root",
+        dest="path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge). "
+        "--knowledge-root is an alias, matching `run`/`ingest`.",
+    )
+    session_end_mode = session_end_parser.add_mutually_exclusive_group()
+    session_end_mode.add_argument(
+        "--incremental",
+        dest="incremental",
+        action="store_true",
+        default=None,
+        help="Compile only raw new/changed since the last ingest and apply the "
+        "#348 index delta. This is the DEFAULT.",
+    )
+    session_end_mode.add_argument(
+        "--full",
+        dest="incremental",
+        action="store_false",
+        help="Force a full recompile of all pending raw intake AND a full "
+        "index rebuild (operator escape hatch).",
+    )
+    session_end_parser.add_argument(
+        "--session",
+        type=str,
+        default=None,
+        help="Scope the new/changed detection to one originSessionId "
+        "(the SessionEnd use-case).",
+    )
+    session_end_parser.add_argument(
+        "--backend",
+        choices=["fts5", "vector"],
+        default=None,
+        help="Override configured search backend (default: read from "
+        "athenaeum.yaml)",
+    )
+    session_end_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory holding the ingest + index manifests "
+        "(default: ~/.cache/athenaeum)",
+    )
+    session_end_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run the compile without writing files, committing, updating the "
+        "ingest stamp, or reindexing.",
+    )
+    session_end_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable debug logging",
+    )
+    _add_lock_args(session_end_parser)
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -858,6 +930,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ingest":
         return _cmd_ingest(args)
+
+    if args.command == "session-end":
+        return _cmd_session_end(args)
 
     if args.command == "recall":
         return _cmd_recall(args)
@@ -1712,6 +1787,76 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "command": "ingest",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "exit_code": 1,
+                }
+            )
+        )
+        return 1
+    finally:
+        if lock is not None and not isinstance(lock, int):
+            lock.release()
+
+    print(json.dumps(result.summary()))
+    return result.exit_code
+
+
+def _cmd_session_end(args: argparse.Namespace) -> int:
+    """Change-gated SessionEnd ingest + reindex (issue #350).
+
+    Thin CLI wrapper over :func:`athenaeum.librarian.session_end` — the single
+    reusable composition the cwc SessionEnd hook and the nightly-after-librarian
+    path invoke. Acquires the shared run lock (single-flight, #309) ONCE around
+    both the compile and the reindex, prints a one-line JSON summary (nested
+    ingest counts + reindex pages + duration), and exits non-zero when the
+    underlying compile fails.
+    """
+    import json
+
+    from athenaeum.config import load_config
+    from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, session_end
+
+    logging.basicConfig(
+        level=logging.DEBUG if getattr(args, "verbose", False) else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    knowledge_root = (
+        args.path.expanduser().resolve() if args.path else DEFAULT_KNOWLEDGE_ROOT
+    )
+    raw_root = knowledge_root / "raw"
+    wiki_root = knowledge_root / "wiki"
+    incremental = True if args.incremental is None else args.incremental
+
+    cfg = load_config(knowledge_root)
+
+    # Issue #309 single-flight: the compile + reindex both mutate on-disk state
+    # (wiki/ and the index) and share the nightly-run lock. A --dry-run reads
+    # only, so it does not take the lock.
+    lock: RunLock | int | None = None
+    if not args.dry_run:
+        lock = _acquire_or_exit(knowledge_root, args, cfg)
+        if isinstance(lock, int):
+            return lock
+    try:
+        result = session_end(
+            raw_root=raw_root,
+            wiki_root=wiki_root,
+            knowledge_root=knowledge_root,
+            incremental=incremental,
+            session=args.session,
+            cache_dir=args.cache_dir,
+            config=cfg,
+            backend=args.backend,
+            dry_run=args.dry_run,
+            install_signal_handlers=not args.dry_run,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
+        print(
+            json.dumps(
+                {
+                    "command": "session-end",
                     "error": f"{type(exc).__name__}: {exc}",
                     "exit_code": 1,
                 }

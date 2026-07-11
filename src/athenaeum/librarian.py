@@ -2002,3 +2002,178 @@ def ingest(
         duration_ms=int((time.monotonic() - start) * 1000),
         session=session,
     )
+
+
+def reindex(
+    knowledge_root: Path = DEFAULT_KNOWLEDGE_ROOT,
+    wiki_root: Path | None = None,
+    *,
+    cache_dir: Path | None = None,
+    config: dict[str, object] | None = None,
+    backend: str | None = None,
+    incremental: bool = True,
+) -> tuple[str, int]:
+    """Rebuild the search index; return ``(backend_name, pages_indexed)``.
+
+    The reusable core the ``reindex`` CLI and the SessionEnd composition
+    (:func:`session_end`, issue #350) share, so both apply the *same* backend
+    resolution, extra-intake roots, and index globs. ``incremental`` (default,
+    issue #348) applies only the add/change/delete hash-diff delta — a fast
+    no-op when the wiki has not changed since the last build. A ``vector``
+    backend that is not installed raises ``ImportError`` to the caller.
+    """
+    from athenaeum.config import resolve_embedding_model, resolve_index_globs
+    from athenaeum.search import build_fts5_index, build_vector_index
+
+    if wiki_root is None:
+        wiki_root = knowledge_root / "wiki"
+    if config is None:
+        config = load_config(knowledge_root)
+    resolved_cache = _resolve_cache_dir(cache_dir)
+    resolved_cache.mkdir(parents=True, exist_ok=True)
+    backend_name = backend or str(config.get("search_backend", "fts5"))
+    extra_roots = resolve_extra_intake_roots(knowledge_root, config)
+    include_globs, exclude_globs = resolve_index_globs(config)
+
+    if backend_name == "vector":
+        pages = build_vector_index(
+            wiki_root,
+            resolved_cache,
+            extra_roots=extra_roots,
+            incremental=incremental,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            embedding_model=resolve_embedding_model(config),
+        )
+    else:
+        pages = build_fts5_index(
+            wiki_root,
+            resolved_cache,
+            extra_roots=extra_roots,
+            incremental=incremental,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+        )
+    return backend_name, pages
+
+
+@dataclass
+class SessionEndResult:
+    """Summary of a :func:`session_end` invocation (issue #350).
+
+    Wraps the underlying :class:`IngestResult` and records whether the reindex
+    step ran (it is change-gated on the compile actually having run) and how
+    many pages it touched. ``exit_code`` propagates the ingest compile's status
+    — the SessionEnd path never indexes a half-compiled wiki.
+    """
+
+    ingest: IngestResult
+    reindexed: bool
+    reindex_pages: int
+    backend: str
+    duration_ms: int
+    session: str | None = None
+
+    @property
+    def exit_code(self) -> int:
+        return self.ingest.exit_code
+
+    def summary(self) -> dict[str, object]:
+        """One-line JSON-serializable summary (nests the ingest summary)."""
+        data: dict[str, object] = {
+            "command": "session-end",
+            "mode": self.ingest.mode,
+            "ingest": self.ingest.summary(),
+            "reindexed": self.reindexed,
+            "reindex_pages": self.reindex_pages,
+            "backend": self.backend,
+            "duration_ms": self.duration_ms,
+            "exit_code": self.exit_code,
+        }
+        if self.session is not None:
+            data["session"] = self.session
+        return data
+
+
+def session_end(
+    raw_root: Path = DEFAULT_RAW_ROOT,
+    wiki_root: Path = DEFAULT_WIKI_ROOT,
+    knowledge_root: Path = DEFAULT_KNOWLEDGE_ROOT,
+    *,
+    session: str | None = None,
+    incremental: bool = True,
+    cache_dir: Path | None = None,
+    config: dict[str, object] | None = None,
+    backend: str | None = None,
+    dry_run: bool = False,
+    **run_kwargs: Any,
+) -> SessionEndResult:
+    """Change-gated SessionEnd compile-then-index composition (issue #350).
+
+    The single command the cwc SessionEnd hook and the nightly-after-librarian
+    path invoke so a memory ``remember``ed by one agent becomes recallable by
+    every other agent after that session ends — closing the ~24h gap where a
+    fact sat in ``raw/`` unseen until the next nightly librarian run.
+
+    Two steps, both change-gated so an idle SessionEnd is cheap:
+
+    1. **Incremental** :func:`ingest` of this session's new/changed raw intake.
+       Internally a fast no-op (zero LLM) when nothing is new; ``tier0``
+       structured entries compile with no model cost.
+    2. **Then** :func:`reindex` — but *only when the compile actually ran*
+       (``ingest`` was not a no-op) and succeeded. An idle SessionEnd (no new
+       raw), a failed compile, or a ``dry_run`` never touches the index, per
+       the issue's per-session cost bound.
+
+    ``session`` scopes the new/changed detection to one ``originSessionId``
+    (the SessionEnd use-case). ``incremental=False`` forces a full recompile +
+    full reindex (an operator escape hatch). Extra keyword arguments forward to
+    :func:`run` (e.g. ``install_signal_handlers``). Single-flight locking is the
+    caller's responsibility — the CLI wrapper holds the run lock across both
+    steps.
+    """
+    start = time.monotonic()
+    if config is None:
+        config = load_config(knowledge_root)
+
+    ingest_result = ingest(
+        raw_root=raw_root,
+        wiki_root=wiki_root,
+        knowledge_root=knowledge_root,
+        incremental=incremental,
+        session=session,
+        cache_dir=cache_dir,
+        config=config,
+        dry_run=dry_run,
+        **run_kwargs,
+    )
+
+    backend_name = backend or str(config.get("search_backend", "fts5"))
+    reindexed = False
+    reindex_pages = 0
+
+    # Change-gate the index step: reindex only when the compile actually ran
+    # (wiki may have changed) AND succeeded, and never on a dry-run. An idle
+    # no-op ingest short-circuits here → no reindex, per the acceptance bound.
+    should_reindex = (
+        not ingest_result.noop and ingest_result.exit_code == 0 and not dry_run
+    )
+    if should_reindex:
+        backend_name, reindex_pages = reindex(
+            knowledge_root=knowledge_root,
+            wiki_root=wiki_root,
+            cache_dir=cache_dir,
+            config=config,
+            backend=backend,
+            incremental=incremental,
+        )
+        reindexed = True
+
+    return SessionEndResult(
+        ingest=ingest_result,
+        reindexed=reindexed,
+        reindex_pages=reindex_pages,
+        backend=backend_name,
+        duration_ms=int((time.monotonic() - start) * 1000),
+        session=session,
+    )
