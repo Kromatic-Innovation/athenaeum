@@ -72,6 +72,7 @@ from athenaeum.models import (
     load_schema_list,
     parse_access,
     parse_asserter,
+    parse_claim_kind,
     parse_deprecated,
     parse_frontmatter,
     parse_model,
@@ -329,6 +330,9 @@ def discover_auto_memory_files(
                         model=parse_model(meta_for_markers),
                         on_behalf_of=parse_on_behalf_of(meta_for_markers),
                         asserter=parse_asserter(meta_for_markers),
+                        # Issue #327: epistemic claim kind (fail-open when
+                        # absent/unrecognized → "" unclassified).
+                        claim_kind=parse_claim_kind(meta_for_markers),
                         # Issue #308: claim-level temporal validity bounds.
                         valid_from=validity_bound_str(meta_for_markers, "valid_from"),
                         valid_until=validity_bound_str(meta_for_markers, "valid_until"),

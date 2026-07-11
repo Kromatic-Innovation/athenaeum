@@ -121,6 +121,24 @@ class TestPositiveDetection:
         assert result.detected is True
         assert result.conflict_type == "factual"
 
+    def test_stance_conflict_type_supported(self, tmp_path: Path) -> None:
+        # Issue #327: `stance` routes an evaluative (opinion) pair to the
+        # resolver's opinion-attribution short-circuit.
+        scope = tmp_path / "scope"
+        m1 = _write_am(scope, "a.md", "Tabs are better than spaces.")
+        m2 = _write_am(scope, "b.md", "Spaces are better than tabs.")
+        payload = (
+            '{"detected": true, "conflict_type": "stance", '
+            f'"members_involved": ["{m1.origin_scope}/{m1.path.name}", '
+            f'"{m2.origin_scope}/{m2.path.name}"], '
+            '"conflicting_passages": ["Tabs are better than spaces.", '
+            '"Spaces are better than tabs."], '
+            '"rationale": "Opposing evaluative preferences."}'
+        )
+        result = detect_contradictions([m1, m2], _fake_client(payload))
+        assert result.detected is True
+        assert result.conflict_type == "stance"
+
     def test_prose_before_json_is_tolerated(self, tmp_path: Path) -> None:
         """Detector is allowed to prefix or suffix the JSON with prose."""
         scope = tmp_path / "scope"

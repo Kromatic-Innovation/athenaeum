@@ -63,10 +63,12 @@ from typing import TYPE_CHECKING, Any, Literal
 from athenaeum.contradictions import ContradictionResult
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
+    OPINION_CLAIM_KIND,
     AutoMemoryFile,
     TokenUsage,
     _coerce_iso_date,
     cache_usage_counts,
+    compare_asserters,
     parse_frontmatter,
     parse_valid_from,
     render_frontmatter,
@@ -145,6 +147,12 @@ DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION: dict[str, float] = {
     # a bounded window is reversible and loses no claim.
     "scope_a": 0.90,
     "scope_b": 0.90,
+    # Issue #327: opinion attribution. NON-destructive — both members stay
+    # active with explicit attribution; nothing is deleted or superseded.
+    # Aligned with the 0.90 record/mark bar (below the 0.95 destructive-delete
+    # bar). The deterministic stance short-circuit emits this at confidence
+    # 1.0, so the threshold matters only for an LLM-returned attribute_both.
+    "attribute_both": 0.90,
 }
 # Sentinel set of actions that never auto-apply regardless of threshold.
 # Belt-and-suspenders: Lane 3's ``_emit_escalation`` already routes
@@ -218,6 +226,15 @@ ResolverAction = Literal[
     # ``valid_from``); org/locale coordinate pinning is deferred to the #329 ADR.
     "scope_a",
     "scope_b",
+    # Opinion-attribution verdict (issue #327): BOTH sides are evaluative
+    # (``opinion`` claim_kind) and stay ACTIVE with explicit attribution to
+    # their respective asserters. Returned when the two opinions come from
+    # DIFFERENT known asserters, OR — the common fallback — when the asserter
+    # identity is UNKNOWN on either side (a Claude session carries no OIDC
+    # identity). An opinion is NEVER superseded or deleted by source
+    # precedence: reasonable people disagree and both stay right. Non-
+    # destructive; the pair short-circuits and never re-queues (like refines).
+    "attribute_both",
 ]
 
 _VALID_WINNERS: frozenset[str] = frozenset(("a", "b", "merge", "neither"))
@@ -236,6 +253,7 @@ _VALID_ACTIONS: frozenset[str] = frozenset(
         "forget_b",
         "scope_a",
         "scope_b",
+        "attribute_both",
     )
 )
 
@@ -267,6 +285,11 @@ DEPRECATE_BOTH_ACTION = "deprecate_both"
 # can reference them without re-typing the literals.
 SCOPE_A_ACTION = "scope_a"
 SCOPE_B_ACTION = "scope_b"
+# Opinion-attribution verdict (#327) — non-destructive. BOTH opinion members
+# stay active with explicit attribution to their asserters; neither is
+# superseded/deleted by precedence. Exported so :mod:`merge`, :mod:`tiers`, and
+# tests can reference it without re-typing the literal.
+ATTRIBUTE_BOTH_ACTION = "attribute_both"
 
 
 @dataclass
@@ -337,8 +360,23 @@ _RESOLVE_SYSTEM = """You are a resolver for an AI agent's long-term memory syste
 A cheap detector has flagged two memory snippets as contradictory. The
 detector over-fires, so your job is two-step:
 
-STEP 1 — CLASSIFY each side as one of three memory KINDS. The kind
+STEP 1 — CLASSIFY each side as one of the memory KINDS. The kind
 determines which action set applies.
+
+  OPINION — an EVALUATIVE stance, judgment, or taste on which reasonable
+  people can disagree and both stay right. Examples:
+    - "tabs are better than spaces"
+    - "the onboarding flow feels clunky"
+    - "Rust is the best systems language"
+  An opinion is NEVER resolved by source precedence — a more-authoritative
+  source does not make one opinion "correct" and the other "wrong." When
+  BOTH sides are OPINION, use attribute_both: keep both, each attributed to
+  its asserter. (The pipeline supplies a deterministic asserter-comparison
+  short-circuit for this case; you will usually not see clean opinion pairs,
+  but when you do, prefer attribute_both over any keep_/correct_/forget_.)
+  Distinguish OPINION from PREFERENCE: a PREFERENCE is a standing
+  instruction the agent should FOLLOW ("open review files with subl"); an
+  OPINION is a held viewpoint, not an instruction.
 
   PREFERENCE — a durable user/agent preference. Examples:
     - "open files for human review with `subl`"
@@ -448,6 +486,12 @@ STEP 2 — APPLY THE CLASSIFICATION:
   periods. scope_a narrows side a; scope_b narrows side b. Set
   recommended_winner to "neither" (no side loses).
 
+  attribute_both — return when BOTH sides are OPINION (evaluative stances)
+  that differ. Both stay ACTIVE, each attributed to its own asserter; the
+  pair is NOT resolved by precedence and does not re-queue. Set
+  recommended_winner to "neither". Never supersede or delete an opinion in
+  favor of another opinion on source authority alone.
+
   retain_both_with_context — fallback when classification is mixed or
   precedence cannot decide; both stay active and the human decides.
 
@@ -502,7 +546,8 @@ For most actions:
   "recommended_winner": "a" | "b" | "merge" | "neither",
   "action":
       "keep_a" | "keep_b" | "correct_a" | "correct_b"
-      | "forget_a" | "forget_b" | "scope_a" | "scope_b" | "merge"
+      | "forget_a" | "forget_b" | "scope_a" | "scope_b"
+      | "attribute_both" | "merge"
       | "deprecate_both" | "retain_both_with_context" | "not_a_conflict",
   "rationale": "<one sentence: name the kind classification AND the rule applied>",
   "confidence": <float between 0 and 1>,
@@ -1188,6 +1233,161 @@ def _scope_verdict_proposal(
     return None
 
 
+def _asserter_label(asserter: dict[str, Any] | None) -> str:
+    """Human-readable asserter label for a rationale — name > email > key."""
+    if not isinstance(asserter, dict):
+        return "unknown"
+    for key in ("name", "email"):
+        val = asserter.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return "unknown"
+
+
+def _newer_opinion_index(a: AutoMemoryFile, b: AutoMemoryFile) -> int | None:
+    """Return the index (0/1) of the newer of two dated opinions, or ``None``.
+
+    Ordering signal priority (mirrors :func:`_sequential_snapshot_close`):
+    ``valid_from`` first, then ingestion date (``created`` / ``updated``). With
+    no distinguishing signal (both undated / equal), returns ``None`` so the
+    caller keeps BOTH rather than guessing.
+    """
+    a_meta = _member_frontmatter(a.path)
+    b_meta = _member_frontmatter(b.path)
+    a_from = parse_valid_from(a_meta)
+    b_from = parse_valid_from(b_meta)
+    if a_from is not None and b_from is not None and a_from != b_from:
+        return 0 if a_from > b_from else 1
+    a_ing = _member_ingestion_date(a_meta)
+    b_ing = _member_ingestion_date(b_meta)
+    if a_ing is not None and b_ing is not None and a_ing != b_ing:
+        return 0 if a_ing > b_ing else 1
+    return None
+
+
+def _stance_attribution_verdict(
+    detector_result: ContradictionResult,
+    members: list[AutoMemoryFile],
+) -> ResolutionProposal | None:
+    """Return the #327 opinion-attribution verdict, or ``None`` to fall through.
+
+    Deterministic short-circuit (no Opus call) for EVALUATIVE pairs — two
+    ``opinion`` claim_kind snippets that "conflict" only because they express
+    different stances. An opinion is NEVER resolved by source precedence:
+    reasonable people disagree and both stay right.
+
+    Engagement gate (conservative, fail-open):
+
+    - Fires when BOTH sides carry ``claim_kind: opinion``, OR when the detector
+      routed the pair as ``conflict_type == "stance"`` AND neither side is
+      EXPLICITLY classified as a non-opinion kind (the common case where a
+      member is still unclassified).
+    - If EITHER side is explicitly a non-opinion kind (``fact`` / ``decision``
+      / ``policy`` / ``observation`` / ``definition``), this returns ``None``
+      and the normal precedence path runs — an opinion-vs-fact pair is not an
+      attribution case.
+
+    Asserter comparison (:func:`athenaeum.models.compare_asserters`):
+
+    - ``different`` (both known, distinct) → ``attribute_both`` (conf 1.0):
+      both stay active with explicit attribution.
+    - ``unknown`` (missing identity on either side — the COMMON case) →
+      ``attribute_both`` (conf 1.0). REQUIRED fallback: never supersede or
+      delete an opinion by precedence when identity is missing.
+    - ``same`` + a distinguishing date → supersession (keep the newer opinion),
+      as with any dated same-author update.
+    - ``same`` + undated → ``attribute_both`` (cannot order; keep both rather
+      than guess).
+    """
+    if len(detector_result.members_involved) < 2:
+        return None
+    flagged = _resolve_flagged_pair(detector_result, members)
+    if len(flagged) < 2:
+        return None
+    a, b = flagged[0], flagged[1]
+    a_kind = (a.claim_kind or "").strip()
+    b_kind = (b.claim_kind or "").strip()
+
+    # An EXPLICIT non-opinion classification on either side blocks the
+    # attribution path — this is not an opinion-vs-opinion pair.
+    a_blocks = bool(a_kind) and a_kind != OPINION_CLAIM_KIND
+    b_blocks = bool(b_kind) and b_kind != OPINION_CLAIM_KIND
+    if a_blocks or b_blocks:
+        return None
+
+    both_opinion = a_kind == OPINION_CLAIM_KIND and b_kind == OPINION_CLAIM_KIND
+    stance_routed = detector_result.conflict_type == "stance"
+    if not (both_opinion or stance_routed):
+        return None
+
+    verdict = compare_asserters(a.asserter, b.asserter)
+    if verdict == "same":
+        newer = _newer_opinion_index(a, b)
+        if newer == 0:
+            return ResolutionProposal(
+                recommended_winner="a",
+                action=KEEP_A_ACTION,
+                rationale=(
+                    "same-asserter opinion superseded by a newer dated stance "
+                    "(keep the newer)"
+                ),
+                confidence=1.0,
+                source_precedence_used=["a:newer-opinion > b:older-opinion"],
+            )
+        if newer == 1:
+            return ResolutionProposal(
+                recommended_winner="b",
+                action=KEEP_B_ACTION,
+                rationale=(
+                    "same-asserter opinion superseded by a newer dated stance "
+                    "(keep the newer)"
+                ),
+                confidence=1.0,
+                source_precedence_used=["b:newer-opinion > a:older-opinion"],
+            )
+        # Same asserter, no distinguishing date — keep both rather than guess.
+        return ResolutionProposal(
+            recommended_winner="neither",
+            action=ATTRIBUTE_BOTH_ACTION,
+            rationale=(
+                "same-asserter opinions with no distinguishing date; keeping "
+                "both (an opinion is never dropped by precedence)"
+            ),
+            confidence=1.0,
+            source_precedence_used=[],
+        )
+
+    label_a = _asserter_label(a.asserter)
+    label_b = _asserter_label(b.asserter)
+    if verdict == "different":
+        return ResolutionProposal(
+            recommended_winner="neither",
+            action=ATTRIBUTE_BOTH_ACTION,
+            rationale=(
+                f"evaluative (opinion) pair from different asserters "
+                f"({label_a} vs {label_b}); both stay active with explicit "
+                "attribution — an opinion is not resolved by precedence"
+            ),
+            confidence=1.0,
+            source_precedence_used=[f"a:asserter={label_a} ; b:asserter={label_b}"],
+        )
+    # verdict == "unknown" — the REQUIRED keep-both fallback. Identity is
+    # missing on at least one side (a Claude session carries no OIDC identity),
+    # so we CANNOT establish "same vs different" — and we must NEVER supersede
+    # or delete an opinion by precedence when identity is unknown.
+    return ResolutionProposal(
+        recommended_winner="neither",
+        action=ATTRIBUTE_BOTH_ACTION,
+        rationale=(
+            "evaluative (opinion) pair with unknown asserter identity; keeping "
+            "both (fallback — an opinion is never superseded by precedence when "
+            "identity is missing)"
+        ),
+        confidence=1.0,
+        source_precedence_used=[],
+    )
+
+
 def _declared_winner(
     detector_result: ContradictionResult,
     members: list[AutoMemoryFile],
@@ -1436,6 +1636,17 @@ def propose_resolution(
     declared = _declared_winner(detector_result, members)
     if declared is not None:
         return declared
+
+    # Issue #327: opinion-attribution short-circuit. An evaluative (``opinion``
+    # claim_kind, or detector-routed ``stance``) pair is NEVER resolved by
+    # source precedence — different asserters legitimately disagree, and an
+    # unknown asserter (the common Claude-session case) MUST keep both. Runs
+    # after the declared-relationship check (an explicit supersedes still wins)
+    # and before the LLM path. Fails through to the LLM when the pair is not
+    # evaluative or one side is explicitly a non-opinion kind.
+    stance = _stance_attribution_verdict(detector_result, members)
+    if stance is not None:
+        return stance
 
     if client is None:
         log.warning(
@@ -1734,13 +1945,23 @@ _ENACT_SCOPE_NARROW_INDEX: dict[str, int] = {
     SCOPE_B_ACTION: 1,  # scope_b → narrow side b
 }
 
+# Issue #327: opinion-attribution enactment. NON-destructive — stamps
+# ``attributed: true`` on BOTH members so the compiled output records that this
+# evaluative pair was kept-both-with-attribution (each member already carries
+# its own ``asserter:`` block). No member is deleted, superseded, or
+# deprecated; both stay active. Orientation-AGNOSTIC (symmetric), so it needs
+# no flip (see :data:`_FLIP_ACTION`).
+_ENACT_ATTRIBUTE_BOTH_ACTIONS: frozenset[str] = frozenset((ATTRIBUTE_BOTH_ACTION,))
+
 # Exported so callers / tests can ask "does this action mutate state?" without
 # re-deriving the set. Union of the destructive delete actions (#166), the
-# non-destructive marking actions (#191), and the scope-narrow actions (#329).
+# non-destructive marking actions (#191), the scope-narrow actions (#329), and
+# the opinion-attribution action (#327).
 ENACTING_ACTIONS: frozenset[str] = (
     frozenset(_ENACT_DELETE_INDEX)
     | _ENACT_MARK_ACTIONS
     | frozenset(_ENACT_SCOPE_NARROW_INDEX)
+    | _ENACT_ATTRIBUTE_BOTH_ACTIONS
 )
 
 # Issue #199: orientation-flip map. The claim-pair fingerprint is
@@ -1752,8 +1973,9 @@ ENACTING_ACTIONS: frozenset[str] = (
 # stored action must be flipped to hit the correct member. The auto-apply lane
 # (:mod:`athenaeum.tiers`) reconciles orientation via the persisted per-side
 # anchors and applies this flip when reversed. ``deprecate_both`` /
-# ``not_a_conflict`` / ``retain_both_with_context`` are orientation-AGNOSTIC
-# and deliberately absent — they need no flip.
+# ``attribute_both`` (#327 — symmetric, marks BOTH sides) / ``not_a_conflict``
+# / ``retain_both_with_context`` are orientation-AGNOSTIC and deliberately
+# absent — they need no flip.
 _FLIP_ACTION: dict[str, str] = {
     CORRECT_A_ACTION: CORRECT_B_ACTION,
     CORRECT_B_ACTION: CORRECT_A_ACTION,
@@ -2067,6 +2289,33 @@ def enact_resolution(
         if marked_any:
             log.info(
                 "resolutions: enacted %s — marked both members deprecated",
+                action,
+            )
+            return Path(member_paths[0])
+        return None
+
+    # --- Opinion-attribution branch (#327) ---
+    # attribute_both stamps ``attributed: true`` on BOTH members — a
+    # non-destructive record that this evaluative pair was kept-both-with-
+    # attribution. Both members stay ACTIVE (``attributed`` is NOT an
+    # inactive marker), each keeping its own ``asserter:`` block as the
+    # explicit attribution. No delete, no superseded_by/deprecated.
+    if action in _ENACT_ATTRIBUTE_BOTH_ACTIONS:
+        if not member_paths or len(member_paths) < 2:
+            log.warning(
+                "resolutions: cannot enact %s — need 2 member_paths (got %d)",
+                action,
+                0 if not member_paths else len(member_paths),
+            )
+            return None
+        marked_any = False
+        for mp in member_paths[:2]:
+            if _mark_member_frontmatter(Path(mp), "attributed", True):
+                marked_any = True
+        if marked_any:
+            log.info(
+                "resolutions: enacted %s — marked both opinion members "
+                "attributed (both stay active)",
                 action,
             )
             return Path(member_paths[0])
