@@ -97,6 +97,8 @@ class TestEnactResolutionUnit:
     def test_enacting_actions_set(self) -> None:
         # #191: keep_a/keep_b/deprecate_both joined the enacting set (marking,
         # not deleting) alongside the original four delete actions.
+        # #329: scope_a/scope_b joined (non-destructive scope narrowing — both
+        # members stay active).
         assert ENACTING_ACTIONS == frozenset(
             {
                 "forget_a",
@@ -106,6 +108,8 @@ class TestEnactResolutionUnit:
                 "keep_a",
                 "keep_b",
                 "deprecate_both",
+                "scope_a",
+                "scope_b",
             }
         )
 

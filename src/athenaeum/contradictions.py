@@ -186,6 +186,18 @@ def _member_scope_header(am: AutoMemoryFile) -> str:
     valid_until = validity_bound_str(meta, "valid_until")
     if valid_from or valid_until:
         segments.append(f"valid: {valid_from or 'open'} → {valid_until or 'open'}")
+    # Issue #329: org/locale scope dimensions. Surfaced as trusted context so
+    # the detector can reason about scope-separated claims (org-wide rule vs a
+    # team's local exception). The authoritative DISJOINT/OVERRIDE short-circuit
+    # runs upstream in resolutions._scope_verdict_proposal; this line is
+    # advisory signal for the pairs that still reach the detector. Values are
+    # echoed verbatim (no tree validation here) — omitted when absent.
+    scope_block = meta.get("scope")
+    if isinstance(scope_block, dict):
+        for dim in ("org", "locale"):
+            val = scope_block.get(dim)
+            if isinstance(val, str) and val.strip():
+                segments.append(f"{dim}: {val.strip()}")
     source_type = coerce_source_type(meta.get("source_type"))
     if source_type != DEFAULT_SOURCE_TYPE:
         segments.append(f"source: {source_type}")

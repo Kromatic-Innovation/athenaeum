@@ -510,4 +510,9 @@ class TestModuleConstants:
             "correct_b": 0.95,
             "forget_a": 0.95,
             "forget_b": 0.95,
+            # Issue #329: scope_a/scope_b NARROW the named side's scope
+            # (non-destructive — both members stay active), aligned with the
+            # 0.90 record/mark bar, below the 0.95 destructive-delete bar.
+            "scope_a": 0.90,
+            "scope_b": 0.90,
         }
