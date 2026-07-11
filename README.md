@@ -77,6 +77,33 @@ athenaeum run \
   --verbose
 ```
 
+### On-demand ingest & reindex (issue #349)
+
+The nightly `athenaeum run` is the batch path. When an agent (or you) needs a
+just-`remember`ed fact to become recallable **now** — decoupled from the
+nightly cadence — use the two on-demand commands. Both are single-flight (they
+share the same run lock as `run`, issue #309) and print a one-line JSON summary
+with counts and duration; both exit non-zero on failure.
+
+```bash
+# Compile only raw intake that is new/changed since the last ingest, then
+# refresh the search index — the round-trip that makes a memory recallable.
+athenaeum ingest              # --incremental is the DEFAULT (fast no-op if none)
+athenaeum reindex             # --incremental hash-diff delta (depends on #348)
+
+athenaeum ingest --full       # recompile all pending raw intake
+athenaeum reindex --full      # rebuild the index from scratch
+athenaeum ingest --session <id>   # scope new/changed detection to one session
+```
+
+`ingest --incremental` tracks a content-hash stamp
+(`~/.cache/athenaeum/ingest-manifest.json`, mirroring the #348 index manifest),
+so it is a fast no-op when nothing has changed. `tier0_passthrough`
+pre-structured intake compiles with **no LLM cost**. `reindex` is the canonical
+name; `rebuild-index` remains as a back-compat alias for the exact same
+command. The reusable engine lives at `athenaeum.librarian.ingest` (the
+SessionEnd hook, issue #350, calls it directly).
+
 ## Data lifecycle & upgrade impact
 
 > **Upgrade impact (0.10.0) — `athenaeum run` now MOVES and DELETES raw
@@ -535,8 +562,10 @@ release line:
 - **FTS5 index rebuilds are non-atomic and unlocked.** A shell hook and the
   librarian run rebuilding simultaneously can race; the window is small and
   single-user wikis do not hit it in practice, but hardened multi-writer
-  safety remains future work. Workaround: don't invoke `athenaeum rebuild-index` and
-  `athenaeum run` concurrently on the same `$KNOWLEDGE_ROOT`.
+  safety remains future work. The `athenaeum run` / `ingest` / `reindex`
+  (`rebuild-index`) commands are single-flight against each other via the run
+  lock (issue #309); the residual race is only with the example shell hook,
+  which does not take that lock.
 - **The `keyword` search backend is a scan-on-query fallback.** It reads
   every wiki page on every query; fine under ~1,000 entities, painful past
   that. Use `search_backend: fts5` (default in the CLI and hooks) for any

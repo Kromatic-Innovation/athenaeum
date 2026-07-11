@@ -18,7 +18,14 @@ releases.
 __version__ = "0.13.13"
 
 from athenaeum.init import init_knowledge_dir
-from athenaeum.librarian import discover_raw_files, process_one, rebuild_index, run
+from athenaeum.librarian import (
+    IngestResult,
+    discover_raw_files,
+    ingest,
+    process_one,
+    rebuild_index,
+    run,
+)
 from athenaeum.models import (
     ClassifiedEntity,
     EntityAction,
@@ -38,11 +45,13 @@ __all__ = [
     "EntityAction",
     "EntityIndex",
     "EscalationItem",
+    "IngestResult",
     "ProcessingResult",
     "RawFile",
     "WikiEntity",
     "discover_raw_files",
     "generate_uid",
+    "ingest",
     "init_knowledge_dir",
     "parse_frontmatter",
     "process_one",
