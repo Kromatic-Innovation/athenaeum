@@ -290,6 +290,105 @@ class TestJsonHardening:
 
 
 # ---------------------------------------------------------------------------
+# JSON-repair retry (issue #345, WS2)
+# ---------------------------------------------------------------------------
+
+
+def _sequence_client(*payload_texts: str) -> MagicMock:
+    """A client whose ``messages.create`` returns each text in turn."""
+    client = MagicMock()
+
+    def _make(text: str) -> MagicMock:
+        response = MagicMock()
+        response.content = [MagicMock(text=text)]
+        response.usage = MagicMock(
+            input_tokens=0,
+            output_tokens=0,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        return response
+
+    client.messages.create.side_effect = [_make(t) for t in payload_texts]
+    return client
+
+
+class TestJsonRepairRetry:
+    """The resolver retries once on a no-JSON response before falling back."""
+
+    _VALID = (
+        '{"recommended_winner": "b", "action": "keep_b", '
+        '"confidence": 0.9, "rationale": "newer decision wins", '
+        '"source_precedence_used": ["a:unsourced > b:user:s"]}'
+    )
+
+    def test_malformed_then_valid_picks_winner(self, tmp_path: Path) -> None:
+        """A prose-only first response is repaired on the second attempt."""
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "x")
+        b = _write_am(scope, "b.md", "y")
+        client = _sequence_client(
+            "I think b is the winner but here is no JSON at all.",
+            self._VALID,
+        )
+        proposal = propose_resolution(_detected([a, b]), [a, b], client)
+        assert client.messages.create.call_count == 2
+        assert proposal.action == "keep_b"
+        assert proposal.recommended_winner == "b"
+        assert proposal.confidence == pytest.approx(0.9)
+
+    def test_retry_appends_strict_json_reminder(self, tmp_path: Path) -> None:
+        """The retry turn carries the assistant reply + the repair nudge."""
+        import athenaeum.resolutions as resolutions_mod
+
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "x")
+        b = _write_am(scope, "b.md", "y")
+        client = _sequence_client("no json here", self._VALID)
+        propose_resolution(_detected([a, b]), [a, b], client)
+
+        retry_messages = client.messages.create.call_args_list[1].kwargs["messages"]
+        roles = [m["role"] for m in retry_messages]
+        assert roles == ["user", "assistant", "user"]
+        assert retry_messages[-1]["content"] == resolutions_mod._JSON_REPAIR_NUDGE
+
+    def test_multiple_objects_first_then_valid(self, tmp_path: Path) -> None:
+        """Two candidate objects (ambiguous → no-JSON) also trigger the retry."""
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "x")
+        b = _write_am(scope, "b.md", "y")
+        client = _sequence_client(
+            'Example: {"action": "keep_a"} and answer {"action": "keep_b"}',
+            self._VALID,
+        )
+        proposal = propose_resolution(_detected([a, b]), [a, b], client)
+        assert client.messages.create.call_count == 2
+        assert proposal.action == "keep_b"
+
+    def test_no_json_both_attempts_falls_back(self, tmp_path: Path) -> None:
+        """When the repair also fails, the deterministic fallback is returned."""
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "x")
+        b = _write_am(scope, "b.md", "y")
+        client = _sequence_client("still no json", "and still none")
+        proposal = propose_resolution(_detected([a, b]), [a, b], client)
+        assert client.messages.create.call_count == 2
+        assert proposal.action == "retain_both_with_context"
+        assert proposal.confidence == 0.0
+        assert proposal.rationale == "resolver-returned-no-json"
+
+    def test_valid_first_response_does_not_retry(self, tmp_path: Path) -> None:
+        """A well-formed first response must NOT cost a second call."""
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "x")
+        b = _write_am(scope, "b.md", "y")
+        client = _sequence_client(self._VALID)
+        proposal = propose_resolution(_detected([a, b]), [a, b], client)
+        assert client.messages.create.call_count == 1
+        assert proposal.action == "keep_b"
+
+
+# ---------------------------------------------------------------------------
 # Precedence-tier rationale shapes
 # ---------------------------------------------------------------------------
 

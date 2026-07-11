@@ -5,14 +5,19 @@ Runs :func:`propose_resolution` against every case in
 ``tests/evals/data/resolver/cases.yaml`` using a real Opus call.
 
 Action-class taxonomy (per the issue):
-    - ``not_a_conflict`` — pass (snapshot / refinement / restatement)
-    - ``keep_pick_winner`` — contradict (dated supersession — the winner is
-      picked; matches ``keep_a`` / ``keep_b`` / ``correct_a`` / ``correct_b``)
-    - ``disambiguation`` — escalate (undated mutually-exclusive fact — the
-      resolver returns ``retain_both_with_context`` with a non-empty
-      ``disambiguation_options`` list, per the resolver system prompt)
+    - ``not_a_conflict`` — pass (sequential dated snapshot / restatement)
+    - ``keep_pick_winner`` — contradict (a DECISION superseded by a newer one,
+      or a precedence-decidable fact — the winner is picked; matches
+      ``keep_a`` / ``keep_b`` / ``correct_a`` / ``correct_b``)
+    - ``disambiguation`` — escalate (undated mutually-exclusive fact NOT
+      resolvable by precedence — the resolver returns
+      ``retain_both_with_context`` with a non-empty ``disambiguation_options``
+      list, per the resolver system prompt)
+    - ``propose_merge`` — merge (a general PREFERENCE rule + narrower exception
+      that reads more cleanly as one consolidated memory — the resolver system
+      prompt directs this pattern to ``propose_merge``)
 
-Aggregate floor: ≥ 4/5 (acceptance criteria).
+Aggregate floor: ≥ 6/8 (see ``RESOLVER_FLOOR`` derivation below).
 """
 
 from __future__ import annotations
@@ -42,7 +47,14 @@ from tests.evals.harness import (
 pytestmark = pytest.mark.eval
 
 
-RESOLVER_FLOOR = 4  # ≥ 4/5 per acceptance criteria
+# Floor derivation (issue #345, WS3): the golden set holds N=8 cases, two per
+# action class (not_a_conflict, keep_pick_winner, disambiguation,
+# propose_merge). All 8 pass reliably on the default Opus resolver (verified
+# across repeated live runs while calibrating this issue). A floor of 6 leaves
+# >= 2-case slack, so a single hard case (or one non-JSON response, now guarded
+# by the WS2 repair retry) no longer sinks the whole layer — the small-sample
+# hostage problem the pre-#345 5-case / floor-4 set had.
+RESOLVER_FLOOR = 6  # >= 6/8; 2-case slack over an all-pass expectation
 
 
 def _load_cases() -> list[dict[str, Any]]:
@@ -78,7 +90,9 @@ def _materialise_members(
     return members
 
 
-def _detector_result(case: dict[str, Any], members: list[AutoMemoryFile]) -> ContradictionResult:
+def _detector_result(
+    case: dict[str, Any], members: list[AutoMemoryFile]
+) -> ContradictionResult:
     det = case["detector"]
     return ContradictionResult(
         detected=True,
