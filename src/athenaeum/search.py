@@ -23,6 +23,7 @@ import re
 import shutil
 import sqlite3
 from collections.abc import Iterable, Iterator
+from datetime import date
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -54,6 +55,7 @@ class SearchBackend(Protocol):
         incremental: bool = True,
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
+        as_of: date | None = None,
     ) -> int:
         """Build or rebuild the search index.
 
@@ -77,13 +79,24 @@ class SearchBackend(Protocol):
                 returns in sub-second time regardless of corpus size.
                 When ``False`` (seeding, ``reindex --full``), wipe and
                 rebuild from scratch. No prior manifest also forces a full
-                build.
+                build. Setting ``as_of`` (below) also forces a full build.
             include_globs / exclude_globs: Optional corpus-scoping globs
                 matched against the indexed name (issue #348 COULD). The
                 default (``None`` / ``None``) indexes everything — the
                 Apollo contact wikis are legitimate name-recall targets and
                 must stay indexed by default. This is a footprint/relevance
                 knob, not the CPU fix.
+            as_of: Issue #308 slice 3 — the date the index reflects. The
+                inactive filter drops pages outside their
+                ``[valid_from, valid_until]`` window relative to THIS date.
+                ``None`` (default) means today, so the live index is
+                unchanged. Pass a past date to build an as-of *rewind*
+                index: a page whose ``valid_until`` had not yet passed on
+                that date is included even if it has expired since. An as-of
+                build is always a FULL build (a historical snapshot has no
+                stable manifest to diff against), written into whatever
+                ``cache_dir`` the caller chose (a scratch dir, so the live
+                index is untouched).
 
         Returns the total number of pages in the index across all roots.
         """
@@ -98,11 +111,19 @@ class SearchBackend(Protocol):
         exclude: set[str] | None = None,
         wiki_root: Path | None = None,
         caller_audience: set[str] | None = None,
+        as_of: date | None = None,
     ) -> list[tuple[str, str, float]]:
         """Search the index.
 
         ``wiki_root`` is used by scan-on-query backends (e.g. keyword) that
         don't maintain an on-disk index; indexed backends ignore it.
+
+        ``as_of`` (issue #308 slice 3) pins the temporal view. Indexed
+        backends (fts5 / vector) filter at BUILD time, so they IGNORE this
+        parameter — an as-of view for them is a matching as-of index (see
+        ``build_index``). The scan-on-query ``keyword`` backend honors it
+        directly, filtering each page against its validity window at query
+        time. ``None`` (default) means today.
 
         ``caller_audience`` (issue #312) pins the query to a restricted read
         scope. ``None`` is the owner / default caller: no filtering, every
@@ -317,6 +338,7 @@ def _scan_indexed_records(
     *,
     include_globs: Iterable[str] | None = None,
     exclude_globs: Iterable[str] | None = None,
+    as_of: date | None = None,
 ) -> Iterator[tuple[str, Path, str, str, dict[str, Any]]]:
     """Yield ``(indexed_name, path, content_hash, text, meta)`` per active page.
 
@@ -325,6 +347,12 @@ def _scan_indexed_records(
     index document). Inactive memories are filtered here so they are absent
     from both index and manifest — the incremental differ then treats an
     active→inactive flip as a deletion. Unreadable files are skipped.
+
+    ``as_of`` (issue #308 slice 3) pins the temporal view: a page outside its
+    validity window relative to ``as_of`` (default today) is filtered out here,
+    exactly like a #191 tombstone. Only an as-of BUILD passes this (and an as-of
+    build is always full), so the manifest a normal live rebuild diffs against is
+    never contaminated by a historical view.
     """
     include = list(include_globs) if include_globs else None
     exclude = list(exclude_globs) if exclude_globs else None
@@ -339,7 +367,9 @@ def _scan_indexed_records(
         text = data.decode("utf-8", errors="replace")
         meta, _ = parse_frontmatter(text)
         # Issue #191: inactive members never enter the index or the manifest.
-        if is_inactive_memory(meta):
+        # Issue #308: an as-of build additionally drops pages outside their
+        # validity window relative to ``as_of`` (default today).
+        if is_inactive_memory(meta, as_of):
             continue
         yield indexed_name, path, content_hash, text, meta
 
@@ -436,6 +466,7 @@ class FTS5Backend:
         incremental: bool = True,
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
+        as_of: date | None = None,
     ) -> int:
         """Scan wiki + extra intake roots and build an FTS5 index.
 
@@ -443,7 +474,8 @@ class FTS5Backend:
         entries are indexed with a bare filename; extra-root entries with
         ``<root_name>/<relpath>``. Incremental by default (issue #348):
         only added/changed/removed pages are touched, keyed off a whole-file
-        content-hash manifest sidecar.
+        content-hash manifest sidecar. An as-of build (``as_of`` set, issue
+        #308) is always a full build reflecting that date's validity windows.
         """
         cache_dir.mkdir(parents=True, exist_ok=True)
         db_path = cache_dir / _DB_NAME
@@ -455,14 +487,21 @@ class FTS5Backend:
                 extra_roots,
                 include_globs=include_globs,
                 exclude_globs=exclude_globs,
+                as_of=as_of,
             )
         )
         current_hashes = {name: h for name, _p, h, _t, _m in current}
 
-        stored = _load_manifest(manifest_path) if incremental else None
+        # Issue #308: an as-of view is a historical snapshot — never diff it
+        # against (or seed) the live manifest, so force a full build.
+        stored = (
+            _load_manifest(manifest_path) if incremental and as_of is None else None
+        )
         # Incremental only when we have BOTH a prior manifest and a live DB;
         # otherwise seed with a clean full rebuild.
-        do_incremental = incremental and stored is not None and db_path.is_file()
+        do_incremental = (
+            incremental and as_of is None and stored is not None and db_path.is_file()
+        )
 
         if not do_incremental:
             if db_path.exists():
@@ -518,9 +557,11 @@ class FTS5Backend:
         exclude: set[str] | None = None,
         wiki_root: Path | None = None,
         caller_audience: set[str] | None = None,
+        as_of: date | None = None,
     ) -> list[tuple[str, str, float]]:
         """Query the FTS5 index. Returns ``(filename, name, score)`` triples."""
         del wiki_root  # FTS5 reads the pre-built index, not the wiki files
+        del as_of  # #308: FTS5 filters at build time; as-of view = as-of index
         db_path = cache_dir / _DB_NAME
         if not db_path.is_file():
             return []
@@ -693,13 +734,16 @@ class VectorBackend:
         incremental: bool = True,
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
+        as_of: date | None = None,
     ) -> int:
         """Build a chromadb collection from wiki + extra intake roots.
 
         See :meth:`SearchBackend.build_index` for the full contract.
         Incremental by default (issue #348): only added/changed/removed
         pages are (re-)embedded, keyed off a whole-file content-hash
-        manifest sidecar. A no-op rebuild re-embeds nothing.
+        manifest sidecar. A no-op rebuild re-embeds nothing. An as-of build
+        (``as_of`` set, issue #308) is always a full build reflecting that
+        date's validity windows.
         """
         chromadb = self._get_chromadb()
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -712,16 +756,22 @@ class VectorBackend:
                 extra_roots,
                 include_globs=include_globs,
                 exclude_globs=exclude_globs,
+                as_of=as_of,
             )
         )
         current_hashes = {name: h for name, _p, h, _t, _m in current}
 
-        stored = _load_manifest(manifest_path) if incremental else None
+        # Issue #308: an as-of view is a historical snapshot — never diff it
+        # against (or seed) the live manifest, so force a full build.
+        stored = (
+            _load_manifest(manifest_path) if incremental and as_of is None else None
+        )
         stored_model = stored.get("embedding_model") if stored else None
         # Incremental only when we have a prior manifest, a live collection
         # dir, AND the SAME embedding model — a model swap must re-embed all.
         do_incremental = (
             incremental
+            and as_of is None
             and stored is not None
             and vector_dir.is_dir()
             and stored_model == self.embedding_model
@@ -798,9 +848,11 @@ class VectorBackend:
         exclude: set[str] | None = None,
         wiki_root: Path | None = None,
         caller_audience: set[str] | None = None,
+        as_of: date | None = None,
     ) -> list[tuple[str, str, float]]:
         """Query the chromadb collection with semantic search."""
         del wiki_root  # Vector reads the pre-built chromadb collection
+        del as_of  # #308: vector filters at build time; as-of view = as-of index
         chromadb = self._get_chromadb()
 
         vector_dir = cache_dir / _VECTOR_DIR
@@ -979,16 +1031,19 @@ class KeywordBackend:
         incremental: bool = True,
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
+        as_of: date | None = None,
     ) -> int:
         """No-op: the keyword backend rescans on every query.
 
         Returns a count that includes wiki entries + extra-root entries
         (``MEMORY.md`` and non-``.md`` files excluded) so status checks
         see a comparable number to the indexed backends. The ``incremental``
-        / glob knobs are accepted for Protocol parity but inert here — there
-        is no persisted index to diff or scope.
+        / glob knobs (issue #348) and ``as_of`` (issue #308) are accepted for
+        Protocol parity but inert here — there is no persisted index to diff or
+        scope, and the temporal filter is applied at QUERY time
+        (:meth:`query`), not here.
         """
-        del cache_dir, incremental, include_globs, exclude_globs
+        del cache_dir, incremental, include_globs, exclude_globs, as_of
         count = sum(
             1
             for p in wiki_root.rglob("*.md")
@@ -1012,8 +1067,15 @@ class KeywordBackend:
         exclude: set[str] | None = None,
         wiki_root: Path | None = None,
         caller_audience: set[str] | None = None,
+        as_of: date | None = None,
     ) -> list[tuple[str, str, float]]:
-        """Score every non-underscore wiki page and return the top-n hits."""
+        """Score every non-underscore wiki page and return the top-n hits.
+
+        ``as_of`` (issue #308 slice 3) filters each page against its validity
+        window at query time — the keyword backend scans on query, so it honors
+        an as-of *rewind* directly (no as-of index build needed). ``None`` =
+        today.
+        """
         del cache_dir
         if wiki_root is None or not wiki_root.is_dir():
             return []
@@ -1040,7 +1102,9 @@ class KeywordBackend:
 
             fm, body = parse_frontmatter(text)
             # Issue #191: skip inactive members (superseded_by / deprecated).
-            if is_inactive_memory(fm):
+            # Issue #308 slice 3: also skip pages outside their validity window
+            # relative to ``as_of`` (default today) — the query-time as-of view.
+            if is_inactive_memory(fm, as_of):
                 continue
             # Issue #312 — Layer B (keyword): authorize BEFORE scoring so a
             # forbidden page never enters ``scored`` and cannot occupy a top-n
@@ -1083,6 +1147,20 @@ def get_backend(name: str) -> SearchBackend:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_as_of(as_of: date | str | None) -> date | None:
+    """Coerce an ``as_of`` argument (ISO string or ``date``) to a ``date``.
+
+    Convenience for shell-hook / CLI callers that pass ``as_of`` as an
+    ISO-8601 ``YYYY-MM-DD`` string. ``None`` and ``date`` pass through. A
+    non-empty unparseable string raises ``ValueError`` — unlike the fail-open
+    frontmatter parse, an operator explicitly asking for an as-of view with a
+    bad date should get a loud error, not a silent today-view.
+    """
+    if as_of is None or isinstance(as_of, date):
+        return as_of
+    return date.fromisoformat(as_of.strip())
+
+
 def build_fts5_index(
     wiki_root: str | Path,
     cache_dir: str | Path,
@@ -1091,6 +1169,7 @@ def build_fts5_index(
     incremental: bool = True,
     include_globs: Iterable[str] | None = None,
     exclude_globs: Iterable[str] | None = None,
+    as_of: date | str | None = None,
 ) -> int:
     """Build an FTS5 index. Callable from shell hooks via ``python3 -c``.
 
@@ -1099,6 +1178,10 @@ def build_fts5_index(
     scanned recursively, e.g. ``~/knowledge/raw/auto-memory``).
     ``incremental`` (default ``True``, issue #348) applies only the
     add/change/delete delta; pass ``False`` to force a full rebuild.
+
+    ``as_of`` (issue #308) builds an as-of *rewind* index: pass an ISO date
+    string or a ``date`` to reflect the knowledge base as it stood then
+    (always a full build). ``None`` (default) means today.
     """
     roots = [Path(r) for r in extra_roots] if extra_roots else None
     return FTS5Backend().build_index(
@@ -1108,6 +1191,7 @@ def build_fts5_index(
         incremental=incremental,
         include_globs=include_globs,
         exclude_globs=exclude_globs,
+        as_of=_coerce_as_of(as_of),
     )
 
 
@@ -1131,6 +1215,7 @@ def build_vector_index(
     include_globs: Iterable[str] | None = None,
     exclude_globs: Iterable[str] | None = None,
     embedding_model: str | None = None,
+    as_of: date | str | None = None,
 ) -> int:
     """Build a chromadb vector index. Callable from shell hooks.
 
@@ -1138,7 +1223,8 @@ def build_vector_index(
     :meth:`VectorBackend.build_index`. ``incremental`` (default ``True``,
     issue #348) re-embeds only the delta. ``embedding_model`` (issue #315
     seam) defaults to ``all-MiniLM-L6-v2`` — the documented default is not
-    changed here; swapping it forces a one-time full re-embed.
+    changed here; swapping it forces a one-time full re-embed. ``as_of``
+    (issue #308) builds an as-of *rewind* index — see :func:`build_fts5_index`.
     """
     roots = [Path(r) for r in extra_roots] if extra_roots else None
     return VectorBackend(embedding_model=embedding_model).build_index(
@@ -1148,6 +1234,7 @@ def build_vector_index(
         incremental=incremental,
         include_globs=include_globs,
         exclude_globs=exclude_globs,
+        as_of=_coerce_as_of(as_of),
     )
 
 

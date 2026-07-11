@@ -1107,3 +1107,107 @@ class TestRunPushFlag:
         # None lets the resolver default to off — explicit False would
         # collapse a future "yaml-on, no flag" precedence.
         assert captured.get("push_after_run") is None
+
+
+class TestAsOfView:
+    """Issue #308 slice 3: the ``--as-of DATE`` temporal recall view.
+
+    A read-only rewind through the upper bound: a claim valid THEN but expired
+    NOW is returned. The live index is never overwritten.
+    """
+
+    @pytest.fixture
+    def temporal_knowledge(self, tmp_path: Path) -> Path:
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "closed.md").write_text(
+            "---\nname: Closed Policy\ntype: reference\n"
+            "description: rollout policy\nvalid_until: 2026-03-01\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        (wiki / "mid.md").write_text(
+            "---\nname: Mid Policy\ntype: reference\n"
+            "description: rollout policy\nvalid_until: 2026-06-01\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        (wiki / "always.md").write_text(
+            "---\nname: Always Policy\ntype: reference\n"
+            "description: rollout policy\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        return knowledge
+
+    def test_recall_as_of_rewind(
+        self,
+        temporal_knowledge: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        cache = tmp_path / "cache"
+        rc = main(
+            [
+                "recall",
+                "rollout",
+                "--path",
+                str(temporal_knowledge),
+                "--cache-dir",
+                str(cache),
+                "--backend",
+                "fts5",
+                "--as-of",
+                "2026-04-01",
+                "--top-k",
+                "10",
+            ]
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "mid.md" in out  # still valid on 2026-04-01
+        assert "always.md" in out
+        assert "closed.md" not in out  # expired by 2026-04-01
+        # The as-of index lives in a scratch subdir, NOT the live index.
+        assert (cache / "_asof" / "2026-04-01" / "wiki-index.db").exists()
+        assert not (cache / "wiki-index.db").exists()
+
+    def test_recall_bad_as_of_date_is_rejected(
+        self, temporal_knowledge: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit):
+            main(
+                [
+                    "recall",
+                    "rollout",
+                    "--path",
+                    str(temporal_knowledge),
+                    "--as-of",
+                    "not-a-date",
+                ]
+            )
+        assert "invalid ISO date" in capsys.readouterr().err
+
+    def test_rebuild_index_as_of_note(
+        self,
+        temporal_knowledge: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        cache = tmp_path / "asof-cache"
+        rc = main(
+            [
+                "rebuild-index",
+                "--path",
+                str(temporal_knowledge),
+                "--cache-dir",
+                str(cache),
+                "--backend",
+                "fts5",
+                "--as-of",
+                "2026-04-01",
+            ]
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        # mid + always are live on 2026-04-01; closed has expired. An as-of
+        # build is always full (issue #348 reconciliation).
+        assert "FTS5 index rebuilt as of 2026-04-01 (full): 2 pages" in out
