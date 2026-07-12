@@ -97,7 +97,19 @@ class _FakeBatches:
         self.submitted.append(requests)
         batch_id = f"msgbatch_{len(self.submitted)}"
         self._retrieve_counts[batch_id] = 0
-        return SimpleNamespace(id=batch_id, processing_status="in_progress")
+        # A batch that completes within the first poll cycle is reported as
+        # already ``ended`` at create time, so ``execute_batch``'s poll loop
+        # is skipped and no real ``time.sleep(BATCH_POLL_INTERVAL_SECONDS)``
+        # runs. The run()-level batch tests reach ``execute_batch`` through
+        # ``process_batch_run`` and cannot inject a no-op ``sleep``; without
+        # this they each block ~30s per batch on wall-clock poll intervals.
+        # Tests that specifically exercise the polling loop opt in via
+        # ``polls_until_end`` (>1) or ``never_end`` and inject their own sleep.
+        ends_immediately = not self._never_end and self._polls_until_end <= 1
+        return SimpleNamespace(
+            id=batch_id,
+            processing_status="ended" if ends_immediately else "in_progress",
+        )
 
     def retrieve(self, batch_id: str) -> SimpleNamespace:
         self._retrieve_counts[batch_id] += 1
@@ -572,9 +584,7 @@ class TestBatchSelfResolvingGuard:
     def test_self_resolving_claim_flagged_before_batch_submission(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        contents = [
-            "WidgetFoo is primary. Human-confirmed (Tristan, 2026-07-02).\n"
-        ]
+        contents = ["WidgetFoo is primary. Human-confirmed (Tristan, 2026-07-02).\n"]
         root = _seed_root(tmp_path, "k", contents)
         _clean_env(monkeypatch)
         client = _FakeClient(_scripted_responder, allow_sync=False)
