@@ -796,6 +796,48 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_lock_args(rebuild_parser)
 
+    # compile command (issue #359) — compile-as-of. Recompiles a HISTORICAL
+    # wiki snapshot as it would have stood on --as-of, into a scratch --out
+    # dir. Distinct from slice 3's read-time `recall/reindex --as-of` filter:
+    # this RE-RUNS the deterministic C3 blend (resurrecting members expired
+    # now but valid then), never touching the live wiki or raw tree.
+    compile_parser = subparsers.add_parser(
+        "compile",
+        help="Issue #359: recompile a historical wiki snapshot as-of a past "
+        "date into a scratch --out dir (compile-as-of). Distinct from the "
+        "read-time `recall/reindex --as-of` filter — this re-runs the C3 "
+        "blend so members expired now but valid then are re-included. "
+        "Deterministic (no LLM); never mutates the live wiki or raw tree.",
+    )
+    compile_parser.add_argument(
+        "--path",
+        "--knowledge-root",
+        dest="path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge).",
+    )
+    compile_parser.add_argument(
+        "--as-of",
+        dest="as_of",
+        type=_iso_date,
+        required=True,
+        metavar="YYYY-MM-DD",
+        help="Historical date to recompile as of (inclusive). Members whose "
+        "validity window had closed on this date (or that carry a tombstone) "
+        "are excluded; members expired now but valid then are re-included. "
+        "Rewind is valid-time, not transaction-time (see docs §8.7).",
+    )
+    compile_parser.add_argument(
+        "--out",
+        dest="out",
+        type=Path,
+        required=True,
+        metavar="DIR",
+        help="Scratch directory to write the recompiled wiki into. MUST NOT "
+        "be the live wiki/ directory.",
+    )
+
     # ingest command (issue #349) — on-demand compile of new/changed raw
     # intake into the wiki. The manual escape hatch that makes a just-
     # remembered fact recallable now, decoupled from the nightly `run`.
@@ -958,6 +1000,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command in ("reindex", "rebuild-index"):
         return _cmd_rebuild_index(args)
+
+    if args.command == "compile":
+        return _cmd_compile_as_of(args)
 
     if args.command == "ingest":
         return _cmd_ingest(args)
@@ -1682,6 +1727,49 @@ def _reindex_summary(
             }
         )
     )
+
+
+def _cmd_compile_as_of(args: argparse.Namespace) -> int:
+    """Issue #359: recompile a historical wiki snapshot as-of a past date.
+
+    Re-runs the deterministic C3 blend (no LLM) with ``--as-of`` threaded into
+    the per-member active predicate, writing to ``--out``. Never mutates the
+    live wiki or raw tree. Distinct from slice 3's read-time filter — see
+    :func:`athenaeum.merge.compile_as_of`.
+    """
+    from athenaeum.config import load_config
+    from athenaeum.merge import compile_as_of
+
+    knowledge_root = args.path.expanduser().resolve()
+    wiki_root = knowledge_root / "wiki"
+    if not wiki_root.exists():
+        print(f"Wiki directory not found: {wiki_root}", file=sys.stderr)
+        return 1
+
+    as_of = args.as_of
+    out_dir = args.out.expanduser().resolve()
+    if out_dir == wiki_root.expanduser().resolve():
+        print(
+            "--out must not be the live wiki directory; point it at a scratch "
+            f"path (got {out_dir})",
+            file=sys.stderr,
+        )
+        return 1
+
+    cfg = load_config(knowledge_root)
+    try:
+        entries = compile_as_of(knowledge_root, as_of, out_dir, config=cfg)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(
+        f"Recompiled {len(entries)} wiki entr"
+        f"{'y' if len(entries) == 1 else 'ies'} as of "
+        f"{as_of.isoformat()} into {out_dir} "
+        "(compile-as-of; live wiki untouched)"
+    )
+    return 0
 
 
 def _cmd_rebuild_index(args: argparse.Namespace) -> int:

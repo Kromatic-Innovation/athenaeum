@@ -581,9 +581,53 @@ The as-of rewind operates through the **upper bound** (`valid_until`) and the
 (§8.3), a claim not yet valid on DATE is NOT excluded by this view — that is the
 deliberate cost of keeping #324's disjoint detector working, and the
 supersession-as-interval value (slice-2 `valid_until` closes) is unaffected. The
-MCP `recall` tool and the C3 *compile* view stay at today (default `as_of`) — a
-compile-as-of would write a historical view over the live wiki, so it is deferred
-to a later slice.
+MCP `recall` tool stays at today (default `as_of`). The C3 *compile*-as-of is a
+SEPARATE capability (§8.7, #359) — it recompiles rather than filters, so it is
+not a read-time view over the live wiki.
+
+### 8.7 Compile-as-of (recompiled historical snapshot, #359)
+
+Slice 3 (§8.5) is a **read-time view**: it filters the ALREADY-compiled live
+wiki so it can only HIDE pages/claims outside the as-of window. It cannot
+resurrect a member's content the live compile already dropped — an expired
+member is not present in any compiled page for a read filter to reveal.
+
+**compile-as-of** answers the harder question the read view cannot: *what would
+the COMPILER have produced on DATE?* It RE-RUNS the deterministic C3 blend
+(`merge.merge_clusters_to_wiki`) with `as_of` threaded into the per-member
+`is_inactive(as_of)` predicate, so a member expired now but valid on DATE is
+**re-included** and each entry's merged prose / fields / `sources:` are
+re-derived as they would have compiled then. The result is written to a scratch
+`--out` directory; the live wiki and raw tree are never touched.
+
+- **Surface: `athenaeum compile --as-of YYYY-MM-DD --out <dir>`** →
+  `merge.compile_as_of(knowledge_root, as_of, out_dir)`. Deterministic:
+  `client=None`, so no LLM contradiction detector runs (no API spend, no
+  escalation written). Raw members are never retired or mutated (retire is a
+  separate librarian pass, not part of the merge). `--out` may not be the live
+  `wiki/` (raises).
+- **Reuses existing plumbing.** No parallel machinery: the same
+  `is_inactive(as_of)` predicate slice 3 keys on (upper bound `valid_until` +
+  #191 tombstones), the same `merge_clusters_to_wiki` C3 compile, threaded with
+  an `out_wiki_root` override.
+
+**Scope & limitations (honest).**
+
+- **Reuses the CURRENT cluster assignments (C1 output).** Clusters are not
+  re-derived as-of DATE; the rewind is over *which members within each cluster
+  contribute*, not the topic grouping itself.
+- **Valid-time, NOT transaction-time.** Raw members carry no reliable ingestion
+  timestamp — only `valid_from` / `valid_until` real-world validity plus the
+  slice-2 *dated* `valid_until` supersession closes (`_member_ingestion_date`
+  falls back to `None` for members without `created` / `updated`). So
+  compile-as-of rewinds **valid-time**: it cannot exclude a claim merely
+  because it was *ingested* after DATE, nor un-apply an **undated**
+  `superseded_by` tombstone (a keep_a/keep_b loser reappears only via its dated
+  `valid_until` close, §8.4 — not via the bare pointer). A TRUE bitemporal
+  transaction-time replay would need per-member assertion timestamps the data
+  model does not carry (git history could supply them, but that is a heavier,
+  separate mechanism, deliberately not built here for a COULD-priority
+  research/audit feature).
 
 ### 8.4 Resolver interval-close (slice 2)
 
@@ -965,7 +1009,7 @@ the read-side parsers (`models.parse_asserter`,
 | §3 tier0 byte-for-byte | (no issue — already invariant) | Existing tier0 passthrough already satisfies the rule. Add a regression test asserting per-value shape round-trips. |
 | §4 MCP `remember(sources=...)` | #96 | Replace the bare-dict heuristic with the `_source`/`_field_sources` wrapper keys; update docstring + integration test. |
 | §5 legacy slug migration | #97 | `athenaeum repair --legacy-source-slugs` with dry-run/apply, the fixed mapping table, and post-migration validation. |
-| §8 claim-level temporal validity | #308 | Slice 1: `valid_from` / `valid_until` parse + round-trip; shared `valid_until_expired` helper; currently-valid-by-default filter. **Slice 2 (shipped): resolver interval-close (§8.4) — `enact_resolution` stamps the loser's `valid_until` on `keep_a`/`keep_b` and sequential-snapshot `not_a_conflict`, only-close-never-widen.** Slice 3 (`--as-of`) deferred. #329 generalizes the close to non-time scopes. |
+| §8 claim-level temporal validity | #308 | Slice 1: `valid_from` / `valid_until` parse + round-trip; shared `valid_until_expired` helper; currently-valid-by-default filter. **Slice 2 (shipped): resolver interval-close (§8.4) — `enact_resolution` stamps the loser's `valid_until` on `keep_a`/`keep_b` and sequential-snapshot `not_a_conflict`, only-close-never-widen.** **Slice 3 (shipped, #354): read-time `--as-of` view (§8.5) — `recall --as-of` / `reindex --as-of` filter the compiled wiki by the upper bound + #191 tombstones, no recompile.** **Slice 4 (shipped): per-claim compiled validity (§8.6).** **compile-as-of (shipped, #359, §8.7): `compile --as-of --out` RE-RUNS the deterministic C3 blend into a scratch dir — resurrects members expired now but valid then; valid-time only.** #329 generalizes the close to non-time scopes. |
 | §9 multi-dimensional scoped claims | #329 | Buildable subset: `scope: {org, locale}` poset (trees) + time, versioned tree config (`scope.org`/`scope.locale`), three-way `scope_comparison` verdict (DISJOINT / OVERRIDE / OVERLAP) wired into `resolutions._scope_verdict_proposal`, and `scope_a`/`scope_b` resolver actions (time-dimension narrowing enactment). **Deferred (ADR):** time-nesting OVERRIDE, org/locale coordinate pinning enactment, recall `serve --scope` filter, team/multi-tenant scope-identity (#314). |
 | §10 channel split + model + asserter | #326 | Extend `SOURCE_TYPES` with `agent-observed` and `model-prior`; add `model:` / `on_behalf_of:` / `asserter:` claim-level frontmatter fields; extend `remember(sources=...)` with `_source_type` / `_source_ref` / `_model` / `_on_behalf_of` / `_asserter` wrapper keys; drop `model-prior:<model-id>` into the resolver's precedence taxonomy below `script:`. |
 | §12 claim kind + opinion attribution | #327 | Add `claim_kind:` (`fact`/`observation`/`opinion`/`decision`/`policy`/`definition`) classified once at intake (`claim_kind.classify_claim_kind`, tier2-style), round-tripped by tier0; add `compare_asserters` (`same`/`different`/`unknown`) over the §10.3 identity key; add the `attribute_both` resolver action + `_stance_attribution_verdict` short-circuit + detector `stance` conflict type. An opinion is NEVER resolved by precedence; unknown asserter → keep-both fallback. |
