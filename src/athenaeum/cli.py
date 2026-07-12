@@ -2005,6 +2005,11 @@ def _cmd_session_end(args: argparse.Namespace) -> int:
             lock.release()
 
     print(json.dumps(result.summary()))
+    # Issue #370: the summary line is the only stdout; flush both streams so a
+    # caller tailing the pipe sees the result immediately (the reindex can run
+    # for minutes and the run otherwise looks like a silent hang).
+    sys.stdout.flush()
+    sys.stderr.flush()
     return result.exit_code
 
 

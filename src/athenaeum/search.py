@@ -35,6 +35,8 @@ from athenaeum.models import (
     is_inactive_memory,
     is_page_authorized,
     parse_frontmatter,
+    valid_until_expired,
+    validity_bound_str,
 )
 
 # ---------------------------------------------------------------------------
@@ -339,25 +341,59 @@ def _scan_indexed_records(
     include_globs: Iterable[str] | None = None,
     exclude_globs: Iterable[str] | None = None,
     as_of: date | None = None,
-) -> Iterator[tuple[str, Path, str, str, dict[str, Any]]]:
-    """Yield ``(indexed_name, path, content_hash, text, meta)`` per active page.
+    prior: dict[str, tuple[int, int, str, str]] | None = None,
+) -> Iterator[tuple[str, Path, str, str, dict[str, Any], tuple[int, int, str]]]:
+    """Yield ``(indexed_name, path, hash, text, meta, statrec)`` per active page.
 
     ``content_hash`` is the sha256 of the whole file (frontmatter + body).
     ``text`` is the full decoded file (callers truncate as needed for the
-    index document). Inactive memories are filtered here so they are absent
-    from both index and manifest — the incremental differ then treats an
-    active→inactive flip as a deletion. Unreadable files are skipped.
+    index document). ``statrec`` is ``(mtime_ns, size, valid_until_iso)`` for
+    the manifest's stat pre-filter. Inactive memories are filtered here so they
+    are absent from both index and manifest — the incremental differ then treats
+    an active→inactive flip as a deletion. Unreadable files are skipped.
 
     ``as_of`` (issue #308 slice 3) pins the temporal view: a page outside its
     validity window relative to ``as_of`` (default today) is filtered out here,
     exactly like a #191 tombstone. Only an as-of BUILD passes this (and an as-of
     build is always full), so the manifest a normal live rebuild diffs against is
     never contaminated by a historical view.
+
+    ``prior`` (issue #370) enables the stat pre-filter: a map ``indexed_name ->
+    (mtime_ns, size, valid_until_iso, hash)`` from the last manifest. When a
+    file's ``(mtime_ns, size)`` matches its prior entry, its body is NOT read or
+    re-hashed — the stored hash is reused (rsync-style heuristic). The page was
+    active last build (only active pages are in the manifest) and its content is
+    unchanged, so it stays active EXCEPT if its ``valid_until`` has since expired
+    relative to ``as_of`` — that time-varying bound is re-checked from the stored
+    date without a read, preserving the #308 date-expiry semantics. Stat-matched
+    rows yield placeholder ``text=""``/``meta={}``: callers only consume those
+    for the add/change delta, whose members always fail the stat match and are
+    freshly read. ``prior`` MUST be ``None`` for a full (re)build — a full build
+    inserts every scanned record, so the placeholders would corrupt it. Callers
+    pass ``prior`` only on the incremental-apply path.
     """
     include = list(include_globs) if include_globs else None
     exclude = list(exclude_globs) if exclude_globs else None
     for indexed_name, path in _scan_all_entries(wiki_root, extra_roots):
         if not _passes_globs(indexed_name, include, exclude):
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        mtime_ns, size = st.st_mtime_ns, st.st_size
+        prior_rec = prior.get(indexed_name) if prior else None
+        if prior_rec is not None and prior_rec[0] == mtime_ns and prior_rec[1] == size:
+            # Stat fast-path: content unchanged since the last active build.
+            # Re-check ONLY the time-varying upper bound (superseded_by /
+            # deprecated are content-based and cannot change without a stat
+            # change). ``valid_until`` may have crossed ``as_of`` (default
+            # today) with no content edit — drop the page then so it becomes a
+            # manifest ``removed`` and leaves the index (issue #308).
+            stored_vu = prior_rec[2]
+            if stored_vu and valid_until_expired({"valid_until": stored_vu}, as_of):
+                continue
+            yield indexed_name, path, prior_rec[3], "", {}, (mtime_ns, size, stored_vu)
             continue
         try:
             data = path.read_bytes()
@@ -371,7 +407,8 @@ def _scan_indexed_records(
         # validity window relative to ``as_of`` (default today).
         if is_inactive_memory(meta, as_of):
             continue
-        yield indexed_name, path, content_hash, text, meta
+        vu = validity_bound_str(meta, "valid_until")
+        yield indexed_name, path, content_hash, text, meta, (mtime_ns, size, vu)
 
 
 def _compute_delta(
@@ -417,13 +454,67 @@ def _manifest_hashes(manifest: dict[str, Any] | None) -> dict[str, str]:
     return {}
 
 
+def _manifest_stats(manifest: dict[str, Any] | None) -> dict[str, tuple[int, int, str]]:
+    """Extract the ``{indexed_name: (mtime_ns, size, valid_until)}`` stat map.
+
+    Issue #370's stat pre-filter. Absent (a v1 manifest predating stats) or
+    malformed => ``{}``, which forces a one-time full hash of every file and the
+    manifest upgrades to v2 on the next write. Each stored entry is a
+    ``[mtime_ns, size, valid_until]`` list (JSON has no tuples); rows that do not
+    parse are skipped (fail to a re-hash), never crashing the build.
+    """
+    if not manifest:
+        return {}
+    stats = manifest.get("stats")
+    if not isinstance(stats, dict):
+        return {}
+    out: dict[str, tuple[int, int, str]] = {}
+    for name, rec in stats.items():
+        try:
+            mtime_ns, size, vu = rec[0], rec[1], rec[2]
+            out[str(name)] = (int(mtime_ns), int(size), str(vu or ""))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out
+
+
+def _scan_prior(
+    manifest: dict[str, Any] | None,
+) -> dict[str, tuple[int, int, str, str]]:
+    """Join a manifest's hashes + stats into the scan's ``prior`` map (#370).
+
+    Returns ``{indexed_name: (mtime_ns, size, valid_until, hash)}`` for names
+    that have BOTH a hash and a stat entry. A name missing either (e.g. every
+    name in a v1 manifest, which has no ``stats``) is omitted, so it is read and
+    re-hashed exactly once — after which the v2 write records its stat.
+    """
+    hashes = _manifest_hashes(manifest)
+    stats = _manifest_stats(manifest)
+    out: dict[str, tuple[int, int, str, str]] = {}
+    for name, (mtime_ns, size, vu) in stats.items():
+        h = hashes.get(name)
+        if h is not None:
+            out[name] = (mtime_ns, size, vu, h)
+    return out
+
+
 def _write_manifest(
     path: Path,
     hashes: dict[str, str],
     extra: dict[str, Any] | None = None,
+    stats: dict[str, tuple[int, int, str]] | None = None,
 ) -> None:
-    """Atomically write the manifest sidecar (temp file + rename)."""
-    payload: dict[str, Any] = {"version": 1, "hashes": hashes}
+    """Atomically write the manifest sidecar (temp file + rename).
+
+    ``stats`` (issue #370) persists the per-file ``(mtime_ns, size,
+    valid_until)`` alongside the hash so the next build's stat pre-filter can
+    skip re-reading unchanged files. Bumped to ``version: 2`` when stats are
+    written; a reader that only knows ``hashes`` is unaffected (still present).
+    """
+    version = 2 if stats is not None else 1
+    payload: dict[str, Any] = {"version": version, "hashes": hashes}
+    if stats is not None:
+        payload["stats"] = {k: [v[0], v[1], v[2]] for k, v in stats.items()}
     if extra:
         payload.update(extra)
     tmp = path.with_name(path.name + ".tmp")
@@ -481,17 +572,6 @@ class FTS5Backend:
         db_path = cache_dir / _DB_NAME
         manifest_path = cache_dir / _FTS5_MANIFEST
 
-        current = list(
-            _scan_indexed_records(
-                wiki_root,
-                extra_roots,
-                include_globs=include_globs,
-                exclude_globs=exclude_globs,
-                as_of=as_of,
-            )
-        )
-        current_hashes = {name: h for name, _p, h, _t, _m in current}
-
         # Issue #308: an as-of view is a historical snapshot — never diff it
         # against (or seed) the live manifest, so force a full build.
         stored = (
@@ -503,6 +583,23 @@ class FTS5Backend:
             incremental and as_of is None and stored is not None and db_path.is_file()
         )
 
+        # Issue #370: feed the prior manifest's stats into the scan so unchanged
+        # files are stat-matched instead of re-read. A full build inserts every
+        # scanned record, so it must read every file — ``prior=None`` there.
+        prior = _scan_prior(stored) if do_incremental else None
+        current = list(
+            _scan_indexed_records(
+                wiki_root,
+                extra_roots,
+                include_globs=include_globs,
+                exclude_globs=exclude_globs,
+                as_of=as_of,
+                prior=prior,
+            )
+        )
+        current_hashes = {name: h for name, _p, h, _t, _m, _s in current}
+        current_stats = {name: s for name, _p, _h, _t, _m, s in current}
+
         if not do_incremental:
             if db_path.exists():
                 db_path.unlink()
@@ -511,13 +608,13 @@ class FTS5Backend:
                 conn.execute(self._CREATE_SQL)
                 rows = [
                     self._row_for(name, path, text, meta)
-                    for name, path, _h, text, meta in current
+                    for name, path, _h, text, meta, _s in current
                 ]
                 conn.executemany(self._INSERT_SQL, rows)
                 conn.commit()
             finally:
                 conn.close()
-            _write_manifest(manifest_path, current_hashes)
+            _write_manifest(manifest_path, current_hashes, stats=current_stats)
             return len(rows)
 
         # Incremental path — diff and apply only the delta.
@@ -537,7 +634,7 @@ class FTS5Backend:
             if reindex:
                 rows = [
                     self._row_for(name, path, text, meta)
-                    for name, path, _h, text, meta in current
+                    for name, path, _h, text, meta, _s in current
                     if name in reindex
                 ]
                 conn.executemany(self._INSERT_SQL, rows)
@@ -545,7 +642,7 @@ class FTS5Backend:
             total = int(conn.execute("SELECT count(*) FROM wiki").fetchone()[0])
         finally:
             conn.close()
-        _write_manifest(manifest_path, current_hashes)
+        _write_manifest(manifest_path, current_hashes, stats=current_stats)
         return total
 
     def query(
@@ -694,13 +791,13 @@ class VectorBackend:
     def _add_records(
         self,
         collection: Any,
-        records: list[tuple[str, Path, str, str, dict[str, Any]]],
+        records: list[tuple[str, Path, str, str, dict[str, Any], tuple[int, int, str]]],
     ) -> None:
         """Embed and add a batch of scanned records to the collection."""
         ids: list[str] = []
         documents: list[str] = []
         metadatas: list[dict[str, str]] = []
-        for indexed_name, path, _h, text, meta in records:
+        for indexed_name, path, _h, text, meta, _s in records:
             name, _tags, _aliases, _description = _extract_frontmatter_fields(text)
             if not name:
                 name = path.stem
@@ -750,17 +847,6 @@ class VectorBackend:
         vector_dir = cache_dir / _VECTOR_DIR
         manifest_path = cache_dir / _VECTOR_MANIFEST
 
-        current = list(
-            _scan_indexed_records(
-                wiki_root,
-                extra_roots,
-                include_globs=include_globs,
-                exclude_globs=exclude_globs,
-                as_of=as_of,
-            )
-        )
-        current_hashes = {name: h for name, _p, h, _t, _m in current}
-
         # Issue #308: an as-of view is a historical snapshot — never diff it
         # against (or seed) the live manifest, so force a full build.
         stored = (
@@ -777,6 +863,34 @@ class VectorBackend:
             and stored_model == self.embedding_model
         )
 
+        # Issue #370: stat pre-filter the scan on the incremental path only —
+        # a full (re)build embeds every scanned record and cannot use the
+        # placeholder text/meta that stat-matched rows carry.
+        prior = _scan_prior(stored) if do_incremental else None
+
+        def _scan(with_prior: dict[str, tuple[int, int, str, str]] | None) -> tuple[
+            list[tuple[str, Path, str, str, dict[str, Any], tuple[int, int, str]]],
+            dict[str, str],
+            dict[str, tuple[int, int, str]],
+        ]:
+            recs = list(
+                _scan_indexed_records(
+                    wiki_root,
+                    extra_roots,
+                    include_globs=include_globs,
+                    exclude_globs=exclude_globs,
+                    as_of=as_of,
+                    prior=with_prior,
+                )
+            )
+            return (
+                recs,
+                {name: h for name, _p, h, _t, _m, _s in recs},
+                {name: s for name, _p, _h, _t, _m, s in recs},
+            )
+
+        current, current_hashes, current_stats = _scan(prior)
+
         # chromadb caches PersistentClient systems per-path at the module
         # level. Clear it so a fresh client sees the true on-disk state
         # (avoids stale-collection "already exists" desync — see issue #32).
@@ -791,12 +905,28 @@ class VectorBackend:
                     _VECTOR_COLLECTION,
                     embedding_function=self._embedding_function(),
                 )
-            except Exception:
+            except Exception as exc:
                 # Corrupt / missing collection despite a manifest — fall back
                 # to a clean full rebuild rather than accreting a bad delta.
+                # Issue #370: log it — a silent full rmtree+re-embed of a 21k
+                # corpus was indistinguishable from a hang. WARNING so a real
+                # (expensive) full rebuild is diagnosable, not silent.
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "vector incremental open failed (%s: %s); "
+                    "falling back to FULL rebuild (rmtree + re-embed all)",
+                    type(exc).__name__,
+                    exc,
+                )
                 do_incremental = False
 
         if not do_incremental:
+            # A stat pre-filtered scan yields placeholder bodies for unchanged
+            # rows; a full rebuild embeds every row, so re-scan with full reads
+            # first (only when we took the fast-path).
+            if prior is not None:
+                current, current_hashes, current_stats = _scan(None)
             # Full (re)build — nuke any prior on-disk state before opening a
             # PersistentClient. chromadb's SQLite metadata and the rust
             # binding's collection store can desync; a full wipe is the
@@ -815,6 +945,7 @@ class VectorBackend:
                 manifest_path,
                 current_hashes,
                 {"embedding_model": self.embedding_model},
+                stats=current_stats,
             )
             return len(current)
 
@@ -836,6 +967,7 @@ class VectorBackend:
             manifest_path,
             current_hashes,
             {"embedding_model": self.embedding_model},
+            stats=current_stats,
         )
         return total
 
@@ -941,6 +1073,13 @@ class VectorBackend:
         provider. Missing ids are silently omitted so callers can cluster
         over the intersection of "requested" and "actually indexed".
         Returns ``{}`` when the collection does not exist or is empty.
+
+        Issue #370: this is a pure READ of stored embeddings (``get`` with
+        ``include=["embeddings"]`` never embeds), so the collection is opened
+        with ``embedding_function=None`` — the default arg is a module-level
+        ``DefaultEmbeddingFunction()`` that (in a future chromadb) could pull in
+        the ONNX model on this read-only path. Passing ``None`` guarantees the
+        embedding backend is never constructed here.
         """
         chromadb = self._get_chromadb()
         vector_dir = cache_dir / _VECTOR_DIR
@@ -953,7 +1092,9 @@ class VectorBackend:
 
         client = chromadb.PersistentClient(path=str(vector_dir))
         try:
-            collection = client.get_collection(_VECTOR_COLLECTION)
+            collection = client.get_collection(
+                _VECTOR_COLLECTION, embedding_function=None
+            )
         except Exception:
             return {}
 
@@ -963,8 +1104,15 @@ class VectorBackend:
             return {}
 
         out: dict[str, list[float]] = {}
-        result_ids = result.get("ids") or []
-        embeddings = result.get("embeddings") or []
+        # chromadb returns embeddings as a numpy array — ``x or []`` raises
+        # "truth value ambiguous" on it, so normalize with an explicit None
+        # check instead of truthiness (issue #370: this read path must work).
+        result_ids = result.get("ids")
+        if result_ids is None:
+            result_ids = []
+        embeddings = result.get("embeddings")
+        if embeddings is None:
+            embeddings = []
         for i, doc_id in enumerate(result_ids):
             if i >= len(embeddings):
                 continue

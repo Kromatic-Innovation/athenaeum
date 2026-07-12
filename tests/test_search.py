@@ -1149,3 +1149,235 @@ class TestIncrementalHelpers:
     def test_passes_globs_exclude(self) -> None:
         assert search_module._passes_globs("acme.md", None, ["acme*"]) is False
         assert search_module._passes_globs("lean.md", None, ["acme*"]) is True
+
+
+# ---------------------------------------------------------------------------
+# Stat pre-filter (issue #370) — skip re-reading files whose (mtime,size) match
+# ---------------------------------------------------------------------------
+
+
+class TestStatPreFilter:
+    """The manifest stores per-file (mtime_ns, size); a stat match reuses the
+    stored hash without reading/hashing the body (rsync-style heuristic)."""
+
+    @pytest.fixture
+    def hash_spy(self, monkeypatch: pytest.MonkeyPatch) -> dict:
+        """Count sha256 invocations — one per file body actually read+hashed.
+
+        The only ``hashlib.sha256`` caller on the FTS5 build path is the scan's
+        read+hash of a file body, so the count is exactly the number of files
+        NOT served by the stat fast-path.
+        """
+        calls = {"n": 0}
+        orig = search_module.hashlib.sha256
+
+        def spy(data: bytes = b"") -> object:
+            calls["n"] += 1
+            return orig(data)
+
+        monkeypatch.setattr(search_module.hashlib, "sha256", spy)
+        return calls
+
+    def test_seed_writes_v2_manifest_with_stats(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        import json
+
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        m = json.loads((cache / "fts5-manifest.json").read_text())
+        assert m["version"] == 2
+        assert set(m["stats"]) == set(m["hashes"])
+        # Each stat record is (mtime_ns, size, valid_until).
+        rec = next(iter(m["stats"].values()))
+        assert len(rec) == 3
+        assert isinstance(rec[0], int) and isinstance(rec[1], int)
+
+    def test_unchanged_rebuild_reads_no_bodies(
+        self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict, delta_spy: dict
+    ) -> None:
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)  # seed reads+hashes
+        hash_spy["n"] = 0  # reset AFTER the seed
+        count = FTS5Backend().build_index(wiki_with_pages, cache)
+        # No file touched → every page stat-matches → zero bodies re-hashed.
+        assert hash_spy["n"] == 0
+        assert delta_spy["added"] == []
+        assert delta_spy["changed"] == []
+        assert delta_spy["removed"] == []
+        assert count == 3
+
+    def test_changed_file_is_rehashed_and_reindexed(
+        self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict, delta_spy: dict
+    ) -> None:
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        hash_spy["n"] = 0
+        # Edit one body (size + mtime change) → only that file re-hashed.
+        (wiki_with_pages / "acme-corp.md").write_text(
+            "---\n"
+            "name: Acme Corp\n"
+            "tags: [client, fintech]\n"
+            "description: Enterprise client in financial services\n"
+            "---\n\n"
+            "Acme Corp pivoted to a quantum cryptography product line entirely.\n"
+        )
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        assert hash_spy["n"] == 1  # ONLY the changed file was read+hashed
+        assert delta_spy["changed"] == ["acme-corp.md"]
+        assert delta_spy["added"] == []
+        assert delta_spy["removed"] == []
+
+    def test_mtime_bump_same_content_touches_no_index_rows(
+        self,
+        wiki_with_pages: Path,
+        tmp_path: Path,
+        delta_spy: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A stat change with IDENTICAL content is re-hashed but never re-indexed.
+
+        Bumping mtime breaks the (mtime,size) match, so the body is re-read to
+        re-verify the hash — but the identical hash means the differ reports NO
+        change and zero index rows are touched. This is the correctness backstop
+        for the rsync heuristic: a stat change never causes a spurious re-index.
+        """
+        import os
+
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        p = wiki_with_pages / "acme-corp.md"
+        st = p.stat()
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000_000))
+
+        rows_built = {"n": 0}
+        orig_row = FTS5Backend._row_for
+
+        def counting_row(name, path, text, meta):  # type: ignore[no-untyped-def]
+            rows_built["n"] += 1
+            return orig_row(name, path, text, meta)
+
+        monkeypatch.setattr(FTS5Backend, "_row_for", staticmethod(counting_row))
+        count = FTS5Backend().build_index(wiki_with_pages, cache)
+        assert delta_spy["changed"] == []  # identical content → not a change
+        assert rows_built["n"] == 0  # zero index rows touched
+        assert count == 3
+
+    def test_v1_manifest_backcompat_upgrades_to_v2(
+        self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict
+    ) -> None:
+        """A v1 manifest (hashes only, no stats) loads, forces one full re-hash,
+        and upgrades to v2 with stats on write."""
+        import json
+
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)  # writes v2
+        mpath = cache / "fts5-manifest.json"
+        m = json.loads(mpath.read_text())
+        # Downgrade to a pre-#370 v1 manifest: drop the stat map entirely.
+        mpath.write_text(json.dumps({"version": 1, "hashes": m["hashes"]}))
+
+        hash_spy["n"] = 0
+        count = FTS5Backend().build_index(wiki_with_pages, cache)
+        # No stats → the fast-path can't fire → every file is read+hashed once.
+        assert hash_spy["n"] == 3
+        assert count == 3
+        # The manifest is upgraded back to v2 with a full stat map.
+        m2 = json.loads(mpath.read_text())
+        assert m2["version"] == 2
+        assert set(m2["stats"]) == set(m2["hashes"])
+
+    def test_valid_until_expiry_drops_page_without_reading(
+        self, tmp_path: Path
+    ) -> None:
+        """A content-unchanged page whose valid_until has passed is dropped on a
+        later build (date-expiry re-checked from the stored bound, no read)."""
+        from datetime import date, timedelta
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        # valid_until yesterday, but written "as of" a past build is simulated by
+        # building first while still valid is not possible retroactively; instead
+        # assert the stored-bound path: a page already expired is absent, and a
+        # far-future page stays. Use a future bound so the seed indexes it.
+        future = (date.today() + timedelta(days=3650)).isoformat()
+        (wiki / "temp.md").write_text(
+            f"---\nname: Temp\nvalid_until: {future}\n---\n\nStill valid.\n"
+        )
+        cache = tmp_path / "cache"
+        assert FTS5Backend().build_index(wiki, cache) == 1
+
+        # Rewrite the manifest's stored valid_until to a PAST date, leaving stat
+        # (mtime,size) untouched so the fast-path fires — the stored-bound expiry
+        # re-check must then drop the page WITHOUT the file being read.
+        import json
+
+        mpath = cache / "fts5-manifest.json"
+        m = json.loads(mpath.read_text())
+        past = (date.today() - timedelta(days=1)).isoformat()
+        name = next(iter(m["stats"]))
+        mtime_ns, size, _vu = m["stats"][name]
+        m["stats"][name] = [mtime_ns, size, past]
+        mpath.write_text(json.dumps(m))
+
+        # Guard: the body must NOT be read on this build (stat still matches).
+        import athenaeum.search as sm
+
+        orig = sm.hashlib.sha256
+
+        def boom(_data: bytes = b"") -> object:  # pragma: no cover - guard
+            raise AssertionError("stat-matched file must not be re-hashed")
+
+        try:
+            sm.hashlib.sha256 = boom  # type: ignore[assignment]
+            count = FTS5Backend().build_index(wiki, cache)
+        finally:
+            sm.hashlib.sha256 = orig  # type: ignore[assignment]
+        assert count == 0  # expired page dropped from the index
+
+
+class TestFetchEmbeddingsNoModelLoad:
+    """fetch_embeddings is a pure read; it must not attach the default (ONNX) EF."""
+
+    @pytest.fixture(autouse=True)
+    def _require_chromadb(self) -> None:
+        pytest.importorskip("chromadb")
+
+    def test_get_collection_called_with_no_embedding_function(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import chromadb
+        from chromadb.api.client import Client, SharedSystemClient
+
+        from athenaeum.search import _VECTOR_COLLECTION, _VECTOR_DIR
+
+        cache = tmp_path / "cache"
+        vector_dir = cache / _VECTOR_DIR
+        vector_dir.mkdir(parents=True)
+
+        # Build a collection with PRE-COMPUTED embeddings and no EF, exactly as
+        # the read path expects — so no ONNX model is needed to seed it either.
+        SharedSystemClient.clear_system_cache()
+        client = chromadb.PersistentClient(path=str(vector_dir))
+        col = client.create_collection(_VECTOR_COLLECTION, embedding_function=None)
+        col.add(
+            ids=["a.md", "b.md"],
+            embeddings=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+            documents=["x", "y"],
+        )
+
+        # Spy: fetch_embeddings must open the collection with embedding_function
+        # explicitly None, so chromadb never constructs its default (ONNX) EF.
+        captured: dict = {}
+        orig_get = Client.get_collection
+
+        def spy_get(self, name, *a, **k):  # type: ignore[no-untyped-def]
+            captured["ef"] = k.get("embedding_function", "MISSING")
+            return orig_get(self, name, *a, **k)
+
+        monkeypatch.setattr(Client, "get_collection", spy_get)
+
+        out = VectorBackend().fetch_embeddings(["a.md", "b.md"], cache)
+        assert captured["ef"] is None
+        assert set(out) == {"a.md", "b.md"}
+        assert out["a.md"] == pytest.approx([0.1, 0.2, 0.3], abs=1e-6)
