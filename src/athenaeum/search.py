@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import sqlite3
+import time
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import date
 from fnmatch import fnmatch
@@ -43,6 +44,14 @@ from athenaeum.models import (
 # Protocol
 # ---------------------------------------------------------------------------
 
+# Issue #373: default age (days) for the periodic full-re-hash backstop that
+# heals the #370 stat pre-filter's blind spot (a content edit preserving both
+# mtime and size). Referenced by every ``build_index`` signature, so it is
+# defined here before the Protocol; the full rationale lives beside the manifest
+# helpers below. Resolved from config by
+# ``config.resolve_reindex_full_rehash_max_age_days``.
+_DEFAULT_FULL_REHASH_MAX_AGE_DAYS = 7.0
+
 
 @runtime_checkable
 class SearchBackend(Protocol):
@@ -58,6 +67,7 @@ class SearchBackend(Protocol):
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
         as_of: date | None = None,
+        full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
     ) -> int:
         """Build or rebuild the search index.
 
@@ -99,6 +109,16 @@ class SearchBackend(Protocol):
                 stable manifest to diff against), written into whatever
                 ``cache_dir`` the caller chose (a scratch dir, so the live
                 index is untouched).
+            full_rehash_max_age_days: Issue #373 — the self-healing backstop for
+                the #370 stat pre-filter. On an INCREMENTAL build, when the
+                manifest has not recorded a full re-hash within this many days,
+                the stat fast-path is skipped for ONE build: every file is
+                re-read and re-hashed so a content edit that preserved both
+                ``mtime`` and ``size`` is finally caught. The change delta is
+                STILL applied incrementally (no full re-embed / FTS5 rebuild).
+                ``0`` / negative = always re-hash; a very large value =
+                effectively never. Ignored on a full or as-of build (both
+                already re-hash everything).
 
         Returns the total number of pages in the index across all roots.
         """
@@ -302,6 +322,29 @@ def _scan_all_entries(
 _FTS5_MANIFEST = "fts5-manifest.json"
 _VECTOR_MANIFEST = "vector-manifest.json"
 
+# Issue #373: ``_DEFAULT_FULL_REHASH_MAX_AGE_DAYS`` (defined above the Protocol)
+# bounds the stat pre-filter's blind window — an incremental build that has not
+# re-hashed everything within that many days ignores the stat fast-path for ONE
+# build (re-reads + re-hashes every file) while still applying the change delta
+# incrementally, so a content edit preserving both mtime and size is caught
+# without paying for a full re-embed.
+
+# Top-level manifest key recording the epoch-seconds timestamp of the last build
+# that re-hashed every file (a full rebuild or a stale-triggered incremental
+# re-hash). Absent (a pre-#373 manifest) => treated as infinitely stale, so the
+# first build after this ships does one full re-hash and stamps it.
+_MANIFEST_REHASH_KEY = "last_full_rehash_at"
+
+
+def _now() -> float:
+    """Return the current epoch seconds.
+
+    A module-level indirection (not cached) so tests can monkeypatch the clock
+    to age a manifest past the full-re-hash staleness window (issue #373).
+    """
+    return time.time()
+
+
 # Default embedding model (issue #315 slice). Kept as the documented default;
 # the one-time seed re-embed that incremental seeding requires is the natural
 # opportunity to evaluate a stronger model (see VectorBackend).
@@ -478,6 +521,21 @@ def _manifest_stats(manifest: dict[str, Any] | None) -> dict[str, tuple[int, int
     return out
 
 
+def _manifest_last_full_rehash(manifest: dict[str, Any] | None) -> float | None:
+    """Read the manifest's ``last_full_rehash_at`` epoch seconds (issue #373).
+
+    ``None`` when absent (a pre-#373 manifest) or malformed — the caller treats
+    that as infinitely stale and forces one full re-hash. A ``bool`` (a subclass
+    of ``int``) is rejected so a stray ``true`` cannot read as ``1.0``.
+    """
+    if not manifest:
+        return None
+    raw = manifest.get(_MANIFEST_REHASH_KEY)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return float(raw)
+
+
 def _scan_prior(
     manifest: dict[str, Any] | None,
 ) -> dict[str, tuple[int, int, str, str]]:
@@ -503,6 +561,7 @@ def _write_manifest(
     hashes: dict[str, str],
     extra: dict[str, Any] | None = None,
     stats: dict[str, tuple[int, int, str]] | None = None,
+    last_full_rehash_at: float | None = None,
 ) -> None:
     """Atomically write the manifest sidecar (temp file + rename).
 
@@ -510,11 +569,19 @@ def _write_manifest(
     valid_until)`` alongside the hash so the next build's stat pre-filter can
     skip re-reading unchanged files. Bumped to ``version: 2`` when stats are
     written; a reader that only knows ``hashes`` is unaffected (still present).
+
+    ``last_full_rehash_at`` (issue #373) records the epoch seconds of the most
+    recent build that re-hashed every file (a full rebuild or a stale-triggered
+    incremental re-hash). The stale-detection backstop reads it to decide when
+    to force the next full re-hash; a fresh incremental build PRESERVES the prior
+    value by passing it back unchanged. ``None`` omits the key.
     """
     version = 2 if stats is not None else 1
     payload: dict[str, Any] = {"version": version, "hashes": hashes}
     if stats is not None:
         payload["stats"] = {k: [v[0], v[1], v[2]] for k, v in stats.items()}
+    if last_full_rehash_at is not None:
+        payload[_MANIFEST_REHASH_KEY] = last_full_rehash_at
     if extra:
         payload.update(extra)
     tmp = path.with_name(path.name + ".tmp")
@@ -558,6 +625,7 @@ class FTS5Backend:
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
         as_of: date | None = None,
+        full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
     ) -> int:
         """Scan wiki + extra intake roots and build an FTS5 index.
 
@@ -567,6 +635,8 @@ class FTS5Backend:
         only added/changed/removed pages are touched, keyed off a whole-file
         content-hash manifest sidecar. An as-of build (``as_of`` set, issue
         #308) is always a full build reflecting that date's validity windows.
+        ``full_rehash_max_age_days`` (issue #373) periodically forces a full
+        re-hash on the incremental path — see :meth:`SearchBackend.build_index`.
         """
         cache_dir.mkdir(parents=True, exist_ok=True)
         db_path = cache_dir / _DB_NAME
@@ -583,10 +653,24 @@ class FTS5Backend:
             incremental and as_of is None and stored is not None and db_path.is_file()
         )
 
+        # Issue #373: self-healing full-re-hash backstop. On the incremental
+        # path, if the manifest has not recorded a full re-hash within the max
+        # age, force one this build (``prior=None`` => every file re-read and
+        # re-hashed) while STILL applying the change delta incrementally. A fresh
+        # manifest preserves its stored timestamp; a full rebuild always stamps.
+        now = _now()
+        last_rehash = _manifest_last_full_rehash(stored)
+        stale = last_rehash is None or (now - last_rehash) > (
+            full_rehash_max_age_days * 86400.0
+        )
+        rehash_at = now if (not do_incremental or stale) else last_rehash
+
         # Issue #370: feed the prior manifest's stats into the scan so unchanged
         # files are stat-matched instead of re-read. A full build inserts every
-        # scanned record, so it must read every file — ``prior=None`` there.
-        prior = _scan_prior(stored) if do_incremental else None
+        # scanned record, so it must read every file — ``prior=None`` there. A
+        # stale incremental build (#373) likewise passes ``prior=None`` to force
+        # a re-hash of every file.
+        prior = _scan_prior(stored) if (do_incremental and not stale) else None
         current = list(
             _scan_indexed_records(
                 wiki_root,
@@ -614,7 +698,12 @@ class FTS5Backend:
                 conn.commit()
             finally:
                 conn.close()
-            _write_manifest(manifest_path, current_hashes, stats=current_stats)
+            _write_manifest(
+                manifest_path,
+                current_hashes,
+                stats=current_stats,
+                last_full_rehash_at=rehash_at,
+            )
             return len(rows)
 
         # Incremental path — diff and apply only the delta.
@@ -642,7 +731,12 @@ class FTS5Backend:
             total = int(conn.execute("SELECT count(*) FROM wiki").fetchone()[0])
         finally:
             conn.close()
-        _write_manifest(manifest_path, current_hashes, stats=current_stats)
+        _write_manifest(
+            manifest_path,
+            current_hashes,
+            stats=current_stats,
+            last_full_rehash_at=rehash_at,
+        )
         return total
 
     def query(
@@ -832,6 +926,7 @@ class VectorBackend:
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
         as_of: date | None = None,
+        full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
     ) -> int:
         """Build a chromadb collection from wiki + extra intake roots.
 
@@ -840,7 +935,9 @@ class VectorBackend:
         pages are (re-)embedded, keyed off a whole-file content-hash
         manifest sidecar. A no-op rebuild re-embeds nothing. An as-of build
         (``as_of`` set, issue #308) is always a full build reflecting that
-        date's validity windows.
+        date's validity windows. ``full_rehash_max_age_days`` (issue #373)
+        periodically forces a full re-hash on the incremental path — the change
+        delta is still applied incrementally (no full re-embed).
         """
         chromadb = self._get_chromadb()
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -863,10 +960,21 @@ class VectorBackend:
             and stored_model == self.embedding_model
         )
 
+        # Issue #373: self-healing full-re-hash backstop (identical to FTS5).
+        # On the incremental path, force a full re-hash of every file when the
+        # manifest has not recorded one within the max age — the change delta is
+        # still applied incrementally (no rmtree / full re-embed).
+        now = _now()
+        last_rehash = _manifest_last_full_rehash(stored)
+        stale = last_rehash is None or (now - last_rehash) > (
+            full_rehash_max_age_days * 86400.0
+        )
+
         # Issue #370: stat pre-filter the scan on the incremental path only —
         # a full (re)build embeds every scanned record and cannot use the
-        # placeholder text/meta that stat-matched rows carry.
-        prior = _scan_prior(stored) if do_incremental else None
+        # placeholder text/meta that stat-matched rows carry. A stale incremental
+        # build (#373) also passes ``prior=None`` to force a re-hash of all.
+        prior = _scan_prior(stored) if (do_incremental and not stale) else None
 
         def _scan(with_prior: dict[str, tuple[int, int, str, str]] | None) -> tuple[
             list[tuple[str, Path, str, str, dict[str, Any], tuple[int, int, str]]],
@@ -946,6 +1054,7 @@ class VectorBackend:
                 current_hashes,
                 {"embedding_model": self.embedding_model},
                 stats=current_stats,
+                last_full_rehash_at=now,
             )
             return len(current)
 
@@ -968,6 +1077,7 @@ class VectorBackend:
             current_hashes,
             {"embedding_model": self.embedding_model},
             stats=current_stats,
+            last_full_rehash_at=(now if stale else last_rehash),
         )
         return total
 
@@ -1248,18 +1358,21 @@ class KeywordBackend:
         include_globs: Iterable[str] | None = None,
         exclude_globs: Iterable[str] | None = None,
         as_of: date | None = None,
+        full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
     ) -> int:
         """No-op: the keyword backend rescans on every query.
 
         Returns a count that includes wiki entries + extra-root entries
         (``MEMORY.md`` and non-``.md`` files excluded) so status checks
         see a comparable number to the indexed backends. The ``incremental``
-        / glob knobs (issue #348) and ``as_of`` (issue #308) are accepted for
-        Protocol parity but inert here — there is no persisted index to diff or
-        scope, and the temporal filter is applied at QUERY time
+        / glob knobs (issue #348), ``as_of`` (issue #308), and
+        ``full_rehash_max_age_days`` (issue #373) are accepted for Protocol
+        parity but inert here — there is no persisted manifest to diff, scope,
+        or re-hash, and the temporal filter is applied at QUERY time
         (:meth:`query`), not here.
         """
         del cache_dir, incremental, include_globs, exclude_globs, as_of
+        del full_rehash_max_age_days
         count = sum(
             1
             for p in wiki_root.rglob("*.md")
@@ -1386,6 +1499,7 @@ def build_fts5_index(
     include_globs: Iterable[str] | None = None,
     exclude_globs: Iterable[str] | None = None,
     as_of: date | str | None = None,
+    full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
 ) -> int:
     """Build an FTS5 index. Callable from shell hooks via ``python3 -c``.
 
@@ -1398,6 +1512,8 @@ def build_fts5_index(
     ``as_of`` (issue #308) builds an as-of *rewind* index: pass an ISO date
     string or a ``date`` to reflect the knowledge base as it stood then
     (always a full build). ``None`` (default) means today.
+    ``full_rehash_max_age_days`` (issue #373) sets the periodic full-re-hash
+    backstop for the stat pre-filter.
     """
     roots = [Path(r) for r in extra_roots] if extra_roots else None
     return FTS5Backend().build_index(
@@ -1408,6 +1524,7 @@ def build_fts5_index(
         include_globs=include_globs,
         exclude_globs=exclude_globs,
         as_of=_coerce_as_of(as_of),
+        full_rehash_max_age_days=full_rehash_max_age_days,
     )
 
 
@@ -1432,6 +1549,7 @@ def build_vector_index(
     exclude_globs: Iterable[str] | None = None,
     embedding_model: str | None = None,
     as_of: date | str | None = None,
+    full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
 ) -> int:
     """Build a chromadb vector index. Callable from shell hooks.
 
@@ -1441,6 +1559,8 @@ def build_vector_index(
     seam) defaults to ``all-MiniLM-L6-v2`` — the documented default is not
     changed here; swapping it forces a one-time full re-embed. ``as_of``
     (issue #308) builds an as-of *rewind* index — see :func:`build_fts5_index`.
+    ``full_rehash_max_age_days`` (issue #373) sets the periodic full-re-hash
+    backstop for the stat pre-filter.
     """
     roots = [Path(r) for r in extra_roots] if extra_roots else None
     return VectorBackend(embedding_model=embedding_model).build_index(
@@ -1451,6 +1571,7 @@ def build_vector_index(
         include_globs=include_globs,
         exclude_globs=exclude_globs,
         as_of=_coerce_as_of(as_of),
+        full_rehash_max_age_days=full_rehash_max_age_days,
     )
 
 
