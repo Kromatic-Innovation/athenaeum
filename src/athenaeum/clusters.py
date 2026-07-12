@@ -31,6 +31,7 @@ embedding provider.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -387,14 +388,21 @@ def cluster_auto_memory_files(
     adj = _build_adjacency(file_ids, embeddings, threshold)
     components = _single_linkage(adj)
 
-    # Stable cluster id: origin scope of the first member + a sequential
-    # index, so re-runs on the same input produce the same ids and C3's
-    # merge receipts stay traceable.
+    # Stable cluster id: a content-address over the sorted member relpaths,
+    # prefixed by a human-readable scope hint. Issue #370 (delta compile):
+    # the previous positional ``f"{scope_hint}-{seq:04d}"`` id was UNSTABLE —
+    # the same cluster got a different id depending on how many other
+    # clusters the component enumeration happened to precede it with. A
+    # delta run over a pool SUBSET enumerates a different set of components,
+    # so a positional id would drift for byte-identical clusters and break
+    # full-vs-delta equivalence (the id renders into wiki frontmatter). A
+    # content-address is deterministic across a full run and any delta run
+    # whose pool reproduces the same member set. ``scope_hint`` is the min
+    # origin_scope over members (set-determined, order-independent) so a
+    # cross-scope cluster's prefix never depends on member ordering.
     clusters: list[Cluster] = []
-    for seq, component in enumerate(components):
+    for component in components:
         members = [files[i] for i in component]
-        scope_hint = members[0].origin_scope.lstrip("-_") or "unscoped"
-        cluster_id = f"{scope_hint}-{seq:04d}"
         relpaths: list[str] = []
         for am in members:
             relpath = None
@@ -406,6 +414,14 @@ def cluster_auto_memory_files(
                 except ValueError:
                     continue
             relpaths.append(relpath or str(am.path))
+
+        scope_hint = min(am.origin_scope for am in members).lstrip("-_") or "unscoped"
+        digest = (
+            hashlib.sha1(  # noqa: S324 — non-crypto content-address, not a signature
+                "\n".join(sorted(relpaths)).encode("utf-8")
+            ).hexdigest()[:8]
+        )
+        cluster_id = f"{scope_hint}-{digest}"
 
         centroid = _mean_intra_similarity(component, file_ids, embeddings)
         if len(component) == 1:
