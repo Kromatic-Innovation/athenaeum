@@ -44,7 +44,7 @@ import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -825,6 +825,7 @@ def merge_cluster_row(
     am_by_path: dict[str, AutoMemoryFile],
     ephemeral_scopes: list[str] | None = None,
     operational_markers: list[str] | None = None,
+    as_of: date | None = None,
 ) -> MergedWikiEntry | None:
     """Build one :class:`MergedWikiEntry` from a cluster JSONL row.
 
@@ -832,6 +833,14 @@ def merge_cluster_row(
     file on disk — C2's rotated reports may reference files that have
     been removed between runs, and we prefer to skip such rows with a
     log line rather than crash the whole merge pass.
+
+    ``as_of`` (issue #359, compile-as-of) rewinds the per-member active
+    predicate: a member is excluded when ``is_inactive(as_of)`` — its
+    ``valid_until`` had already passed on ``as_of`` OR it carries a
+    tombstone. Left ``None`` (the default) the predicate keys on today,
+    matching the live compile. This is VALID-time, not transaction-time:
+    a member ingested after ``as_of`` but whose validity window covers
+    ``as_of`` is still blended (see :func:`compile_as_of`).
 
     C4 (#198): contradiction detection is NOT performed here — the caller
     (:func:`merge_clusters_to_wiki`) runs it against the resolved member
@@ -958,7 +967,8 @@ def merge_cluster_row(
         # Issue #191: skip members marked inactive (superseded_by / deprecated)
         # so their bodies are never composed into the wiki entry and they do
         # not contribute sources. Inactive files stay on disk for audit.
-        if am.is_inactive():
+        # Issue #359: ``as_of`` rewinds this member predicate for compile-as-of.
+        if am.is_inactive(as_of):
             log.info(
                 "cluster %s: member %s is inactive (superseded/deprecated); excluding from compile",
                 cluster_id,
@@ -1171,6 +1181,8 @@ def merge_clusters_to_wiki(
     client: "anthropic.Anthropic | None" = None,
     usage: TokenUsage | None = None,
     now: datetime | None = None,
+    as_of: date | None = None,
+    out_wiki_root: Path | None = None,
 ) -> list[MergedWikiEntry]:
     """Read the canonical cluster JSONL and emit one wiki entry per cluster.
 
@@ -1203,6 +1215,19 @@ def merge_clusters_to_wiki(
             cached row's ``resolved_at``. Defaults to ``datetime.now(UTC)``
             (frozen once here so all clusters in the run share one clock).
             Tests pass a fixed value so no wall-clock leaks into assertions.
+        as_of: Issue #359 (compile-as-of). Rewinds the per-member active
+            predicate (``is_inactive(as_of)``) so the deterministic C3 blend
+            re-derives each entry from only the members valid on ``as_of`` —
+            a member expired now but valid then is RE-INCLUDED. ``None`` (the
+            default) keys on today, matching the live compile. Distinct from
+            slice 3's read-time ``--as-of`` filter, which only hides
+            already-compiled pages and cannot resurrect a dropped member's
+            content. See :func:`compile_as_of`.
+        out_wiki_root: Issue #359. Redirect the wiki write target (and the
+            ``_pending_*`` sidecars) to this directory instead of
+            ``knowledge_root / "wiki"``. Used by compile-as-of to write a
+            recompiled snapshot into a scratch dir WITHOUT mutating the live
+            wiki. ``None`` (the default) writes to the live wiki.
 
     Returns:
         The list of :class:`MergedWikiEntry` records in cluster-file order.
@@ -1240,6 +1265,7 @@ def merge_clusters_to_wiki(
             am_by_path=am_by_path,
             ephemeral_scopes=ephemeral_scopes,
             operational_markers=operational_markers,
+            as_of=as_of,
         )
         if entry is None:
             continue
@@ -1304,7 +1330,7 @@ def merge_clusters_to_wiki(
     #   then chunk by cap before running the detector.
     # - similarity: per-cluster pass + cosine sweep over raw + wiki.
     # - both: ancestor pooling THEN similarity sweep over remaining pairs.
-    wiki_root = knowledge_root / "wiki"
+    wiki_root = out_wiki_root if out_wiki_root is not None else knowledge_root / "wiki"
     escalations: list[EscalationItem] = []
     mode = resolve_cross_scope_mode(resolved_config)
     cluster_size_cap = resolve_cluster_size_cap(resolved_config)
@@ -1559,7 +1585,7 @@ def merge_clusters_to_wiki(
     # contradiction escalations. ``am_by_path`` (the row-builder body lookup)
     # is left intact — the row-level skip in ``merge_cluster_row`` handles
     # compile exclusion.
-    auto_memory_list = [am for am in auto_memory_files if not am.is_inactive()]
+    auto_memory_list = [am for am in auto_memory_files if not am.is_inactive(as_of)]
     use_ancestor = mode in ("ancestor", "both")
 
     # Issue #126: Opus-backed resolver budget. The resolver is opt-in
@@ -1823,3 +1849,76 @@ def merge_clusters_to_wiki(
         )
 
     return entries
+
+
+def compile_as_of(
+    knowledge_root: Path,
+    as_of: date,
+    out_dir: Path,
+    *,
+    config: dict[str, Any] | None = None,
+) -> list[MergedWikiEntry]:
+    """Recompile a historical wiki snapshot as it would have stood on ``as_of``.
+
+    Issue #359 (§8.7). This is the COMPILE-as-of capability, distinct from
+    slice 3's read-time ``--as-of`` filter:
+
+    - **Slice 3** (``recall --as-of`` / ``reindex --as-of``) filters the
+      ALREADY-compiled live wiki at read/index time. It can only HIDE
+      compiled pages whose frontmatter falls outside the as-of window; it
+      cannot resurrect a member's content that the live compile already
+      dropped (an expired member is not in any compiled page for a read
+      filter to reveal).
+    - **compile-as-of** RE-RUNS the deterministic C3 blend
+      (:func:`merge_clusters_to_wiki`) with ``as_of`` threaded into the
+      per-member ``is_inactive`` predicate, so a member expired now but
+      valid on ``as_of`` is RE-INCLUDED and the merged prose / fields /
+      sources are re-derived as they would have compiled on that date. The
+      result is written to ``out_dir`` — the live wiki and raw tree are
+      never touched.
+
+    Safety and scope:
+
+    - ``client`` is fixed to ``None``: no LLM contradiction detector runs, so
+      there is no API spend and no escalation is written. The blend is fully
+      deterministic over the current cluster assignments.
+    - Raw members are never retired or mutated (retire is a separate
+      librarian pass, not part of the merge).
+    - It reuses the CURRENT cluster JSONL (C1 output); clusters are not
+      re-derived as-of ``as_of``. The rewind is over which members within
+      each cluster contribute.
+    - The rewind is **valid-time**, not transaction-time. Raw members carry
+      no reliable ingestion timestamp (only ``valid_from`` / ``valid_until``
+      real-world validity + dated ``valid_until`` supersession closes), so
+      compile-as-of cannot exclude a claim merely because it was *ingested*
+      after ``as_of``, nor un-apply an undated ``superseded_by`` tombstone.
+      A temporally-superseded loser (slice-2 dated ``valid_until`` close)
+      DOES correctly reappear when ``as_of`` precedes the close.
+
+    Args:
+        knowledge_root: Root of the knowledge directory.
+        as_of: The historical date to recompile as of (inclusive upper bound).
+        out_dir: Scratch directory to write the recompiled wiki into. MUST NOT
+            be the live ``wiki/`` directory — a :class:`ValueError` is raised
+            if it is.
+        config: Optional resolved config dict.
+
+    Returns:
+        The list of :class:`MergedWikiEntry` records written to ``out_dir``.
+    """
+    resolved_config = config if config is not None else load_config(knowledge_root)
+    out_dir = out_dir.expanduser().resolve()
+    live_wiki = (knowledge_root / "wiki").expanduser().resolve()
+    if out_dir == live_wiki:
+        raise ValueError(
+            "compile_as_of: out_dir must not be the live wiki directory "
+            f"({live_wiki}); point --out at a scratch path"
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return merge_clusters_to_wiki(
+        knowledge_root,
+        config=resolved_config,
+        client=None,
+        as_of=as_of,
+        out_wiki_root=out_dir,
+    )
