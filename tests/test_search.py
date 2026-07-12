@@ -1336,6 +1336,280 @@ class TestStatPreFilter:
         assert count == 0  # expired page dropped from the index
 
 
+# ---------------------------------------------------------------------------
+# Periodic full re-hash backstop (issue #373) — heal the #370 stat pre-filter's
+# blind spot: a content edit that preserves BOTH (mtime_ns, size).
+# ---------------------------------------------------------------------------
+
+
+def _stat_preserving_edit(path: Path, old: str, new: str) -> None:
+    """Replace ``old``->``new`` in ``path`` keeping (mtime_ns, size) identical.
+
+    ``old`` and ``new`` MUST be equal length so the file size is unchanged; the
+    original mtime is restored via ``os.utime``. This forges exactly the edit the
+    #370 stat fast-path cannot see — the manifest's stored ``(mtime_ns, size)``
+    still match, so the stored hash would be wrongly reused without a re-hash.
+    """
+    import os
+
+    assert len(old) == len(new), "edit must preserve byte length"
+    st = path.stat()
+    text = path.read_text()
+    assert old in text
+    path.write_text(text.replace(old, new))
+    assert path.stat().st_size == st.st_size  # size preserved
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))  # restore mtime
+    assert path.stat().st_mtime_ns == st.st_mtime_ns
+
+
+def _age_manifest_rehash(manifest_path: Path, days: float) -> None:
+    """Rewind the manifest's ``last_full_rehash_at`` by ``days`` (issue #373)."""
+    import json
+    import time
+
+    m = json.loads(manifest_path.read_text())
+    m["last_full_rehash_at"] = time.time() - days * 86400.0
+    manifest_path.write_text(json.dumps(m))
+
+
+@pytest.fixture
+def hash_spy(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Count sha256 invocations — one per file body actually read+hashed."""
+    calls = {"n": 0}
+    orig = search_module.hashlib.sha256
+
+    def spy(data: bytes = b"") -> object:
+        calls["n"] += 1
+        return orig(data)
+
+    monkeypatch.setattr(search_module.hashlib, "sha256", spy)
+    return calls
+
+
+class TestFullReHashBackstopFTS5:
+    """#373: a periodic full re-hash on the incremental path catches a
+    stat-preserved content edit that #370's fast-path would otherwise miss,
+    without falling back to a full FTS5 rebuild."""
+
+    def test_seed_stamps_last_full_rehash_at(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        import json
+        import time
+
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        m = json.loads((cache / "fts5-manifest.json").read_text())
+        assert "last_full_rehash_at" in m
+        assert abs(m["last_full_rehash_at"] - time.time()) < 60
+
+    def test_fresh_uses_fast_path_and_preserves_timestamp(
+        self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict, delta_spy: dict
+    ) -> None:
+        """A fresh manifest (recent stamp) + unchanged corpus keeps the stat
+        fast-path (0 body reads) and does NOT bump last_full_rehash_at."""
+        import json
+
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        seed_stamp = json.loads((cache / "fts5-manifest.json").read_text())[
+            "last_full_rehash_at"
+        ]
+        hash_spy["n"] = 0
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        assert hash_spy["n"] == 0  # fast-path: no body re-hashed
+        assert delta_spy["changed"] == []
+        # Timestamp preserved, not re-stamped on a non-stale build.
+        after = json.loads((cache / "fts5-manifest.json").read_text())[
+            "last_full_rehash_at"
+        ]
+        assert after == seed_stamp
+
+    def test_stale_rehash_catches_stat_preserved_edit(
+        self,
+        wiki_with_pages: Path,
+        tmp_path: Path,
+        hash_spy: dict,
+        delta_spy: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The key backstop test. An edit that preserves (mtime,size) is invisible
+        to the fast-path; an aged manifest forces a re-hash that catches it, and
+        only the ONE changed file is re-indexed (incremental delta, not a full
+        rebuild)."""
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+
+        # Forge a stat-preserved frontmatter edit (fintech -> medtech, both 7
+        # chars). FTS5 indexes the tags, so a caught edit is searchable.
+        p = wiki_with_pages / "acme-corp.md"
+        _stat_preserving_edit(p, "fintech", "medtech")
+
+        # Sanity: with the fresh manifest the fast-path WOULD miss it.
+        pre = FTS5Backend().query("medtech", cache)
+        assert "acme-corp.md" not in [r[0] for r in pre]
+
+        # Age the manifest past the 7-day window and rebuild.
+        _age_manifest_rehash(cache / "fts5-manifest.json", days=8)
+        hash_spy["n"] = 0
+        rows_built = {"n": 0}
+        orig_row = FTS5Backend._row_for
+
+        def counting_row(name, path, text, meta):  # type: ignore[no-untyped-def]
+            rows_built["n"] += 1
+            return orig_row(name, path, text, meta)
+
+        monkeypatch.setattr(FTS5Backend, "_row_for", staticmethod(counting_row))
+        count = FTS5Backend().build_index(wiki_with_pages, cache)
+
+        # Stale forced a re-hash of EVERY file (3 bodies read+hashed)...
+        assert hash_spy["n"] == 3
+        # ...but only the one changed file entered the delta and was re-indexed
+        # (a full rebuild would have re-inserted all 3 rows).
+        assert delta_spy["changed"] == ["acme-corp.md"]
+        assert delta_spy["added"] == []
+        assert delta_spy["removed"] == []
+        assert rows_built["n"] == 1
+        assert count == 3
+        # The edit is now caught and searchable.
+        post = FTS5Backend().query("medtech", cache)
+        assert "acme-corp.md" in [r[0] for r in post]
+
+    def test_max_age_zero_always_rehashes(
+        self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict
+    ) -> None:
+        """full_rehash_max_age_days=0 => never trust the fast-path."""
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        hash_spy["n"] = 0
+        # Fresh manifest, unchanged corpus, but max_age 0 forces a full re-hash.
+        FTS5Backend().build_index(wiki_with_pages, cache, full_rehash_max_age_days=0)
+        assert hash_spy["n"] == 3
+
+    def test_backcompat_no_timestamp_triggers_one_rehash_then_stamps(
+        self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict
+    ) -> None:
+        """A manifest without last_full_rehash_at (pre-#373) is infinitely stale:
+        exactly one full re-hash, then it stamps and reverts to the fast-path."""
+        import json
+
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        mpath = cache / "fts5-manifest.json"
+        m = json.loads(mpath.read_text())
+        # Simulate a pre-#373 manifest: keep stats, drop the timestamp.
+        m.pop("last_full_rehash_at", None)
+        mpath.write_text(json.dumps(m))
+
+        hash_spy["n"] = 0
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        assert hash_spy["n"] == 3  # forced full re-hash exactly once
+        m2 = json.loads(mpath.read_text())
+        assert "last_full_rehash_at" in m2  # stamped
+
+        # Next build is fresh again → fast-path, zero bodies read.
+        hash_spy["n"] = 0
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        assert hash_spy["n"] == 0
+
+
+class TestFullReHashBackstopVector:
+    """#373 for the vector backend: a stale re-hash catches a stat-preserved edit
+    and re-embeds ONLY the changed file (no rmtree / full re-embed)."""
+
+    @pytest.fixture(autouse=True)
+    def _require_chromadb(self) -> None:
+        pytest.importorskip("chromadb")
+
+    def test_seed_stamps_last_full_rehash_at(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        import json
+        import time
+
+        cache = tmp_path / "cache"
+        VectorBackend().build_index(wiki_with_pages, cache)
+        m = json.loads((cache / "vector-manifest.json").read_text())
+        assert "last_full_rehash_at" in m
+        assert abs(m["last_full_rehash_at"] - time.time()) < 60
+
+    def test_fresh_uses_fast_path_and_preserves_timestamp(
+        self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict, delta_spy: dict
+    ) -> None:
+        import json
+
+        cache = tmp_path / "cache"
+        VectorBackend().build_index(wiki_with_pages, cache)
+        seed_stamp = json.loads((cache / "vector-manifest.json").read_text())[
+            "last_full_rehash_at"
+        ]
+        hash_spy["n"] = 0
+        VectorBackend().build_index(wiki_with_pages, cache)
+        assert hash_spy["n"] == 0
+        assert delta_spy["changed"] == []
+        after = json.loads((cache / "vector-manifest.json").read_text())[
+            "last_full_rehash_at"
+        ]
+        assert after == seed_stamp
+
+    def test_stale_rehash_catches_stat_preserved_edit(
+        self,
+        wiki_with_pages: Path,
+        tmp_path: Path,
+        hash_spy: dict,
+        delta_spy: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache = tmp_path / "cache"
+        VectorBackend().build_index(wiki_with_pages, cache)
+
+        # Same-length body edit, mtime restored → invisible to the fast-path.
+        p = wiki_with_pages / "acme-corp.md"
+        _stat_preserving_edit(p, "fintech", "medtech")
+
+        _age_manifest_rehash(cache / "vector-manifest.json", days=8)
+        hash_spy["n"] = 0
+
+        # Spy the embed/add path: a full re-embed would add all 3; the delta adds 1.
+        added_records = {"n": 0}
+        orig_add = VectorBackend._add_records
+
+        def counting_add(self, collection, records):  # type: ignore[no-untyped-def]
+            added_records["n"] += len(records)
+            return orig_add(self, collection, records)
+
+        monkeypatch.setattr(VectorBackend, "_add_records", counting_add)
+
+        count = VectorBackend().build_index(wiki_with_pages, cache)
+        assert hash_spy["n"] == 3  # stale forced a full re-hash
+        assert delta_spy["changed"] == ["acme-corp.md"]
+        assert delta_spy["added"] == []
+        assert delta_spy["removed"] == []
+        assert added_records["n"] == 1  # ONLY the changed file re-embedded
+        assert count == 3
+
+    def test_backcompat_no_timestamp_triggers_one_rehash_then_stamps(
+        self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict
+    ) -> None:
+        import json
+
+        cache = tmp_path / "cache"
+        VectorBackend().build_index(wiki_with_pages, cache)
+        mpath = cache / "vector-manifest.json"
+        m = json.loads(mpath.read_text())
+        m.pop("last_full_rehash_at", None)
+        mpath.write_text(json.dumps(m))
+
+        hash_spy["n"] = 0
+        VectorBackend().build_index(wiki_with_pages, cache)
+        assert hash_spy["n"] == 3  # forced full re-hash exactly once
+        assert "last_full_rehash_at" in json.loads(mpath.read_text())
+
+        hash_spy["n"] = 0
+        VectorBackend().build_index(wiki_with_pages, cache)
+        assert hash_spy["n"] == 0  # fresh again → fast-path
+
+
 class TestFetchEmbeddingsNoModelLoad:
     """fetch_embeddings is a pure read; it must not attach the default (ONNX) EF."""
 

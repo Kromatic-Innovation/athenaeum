@@ -19,6 +19,7 @@ from athenaeum.config import (
     resolve_push_after_run,
     resolve_push_branch,
     resolve_push_remote,
+    resolve_reindex_full_rehash_max_age_days,
     resolve_retire,
     write_default_config,
 )
@@ -210,6 +211,61 @@ class TestResolveMinClusterCohesionScopes:
                 {"librarian": {"min_cluster_cohesion_scopes": "x"}}
             )
             == 4
+        )
+
+
+class TestResolveReindexFullRehashMaxAgeDays:
+    ROOT = Path("/nonexistent-knowledge-root")
+
+    def test_default_is_seven(self) -> None:
+        assert resolve_reindex_full_rehash_max_age_days(self.ROOT, {}) == 7.0
+        assert (
+            resolve_reindex_full_rehash_max_age_days(self.ROOT, {"librarian": {}})
+            == 7.0
+        )
+        assert (
+            resolve_reindex_full_rehash_max_age_days(
+                self.ROOT, {"librarian": {"reindex": {}}}
+            )
+            == 7.0
+        )
+
+    def test_yaml_value_wins(self) -> None:
+        assert (
+            resolve_reindex_full_rehash_max_age_days(
+                self.ROOT, {"librarian": {"reindex": {"full_rehash_max_age_days": 14}}}
+            )
+            == 14.0
+        )
+
+    def test_zero_and_negative_pass_through(self) -> None:
+        # 0 / negative = always re-hash; returned as-is (not clamped to default).
+        assert (
+            resolve_reindex_full_rehash_max_age_days(
+                self.ROOT, {"librarian": {"reindex": {"full_rehash_max_age_days": 0}}}
+            )
+            == 0.0
+        )
+        assert (
+            resolve_reindex_full_rehash_max_age_days(
+                self.ROOT, {"librarian": {"reindex": {"full_rehash_max_age_days": -1}}}
+            )
+            == -1.0
+        )
+
+    def test_bool_and_non_numeric_fall_through(self) -> None:
+        assert (
+            resolve_reindex_full_rehash_max_age_days(
+                self.ROOT,
+                {"librarian": {"reindex": {"full_rehash_max_age_days": True}}},
+            )
+            == 7.0
+        )
+        assert (
+            resolve_reindex_full_rehash_max_age_days(
+                self.ROOT, {"librarian": {"reindex": {"full_rehash_max_age_days": "x"}}}
+            )
+            == 7.0
         )
 
 

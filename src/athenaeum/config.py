@@ -501,6 +501,38 @@ def resolve_delta_max_affected_members(config: dict[str, Any] | None) -> int:
     return default
 
 
+def resolve_reindex_full_rehash_max_age_days(
+    knowledge_root: Path,
+    config: dict[str, Any] | None = None,
+) -> float:
+    """Resolve the periodic full-re-hash backstop age in days (#373, default 7).
+
+    The #370 stat pre-filter reuses a stored content hash whenever a file's
+    ``(mtime_ns, size)`` match the manifest, so a content edit that preserved
+    BOTH would slip past until a full re-hash. On an INCREMENTAL build, when the
+    manifest has not recorded a full re-hash within this many days, the search
+    backend re-reads and re-hashes EVERY file for one build (still applying the
+    change delta incrementally — no full re-embed / FTS5 rebuild). Read from
+    ``librarian.reindex.full_rehash_max_age_days``.
+
+    ``0`` or negative => always re-hash; a very large value => effectively never.
+    ``bool`` (an ``int`` subclass) and non-numeric values fall through to the
+    default so ``full_rehash_max_age_days: yes`` cannot read as ``1``.
+    """
+    default = 7.0
+    if config is None:
+        config = load_config(knowledge_root)
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            reindex_cfg = cfg.get("reindex")
+            if isinstance(reindex_cfg, dict):
+                raw = reindex_cfg.get("full_rehash_max_age_days")
+                if not isinstance(raw, bool) and isinstance(raw, (int, float)):
+                    return float(raw)
+    return default
+
+
 def resolve_lock_timeout(config: dict[str, Any] | None) -> float:
     """Resolve the default run-lock wait (seconds) from env > yaml > 0 (#309).
 
