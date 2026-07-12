@@ -57,6 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Temporal `recall --as-of <date>` view and per-claim compiled validity (#308).**
   A historical read-time view over validity windows, and per-source validity
   stamped into compiled entries.
+- **`athenaeum compile --as-of <date> --out <dir>` — historical recompiled wiki
+  view (#359).** Distinct from the read-time `recall --as-of` filter: re-runs the
+  deterministic C3 blend with `as_of` threaded into the per-member validity
+  predicate, writing to a scratch dir (live wiki never touched, no LLM spend), so
+  a member expired-as-of-today is re-included when the date precedes its
+  `valid_until` close. Valid-time rewind; transaction-time replay is documented as
+  deferred (the frontmatter model lacks per-member assertion timestamps).
 - **`athenaeum serve` honors `KNOWLEDGE_RAW_PATH` / `KNOWLEDGE_WIKI_PATH` (#355)**
   — each env var overrides its root individually; otherwise falls back to
   `<path>/raw|wiki`. Makes athenaeum's MCP server a drop-in for the standalone
@@ -68,6 +75,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two mislabeled golden fixtures corrected, the golden set enlarged 5 → 8, the
   floor re-derived with slack, and `propose_resolution` now retries once with a
   strict-JSON reminder when the first response has no parseable JSON object.
+- **`TestBatchSyncEquivalence` no longer hangs locally (#362).** The batch-mode
+  test double now reports an immediately-completing batch at create time, so the
+  poll loop's real 30s sleep is skipped under test (suite runs in seconds, not
+  ~60s/test); production poll cadence unchanged.
 
 
 ## [0.13.13] - 2026-07-06
