@@ -636,7 +636,11 @@ class TestRunLevelBudgetThreading:
             "athenaeum.librarian.discover_auto_memory_files",
             lambda *a, **k: [fake_am],
         )
-        monkeypatch.setattr("athenaeum.librarian._run_cluster_pass", lambda *a, **k: 0)
+        # #370 PR2: _run_cluster_pass now returns None (whole-corpus) or the
+        # delta affected-id set — not the old int cluster count.
+        monkeypatch.setattr(
+            "athenaeum.librarian._run_cluster_pass", lambda *a, **k: None
+        )
 
         def fake_merge(knowledge_root, **kwargs):
             kwargs["usage"].api_calls += 5
@@ -925,7 +929,11 @@ class TestRunLevelBudgetThreading:
 
         # Skip the embedding-backed cluster pass; merge reads the seeded
         # JSONL directly. Entity tiers burn zero API calls.
-        monkeypatch.setattr("athenaeum.librarian._run_cluster_pass", lambda *a, **k: 0)
+        # #370 PR2: _run_cluster_pass now returns None (whole-corpus) or the
+        # delta affected-id set — not the old int cluster count.
+        monkeypatch.setattr(
+            "athenaeum.librarian._run_cluster_pass", lambda *a, **k: None
+        )
         monkeypatch.setattr(
             "athenaeum.librarian.process_one",
             _fake_process_one_factory(calls_per_file=0),

@@ -50,6 +50,9 @@ from athenaeum.clusters import (
 )
 from athenaeum.config import (
     load_config,
+    resolve_delta_enabled,
+    resolve_delta_max_affected_clusters,
+    resolve_delta_max_affected_members,
     resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
     resolve_operational_markers,
@@ -58,8 +61,13 @@ from athenaeum.config import (
     resolve_push_remote,
     resolve_retire,
 )
+from athenaeum.delta import compute_affected_clusters, splice_cluster_report
 from athenaeum.ephemeral import classify_ephemeral
-from athenaeum.merge import merge_clusters_to_wiki
+from athenaeum.merge import (
+    derive_topic_slug,
+    merge_clusters_to_wiki,
+    read_cluster_rows,
+)
 from athenaeum.models import (
     AutoMemoryFile,
     EntityAction,
@@ -830,28 +838,70 @@ def process_one(
     return result
 
 
+def _write_cluster_report_and_prune(
+    clusters: list,
+    output_path: Path,
+    knowledge_root: Path,
+    resolved_config: dict[str, object] | None,
+) -> None:
+    """Write *clusters* to the canonical report and prune old rotations (#311)."""
+    canonical, timestamped = write_cluster_report(clusters, output_path)
+    log.info(
+        "cluster report written: %s (rotated copy: %s)",
+        canonical,
+        timestamped,
+    )
+    if timestamped is not None:
+        retention = resolve_rotation_retention(knowledge_root, config=resolved_config)
+        try:
+            pruned = prune_cluster_rotations(output_path, keep=retention)
+            if pruned:
+                log.info(
+                    "pruned %d old cluster rotation(s) (retention=%d)",
+                    len(pruned),
+                    retention,
+                )
+        except Exception as exc:  # noqa: BLE001 — prune must not abort the run
+            log.warning("cluster rotation prune failed (non-fatal): %s", exc)
+
+
 def _run_cluster_pass(
     auto_memory_files: list[AutoMemoryFile],
     knowledge_root: Path,
     *,
     config: dict[str, object] | None = None,
     dry_run: bool = False,
-) -> int:
+    changed_paths: set[Path] | None = None,
+) -> set[str] | None:
     """Cluster discovered auto-memory files and write the JSONL report.
 
     Reuses the recall-index chromadb collection via
     :class:`athenaeum.search.VectorBackend`; falls back to a hashing-
-    trick vector if the index is unavailable. Returns the number of
-    clusters written (0 when there is nothing to cluster or on dry-run).
+    trick vector if the index is unavailable.
+
+    Returns:
+        - ``None`` in the whole-corpus mode (the merge pass should recompile
+          every cluster), including the dry-run, empty-input, and
+          no-extra-roots short circuits, AND every delta fallback (D1-D3/D2).
+        - ``set[str]`` when the delta path (issue #370 PR2) engaged: the NEW
+          cluster ids that were (re)clustered and written this pass, so the
+          merge pass can recompile ONLY those and leave every unaffected
+          ``wiki/auto-*.md`` untouched.
+
+    ``changed_paths`` (issue #370 PR2) is the set of absolute auto-memory paths
+    that changed this run. When provided AND delta is viable, only those files
+    and their affected clusters are re-clustered + spliced into the existing
+    report. ``None`` (the default) preserves the whole-corpus behaviour
+    byte-for-byte.
     """
     if not auto_memory_files:
-        return 0
+        return None
 
     resolved_config = config if config is not None else load_config(knowledge_root)
     extra_roots = resolve_extra_intake_roots(knowledge_root, config=resolved_config)
     if not extra_roots:
         log.info("cluster pass: no extra intake roots configured — skipping")
-        return 0
+        return None
 
     threshold = resolve_cluster_threshold(knowledge_root, config=resolved_config)
 
@@ -866,11 +916,35 @@ def _run_cluster_pass(
             "clustering (no chromadb/model load)",
             len(auto_memory_files),
         )
-        return 0
+        return None
 
     cache_dir = Path(
         os.environ.get("ATHENAEUM_CACHE_DIR") or (Path.home() / ".cache" / "athenaeum")
     )
+    output_path = resolve_cluster_output_path(knowledge_root, config=resolved_config)
+
+    # Issue #370 PR2: delta-scoped cluster pass. Only reachable when a caller
+    # threads ``changed_paths`` (ingest / session_end); the nightly ``run``
+    # never does, so it always takes the whole-corpus path below. An EMPTY set
+    # is a valid delta ("no auto-memory changed this run") — distinct from
+    # ``None`` (whole-corpus) — and resolves to a no-op merge that rewrites
+    # nothing, so an entity-only ingest never churns the auto-memory wiki.
+    if changed_paths is not None:
+        affected_ids = _delta_cluster_pass(
+            auto_memory_files,
+            changed_paths,
+            output_path,
+            extra_roots=extra_roots,
+            cache_dir=cache_dir,
+            threshold=threshold,
+            knowledge_root=knowledge_root,
+            resolved_config=resolved_config,
+        )
+        if affected_ids is not None:
+            return affected_ids
+        # else: a fallback trigger fired (already logged) — fall through to the
+        # whole-corpus compile below, which is always correct.
+
     clusters = cluster_auto_memory_files(
         auto_memory_files,
         extra_roots=extra_roots,
@@ -885,31 +959,179 @@ def _run_cluster_pass(
         threshold,
     )
 
-    output_path = resolve_cluster_output_path(knowledge_root, config=resolved_config)
-    canonical, timestamped = write_cluster_report(clusters, output_path)
+    _write_cluster_report_and_prune(
+        clusters, output_path, knowledge_root, resolved_config
+    )
+    return None
+
+
+def _delta_cluster_pass(
+    auto_memory_files: list[AutoMemoryFile],
+    changed_paths: set[Path],
+    output_path: Path,
+    *,
+    extra_roots: list[Path],
+    cache_dir: Path,
+    threshold: float,
+    knowledge_root: Path,
+    resolved_config: dict[str, object] | None,
+) -> set[str] | None:
+    """Delta-scoped cluster pass (issue #370 PR2). ``None`` = fall back to full.
+
+    Reads the prior cluster report, computes the affected scope, re-clusters
+    only the affected pool, splices the result back into the report, and returns
+    the NEW cluster ids for the merge pass to recompile. Any fallback trigger
+    (D1-D3/D2) returns ``None`` after logging its reason.
+    """
+    prior_rows = read_cluster_rows(output_path)
+    scope = compute_affected_clusters(
+        changed_paths,
+        prior_rows,
+        auto_memory_files,
+        extra_roots=extra_roots,
+        cache_dir=cache_dir,
+        threshold=threshold,
+        max_affected_clusters=resolve_delta_max_affected_clusters(resolved_config),
+        max_affected_members=resolve_delta_max_affected_members(resolved_config),
+    )
+    if scope is None:
+        return None
+
+    new_partial = cluster_auto_memory_files(
+        scope.pool,
+        extra_roots=extra_roots,
+        cache_dir=cache_dir,
+        threshold=threshold,
+    )
+    spliced = splice_cluster_report(prior_rows, scope.affected_ids, new_partial)
     log.info(
-        "cluster report written: %s (rotated copy: %s)",
-        canonical,
-        timestamped,
+        "delta cluster pass: %d changed file(s), %d pooled member(s) → "
+        "%d affected cluster(s) re-clustered; %d total cluster(s) in report",
+        len(changed_paths),
+        len(scope.pool),
+        len(new_partial),
+        len(spliced),
+    )
+    _write_cluster_report_and_prune(
+        spliced, output_path, knowledge_root, resolved_config
+    )
+    return {c.cluster_id for c in new_partial}
+
+
+def _delta_slug_collision(
+    knowledge_root: Path,
+    config: dict[str, object] | None,
+    affected_ids: set[str],
+) -> bool:
+    """F6 guard: does any affected cluster's slug collide run-globally?
+
+    A full merge resolves topic-slug collisions run-globally — the first row (in
+    report order) with a given base slug keeps it, later ones are suffixed. A
+    delta merge only writes the affected subset, so if an affected entry's
+    derived base slug also belongs to ANOTHER corpus cluster (affected or not),
+    a subset merge could assign a different final slug than the whole-corpus
+    merge would. Detecting that here lets :func:`run` fall back to a full
+    whole-corpus compile (always correct) rather than risk a divergent slug.
+    ``derive_topic_slug`` is pure over ``member_paths`` + ``cluster_id``, so this
+    reads the (already spliced) report and needs no re-clustering.
+    """
+    output_path = resolve_cluster_output_path(knowledge_root, config=config)
+    rows = read_cluster_rows(output_path)
+    slug_to_ids: dict[str, set[str]] = {}
+    for row in rows:
+        cid = str(row.get("cluster_id", ""))
+        member_paths = [str(m) for m in row.get("member_paths", [])]
+        slug = derive_topic_slug(member_paths, cid)
+        slug_to_ids.setdefault(slug, set()).add(cid)
+    for ids in slug_to_ids.values():
+        if len(ids) > 1 and ids & affected_ids:
+            return True
+    return False
+
+
+def _compile_auto_memory(
+    auto_memory_files: list[AutoMemoryFile],
+    knowledge_root: Path,
+    *,
+    config: dict[str, object] | None,
+    dry_run: bool,
+    client: Any,
+    usage: TokenUsage | None,
+    changed_paths: set[Path] | None,
+) -> list:
+    """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
+
+    Issue #370 PR2: this is the single choke point for the delta-scoped compile,
+    extracted from :func:`run` so the equivalence test can drive the EXACT
+    orchestration on the deterministic ``client=None`` path (run's own
+    pre-flight refuses a keyless ``api``-provider full pipeline, so the test
+    cannot reach this logic through run()).
+
+    Delta is enabled ONLY on the deterministic ``client is None`` path
+    (session_end / ingest tier0, no LLM). The nightly LLM run — any live client —
+    MUST stay whole-corpus (fallback trigger D5). This gates on ``client is
+    None`` rather than the cross-scope mode because the PRIMARY per-cluster
+    contradiction detector (``detect_contradictions`` inside the merge loop) runs
+    for EVERY mode, including ``cross_scope_mode == 'off'`` — only the extra
+    cross-scope similarity sweep is mode-gated. Scoping the merge to the affected
+    clusters would therefore make a live-client run's escalation sidecars
+    (``_pending_questions.md`` / ``_pending_merges.md`` / the resolved cache)
+    diverge from a full compile. All new params default to the whole-corpus
+    behaviour, so a call with ``changed_paths=None`` is byte-identical to the
+    pre-#370 pipeline.
+    """
+    delta_enabled = resolve_delta_enabled(config)
+    delta_eligible = (
+        not dry_run and changed_paths is not None and delta_enabled and client is None
+    )
+    if changed_paths is not None and not delta_eligible and not dry_run:
+        if client is not None:
+            log.warning(
+                "delta: live LLM client — whole-corpus compile so contradiction "
+                "escalations stay corpus-consistent (D5)"
+            )
+        elif not delta_enabled:
+            log.info(
+                "delta: disabled via librarian.delta.enabled — whole-corpus compile"
+            )
+
+    only_cluster_ids = _run_cluster_pass(
+        auto_memory_files,
+        knowledge_root,
+        config=config,
+        dry_run=dry_run,
+        changed_paths=changed_paths if delta_eligible else None,
     )
 
-    # Prune old timestamped rotations so they don't grow unbounded (#311).
-    # Debugging artifacts only (recovery is git-based); a prune failure must
-    # never abort the run.
-    if timestamped is not None:
-        retention = resolve_rotation_retention(knowledge_root, config=resolved_config)
-        try:
-            pruned = prune_cluster_rotations(output_path, keep=retention)
-            if pruned:
-                log.info(
-                    "pruned %d old cluster rotation(s) (retention=%d)",
-                    len(pruned),
-                    retention,
-                )
-        except Exception as exc:  # noqa: BLE001 — prune must not abort the run
-            log.warning("cluster rotation prune failed (non-fatal): %s", exc)
+    # F6: run-global slug-collision guard. If any affected entry's slug would
+    # collide with another corpus entry, a subset merge could assign a different
+    # final slug than the whole-corpus merge — fall back to a full compile, which
+    # resolves the collision deterministically.
+    if only_cluster_ids is not None and _delta_slug_collision(
+        knowledge_root, config, only_cluster_ids
+    ):
+        log.warning(
+            "delta: affected slug collides run-globally (F6) — re-running "
+            "whole-corpus cluster + merge"
+        )
+        _run_cluster_pass(
+            auto_memory_files, knowledge_root, config=config, dry_run=dry_run
+        )
+        only_cluster_ids = None
 
-    return len(clusters)
+    # C3: merge clusters into canonical wiki/auto-*.md entries. C4 contradiction
+    # detection runs inside merge_clusters_to_wiki and reuses the shared client.
+    # When ``only_cluster_ids`` is set (delta path), only the affected entries
+    # are merged + written; every unaffected wiki page is left untouched.
+    return merge_clusters_to_wiki(
+        knowledge_root,
+        auto_memory_files=auto_memory_files,
+        config=config,
+        dry_run=dry_run,
+        client=client,
+        usage=usage,
+        only_cluster_ids=only_cluster_ids,
+    )
 
 
 def _run_retire(
@@ -1156,6 +1378,7 @@ def run(
     push_after_run: bool | None = None,
     projects_root: Path | None = None,
     install_signal_handlers: bool = False,
+    changed_paths: set[Path] | None = None,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error.
 
@@ -1417,25 +1640,18 @@ def run(
             for scope, count in sorted(by_scope.items()):
                 log.info("  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count)
 
-        _run_cluster_pass(
+        # C2 + C3 + C4: cluster, merge, and detect. Issue #370 PR2 threads the
+        # optional ``changed_paths`` delta through this one call — see
+        # :func:`_compile_auto_memory` for the delta-eligibility (D5) gate, the
+        # cluster pass, the F6 slug-collision guard, and the merge.
+        merged_entries = _compile_auto_memory(
             auto_memory_files,
             knowledge_root,
             config=config,
             dry_run=dry_run,
-        )
-
-        # C3: merge clusters into canonical wiki/auto-*.md entries. Runs
-        # after C2 in the same pipeline so a full librarian run refreshes
-        # cluster + merge together. Uses the cluster JSONL written above.
-        # C4: contradiction detection runs inside merge_clusters_to_wiki
-        # and reuses the shared Anthropic client.
-        merged_entries = merge_clusters_to_wiki(
-            knowledge_root,
-            auto_memory_files=auto_memory_files,
-            config=config,
-            dry_run=dry_run,
             client=merge_client,
             usage=usage,
+            changed_paths=changed_paths,
         )
 
         # Issue #261 (slice B of #259): move-then-retire lifecycle. Runs after
@@ -2092,11 +2308,35 @@ def ingest(
             session=session,
         )
 
+    # Issue #370 PR2: thread the auto-memory delta into ``run`` so the cluster +
+    # merge passes scope to only the changed files' affected clusters. Map the
+    # new/changed relpaths that live under an auto-memory intake root to absolute
+    # paths; entity raw (``raw/<ts>-<uuid>.md``) is excluded, so an entity-only
+    # ingest yields an EMPTY set — a valid delta ("no auto-memory changed") that
+    # leaves the auto-memory wiki untouched instead of recompiling it. ``run``
+    # itself vetoes delta under LLM contradiction mode (D5) and falls back to a
+    # full compile when the delta is not viable (D1-D3/F6), so this is always a
+    # safe optimisation hint. Only passed when a real compile runs (below), never
+    # via the dry-run / no-op early returns above.
+    extra_roots = resolve_extra_intake_roots(knowledge_root, config=config)
+    auto_changed: set[Path] = set()
+    for rel in (*added, *changed):
+        abspath = (knowledge_root / rel).resolve()
+        for root in extra_roots:
+            try:
+                abspath.relative_to(root.resolve())
+            except ValueError:
+                continue
+            auto_changed.add(abspath)
+            break
+    run_kwargs.pop("changed_paths", None)
+
     exit_code = run(
         raw_root=raw_root,
         wiki_root=wiki_root,
         knowledge_root=knowledge_root,
         dry_run=dry_run,
+        changed_paths=auto_changed,
         **run_kwargs,
     )
 

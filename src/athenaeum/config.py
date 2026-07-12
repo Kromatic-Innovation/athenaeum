@@ -433,6 +433,74 @@ def resolve_min_cluster_cohesion_scopes(config: dict[str, Any] | None) -> int:
     return default
 
 
+def resolve_delta_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the delta-scoped-compile opt-in (#370 PR2) from ``librarian.delta``.
+
+    When TRUE (the default), the deterministic ``client=None`` compile path
+    (session_end / ingest tier0) may scope the cluster + merge passes to only
+    the changed files and their affected clusters instead of re-clustering and
+    re-merging the whole auto-memory corpus. This is a pure SPEED optimization
+    that is proven byte-equivalent to the whole-corpus path
+    (``tests/test_delta_compile_equivalence.py``); the nightly LLM ``run`` (a
+    live client with cross-scope contradiction detection) always stays
+    whole-corpus regardless of this flag. Set ``librarian.delta.enabled: false``
+    to force the whole-corpus path everywhere. ``bool`` yaml values are honored;
+    anything else falls through to the TRUE default.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            delta_cfg = cfg.get("delta")
+            if isinstance(delta_cfg, dict):
+                raw = delta_cfg.get("enabled")
+                if isinstance(raw, bool):
+                    return raw
+    return True
+
+
+def resolve_delta_max_affected_clusters(config: dict[str, Any] | None) -> int:
+    """Resolve the delta closure's affected-cluster cap (#370 PR2, default 8).
+
+    When the change-closure fixpoint pulls in MORE than this many clusters, the
+    delta is no longer a small local update — the run falls back to a full
+    whole-corpus compile (fallback trigger D2) rather than churning most of the
+    corpus through the "delta" path. ``librarian.delta.max_affected_clusters``;
+    ``bool`` and non-positive / non-int values fall through to the default.
+    """
+    default = 8
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            delta_cfg = cfg.get("delta")
+            if isinstance(delta_cfg, dict):
+                raw = delta_cfg.get("max_affected_clusters")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    return raw
+    return default
+
+
+def resolve_delta_max_affected_members(config: dict[str, Any] | None) -> int:
+    """Resolve the delta closure's pooled-member cap (#370 PR2, default 200).
+
+    Companion to :func:`resolve_delta_max_affected_clusters`: when the pool of
+    files entering the delta re-cluster exceeds this many members, fall back to
+    a full compile (fallback trigger D2). Bounds the worst-case
+    re-cluster cost so a pathological closure can never do MORE work than a full
+    run. ``librarian.delta.max_affected_members``; ``bool`` and non-positive /
+    non-int values fall through to the default.
+    """
+    default = 200
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            delta_cfg = cfg.get("delta")
+            if isinstance(delta_cfg, dict):
+                raw = delta_cfg.get("max_affected_members")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    return raw
+    return default
+
+
 def resolve_lock_timeout(config: dict[str, Any] | None) -> float:
     """Resolve the default run-lock wait (seconds) from env > yaml > 0 (#309).
 

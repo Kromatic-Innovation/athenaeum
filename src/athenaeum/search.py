@@ -22,7 +22,7 @@ import os
 import re
 import shutil
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from datetime import date
 from fnmatch import fnmatch
 from pathlib import Path
@@ -1121,6 +1121,74 @@ class VectorBackend:
                 continue
             # chromadb returns numpy arrays in some versions — coerce to list
             out[doc_id] = [float(x) for x in vec]
+        return out
+
+    def query_neighbors(
+        self,
+        embedding: Sequence[float],
+        cache_dir: Path,
+        *,
+        k: int = 200,
+        exclude_ids: Iterable[str] | None = None,
+    ) -> list[tuple[str, float]]:
+        """Return ``[(id, distance)]`` for the ``k`` nearest stored neighbors.
+
+        Issue #370 (delta compile): a by-VECTOR nearest-neighbor accessor for
+        the delta-scoped cluster pass. Unlike :meth:`query` (which embeds a
+        query *string*), this queries by an already-resolved embedding vector,
+        so the collection is opened with ``embedding_function=None`` — this is
+        a pure read that never constructs the ONNX embedder.
+
+        The caller OVER-FETCHES (large ``k``) because chromadb's default HNSW
+        space is L2, which only approximates cosine ranking; the delta closure
+        re-confirms every returned candidate with an exact cosine check before
+        treating it as a true single-linkage edge, so ANN ranking noise cannot
+        introduce a spurious edge. Returns fewer than ``k`` when the collection
+        is smaller. ``exclude_ids`` drops the query file itself (and any known
+        non-candidates) via a chromadb ``where`` filter. Returns ``[]`` when the
+        collection does not exist or is empty.
+        """
+        chromadb = self._get_chromadb()
+        vector_dir = cache_dir / _VECTOR_DIR
+        if not vector_dir.is_dir():
+            return []
+
+        client = chromadb.PersistentClient(path=str(vector_dir))
+        try:
+            collection = client.get_collection(
+                _VECTOR_COLLECTION, embedding_function=None
+            )
+        except Exception:
+            return []
+
+        count = collection.count()
+        if count == 0:
+            return []
+
+        where: dict[str, Any] | None = None
+        excluded = [e for e in (exclude_ids or [])]
+        if len(excluded) == 1:
+            where = {"filename": {"$ne": excluded[0]}}
+        elif len(excluded) > 1:
+            where = {"filename": {"$nin": excluded}}
+
+        try:
+            results = collection.query(
+                query_embeddings=[list(embedding)],
+                n_results=min(k, count),
+                where=where,
+            )
+        except Exception:
+            return []
+
+        out: list[tuple[str, float]] = []
+        ids = results.get("ids") or []
+        if ids and ids[0]:
+            distances = results.get("distances") or [[]]
+            dist_row = distances[0] if distances else []
+            for i, doc_id in enumerate(ids[0]):
+                dist = float(dist_row[i]) if i < len(dist_row) else 0.0
+                out.append((doc_id, dist))
         return out
 
 

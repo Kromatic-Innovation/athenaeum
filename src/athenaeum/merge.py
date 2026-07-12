@@ -1183,6 +1183,7 @@ def merge_clusters_to_wiki(
     now: datetime | None = None,
     as_of: date | None = None,
     out_wiki_root: Path | None = None,
+    only_cluster_ids: set[str] | None = None,
 ) -> list[MergedWikiEntry]:
     """Read the canonical cluster JSONL and emit one wiki entry per cluster.
 
@@ -1228,6 +1229,15 @@ def merge_clusters_to_wiki(
             ``knowledge_root / "wiki"``. Used by compile-as-of to write a
             recompiled snapshot into a scratch dir WITHOUT mutating the live
             wiki. ``None`` (the default) writes to the live wiki.
+        only_cluster_ids: Issue #370 PR2 (delta compile). When set, ONLY the
+            cluster rows whose ``cluster_id`` is in this set are merged and
+            written — every unaffected ``wiki/auto-*.md`` is left untouched. The
+            caller (:func:`athenaeum.librarian.run` on the deterministic
+            ``client=None`` path) guarantees these ids do not slug-collide with
+            any unaffected entry before scoping the merge, and the cross-scope
+            similarity sweep is skipped (it is whole-corpus by nature and only
+            runs on the full path). ``None`` (the default) merges every cluster
+            — today's whole-corpus behaviour, byte-for-byte.
 
     Returns:
         The list of :class:`MergedWikiEntry` records in cluster-file order.
@@ -1238,6 +1248,18 @@ def merge_clusters_to_wiki(
     if not rows:
         log.info("merge pass: no clusters at %s — nothing to merge", cluster_path)
         return []
+
+    # Issue #370 PR2: delta-scoped merge. Filter to the affected cluster rows
+    # BEFORE building any entry so unaffected entries are neither rebuilt nor
+    # rewritten (proving the "untouched entries stay byte + mtime identical"
+    # equivalence property). Order among the surviving rows is preserved.
+    if only_cluster_ids is not None:
+        rows = [r for r in rows if str(r.get("cluster_id", "")) in only_cluster_ids]
+        if not rows:
+            log.info(
+                "merge pass: delta scope matched no cluster rows — nothing to merge"
+            )
+            return []
 
     extra_roots = resolve_extra_intake_roots(knowledge_root, config=resolved_config)
 
@@ -1757,7 +1779,12 @@ def merge_clusters_to_wiki(
         entry.contradictions_detected = bool(aggregate.detected)
 
     # Similarity sweep (mode in {similarity, both}).
-    if mode in ("similarity", "both"):
+    # Issue #370 PR2: the sweep is whole-corpus by nature (it scans ALL raw
+    # intake and wiki entries for cross-pair contradictions), so it is skipped
+    # on the delta path — that path is the deterministic ``client=None`` compile
+    # where the detector returns ``detected=False`` regardless and the sweep can
+    # therefore have no effect on the written bytes.
+    if mode in ("similarity", "both") and only_cluster_ids is None:
         from athenaeum.clusters import DEFAULT_CACHE_DIR
 
         wiki_files: list[Path] = []
