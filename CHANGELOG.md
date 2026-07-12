@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-07-12
+
+Session-end / incremental-compile efficiency (issue #370) plus a self-healing
+index backstop (#373). No public API change; opt-in config knobs only.
+
+### Changed — behavior
+
+- **`session-end --dry-run` is now a cheap manifest-diff preview (#370).** It no
+  longer compiles, clusters, or merges, and never opens chromadb or loads the
+  embedding model — it reports intended-work counts (`new_or_changed`,
+  `reindex.would_change`) from the manifest diff and exits. Previously a dry-run
+  paid the full whole-corpus cost.
+- **Incremental compile is delta-scoped on the `client=None` path (#370).** A
+  `session-end`/`ingest` now re-clusters and re-merges only the clusters a change
+  actually touches (the changed file's prior cluster plus any above-threshold
+  neighbors, closed to a fixpoint over cached embeddings); other `auto-*.md` are
+  left untouched. The nightly LLM `run` stays whole-corpus. Correctness falls back
+  to a full compile (logged) when a change can't be cleanly bounded.
+- **`cluster_id` is now content-addressed** (was a positional sequence index) so
+  full and delta runs mint identical ids. **One-time effect:** the first full run
+  after upgrade rewrites every `auto-*.md` once as ids re-stamp; harmless (recall
+  reads all `auto-*.md`) and self-healing.
+
+### Added
+
+- **Stat (mtime/size) pre-filter on the index and ingest manifests (#370).**
+  Unchanged files reuse their stored content hash instead of re-reading and
+  re-hashing every wiki file on each build. A page whose validity window expires
+  still drops with zero reads (the `valid_until` bound is recorded in the
+  manifest). `--full` still forces a complete re-hash.
+- **Self-healing periodic full re-hash backstop (#373).** Config
+  `librarian.reindex.full_rehash_max_age_days` (default 7): when the manifest has
+  not had a full re-hash in that window, the next incremental reindex re-hashes
+  every file (catching a content edit that preserved both mtime and size) while
+  still applying only the delta — seconds, not a full re-embed.
+- **Delta config knobs:** `librarian.delta.enabled` (default true),
+  `librarian.delta.max_affected_clusters` (8), `librarian.delta.max_affected_members`
+  (200) (#370).
+
+### Fixed
+
+- **`fetch_embeddings` crashed on chromadb's numpy embeddings array** (ambiguous
+  truth-value) whenever embeddings were returned, which had effectively broken
+  vector-backend clustering; fixed on the read path (#370).
+
+
 ## [0.14.0] - 2026-07-11
 
 ### Changed — behavior
