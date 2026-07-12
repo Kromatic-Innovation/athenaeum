@@ -232,6 +232,113 @@ class TestSessionEndComposition:
         assert not (cache / "ingest-manifest.json").exists()
         assert list((root / "raw" / "sessions").glob("2024*.md"))
 
+    def test_dry_run_previews_without_compile_cluster_or_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dry-run is a pure manifest-diff preview (#370): NO compile, NO
+        clustering, NO chromadb/ONNX — yet it still reports the deltas."""
+        import athenaeum.librarian as lib
+
+        def _boom(*_a: object, **_k: object) -> object:
+            raise AssertionError("must not run on a dry-run")
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        # The heavy compile pipeline (run → cluster → chromadb) must never fire.
+        monkeypatch.setattr(lib, "run", _boom)
+        monkeypatch.setattr(lib, "cluster_auto_memory_files", _boom)
+
+        result = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+            dry_run=True,
+        )
+        assert result.dry_run is True
+        assert result.reindexed is False
+        # The preview still counts the new raw file...
+        assert result.ingest.new_or_changed == 1
+        assert result.ingest.noop is False
+        # ...and reports a cheap wiki-diff reindex preview (no chromadb opened).
+        assert result.reindex_would_change is not None
+        assert result.reindex_would_change >= 0
+        # No compile side effects: no wiki page, no stamp, raw preserved.
+        assert not list((root / "wiki").glob("p-0001-*.md"))
+        assert not (cache / "ingest-manifest.json").exists()
+        assert list((root / "raw" / "sessions").glob("2024*.md"))
+        # The JSON summary surfaces the preview count.
+        summary = result.summary()
+        assert summary["reindex_would_change"] == result.reindex_would_change
+
+    def test_vector_backend_dry_run_never_opens_chromadb_or_onnx(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The PRODUCTION path: ``backend="vector"`` dry-run must stay a pure
+        manifest-diff preview — it must NOT construct a chromadb client OR build
+        any embedding function (the ONNX model). This pins the #370 claim on the
+        configured backend, not just fts5.
+        """
+        pytest.importorskip("chromadb")
+        import chromadb
+
+        import athenaeum.librarian as lib
+        from athenaeum.search import VectorBackend
+
+        root = _seed_knowledge_root(tmp_path)
+        # A real wiki page so the would_change preview has something to diff.
+        (root / "wiki" / "lean.md").write_text("---\nname: Lean\n---\n\nbody\n")
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        # Any attempt to open chromadb or build the embedding function on the
+        # dry-run path fails the test immediately.
+        def _no_chromadb(*_a: object, **_k: object) -> object:
+            raise AssertionError(
+                "chromadb.PersistentClient must not be opened on a dry-run"
+            )
+
+        def _no_ef(*_a: object, **_k: object) -> object:
+            raise AssertionError("embedding function must not be built on a dry-run")
+
+        monkeypatch.setattr(chromadb, "PersistentClient", _no_chromadb)
+        monkeypatch.setattr(VectorBackend, "_embedding_function", _no_ef)
+        # onnxruntime is optional; guard its session construction too when present.
+        try:
+            import onnxruntime as _ort
+
+            monkeypatch.setattr(_ort, "InferenceSession", _no_ef)
+        except ImportError:
+            pass
+
+        result = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="vector",
+            dry_run=True,
+        )
+        # Completed without touching chromadb/ONNX (else the guards would raise).
+        assert result.dry_run is True
+        assert result.reindexed is False
+        assert result.backend == "vector"
+        assert result.ingest.new_or_changed == 1
+        # Cheap wiki-diff preview: an int (would_change) or the null-with-note
+        # fallback — either way, no chromadb was opened to compute it.
+        summary = result.summary()
+        assert "reindex_would_change" in summary
+        if result.reindex_would_change is None:
+            assert "reindex_would_change_note" in summary
+        else:
+            assert result.reindex_would_change >= 1  # the lean.md page
+        # No compile/index side effects.
+        assert not (cache / "ingest-manifest.json").exists()
+        assert not (cache / "wiki-vectors").exists()
+
     def test_full_forces_recompile_and_full_reindex(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
