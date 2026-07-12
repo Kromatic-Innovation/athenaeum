@@ -117,7 +117,7 @@ SessionEnd hook (and the nightly-after-librarian path) invokes:
 athenaeum session-end                     # incremental ingest + reindex (DEFAULT)
 athenaeum session-end --session <id>      # scope new/changed detection to one session
 athenaeum session-end --full              # force a full recompile + full index rebuild
-athenaeum session-end --dry-run           # compile-check only; no writes, no reindex
+athenaeum session-end --dry-run           # cheap manifest-diff preview — no compile, no reindex, no model load
 ```
 
 Both steps are change-gated so an idle SessionEnd is cheap:

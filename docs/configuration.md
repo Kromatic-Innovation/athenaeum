@@ -48,6 +48,10 @@ Every default figure on this page is verified against the code under
 | Embedding cache root | — | `ATHENAEUM_CACHE_DIR` | — | `~/.cache/athenaeum` | Cache root used by the librarian's cluster pass (chromadb lives at `<dir>/wiki-vectors/`). The `recall` / `rebuild-index` commands do **not** read this var — they take `--cache-dir` (same default). |
 | Post-run git push | `--push` | — | `librarian.push_after_run` | off | Push the knowledge repo to its remote after a successful run that produced at least one commit (#284). Closes the move-then-retire recovery gap on multi-machine setups: without it, scheduled nightly runs commit locally but origin silently drifts. Uses the operator's ambient git auth (credential helper / SSH); athenaeum handles no tokens or secrets. `--dry-run` never pushes; a run with no new commits never pushes; a push failure is a non-fatal warning (`athenaeum-push-failed:`) and the next run retries. Remote/branch come from `librarian.push_remote` (default `origin`) and `librarian.push_branch` (default: current branch's upstream). |
 | Run-lock wait | `--wait` | `ATHENAEUM_LOCK_TIMEOUT` | `librarian.lock_timeout` | `0` | Default seconds a mutating command blocks for the single-machine run lock before failing (#309). `0` = fail-fast (name the holder, exit non-zero). The `--wait` flag overrides per-invocation. See the run-lock note below. |
+| Delta-scoped compile | — | — | `librarian.delta.enabled` | `true` | Enable delta-scoped incremental compile on the deterministic (`client=None`) path — `session-end` / `ingest` tier0 (#370). When on, re-cluster and re-merge only the clusters a change actually touches instead of the whole auto-memory corpus; byte-equivalent to the whole-corpus path. Set `false` to always compile whole-corpus. The nightly LLM `run` always stays whole-corpus regardless of this flag. `bool` yaml values are honored; anything else falls through to the `true` default. |
+| Delta affected-cluster cap | — | — | `librarian.delta.max_affected_clusters` | `8` | If a change would touch more than this many clusters, fall back to a full whole-corpus compile rather than churning most of the corpus through the delta path (#370). `bool` / non-positive / non-int values fall through to the default. |
+| Delta affected-member cap | — | — | `librarian.delta.max_affected_members` | `200` | If the affected-cluster member pool exceeds this many files, fall back to a full compile (#370). Bounds worst-case re-cluster cost so a pathological closure never does more work than a full run. `bool` / non-positive / non-int values fall through to the default. |
+| Full-rehash backstop age (days) | — | — | `librarian.reindex.full_rehash_max_age_days` | `7` | Self-healing periodic full re-hash backstop (#373). The #370 stat pre-filter reuses a stored content hash whenever a file's `(mtime, size)` match the index manifest; when the manifest has not had a full re-hash within this window, the next incremental reindex re-hashes **every** file (catching a content edit that preserved both mtime and size) while still applying only the delta — seconds, not a full re-embed / FTS5 rebuild. `0` or negative = always re-hash; a very large value = effectively never. `bool` / non-numeric values fall through to the default. |
 | API key | — | `ANTHROPIC_API_KEY` | — | (required) | Required for Tier 2/3 LLM calls. Optional with `--dry-run`, `--cluster-only`, or `--merge-only`. |
 
 > **Design decision — CLI rejects `0`, env/yaml accept it.** The
@@ -58,6 +62,14 @@ Every default figure on this page is verified against the code under
 > asymmetry is intentional, not an oversight (decided 2026-06-12; refs #235
 > and the #240 review). A run whose budget resolves to `0` logs a prominent
 > warning at start so an accidental zero is diagnosable immediately.
+
+> **Backstop guarantee (#373).** The #370 stat pre-filter reuses a stored
+> content hash when a file's `mtime` and `size` both match the manifest, so a
+> content edit that preserves BOTH would otherwise slip past an incremental
+> reindex indefinitely. `librarian.reindex.full_rehash_max_age_days` bounds that
+> worst case: such an edit is guaranteed to surface within
+> `full_rehash_max_age_days` (default ≤ 7 days), even if nothing else triggers a
+> re-hash in the meantime.
 
 Path and mode flags on `athenaeum run` (CLI-only): `--raw-root` and
 `--wiki-root` (default under the knowledge root), `--knowledge-root` /
@@ -310,6 +322,12 @@ librarian:
   lock_timeout: 0               # run-lock wait seconds; 0 = fail-fast (#309)
   page_warn_bytes: 8192         # warn on wiki pages over this size (#310)
   page_flag_bytes: 16384        # flag pages over this size for splitting (#310)
+  delta:
+    enabled: true               # delta-scoped incremental compile on client=None path (#370)
+    max_affected_clusters: 8    # > this many clusters touched => full compile (#370)
+    max_affected_members: 200   # > this many pooled members => full compile (#370)
+  reindex:
+    full_rehash_max_age_days: 7 # periodic full re-hash backstop; 0 = always re-hash (#373)
 
 models:
   classify: claude-haiku-4-5-20251001

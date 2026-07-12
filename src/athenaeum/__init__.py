@@ -8,7 +8,7 @@ Most functionality is exercised through the CLI subcommands
 ``athenaeum ingest-merges``,
 etc.) — see the CLI documentation in ``README.md`` and ``athenaeum --help``
 for the full subcommand list. Internal modules (``contradictions``,
-``merge``, ``clusters``, ``dedupe``, ``repair``, ``answers``,
+``merge``, ``clusters``, ``delta``, ``dedupe``, ``repair``, ``answers``,
 ``provenance``, ``resolutions``, ``json_utils``, ``retire``, ``owner``,
 ``transcript_verify``, ``wiki_dedupe``) are importable but not part of
 the stable public surface; their signatures may change between minor
