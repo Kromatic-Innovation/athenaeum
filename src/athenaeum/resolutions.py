@@ -4,7 +4,10 @@
 Sits between :func:`athenaeum.contradictions.detect_contradictions` (the
 cheap Haiku detector) and :func:`athenaeum.tiers.tier4_escalate` (the
 human-review writer). When the detector flags a cluster, the resolver
-proposes a winner using a 9-tier source-precedence taxonomy. The
+proposes a winner using a 9-tier source-precedence taxonomy (canonical
+tier list: the ``SOURCE-PRECEDENCE TAXONOMY`` block of ``_RESOLVE_SYSTEM``
+below — keep this ``9-tier`` count and the byte-exact golden snapshot
+``tests/data/resolve_system.txt`` in sync if the taxonomy changes). The
 proposal — winner, action, confidence, rationale, the precedence
 comparison the resolver leaned on — is rendered as an OPTIONAL trailing
 block on each ``_pending_questions.md`` entry. The user remains the
@@ -353,6 +356,12 @@ class MergeProposal:
 # ---------------------------------------------------------------------------
 # Prompt
 # ---------------------------------------------------------------------------
+#
+# DRIFT GUARD: the ``SOURCE-PRECEDENCE TAXONOMY`` inside this string is the
+# CANONICAL tier list. If you change the tier count or order, also update the
+# ``9-tier`` count in this module's docstring above AND regenerate the
+# byte-exact golden snapshot ``tests/data/resolve_system.txt`` (pinned by
+# ``tests/test_resolve_system_snapshot.py``) in the same commit.
 
 
 _RESOLVE_SYSTEM = """You are a resolver for an AI agent's long-term memory system.
