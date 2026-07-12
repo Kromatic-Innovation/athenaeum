@@ -854,6 +854,20 @@ def _run_cluster_pass(
         return 0
 
     threshold = resolve_cluster_threshold(knowledge_root, config=resolved_config)
+
+    # Issue #370: a dry-run must not cluster at all — ``cluster_auto_memory_files``
+    # opens the chromadb collection (loading ONNX) to fetch embeddings. Return
+    # BEFORE that call so a dry-run stays a cheap preview even if some other
+    # caller reaches this pass under dry_run (defense-in-depth: ``run()`` also
+    # guards the call site, and ``ingest(dry_run=True)`` no longer invokes run).
+    if dry_run:
+        log.info(
+            "  [DRY RUN] cluster pass: %d auto-memory file(s) — skipping "
+            "clustering (no chromadb/model load)",
+            len(auto_memory_files),
+        )
+        return 0
+
     cache_dir = Path(
         os.environ.get("ATHENAEUM_CACHE_DIR") or (Path.home() / ".cache" / "athenaeum")
     )
@@ -870,16 +884,6 @@ def _run_cluster_pass(
         len(clusters),
         threshold,
     )
-
-    if dry_run:
-        for c in clusters:
-            log.info(
-                "  [DRY RUN] cluster %s: %d member(s) centroid=%.2f",
-                c.cluster_id,
-                len(c.member_paths),
-                c.centroid_score,
-            )
-        return 0
 
     output_path = resolve_cluster_output_path(knowledge_root, config=resolved_config)
     canonical, timestamped = write_cluster_report(clusters, output_path)
@@ -1841,6 +1845,8 @@ def _raw_hash_snapshot(
     knowledge_root: Path,
     *,
     session: str | None = None,
+    prior_stats: dict[str, tuple[int, int, str]] | None = None,
+    out_stats: dict[str, tuple[int, int]] | None = None,
 ) -> dict[str, str]:
     """Map ``relpath -> sha256`` for every raw intake ``*.md`` under *raw_root*.
 
@@ -1850,6 +1856,14 @@ def _raw_hash_snapshot(
     When *session* is given, only files whose frontmatter ``originSessionId``
     matches are included (the per-session incremental gate #350 needs).
     Unreadable files are skipped.
+
+    Issue #370 stat pre-filter: ``prior_stats`` maps ``relpath ->
+    (mtime_ns, size, hash)`` from the last ingest manifest. When a file's
+    ``(mtime_ns, size)`` matches AND no ``session`` filter is active, the stored
+    hash is reused without reading the body. A ``session`` filter still reads
+    every file (it must parse ``originSessionId``) but reuses those bytes for the
+    hash. ``out_stats``, when provided, collects ``relpath -> (mtime_ns, size)``
+    for every included file so the caller can persist it for the next run.
     """
     snapshot: dict[str, str] = {}
     if not raw_root.exists():
@@ -1860,6 +1874,27 @@ def _raw_hash_snapshot(
         if fpath.name == ".gitkeep" or fpath.name in _AUTO_MEMORY_SKIP_NAMES:
             continue
         try:
+            st = fpath.stat()
+        except OSError:
+            continue
+        mtime_ns, size = st.st_mtime_ns, st.st_size
+        try:
+            rel = fpath.relative_to(knowledge_root).as_posix()
+        except ValueError:
+            rel = str(fpath)
+        prior = prior_stats.get(rel) if prior_stats else None
+        if (
+            session is None
+            and prior is not None
+            and prior[0] == mtime_ns
+            and prior[1] == size
+        ):
+            # Content unchanged since last stamp — reuse the stored hash.
+            snapshot[rel] = prior[2]
+            if out_stats is not None:
+                out_stats[rel] = (mtime_ns, size)
+            continue
+        try:
             data = fpath.read_bytes()
         except OSError:
             continue
@@ -1867,11 +1902,9 @@ def _raw_hash_snapshot(
             meta, _ = parse_frontmatter(data.decode("utf-8", errors="replace"))
             if str((meta or {}).get("originSessionId") or "") != session:
                 continue
-        try:
-            rel = fpath.relative_to(knowledge_root).as_posix()
-        except ValueError:
-            rel = str(fpath)
         snapshot[rel] = hashlib.sha256(data).hexdigest()
+        if out_stats is not None:
+            out_stats[rel] = (mtime_ns, size)
     return snapshot
 
 
@@ -1896,10 +1929,49 @@ def _load_ingest_manifest(path: Path) -> dict[str, str] | None:
     return {}
 
 
-def _write_ingest_manifest(path: Path, hashes: dict[str, str]) -> None:
-    """Atomically write the ingest stamp manifest (temp file + rename)."""
+def _load_ingest_manifest_stats(path: Path) -> dict[str, tuple[int, int]]:
+    """Load the ingest stamp's ``relpath -> (mtime_ns, size)`` stat map (#370).
+
+    Absent (a v1 manifest with no ``stats``) or malformed => ``{}``, which
+    forces a one-time full read+hash of every raw file and upgrades the manifest
+    to v2 on the next stamp. Rows that do not parse are skipped, never crashing.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    stats = data.get("stats")
+    if not isinstance(stats, dict):
+        return {}
+    out: dict[str, tuple[int, int]] = {}
+    for k, v in stats.items():
+        try:
+            out[str(k)] = (int(v[0]), int(v[1]))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out
+
+
+def _write_ingest_manifest(
+    path: Path,
+    hashes: dict[str, str],
+    stats: dict[str, tuple[int, int]] | None = None,
+) -> None:
+    """Atomically write the ingest stamp manifest (temp file + rename).
+
+    ``stats`` (issue #370) persists per-file ``(mtime_ns, size)`` so the next
+    run's stat pre-filter can skip re-reading unchanged raw files. Bumped to
+    ``version: 2`` when stats are written; ``hashes`` stays present for readers.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": 1, "hashes": hashes}
+    version = 2 if stats is not None else 1
+    payload: dict[str, Any] = {"version": version, "hashes": hashes}
+    if stats is not None:
+        payload["stats"] = {k: [v[0], v[1]] for k, v in stats.items()}
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     tmp.replace(path)
@@ -1948,19 +2020,61 @@ def ingest(
     manifest_path = _resolve_cache_dir(cache_dir) / INGEST_MANIFEST_NAME
     mode = "incremental" if incremental else "full"
 
+    stored = _load_ingest_manifest(manifest_path)
+    stored_stats = _load_ingest_manifest_stats(manifest_path)
+    # Issue #370: reuse the stored hash for raw files whose (mtime_ns, size) are
+    # unchanged since the last stamp, skipping the read+hash. Only names present
+    # in BOTH the stat map and the hash map are eligible (a v1 manifest has no
+    # stats → empty prior → every file is read once, then upgraded to v2).
+    raw_prior: dict[str, tuple[int, int, str]] = {
+        rel: (stored_stats[rel][0], stored_stats[rel][1], stored[rel])
+        for rel in stored_stats
+        if stored is not None and rel in stored
+    }
+
     # Snapshot the raw intake BEFORE compiling (keyed relpath -> hash). The
     # session-scoped view drives the new/changed gate; the unscoped view drives
     # both the stamp we persist and the consumed-file (``compiled``) count.
-    before = _raw_hash_snapshot(raw_root, knowledge_root, session=session)
+    # ``before_all_stats`` collects the unscoped (mtime_ns, size) for the stamp.
+    before_all_stats: dict[str, tuple[int, int]] = {}
+    before = _raw_hash_snapshot(
+        raw_root,
+        knowledge_root,
+        session=session,
+        prior_stats=raw_prior,
+        out_stats=(before_all_stats if session is None else None),
+    )
     before_all = (
-        before if session is None else _raw_hash_snapshot(raw_root, knowledge_root)
+        before
+        if session is None
+        else _raw_hash_snapshot(
+            raw_root,
+            knowledge_root,
+            prior_stats=raw_prior,
+            out_stats=before_all_stats,
+        )
     )
 
-    stored = _load_ingest_manifest(manifest_path)
     baseline = stored or {}
     added = [k for k in before if k not in baseline]
     changed = [k for k, h in before.items() if k in baseline and baseline[k] != h]
     new_or_changed = len(added) + len(changed)
+
+    # Issue #370: a dry-run is a pure manifest-diff PREVIEW — report the delta
+    # counts WITHOUT invoking the heavy compile (no clustering, no merge, no
+    # chromadb/ONNX). ``noop`` preserves its meaning (nothing new/changed) and a
+    # dry-run never stamps. Returning here also keeps ``run()`` off the dry-run
+    # path entirely (the cluster/merge guards below are defense-in-depth).
+    if dry_run:
+        return IngestResult(
+            mode=mode,
+            new_or_changed=new_or_changed,
+            compiled=0,
+            noop=new_or_changed == 0,
+            exit_code=0,
+            duration_ms=int((time.monotonic() - start) * 1000),
+            session=session,
+        )
 
     # Incremental fast no-op: a prior stamp exists and nothing is new/changed.
     # Never invoke the compile — and leave the stamp untouched. Rewriting it
@@ -1995,7 +2109,7 @@ def ingest(
     # that appeared mid-run are absent here, so they correctly surface as
     # ``added`` next run. A failed compile leaves the stamp untouched (retry).
     if exit_code == 0 and not dry_run:
-        _write_ingest_manifest(manifest_path, before_all)
+        _write_ingest_manifest(manifest_path, before_all, stats=before_all_stats)
 
     return IngestResult(
         mode=mode,
@@ -2061,6 +2175,59 @@ def reindex(
     return backend_name, pages
 
 
+def _reindex_would_change(
+    knowledge_root: Path,
+    wiki_root: Path,
+    *,
+    cache_dir: Path | None,
+    config: dict[str, object],
+    backend: str | None,
+) -> int | None:
+    """Cheap dry-run preview of how many pages a reindex would touch (#370).
+
+    Diffs the current wiki against the vector/fts5 index manifest — the SAME
+    ``added + changed + removed`` delta :func:`reindex` would apply — but WITHOUT
+    opening chromadb or loading any embedding model. The scan reuses the #370
+    stat pre-filter, so it re-hashes only changed files. Returns the delta count,
+    or ``None`` when it cannot be computed cheaply (no wiki dir).
+    """
+    from athenaeum.config import resolve_index_globs
+    from athenaeum.search import (
+        _FTS5_MANIFEST,
+        _VECTOR_MANIFEST,
+        _compute_delta,
+        _load_manifest,
+        _manifest_hashes,
+        _scan_indexed_records,
+        _scan_prior,
+    )
+
+    if not wiki_root.is_dir():
+        return None
+    resolved_cache = _resolve_cache_dir(cache_dir)
+    backend_name = backend or str(config.get("search_backend", "fts5"))
+    manifest_name = _VECTOR_MANIFEST if backend_name == "vector" else _FTS5_MANIFEST
+    manifest_path = resolved_cache / manifest_name
+    extra_roots = resolve_extra_intake_roots(knowledge_root, config)
+    include_globs, exclude_globs = resolve_index_globs(config)
+
+    stored = _load_manifest(manifest_path)
+    prior = _scan_prior(stored) if stored is not None else None
+    current_hashes = {
+        name: h
+        for name, _p, h, _t, _m, _s in _scan_indexed_records(
+            wiki_root,
+            extra_roots,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            prior=prior,
+        )
+    }
+    stored_hashes = _manifest_hashes(stored)
+    added, changed, removed = _compute_delta(current_hashes, stored_hashes)
+    return len(added) + len(changed) + len(removed)
+
+
 @dataclass
 class SessionEndResult:
     """Summary of a :func:`session_end` invocation (issue #350).
@@ -2077,6 +2244,11 @@ class SessionEndResult:
     backend: str
     duration_ms: int
     session: str | None = None
+    # Issue #370: on a dry-run, a cheap manifest hash-diff of how many pages a
+    # real reindex WOULD touch — computed WITHOUT opening chromadb or loading a
+    # model. ``None`` on a non-dry-run, or when it could not be computed cheaply.
+    dry_run: bool = False
+    reindex_would_change: int | None = None
 
     @property
     def exit_code(self) -> int:
@@ -2094,6 +2266,14 @@ class SessionEndResult:
             "duration_ms": self.duration_ms,
             "exit_code": self.exit_code,
         }
+        if self.dry_run:
+            # Cheap preview: how many pages a reindex would touch. ``null`` here
+            # means it could not be computed without chromadb (never loaded one).
+            data["reindex_would_change"] = self.reindex_would_change
+            if self.reindex_would_change is None:
+                data["reindex_would_change_note"] = (
+                    "not computed (no index manifest / wiki); " "chromadb not opened"
+                )
         if self.session is not None:
             data["session"] = self.session
         return data
@@ -2155,6 +2335,7 @@ def session_end(
     backend_name = backend or str(config.get("search_backend", "fts5"))
     reindexed = False
     reindex_pages = 0
+    reindex_would_change: int | None = None
 
     # Change-gate the index step: reindex only when the compile actually ran
     # (wiki may have changed) AND succeeded, and never on a dry-run. An idle
@@ -2163,6 +2344,17 @@ def session_end(
         not ingest_result.noop and ingest_result.exit_code == 0 and not dry_run
     )
     if should_reindex:
+        # Issue #370: announce the planned work BEFORE the (potentially minutes-
+        # long) reindex so the run does not look like a silent hang.
+        log.info(
+            "session-end: %d new/changed raw (compiled %d); reindexing wiki "
+            "(%s backend)…",
+            ingest_result.new_or_changed,
+            ingest_result.compiled,
+            backend_name,
+        )
+        sys.stdout.flush()
+        sys.stderr.flush()
         backend_name, reindex_pages = reindex(
             knowledge_root=knowledge_root,
             wiki_root=wiki_root,
@@ -2171,7 +2363,19 @@ def session_end(
             backend=backend,
             incremental=incremental,
         )
+        log.info("session-end: reindex complete — %d page(s) indexed", reindex_pages)
         reindexed = True
+    elif dry_run:
+        # Issue #370: cheap dry-run preview — count how many pages a reindex
+        # WOULD touch via a manifest hash-diff (the SAME delta reindex applies)
+        # WITHOUT opening chromadb or loading any embedding model.
+        reindex_would_change = _reindex_would_change(
+            knowledge_root,
+            wiki_root,
+            cache_dir=cache_dir,
+            config=config,
+            backend=backend,
+        )
 
     return SessionEndResult(
         ingest=ingest_result,
@@ -2180,4 +2384,6 @@ def session_end(
         backend=backend_name,
         duration_ms=int((time.monotonic() - start) * 1000),
         session=session,
+        dry_run=dry_run,
+        reindex_would_change=reindex_would_change,
     )

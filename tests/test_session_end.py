@@ -232,6 +232,48 @@ class TestSessionEndComposition:
         assert not (cache / "ingest-manifest.json").exists()
         assert list((root / "raw" / "sessions").glob("2024*.md"))
 
+    def test_dry_run_previews_without_compile_cluster_or_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dry-run is a pure manifest-diff preview (#370): NO compile, NO
+        clustering, NO chromadb/ONNX — yet it still reports the deltas."""
+        import athenaeum.librarian as lib
+
+        def _boom(*_a: object, **_k: object) -> object:
+            raise AssertionError("must not run on a dry-run")
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        # The heavy compile pipeline (run → cluster → chromadb) must never fire.
+        monkeypatch.setattr(lib, "run", _boom)
+        monkeypatch.setattr(lib, "cluster_auto_memory_files", _boom)
+
+        result = lib.session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+            dry_run=True,
+        )
+        assert result.dry_run is True
+        assert result.reindexed is False
+        # The preview still counts the new raw file...
+        assert result.ingest.new_or_changed == 1
+        assert result.ingest.noop is False
+        # ...and reports a cheap wiki-diff reindex preview (no chromadb opened).
+        assert result.reindex_would_change is not None
+        assert result.reindex_would_change >= 0
+        # No compile side effects: no wiki page, no stamp, raw preserved.
+        assert not list((root / "wiki").glob("p-0001-*.md"))
+        assert not (cache / "ingest-manifest.json").exists()
+        assert list((root / "raw" / "sessions").glob("2024*.md"))
+        # The JSON summary surfaces the preview count.
+        summary = result.summary()
+        assert summary["reindex_would_change"] == result.reindex_would_change
+
     def test_full_forces_recompile_and_full_reindex(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
