@@ -2380,7 +2380,11 @@ def reindex(
     no-op when the wiki has not changed since the last build. A ``vector``
     backend that is not installed raises ``ImportError`` to the caller.
     """
-    from athenaeum.config import resolve_embedding_model, resolve_index_globs
+    from athenaeum.config import (
+        resolve_embedding_model,
+        resolve_index_globs,
+        resolve_reindex_full_rehash_max_age_days,
+    )
     from athenaeum.search import build_fts5_index, build_vector_index
 
     if wiki_root is None:
@@ -2392,6 +2396,9 @@ def reindex(
     backend_name = backend or str(config.get("search_backend", "fts5"))
     extra_roots = resolve_extra_intake_roots(knowledge_root, config)
     include_globs, exclude_globs = resolve_index_globs(config)
+    full_rehash_max_age_days = resolve_reindex_full_rehash_max_age_days(
+        knowledge_root, config
+    )
 
     if backend_name == "vector":
         pages = build_vector_index(
@@ -2402,6 +2409,7 @@ def reindex(
             include_globs=include_globs,
             exclude_globs=exclude_globs,
             embedding_model=resolve_embedding_model(config),
+            full_rehash_max_age_days=full_rehash_max_age_days,
         )
     else:
         pages = build_fts5_index(
@@ -2411,6 +2419,7 @@ def reindex(
             incremental=incremental,
             include_globs=include_globs,
             exclude_globs=exclude_globs,
+            full_rehash_max_age_days=full_rehash_max_age_days,
         )
     return backend_name, pages
 

@@ -1780,6 +1780,7 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
         resolve_embedding_model,
         resolve_extra_intake_roots,
         resolve_index_globs,
+        resolve_reindex_full_rehash_max_age_days,
     )
     from athenaeum.search import build_fts5_index, build_vector_index
 
@@ -1805,6 +1806,9 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
     extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
     include_globs, exclude_globs = resolve_index_globs(cfg)
     embedding_model = resolve_embedding_model(cfg)
+    full_rehash_max_age_days = resolve_reindex_full_rehash_max_age_days(
+        knowledge_root, cfg
+    )
     incremental = not getattr(args, "full", False)
 
     # Issue #308: an as-of index reflects a past date's validity windows and is
@@ -1833,6 +1837,7 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
                     exclude_globs=exclude_globs,
                     embedding_model=embedding_model,
                     as_of=as_of,
+                    full_rehash_max_age_days=full_rehash_max_age_days,
                 )
             except ImportError as exc:
                 print(f"Vector backend unavailable: {exc}", file=sys.stderr)
@@ -1855,6 +1860,7 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
                 include_globs=include_globs,
                 exclude_globs=exclude_globs,
                 as_of=as_of,
+                full_rehash_max_age_days=full_rehash_max_age_days,
             )
             print(
                 f"FTS5 index rebuilt{as_of_note} ({mode}): {count} pages "
