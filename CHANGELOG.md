@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Session-end / incremental-compile efficiency (issue #370) plus a self-healing
 index backstop (#373). No public API change; opt-in config knobs only.
 
+> **Upgrade note:** `session-end --dry-run` changed semantics — it is now a
+> cheap manifest-diff preview (no compile, no cluster/merge, no chromadb, no
+> embedding-model load), not a whole-corpus compile-check. If you relied on
+> `--dry-run` to smoke-test a compile, run `session-end --full` (or a real
+> `run`) instead. See the behavior note below.
+
 ### Changed — behavior
 
 - **`session-end --dry-run` is now a cheap manifest-diff preview (#370).** It no
