@@ -36,7 +36,9 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum.config import load_config
+from athenaeum.clusters import DEFAULT_CLUSTER_THRESHOLD
+from athenaeum.config import load_config, resolve_extra_intake_roots
+from athenaeum.delta import compute_affected_clusters
 from athenaeum.librarian import _compile_auto_memory, discover_auto_memory_files
 from athenaeum.merge import read_cluster_rows, resolve_cluster_output_path
 
@@ -382,3 +384,172 @@ def test_no_changed_paths_is_byte_identical_to_full(
     rerun = _make_branch(golden, tmp_path / "rerun")
     _compile(rerun, changed=None, monkeypatch=monkeypatch)
     assert _read_wiki(rerun) == golden_wiki
+
+
+# ---------------------------------------------------------------------------
+# Chain topology: A–B–C where B is the SOLE bridge holding C (probed cosines:
+# A~B=0.61, B~C=0.77, A~C=0.16 — so {A,B,C} is ONE single-linkage cluster).
+# Changing B to drop the B~C link must repartition the WHOLE prior cluster.
+# ---------------------------------------------------------------------------
+
+# B mixes both topics (== the bridge recipe) so it links A (voltaire) and C
+# (pgvector); A and C do not link each other. Kept verbatim for stable cosines.
+# Filenames are chosen so the post-split clusters derive DISTINCT topic slugs
+# ({A,B} → "inbox/triage/bridge", {C} → "pgvector/store"), exercising the clean
+# delta path rather than the F6 slug-collision fallback (covered separately).
+_CHAIN_B = f"{_A} {_A} {_B} {_B}"
+_CHAIN_DOCK = BASE_FILES["gamma"]["reference_docker_orphan_a.md"]
+
+_CHAIN_MEMBERS = [
+    "chain/project_inbox_triage_a.md",
+    "chain/project_inbox_triage_bridge.md",
+    "chain/reference_pgvector_store.md",
+]
+
+
+def _write_chain_base(root: Path, b_body: str) -> None:
+    _write_am_file(root, "chain", "project_inbox_triage_a.md", _A)
+    _write_am_file(root, "chain", "project_inbox_triage_bridge.md", b_body)
+    _write_am_file(root, "chain", "reference_pgvector_store.md", _B)
+    # An unrelated singleton, to prove delta leaves untouched entries alone.
+    _write_am_file(root, "misc", "reference_docker_note.md", _CHAIN_DOCK)
+    _write_config(root)
+    (root / "wiki").mkdir(parents=True, exist_ok=True)
+
+
+def _break_bridge(root: Path) -> set[Path]:
+    """Rewrite B to a pure-A near-dup so it no longer links C (B~C falls below)."""
+    p = root / "raw" / "auto-memory" / "chain" / "project_inbox_triage_bridge.md"
+    p.write_text(
+        f"---\nname: project_inbox_triage_bridge\ntype: auto-memory\n---\n{_A}\n",
+        encoding="utf-8",
+    )
+    return {p}
+
+
+def test_chain_transitive_repartition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single-linkage chain A–B–C repartitions correctly when the sole bridge
+    B changes: the WHOLE prior cluster {A,B,C} is pooled and re-clustered, so C
+    (unchanged, and no longer linked by B) is split off — matching a full run.
+    """
+    pytest.importorskip("chromadb")
+
+    golden = tmp_path / "chain-golden"
+    _write_chain_base(golden, _CHAIN_B)
+    _build_index(golden)
+    _compile(golden, changed=None, monkeypatch=monkeypatch)
+
+    # Sanity: GOLDEN really is the A–B–C chain as one cluster + a docker singleton.
+    gmem = _cluster_membership(golden)
+    assert any(
+        sorted(m) == _CHAIN_MEMBERS for m in gmem.values()
+    ), f"expected the A-B-C chain as one cluster, got {list(gmem.values())}"
+    golden_wiki = _read_wiki(golden)
+    golden_mtimes = _wiki_mtimes(golden)
+
+    # (a) Pin the closure: compute_affected_clusters must pool the ENTIRE prior
+    #     cluster {A,B,C} even though changed B no longer links C.
+    probe = _make_branch(golden, tmp_path / "chain-probe")
+    changed = _break_bridge(probe)
+    _reindex(probe)
+    monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(probe / ".cache"))
+    config = load_config(probe)
+    files = discover_auto_memory_files(probe, config=config)
+    prior_rows = read_cluster_rows(resolve_cluster_output_path(probe, config=config))
+    scope = compute_affected_clusters(
+        changed,
+        prior_rows,
+        files,
+        extra_roots=resolve_extra_intake_roots(probe),
+        cache_dir=probe / ".cache",
+        threshold=DEFAULT_CLUSTER_THRESHOLD,
+        max_affected_clusters=8,
+        max_affected_members=200,
+    )
+    assert scope is not None
+    assert sorted(p.name for p in (f.path for f in scope.pool)) == [
+        "project_inbox_triage_a.md",
+        "project_inbox_triage_bridge.md",
+        "reference_pgvector_store.md",
+    ]
+
+    # (b) Full == delta, byte-for-byte + membership, and C split into a singleton.
+    branch_a = _make_branch(golden, tmp_path / "chain-A")
+    _break_bridge(branch_a)
+    _reindex(branch_a)
+    _compile(branch_a, changed=None, monkeypatch=monkeypatch)
+
+    branch_b = _make_branch(golden, tmp_path / "chain-B")
+    changed_b = _break_bridge(branch_b)
+    _reindex(branch_b)
+    _compile(branch_b, changed=changed_b, monkeypatch=monkeypatch)
+
+    wiki_a = _read_wiki(branch_a)
+    wiki_b = _read_wiki(branch_b)
+    assert wiki_a == wiki_b
+    assert _cluster_membership(branch_a) == _cluster_membership(branch_b)
+    # C really was repartitioned out into its own cluster.
+    assert any(
+        m == ["chain/reference_pgvector_store.md"]
+        for m in _cluster_membership(branch_b).values()
+    ), "C should split into its own singleton cluster after the bridge breaks"
+
+    # The unrelated docker singleton is untouched (byte + mtime) by the delta.
+    affected = {
+        name
+        for name in set(golden_wiki) | set(wiki_a)
+        if golden_wiki.get(name) != wiki_a.get(name)
+    }
+    b_mtimes = _wiki_mtimes(branch_b)
+    for name, gbytes in golden_wiki.items():
+        if name in affected:
+            continue
+        assert wiki_b[name] == gbytes
+        assert (
+            b_mtimes[name] == golden_mtimes[name]
+        ), f"untouched {name} was rewritten by delta"
+
+
+def test_f6_slug_collision_falls_back(
+    golden: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An affected entry's base slug colliding with another corpus entry trips
+    the F6 guard → full whole-corpus fallback (WARNING logged; delta == full).
+
+    Rewriting alpha's ``project_voltaire_triage_c`` body to a distinct topic
+    makes it LEAVE the alpha cluster as a singleton — but it keeps its
+    voltaire/triage filename, so its derived base slug still equals the shrunken
+    alpha cluster's slug. ``_delta_slug_collision`` detects that and forces a
+    full compile (the subset merge could otherwise pick a divergent suffix).
+    """
+
+    def mutate(root: Path) -> set[Path]:
+        p = root / "raw" / "auto-memory" / "alpha" / "project_voltaire_triage_c.md"
+        p.write_text(
+            "---\nname: project_voltaire_triage_c\ntype: auto-memory\n---\n"
+            f"{_NEW_TOPIC}\n",
+            encoding="utf-8",
+        )
+        return {p}
+
+    branch_a = _make_branch(golden, tmp_path / "f6-A")
+    mutate(branch_a)
+    _reindex(branch_a)
+    _compile(branch_a, changed=None, monkeypatch=monkeypatch)
+
+    branch_b = _make_branch(golden, tmp_path / "f6-B")
+    changed = mutate(branch_b)
+    _reindex(branch_b)
+    with caplog.at_level(logging.WARNING, logger="athenaeum"):
+        _compile(branch_b, changed=changed, monkeypatch=monkeypatch)
+
+    assert any(
+        "collides run-globally (F6)" in rec.getMessage() for rec in caplog.records
+    ), "expected an F6 slug-collision WARNING"
+    assert _read_wiki(branch_a) == _read_wiki(branch_b)
+    assert _cluster_membership(branch_a) == _cluster_membership(branch_b)

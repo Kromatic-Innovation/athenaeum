@@ -61,7 +61,6 @@ from athenaeum.config import (
     resolve_push_remote,
     resolve_retire,
 )
-from athenaeum.cross_scope import resolve_cross_scope_mode
 from athenaeum.delta import compute_affected_clusters, splice_cluster_report
 from athenaeum.ephemeral import classify_ephemeral
 from athenaeum.merge import (
@@ -1068,24 +1067,28 @@ def _compile_auto_memory(
     pre-flight refuses a keyless ``api``-provider full pipeline, so the test
     cannot reach this logic through run()).
 
-    Delta is enabled ONLY on the deterministic ``client=None`` path (session_end
-    / ingest tier0). The nightly LLM run — a live client with cross-scope
-    contradiction detection active — MUST stay whole-corpus (fallback trigger
-    D5). All new params default to the whole-corpus behaviour, so a call with
-    ``changed_paths=None`` is byte-identical to the pre-#370 pipeline.
+    Delta is enabled ONLY on the deterministic ``client is None`` path
+    (session_end / ingest tier0, no LLM). The nightly LLM run — any live client —
+    MUST stay whole-corpus (fallback trigger D5). This gates on ``client is
+    None`` rather than the cross-scope mode because the PRIMARY per-cluster
+    contradiction detector (``detect_contradictions`` inside the merge loop) runs
+    for EVERY mode, including ``cross_scope_mode == 'off'`` — only the extra
+    cross-scope similarity sweep is mode-gated. Scoping the merge to the affected
+    clusters would therefore make a live-client run's escalation sidecars
+    (``_pending_questions.md`` / ``_pending_merges.md`` / the resolved cache)
+    diverge from a full compile. All new params default to the whole-corpus
+    behaviour, so a call with ``changed_paths=None`` is byte-identical to the
+    pre-#370 pipeline.
     """
     delta_enabled = resolve_delta_enabled(config)
-    cross_scope_active = resolve_cross_scope_mode(config) != "off"
-    llm_mode = client is not None and cross_scope_active
     delta_eligible = (
-        not dry_run and changed_paths is not None and delta_enabled and not llm_mode
+        not dry_run and changed_paths is not None and delta_enabled and client is None
     )
     if changed_paths is not None and not delta_eligible and not dry_run:
-        if llm_mode:
+        if client is not None:
             log.warning(
-                "delta: LLM contradiction mode active (client set, "
-                "cross_scope_mode=%s) — whole-corpus compile (D5)",
-                resolve_cross_scope_mode(config),
+                "delta: live LLM client — whole-corpus compile so contradiction "
+                "escalations stay corpus-consistent (D5)"
             )
         elif not delta_enabled:
             log.info(

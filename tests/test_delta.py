@@ -222,15 +222,29 @@ def _capture_compile(monkeypatch):
     return seen
 
 
-def test_d5_llm_mode_forces_whole_corpus(tmp_path: Path, monkeypatch) -> None:
-    """client set + cross_scope_mode != off → delta vetoed (whole-corpus)."""
+@pytest.mark.parametrize("cross_scope_mode", ["ancestor", "off"])
+def test_d5_live_client_forces_whole_corpus(
+    tmp_path: Path, monkeypatch, cross_scope_mode: str
+) -> None:
+    """ANY live client → delta vetoed (whole-corpus), REGARDLESS of the mode.
+
+    The gate keys on ``client is None``, not the cross-scope mode, because the
+    PRIMARY per-cluster contradiction detector runs even at ``mode='off'`` — so
+    a scoped merge under a live client would diverge the escalation sidecars
+    from a full compile. Both ``ancestor`` (sweep active) and ``off`` (sweep
+    disabled, but the per-cluster detector still fires) must stay whole-corpus.
+    """
     root = tmp_path
-    _config(root)
+    (root / "athenaeum.yaml").write_text(
+        "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n"
+        f"contradiction:\n  cross_scope_mode: {cross_scope_mode}\n"
+    )
+    (root / "wiki").mkdir(parents=True, exist_ok=True)
     p = _write_am(root, "alpha", "project_x.md", "content")
     from athenaeum.config import load_config
     from athenaeum.librarian import discover_auto_memory_files
 
-    config = load_config(root)  # default cross_scope_mode = ancestor (active)
+    config = load_config(root)
     files = discover_auto_memory_files(root, config=config)
     seen = _capture_compile(monkeypatch)
     lib._compile_auto_memory(

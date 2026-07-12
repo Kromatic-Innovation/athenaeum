@@ -29,6 +29,20 @@ so the caller runs a full whole-corpus compile, logging the reason):
 - D2  closure blow-up: affected clusters or pooled members exceed the caps.
 - D3  a CHANGED (non-new) file that should be indexed missed chromadb — its
       only vector is the hashing fallback, so its neighbors are untrustworthy.
+
+First-delta-after-deploy migration edge (harmless, self-healing):
+
+The cluster_id stabilization (PR2 step 1) content-addresses new ids, but a delta
+run only rewrites the AFFECTED rows — unaffected rows keep whatever id the prior
+report already held, including the OLD positional ``<scope>-<seq>`` ids from a
+pre-PR2 report. If an unaffected entry's topic slug fell back to its cluster_id
+(no usable filename tokens) OR was disambiguated by a cluster_id suffix on a slug
+collision, that entry keeps its ``auto-<positional-id>.md`` filename until a full
+run re-content-addresses every row. This is harmless: recall reads ALL
+``auto-*.md`` regardless of filename, the entry's CONTENT is unchanged, and the
+first nightly whole-corpus ``run`` (no ``changed_paths``) rewrites the entire
+report with content-addressed ids and heals the naming. Delta never deletes the
+stale-named orphan (F5 parity — full runs leak orphans identically).
 """
 
 from __future__ import annotations
