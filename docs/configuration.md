@@ -318,6 +318,40 @@ the `scope_a` / `scope_b` resolver actions are documented in
 chromadb and the `wiki` collection name. Setting either key has no effect
 today.
 
+## Kill switch (`athenaeum disable` / `enable`, #379)
+
+One discoverable, reversible way to stop all athenaeum background work — no
+hand-editing of `~/.claude/settings.json` and no `pkill`. Every entry point
+(the `session-end` compile pass, the MCP write tools, and the example shell
+hooks) checks the same state before doing anything.
+
+| Action | Effect |
+|---|---|
+| `athenaeum disable` | Turns **everything** off — compile, contradiction detection, recall, notifications (scope `all`). |
+| `athenaeum disable --compile` | Granular: stops only the expensive compile/detect pass; recall stays on (scope `compile`). |
+| `athenaeum disable --reason "..."` | Records a note shown by `athenaeum status`. |
+| `athenaeum enable` | Removes the state file and restores prior behaviour exactly. |
+| `athenaeum status` | Reports on/off, scope, and reason (in addition to the knowledge-base summary). |
+
+**State file.** The state lives at `$ATHENAEUM_CACHE_DIR/disabled` (default
+`~/.cache/athenaeum/disabled`; `--cache-dir` overrides it on the kill-switch
+commands). Its mere presence means "disabled at scope `all`" unless the file
+says `compile` — so an emergency `touch ~/.cache/athenaeum/disabled` is a valid
+full-off, and `rm` re-enables. The shell hooks read this file directly with
+`grep`, so the per-turn recall path pays no Python startup.
+
+**Env override.** `ATHENAEUM_DISABLED` beats the file: `1` / `true` / `yes` /
+`on` / `all` force scope `all`; `compile` forces scope `compile`; `0` / `false`
+/ `off` / unset defer to the file (an explicit `0` does **not** force-enable
+past a state file). `athenaeum enable` warns when the env is still forcing it
+off.
+
+| Scope | `session-end` compile / detectors | Recall hooks + MCP writes | Notifications |
+|---|---|---|---|
+| _(enabled)_ | on | on | on |
+| `compile` | **off** | on | on |
+| `all` | **off** | **off** | **off** |
+
 ## Hook / sidecar environment (examples/claude-code)
 
 These are read by the example shell hooks, not by the Python package. Setup
@@ -339,6 +373,8 @@ guide: [`examples/claude-code/README.md`](../examples/claude-code/README.md).
 | `ATHENAEUM_PQ_HOOK_DEBUG` | `0` | `1` logs `pending-questions-surface.sh` diagnostics to stderr |
 | `AUTO_RECALL` | from `athenaeum.yaml` (`true`) | Shell-env override for per-turn recall |
 | `SEARCH_BACKEND` | from `athenaeum.yaml` (`fts5`) | Shell-env override for the search backend |
+| `ATHENAEUM_DISABLED` | _(unset)_ | Kill switch (#379) — `all`/`1`/`true` no-ops every hook; `compile` stops only the compile pass. Beats the `disabled` state file. See [Kill switch](#kill-switch-athenaeum-disable--enable-379). |
+| `ATHENAEUM_CACHE_DIR` | `~/.cache/athenaeum` | Cache dir the hooks look in for the kill-switch `disabled` state file. |
 
 ## Alternative model gateways (`ANTHROPIC_BASE_URL`)
 

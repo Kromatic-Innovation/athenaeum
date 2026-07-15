@@ -32,6 +32,22 @@
 
 set -euo pipefail
 
+# ── Kill switch (issue #379) ───────────────────────────────────────────────
+# Honour ~/.cache/athenaeum/disabled (+ ATHENAEUM_DISABLED). Mirrors
+# athenaeum.killswitch.is_disabled("recall"): the "all" scope no-ops this
+# injection; the "compile" scope leaves recall on. Costs no Python startup.
+__athenaeum_recall_disabled() {
+  case "${ATHENAEUM_DISABLED:-}" in
+    1 | true | yes | on | all) return 0 ;;
+    compile) return 1 ;;
+  esac
+  local f="${ATHENAEUM_CACHE_DIR:-$HOME/.cache/athenaeum}/disabled"
+  [ -f "$f" ] || return 1
+  grep -Eq '"scope"[[:space:]]*:[[:space:]]*"compile"|^[[:space:]]*compile[[:space:]]*$' "$f" 2>/dev/null && return 1
+  return 0
+}
+__athenaeum_recall_disabled && exit 0
+
 KNOWLEDGE_ROOT="${KNOWLEDGE_ROOT:-$HOME/knowledge}"
 WIKI_ROOT="${KNOWLEDGE_WIKI_PATH:-$KNOWLEDGE_ROOT/wiki}"
 SKIP_WORDS="${ATHENAEUM_INJECT_SKIP_WORDS:-Code|Users|home|workspace|src|lib|app|var|tmp|usr}"
