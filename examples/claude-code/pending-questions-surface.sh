@@ -44,6 +44,22 @@
 
 set -euo pipefail
 
+# ── Kill switch (issue #379) ───────────────────────────────────────────────
+# Honour ~/.cache/athenaeum/disabled (+ ATHENAEUM_DISABLED). Mirrors
+# athenaeum.killswitch.is_disabled("recall"): the "all" scope silences these
+# notifications; the "compile" scope leaves them on. Costs no Python startup.
+__athenaeum_recall_disabled() {
+  case "${ATHENAEUM_DISABLED:-}" in
+    1 | true | yes | on | all) return 0 ;;
+    compile) return 1 ;;
+  esac
+  local f="${ATHENAEUM_CACHE_DIR:-$HOME/.cache/athenaeum}/disabled"
+  [ -f "$f" ] || return 1
+  grep -Eq '"scope"[[:space:]]*:[[:space:]]*"compile"|^[[:space:]]*compile[[:space:]]*$' "$f" 2>/dev/null && return 1
+  return 0
+}
+__athenaeum_recall_disabled && exit 0
+
 KNOWLEDGE_ROOT="${KNOWLEDGE_ROOT:-$HOME/knowledge}"
 CACHE_DIR="${HOME}/.cache/athenaeum"
 SNOOZE_FILE="${CACHE_DIR}/pending-questions-snoozed-until"

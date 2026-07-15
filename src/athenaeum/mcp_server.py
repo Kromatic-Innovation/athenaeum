@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from athenaeum.killswitch import is_disabled
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
     SOURCE_TYPES,
@@ -28,6 +29,27 @@ from athenaeum.provenance import resolve_remember_extras, resolve_remember_sourc
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
 
 log = logging.getLogger(__name__)
+
+# Kill switch (issue #379): message + dict returned by the mutating MCP tools
+# when athenaeum is disabled at the ``all`` scope. Capture/resolve are the
+# "capture" aspect — a ``--compile`` scope leaves them on.
+_KILL_SWITCH_MSG = (
+    "athenaeum is disabled (kill switch, issue #379): knowledge writes are off. "
+    "Run 'athenaeum enable' to restore."
+)
+
+
+def _kill_switch_result() -> dict:
+    """Structured refusal for the ``resolve_*`` tools (mirrors their dict shape)."""
+    return {
+        "ok": False,
+        "error_code": "disabled",
+        "message": _KILL_SWITCH_MSG,
+        "resolved_block": None,
+        # legacy aliases (see resolve_question / resolve_merge):
+        "block": None,
+        "error": _KILL_SWITCH_MSG,
+    }
 
 # Default wiki-level source stamped onto remember() writes when the caller
 # does not supply ``sources``. ``claude:inferred`` is intentionally
@@ -693,6 +715,8 @@ def create_server(
         Returns:
             Confirmation message with the file path.
         """
+        if is_disabled("capture", cache_dir=cache_dir):
+            return _KILL_SWITCH_MSG
         return remember_write(
             raw_root,
             content,
@@ -753,6 +777,9 @@ def create_server(
             (= ``message`` on failure). New callers should prefer
             ``error_code`` + ``message`` + ``resolved_block``.
         """
+        if is_disabled("capture", cache_dir=cache_dir):
+            return _kill_switch_result()
+
         from athenaeum.answers import resolve_by_id
 
         result = resolve_by_id(
@@ -820,6 +847,9 @@ def create_server(
             New callers should prefer ``error_code`` + ``message`` +
             ``resolved_block``.
         """
+        if is_disabled("capture", cache_dir=cache_dir):
+            return _kill_switch_result()
+
         from athenaeum.pending_merges import resolve_merge as _resolve_merge
 
         if decision not in ("approve", "reject"):
