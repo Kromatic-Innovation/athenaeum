@@ -534,3 +534,133 @@ class TestPendingQuestionsSurface:
         assert result.returncode == 0
         assert "[Pending memory questions]" in result.stdout
         assert "1 unresolved" in result.stdout
+
+
+class TestKillSwitchHooks:
+    """The hooks honour the kill-switch state file / env (issue #379).
+
+    The Python side of the same contract is in ``test_kill_switch.py``; these
+    assert the bash guards agree — ``all`` scope no-ops every hook, ``compile``
+    scope leaves the recall hooks running, and ``ATHENAEUM_DISABLED`` overrides
+    the file.
+    """
+
+    def _write_disabled(self, home: Path, body: str) -> None:
+        cache = home / ".cache" / "athenaeum"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "disabled").write_text(body)
+
+    def test_session_start_noops_when_disabled_all(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        self._write_disabled(tmp_path, '{"scope": "all"}')
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0
+        # No index build happened — the config.env / index db are never written.
+        assert not (tmp_path / ".cache" / "athenaeum" / "config.env").exists()
+        assert not (tmp_path / ".cache" / "athenaeum" / "wiki-index.db").exists()
+
+    def test_session_start_runs_under_compile_scope(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._write_disabled(tmp_path, '{"scope": "compile"}')
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0
+        # compile scope leaves recall on — the index IS built.
+        assert (tmp_path / ".cache" / "athenaeum" / "wiki-index.db").is_file()
+
+    def test_env_override_noops_session_start(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        env = dict(hook_env)
+        env["ATHENAEUM_DISABLED"] = "1"
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0
+        assert not (tmp_path / ".cache" / "athenaeum" / "config.env").exists()
+
+    def test_empty_disabled_file_noops(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        # An emergency `touch $cache/disabled` (empty file) counts as all-off.
+        self._write_disabled(tmp_path, "")
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0
+        assert not (tmp_path / ".cache" / "athenaeum" / "config.env").exists()
+
+    def test_user_prompt_recall_noops_when_disabled(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        self._write_disabled(tmp_path, '{"scope": "all"}')
+        stdin_payload = json.dumps(
+            {"prompt": "customer development", "session_id": "kill-switch-test"}
+        )
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            env=hook_env,
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+    def test_pending_questions_silent_when_disabled(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        self._write_disabled(tmp_path, '{"scope": "all"}')
+        result = subprocess.run(
+            ["bash", str(PENDING_QUESTIONS)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+    def test_rebuild_index_noops_when_disabled(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        self._write_disabled(tmp_path, '{"scope": "all"}')
+        result = subprocess.run(
+            ["bash", str(REBUILD_INDEX)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0
+        assert not (tmp_path / ".cache" / "athenaeum" / "wiki-index.db").exists()

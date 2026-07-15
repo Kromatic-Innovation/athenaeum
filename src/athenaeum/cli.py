@@ -154,6 +154,52 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("~/knowledge"),
         help="Knowledge directory (default: ~/knowledge)",
     )
+    status_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory holding the kill-switch state "
+        "(default: ~/.cache/athenaeum). Only affects the kill-switch line.",
+    )
+
+    # disable / enable commands — the kill switch (issue #379)
+    disable_parser = subparsers.add_parser(
+        "disable",
+        help="Turn athenaeum's background work off (compile, detectors, "
+        "recall, notifications). Reversible with 'athenaeum enable'.",
+    )
+    disable_parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Granular: stop only the expensive compile/detect pass "
+        "(session-end contradiction detection); leave recall on.",
+    )
+    disable_parser.add_argument(
+        "--reason",
+        type=str,
+        default=None,
+        help="Optional note recorded in the state file and shown by "
+        "'athenaeum status'.",
+    )
+    disable_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory for the state file "
+        "(default: ~/.cache/athenaeum).",
+    )
+
+    enable_parser = subparsers.add_parser(
+        "enable",
+        help="Undo 'athenaeum disable' — restore all background work.",
+    )
+    enable_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory for the state file "
+        "(default: ~/.cache/athenaeum).",
+    )
 
     # serve command — start the MCP memory server
     serve_parser = subparsers.add_parser("serve", help="Start the MCP memory server")
@@ -983,6 +1029,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         return _cmd_status(args)
 
+    if args.command == "disable":
+        return _cmd_disable(args)
+
+    if args.command == "enable":
+        return _cmd_enable(args)
+
     if args.command == "serve":
         return _cmd_serve(args)
 
@@ -1355,7 +1407,14 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
+    from athenaeum.killswitch import format_status_line
     from athenaeum.status import format_status, status
+
+    # Kill-switch state (issue #379) is process/cache state, independent of the
+    # knowledge base — report it first so 'athenaeum status' always answers
+    # "is it on?" even when the knowledge directory is missing.
+    print(format_status_line(getattr(args, "cache_dir", None)))
+    print()
 
     target = args.path.expanduser().resolve()
     if not target.exists():
@@ -1364,6 +1423,59 @@ def _cmd_status(args: argparse.Namespace) -> int:
         return 1
     info = status(target)
     print(format_status(info))
+    return 0
+
+
+def _cmd_disable(args: argparse.Namespace) -> int:
+    """Kill switch (#379): stop athenaeum background work, reversibly."""
+    from athenaeum import killswitch
+
+    scope = killswitch.SCOPE_COMPILE if args.compile else killswitch.SCOPE_ALL
+    path = killswitch.disable(
+        scope, reason=args.reason, cache_dir=getattr(args, "cache_dir", None)
+    )
+    if scope == killswitch.SCOPE_COMPILE:
+        print(
+            "athenaeum disabled (compile): the session-end compile/detect pass "
+            "is off; recall stays on."
+        )
+    else:
+        print(
+            "athenaeum disabled: all background work is off — compile, "
+            "contradiction detection, recall, and notifications."
+        )
+    print(f"State: {path}")
+    print("Re-enable with: athenaeum enable")
+
+    env_state = killswitch.current_state(getattr(args, "cache_dir", None))
+    if env_state.source == "env" and env_state.scope != scope:
+        print(
+            f"note: {killswitch.ENV_VAR}={os.environ.get(killswitch.ENV_VAR)!r} "
+            f"overrides the state file (effective scope: {env_state.scope}).",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _cmd_enable(args: argparse.Namespace) -> int:
+    """Kill switch (#379): undo 'athenaeum disable'."""
+    from athenaeum import killswitch
+
+    removed = killswitch.enable(cache_dir=getattr(args, "cache_dir", None))
+    if removed:
+        print("athenaeum enabled: background work restored.")
+    else:
+        print("athenaeum was already enabled (no state file to remove).")
+
+    env = killswitch.current_state(getattr(args, "cache_dir", None))
+    if env.source == "env":
+        print(
+            f"warning: {killswitch.ENV_VAR}={os.environ.get(killswitch.ENV_VAR)!r} "
+            f"still forces disabled (scope: {env.scope}); unset it to fully "
+            "re-enable.",
+            file=sys.stderr,
+        )
+        return 0
     return 0
 
 
@@ -1971,6 +2083,28 @@ def _cmd_session_end(args: argparse.Namespace) -> int:
     raw_root = knowledge_root / "raw"
     wiki_root = knowledge_root / "wiki"
     incremental = True if args.incremental is None else args.incremental
+
+    # Kill switch (#379): the compile/detect pass is the expensive, unattended
+    # ``claude -p`` fan-out — honour the disabled flag BEFORE the lock or any
+    # work, so 'athenaeum disable' (or --compile) prevents the next pass with
+    # no pkill needed. Emit a JSON no-op line so callers tailing the pipe see it.
+    from athenaeum.killswitch import current_state, is_disabled
+
+    if is_disabled("compile", cache_dir=args.cache_dir):
+        state = current_state(args.cache_dir)
+        print(
+            json.dumps(
+                {
+                    "command": "session-end",
+                    "noop": True,
+                    "reason": "disabled",
+                    "scope": state.scope,
+                    "source": state.source,
+                }
+            )
+        )
+        sys.stdout.flush()
+        return 0
 
     cfg = load_config(knowledge_root)
 
