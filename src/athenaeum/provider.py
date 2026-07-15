@@ -315,6 +315,11 @@ class ClaudeCliClient:
                 timeout=self.timeout,
                 cwd=self.cwd,
                 check=False,
+                # Suppress the host Claude Code Stop-hook desktop notification
+                # for these programmatic ``claude -p`` calls (#377). Merged on
+                # top of the inherited environment so PATH/HOME/ambient auth
+                # still reach the subprocess.
+                env={**os.environ, "CLAUDE_SUPPRESS_NOTIFY": "1"},
             )
         except subprocess.TimeoutExpired as exc:
             # A timeout is transient — surface it as TransientAPIError so it is

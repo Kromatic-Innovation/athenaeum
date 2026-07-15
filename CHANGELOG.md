@@ -27,6 +27,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The env override wins over the file; `ATHENAEUM_DISABLED=1` (or `all` /
     `compile`) forces the state without touching the file — handy for a scoped
     one-off — and `athenaeum enable` warns when the env is still forcing it off.
+- **Durable LLM-spend ledger + `athenaeum spend` + a spend ceiling (#378).**
+  Athenaeum runs on two cost models that must never be blended — the
+  `claude-cli` **subscription** path (no invoice; consumes subscription quota,
+  constrained in TOKENS) and the metered `anthropic` **API** path (real
+  dollars: the resolver on the api backend, batch mode, and the per-turn
+  `query-topics` recall extractor). The in-memory token summary was logged and
+  discarded, so "how much has athenaeum spent, and is any of it real money?"
+  was unanswerable from data. Now:
+  - **Ledger.** Each pipeline run appends one JSONL record to
+    `~/.cache/athenaeum/spend.jsonl` carrying the **provider** (`claude-cli`
+    vs `anthropic` — the field that makes "are we spending real money?" an
+    empirical question), run type, model ids, the four token counters kept
+    **separate**, and a **provider-tagged** USD estimate that is always `$0` on
+    the subscription path so subscription rows can never be summed into the
+    dollar total. Append-only and crash-safe (single `O_APPEND` write per
+    record; the reader tolerates a torn trailing line); records only counts and
+    metadata, never content or credentials. On by default; disable with
+    `spend.ledger_enabled: false` / `ATHENAEUM_SPEND_LEDGER_ENABLED=0`.
+  - **`athenaeum spend --since 7d [--by-model] [--by-provider] [--json]`.**
+    Reports **$ for the API path** and **tokens for the subscription path**,
+    never blended. `--json` is the shape `/good-morning` consumes.
+  - **Spend ceiling.** Configurable per-run and per-day ceilings —
+    `spend.max_tokens_per_run` / `spend.max_tokens_per_day` (subscription
+    tokens) and `spend.max_usd_per_run` / `spend.max_usd_per_day` (API
+    dollars). On breach the librarian pass stops early and loudly and defers
+    the remaining intake (like the `max_api_calls` budget) rather than silently
+    continuing. Off unless configured.
+
+### Fixed
+
+- **Stale pre-#330 docstrings in `cli.py` (#378 drive-by).** `_cmd_ingest_answers`
+  and `_cmd_reresolve_questions` described "builds a live Anthropic client from
+  `ANTHROPIC_API_KEY`"; both now build through the provider seam
+  (`build_llm_client`), matching the actual post-#330 behavior.
 
 ## [0.14.1] - 2026-07-12
 
