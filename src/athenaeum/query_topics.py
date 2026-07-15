@@ -72,17 +72,35 @@ def extract_topics(
     if not prompt or len(prompt.strip()) < 4:
         return []
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
+    # Route through the provider seam (issue #380) instead of constructing an
+    # anthropic.Anthropic client directly. With ``llm.provider: claude-cli`` this
+    # runs the per-turn topic extraction on the subscription and makes ZERO
+    # metered API calls; with ``provider: api`` and no key the factory returns
+    # None and we fall back to the regex extractor exactly as before. The CLI
+    # client mirrors ``client.messages.create(**params)`` so the call below is
+    # unchanged. ``timeout`` / ``max_retries=0`` are preserved on both backends.
+    # ``provider`` is resolved here too so the spend ledger (below, #378) records
+    # the backend actually used — never a hardcoded ``api`` that would misreport
+    # a subscription call as metered dollars.
+    try:
+        from athenaeum.provider import build_llm_client, resolve_provider
+
+        provider = resolve_provider(config)
+        client = build_llm_client(config, timeout=timeout, max_retries=0)
+    except Exception as exc:  # noqa: BLE001 — never raise out of the recall hook
+        # Missing SDK, a bad ``llm.provider`` value, etc. — collapse to the
+        # regex-extractor fallback, same guarantee the whole module makes.
+        log.warning(
+            "query_topics: client construction failed (%s); falling back to "
+            "regex extractor: %s",
+            exc.__class__.__name__,
+            exc,
+        )
+        return []
+    if client is None:
         return []
 
     try:
-        import anthropic
-    except ImportError:
-        return []
-
-    try:
-        client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=0)
         response = client.messages.create(
             model=_get_topic_model(config),
             max_tokens=256,
@@ -116,10 +134,12 @@ def extract_topics(
         getattr(_usage, "cache_read_input_tokens", 0),
     )
     # Issue #378: this is the highest-frequency LLM call in the system — the
-    # per-turn recall extractor, fired on EVERY prompt — and it ALWAYS talks to
-    # the metered Anthropic SDK directly (it is intentionally left on `api`,
-    # unaffected by ATHENAEUM_LLM_PROVIDER; see #380). It is therefore the one
-    # real metered-API exposure that must be visible in the spend ledger.
+    # per-turn recall extractor, fired on EVERY prompt. Post-#380 it routes
+    # through the provider seam, so it runs on the metered Anthropic SDK only
+    # under ``provider: api``; under ``claude-cli`` it is subscription-covered.
+    # Record the backend ACTUALLY used (``provider`` resolved above) so the
+    # ledger reports api usage as real dollars and claude-cli usage as $0 —
+    # never a hardcoded ``api`` that would misreport a subscription call.
     # Best-effort and import-light: a ledger failure never touches the 3s
     # recall budget. Only recorded when the response carried usage counters
     # (a real SDK response always does) — never a phantom zero-token row.
@@ -139,7 +159,7 @@ def extract_topics(
             spend.record_spend(
                 _u,
                 run_type="query-topics",
-                provider="api",
+                provider=provider,
                 session_id=os.environ.get("CLAUDE_SESSION_ID"),
                 config=config,
             )
