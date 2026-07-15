@@ -449,4 +449,10 @@ def build_llm_client(
     kwargs: dict[str, Any] = {"api_key": key}
     if max_retries is not None:
         kwargs["max_retries"] = max_retries
+    # Forward a client-level timeout when the caller set one (issue #380). Only
+    # the per-turn query_topics call site passes ``timeout`` today, so this is
+    # additive for every other caller (they leave it None -> SDK default) while
+    # preserving query_topics' 3s hook budget byte-for-byte on the api backend.
+    if timeout is not None:
+        kwargs["timeout"] = timeout
     return anthropic.Anthropic(**kwargs)
