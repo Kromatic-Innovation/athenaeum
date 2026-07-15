@@ -199,6 +199,63 @@ Constraints and semantics:
   the direct Anthropic SDK and gated on `ANTHROPIC_API_KEY`; it is unaffected
   by `ATHENAEUM_LLM_PROVIDER`.
 
+## Spend ledger and ceiling (#378)
+
+Athenaeum spends on two cost models that must **never be blended**: the
+`claude-cli` **subscription** path (no invoice — consumes your Claude
+subscription quota, constrained in TOKENS) and the metered `anthropic` **API**
+path (real dollars — the resolver on the `api` backend, batch mode, and the
+per-turn `query-topics` recall extractor). The **durable spend ledger** records
+each run's usage so "how much has athenaeum spent, and is any of it real
+money?" is answerable from data rather than a code audit.
+
+Each pipeline run appends one JSONL record to `~/.cache/athenaeum/spend.jsonl`:
+timestamp, `run_type`, **`provider`** (`claude-cli` vs `anthropic`), model
+id(s), the four token counters kept **separate** (input / output / cache-write
+/ cache-read — cache-read is ~10x cheaper, so collapsing them destroys the
+signal), and a **provider-tagged** `estimated_cost_usd` that is always `0` on
+the subscription path (subscription rows can never be summed into a dollar
+total). The ledger is append-only and crash-safe (a single `O_APPEND` write per
+record; a torn trailing line is skipped on read) and records only counts and
+metadata — never prompt/response content or credentials.
+
+Report it with `athenaeum spend`:
+
+```
+athenaeum spend --since 7d [--by-model] [--by-provider] [--json]
+```
+
+`--since` accepts a window (`7d` / `24h` / `30m` / `2w`) or an ISO date. The
+output keeps **$ (API)** and **tokens (subscription)** on separate rows;
+`--json` is the machine-readable shape `/good-morning` consumes.
+
+The **spend ceiling** is the actual mitigation — a monitor reports after the
+fact, the ceiling stops the burn. When a configured ceiling is reached the
+librarian pass stops early and loudly and defers the remaining intake (exactly
+like the `max_api_calls` budget), never silently continuing. All ceilings are
+**off unless configured**.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Ledger enabled | `ATHENAEUM_SPEND_LEDGER_ENABLED` | `spend.ledger_enabled` | `true` | Write the durable spend ledger. Off is a clean no-op. |
+| Ledger path | `ATHENAEUM_SPEND_LEDGER` | `spend.ledger_path` | `~/.cache/athenaeum/spend.jsonl` | Override the ledger file location (test/relocation seam). |
+| Per-run token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN` | `spend.max_tokens_per_run` | — (off) | **Subscription path.** Stop the run when its total tokens reach this. |
+| Per-day token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY` | `spend.max_tokens_per_day` | — (off) | **Subscription path.** Ledger tokens since UTC midnight + this run. |
+| Per-run dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_RUN` | `spend.max_usd_per_run` | — (off) | **API path.** Stop the run when its estimated USD reaches this. |
+| Per-day dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_DAY` | `spend.max_usd_per_day` | — (off) | **API path.** Ledger dollars since UTC midnight + this run. |
+
+The subscription path is bounded in **tokens**, the API path in **dollars** —
+each ceiling only gates its own path. `bool` / non-numeric / non-positive
+values fall through to "off" so a nonsensical value can never silently pin the
+pass to a no-op.
+
+```yaml
+spend:
+  # ledger_enabled: true          # on by default
+  max_tokens_per_run: 2000000     # cap the nightly subscription burn
+  max_usd_per_day: 5.00           # cap real API dollars per day
+```
+
 ## Contradiction detection and resolver
 
 Detection knobs live under the `contradiction:` yaml block; resolver knobs

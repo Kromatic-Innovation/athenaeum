@@ -639,6 +639,149 @@ def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
     )
 
 
+def _resolve_optional_positive_number(
+    config: dict[str, Any] | None,
+    block: str,
+    key: str,
+    env_var: str,
+    *,
+    cast: type,
+) -> Any | None:
+    """Resolve an OPTIONAL positive number ``<block>.<key>`` (env > yaml > None).
+
+    Shared helper for the spend ceilings (issue #378). Unlike
+    :func:`_resolve_positive_int_knob`, an unset knob resolves to ``None`` — a
+    ceiling is off unless the operator opts in — rather than a code default.
+    ``env_var`` wins when it parses to a positive number, otherwise the yaml key
+    is read, otherwise ``None``. ``bool`` (an ``int`` subclass) and non-numeric
+    / ``<= 0`` values fall through to ``None`` so ``max_usd_per_day: yes`` cannot
+    become ``1`` and a nonsensical zero/negative ceiling cannot silently pin the
+    pass to a no-op. No seed in ``_DEFAULTS`` (issue #231).
+    """
+    env = os.environ.get(env_var)
+    if env is not None:
+        try:
+            value = cast(env)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and value > 0:
+            return value
+
+    if isinstance(config, dict):
+        cfg = config.get(block)
+        if isinstance(cfg, dict):
+            raw = cfg.get(key)
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    value = cast(raw)
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None and value > 0:
+                    return value
+    return None
+
+
+def resolve_spend_ledger_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve whether the spend ledger is written (env > yaml > True) (#378).
+
+    The durable LLM-spend ledger (``~/.cache/athenaeum/spend.jsonl``) is ON by
+    default — it is append-only, crash-safe, and records only counts (never
+    content or credentials), so the cost is negligible. Precedence:
+    ``ATHENAEUM_SPEND_LEDGER_ENABLED`` env > ``spend.ledger_enabled`` yaml >
+    ``True``. Any env value other than a falsey token (``0`` / ``false`` /
+    ``no`` / ``off``, case-insensitive) is truthy; a non-bool yaml value falls
+    through to the default. No seed in ``_DEFAULTS`` (issue #231).
+    """
+    env = os.environ.get("ATHENAEUM_SPEND_LEDGER_ENABLED")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off", "")
+    if isinstance(config, dict):
+        cfg = config.get("spend")
+        if isinstance(cfg, dict):
+            raw = cfg.get("ledger_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return True
+
+
+def resolve_spend_ledger_path(config: dict[str, Any] | None) -> Path | None:
+    """Resolve an explicit spend-ledger path override (env > yaml > None) (#378).
+
+    ``None`` means "use the default" — ``<cache_dir>/spend.jsonl`` under
+    ``~/.cache/athenaeum`` (see :func:`athenaeum.spend.default_ledger_path`).
+    Precedence: ``ATHENAEUM_SPEND_LEDGER`` env > ``spend.ledger_path`` yaml >
+    ``None``. Chiefly a test/relocation seam. No seed in ``_DEFAULTS`` (#231).
+    """
+    env = os.environ.get("ATHENAEUM_SPEND_LEDGER")
+    if env is not None and env.strip():
+        return Path(env).expanduser()
+    if isinstance(config, dict):
+        cfg = config.get("spend")
+        if isinstance(cfg, dict):
+            raw = cfg.get("ledger_path")
+            if isinstance(raw, str) and raw.strip():
+                return Path(raw).expanduser()
+    return None
+
+
+def resolve_spend_max_tokens_per_run(config: dict[str, Any] | None) -> int | None:
+    """Resolve the per-run SUBSCRIPTION token ceiling (env > yaml > None) (#378).
+
+    A run served by the ``claude-cli`` provider consumes subscription quota
+    rather than dollars, so its ceiling is a TOKEN count. When set and the
+    run-level total tokens reach it, the pass stops early and loudly (the
+    remaining intake defers to the next run, exactly like the ``max_api_calls``
+    budget). Precedence: ``ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN`` env >
+    ``spend.max_tokens_per_run`` yaml > ``None`` (no ceiling).
+    """
+    return _resolve_optional_positive_number(
+        config, "spend", "max_tokens_per_run",
+        "ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN", cast=int,
+    )
+
+
+def resolve_spend_max_tokens_per_day(config: dict[str, Any] | None) -> int | None:
+    """Resolve the per-day SUBSCRIPTION token ceiling (env > yaml > None) (#378).
+
+    Summed across every ledger record on the subscription path since the start
+    of the current UTC day, plus the current run's accrued tokens. Precedence:
+    ``ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY`` env > ``spend.max_tokens_per_day``
+    yaml > ``None`` (no ceiling).
+    """
+    return _resolve_optional_positive_number(
+        config, "spend", "max_tokens_per_day",
+        "ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY", cast=int,
+    )
+
+
+def resolve_spend_max_usd_per_run(config: dict[str, Any] | None) -> float | None:
+    """Resolve the per-run API DOLLAR ceiling (env > yaml > None) (#378).
+
+    A run served by the metered ``anthropic`` API path is constrained in real
+    dollars. When set and the run's estimated USD reaches it, the pass stops
+    early and loudly. Precedence: ``ATHENAEUM_SPEND_MAX_USD_PER_RUN`` env >
+    ``spend.max_usd_per_run`` yaml > ``None`` (no ceiling).
+    """
+    return _resolve_optional_positive_number(
+        config, "spend", "max_usd_per_run",
+        "ATHENAEUM_SPEND_MAX_USD_PER_RUN", cast=float,
+    )
+
+
+def resolve_spend_max_usd_per_day(config: dict[str, Any] | None) -> float | None:
+    """Resolve the per-day API DOLLAR ceiling (env > yaml > None) (#378).
+
+    Summed across every ledger record on the metered API path since the start
+    of the current UTC day, plus the current run's accrued USD. Precedence:
+    ``ATHENAEUM_SPEND_MAX_USD_PER_DAY`` env > ``spend.max_usd_per_day`` yaml >
+    ``None`` (no ceiling).
+    """
+    return _resolve_optional_positive_number(
+        config, "spend", "max_usd_per_day",
+        "ATHENAEUM_SPEND_MAX_USD_PER_DAY", cast=float,
+    )
+
+
 def resolve_model(
     knob: str,
     env_var: str,

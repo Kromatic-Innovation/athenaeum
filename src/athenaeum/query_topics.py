@@ -115,6 +115,36 @@ def extract_topics(
         getattr(_usage, "cache_creation_input_tokens", 0),
         getattr(_usage, "cache_read_input_tokens", 0),
     )
+    # Issue #378: this is the highest-frequency LLM call in the system — the
+    # per-turn recall extractor, fired on EVERY prompt — and it ALWAYS talks to
+    # the metered Anthropic SDK directly (it is intentionally left on `api`,
+    # unaffected by ATHENAEUM_LLM_PROVIDER; see #380). It is therefore the one
+    # real metered-API exposure that must be visible in the spend ledger.
+    # Best-effort and import-light: a ledger failure never touches the 3s
+    # recall budget. Only recorded when the response carried usage counters
+    # (a real SDK response always does) — never a phantom zero-token row.
+    if _usage is not None:
+        try:
+            from athenaeum import spend
+            from athenaeum.models import TokenUsage
+
+            _u = TokenUsage()
+            _u.add(
+                int(getattr(_usage, "input_tokens", 0) or 0),
+                int(getattr(_usage, "output_tokens", 0) or 0),
+                int(getattr(_usage, "cache_creation_input_tokens", 0) or 0),
+                int(getattr(_usage, "cache_read_input_tokens", 0) or 0),
+                model=_get_topic_model(config),
+            )
+            spend.record_spend(
+                _u,
+                run_type="query-topics",
+                provider="api",
+                session_id=os.environ.get("CLAUDE_SESSION_ID"),
+                config=config,
+            )
+        except Exception:  # noqa: BLE001 — ledger must never break recall
+            pass
 
     try:
         text = response.content[0].text.strip()
