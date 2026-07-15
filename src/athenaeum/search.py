@@ -1333,10 +1333,8 @@ def score_keyword_page(tokens: list[str], frontmatter: dict, body: str) -> float
 
     score = 0.0
     for token in tokens:
-        if token in fm_text:
-            score += 3.0
-        if token in body_lower:
-            score += 1.0
+        score += fm_text.count(token) * 3.0
+        score += body_lower.count(token) * 1.0
     return score
 
 
