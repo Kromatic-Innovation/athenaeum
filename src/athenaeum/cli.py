@@ -155,6 +155,51 @@ def main(argv: list[str] | None = None) -> int:
         help="Knowledge directory (default: ~/knowledge)",
     )
 
+    # spend command — report the durable LLM-spend ledger (issue #378)
+    spend_parser = subparsers.add_parser(
+        "spend",
+        help="Report LLM spend from the durable ledger ($ for API, tokens for "
+        "subscription — never blended)",
+    )
+    spend_parser.add_argument(
+        "--since",
+        type=str,
+        default="7d",
+        help="Lower bound: a window (7d / 24h / 30m / 2w) or an ISO date "
+        "(2026-07-01). Default: 7d.",
+    )
+    spend_parser.add_argument(
+        "--by-model", action="store_true", help="Break down per serving model."
+    )
+    spend_parser.add_argument(
+        "--by-provider",
+        action="store_true",
+        help="Break down per run type within each cost path.",
+    )
+    spend_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON (what /good-morning consumes).",
+    )
+    spend_parser.add_argument(
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory for config resolution (default: ~/knowledge).",
+    )
+    spend_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("~/.cache/athenaeum"),
+        help="Cache dir holding spend.jsonl (default: ~/.cache/athenaeum).",
+    )
+    spend_parser.add_argument(
+        "--ledger",
+        type=Path,
+        default=None,
+        help="Explicit ledger file path (overrides --cache-dir and config).",
+    )
+
     # serve command — start the MCP memory server
     serve_parser = subparsers.add_parser("serve", help="Start the MCP memory server")
     serve_parser.add_argument(
@@ -982,6 +1027,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "status":
         return _cmd_status(args)
+    if args.command == "spend":
+        return _cmd_spend(args)
 
     if args.command == "serve":
         return _cmd_serve(args)
@@ -1367,6 +1414,62 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_spend(args: argparse.Namespace) -> int:
+    """Report LLM spend from the durable ledger (issue #378).
+
+    Separates real API DOLLARS from subscription TOKENS — never a blended
+    figure. ``--json`` emits the machine-readable shape ``/good-morning``
+    consumes; the human default renders the two paths as distinct rows.
+    """
+    import json
+
+    from athenaeum import spend
+    from athenaeum.config import load_config
+
+    target = args.path.expanduser().resolve()
+    config = load_config(target) if target.exists() else None
+
+    if args.ledger is not None:
+        ledger_path = args.ledger.expanduser().resolve()
+    else:
+        ledger_path = spend.resolve_ledger_path(
+            config, cache_dir=args.cache_dir.expanduser().resolve()
+        )
+
+    try:
+        since_dt = spend.parse_since(args.since)
+    except ValueError:
+        print(
+            f"Invalid --since value: {args.since!r} — use a window (7d / 24h / "
+            f"30m / 2w) or an ISO date (2026-07-01).",
+            file=sys.stderr,
+        )
+        return 2
+
+    records = spend.read_ledger(ledger_path, since=since_dt)
+    summary = spend.summarize(
+        records, by_model=args.by_model, by_provider=args.by_provider
+    )
+
+    if args.json:
+        payload = {
+            "since": since_dt.isoformat().replace("+00:00", "Z"),
+            "ledger_path": str(ledger_path),
+            **summary,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(
+            spend.format_summary(
+                summary,
+                since_label=args.since,
+                by_model=args.by_model,
+                by_provider=args.by_provider,
+            )
+        )
+    return 0
+
+
 def _resolve_serve_roots(target: Path) -> tuple[Path, Path]:
     """Resolve the raw/wiki roots for ``athenaeum serve``.
 
@@ -1559,10 +1662,12 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
 
     See :func:`athenaeum.answers.ingest_answers` for the semantics.
 
-    When ``ANTHROPIC_API_KEY`` is set, builds a live Anthropic client and
-    passes it to ``ingest_answers`` so free-text answers can use the
-    LLM-backed proposer (issue #210). When the key is absent or client
-    construction fails, the annotation fallback is used instead.
+    Builds the LLM client via the provider seam (``build_llm_client``, #330)
+    and passes it to ``ingest_answers`` so free-text answers can use the
+    LLM-backed proposer (issue #210): a ``claude-cli`` subscription client, or
+    an Anthropic SDK client when ``provider: api`` and ``ANTHROPIC_API_KEY`` is
+    set. When the key is absent (api backend) or construction fails, the
+    annotation fallback is used instead.
     """
     from athenaeum.answers import ingest_answers
     from athenaeum.config import load_config
@@ -1655,9 +1760,11 @@ def _cmd_ingest_merges(args: argparse.Namespace) -> int:
 def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
     """Re-resolve open, proposal-less pending questions (issue #188).
 
-    Mirrors :func:`_cmd_ingest_answers`: loads config, builds a live Anthropic
-    client from ``ANTHROPIC_API_KEY`` (``None`` when absent — offline is a
-    no-op), and delegates to :func:`athenaeum.tiers.reresolve_open_questions`.
+    Mirrors :func:`_cmd_ingest_answers`: loads config, builds the LLM client
+    via the provider seam (``build_llm_client``, #330 — a subscription
+    ``claude-cli`` client or an Anthropic SDK client per ``llm.provider``;
+    ``None`` when the api backend has no key, where offline is a no-op), and
+    delegates to :func:`athenaeum.tiers.reresolve_open_questions`.
     """
     from athenaeum.config import load_config
     from athenaeum.provider import build_llm_client
