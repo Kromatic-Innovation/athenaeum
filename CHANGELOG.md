@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Kill switch — `athenaeum disable` / `enable` / `status` (#379).** One
+  discoverable, reversible command stops all athenaeum background work instead
+  of hand-editing the hook commands out of `~/.claude/settings.json` and
+  `pkill`-ing in-flight detectors. Backed by a state file
+  (`$ATHENAEUM_CACHE_DIR/disabled`, default `~/.cache/athenaeum/disabled`) plus
+  an `ATHENAEUM_DISABLED` env override that **every entry point honours** — the
+  `session-end` compile pass, the MCP write tools (`remember`,
+  `resolve_question`, `resolve_merge`), and the shell hooks in
+  `examples/claude-code/` (which read the file directly with `grep`, so the
+  per-turn recall path adds no Python startup).
+  - `athenaeum disable` turns everything off (compile, contradiction detection,
+    recall, notifications). `athenaeum disable --compile` is granular — it stops
+    only the expensive compile/detect pass and leaves recall on.
+  - `athenaeum enable` removes the state file and restores prior behaviour
+    exactly. `athenaeum status` now reports the on/off state, scope, and reason.
+  - The env override wins over the file; `ATHENAEUM_DISABLED=1` (or `all` /
+    `compile`) forces the state without touching the file — handy for a scoped
+    one-off — and `athenaeum enable` warns when the env is still forcing it off.
 - **Durable LLM-spend ledger + `athenaeum spend` + a spend ceiling (#378).**
   Athenaeum runs on two cost models that must never be blended — the
   `claude-cli` **subscription** path (no invoice; consumes subscription quota,
