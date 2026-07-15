@@ -997,6 +997,18 @@ def ingest_answers(
             usage.cache_read_input_tokens,
             usage.estimated_cost_usd,
         )
+    # Issue #378: persist the answers-ingest spend to the durable ledger,
+    # tagged with the resolved provider so the free-text proposer's metered
+    # (or subscription) usage is answerable from data. Best-effort.
+    from athenaeum import spend
+    from athenaeum.provider import resolve_provider
+
+    spend.record_spend(
+        usage,
+        run_type="answers",
+        provider=resolve_provider(config),
+        config=config,
+    )
 
     if ingested == 0:
         return 0

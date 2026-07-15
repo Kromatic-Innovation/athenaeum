@@ -240,6 +240,24 @@ class TestClaudeCliCreate:
         # ``--append-system-prompt`` must NOT be used (would inherit persona).
         assert "--append-system-prompt" not in argv
 
+    def test_suppresses_host_desktop_notification(self, monkeypatch):
+        # #377: every programmatic ``claude -p`` call must set
+        # CLAUDE_SUPPRESS_NOTIFY=1, merged on top of the inherited env so
+        # PATH/HOME/ambient auth still reach the subprocess.
+        monkeypatch.setenv("PATH", "/sentinel/bin")
+        cap = {}
+        _stub_run(monkeypatch, stdout=_envelope(), capture=cap)
+        client = ClaudeCliClient()
+        client.messages.create(
+            model="m-1",
+            system="SYSTEM-TEXT",
+            messages=[{"role": "user", "content": "USER-TEXT"}],
+        )
+        env = cap["kwargs"]["env"]
+        assert env["CLAUDE_SUPPRESS_NOTIFY"] == "1"
+        # inherited environment is preserved, not replaced.
+        assert env["PATH"] == "/sentinel/bin"
+
     def test_cache_control_stripped_from_cli_path(self, monkeypatch):
         cap = {}
         _stub_run(monkeypatch, stdout=_envelope(), capture=cap)

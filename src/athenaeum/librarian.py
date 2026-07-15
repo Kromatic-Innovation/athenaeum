@@ -38,6 +38,7 @@ from typing import Any
 
 import anthropic
 
+from athenaeum import spend
 from athenaeum._lint import _strip_self_reference
 from athenaeum._retry import TransientAPIError
 from athenaeum.clusters import (
@@ -1845,6 +1846,21 @@ def run(
                     deferred_refs = [r.ref for r in raw_files[i:]]
                     break
 
+                # Issue #378: the spend ceiling is the actual mitigation — a
+                # monitor reports after the fact, this STOPS the burn. Tokens
+                # bound the subscription path, dollars the API path. On breach
+                # we log loudly and defer the rest (never silently continue).
+                if not dry_run:
+                    _ceiling = spend.ceiling_tripped(
+                        usage, provider=provider, config=config
+                    )
+                    if _ceiling is not None:
+                        log.error(
+                            "Spend ceiling reached (%s) — stopping early", _ceiling
+                        )
+                        deferred_refs = [r.ref for r in raw_files[i:]]
+                        break
+
                 log.info("Processing: %s", raw.ref)
                 try:
                     result = process_one(
@@ -1936,6 +1952,12 @@ def run(
                 usage.cache_read_input_tokens,
                 usage.estimated_cost_usd,
             )
+        # Issue #378: persist this run's spend to the durable ledger so it is
+        # answerable from data (not from grep) how much — and whether real
+        # money — athenaeum spent. Best-effort: never breaks the run. Skipped
+        # on dry-run (no real work) — the counters are all zero there anyway.
+        if not dry_run:
+            spend.record_spend(usage, run_type="librarian", provider=provider)
 
         if not dry_run and (total_created > 0 or total_updated > 0):
             rebuild_index(wiki_root)
