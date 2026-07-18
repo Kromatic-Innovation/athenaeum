@@ -42,3 +42,36 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v --tb=short --cov=athenaeum --cov-report=term-missing --cov-fail-under=75
+
+  # hestia#557 — a single, always-present aggregate status that is intended to
+  # be the ONE required check on develop/main. It runs on every event
+  # (`if: always()`) so it reports a concrete conclusion even when the real
+  # `test` job is legitimately skipped. Making the matrix `test` job itself
+  # required would name per-leg checks (`test (3.11)` …) and would wedge on a
+  # legitimately skipped run, since a *skipped* job never satisfies a required
+  # check. This synthesized gate is green exactly when the test matrix is truly
+  # green OR was skipped.
+  ci-required:
+    name: CI Required
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate CI result
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          echo "test=$TEST_RESULT"
+          # `success`  → the test matrix ran and every leg passed.
+          # `skipped`  → the test job was legitimately skipped.
+          # anything else (failure/cancelled) → fail the gate.
+          case "$TEST_RESULT" in
+            success|skipped)
+              echo "CI Required: green (test=$TEST_RESULT)"
+              exit 0
+              ;;
+            *)
+              echo "::error::test job result '$TEST_RESULT' is not green — failing the aggregate gate."
+              exit 1
+              ;;
+          esac
