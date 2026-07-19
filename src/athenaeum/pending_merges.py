@@ -130,6 +130,31 @@ def _make_id(sources: list[str], target_name: str) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
+def _outer_draft_fence(draft_body: str) -> str:
+    """Pick a ```markdown fence run longer than any backtick run in the body.
+
+    The ``**Draft**:`` field wraps ``draft_body`` in a ```` ```markdown ````
+    ... ```` ``` ```` fence. The reader closes that fence on the first bare
+    backtick line whose length EXACTLY matches the opener (see
+    :func:`_scan_fence_state`). A merged draft body synthesized by
+    :func:`athenaeum.merge.synthesize_body` copies source-memory bodies
+    verbatim, so it may itself contain a bare ```` ``` ```` code fence. If the
+    outer fence used the same three backticks, that inner fence would close it
+    prematurely — leaking the draft's ``## From `<scope>/<file>` `` subsections
+    out as bogus top-level blocks that the reader then rejects as "malformed
+    headers" and can never archive (issue #394, the #299/#303 regression).
+
+    Choosing an outer fence one backtick longer than the longest run inside the
+    body makes the nested-fence convention documented in the module docstring
+    automatic instead of hand-maintained: an inner fence can never match the
+    outer fence's length, so it can never close it.
+    """
+    longest_run = 0
+    for match in re.finditer(r"`+", draft_body):
+        longest_run = max(longest_run, len(match.group(0)))
+    return "`" * max(3, longest_run + 1)
+
+
 def _escape_quotes(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -172,9 +197,10 @@ def render_block(
         parts.append(f"- {src}")
     parts.append(f"**Confidence**: {confidence:.2f}")
     parts.append("**Draft**:")
-    parts.append("```markdown")
+    fence = _outer_draft_fence(draft_merged_body)
+    parts.append(f"{fence}markdown")
     parts.append(draft_merged_body.rstrip("\n"))
-    parts.append("```")
+    parts.append(fence)
     return "\n".join(parts)
 
 
@@ -188,6 +214,20 @@ def _split_blocks(text: str) -> list[str]:
     treated as block/paragraph delimiters — they are always appended as
     content. Fence tracking is shared with :func:`_parse_block` via
     :func:`_scan_fence_state` so the two can't diverge (#292).
+
+    Only a CANONICAL merge header (``## [DATE] Merge: "name"`` — the
+    :data:`_HEADER_RE` shape) starts a new top-level block. A bare ``## ``
+    line that is not a canonical header — most importantly the
+    ``## From `<scope>/<file>` `` subsections that
+    :func:`athenaeum.merge.synthesize_body` writes into a draft body — is
+    NOT a block boundary: it is appended to the current block when one is
+    open, or dropped as inter-block preamble when none is. This is what
+    lets a draft whose fence was broken by an inner code fence (issue #394)
+    re-absorb its leaked ``## From`` subsections into the parent block
+    instead of spraying thousands of "malformed header" warnings, and lets
+    orphan ``## From`` fragments left behind by an already-archived merge
+    drain out of the sidecar on the next rewrite rather than accreting
+    forever.
     """
     blocks: list[str] = []
     current: list[str] = []
@@ -227,7 +267,7 @@ def _split_blocks(text: str) -> list[str]:
             if current:
                 current.append(line)
             continue
-        if line.startswith("## "):
+        if _HEADER_RE.match(line):
             if current:
                 blocks.append("\n".join(current).rstrip())
             current = [line]
@@ -651,13 +691,20 @@ def ingest_resolved_merges(merges_path: Path) -> int:
     Same shape as :func:`athenaeum.answers.ingest_answers` for the
     questions sidecar. Idempotent. Returns the number of merges archived
     on this run.
+
+    Also COMPACTS the primary file every run: it is rewritten from the
+    blocks :func:`_split_blocks` still recognizes as canonical merge
+    blocks, which drops any orphan ``## From`` fragments a broken draft
+    fence leaked in an earlier version (issue #394). The recomposed form
+    is stable — re-splitting it yields the same blocks — so once the
+    backlog has drained the file stops changing and no needless rewrite
+    happens. This is what makes the 13 MB regressed sidecar shrink on the
+    next run instead of only when a human happens to resolve a merge.
     """
     if not merges_path.exists():
         return 0
     text = merges_path.read_text(encoding="utf-8")
     blocks = _split_blocks(text)
-    if not blocks:
-        return 0
 
     archive_path = merges_path.parent / "_pending_merges_archive.md"
     now = datetime.now(timezone.utc)
@@ -672,11 +719,26 @@ def ingest_resolved_merges(merges_path: Path) -> int:
             continue
         archived.append(f"{block_text}\n\n**Archived**: {iso_ts}\n")
 
+    # Recompose the primary file from recognized blocks. Any leaked orphan
+    # ``## From`` fragment that _split_blocks no longer treats as a block is
+    # dropped here, draining the sidecar (issue #394). Compact even when
+    # nothing was archived this run, but only actually write when the bytes
+    # would change, so a clean file is left untouched.
+    primary_parts = ["# Pending Merges", *remaining]
+    new_primary = "\n\n---\n\n".join(primary_parts) + "\n"
     if not archived:
+        if new_primary != text:
+            atomic_write_text(merges_path, new_primary)
+            log.info(
+                "pending_merges: compacted sidecar %s (%d -> %d bytes), "
+                "no resolved blocks to archive",
+                merges_path.name,
+                len(text),
+                len(new_primary),
+            )
         return 0
 
-    primary_parts = ["# Pending Merges", *remaining]
-    atomic_write_text(merges_path, "\n\n---\n\n".join(primary_parts) + "\n")
+    atomic_write_text(merges_path, new_primary)
 
     existing_archive = ""
     if archive_path.exists():
