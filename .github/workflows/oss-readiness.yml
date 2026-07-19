@@ -1,0 +1,124 @@
+name: OSS Readiness
+
+# Deterministic OSS-readiness gate (issue #390 / hestia#583). Composes existing
+# tools — nothing here is reimplemented:
+#   * community-files : presence of LICENSE + community health files
+#   * secrets-scan    : Gitleaks working-tree scan
+#   * pypi-hygiene    : `python -m build` + `twine check --strict` + pyroma
+#
+# Runs on develop PRs and pushes, mirroring ci.yml. The `OSS Readiness`
+# aggregate job mirrors ci.yml's `CI Required` pattern (a single always-present
+# status) so it can later be folded into branch protection as one required
+# check without naming per-tool check-runs.
+#
+# Third-party actions are pinned to full commit SHAs for supply-chain hygiene;
+# the semver comment after each pin records the release the SHA maps to at pin
+# time. Keep in sync with ci.yml / release.yml. The gitleaks binary is likewise
+# version-pinned AND checksum-verified before use.
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  community-files:
+    name: Community files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Assert license + community health files present
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in LICENSE README.md CODE_OF_CONDUCT.md CONTRIBUTING.md SECURITY.md; do
+            if [ -s "$f" ]; then
+              echo "ok: $f"
+            else
+              echo "::error file=$f::required OSS community file missing or empty"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+  secrets-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    env:
+      # Pinned + checksum-verified; bump both together from the release's
+      # gitleaks_<ver>_checksums.txt.
+      GITLEAKS_VERSION: "8.24.3"
+      GITLEAKS_SHA256: "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install gitleaks (pinned + checksum-verified)
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSL -o gitleaks.tar.gz "$url"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+
+      - name: Scan working tree for secrets
+        # --no-git scans the checked-out tree (deterministic) rather than full
+        # history, so the gate reflects what a PR actually introduces.
+        run: ./gitleaks detect --source . --no-git --redact --verbose
+
+  pypi-hygiene:
+    name: PyPI hygiene (build + twine + pyroma)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install packaging tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build pyroma twine
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: twine check
+        run: twine check --strict dist/*
+
+      - name: pyroma
+        run: pyroma --min=8 .
+
+  oss-readiness:
+    # Single always-present aggregate status (mirrors ci.yml's `CI Required`):
+    # green exactly when every OSS-readiness check passed or was skipped, so it
+    # can serve as one required check without wedging on a skipped leg.
+    name: OSS Readiness
+    needs: [community-files, secrets-scan, pypi-hygiene]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate OSS-readiness result
+        env:
+          CF: ${{ needs.community-files.result }}
+          SS: ${{ needs.secrets-scan.result }}
+          PH: ${{ needs.pypi-hygiene.result }}
+        run: |
+          echo "community-files=$CF secrets-scan=$SS pypi-hygiene=$PH"
+          for r in "$CF" "$SS" "$PH"; do
+            case "$r" in
+              success|skipped) ;;
+              *)
+                echo "::error::an OSS-readiness check result was '$r' — failing the aggregate gate."
+                exit 1
+                ;;
+            esac
+          done
+          echo "OSS Readiness: green"
