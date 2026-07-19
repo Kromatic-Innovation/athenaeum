@@ -560,3 +560,176 @@ def test_split_blocks_nested_fence_of_different_length_survives(
 
     target = tmp_path / "nested-fence-merge.md"
     assert target.read_text(encoding="utf-8") == draft_body
+
+
+# ---------------------------------------------------------------------------
+# issue #394 — _pending_merges.md regrew to 13MB + ~30K malformed-header
+# warnings/run because a merge draft copied a source body verbatim (via
+# athenaeum.merge.synthesize_body), and that body contained a bare three-
+# backtick code fence. Under the old three-backtick outer ```markdown fence
+# the inner fence closed the outer one prematurely, leaking the draft's
+# ``## From `<scope>/<file>` `` subsections out as bogus top-level blocks the
+# reader rejected as malformed and could never archive — so orphan fragments
+# accreted forever and flooded stderr. (Regression of the #299/#303 fix.)
+# ---------------------------------------------------------------------------
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def test_render_block_outer_fence_outgrows_inner_code_fence() -> None:
+    """The writer picks a ```markdown fence longer than any backtick run in
+    the draft body, so a bare three-backtick code fence inside the body can
+    never close the outer fence (issue #394)."""
+    from athenaeum.pending_merges import render_block
+
+    draft_body = "Intro paragraph.\n\n```\nnpm test\n```\n\nOutro paragraph."
+    block = render_block(
+        merge_target_name="fence-in-body",
+        sources=["/k/user/a.md", "/k/user/b.md"],
+        rationale="body copies a source that contains a bare ``` fence",
+        draft_merged_body=draft_body,
+        confidence=0.9,
+        created_at="2026-07-19",
+    )
+    # A four-backtick outer fence wraps the three-backtick inner one.
+    assert "````markdown" in block
+    assert "```markdown" not in block.replace("````markdown", "")
+
+
+def test_render_block_round_trips_draft_with_inner_code_fence() -> None:
+    """A draft body containing a bare three-backtick fence must survive the
+    write -> _split_blocks -> _parse_block round-trip byte-for-byte, and must
+    NOT leak its ``## From`` subsections as extra blocks (issue #394)."""
+    from athenaeum.merge import synthesize_body
+    from athenaeum.pending_merges import (
+        _parse_block,
+        _split_blocks,
+        render_block,
+    )
+
+    # Exactly the shape synthesize_body emits: `## From` subsections whose
+    # content copies a source body that includes a bare ``` code fence.
+    draft_body = synthesize_body(
+        [
+            ("user", "alice.md", "Alice is a PM.\n\nRun:\n```\nnpm test\n```\n\nMore."),
+            ("user", "bob.md", "Bob is an engineer."),
+        ]
+    )
+    assert "## From `user/alice.md`" in draft_body
+    assert "## From `user/bob.md`" in draft_body
+
+    block = render_block(
+        merge_target_name="alice",
+        sources=["/k/user/alice.md", "/k/user/bob.md"],
+        rationale="same person",
+        draft_merged_body=draft_body,
+        confidence=0.9,
+        created_at="2026-07-19",
+    )
+    text = "# Pending Merges\n\n" + block + "\n"
+
+    blocks = _split_blocks(text)
+    assert len(blocks) == 1, f"draft leaked into extra blocks: {blocks}"
+    parsed = _parse_block(blocks[0])
+    assert parsed is not None
+    assert parsed.merge_target_name == "alice"
+    # render_block rstrips / _parse_block strips trailing newlines (existing
+    # behavior); the point here is the body content survives intact and the
+    # `## From` subsections are NOT leaked out as separate blocks.
+    assert parsed.draft_merged_body == draft_body.strip("\n")
+    assert "## From `user/bob.md`" in parsed.draft_merged_body
+
+
+def test_split_blocks_reabsorbs_leaked_from_subsections(caplog) -> None:
+    """A legacy block written with the old three-backtick fence, whose draft
+    leaked its ``## From`` subsections, must parse as ONE block with no
+    "malformed header" warning — the leaked subsections are re-absorbed as
+    content, not sprayed as bogus blocks (issue #394)."""
+    import logging
+
+    from athenaeum.pending_merges import _split_blocks, parse_pending_merges
+
+    # Old-writer output: three-backtick outer fence, three-backtick inner fence.
+    legacy = (
+        "# Pending Merges\n\n"
+        '## [2026-06-01] Merge: "alice"\n'
+        "- [ ] Approve this merge? Sources: a, b\n\n"
+        "**Rationale**: same person\n"
+        "**Sources**:\n"
+        "- /k/user/a.md\n"
+        "- /k/user/b.md\n"
+        "**Confidence**: 0.92\n"
+        "**Draft**:\n"
+        "```markdown\n"
+        "## From `user/a.md`\n\n"
+        "Alice is a PM.\n\n"
+        "```\n"  # <-- bare inner fence prematurely closes the outer fence
+        "npm test\n"
+        "```\n\n"
+        "## From `user/b.md`\n\n"  # <-- would have leaked as a bogus block
+        "Alice owns the roadmap.\n"
+        "```\n"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="athenaeum.pending_merges"):
+        blocks = _split_blocks(legacy)
+    first_lines = [b.splitlines()[0] for b in blocks]
+    assert first_lines == ['## [2026-06-01] Merge: "alice"'], first_lines
+    assert not any(
+        "malformed header" in rec.getMessage() for rec in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "_pending_merges.md"
+        p.write_text(legacy, encoding="utf-8")
+        pms = parse_pending_merges(p)
+        assert [pm.merge_target_name for pm in pms] == ["alice"]
+
+
+def test_ingest_resolved_merges_drains_orphan_fragments_from_fixture(
+    tmp_path: Path, caplog
+) -> None:
+    """Running ``ingest-merges`` against the regressed live-sidecar fixture
+    drains the accreted orphan ``## From`` fragments, keeps the still-valid
+    unresolved merge proposals, is idempotent, and emits no malformed-header
+    flood (issue #394 acceptance criteria)."""
+    import logging
+
+    from athenaeum.pending_merges import (
+        ingest_resolved_merges,
+        parse_pending_merges,
+    )
+
+    fixture = (FIXTURES_DIR / "pending_merges_regressed.md").read_text(
+        encoding="utf-8"
+    )
+    merges = tmp_path / "_pending_merges.md"
+    merges.write_text(fixture, encoding="utf-8")
+
+    before_from = fixture.count("## From")
+    assert before_from >= 4  # valid subsections + accreted orphans
+
+    with caplog.at_level(logging.WARNING, logger="athenaeum.pending_merges"):
+        archived = ingest_resolved_merges(merges)  # RUN 1 — compaction pass
+
+    assert archived == 0  # nothing was resolved this run
+    after1 = merges.read_text(encoding="utf-8")
+    assert len(after1) < len(fixture), "sidecar did not shrink"
+
+    # The two still-valid unresolved proposals survive; the standalone orphan
+    # fragments are drained.
+    pms = parse_pending_merges(merges)
+    assert {pm.merge_target_name for pm in pms} == {"alice-pm", "bob-eng"}
+    assert "user_carol_orphan" not in after1
+
+    # No "malformed header" flood while draining.
+    assert not any(
+        "malformed header" in rec.getMessage() for rec in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+    # Idempotent: a second run makes no further change.
+    archived2 = ingest_resolved_merges(merges)  # RUN 2
+    assert archived2 == 0
+    assert merges.read_text(encoding="utf-8") == after1
