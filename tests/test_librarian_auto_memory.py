@@ -961,6 +961,119 @@ class TestRetireNonContradictory:
         assert not any("auto-memory/" in f for f in filenames)
 
 
+def _scope_dir(knowledge_root: Path) -> Path:
+    return knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code-home"
+
+
+def _seed_index(knowledge_root: Path, body: str) -> Path:
+    """Write + commit a scope MEMORY.md so retire rewrites a TRACKED file."""
+    index = _scope_dir(knowledge_root) / "MEMORY.md"
+    index.write_text(body, encoding="utf-8")
+    _git(knowledge_root, "add", "--", "raw/auto-memory/-Users-tristankromer-Code-home/MEMORY.md")
+    _git(knowledge_root, "commit", "-m", "seed: scope MEMORY.md index")
+    return index
+
+
+class TestRetireIndexSweep:
+    """Issue #388: retiring a member drops its sibling MEMORY.md pointer."""
+
+    def test_retired_member_pointer_is_dropped(self, retire_root: Path) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import run_retire_pass
+
+        index = _seed_index(
+            retire_root,
+            "# Memory Index\n"
+            "- [Berlin](user_tristan_berlin_address.md) — lives in Berlin\n"
+            "- [Keeper](user_keeper.md) — unrelated, kept\n",
+        )
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root)
+
+        text = index.read_text(encoding="utf-8")
+        # The retired member's pointer is gone...
+        assert "user_tristan_berlin_address.md" not in text
+        # ...but the heading and the unrelated pointer are preserved verbatim.
+        assert "# Memory Index" in text
+        assert "- [Keeper](user_keeper.md) — unrelated, kept\n" in text
+        assert report.index_pruned == [
+            "-Users-tristankromer-Code-home/user_tristan_berlin_address.md"
+        ]
+
+    def test_index_rewrite_lands_in_the_same_commit(self, retire_root: Path) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import run_retire_pass
+
+        _seed_index(
+            retire_root,
+            "- [Berlin](user_tristan_berlin_address.md) — hook\n",
+        )
+        entries = merge_clusters_to_wiki(retire_root)
+        run_retire_pass(entries, retire_root)
+
+        # Commit B (HEAD) contains the wiki write, the raw deletion AND the
+        # index rewrite together — index and deletion are atomic.
+        show = _git(retire_root, "show", "--stat", "--format=", "HEAD")
+        assert "MEMORY.md" in show.stdout
+        assert "user_tristan_berlin_address.md" in show.stdout
+        assert "wiki/auto-" in show.stdout
+        assert _git(retire_root, "status", "--porcelain").stdout.strip() == ""
+
+    def test_preexisting_dangling_pointer_is_left_for_backfill(
+        self, retire_root: Path
+    ) -> None:
+        """Conservative: retire only sweeps pointers to members IT retired.
+
+        A pointer already orphaned by an earlier run is NOT swept by the
+        nightly pass — that is the ``prune-index`` backfill's job, kept out so
+        the retire commit stays scoped to its own deletions.
+        """
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import run_retire_pass
+
+        index = _seed_index(
+            retire_root,
+            "- [Berlin](user_tristan_berlin_address.md) — hook\n"
+            "- [Old](reference_already_gone.md) — pre-existing dangling\n",
+        )
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root)
+
+        text = index.read_text(encoding="utf-8")
+        assert "user_tristan_berlin_address.md" not in text  # this run's member
+        assert "reference_already_gone.md" in text  # untouched pre-existing
+        assert "reference_already_gone.md" not in "\n".join(report.index_pruned)
+
+    def test_dry_run_reports_but_does_not_write_index(self, retire_root: Path) -> None:
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import run_retire_pass
+
+        index = _seed_index(
+            retire_root,
+            "- [Berlin](user_tristan_berlin_address.md) — hook\n",
+        )
+        before = index.read_text(encoding="utf-8")
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root, dry_run=True)
+
+        # Reported as a would-prune, but the file on disk is untouched.
+        assert report.index_pruned == [
+            "-Users-tristankromer-Code-home/user_tristan_berlin_address.md"
+        ]
+        assert index.read_text(encoding="utf-8") == before
+
+    def test_missing_index_does_not_break_retire(self, retire_root: Path) -> None:
+        # No MEMORY.md in the scope: retire still moves + git rms as before.
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import run_retire_pass
+
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root)
+        assert report.committed is True
+        assert len(report.moved) == 1
+        assert report.index_pruned == []
+
+
 class TestRetireContradictory:
     def test_contradictory_raw_is_held_not_deleted(self, tmp_path: Path) -> None:
         from unittest.mock import MagicMock
