@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from athenaeum.config import load_config, resolve_extra_intake_roots
+from athenaeum.memory_index import INDEX_FILENAME, rewrite_index
 from athenaeum.merge import (
     MergedWikiEntry,
     render_merged_entry,
@@ -96,6 +97,9 @@ class RetireReport:
     held: list[str] = field(default_factory=list)
     wiki_updated: list[str] = field(default_factory=list)
     dispositions: list[FileDisposition] = field(default_factory=list)
+    # Issue #388: ``<scope>/<file>.md`` pointers dropped from each affected
+    # scope's sibling ``MEMORY.md`` index because this pass retired the member.
+    index_pruned: list[str] = field(default_factory=list)
 
 
 def _git(
@@ -347,6 +351,38 @@ def _resolve_members(entry: MergedWikiEntry, extra_roots: list[Path]) -> list[Pa
     return resolved
 
 
+def _plan_index_sweep(
+    retiring: list[tuple[MergedWikiEntry, list[Path]]],
+) -> dict[Path, tuple[str, list[str]]]:
+    """Plan the ``MEMORY.md`` rewrite for each scope this pass is retiring (#388).
+
+    Returns ``{index_path: (new_text, dropped_targets)}`` for every affected
+    scope whose sibling index actually loses a pointer. Only pointers to members
+    THIS pass retired are swept (conservative — a pre-existing dangling pointer
+    from an earlier run is left for the ``prune-index`` backfill so a nightly
+    retire commit stays scoped to its own deletions). Scopes with no index, an
+    unreadable index, or nothing to drop are omitted.
+    """
+    retired_by_scope: dict[Path, set[str]] = {}
+    for _entry, members in retiring:
+        for m in members:
+            retired_by_scope.setdefault(m.parent, set()).add(m.name)
+
+    plan: dict[Path, tuple[str, list[str]]] = {}
+    for scope_dir, retired_names in retired_by_scope.items():
+        index_path = scope_dir / INDEX_FILENAME
+        if not index_path.is_file():
+            continue
+        try:
+            text = index_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        new_text, dropped = rewrite_index(text, retired_names.__contains__)
+        if dropped:
+            plan[index_path] = (new_text, dropped)
+    return plan
+
+
 def run_retire_pass(
     entries: list[MergedWikiEntry],
     knowledge_root: Path,
@@ -464,6 +500,13 @@ def run_retire_pass(
             report.wiki_updated.append(entry.filename)
 
     if dry_run:
+        # Issue #388: report the index pointers a real run WOULD sweep, without
+        # touching disk. Computed from the retired member set, so it needs no
+        # deletion to have happened.
+        for index_path, (_new_text, dropped) in _plan_index_sweep(retiring).items():
+            report.index_pruned.extend(
+                f"{index_path.parent.name}/{t}" for t in dropped
+            )
         _log_report(report)
         return report
 
@@ -510,16 +553,33 @@ def run_retire_pass(
         page.write_text(render_merged_entry(entry), encoding="utf-8")
         wiki_rel.append(str(page.resolve().relative_to(kr)))
 
+    # Issue #388: rewrite each retired member's sibling ``MEMORY.md`` in the
+    # SAME commit as the deletion, so the always-on index never keeps a pointer
+    # to a file this pass removed. Conservative like the rest of the pass: only
+    # pointers to members retired THIS run are dropped.
+    index_rel: list[str] = []
+    for index_path, (new_text, dropped) in _plan_index_sweep(retiring).items():
+        index_path.write_text(new_text, encoding="utf-8")
+        index_rel.append(str(index_path.resolve().relative_to(kr)))
+        report.index_pruned.extend(f"{index_path.parent.name}/{t}" for t in dropped)
+        log.info(
+            "retire: pruned %d dangling %s pointer(s) in %s",
+            len(dropped),
+            INDEX_FILENAME,
+            index_path.parent.name,
+        )
+
     # Retire: git rm the moved raw files (staged deletion, recoverable).
     del_rel = [
         str(m.resolve().relative_to(kr)) for _e, members in retiring for m in members
     ]
     _git(knowledge_root, "rm", "--quiet", "--", *del_rel)
 
-    # Commit B — wiki updates + raw deletions TOGETHER (single recoverable
-    # commit). Scoped staging (Quine C2): the deletions are already staged by
-    # ``git rm``; we add exactly the wiki entries we rewrote, not ``-A``.
-    _git(knowledge_root, "add", "--", *wiki_rel)
+    # Commit B — wiki updates + index rewrites + raw deletions TOGETHER (single
+    # recoverable commit). Scoped staging (Quine C2): the deletions are already
+    # staged by ``git rm``; we add exactly the wiki entries and indexes we
+    # rewrote, not ``-A``.
+    _git(knowledge_root, "add", "--", *wiki_rel, *index_rel)
     _git(
         knowledge_root,
         "commit",
@@ -540,11 +600,13 @@ def run_retire_pass(
 def _log_report(report: RetireReport) -> None:
     prefix = "[DRY RUN] " if report.dry_run else ""
     log.info(
-        "%sretire plan: %d to move, %d held, %d wiki entr(y/ies) updated",
+        "%sretire plan: %d to move, %d held, %d wiki entr(y/ies) updated, "
+        "%d index pointer(s) pruned",
         prefix,
         len(report.moved),
         len(report.held),
         len(report.wiki_updated),
+        len(report.index_pruned),
     )
     for disp in report.dispositions:
         log.info(

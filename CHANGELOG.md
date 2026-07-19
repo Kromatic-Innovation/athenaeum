@@ -57,6 +57,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Move-then-retire no longer leaves dangling `MEMORY.md` pointers (#388).**
+  The move-then-retire pass (`retire.py`) `git rm`'d a retired raw member but
+  never rewrote the sibling per-scope `MEMORY.md` index that pointed at it, so
+  every retirement left a dangling pointer — and unlike the compiled wiki page,
+  `MEMORY.md` loads into **every** session's context, so a stale line keeps
+  asserting a fact whose file is gone. The retire pass now drops each retired
+  member's index pointer in the SAME commit as the deletion (conservative: only
+  pointers to members that run retired; a pre-existing dangling pointer is left
+  for the backfill), so index and deletion stay atomic. Cross-tree links
+  (`../wiki/…`), URLs, anchors, headings and prose are preserved verbatim.
+  - **Backfill: `athenaeum auto-memory prune-index` (#388).** A one-shot sweep
+    for pointers already orphaned by pre-#388 runs — dry-run by default (prints
+    the dangling-per-scope list, exit 2), `--apply` rewrites the affected
+    indexes in one labeled, git-recoverable commit. A pointer is dangling when
+    its bare `<file>.md` target no longer exists in the scope directory.
 - **Stale pre-#330 docstrings in `cli.py` (#378 drive-by).** `_cmd_ingest_answers`
   and `_cmd_reresolve_questions` described "builds a live Anthropic client from
   `ANTHROPIC_API_KEY`"; both now build through the provider seam
