@@ -752,6 +752,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_lock_args(prune_parser)
 
+    # prune-index (issue #388): one-shot backfill that drops dangling
+    # <scope>/MEMORY.md pointers left by pre-#388 move-then-retire runs. The
+    # inline fix in retire.py prevents NEW dangling pointers; this sweeps the
+    # ones already on disk. Default is dry-run; --apply rewrites + commits.
+    prune_index_parser = auto_memory_sub.add_parser(
+        "prune-index",
+        help="Prune dangling pointers from <scope>/MEMORY.md indexes (issue "
+        "#388). A pointer is dangling when its target .md no longer exists on "
+        "disk. Default is dry-run; --apply rewrites the indexes in one commit.",
+    )
+    prune_index_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Rewrite the affected MEMORY.md indexes in one labeled commit. "
+        "Without this flag the command is a dry-run.",
+    )
+    prune_index_parser.add_argument(
+        "--path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    _add_lock_args(prune_index_parser)
+
     # repair command — frontmatter YAML repair tools (tag-indent, value-quoting)
     repair_parser = subparsers.add_parser(
         "repair",
@@ -1310,12 +1334,17 @@ def _cmd_claims(args: argparse.Namespace) -> int:
 
 
 def _cmd_auto_memory(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum auto-memory prune`` (issue #278)."""
+    """Dispatch ``athenaeum auto-memory {prune,prune-index}`` (issues #278/#388)."""
     target = getattr(args, "auto_memory_target", None)
-    if target != "prune":
-        print("usage: athenaeum auto-memory prune [--apply] ...", file=sys.stderr)
-        return 2
-    return _cmd_auto_memory_prune(args)
+    if target == "prune":
+        return _cmd_auto_memory_prune(args)
+    if target == "prune-index":
+        return _cmd_auto_memory_prune_index(args)
+    print(
+        "usage: athenaeum auto-memory {prune,prune-index} [--apply] ...",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def _cmd_auto_memory_prune(args: argparse.Namespace) -> int:
@@ -1387,6 +1416,76 @@ def _cmd_auto_memory_prune(args: argparse.Namespace) -> int:
         if report.committed:
             print(f"\n  pruned {len(report.kill)} page(s); committed.")
             _rebuild_recall_index(knowledge_root, cfg, args)
+        else:
+            print("\n  nothing pruned.")
+        return 0
+    finally:
+        lock.release()
+
+
+def _cmd_auto_memory_prune_index(args: argparse.Namespace) -> int:
+    """Backfill: prune dangling ``<scope>/MEMORY.md`` pointers (issue #388).
+
+    Move-then-retire ``git rm``\\s a raw member but only rewrites the sibling
+    index for members it retires going forward; this one-shot sweep removes the
+    pointers already orphaned by earlier runs. A pointer is dangling when its
+    bare ``<file>.md`` target no longer exists in the scope directory.
+
+    Exit codes (mirroring ``auto-memory prune`` / ``repair``):
+        0 - clean run (nothing dangling, OR ``--apply`` succeeded, no errors).
+        1 - errors encountered (apply without git, unreadable index, ...).
+        2 - dry-run found dangling pointers that WOULD be pruned.
+    """
+    from athenaeum.config import load_config, resolve_extra_intake_roots
+    from athenaeum.memory_index import apply_prune_index, build_dangling_report
+
+    knowledge_root = args.path.expanduser().resolve()
+    if not knowledge_root.is_dir():
+        print(f"Knowledge root not found: {knowledge_root}", file=sys.stderr)
+        return 1
+
+    cfg = load_config(knowledge_root)
+    intake_roots = resolve_extra_intake_roots(knowledge_root, config=cfg)
+    report = build_dangling_report(intake_roots)
+
+    mode = "APPLY" if args.apply else "DRY RUN"
+    print(f"=== prune dangling MEMORY.md pointers ({mode}) ===")
+    print(f"  indexes scanned: {report.scanned_indexes}")
+    print(f"  scopes affected: {len(report.scopes)}")
+    print(f"  dangling total:  {report.total_dangling}")
+
+    if report.scopes:
+        print("\n  DANGLING:")
+        for scope in report.scopes:
+            print(
+                f"    {scope.index_path.parent.name}: "
+                f"{len(scope.dangling)}/{scope.total_pointers} pointers"
+            )
+            for target in scope.dangling:
+                print(f"      - {target}")
+
+    if not args.apply:
+        for err in report.errors:
+            print(f"  ERR {err}", file=sys.stderr)
+        if report.errors:
+            return 1
+        return 2 if report.scopes else 0
+
+    # --apply (mutating): acquire the single-machine run lock (issue #309).
+    lock = _acquire_or_exit(knowledge_root, args, cfg)
+    if isinstance(lock, int):
+        return lock
+    try:
+        report = apply_prune_index(knowledge_root, report)
+        for err in report.errors:
+            print(f"  ERR {err}", file=sys.stderr)
+        if report.errors:
+            return 1
+        if report.committed:
+            print(
+                f"\n  pruned {report.total_dangling} pointer(s) across "
+                f"{len(report.scopes)} scope(s); committed."
+            )
         else:
             print("\n  nothing pruned.")
         return 0

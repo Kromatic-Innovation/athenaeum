@@ -348,3 +348,71 @@ class TestPruneCli:
         from athenaeum.cli import main
 
         assert main(["auto-memory"]) == 2
+
+
+def _knowledge_with_dangling_index(tmp_path: Path) -> Path:
+    """A git repo whose raw/auto-memory/<scope>/MEMORY.md has a dangling pointer."""
+    kr = tmp_path / "knowledge"
+    scope = kr / "raw" / "auto-memory" / "-Users-x-Code-a"
+    scope.mkdir(parents=True)
+    (scope / "MEMORY.md").write_text(
+        "- [Gone](reference_gone.md) — dangling\n- [Live](reference_live.md) — ok\n",
+        encoding="utf-8",
+    )
+    (scope / "reference_live.md").write_text("live", encoding="utf-8")
+    (kr / "wiki").mkdir(parents=True)
+    _git_init(kr)
+    return kr
+
+
+class TestPruneIndexCli:
+    """Issue #388: ``auto-memory prune-index`` backfill CLI."""
+
+    def test_dry_run_lists_dangling_exit_2(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import main
+
+        kr = _knowledge_with_dangling_index(tmp_path)
+        rc = main(["auto-memory", "prune-index", "--path", str(kr)])
+        out = capsys.readouterr().out
+        assert rc == 2
+        assert "DANGLING" in out
+        assert "reference_gone.md" in out
+        # Dry-run writes nothing.
+        idx = kr / "raw" / "auto-memory" / "-Users-x-Code-a" / "MEMORY.md"
+        assert "reference_gone.md" in idx.read_text(encoding="utf-8")
+
+    def test_dry_run_clean_exit_0(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import main
+
+        kr = tmp_path / "knowledge"
+        scope = kr / "raw" / "auto-memory" / "-Users-x-Code-a"
+        scope.mkdir(parents=True)
+        (scope / "MEMORY.md").write_text("- [Live](user_ok.md)\n", encoding="utf-8")
+        (scope / "user_ok.md").write_text("ok", encoding="utf-8")
+        (kr / "wiki").mkdir(parents=True)
+        _git_init(kr)
+
+        rc = main(["auto-memory", "prune-index", "--path", str(kr)])
+        assert rc == 0
+        assert "dangling total:  0" in capsys.readouterr().out
+
+    def test_apply_rewrites_and_commits(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import main
+
+        kr = _knowledge_with_dangling_index(tmp_path)
+        rc = main(["auto-memory", "prune-index", "--apply", "--path", str(kr)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "committed" in out
+        idx = kr / "raw" / "auto-memory" / "-Users-x-Code-a" / "MEMORY.md"
+        text = idx.read_text(encoding="utf-8")
+        assert "reference_gone.md" not in text
+        assert "reference_live.md" in text
+        head = _git(kr, "show", "--name-only", "--format=", "HEAD")
+        assert "-Users-x-Code-a/MEMORY.md" in head.stdout
