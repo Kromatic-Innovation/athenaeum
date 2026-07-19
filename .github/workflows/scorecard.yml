@@ -1,0 +1,52 @@
+name: OpenSSF Scorecard
+
+# Optional, scheduled supply-chain posture report (issue #390 / hestia#583).
+# Scorecard is intentionally NOT part of the per-PR OSS-readiness gate
+# (oss-readiness.yml): it runs weekly (and on demand), publishes to the OpenSSF
+# REST API, and uploads SARIF to the repo's code-scanning tab. Because it never
+# runs on `pull_request`, it can neither gate nor redden a PR — it is purely an
+# informational, periodic signal, matching the issue's "optionally … scheduled".
+#
+# Actions pinned to full commit SHAs; the semver comment after each pin records
+# the release the SHA maps to at pin time.
+
+on:
+  schedule:
+    - cron: "27 6 * * 1"   # weekly, Monday 06:27 UTC
+  branch_protection_rule:
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # upload SARIF to the code-scanning tab
+      id-token: write          # publish results to the Scorecard REST API
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a  # v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload to code-scanning
+        uses: github/codeql-action/upload-sarif@e58424170fb0262c8d7ed60a2e84b9bffe205c67  # codeql-bundle-v2.26.1
+        with:
+          sarif_file: results.sarif
