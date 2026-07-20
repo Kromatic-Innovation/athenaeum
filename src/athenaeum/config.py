@@ -461,6 +461,82 @@ def resolve_min_cluster_cohesion_scopes(config: dict[str, Any] | None) -> int:
     return default
 
 
+def resolve_max_merge_sources(config: dict[str, Any] | None) -> int:
+    """Resolve the resolver merge-proposal source-count cap (#400).
+
+    The resolver's merge-proposal path (``propose_merge`` → ``_pending_merges.md``)
+    had no size cap, so a degenerate over-cluster — 1,600+ source memories folded
+    into one proposed page at ~0.33 confidence — was emitted (and re-emitted every
+    run) to the human queue. A merge above this many sources is by definition not
+    the pairwise / small-group refinement a merge proposal is for, so it is
+    suppressed before it reaches ``_pending_merges.md`` (neither proposed nor
+    escalated as a pending question).
+
+    DEFAULT 25 (active) — anchored to :func:`athenaeum.cross_scope.resolve_cluster_size_cap`
+    (also 25): 25 sources is already well beyond a pairwise/small-group merge,
+    and the observed degenerates carried 1,600-1,700, so the default excludes
+    them decisively with effectively zero risk of suppressing a legitimate merge.
+    Env ``ATHENAEUM_MAX_MERGE_SOURCES`` > yaml ``librarian.max_merge_sources`` >
+    this default; ``0`` (or negative) disables the cap. No seed in ``_DEFAULTS``
+    (#231) so the code default stays reachable. ``bool`` and non-numeric yaml
+    values fall through to the default.
+    """
+    default = 25
+    env = os.environ.get("ATHENAEUM_MAX_MERGE_SOURCES")
+    if env is not None:
+        try:
+            return int(env)
+        except (TypeError, ValueError):
+            pass
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("max_merge_sources")
+            if isinstance(raw, int) and not isinstance(raw, bool):
+                return raw
+    return default
+
+
+def resolve_min_merge_confidence(config: dict[str, Any] | None) -> float:
+    """Resolve the resolver merge-proposal confidence floor (#400).
+
+    A second, opt-in gate on the merge-proposal path: a proposal whose resolver
+    confidence is strictly below this floor is suppressed before it reaches
+    ``_pending_merges.md``. Complements :func:`resolve_max_merge_sources` — the
+    size cap catches the degenerate over-clusters by shape, this lets an operator
+    additionally keep low-confidence small merges out of the human queue.
+
+    DEFAULT 0.0 (OFF): a baked-in confidence floor is a corpus-specific product
+    call (what confidence a human wants to review is deployment-dependent), so it
+    ships disabled and is opt-in via ``athenaeum.yaml`` — mirroring
+    :func:`resolve_min_cluster_cohesion`. Env ``ATHENAEUM_MIN_MERGE_CONFIDENCE`` >
+    yaml ``librarian.min_merge_confidence`` > this default. No seed in
+    ``_DEFAULTS`` (#231). ``bool`` and non-numeric / negative values fall through
+    to 0.0 (off).
+    """
+    env = os.environ.get("ATHENAEUM_MIN_MERGE_CONFIDENCE")
+    if env is not None:
+        try:
+            value = float(env)
+            if value > 0.0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("min_merge_confidence")
+            if raw is None or isinstance(raw, bool):
+                return 0.0
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return 0.0
+            if value > 0.0:
+                return value
+    return 0.0
+
+
 def resolve_delta_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the delta-scoped-compile opt-in (#370 PR2) from ``librarian.delta``.
 
