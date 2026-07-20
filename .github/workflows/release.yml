@@ -83,7 +83,7 @@ jobs:
       # workflow ref at publish time. See v0.2.1 release attempt (run
       # 24582826878) for the failure mode this comment documents.
       - name: Publish to PyPI via Trusted Publishing
-        uses: pypa/gh-action-pypi-publish@v1.14.0
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
         with:
           # PEP 740 attestations — publisher mints a sigstore bundle,
           # PyPI stores it, downstream consumers can

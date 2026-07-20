@@ -39,12 +39,12 @@ jobs:
       PROMOTION_REASON: ${{ github.event.inputs.reason }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0
 
       - name: Load workflow-bot App credentials from 1Password
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@3a12b0ab99d9cd590a3e9b5a90ea017210ed9556  # v4.0.1
         with:
           export-env: true
         env:
@@ -54,7 +54,7 @@ jobs:
 
       - name: Mint GitHub App installation token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ env.KROMATIC_WORKFLOW_BOT_APP_ID }}
           private-key: ${{ env.KROMATIC_WORKFLOW_BOT_PRIVATE_KEY }}
