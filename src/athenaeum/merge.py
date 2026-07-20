@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -116,6 +117,25 @@ if TYPE_CHECKING:
     import anthropic
 
 log = logging.getLogger(__name__)
+
+
+class RunDeadlineExceeded(Exception):
+    """Raised inside the merge pass when the run-level wall-clock deadline trips.
+
+    Issue #396. The merge/detect loops are the post-compile phase where the
+    #396 incident wedged (a hung ``claude -p`` merge subprocess). When
+    :func:`merge_clusters_to_wiki` is armed with a ``deadline`` (an absolute
+    :func:`time.monotonic` value) it checks it at each cluster/chunk boundary
+    and raises this so the caller (:func:`athenaeum.librarian.run`) can commit
+    the partial progress and exit non-zero (resumable), mirroring the #337
+    interrupt-checkpoint path. ``phase`` names where the trip occurred for the
+    commit message and the run log.
+    """
+
+    def __init__(self, phase: str) -> None:
+        super().__init__(f"run-level wall-clock deadline exceeded during {phase}")
+        self.phase = phase
+
 
 # Legacy centroid-cohesion constant from C3. C4 replaces this with real
 # claim-level contradiction detection via
@@ -1186,6 +1206,7 @@ def merge_clusters_to_wiki(
     as_of: date | None = None,
     out_wiki_root: Path | None = None,
     only_cluster_ids: set[str] | None = None,
+    deadline: float | None = None,
 ) -> list[MergedWikiEntry]:
     """Read the canonical cluster JSONL and emit one wiki entry per cluster.
 
@@ -1288,6 +1309,12 @@ def merge_clusters_to_wiki(
 
     entries: list[MergedWikiEntry] = []
     for row in rows:
+        # Issue #396: wall-clock deadline check at the C3 cluster-merge
+        # boundary. Cheap (a monotonic read) and only active when the run
+        # armed a deadline; keeps a stalled/slow merge pass from running past
+        # the run-level cap. Raised so run() commits partial + exits 124.
+        if deadline is not None and time.monotonic() >= deadline:
+            raise RunDeadlineExceeded("C3 cluster merge")
         entry = merge_cluster_row(
             row,
             extra_roots=extra_roots,
@@ -1698,6 +1725,12 @@ def merge_clusters_to_wiki(
         # entry must NOT be flagged even though the detector fired.
         suppressed = False
         for chunk in chunks:
+            # Issue #396: wall-clock deadline check at the C4 detector/resolver
+            # chunk boundary — the EXACT site the #396 incident wedged in
+            # (cycling `claude -p` merge subprocesses for ~3.5h). Bounds a
+            # stalled detector/resolver loop to the run-level deadline.
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RunDeadlineExceeded("C4 contradiction detector / resolver")
             chunks_run += 1
             # Lane 1 / #167: short-circuit when every pair in the chunk
             # declares the other via refines/supersedes. Saves a Haiku

@@ -66,6 +66,7 @@ from athenaeum.config import (
 from athenaeum.delta import compute_affected_clusters, splice_cluster_report
 from athenaeum.ephemeral import classify_ephemeral
 from athenaeum.merge import (
+    RunDeadlineExceeded,
     derive_topic_slug,
     merge_clusters_to_wiki,
     read_cluster_rows,
@@ -139,6 +140,20 @@ DEFAULT_MAX_API_CALLS = 800
 # flag, wins) > `ATHENAEUM_MAX_FILES` (env) > `librarian.max_files` (yaml)
 # > this default. Resolved by `librarian_max_files()` below.
 DEFAULT_MAX_FILES = 50
+
+# Run-level wall-clock deadline in seconds (issue #396). Budget caps
+# (`--max-files` / `--max-api-calls`) bound how MUCH a run does, but nothing
+# bounded how LONG it ran: a post-checkpoint phase that stopped making
+# progress (the #396 incident: a hung `claude -p` merge subprocess) ran ~15h
+# holding the run-lock until externally killed. The nightly run's ~1h cap
+# came from an external `timeout` wrapper, not athenaeum itself, so any
+# un-wrapped run (a manual backlog drain) was unbounded. This default gives
+# every run an INTERNAL deadline of roughly the nightly external cap so a
+# manual/un-wrapped run is bounded by default. Precedence: `--max-runtime`
+# (CLI flag, wins) > `ATHENAEUM_MAX_RUNTIME` (env) > `librarian.max_runtime`
+# (yaml) > this default. Resolved by `librarian_max_runtime()` below. A
+# resolved value <= 0 disables the deadline (explicit opt-out escape hatch).
+DEFAULT_MAX_RUNTIME = 3600  # 1 hour
 
 # Manifest written next to _pending_questions.md when a budget-tripped run
 # defers intake (issue #220). Overwritten on every tripped run; removed by
@@ -1151,6 +1166,7 @@ def _compile_auto_memory(
     client: Any,
     usage: TokenUsage | None,
     changed_paths: set[Path] | None,
+    deadline: float | None = None,
 ) -> list:
     """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
 
@@ -1224,6 +1240,7 @@ def _compile_auto_memory(
         client=client,
         usage=usage,
         only_cluster_ids=only_cluster_ids,
+        deadline=deadline,
     )
 
 
@@ -1348,6 +1365,36 @@ def librarian_max_files(config: dict[str, object] | None = None) -> int:
     return DEFAULT_MAX_FILES
 
 
+def librarian_max_runtime(config: dict[str, object] | None = None) -> int:
+    """Resolve the run-level wall-clock deadline (seconds) from env > config > default.
+
+    Issue #396. Mirrors :func:`librarian_max_files` (#232): the
+    ``ATHENAEUM_MAX_RUNTIME`` env override wins over the YAML
+    ``librarian.max_runtime`` key so a cron deployment can tune the deadline
+    on a single run without editing config. The ``--max-runtime`` CLI flag
+    (resolved by the caller) wins over both. Non-numeric values fall back to
+    :data:`DEFAULT_MAX_RUNTIME`. Unlike the budget resolvers a non-positive
+    value is a VALID explicit choice — it disables the deadline entirely
+    (the escape hatch for an operator who wants an unbounded run) — so it is
+    returned verbatim rather than clamped to the default.
+    """
+    env = os.environ.get("ATHENAEUM_MAX_RUNTIME")
+    if env is not None:
+        try:
+            return int(env)
+        except (TypeError, ValueError):
+            pass
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict):
+            raw = cfg.get("max_runtime")
+            # bool is an int subclass — `max_runtime: yes` in yaml must not
+            # silently become a 1-second deadline.
+            if isinstance(raw, int) and not isinstance(raw, bool):
+                return raw
+    return DEFAULT_MAX_RUNTIME
+
+
 def librarian_batch_mode(config: dict[str, object] | None = None) -> bool:
     """Resolve the Batch API opt-in from env > config > default off.
 
@@ -1395,8 +1442,9 @@ def _write_deferred_manifest(
     budget: int,
     beyond_window: int = 0,
     failed_refs: list[str] | None = None,
+    reason: str = "budget",
 ) -> Path:
-    """Write the deferred-work manifest after a budget-tripped run (#220).
+    """Write the deferred-work manifest after a budget- or deadline-tripped run.
 
     Lists the raw files the run did NOT process so an operator (or the next
     run's health reporting) can see what was silently deferred. The deferred
@@ -1410,18 +1458,38 @@ def _write_deferred_manifest(
     ``failed_refs`` are files that errored this run (transient API overload
     or processing exception); they also stay on disk and are retried next
     run, but they are not "deferred by budget" so they get their own section.
+
+    ``reason`` (issue #396) selects the header wording: ``"budget"`` (the
+    #220 API-call-budget trip) or ``"deadline"`` (the wall-clock deadline
+    trip). The rest of the manifest — the counts and the deferred-file list —
+    is identical either way; only the explanatory header differs.
     """
     path = wiki_root / DEFERRED_MANIFEST_NAME
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     total_deferred = len(deferred_refs) + beyond_window
+    if reason == "deadline":
+        header = [
+            "# Deferred work — librarian run wall-clock deadline exceeded",
+            "",
+            "The last librarian run stopped early because the run-level",
+            "wall-clock deadline (librarian.max_runtime, issue #396) was",
+            "exceeded. The raw files below were NOT processed this run; they",
+            "remain on disk and the next run picks them up automatically. This",
+            "file is overwritten on every tripped run and removed by the next",
+            "clean run.",
+        ]
+    else:
+        header = [
+            "# Deferred work — librarian run budget exhausted",
+            "",
+            "The last librarian run stopped early because the run-level API call",
+            "budget was exhausted. The raw files below were NOT processed this",
+            "run; they remain on disk and the next run picks them up",
+            "automatically. This file is overwritten on every budget-tripped run",
+            "and removed by the next clean run.",
+        ]
     lines = [
-        "# Deferred work — librarian run budget exhausted",
-        "",
-        "The last librarian run stopped early because the run-level API call",
-        "budget was exhausted. The raw files below were NOT processed this",
-        "run; they remain on disk and the next run picks them up",
-        "automatically. This file is overwritten on every budget-tripped run",
-        "and removed by the next clean run.",
+        *header,
         "",
         f"- run: {now}",
         f"- api_calls_used: {api_calls}",
@@ -1463,6 +1531,7 @@ def run(
     dry_run: bool = False,
     max_files: int | None = None,
     max_api_calls: int | None = None,
+    max_runtime: int | None = None,
     cluster_only: bool = False,
     merge_only: bool = False,
     strict_budget: bool = False,
@@ -1491,6 +1560,19 @@ def run(
     ``None`` (the default) it resolves via env ``ATHENAEUM_MAX_API_CALLS`` >
     yaml ``librarian.max_api_calls`` > :data:`DEFAULT_MAX_API_CALLS`. An
     explicit value (e.g. from the CLI flag) wins over all three.
+
+    ``max_runtime`` is the run-level wall-clock deadline in seconds (issue
+    #396). When ``None`` (the default) it resolves via env
+    ``ATHENAEUM_MAX_RUNTIME`` > yaml ``librarian.max_runtime`` >
+    :data:`DEFAULT_MAX_RUNTIME`; an explicit value (e.g. from the CLI
+    ``--max-runtime`` flag) wins. It bounds the WHOLE run — the post-compile
+    phases (C4 contradiction detector, #290 wiki-dedup, C3 merge/resolver)
+    AND the per-file entity loop — checked at file/cluster/phase boundaries.
+    On trip the run commits partial progress, releases the lock (via the CLI
+    caller's ``finally``), and exits ``124`` (matching coreutils ``timeout``
+    and the #337 interrupt-checkpoint path) — resumable: the deferred intake
+    and any un-run phases are picked up by the next run. A resolved value of
+    ``<= 0`` disables the deadline entirely (unbounded run, the escape hatch).
 
     ``strict_budget`` (issue #227) makes a budget-tripped (DEGRADED) run
     return 1 instead of the default 0, for exit-code-based alerting (e.g.
@@ -1592,6 +1674,12 @@ def run(
     if max_files is None:
         max_files = librarian_max_files(config)
 
+    # Issue #396: resolve the run-level wall-clock deadline the same way
+    # (explicit arg > env > yaml > default). A non-positive resolved value
+    # disables the deadline (unbounded run — the explicit escape hatch).
+    if max_runtime is None:
+        max_runtime = librarian_max_runtime(config)
+
     # Issue #236: resolve the Batch API opt-in the same way (explicit arg >
     # env > yaml > default off).
     if batch_mode is None:
@@ -1686,6 +1774,41 @@ def run(
     # preserves the pre-#330 api-backend construction byte-for-byte.
     merge_client = build_llm_client(config, api_key=api_key, max_retries=3)
 
+    # Issue #396: arm the run-level wall-clock deadline. ``run_deadline`` is an
+    # absolute :func:`time.monotonic` value (or ``None`` when disabled) covering
+    # every phase below — the post-compile phases AND the entity loop — so a
+    # phase that stops making progress (the #396 incident wedged ~3.5h in a
+    # post-checkpoint merge subprocess holding the run-lock) is bounded instead
+    # of running until externally killed. Checked at file/cluster/phase
+    # boundaries; the merge pass additionally checks it inside its per-cluster
+    # loops (see ``deadline=`` below) since that is where the incident wedged.
+    run_deadline: float | None = (
+        (time.monotonic() + max_runtime) if max_runtime > 0 else None
+    )
+
+    def _deadline_exceeded() -> bool:
+        return run_deadline is not None and time.monotonic() >= run_deadline
+
+    def _stop_on_deadline(phase: str) -> int:
+        """Commit partial progress and return 124 when the deadline trips in a
+        pre-entity phase — mirrors the #337 interrupt-checkpoint path (greppable
+        partial commit, exit 124, resumable). The run-lock is released by the
+        CLI caller's ``finally`` on return; the deferred intake / un-run phases
+        are picked up by the next run."""
+        log.warning(
+            "librarian: wall-clock deadline (%ds) exceeded during %s — "
+            "committing partial progress and stopping (resumable, issue #396)",
+            max_runtime,
+            phase,
+        )
+        if not dry_run:
+            git_snapshot(
+                knowledge_root,
+                f"librarian: partial run (deadline {max_runtime}s exceeded "
+                f"during {phase})",
+            )
+        return 124
+
     # Issue #290: wiki-page dedup pass. Clusters compiled wiki/*.md
     # concept/reference/principle pages against EACH OTHER (not against
     # raw/auto-memory intake) and proposes merges via the shared
@@ -1704,18 +1827,30 @@ def run(
         except Exception:
             log.exception("wiki-page dedup pass failed; continuing run")
 
+    # Issue #396: deadline boundary check after the #290 wiki-dedup pass. That
+    # pass swallows its own exceptions (diagnostic, non-load-bearing), so a
+    # deadline raised inside it would be lost — the between-phase check here is
+    # how the deadline "covers" wiki-dedup: if it ran long, the run stops now
+    # rather than starting the (heavier) merge + entity phases past the cap.
+    if _deadline_exceeded():
+        return _stop_on_deadline("post-compile (after #290 wiki-dedup)")
+
     if merge_only:
         # Merge-only path skips discovery + clustering entirely; it reads
         # the canonical cluster JSONL written by a prior C2 run and
         # compiles ``wiki/auto-*.md`` entries from it. Discovery still
         # happens inside merge_clusters_to_wiki() for source propagation.
-        merged_entries = merge_clusters_to_wiki(
-            knowledge_root,
-            config=config,
-            dry_run=dry_run,
-            client=merge_client,
-            usage=usage,
-        )
+        try:
+            merged_entries = merge_clusters_to_wiki(
+                knowledge_root,
+                config=config,
+                dry_run=dry_run,
+                client=merge_client,
+                usage=usage,
+                deadline=run_deadline,  # issue #396
+            )
+        except RunDeadlineExceeded as exc:
+            return _stop_on_deadline(exc.phase)
         # Issue #261 (slice B of #259): move-then-retire. Non-contradictory
         # raw is moved into its wiki entry (origin-traced footnote) and git
         # rm'd; contradictory raw is held in the queue. No-op without .git.
@@ -1770,16 +1905,27 @@ def run(
         # C2 + C3 + C4: cluster, merge, and detect. Issue #370 PR2 threads the
         # optional ``changed_paths`` delta through this one call — see
         # :func:`_compile_auto_memory` for the delta-eligibility (D5) gate, the
-        # cluster pass, the F6 slug-collision guard, and the merge.
-        merged_entries = _compile_auto_memory(
-            auto_memory_files,
-            knowledge_root,
-            config=config,
-            dry_run=dry_run,
-            client=merge_client,
-            usage=usage,
-            changed_paths=changed_paths,
-        )
+        # cluster pass, the F6 slug-collision guard, and the merge. Issue #396:
+        # ``deadline`` is threaded into the merge pass's per-cluster loops (the
+        # #396 wedge site); a trip there raises RunDeadlineExceeded, caught here.
+        try:
+            merged_entries = _compile_auto_memory(
+                auto_memory_files,
+                knowledge_root,
+                config=config,
+                dry_run=dry_run,
+                client=merge_client,
+                usage=usage,
+                changed_paths=changed_paths,
+                deadline=run_deadline,
+            )
+        except RunDeadlineExceeded as exc:
+            return _stop_on_deadline(exc.phase)
+
+        # Issue #396: deadline check at the post-compile phase boundary, before
+        # the retire + reresolve passes (both can commit / make LLM calls).
+        if _deadline_exceeded():
+            return _stop_on_deadline("post-compile (before retire/reresolve)")
 
         # Issue #261 (slice B of #259): move-then-retire lifecycle. Runs after
         # merge + C4 detection. Non-contradictory raw is moved into its wiki
@@ -1870,6 +2016,7 @@ def run(
     failed_files: list[str] = []
     deferred_refs: list[str] = []
     processed_count = 0
+    deadline_tripped = False  # issue #396: set when the entity loop hits the deadline
 
     # Issue #337: a wall-clock timeout (the pre-dawn sweep's `timeout`, which
     # SIGTERMs then, after a grace, KILLs) would otherwise kill the run
@@ -1972,6 +2119,25 @@ def run(
                     deferred_refs = [r.ref for r in raw_files[i:]]
                     break
 
+                # Issue #396: wall-clock deadline check at the per-file boundary.
+                # Mirrors the budget-exhaustion path — defer the remaining
+                # intake and record it in the manifest — but marks the run as
+                # deadline-tripped so it exits 124 (resumable), not 0. Placed
+                # BEFORE the file's LLM work so a run already past the deadline
+                # does not start another (potentially slow) file.
+                if not dry_run and _deadline_exceeded():
+                    log.warning(
+                        "librarian: wall-clock deadline (%ds) exceeded after "
+                        "%d file(s) — deferring %d remaining file(s) and "
+                        "stopping (resumable, issue #396)",
+                        max_runtime,
+                        i,
+                        len(raw_files) - i,
+                    )
+                    deferred_refs = [r.ref for r in raw_files[i:]]
+                    deadline_tripped = True
+                    break
+
                 # Issue #378: the spend ceiling is the actual mitigation — a
                 # monitor reports after the fact, this STOPS the burn. Tokens
                 # bound the subscription path, dollars the API path. On breach
@@ -2036,6 +2202,12 @@ def run(
         # greppable and a manifest records exactly what was deferred. A clean
         # run clears any stale manifest left by a previous tripped run.
         if deferred_refs:
+            # Issue #396: the entity loop defers remaining intake for either
+            # reason; label the manifest + summary with the actual trigger.
+            degraded_reason = (
+                "wall-clock deadline exceeded" if deadline_tripped
+                else "budget exhausted"
+            )
             manifest_path = _write_deferred_manifest(
                 wiki_root,
                 deferred_refs,
@@ -2043,10 +2215,12 @@ def run(
                 budget=max_api_calls,
                 beyond_window=beyond_window,
                 failed_refs=failed_files,
+                reason="deadline" if deadline_tripped else "budget",
             )
             log.warning(
-                "Done (DEGRADED — budget exhausted): %d created, %d updated, "
+                "Done (DEGRADED — %s): %d created, %d updated, "
                 "%d escalated, %d skipped, %d failed, %d deferred (manifest: %s)",
+                degraded_reason,
                 total_created,
                 total_updated,
                 total_escalated,
@@ -2129,6 +2303,20 @@ def run(
             )
     except Exception as exc:  # noqa: BLE001 — guardrail must never break a run
         log.warning("page-size guardrail check failed (non-fatal): %s", exc)
+
+    # Issue #396: the entity loop hit the wall-clock deadline and deferred the
+    # remaining intake. The partial progress is committed (terminal commit
+    # above) and the deferred files are picked up by the next run — exit 124
+    # (matching coreutils `timeout` and the #337 interrupt path) so the trip is
+    # a distinct, resumable non-zero signal rather than a silent success. Takes
+    # precedence over the failed-files / strict-budget codes below: a deadline
+    # trip is the more actionable signal.
+    if deadline_tripped:
+        log.warning(
+            "librarian: run stopped at the wall-clock deadline — exiting 124 "
+            "(partial progress committed, remaining intake resumable next run)"
+        )
+        return 124
 
     if failed_files:
         log.warning("Failed files (will retry next run): %s", ", ".join(failed_files))
