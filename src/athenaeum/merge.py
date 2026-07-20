@@ -56,8 +56,10 @@ from athenaeum.config import (
     resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
     resolve_heartbeat_interval,
+    resolve_max_merge_sources,
     resolve_min_cluster_cohesion,
     resolve_min_cluster_cohesion_scopes,
+    resolve_min_merge_confidence,
     resolve_operational_markers,
 )
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
@@ -1099,6 +1101,45 @@ def _is_low_cohesion_cross_scope(
     return len(entry.origin_scopes) >= min_scopes
 
 
+def _merge_proposal_suppression_reason(
+    *,
+    n_sources: int,
+    confidence: float,
+    config: dict[str, Any] | None,
+) -> str | None:
+    """Return a human-readable reason to SUPPRESS a resolver merge proposal, or None.
+
+    Issue #400. The resolver's ``propose_merge`` path had no floor or cap, so a
+    degenerate over-cluster (1,600+ sources at ~0.33 confidence) was written to
+    ``wiki/_pending_merges.md`` and re-proposed every run. This applies the two
+    merge-proposal gates the resolver was missing, checked BEFORE the proposal
+    is written (so it never reaches the human queue and is not re-emitted):
+
+    * size cap — ``librarian.max_merge_sources`` (default 25, active): a proposal
+      folding more than N sources is not a pairwise/small-group refinement.
+    * confidence floor — ``librarian.min_merge_confidence`` (default 0.0, opt-in):
+      a proposal below the floor is not confident enough to review.
+
+    The third gate the issue names — the cohesion floor — is already enforced
+    UPSTREAM: :func:`_is_low_cohesion_cross_scope` drops low-cohesion cross-scope
+    clusters from ``entries`` before the C4 detect/resolve loop runs, so such a
+    cluster never produces a merge proposal in the first place. (The observed
+    degenerates were HIGH-cohesion — they passed that floor — which is exactly
+    why the size cap, not the cohesion floor, is the operative fix here.)
+
+    Suppression is deterministic in the cluster's shape (source count +
+    confidence), so the same over-cluster is suppressed on every run — stable
+    across runs without any new sidecar state.
+    """
+    max_sources = resolve_max_merge_sources(config)
+    if max_sources > 0 and n_sources > max_sources:
+        return f"over-cluster: {n_sources} sources > max_merge_sources={max_sources}"
+    min_conf = resolve_min_merge_confidence(config)
+    if min_conf > 0.0 and confidence < min_conf:
+        return f"low confidence: {confidence:.2f} < min_merge_confidence={min_conf:.2f}"
+    return None
+
+
 def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
     """Render ``[^name]: **Source:** ...`` footnotes for a source list (#260).
 
@@ -1472,6 +1513,25 @@ def merge_clusters_to_wiki(
         if proposal is not None and proposal.action == PROPOSE_MERGE_ACTION:
             assert isinstance(proposal, MergeProposal)
             member_paths = [str(m.path) for m in (members or [])]
+            # Issue #400: suppress degenerate over-cluster merge proposals
+            # (huge source count / low confidence) BEFORE they reach the human
+            # queue. Dropping entirely — neither a merge proposal nor a
+            # fallback pending-question escalation — is deliberate: a 1,700-
+            # source blend is not a coherent contradiction either, so routing
+            # it to the questions sidecar would just move the noise.
+            _suppress = _merge_proposal_suppression_reason(
+                n_sources=len(member_paths),
+                confidence=proposal.confidence,
+                config=resolved_config,
+            )
+            if _suppress is not None:
+                log.info(
+                    "resolutions: SUPPRESSED degenerate merge proposal for "
+                    "cluster %s (%s); not written to _pending_merges.md",
+                    entry.cluster_id,
+                    _suppress,
+                )
+                return
             try:
                 write_pending_merge(
                     wiki_root / "_pending_merges.md",

@@ -885,6 +885,104 @@ class TestContradictionFixture:
         # The whole point of #145: no human-queue entry for a false positive.
         assert not (wiki / "_pending_questions.md").exists()
 
+    # -- Issue #400: degenerate over-cluster merge-proposal suppression --------
+
+    @staticmethod
+    def _detector_and_merge_clients(confidence: float):
+        """A fake client that returns detected=true then a propose_merge verdict
+        at *confidence* — driving the resolver down the ``_pending_merges.md``
+        emission path so the #400 gate in ``_emit_escalation`` runs."""
+        from unittest.mock import MagicMock
+
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        resolver_payload = (
+            '{"action": "propose_merge", '
+            '"merge_target_name": "prior-session-debris-policy", '
+            '"draft_merged_body": "Prefer parking prior-session debris on WIP.", '
+            f'"confidence": {confidence}, "source_precedence_used": []}}'
+        )
+
+        def _resp(text: str):
+            r = MagicMock()
+            r.content = [MagicMock(text=text)]
+            return r
+
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            _resp(detector_payload),
+            _resp(resolver_payload),
+        ]
+        return client
+
+    def test_over_cluster_merge_proposal_suppressed_by_size_cap(
+        self, contradiction_merge_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #400: a merge proposal whose source count exceeds
+        ``max_merge_sources`` is dropped before it reaches ``_pending_merges.md``
+        — neither proposed nor escalated as a pending question. The 2-member
+        cluster with cap=1 stands in for the observed 1,700-source over-cluster.
+        Suppression is deterministic, so a second run also emits nothing (the
+        "re-proposed every run" regression)."""
+        monkeypatch.setenv("ATHENAEUM_MAX_MERGE_SOURCES", "1")
+        wiki = contradiction_merge_root / "wiki"
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=self._detector_and_merge_clients(confidence=0.33),
+        )
+        assert not (wiki / "_pending_merges.md").exists()
+        # Dropped entirely — not shunted to the questions sidecar either.
+        assert not (wiki / "_pending_questions.md").exists()
+
+        # Stable across runs: a second run re-detects and re-suppresses; still
+        # nothing reaches the human queue.
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=self._detector_and_merge_clients(confidence=0.33),
+        )
+        assert not (wiki / "_pending_merges.md").exists()
+
+    def test_normal_merge_proposal_written_under_default_cap(
+        self, contradiction_merge_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Control: a small (2-source), well-under-cap merge proposal is written
+        as before — the default cap (25) does not suppress legitimate merges."""
+        monkeypatch.delenv("ATHENAEUM_MAX_MERGE_SOURCES", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MIN_MERGE_CONFIDENCE", raising=False)
+        wiki = contradiction_merge_root / "wiki"
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=self._detector_and_merge_clients(confidence=0.82),
+        )
+        pending = wiki / "_pending_merges.md"
+        assert pending.exists()
+        assert "prior-session-debris-policy" in pending.read_text(encoding="utf-8")
+
+    def test_merge_proposal_suppressed_by_confidence_floor(
+        self, contradiction_merge_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #400: an opt-in confidence floor keeps a low-confidence merge
+        (well under the size cap) out of the human queue."""
+        monkeypatch.delenv("ATHENAEUM_MAX_MERGE_SOURCES", raising=False)
+        monkeypatch.setenv("ATHENAEUM_MIN_MERGE_CONFIDENCE", "0.5")
+        wiki = contradiction_merge_root / "wiki"
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=self._detector_and_merge_clients(confidence=0.33),
+        )
+        assert not (wiki / "_pending_merges.md").exists()
+
     def test_budget_exhausted_falls_back_to_escalate(
         self,
         contradiction_merge_root: Path,
