@@ -327,6 +327,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     run_parser.add_argument(
+        "--max-runtime",
+        type=int,
+        default=None,
+        help=(
+            "Run-level wall-clock deadline in seconds (issue #396). On trip "
+            "the run commits partial progress, releases the lock, and exits "
+            "124 (resumable) — bounding the WHOLE run incl. the post-compile "
+            "phases, not just the per-file loop. Default: ATHENAEUM_MAX_RUNTIME "
+            "env, then athenaeum.yaml librarian.max_runtime, then 3600. Pass "
+            "0 (or a negative value) to disable the deadline (unbounded run)."
+        ),
+    )
+    run_parser.add_argument(
         "--strict-budget",
         action="store_true",
         help="Exit nonzero when the run trips the API call budget "
@@ -1858,6 +1871,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             max_files=args.max_files,
             max_api_calls=args.max_api_calls,
+            max_runtime=args.max_runtime,
             cluster_only=getattr(args, "cluster_only", False),
             merge_only=getattr(args, "merge_only", False),
             strict_budget=args.strict_budget,
@@ -1880,6 +1894,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             max_files=args.max_files,
             max_api_calls=args.max_api_calls,
+            max_runtime=args.max_runtime,
             cluster_only=getattr(args, "cluster_only", False),
             merge_only=getattr(args, "merge_only", False),
             strict_budget=args.strict_budget,
