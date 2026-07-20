@@ -22,7 +22,7 @@ import anthropic
 
 from athenaeum._retry import with_retry
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import resolve_model
+from athenaeum.config import resolve_heartbeat_interval, resolve_model
 from athenaeum.fingerprint import (
     _member_key_str,
     _pair_text_from_passages,
@@ -48,6 +48,7 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
+from athenaeum.progress import PhaseHeartbeat
 from athenaeum.search import embed_texts
 
 log = logging.getLogger("athenaeum")
@@ -1663,6 +1664,11 @@ def reresolve_open_questions(
         if not pq.answered and not _block_has_proposal(pq.raw_block)
     ]
     if not targets:
+        # Issue #398: still emit start/done so a watchdog sees the phase ran
+        # even when there was nothing to re-resolve.
+        empty_heartbeat = PhaseHeartbeat("reresolve", total=0, interval_s=0.0)
+        empty_heartbeat.start()
+        empty_heartbeat.done()
         return 0
 
     knowledge_root = knowledge_root_from_pending(pending_path)
@@ -1710,7 +1716,17 @@ def reresolve_open_questions(
     rewrites: dict[str, str] = {}  # block -> replacement text (annotated)
     drops: set[str] = set()  # blocks to remove from primary + archive
 
+    # Issue #398: the resolver's per-question loop is a post-compile dark
+    # zone — a hung ``claude -p`` resolver call previously produced zero
+    # log output. Emit a heartbeat per pending question re-resolved.
+    heartbeat_interval = resolve_heartbeat_interval(resolved_config)
+    heartbeat = PhaseHeartbeat(
+        "reresolve", total=len(targets), interval_s=heartbeat_interval
+    )
+    heartbeat.start()
+
     for pq in targets:
+        heartbeat.tick(pq.entity)
         if calls >= budget:
             # Budget exhausted — leave remaining proposal-less blocks open so
             # the next run can heal them. Not a crash; partial progress stands.
@@ -1799,6 +1815,8 @@ def reresolve_open_questions(
 
         rewrites[pq.raw_block] = block + "\n"
         reresolved += 1
+
+    heartbeat.done()
 
     if not rewrites and not drops:
         return 0
