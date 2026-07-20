@@ -704,6 +704,47 @@ class TestPendingQuestionMCPTools:
         assert lpq is not None
         assert rq is not None
 
+    def test_list_pending_decisions_tool(self, tmp_path: Path) -> None:
+        """`list_pending_decisions` unifies questions + merges (issue #401)."""
+        pytest.importorskip("fastmcp")
+        import asyncio
+
+        from athenaeum.mcp_server import create_server
+
+        raw = tmp_path / "raw"
+        wiki = tmp_path / "wiki"
+        raw.mkdir()
+        wiki.mkdir()
+        src = wiki / "aa11bb22-lean.md"
+        src.write_text("---\nname: Lean Startup\n---\nBML loop.\n", encoding="utf-8")
+        (wiki / "_pending_merges.md").write_text(
+            "# Pending Merges\n\n"
+            '## [2026-06-20] Merge: "startup"\n'
+            "- [ ] Approve? Sources: aa11bb22-lean.md\n**Rationale**: r\n"
+            f"**Sources**:\n- {src}\n**Confidence**: 0.8\n"
+            "**Draft**:\n```markdown\nx\n```\n",
+            encoding="utf-8",
+        )
+        (wiki / "_pending_questions.md").write_text(
+            "# Pending Questions\n\n"
+            '## [2026-07-01] Entity: "Acme" (from sessions/x.md)\n'
+            "- [ ] Still Series A?\n**Conflict type**: principled\n"
+            "**Description**: d\n",
+            encoding="utf-8",
+        )
+        server = create_server(raw_root=raw, wiki_root=wiki)
+
+        async def _run() -> list[dict]:
+            tool = await server.get_tool("list_pending_decisions")
+            return tool.fn()
+
+        result = asyncio.run(_run())
+        types = [d["type"] for d in result]
+        assert types == ["merge", "question"]  # oldest (merge) first
+        merge = result[0]
+        assert merge["payload"]["sources"][0]["title"] == "Lean Startup"
+        assert "Lean Startup" in merge["summary"]
+
 
 # ---------------------------------------------------------------------------
 # recall_search extra-roots integration
