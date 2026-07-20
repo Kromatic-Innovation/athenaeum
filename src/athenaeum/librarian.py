@@ -57,6 +57,7 @@ from athenaeum.config import (
     resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
     resolve_operational_markers,
+    resolve_pull_before_run,
     resolve_push_after_run,
     resolve_push_branch,
     resolve_push_remote,
@@ -464,6 +465,34 @@ def git_snapshot(knowledge_root: Path, message: str) -> bool:
     return True
 
 
+def _maybe_pull_before_run(
+    knowledge_root: Path,
+    *,
+    config: dict | None,
+    pull_before_run: bool,
+    dry_run: bool,
+) -> None:
+    """Pull the knowledge repo before the run starts, iff opted in.
+
+    Issue #399 gating, symmetric to :func:`_maybe_push_after_run`: (a)
+    explicit opt-in, (b) not a ``--dry-run``, (c) a real git repo exists at
+    ``knowledge_root``. Reuses the SAME remote/branch resolvers as the
+    post-run push (``resolve_push_remote`` / ``resolve_push_branch``) — pull
+    and push address the same knowledge remote, so there is no separate
+    pull_remote/pull_branch config surface. Pull failure is non-fatal —
+    ``git_pull`` logs a warning; the run proceeds against the local tree.
+    """
+    if not pull_before_run or dry_run:
+        return
+    if not (knowledge_root / ".git").exists():
+        return
+    git_pull(
+        knowledge_root,
+        remote=resolve_push_remote(config),
+        branch=resolve_push_branch(config),
+    )
+
+
 def _maybe_push_after_run(
     knowledge_root: Path,
     *,
@@ -556,6 +585,69 @@ def git_push(
         return False
     log.info(
         "Pushed knowledge commits to %s%s",
+        remote,
+        f" {branch}" if branch else "",
+    )
+    return True
+
+
+def git_pull(
+    knowledge_root: Path,
+    remote: str = "origin",
+    branch: str | None = None,
+) -> bool:
+    """Pull the knowledge repo's current branch from *remote* (issue #399).
+
+    Runs ``git pull --ff-only --autostash``. ``--ff-only`` refuses to create
+    a merge commit on divergent history — this is a compilation pipeline,
+    not a collaborative branch, so a fast-forward is the only sync shape we
+    want. ``--autostash`` handles the librarian's common dirty-working-tree
+    starting state (uncommitted raw intake from ``remember`` appends,
+    ``.athenaeum.lock``, contact-sync state): it stashes local changes
+    before the ff-only merge and re-applies them after, so a routine dirty
+    tree does not block the pull.
+
+    Returns ``True`` when the pull succeeded, ``False`` otherwise. A failure
+    — diverged history that ``--ff-only`` rejects, an autostash re-apply
+    conflict, or any other non-zero exit — is logged as a clearly-marked
+    WARNING and is NEVER fatal: the run proceeds against the local tree
+    exactly as it would have before this pull existed. Athenaeum performs no
+    credential handling; the operator's ambient git credentials (credential
+    helper / SSH) are used.
+
+    When *branch* is ``None``, ``git pull`` defaults to the configured
+    upstream for the current branch. Passing an explicit branch makes the
+    refspec deterministic.
+    """
+    if not (knowledge_root / ".git").exists():
+        log.warning("No .git in %s — skipping git pull", knowledge_root)
+        return False
+
+    cmd = ["git", "pull", "--ff-only", "--autostash", remote]
+    if branch:
+        cmd.append(branch)
+    result = subprocess.run(
+        cmd,
+        cwd=str(knowledge_root),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        # Non-fatal: surface the failure with a distinct log line so an
+        # operator (or the routine watching the run) can see exactly which
+        # remote/branch failed to fast-forward and why. The run proceeds
+        # against the local tree — never abort, never roll back.
+        log.warning(
+            "athenaeum-pull-failed: git pull %s%s exited %d (run proceeds "
+            "against local tree): %s",
+            remote,
+            f" {branch}" if branch else "",
+            result.returncode,
+            (result.stderr or result.stdout or "").strip(),
+        )
+        return False
+    log.info(
+        "Pulled knowledge repo from %s%s",
         remote,
         f" {branch}" if branch else "",
     )
@@ -1377,6 +1469,7 @@ def run(
     batch_mode: bool | None = None,
     retire: bool | None = None,
     push_after_run: bool | None = None,
+    pull_before_run: bool | None = None,
     projects_root: Path | None = None,
     install_signal_handlers: bool = False,
     changed_paths: set[Path] | None = None,
@@ -1431,6 +1524,22 @@ def run(
     as a non-fatal warning — commits remain locally and the next run retries
     (``git push`` is idempotent). Athenaeum performs no credential handling;
     the operator's ambient git auth (credential helper / SSH) is used.
+
+    ``pull_before_run`` (issue #399) opts INTO a pre-run ``git pull
+    --ff-only --autostash`` that starts the run from origin's latest instead
+    of a possibly-stale local checkout. DEFAULT OFF: when ``None`` it
+    resolves via yaml ``librarian.pull_before_run`` (default off); an
+    explicit ``True`` (e.g. from the CLI ``--pull`` flag) wins. When on AND
+    it is not a ``--dry-run``, the librarian invokes ``git pull`` (remote/
+    branch from the SAME ``librarian.push_remote`` / ``librarian.push_branch``
+    resolvers the push uses, defaulting to ``origin`` and the current
+    branch's upstream) immediately before capturing ``head_at_start``, so
+    the post-run push only pushes commits this run produced. A pull failure
+    — including a diverged history ``--ff-only`` refuses to fast-forward —
+    is logged as a non-fatal warning and the run proceeds against the local
+    tree; ``--autostash`` protects the librarian's routine dirty-tree
+    starting state. Athenaeum performs no credential handling; the
+    operator's ambient git auth is used.
     """
     skip_entity_tiers = cluster_only or merge_only
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -1521,6 +1630,12 @@ def run(
     if push_after_run is None:
         push_after_run = resolve_push_after_run(config)
 
+    # Issue #399: resolve the pre-run pull opt-in the same way (explicit arg
+    # > yaml `librarian.pull_before_run` > default OFF). Symmetric to the
+    # push resolution above.
+    if pull_before_run is None:
+        pull_before_run = resolve_pull_before_run(config)
+
     # Issue #235: a resolved budget of 0 is a valid defer-everything cap
     # (env/yaml zero — the CLI flag rejects it), but it is also the most
     # likely accidental misconfiguration: every LLM tier is skipped and the
@@ -1533,6 +1648,17 @@ def run(
             "ATHENAEUM_MAX_API_CALLS / librarian.max_api_calls to a "
             "positive value if unintended"
         )
+
+    # Issue #399: pull before capturing HEAD so (a) the run starts from
+    # origin's latest and (b) head_at_start reflects the post-pull state, so
+    # the existing post-run push (issue #284) only pushes commits THIS run
+    # produced, not commits picked up by the pull.
+    _maybe_pull_before_run(
+        knowledge_root,
+        config=config,
+        pull_before_run=pull_before_run,
+        dry_run=dry_run,
+    )
 
     # Issue #284: capture HEAD at run-start (before ANY commit site fires)
     # so the post-run push can detect whether the run produced any commit

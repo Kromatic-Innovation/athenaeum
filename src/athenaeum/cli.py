@@ -369,6 +369,19 @@ def main(argv: list[str] | None = None) -> int:
         "retries (`git push` is idempotent).",
     )
     run_parser.add_argument(
+        "--pull",
+        dest="pull_before_run",
+        action="store_true",
+        default=None,
+        help="Before the run starts, invoke `git pull --ff-only --autostash` "
+        "on the knowledge repo (issue #399) using the operator's ambient "
+        "git credentials, so the run compiles against origin's latest. "
+        "Overrides the athenaeum.yaml librarian.pull_before_run toggle "
+        "(default off). No-op on --dry-run. A pull failure (e.g. diverged "
+        "history that --ff-only rejects) is reported as a non-fatal "
+        "warning; the run proceeds against the local tree.",
+    )
+    run_parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -1851,6 +1864,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             batch_mode=args.batch_mode,
             retire=getattr(args, "retire", None),
             push_after_run=getattr(args, "push_after_run", None),
+            pull_before_run=getattr(args, "pull_before_run", None),
         )
 
     from athenaeum.config import load_config
@@ -1872,6 +1886,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             batch_mode=args.batch_mode,
             retire=getattr(args, "retire", None),
             push_after_run=getattr(args, "push_after_run", None),
+            pull_before_run=getattr(args, "pull_before_run", None),
             install_signal_handlers=True,
         )
     finally:
