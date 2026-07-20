@@ -34,6 +34,7 @@ Every default figure on this page is verified against the code under
 |---|---|---|---|---|---|
 | Intake batch size | `--max-files` | `ATHENAEUM_MAX_FILES` | `librarian.max_files` | `50` | Stop after processing this many raw files per run (#232). Env `0` is valid (defer-everything window); the CLI flag rejects `0`. |
 | API call budget | `--max-api-calls` | `ATHENAEUM_MAX_API_CALLS` | `librarian.max_api_calls` | `800` | Run-level cap on estimated API calls (#220, raised from 200). A budget-tripped run is DEGRADED: it writes `wiki/_deferred_work.md` and defers remaining intake. Env `0` is valid (defers the entire intake); the CLI flag rejects `0`. |
+| Wall-clock deadline | `--max-runtime` | `ATHENAEUM_MAX_RUNTIME` | `librarian.max_runtime` | `3600` | Run-level wall-clock deadline in **seconds** (#396). Bounds the WHOLE run — the post-compile phases (C4 detector, #290 wiki-dedup, C3 merge/resolver) AND the per-file entity loop — checked at file/cluster/phase boundaries. On trip the run commits partial progress, releases the lock, writes `wiki/_deferred_work.md`, and exits `124` (matching coreutils `timeout` and the #337 interrupt path) — resumable. A value `<= 0` disables the deadline entirely (unbounded run). The default gives an un-wrapped manual run the same ~1h bound the nightly run gets from its external `timeout` wrapper. |
 | Strict budget exit | `--strict-budget` | — | — | off | Make a budget-tripped (DEGRADED) run exit nonzero instead of `0`, for exit-code-based alerting (#227). |
 | Batch API mode | `--batch-mode` / `--no-batch-mode` | `ATHENAEUM_BATCH_MODE` | `librarian.batch_mode` | off | Submit tier-2/tier-3 LLM calls via the [Anthropic Messages Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing) at a 50% token discount (#236). Latency-tolerant: most batches finish within an hour, 24h worst case — intended for the nightly run. Same-page tier-3 merges stay synchronous; the budget cap is enforced at batch-assembly time (re-checked per file at phase-2 assembly and before the synchronous merges). `--no-batch-mode` forces the synchronous path even when env/yaml turn batch mode on. |
 | Cluster threshold | — | — | `librarian.cluster_threshold` | `0.55` | Cosine cutoff for auto-memory near-duplicate clustering (C2, #196). Higher = tighter clusters. |
@@ -407,6 +408,7 @@ librarian:
   rotation_retention: 30        # timestamped rotations to keep; 0 = keep all (#311)
   max_files: 50
   max_api_calls: 800
+  max_runtime: 3600             # run-level wall-clock deadline in seconds; <= 0 disables (#396)
   batch_mode: false
   ephemeral_scopes: []          # scope globs dropped as ephemeral intake (#280)
   operational_markers: []       # >=2 lower-cased substrings => ephemeral (#280)
