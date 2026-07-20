@@ -572,6 +572,48 @@ def resolve_lock_timeout(config: dict[str, Any] | None) -> float:
     return 0.0
 
 
+def resolve_heartbeat_interval(config: dict[str, Any] | None) -> float:
+    """Resolve the progress-heartbeat emit interval (seconds) (#398).
+
+    The dark-zone phases (T3 merge, C4 contradiction detection, the #290
+    wiki-dedup pass, the #188 re-resolve pass) emit a periodic
+    ``librarian-heartbeat`` progress line via :class:`athenaeum.progress.PhaseHeartbeat`
+    so a stall in one of these phases is visible in the log and detectable by
+    a watchdog. This resolves how often (in seconds) a slow/wedged phase
+    emits a tick::
+
+        librarian:
+          heartbeat_interval: 60   # seconds; <= 0 = emit every tick
+
+    Precedence: ``ATHENAEUM_HEARTBEAT_INTERVAL`` env, then
+    ``librarian.heartbeat_interval`` yaml, then ``60.0`` (default). ``bool``
+    and non-numeric values fall through to the default. A value ``<= 0``
+    means "emit every tick" and returns ``0.0`` (NOT the default — 0 is a
+    valid, distinct configuration, unlike ``resolve_lock_timeout``'s
+    fail-fast collapse).
+    """
+    default = 60.0
+    env = os.environ.get("ATHENAEUM_HEARTBEAT_INTERVAL")
+    if env is not None:
+        try:
+            value = float(env)
+        except ValueError:
+            return default
+        return value if value > 0 else 0.0
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("heartbeat_interval")
+            if raw is None or isinstance(raw, bool):
+                return default
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return default
+            return value if value > 0 else 0.0
+    return default
+
+
 def resolve_lock_break_stale_after(config: dict[str, Any] | None) -> float | None:
     """Resolve the auto-break staleness threshold in seconds (#397, default 6h).
 
