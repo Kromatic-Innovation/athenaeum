@@ -572,6 +572,89 @@ def resolve_lock_timeout(config: dict[str, Any] | None) -> float:
     return 0.0
 
 
+def resolve_lock_break_stale_after(config: dict[str, Any] | None) -> float | None:
+    """Resolve the auto-break staleness threshold in seconds (#397, default 6h).
+
+    A contended :meth:`~athenaeum.runlock.RunLock.acquire` auto-breaks a
+    wedged-but-alive holder's lock — WITHOUT requiring a human to pass
+    ``--force`` — once the holder's heartbeat age exceeds this many seconds.
+    Six hours is comfortably above any healthy librarian run (and well below
+    the pathological multi-hour wedge seen in issue #396); operators can
+    lower it once the librarian reliably refreshes the lock heartbeat::
+
+        librarian:
+          lock_break_stale_after: 21600   # seconds; <= 0 disables auto-break
+
+    Precedence: ``ATHENAEUM_LOCK_BREAK_STALE_AFTER`` env, then
+    ``librarian.lock_break_stale_after`` yaml, then ``21600.0`` (6h). ``bool``
+    and non-numeric values fall through to the default. A value ``<= 0``
+    disables auto-break entirely (returns ``None``).
+    """
+    default = 21600.0
+    env = os.environ.get("ATHENAEUM_LOCK_BREAK_STALE_AFTER")
+    if env is not None:
+        try:
+            value = float(env)
+        except ValueError:
+            return default
+        return value if value > 0 else None
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("lock_break_stale_after")
+            if raw is None:
+                return default
+            if isinstance(raw, bool):
+                return default
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return default
+            return value if value > 0 else None
+    return default
+
+
+def resolve_lock_warn_stale_after(config: dict[str, Any] | None) -> float | None:
+    """Resolve the loud-warning staleness threshold in seconds (#397, default 2h).
+
+    A contended :meth:`~athenaeum.runlock.RunLock.acquire` logs a prominent
+    "likely wedged" warning naming the holder once its heartbeat age exceeds
+    this many seconds — independent of (and typically lower than) the
+    auto-break threshold, so an operator gets an early heads-up even when
+    auto-break has not yet fired::
+
+        librarian:
+          lock_warn_stale_after: 7200   # seconds; <= 0 disables the warning
+
+    Precedence: ``ATHENAEUM_LOCK_WARN_STALE_AFTER`` env, then
+    ``librarian.lock_warn_stale_after`` yaml, then ``7200.0`` (2h). ``bool``
+    and non-numeric values fall through to the default. A value ``<= 0``
+    disables the warning entirely (returns ``None``).
+    """
+    default = 7200.0
+    env = os.environ.get("ATHENAEUM_LOCK_WARN_STALE_AFTER")
+    if env is not None:
+        try:
+            value = float(env)
+        except ValueError:
+            return default
+        return value if value > 0 else None
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("lock_warn_stale_after")
+            if raw is None:
+                return default
+            if isinstance(raw, bool):
+                return default
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return default
+            return value if value > 0 else None
+    return default
+
+
 def _resolve_positive_int_knob(
     config: dict[str, Any] | None,
     key: str,

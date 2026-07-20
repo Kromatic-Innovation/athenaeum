@@ -33,11 +33,39 @@ Behavior:
   warning and run WITHOUT locking. The lock is a single-machine POSIX
   convenience, never a hard dependency.
 
-The lockfile carries the holder's PID, an ISO-8601 UTC timestamp, and the
-hostname (one ``key: value`` per line) purely for diagnostics; mutual exclusion
-comes from the kernel ``flock``, not the file's contents. The kernel releases an
-``flock`` when the holding process dies, so a crashed run never wedges the lock
-permanently — the stale *content* only affects the diagnostic message.
+The lockfile carries the holder's PID, an ISO-8601 UTC acquire ``timestamp``,
+the hostname, and a refreshable ``heartbeat`` timestamp (one ``key: value`` per
+line) purely for diagnostics; mutual exclusion comes from the kernel
+``flock``, not the file's contents. The kernel releases an ``flock`` when the
+holding process dies, so a crashed run never wedges the lock permanently —
+the stale *content* only affects the diagnostic message.
+
+**ALIVE-but-wedged recovery (issue #397).** A crashed holder is already
+handled — the kernel drops its ``flock`` the moment it dies. The gap is a
+holder that is still alive (so ``is_stale``/the kernel see it as healthy) but
+has hung and stopped making progress; it holds the ``flock`` indefinitely and
+blocks every other writer until a human notices and runs ``--force``. Two
+complementary mechanisms close that gap:
+
+* **Heartbeat.** A long-running holder calls :meth:`RunLock.heartbeat`
+  periodically to refresh the lockfile's ``heartbeat`` line while leaving
+  ``pid``/``timestamp``/``host`` untouched. :func:`heartbeat_age_seconds`
+  reports how long it has been since the last refresh (falling back to
+  ``timestamp`` for older lockfiles that predate this field). A wedged holder
+  simply stops calling it, so its heartbeat goes stale even though the
+  process itself is still alive.
+* **Auto-break + loud warning.** A contended :meth:`RunLock.acquire` with
+  ``break_stale_after`` set will, once the holder's heartbeat age exceeds that
+  threshold AND the holder PID is still alive, log a loud warning and break
+  the lock automatically — the same unlink-and-reacquire path ``--force``
+  uses, just gated on staleness instead of unconditional. Below that
+  threshold (or with auto-break disabled), ``warn_stale_after`` independently
+  logs a prominent "likely wedged" warning naming the holder so an operator
+  can intervene with ``--force``, without changing the raised
+  :class:`LockHeld`. Both are ``None``/``<=0``-disabled by default on the
+  class; the CLI wires in concrete defaults (see
+  :func:`athenaeum.config.resolve_lock_break_stale_after` and
+  :func:`athenaeum.config.resolve_lock_warn_stale_after`).
 """
 
 from __future__ import annotations
@@ -153,6 +181,34 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _parse_iso_age_seconds(iso_ts: str | None) -> float | None:
+    """Age in seconds of an ISO-8601 timestamp, or ``None`` if unparseable."""
+    if not iso_ts:
+        return None
+    try:
+        then = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds()
+
+
+def heartbeat_age_seconds(lockfile: Path) -> float | None:
+    """Age in seconds of the holder's effective heartbeat (issue #397).
+
+    Prefers the ``heartbeat:`` line; falls back to ``timestamp:`` when
+    ``heartbeat`` is absent (backward-compat with lockfiles written before
+    this feature existed). Returns ``None`` when the file, its metadata, or
+    both timestamps are absent or unparseable.
+    """
+    holder = read_holder(lockfile)
+    if not holder:
+        return None
+    iso_ts = holder.get("heartbeat") or holder.get("timestamp")
+    return _parse_iso_age_seconds(iso_ts)
+
+
 def is_stale(lockfile: Path) -> bool:
     """True if *lockfile* names a PID that is no longer alive (issue #309).
 
@@ -193,22 +249,34 @@ class RunLock:
         *,
         wait: float = 0,
         force: bool = False,
+        break_stale_after: float | None = None,
+        warn_stale_after: float | None = None,
     ) -> None:
         self.knowledge_root = Path(knowledge_root)
         self.lockfile = self.knowledge_root / LOCKFILE_NAME
         self.wait = max(0.0, float(wait))
         self.force = bool(force)
+        self.break_stale_after = (
+            break_stale_after if break_stale_after and break_stale_after > 0 else None
+        )
+        self.warn_stale_after = (
+            warn_stale_after if warn_stale_after and warn_stale_after > 0 else None
+        )
         self._fd: int | None = None
         self._acquired = False
+        self._acquired_at: str | None = None
 
     # -- internals ---------------------------------------------------------
 
     def _write_metadata(self, fd: int) -> None:
         """Truncate the lockfile and write this holder's diagnostics."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        self._acquired_at = now_iso
         payload = (
             f"pid: {os.getpid()}\n"
-            f"timestamp: {datetime.now(timezone.utc).isoformat()}\n"
+            f"timestamp: {now_iso}\n"
             f"host: {socket.gethostname()}\n"
+            f"heartbeat: {now_iso}\n"
         )
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
@@ -290,7 +358,63 @@ class RunLock:
                     self._finish_acquire(fd)
                     return self
 
+        # Still contended. Determine the holder's heartbeat age once and reuse
+        # it for both the auto-break and the loud-warning checks below
+        # (issue #397 — recovery for an ALIVE-but-wedged holder).
+        age = heartbeat_age_seconds(self.lockfile)
         holder = read_holder(self.lockfile)
+        holder_pid: int | None = None
+        if holder and holder.get("pid"):
+            try:
+                holder_pid = int(holder["pid"])
+            except ValueError:
+                holder_pid = None
+        holder_alive = holder_pid is not None and _pid_alive(holder_pid)
+
+        # Option 1: auto-break a wedged-but-alive holder once its heartbeat is
+        # stale beyond the configured threshold. Breaks exactly like --force
+        # (unlink + re-create + reflock) but gated on staleness, not
+        # unconditional, and does not loop.
+        if (
+            self.break_stale_after is not None
+            and age is not None
+            and age > self.break_stale_after
+            and holder_alive
+        ):
+            log.warning(
+                "runlock: auto-breaking wedged lock held by PID %s — heartbeat "
+                "stale %.0fs (> threshold %.0fs); holder alive but making no "
+                "progress",
+                holder_pid,
+                age,
+                self.break_stale_after,
+            )
+            os.close(fd)
+            self._break_lock()
+            fd = self._open_fd()
+            if self._try_flock(fd):
+                self._finish_acquire(fd)
+                return self
+            # A live holder re-grabbed the fresh inode between unlink and open.
+            os.close(fd)
+            raise LockHeld(self.lockfile, read_holder(self.lockfile))
+
+        # Option 2: even when auto-break is off or below threshold, loudly
+        # warn that the holder looks wedged so an operator can --force it.
+        if (
+            self.warn_stale_after is not None
+            and age is not None
+            and age > self.warn_stale_after
+            and holder_alive
+        ):
+            log.warning(
+                "runlock: holder alive but lock age %.0fs (PID %s) — likely "
+                "wedged; break with --force or lower "
+                "librarian.lock_break_stale_after",
+                age,
+                holder_pid,
+            )
+
         os.close(fd)
         raise LockHeld(self.lockfile, holder)
 
@@ -310,6 +434,34 @@ class RunLock:
             self._write_metadata(fd)
         except OSError as exc:  # pragma: no cover - diagnostics only
             log.warning("runlock: could not write lock metadata: %s", exc)
+
+    def heartbeat(self) -> None:
+        """Refresh the lockfile's ``heartbeat`` line (issue #397).
+
+        Keeps the original ``pid``/``timestamp``/``host`` intact and rewrites
+        only ``heartbeat`` to now. A long-running holder calls this
+        periodically so a healthy run's heartbeat stays fresh; a WEDGED
+        holder stops refreshing it, which is what lets a contended acquire
+        tell "still working" apart from "hung but alive". No-op (safe, no
+        raise) when the lock was never acquired or the no-fcntl degrade path
+        left no fd. Failures are diagnostics-only (logged, not raised).
+        """
+        if not self._acquired or self._fd is None:
+            return
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            payload = (
+                f"pid: {os.getpid()}\n"
+                f"timestamp: {self._acquired_at}\n"
+                f"host: {socket.gethostname()}\n"
+                f"heartbeat: {now_iso}\n"
+            )
+            os.lseek(self._fd, 0, os.SEEK_SET)
+            os.ftruncate(self._fd, 0)
+            os.write(self._fd, payload.encode("utf-8"))
+            os.fsync(self._fd)
+        except OSError as exc:  # pragma: no cover - diagnostics only
+            log.warning("runlock: could not refresh heartbeat: %s", exc)
 
     def release(self) -> None:
         """Release the lock (idempotent). Safe to call when never acquired."""

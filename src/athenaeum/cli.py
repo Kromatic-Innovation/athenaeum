@@ -91,13 +91,23 @@ def _acquire_or_exit(
     :data:`EXIT_LOCK_HELD` exit code after printing the holder to stderr.
     The ``--wait`` flag overrides the resolved default timeout.
     """
-    from athenaeum.config import resolve_lock_timeout
+    from athenaeum.config import (
+        resolve_lock_break_stale_after,
+        resolve_lock_timeout,
+        resolve_lock_warn_stale_after,
+    )
     from athenaeum.runlock import LockHeld, RunLock
 
     wait = getattr(args, "wait", None)
     if wait is None:
         wait = resolve_lock_timeout(config)
-    lock = RunLock(knowledge_root, wait=wait, force=getattr(args, "force", False))
+    lock = RunLock(
+        knowledge_root,
+        wait=wait,
+        force=getattr(args, "force", False),
+        break_stale_after=resolve_lock_break_stale_after(config),
+        warn_stale_after=resolve_lock_warn_stale_after(config),
+    )
     try:
         lock.acquire()
     except LockHeld as exc:
