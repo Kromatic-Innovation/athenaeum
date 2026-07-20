@@ -313,6 +313,34 @@ def resolve_push_branch(config: dict[str, Any] | None) -> str | None:
     return None
 
 
+def resolve_pull_before_run(config: dict[str, Any] | None) -> bool:
+    """Resolve the pre-run ``git pull`` opt-in (issue #399).
+
+    Symmetric to :func:`resolve_push_after_run` (#284): with
+    ``librarian.pull_before_run: true`` (or the ``athenaeum run --pull`` CLI
+    override), the librarian invokes ``git pull --ff-only --autostash`` on
+    the knowledge repo BEFORE the run starts, so the run compiles against
+    origin's latest instead of a possibly-stale local checkout. Default OFF:
+    a fresh install must never side-effect an operator's git remote, and
+    athenaeum itself handles no credentials — pulls (like pushes) rely
+    entirely on the operator's ambient git auth (credential helper / SSH).
+
+    There is no shipped nightly cron wrapper in this repo, so pull and push
+    both stay independently opt-in via yaml/CLI rather than being bundled
+    into an assumed scheduler script. An operator wanting full bidirectional
+    sync sets both ``pull_before_run: true`` and ``push_after_run: true`` in
+    ``athenaeum.yaml``. Non-bool yaml values fall through to the default
+    (off).
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("pull_before_run")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 # Default glob patterns for inherently-throwaway auto-memory scope dirs
 # (issue #278). These live in the CONFIG LAYER on purpose: the discover /
 # prune pipeline logic carries no host-specific scope literals, it only asks
