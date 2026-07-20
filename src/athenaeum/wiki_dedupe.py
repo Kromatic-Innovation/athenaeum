@@ -66,10 +66,11 @@ from athenaeum.clusters import (
     cluster_auto_memory_files,
     resolve_cluster_threshold,
 )
-from athenaeum.config import load_config
+from athenaeum.config import load_config, resolve_heartbeat_interval
 from athenaeum.merge import derive_topic_slug, synthesize_body
 from athenaeum.models import AutoMemoryFile, parse_frontmatter, validity_bound_str
 from athenaeum.pending_merges import write_pending_merge
+from athenaeum.progress import PhaseHeartbeat
 from athenaeum.search import embed_texts
 
 log = logging.getLogger(__name__)
@@ -275,13 +276,25 @@ def propose_wiki_page_merges(
     clusters = find_wiki_page_clusters(
         wiki_root, threshold=resolved_threshold, embedding_provider=embedding_provider
     )
+
+    # Issue #398: this pass (#290) is one of the post-compile dark zones —
+    # a wedge examining a candidate cluster previously produced zero log
+    # output. Emit start/done even with zero candidate clusters so a
+    # watchdog can see the phase ran.
+    heartbeat_interval = resolve_heartbeat_interval(resolved_config)
+    heartbeat = PhaseHeartbeat(
+        "wiki-dedupe", total=len(clusters), interval_s=heartbeat_interval
+    )
+    heartbeat.start()
     if not clusters:
+        heartbeat.done()
         return []
 
     merges_path = wiki_root / "_pending_merges.md"
     proposals: list[dict[str, Any]] = []
 
     for cluster in clusters:
+        heartbeat.tick(cluster.cluster_id)
         members = [
             by_relpath[relpath]
             for relpath in cluster.member_paths
@@ -344,4 +357,5 @@ def propose_wiki_page_merges(
             len(members),
         )
 
+    heartbeat.done()
     return proposals

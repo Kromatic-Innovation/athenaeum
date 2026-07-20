@@ -54,6 +54,7 @@ from athenaeum.config import (
     load_config,
     resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
+    resolve_heartbeat_interval,
     resolve_min_cluster_cohesion,
     resolve_min_cluster_cohesion_scopes,
     resolve_operational_markers,
@@ -97,6 +98,7 @@ from athenaeum.models import (
     validity_windows_disjoint,
 )
 from athenaeum.pending_merges import write_pending_merge
+from athenaeum.progress import PhaseHeartbeat
 from athenaeum.resolutions import (
     ATTRIBUTE_BOTH_ACTION,
     PROPOSE_MERGE_ACTION,
@@ -1243,6 +1245,11 @@ def merge_clusters_to_wiki(
         The list of :class:`MergedWikiEntry` records in cluster-file order.
     """
     resolved_config = config if config is not None else load_config(knowledge_root)
+    # Issue #398: resolved once and threaded into every dark-zone
+    # PhaseHeartbeat below (merge-detect, merge-write) so an operator can
+    # tune the tick cadence via ATHENAEUM_HEARTBEAT_INTERVAL / yaml without
+    # touching call sites.
+    heartbeat_interval = resolve_heartbeat_interval(resolved_config)
     cluster_path = resolve_cluster_output_path(knowledge_root, config=resolved_config)
     rows = read_cluster_rows(cluster_path)
     if not rows:
@@ -1664,7 +1671,16 @@ def merge_clusters_to_wiki(
             usage.api_calls += 1
         return propose_resolution(result, members, client, usage=usage)
 
+    # Issue #398: the C4 contradiction-detection loop is the region that went
+    # dark for 3.5h in the 2026-07-19 incident (per-cluster `claude -p`
+    # detector/resolver subprocess calls with no progress logging). Emit a
+    # heartbeat per cluster processed so a wedge here is visible in the log.
+    detect_heartbeat = PhaseHeartbeat(
+        "merge-detect", total=len(entries), interval_s=heartbeat_interval
+    )
+    detect_heartbeat.start()
     for entry in entries:
+        detect_heartbeat.tick(entry.cluster_id)
         if use_ancestor:
             pooled = pool_cluster_with_ancestors(
                 entry.resolved_members,
@@ -1777,6 +1793,7 @@ def merge_clusters_to_wiki(
                 aggregate = result if chunks else ContradictionResult(detected=False)
         entry.contradiction = aggregate
         entry.contradictions_detected = bool(aggregate.detected)
+    detect_heartbeat.done()
 
     # Similarity sweep (mode in {similarity, both}).
     # Issue #370 PR2: the sweep is whole-corpus by nature (it scans ALL raw
@@ -1856,6 +1873,16 @@ def merge_clusters_to_wiki(
             )
         return entries
 
+    # Issue #398: per-entry write-loop heartbeat. Every entry that reaches
+    # this loop is (re)written, so each counts as one `compiled` unit; there
+    # is no "unchanged" outcome here, and `error` is reserved for an actual
+    # write failure (not a C4-detected contradiction, which is an EXPECTED
+    # human-escalation outcome — surfacing it as an error would corrupt the
+    # liveness/health signal a watchdog reads off this heartbeat).
+    write_heartbeat = PhaseHeartbeat(
+        "merge-write", total=len(entries), interval_s=heartbeat_interval
+    )
+    write_heartbeat.start()
     wiki_root.mkdir(parents=True, exist_ok=True)
     for entry in entries:
         page_path = wiki_root / entry.filename
@@ -1867,6 +1894,8 @@ def merge_clusters_to_wiki(
             len(entry.sources),
             entry.contradictions_detected,
         )
+        write_heartbeat.tick(entry.cluster_id or entry.topic_slug, compiled=1)
+    write_heartbeat.done()
 
     if escalations:
         tier4_escalate(
