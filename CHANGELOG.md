@@ -78,6 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     dollars). On breach the librarian pass stops early and loudly and defers
     the remaining intake (like the `max_api_calls` budget) rather than silently
     continuing. Off unless configured.
+- **Configurable pre-run pull to sync the knowledge repo (#399).** `athenaeum
+  run` can now pull the knowledge repo before a run and push intake + outcomes
+  after, so a run starts from and lands back to GitHub instead of drifting from
+  the remote.
+- **Progress heartbeat for the merge + post-compile phases (#398).** Both
+  phases now emit periodic progress lines, so a long-running (or wedged) run is
+  legible instead of logging zero output for hours.
 
 ### Fixed
 
@@ -100,6 +107,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `_cmd_reresolve_questions` described "builds a live Anthropic client from
   `ANTHROPIC_API_KEY`"; both now build through the provider seam
   (`build_llm_client`), matching the actual post-#330 behavior.
+- **Resolver over-cluster merges are capped and floored (#400).** Degenerate
+  merge proposals (thousands of sources at low confidence, re-proposed and
+  regenerated every run) are now suppressed by a cohesion floor plus a size cap.
+- **`athenaeum run` now has a wall-clock deadline (#396).** A hung
+  post-checkpoint phase can no longer wedge a run indefinitely while holding the
+  run-lock; the run aborts at the deadline instead.
+- **Runlock auto-recovers an alive-but-wedged holder (#397).** A stuck lock
+  holder is now detected and recovered automatically instead of blocking every
+  writer until a manual `--force`.
+- **`_pending_merges.md` no longer regrows unbounded (#394).** Fixes a
+  regression of #299/#303 that let the file balloon (to ~13MB) and flood each
+  run with tens of thousands of malformed-header warnings.
+- **Keyword-backend scoring uses term frequency, not presence (#384).**
+  Corrects the keyword search backend's scoring, fixing a Python 3.13 CI flake.
 
 ### Security
 
