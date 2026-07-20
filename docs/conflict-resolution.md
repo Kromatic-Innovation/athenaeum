@@ -219,8 +219,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 > **Note (2026-05-09):** A previous "section 8" documented the
 > `connectors/apollo.py:enrich_person` resolver and the CLI
 > `enrich --persons` write path. Both were extracted from the OSS package
-> in cwc#235 / athenaeum#112 and now live in the cwc personal toolkit.
-> See cwc/scripts/knowledge-librarian/ for their current home.
+> in athenaeum#112 and now live in a separate private toolkit.
 
 ## 9. Disjoint temporal validity — sequential states are not conflicts (issue #324)
 

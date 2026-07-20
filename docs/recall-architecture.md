@@ -142,6 +142,5 @@ invariant.
 
 ## References
 
-- Live production hook (hardened): `Kromatic-Innovation/code-workspace-config/scripts/hooks/knowledge-recall-on-turn.sh`
-- Fix commits: cwc 781a306 (JSON shape), 99fbc1a (set -a), 1496814 (hybrid merge), e38fb0e (op-read bootstrap)
+- Reference implementation: `examples/claude-code/user-prompt-recall.sh` — the recall-on-turn hook shipped with this repo.
 - Related PRs: athenaeum #40 (JSON shape), #42 (query-topics CLI)

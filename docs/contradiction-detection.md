@@ -372,9 +372,8 @@ next librarian run; the skill does not handle archival.
 
 ### Voltaire briefing surface (Tristan-specific)
 
-For users running NanoClaw / Voltaire as an async companion, the
-[code-workspace-config side of the integration](https://github.com/TriKro/code-workspace-config/issues/245)
-surfaces the same pending-questions stream into the morning briefing. The
+For users running a companion async agent, the companion side of the
+integration surfaces the same pending-questions stream into the morning briefing. The
 two surfaces are independent: the SessionStart hook fires when Claude Code
 starts a new session; the Voltaire briefing fires on the morning cron.
 Either one (or both) can be enabled.

@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/athenaeum.svg)](https://pypi.org/project/athenaeum/)
 [![Python versions](https://img.shields.io/pypi/pyversions/athenaeum.svg)](https://pypi.org/project/athenaeum/)
-[![License](https://img.shields.io/pypi/l/athenaeum.svg)](https://github.com/Kromatic-Innovation/athenaeum/blob/develop/LICENSE)
+[![License](https://img.shields.io/pypi/l/athenaeum.svg)](https://github.com/Kromatic-Innovation/athenaeum/blob/main/LICENSE)
 
 **Production-tested agentic memory for teams deploying multiple AI agents.**
 Append-only intake, a tiered librarian that compiles raw observations into a
@@ -134,8 +134,8 @@ fully-resolved wiki entry — in session B the moment A ends, no waiting for the
 nightly librarian. It is single-flight (shares the `run` lock, #309) and prints
 a one-line JSON summary nesting the ingest counts plus the reindex page count.
 The reusable engine is `athenaeum.librarian.session_end`; the CLI is a thin
-wrapper. The hook that fires this at SessionEnd lives in the workspace config
-(cwc#1084) — this repo ships the command it calls.
+wrapper. The hook that fires this at SessionEnd lives in your Claude Code
+workspace config — this repo ships the command it calls.
 
 ## Maintenance & inspection commands
 
@@ -390,7 +390,7 @@ This gives you:
 - **Context checkpointing** — observations are saved before context-window compaction.
 
 Full setup guide, smoke test, and environment-variable reference:
-[`examples/claude-code/README.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/develop/examples/claude-code/README.md).
+[`examples/claude-code/README.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/examples/claude-code/README.md).
 
 ## Integrations
 
@@ -701,4 +701,4 @@ agent-memory rollouts often and are happy to point at whatever's useful.
 
 ## License
 
-Apache 2.0 — see [LICENSE](https://github.com/Kromatic-Innovation/athenaeum/blob/develop/LICENSE).
+Apache 2.0 — see [LICENSE](https://github.com/Kromatic-Innovation/athenaeum/blob/main/LICENSE).
