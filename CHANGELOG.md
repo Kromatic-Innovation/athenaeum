@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One unified "human decisions needed" list — `athenaeum decisions` +
+  `athenaeum merges` + `list_pending_decisions` MCP tool (#401).** Athenaeum
+  accumulated two separate human-decision queues — pending **questions**
+  (contradiction detector) and pending **merges** (resolver proposals) — but
+  merges had **no CLI and appeared in no briefing**, so a real backlog (34
+  proposals aged 1–4 weeks, found 2026-07-20) could sit unseen indefinitely.
+  - New `athenaeum decisions {list,next,count} --json` returns **both** queues
+    in one call, each item tagged `type: "question" | "merge"` with common
+    fields (`id`, `created_at`, `summary`, `confidence`) plus a type-specific
+    `payload`, sorted oldest-first. `count` prints
+    `N decisions pending (Q questions, M merges; oldest Xd)`.
+  - New `athenaeum merges {list,next,count} --json` — the merges half, a mirror
+    of `athenaeum questions` (the CLI-only briefing path had no way to read
+    merges before).
+  - New `list_pending_decisions()` MCP tool gives containerized agents the same
+    unified list.
+  - Every **merge** is rendered as an **answerable question**: each source page
+    is named by its human title (frontmatter `name:`, not the uuid-slug) with a
+    one-line gist, because cosine topic-similarity alone is not "should-merge"
+    and misleads without the pages' own words. A human can decide approve/reject
+    from one `decisions list` item without opening the raw wiki files.
+
 - **Kill switch — `athenaeum disable` / `enable` / `status` (#379).** One
   discoverable, reversible command stops all athenaeum background work instead
   of hand-editing the hook commands out of `~/.claude/settings.json` and

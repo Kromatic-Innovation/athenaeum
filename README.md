@@ -329,6 +329,29 @@ exposes two tools:
 - `resolve_question(id, answer)` flips the checkbox and writes the answer
   body under it. It does **not** archive on its own — archival runs on the
   next `ingest-answers` pass.
+- `list_pending_decisions()` returns the **unified** queue — pending
+  questions AND resolver merge proposals in one call, each tagged
+  `type: "question" | "merge"` (issue #401). Merges name their source pages
+  by human title with a one-line gist so the item reads as an answerable
+  question.
+
+### One unified "decisions needed" list
+
+Athenaeum accumulates two human-decision queues: **questions** (contradiction
+detector) and **merges** (resolver merge proposals). `athenaeum decisions`
+unifies both so there is one place to look:
+
+```bash
+athenaeum decisions count            # "7 decisions pending (3 questions, 4 merges; oldest 30d)"
+athenaeum decisions list --json      # both queues, each tagged type, oldest first
+athenaeum decisions next             # the single oldest decision
+```
+
+Each merge item is rendered as an answerable question — the source pages are
+named by their frontmatter `name:` (not the uuid-slug) with a one-line gist
+each — because cosine topic-similarity alone is not "should-merge" and misleads
+without the pages' own words. The merges half is also available on its own via
+`athenaeum merges {list,next,count}` (the mirror of `athenaeum questions`).
 
 ### Step 2 — ingest the answers
 

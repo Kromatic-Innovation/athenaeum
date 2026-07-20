@@ -643,7 +643,9 @@ def create_server(
             "Use `list_pending_questions` / `resolve_question` to triage "
             "detector-flagged contradictions, and "
             "`list_pending_merges` / `resolve_merge` to triage resolver-proposed "
-            "memory merges (issue #169)."
+            "memory merges (issue #169). "
+            "Use `list_pending_decisions` for the unified 'human decisions "
+            "needed' queue (questions + merges in one call, issue #401)."
         ),
     )
 
@@ -820,6 +822,30 @@ def create_server(
 
         merges_path = wiki_root / "_pending_merges.md"
         return _list_pending_merges(merges_path)
+
+    @mcp.tool()
+    def list_pending_decisions() -> list[dict]:
+        """List ALL pending human decisions — questions AND merges (issue #401).
+
+        The unified queue behind ``athenaeum decisions list``. Combines the
+        unanswered blocks of ``wiki/_pending_questions.md`` with the
+        unresolved blocks of ``wiki/_pending_merges.md`` into one list,
+        oldest first, so a containerized agent gets the whole "athenaeum
+        needs a human to decide something" backlog in a single call rather
+        than having to poll two tools and merge them itself.
+
+        Each item is tagged ``type: "question" | "merge"`` and carries the
+        common fields ``id``, ``created_at``, ``summary`` (a one-line,
+        answerable question) and ``confidence`` (a float for merges, ``null``
+        for questions), plus a type-specific ``payload``. For a merge the
+        ``summary`` names each source page by its human title with a one-line
+        gist, so the decision is answerable without opening the raw wiki
+        files. Resolve items with the existing ``resolve_question`` /
+        ``resolve_merge`` tools, dispatching on ``type``.
+        """
+        from athenaeum.decisions import list_pending_decisions as _list_decisions
+
+        return _list_decisions(wiki_root)
 
     @mcp.tool()
     def resolve_merge(id: str, decision: str, note: str = "") -> dict:
