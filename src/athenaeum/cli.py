@@ -887,6 +887,19 @@ def main(argv: list[str] | None = None) -> int:
 
     add_questions_subparser(subparsers)
 
+    # merges command (issue #401) — surface unresolved resolver merge
+    # proposals (previously reachable only via the list_pending_merges MCP
+    # tool, so a backlog could sit unseen with no CLI/briefing path).
+    from athenaeum._cmd_merges import add_merges_subparser
+
+    add_merges_subparser(subparsers)
+
+    # decisions command (issue #401) — one unified "human decisions needed"
+    # list combining questions + merges, each tagged by type.
+    from athenaeum._cmd_decisions import add_decisions_subparser
+
+    add_decisions_subparser(subparsers)
+
     # reindex command (issue #349) — rebuild the search index out-of-band.
     # ``rebuild-index`` is kept as a back-compat alias for the #348 spelling;
     # both dispatch to the identical handler (no duplicated index engine).
@@ -1200,6 +1213,16 @@ def main(argv: list[str] | None = None) -> int:
         from athenaeum._cmd_questions import cmd_questions
 
         return cmd_questions(args)
+
+    if args.command == "merges":
+        from athenaeum._cmd_merges import cmd_merges
+
+        return cmd_merges(args)
+
+    if args.command == "decisions":
+        from athenaeum._cmd_decisions import cmd_decisions
+
+        return cmd_decisions(args)
 
     return 0
 
