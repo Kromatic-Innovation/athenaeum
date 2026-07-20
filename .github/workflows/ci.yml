@@ -17,6 +17,12 @@ on:
   pull_request:
     branches: [develop]
 
+# Least-privilege default (Scorecard Token-Permissions, #405). CI only reads
+# the repo and runs tests, so `contents: read` is sufficient; jobs that need
+# more can widen this at the job level.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

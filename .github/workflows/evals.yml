@@ -75,7 +75,7 @@ jobs:
         # crashing, preserving the "mergeable before provisioning" property.
         id: op-key
         continue-on-error: true
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@3a12b0ab99d9cd590a3e9b5a90ea017210ed9556  # v4.0.1
         with:
           export-env: true
         env:

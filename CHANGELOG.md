@@ -99,6 +99,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ANTHROPIC_API_KEY`"; both now build through the provider seam
   (`build_llm_client`), matching the actual post-#330 behavior.
 
+### Security
+
+- **Workflow hardening for OpenSSF Scorecard (#405).** Added a least-privilege
+  top-level `permissions: { contents: read }` block to `ci.yml` (closes the
+  Token-Permissions / High alert) and SHA-pinned the remaining tag-referenced
+  third-party actions — `dependabot/fetch-metadata`, `1password/load-secrets-action`,
+  `actions/checkout` + `actions/create-github-app-token` (in `promote-main.yml`),
+  and `pypa/gh-action-pypi-publish` — each with a trailing `# vX.Y.Z` comment,
+  matching the existing convention. `dependabot.yml`'s `github-actions` ecosystem
+  block keeps the pins fresh automatically.
+
 ## [0.14.1] - 2026-07-12
 
 Session-end / incremental-compile efficiency (issue #370) plus a self-healing
