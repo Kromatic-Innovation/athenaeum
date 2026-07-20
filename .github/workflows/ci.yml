@@ -9,7 +9,7 @@ name: CI
 # the required check-runs on the promoted SHA before pushing the ref update.
 # Since `main`'s tip is always the same commit SHA that develop already
 # tested, an independent main-triggered run would be a pure duplicate of
-# the develop run (code-workspace-config#900 CI-bill audit).
+# the develop run (CI-bill audit).
 
 on:
   push:

@@ -1588,10 +1588,8 @@ BREAKING changes**; see Removed.
   (#112) — the Apollo people-match connector and the `athenaeum enrich
   --persons` CLI subcommand have been removed from the OSS package. Both
   were Kromatic-specific (operator-curated wiki + Apollo API key) and now
-  live in the `code-workspace-config` (cwc) personal toolkit alongside the
-  rest of the Apollo enrichment scripts. See
-  Kromatic-Innovation/code-workspace-config#235 (merged at sha 8fbe5183)
-  for the self-contained replacement. The conflict-resolution
+  live in a separate private toolkit alongside the
+  rest of the Apollo enrichment scripts. The conflict-resolution
   lock document (`docs/conflict-resolution.md`) drops its former section 8
   (`enrich_person` + CLI write path); the conflict-resolution audit suite
   drops `TestEnrichPersonResolution` and `TestCliEnrichWriteFieldSourcesMerge`.
