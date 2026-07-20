@@ -351,8 +351,8 @@ and ships unchanged for any future tree that needs it.
 Out of scope, by design:
 
 - **Enricher Protocol.** Apollo was extracted from the OSS package in
-  Phase 0 (cwc#235 / athenaeum#112). Future paid-API integrations live
-  in their host repositories (e.g. cwc/scripts/knowledge-librarian/).
+  Phase 0 (athenaeum#112). Future paid-API integrations live
+  in their own host repositories.
   athenaeum's contract stops at the on-disk shape and the MCP API.
 - **Conflict resolution semantics.** `docs/conflict-resolution.md` is the
   lock for which-source-wins. This doc only specifies how attribution is
