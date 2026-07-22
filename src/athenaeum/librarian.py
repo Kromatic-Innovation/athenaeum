@@ -382,6 +382,14 @@ def discover_raw_files(raw_root: Path) -> list[RawFile]:
         if not source_dir.is_dir():
             continue
         source = source_dir.name
+        # Issue #414: answer fragments under raw/answers/ are resolution
+        # OUTPUT, not new intake. Re-discovering them feeds already-settled
+        # rulings back through tier1-2 classification and tier4 contradiction
+        # escalation, so the same ruling re-surfaces as fresh pending
+        # questions on every subsequent run. Skip them at the source level,
+        # before any tier classification can re-escalate them.
+        if source == "answers":
+            continue
         for fpath in sorted(source_dir.glob("*.md")):
             if fpath.name == ".gitkeep":
                 continue
