@@ -83,6 +83,40 @@ class TestDiscoverRawFiles:
         names = [f.path.name for f in files]
         assert ".gitkeep" not in names
 
+    def test_skips_answers_source(self, tmp_path: Path) -> None:
+        """Issue #414: raw/answers/*.md are resolution OUTPUT, not intake.
+
+        Re-discovering them re-feeds already-settled rulings through tier1-2
+        classification and tier4 contradiction escalation, so the same ruling
+        re-surfaces as fresh pending questions on every run. discover_raw_files
+        must exclude the answers/ source entirely, while still discovering
+        genuine intake sources sitting alongside it.
+        """
+        from athenaeum.librarian import discover_raw_files
+
+        raw = tmp_path / "raw"
+        answers = raw / "answers"
+        answers.mkdir(parents=True)
+        sessions = raw / "sessions"
+        sessions.mkdir()
+
+        # A resolved-answer fragment (the terminal output of an earlier ruling).
+        (answers / "20260711T062202Z-11223344.md").write_text(
+            "Kromatic is the primary venture; Krobar.ai is subordinate.\n"
+        )
+        # A genuine new observation living beside it.
+        (sessions / "20260712T090000Z-aabbccdd.md").write_text(
+            "Met with a new prospect about lean coaching.\n"
+        )
+
+        files = discover_raw_files(raw)
+        sources = {f.source for f in files}
+        assert "answers" not in sources
+        assert all(f.path.parent.name != "answers" for f in files)
+        # The sibling intake source is still discovered — we did not over-skip.
+        assert "sessions" in sources
+        assert len(files) == 1
+
     def test_empty_dir(self, tmp_path: Path) -> None:
         from athenaeum.librarian import discover_raw_files
 
