@@ -1,11 +1,39 @@
 name: Promote Main
 
-# Fast-forward promotion of develop -> main. Triggered manually.
-# Athenaeum has no staging branch, so the chain is develop -> main.
+# ⚠️  CANONICAL TEMPLATE — DO NOT HAND-EDIT PER REPO.
+#
+# This is the single source of truth for `promote-main.yml` across every
+# Internal Platform repo (registry `family: platform` + `promotionModel:
+# develop-main`). It is versioned in code-workspace-config at
+# `templates/promote-main.yml` and synced into each platform repo by
+# `scripts/sync_promote_workflows.py` (mirror of `derive_repo_configs.py`).
+# A CI drift-check (`.github/workflows/promote-workflow-drift.yml`) fails the
+# build if a repo's committed copy diverges from this canonical content.
+#
+# To change the promotion contract, edit THIS template and re-run the sync
+# script — never hand-edit a repo's `.github/workflows/promote-main.yml`.
+# cwc#1468. End home: cron-fleet (rides cwc#1107).
+#
+# Contract — the `{source_branch, target_branch, reason}` winner (rejecting the
+# old `{sha, reason}` + hardcoded-`ci.yml` shape):
+#
+# Platform repos are `develop-main`: `main` is the deliberate deploy ref (the
+# launchd registry deploy checkout is main-pinned; deploy-guard.sh
+# fast-forwards+reloads it from origin/main before every dispatch, so advancing
+# `main` IS the deploy). `main` is push-restricted (branch-protection
+# allowlist), so a local `octokit.git.updateRef` under a daemon App returns
+# HTTP 422. This workflow does the fast-forward IN CI under the
+# kromatic-workflow-bot App, which holds the protected-branch bypass.
+# `hestia promote --repo <name>` dispatches this workflow.
+#
+# The chain is develop -> main and the `to_main` gate is `ci_green`. This
+# workflow refuses to promote unless the `CI Required` aggregate check is green
+# for the exact develop SHA being promoted (resolved via the generic check-runs
+# API, not a hardcoded `ci.yml` context), then fast-forwards `main` via the refs
+# API (force=false, never a force-push). Triggered by workflow_dispatch.
 #
 # Precondition: `main` is an ancestor of `develop` (fast-forward possible).
 # If it isn't, open a `chore: sync develop with main` PR first.
-# See CONTRIBUTING.md -> "Branch flow and promotion".
 
 on:
   workflow_dispatch:
@@ -26,6 +54,7 @@ permissions:
   contents: write
   actions: read
   statuses: read
+  checks: read
 
 jobs:
   promote:
@@ -39,12 +68,12 @@ jobs:
       PROMOTION_REASON: ${{ github.event.inputs.reason }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Load workflow-bot App credentials from 1Password
-        uses: 1password/load-secrets-action@3a12b0ab99d9cd590a3e9b5a90ea017210ed9556  # v4.0.1
+        uses: 1password/load-secrets-action@v4
         with:
           export-env: true
         env:
@@ -54,7 +83,7 @@ jobs:
 
       - name: Mint GitHub App installation token
         id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ env.KROMATIC_WORKFLOW_BOT_APP_ID }}
           private-key: ${{ env.KROMATIC_WORKFLOW_BOT_PRIVATE_KEY }}
@@ -91,17 +120,18 @@ jobs:
             exit 1
           fi
 
-      - name: Verify CI passed on source SHA
+      - name: Enforce to_main gate — CI Required green on source SHA
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          # Required contexts match branch protection on main: test (3.11|3.12|3.13).
-          required=(test\ \(3.11\) test\ \(3.12\) test\ \(3.13\))
+          # `to_main` gate is `ci_green`; the enforcing context is the `CI
+          # Required` aggregate check. Fail closed if it is not a completed
+          # success on the exact SHA being promoted.
+          required=("CI Required")
 
           for ctx in "${required[@]}"; do
-            # Look up the latest check-run for this context on source_sha.
             conclusion=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${source_sha}/check-runs" \
               --jq ".check_runs[] | select(.name == \"${ctx}\") | .conclusion" | head -n 1)
             if [ "$conclusion" != "success" ]; then
@@ -117,9 +147,9 @@ jobs:
 
       - name: Push fast-forward promotion via refs API
         env:
-          # App-minted token required because main's branch protection
-          # rejects direct ref writes by the default GITHUB_TOKEN with HTTP 422.
-          # The kromatic-workflow-bot App has the bypass for promotion refs.
+          # App-minted token required because main's branch protection rejects
+          # direct ref writes by the default GITHUB_TOKEN with HTTP 422. The
+          # kromatic-workflow-bot App has the bypass for promotion refs.
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
