@@ -52,6 +52,14 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.4.0",
     "fastmcp>=2.0.0,<4.0",
+    # `build` + `hatchling` let tests/test_skill_packaging.py build the wheel
+    # via `python -m build --no-isolation` and assert the bundled skills/
+    # directory is present in the BUILT artifact (issue #419) — the acceptance
+    # bar is "verify presence in the built artifact, not just in git".
+    # hatchling is the build backend (see [build-system]); pinning it here too
+    # makes the no-isolation build deterministic and offline in CI.
+    "build>=1.0",
+    "hatchling",
 ]
 bench = [
     # Optional: pytest-benchmark is only needed to run tests/benchmarks/
@@ -82,6 +90,18 @@ include = [
     "src/athenaeum/schema/**/*.md",
     "src/athenaeum/templates/**/*.md",
 ]
+
+# Ship the bundled skills/ directory (adapter-authoring, issue #419) INSIDE the
+# installed package so it is present in the built WHEEL — not just in git. A
+# top-level skills/ lives outside `packages = ["src/athenaeum"]`, so without an
+# explicit force-include hatchling would silently drop it from the wheel — the
+# same files-allowlist trap that excluded a committed persona file from an npm
+# package (panelist precedent). force-include maps skills/ to athenaeum/skills/,
+# discoverable at runtime via importlib.resources.files("athenaeum") / "skills".
+# The sdist keeps skills/ automatically via hatchling's VCS default (every
+# git-tracked file), so no separate sdist config is needed.
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "athenaeum/skills"
 
 [tool.ruff]
 target-version = "py311"

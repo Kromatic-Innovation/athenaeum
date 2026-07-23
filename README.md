@@ -392,9 +392,20 @@ This gives you:
 Full setup guide, smoke test, and environment-variable reference:
 [`examples/claude-code/README.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/examples/claude-code/README.md).
 
+## Building your own adapter
+
+Any external source — an API, an export file, a message feed, a scraper — can
+feed Athenaeum by writing **raw-intake files** that the librarian compiles into
+the wiki. That seam is a small, stable contract: a source only _appends_ a raw
+file; the librarian is the only writer to the wiki.
+
+- **The contract** — [`docs/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/adapter-contract.md): file location, frontmatter shape, provenance, idempotency, and how compilation reconciles duplicates/updates.
+- **Guided walkthrough** — the bundled [`adapter-authoring`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/skills/adapter-authoring/SKILL.md) skill (ships in the package under `skills/`) teaches an agent or a human how to build a custom adapter step by step.
+- **Worked example** — [`examples/adapters/minimal_adapter.py`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/examples/adapters/minimal_adapter.py): a synthetic, runnable adapter you can copy as a starting point.
+
 ## Integrations
 
-- **Claude Code auto-memory** — bridge `~/.claude/projects/<scope>/memory/` into Athenaeum's `raw/` intake so the librarian can cluster, merge, and contradiction-check Claude Code's durable memory alongside other sources. See [`docs/integrations/claude-code.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/integrations/claude-code.md).
+- **Claude Code auto-memory** — bridge `~/.claude/projects/<scope>/memory/` into Athenaeum's `raw/` intake so the librarian can cluster, merge, and contradiction-check Claude Code's durable memory alongside other sources. A complete worked adapter for the auto-memory intake lane. See [`docs/integrations/claude-code.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/integrations/claude-code.md).
 - **Contradiction detection** — pipeline overview, cross-scope modes, source-precedence taxonomy, configuration reference, and cost model for the auto-memory contradiction path. See [`docs/contradiction-detection.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/contradiction-detection.md).
 
 ## Vector search (optional)
