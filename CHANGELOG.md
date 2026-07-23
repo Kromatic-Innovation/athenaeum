@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Documented the source → raw-intake adapter contract + a bundled
+  adapter-authoring skill (#419).** The raw-intake write API is the seam any
+  external source uses to feed data into the wiki, but it wasn't documented or
+  packaged as a reusable "adapter" contract for OSS consumers.
+  - New [`docs/adapter-contract.md`](docs/adapter-contract.md) specifies the
+    contract end to end: the two intake lanes, the `raw/<source>/<timestamp>-<uuid8>.md`
+    location convention, the frontmatter/provenance shape, idempotency
+    (write-once, append-only, atomic, compile-time dedupe), how compilation
+    reconciles duplicates/updates, and the two write mechanisms (the MCP
+    `remember` tool and direct file drop).
+  - New bundled **`skills/adapter-authoring/`** skill — a self-contained,
+    user-invocable walkthrough for building a custom adapter. It ships **inside
+    the published wheel** (`athenaeum/skills/…`) via a
+    `[tool.hatch.build.targets.wheel.force-include]` mapping, and in the sdist,
+    so any consumer (human or agent) has it after `pip install athenaeum`.
+  - New synthetic, runnable [`examples/adapters/minimal_adapter.py`](examples/adapters/minimal_adapter.py)
+    (plus `examples/adapters/README.md`) — a generic Lane-A adapter, no private
+    specifics or PII, usable as a starting point.
+  - README gains a "Building your own adapter" section; `AGENTS.md` references
+    the skill by path and name so agent sessions surface it.
+
 ## [0.15.0] - 2026-07-20
 
 ### Added
