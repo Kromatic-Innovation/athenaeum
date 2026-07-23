@@ -64,6 +64,15 @@ reviewers cannot read it.
 - Run: `pytest`
 - Coverage: `pytest --cov=athenaeum`
 
+## Bundled skills
+
+- `skills/adapter-authoring/SKILL.md` — **adapter-authoring**: how to build a
+  custom source → raw-intake adapter against the contract in
+  `docs/adapter-contract.md`. Ships inside the published package (under
+  `skills/`) so any consumer — human or agent — can invoke it. Point a session
+  at it whenever someone wants to feed a new external source into a knowledge
+  base.
+
 ## Conventions
 
 - Python 3.11+
