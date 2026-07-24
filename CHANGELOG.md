@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Outbound-draft PII lint (emails/phones) — interim mitigation (#455, split
+  from #428, epic #422).** A reusable, offline, deterministic lint that scans
+  outbound-destined text (email draft, Buffer post, public issue) for PII
+  before it ships. Detects email addresses and phone numbers (in several
+  formats), reports each finding's class + location (line/column + offsets),
+  and supports a strip/redact mode distinct from flag-only. A configurable
+  allowlist drops addresses already known to the recipient; where the caller
+  cannot establish that, the default is to flag (fail safe, never
+  silent-pass).
+  - New `src/athenaeum/outbound_pii.py`: `scan_outbound_text` (flag),
+    `redact_outbound_text` (strip), and the `lint_outbound_text` wrapper, plus
+    an `Allowlist` helper. Reuses the #427 `athenaeum.pii` email/phone patterns
+    as the single source of truth (no second, driftable copy). No network, no
+    live-store access, no LLM call.
+  - New `athenaeum outbound-lint` CLI (`src/athenaeum/_cmd_outbound.py`): reads
+    from `--text`/`--file`/stdin, `--allow`/`--allowlist-file`, `--redact`,
+    `--json`; exits non-zero when PII is found in flag mode so a shell can gate
+    a send on a clean scan. Delivers the mechanism only — wiring it into any
+    specific outbound surface is separate per-surface work, and egress
+    *refusal* stays parked on #428.
 - **Entity source-handle registry — schema + `registry.json` index builder
   (#453, epic #422).** Adds the source-handle frontmatter keys to the
   `person`/`company` scaffold templates and a deterministic CLI step that

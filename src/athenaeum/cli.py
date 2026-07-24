@@ -920,6 +920,12 @@ def main(argv: list[str] | None = None) -> int:
 
     add_calibration_subparser(subparsers)
 
+    # outbound-lint command (issue #455) — scan outbound-destined text for PII
+    # (emails/phones) before it ships; flag or --redact. Offline/deterministic.
+    from athenaeum._cmd_outbound import add_outbound_subparser
+
+    add_outbound_subparser(subparsers)
+
     # reindex command (issue #349) — rebuild the search index out-of-band.
     # ``rebuild-index`` is kept as a back-compat alias for the #348 spelling;
     # both dispatch to the identical handler (no duplicated index engine).
@@ -1295,6 +1301,11 @@ def main(argv: list[str] | None = None) -> int:
         from athenaeum._cmd_calibration import cmd_calibration
 
         return cmd_calibration(args)
+
+    if args.command == "outbound-lint":
+        from athenaeum._cmd_outbound import cmd_outbound
+
+        return cmd_outbound(args)
 
     return 0
 
