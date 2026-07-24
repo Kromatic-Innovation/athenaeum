@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Entity source-handle registry — schema + `registry.json` index builder
+  (#453, epic #422).** Adds the source-handle frontmatter keys to the
+  `person`/`company` scaffold templates and a deterministic CLI step that
+  compiles them into an `entity uid → handle set` index for the fact-mining
+  adapters.
+  - New keys on `src/athenaeum/templates/{person,company}.md`: `domains`,
+    `alt_emails`, `slack_channels`, `slack_user_ids`, `partner_domains`,
+    `drive_folder_ids`, `mural_board_ids`, `handles_verified` (plus the
+    pre-existing `linkedin_url`). No schema-class change needed — `WikiBase`
+    is already `extra="allow"`, so the keys round-trip byte-for-byte through
+    tier0 passthrough. Documented in `docs/source-handles.md`.
+  - New `src/athenaeum/registry.py` + `athenaeum registry` command: walks
+    `wiki/*.md` and emits `registry.json`, recording only entities with at
+    least one populated handle. Deterministic (uid-sorted, canonical key
+    order) and LLM-free. Emits a well-formed **empty** registry when no
+    handles are populated yet — the operator-only seed (#454) is never a
+    precondition. Tooling only; no client data lands in this public repo.
 - **Memory taxonomy — data model, validation, inference-block parser
   (#424).** Adds `memory_class:` as a third, orthogonal frontmatter axis —
   `fact | guideline | axiom | reference | entity | decision | procedure` —
