@@ -1233,6 +1233,48 @@ class VectorBackend:
             out[doc_id] = [float(x) for x in vec]
         return out
 
+    def purge_ids(
+        self,
+        ids: Iterable[str],
+        cache_dir: Path,
+    ) -> int:
+        """Delete the given indexed filenames from the collection (issue #425).
+
+        Embedding hygiene for a fold-into-existing merge: when the resolver
+        deletes old-slug wiki files after folding them into a canonical page,
+        their stale vectors must not linger and surface as near-duplicate
+        recall hits. Mirrors :meth:`fetch_embeddings`'s open pattern (a pure
+        mutation of the existing collection — never constructs an embedding
+        function, since a delete needs no embedding). Returns the number of
+        ids requested that were plausibly present (best-effort — chromadb's
+        ``delete`` does not report which ids actually existed); returns 0
+        when the collection/vector dir does not exist, chromadb is not
+        installed, or the input is empty. Never raises — a purge failure
+        must not block the merge's file-level side effects, which have
+        already happened by the time this runs.
+        """
+        try:
+            chromadb = self._get_chromadb()
+        except ImportError:
+            return 0
+        vector_dir = cache_dir / _VECTOR_DIR
+        if not vector_dir.is_dir():
+            return 0
+
+        id_list = list(ids)
+        if not id_list:
+            return 0
+
+        try:
+            client = chromadb.PersistentClient(path=str(vector_dir))
+            collection = client.get_collection(
+                _VECTOR_COLLECTION, embedding_function=None
+            )
+            collection.delete(ids=id_list)
+        except Exception:
+            return 0
+        return len(id_list)
+
     def query_neighbors(
         self,
         embedding: Sequence[float],

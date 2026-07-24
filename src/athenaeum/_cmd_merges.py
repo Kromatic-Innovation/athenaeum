@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum merges {list,next,count}`` — surface pending merge proposals.
+"""``athenaeum merges {list,next,count,provenance}`` — pending + executed merges.
 
 The mirror of ``athenaeum questions`` for the resolver's merge-proposal
 sidecar (``wiki/_pending_merges.md``). Before issue #401 merges had **no CLI
@@ -12,11 +12,14 @@ named by their human title (frontmatter ``name:``, not the uuid-slug) with a
 one-line gist each, and a ``question`` field phrases the decision plainly —
 so a human can decide approve/reject without opening the raw wiki files.
 
-Three modes mirror ``questions``:
+Four modes:
 
-- ``list``   all unresolved merges (optionally ``--limit``, ``--json``)
-- ``next``   the OLDEST unresolved merge (one block)
-- ``count``  ``N unresolved (oldest: <iso-date>)`` summary
+- ``list``        all unresolved merges (optionally ``--limit``, ``--json``)
+- ``next``        the OLDEST unresolved merge (one block)
+- ``count``       ``N unresolved (oldest: <iso-date>)`` summary
+- ``provenance``  EXECUTED merges from ``wiki/_merge_provenance.jsonl``
+                   (issue #425) — which source pages a merge relied on,
+                   queryable by ``--canonical-slug`` / ``--merge-id``.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import sys
 from pathlib import Path
 
 from athenaeum.decisions import list_pending_merges_rich
+from athenaeum.provenance import read_merge_provenance
 
 
 def _resolve_merges_path(args: argparse.Namespace) -> Path:
@@ -34,6 +38,13 @@ def _resolve_merges_path(args: argparse.Namespace) -> Path:
         (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
     )
     return knowledge_root / "wiki" / "_pending_merges.md"
+
+
+def _resolve_wiki_root(args: argparse.Namespace) -> Path:
+    knowledge_root = (
+        (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
+    )
+    return knowledge_root / "wiki"
 
 
 def _format_block(merge: dict) -> str:
@@ -53,16 +64,53 @@ def _format_block(merge: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_provenance_record(record: dict) -> str:
+    """Human-readable rendering for one executed-merge provenance record."""
+    lines = [
+        f"## [{record.get('ts', '?')}] merge {record.get('merge_id', '?')} "
+        f"({record.get('write_kind', '?')})",
+        f"  canonical: {record.get('canonical_slug', '?')}",
+        "  sources:",
+    ]
+    for src in record.get("source_paths") or []:
+        lines.append(f"    - {src}")
+    return "\n".join(lines)
+
+
 def cmd_merges(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum merges {list,next,count}``.
+    """Dispatch ``athenaeum merges {list,next,count,provenance}``.
 
     Like ``questions``, never raises on a missing/empty ``_pending_merges.md``:
-    count returns 0 / null oldest, list/next print nothing and exit 0.
+    count returns 0 / null oldest, list/next print nothing and exit 0. Same
+    discipline for ``provenance`` against a missing/empty
+    ``_merge_provenance.jsonl``.
     """
     sub = getattr(args, "merges_target", None)
-    if sub not in ("list", "next", "count"):
-        print("usage: athenaeum merges {list,next,count} [...]", file=sys.stderr)
+    if sub not in ("list", "next", "count", "provenance"):
+        print(
+            "usage: athenaeum merges {list,next,count,provenance} [...]",
+            file=sys.stderr,
+        )
         return 2
+
+    if sub == "provenance":
+        wiki_root = _resolve_wiki_root(args)
+        records = read_merge_provenance(
+            wiki_root,
+            canonical_slug=getattr(args, "canonical_slug", None),
+            merge_id=getattr(args, "merge_id", None),
+        )
+        if args.json:
+            sys.stdout.write(json.dumps(records) + "\n")
+            return 0
+        if not records:
+            print("0 recorded")
+            return 0
+        for idx, record in enumerate(records):
+            if idx > 0:
+                print()
+            print(_format_provenance_record(record))
+        return 0
 
     merges_path = _resolve_merges_path(args)
     merges = list_pending_merges_rich(merges_path)
@@ -154,3 +202,22 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         "count", help="Print `N unresolved (oldest: <iso-date>)`."
     )
     _add_common(count_p)
+
+    provenance_p = m_sub.add_parser(
+        "provenance",
+        help=(
+            "List EXECUTED merges from `wiki/_merge_provenance.jsonl` "
+            "(issue #425) — which source pages each merge relied on."
+        ),
+    )
+    _add_common(provenance_p)
+    provenance_p.add_argument(
+        "--canonical-slug",
+        default=None,
+        help="Filter to records for this canonical target slug.",
+    )
+    provenance_p.add_argument(
+        "--merge-id",
+        default=None,
+        help="Filter to the record for this merge id.",
+    )
