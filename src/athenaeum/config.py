@@ -1422,6 +1422,16 @@ search_backend: fts5
 # storage:
 #   mapping:
 #     pii: excluded
+
+# Authority manifest (issue #426). Maps authoritative LIVE sources (skill
+# files, code paths, config) to the topics/slugs they own, so a memory that
+# merely duplicates content a live source already owns can be detected and
+# converted to a one-line pointer stub instead of persisting a full copy.
+# Precedence: ATHENAEUM_AUTHORITY_MANIFEST env > this key > default
+# `<knowledge_root>/authority-manifest.yaml`. See docs/authority-manifest.md
+# and `athenaeum authority --help`.
+# librarian:
+#   authority_manifest_path: authority-manifest.yaml
 """
 
 
@@ -1517,6 +1527,47 @@ def resolve_embedding_model(config: dict[str, Any] | None) -> str | None:
     if isinstance(model, str) and model.strip():
         return model.strip()
     return None
+
+
+def resolve_authority_manifest_path(
+    knowledge_root: Path,
+    config: dict[str, Any] | None = None,
+) -> Path:
+    """Resolve the authority manifest path (issue #426).
+
+    The authority manifest maps authoritative LIVE sources (skill files, code
+    paths, config) to the topics/slugs they own, so the librarian can detect a
+    memory that merely duplicates content a live source already owns. Mirrors
+    the module's standard precedence (env > yaml > default), matching
+    :func:`resolve_spend_ledger_path`'s "explicit path override" shape:
+
+    - ``ATHENAEUM_AUTHORITY_MANIFEST`` env — explicit path (highest).
+    - ``librarian.authority_manifest_path`` yaml — relative values are
+      resolved against ``knowledge_root``; absolute values pass through.
+    - default: ``<knowledge_root>/authority-manifest.yaml`` — a sibling of
+      ``athenaeum.yaml`` at the knowledge root, following the same "config
+      lives at the root of the knowledge tree" convention.
+
+    Does not check for existence — callers (:func:`athenaeum.authority.
+    load_authority_manifest`) handle a missing file as "no manifest configured"
+    (empty, not an error). No seed in ``_DEFAULTS`` (issue #231) so this code
+    default stays reachable.
+    """
+    env = os.environ.get("ATHENAEUM_AUTHORITY_MANIFEST")
+    if env is not None and env.strip():
+        return Path(env).expanduser()
+
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("authority_manifest_path")
+            if isinstance(raw, str) and raw.strip():
+                candidate = Path(raw.strip()).expanduser()
+                if not candidate.is_absolute():
+                    candidate = knowledge_root / candidate
+                return candidate
+
+    return knowledge_root / "authority-manifest.yaml"
 
 
 def resolve_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
