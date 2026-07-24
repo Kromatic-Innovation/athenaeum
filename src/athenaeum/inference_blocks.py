@@ -22,10 +22,14 @@ Each parsed block is an ADDRESSABLE unit (:class:`InferenceBlock`) with a
 stable ``id`` derived from its content, exposing its ``basis`` list and
 ``confidence`` value plus enough of the raw block to be located again later.
 
-Scope: this module is ONLY the schema + parser. The retraction machinery —
-i.e. actually acting on a retracted basis fact by invalidating or
-re-evaluating the dependent inference — is issue #433 and is NOT implemented
-here. A malformed block (missing ``**Basis**:``, missing/unparseable
+Retraction (issue #433): :func:`retract_inference_block` treats a parsed
+``## Inference`` block as a RETRACTABLE UNIT — superseding an interpretation
+retracts just that block (by its stable ``id``) and leaves the rest of the
+page, including its fact core, byte-intact. The fact core (the page's
+frontmatter and any body content outside ``## Inference`` sections) is never
+touched by a retraction; only the targeted block's own lines (header through
+its body, up to but not including the next ``## `` header or end of text)
+are removed. A malformed block (missing ``**Basis**:``, missing/unparseable
 ``**Confidence**:``, or a basis line with no recoverable wikilink) is
 FLAGGED via :attr:`InferenceBlock.malformed` / :attr:`InferenceBlock.errors`
 rather than silently dropped or silently accepted — the block is still
@@ -200,7 +204,73 @@ def parse_inference_blocks(text: str) -> list[InferenceBlock]:
     return blocks
 
 
+def retract_inference_block(text: str, block_id: str) -> str:
+    """Remove the ``## Inference`` block with id ``block_id`` from ``text``.
+
+    Issue #433: the retraction primitive for the addressable units
+    :func:`parse_inference_blocks` returns. Superseding an interpretation
+    retracts ONLY the targeted inference block — the fact core (everything
+    else: frontmatter, other body text, other ``## `` sections including
+    other ``## Inference`` blocks) is preserved BYTE-IDENTICAL. This is a
+    pure text transform (no basis re-evaluation, no cascading — see the
+    module docstring's out-of-scope note carried over from #424) so a
+    caller can round-trip ``parse -> retract -> parse`` and see every other
+    block unchanged.
+
+    Removal boundary matches parsing exactly: the block's own header line
+    (``## Inference``) through the line immediately before the next ``## ``
+    header (of any kind) or end of text — the same span
+    :func:`parse_inference_blocks` captured as ``raw_block`` for that id.
+    The blank line (if any) that separated the retracted block from the
+    following content is preserved verbatim (it belongs to whatever comes
+    next, not to the retracted block), so no double-blank-line or missing-
+    separator artifact is introduced at the seam.
+
+    Raises :class:`ValueError` if no block with ``block_id`` is found — a
+    caller retracting a specific, previously-parsed id should not silently
+    no-op on a stale/mistyped id.
+
+    Returns the full text with the block removed. When ``block_id`` matches
+    no block, raises rather than returning ``text`` unchanged.
+    """
+    lines = text.splitlines(keepends=True)
+    blocks: list[InferenceBlock] = []
+    current: list[str] | None = None
+    current_start: int | None = None
+    spans: list[tuple[int, int, InferenceBlock]] = []  # [start, end) line indices
+
+    for i, line in enumerate(lines):
+        if line.rstrip("\r\n").startswith("## "):
+            if current is not None:
+                parsed = _parse_one_block("".join(current))
+                spans.append((current_start, i, parsed))
+                current = None
+                current_start = None
+            if line.rstrip("\r\n").strip() == "## Inference":
+                current = [line]
+                current_start = i
+            continue
+        if current is not None:
+            current.append(line)
+
+    if current is not None:
+        parsed = _parse_one_block("".join(current))
+        spans.append((current_start, len(lines), parsed))
+
+    for start, end, parsed in spans:
+        blocks.append(parsed)
+        if parsed.id == block_id:
+            new_lines = lines[:start] + lines[end:]
+            return "".join(new_lines)
+
+    raise ValueError(
+        f"no ## Inference block with id {block_id!r} found "
+        f"(known ids: {[b.id for b in blocks]!r})"
+    )
+
+
 __all__ = [
     "InferenceBlock",
     "parse_inference_blocks",
+    "retract_inference_block",
 ]
