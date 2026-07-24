@@ -60,6 +60,14 @@ _MEMORY_PREFIXES = ("feedback_", "project_", "reference_", "user_", "recall_")
 # Cap for a one-line gist so a ``decisions list`` line stays readable.
 _GIST_LIMIT = 160
 
+# Fallback cap on rendered sources per merge item (issue #431) used when a
+# caller does not resolve its own value from config. Mirrors the code default
+# in :func:`athenaeum.config.resolve_decisions_max_sources_per_merge` (kept as
+# a plain literal here, not an import, to avoid a decisions->config->decisions
+# import cycle risk; the two are covered by
+# ``tests/test_bound_merge_read_path.py``'s config-parity check).
+_DECISIONS_MAX_SOURCES_DEFAULT = 20
+
 
 def _one_line(text: str, *, limit: int = _GIST_LIMIT) -> str:
     """Collapse ``text`` to a single trimmed line, truncated to ``limit``."""
@@ -180,9 +188,34 @@ def merge_to_rich(pm: PendingMerge) -> dict:
     }
 
 
-def merge_to_decision(pm: PendingMerge) -> dict:
-    """Convert a :class:`PendingMerge` to a unified decision dict."""
+def merge_to_decision(
+    pm: PendingMerge, *, max_sources: int = _DECISIONS_MAX_SOURCES_DEFAULT
+) -> dict:
+    """Convert a :class:`PendingMerge` to a unified decision dict.
+
+    Issue #431 (read-path defense-in-depth): the decisions view previously
+    rendered EVERY source of a merge with no cap, so a proposal with a very
+    large source list could blow out a single decision item's payload. The
+    rendered ``payload["sources"]`` list is capped to ``max_sources`` entries;
+    when sources are omitted, ``payload["sources_omitted"]`` carries the
+    accurate remainder count (``0`` when nothing was omitted, so a normal-
+    sized merge's payload is unchanged from before this cap existed).
+    ``max_sources <= 0`` disables the cap (all sources rendered).
+
+    Args:
+        pm: The pending merge to convert.
+        max_sources: Cap on rendered sources — see
+            :func:`athenaeum.config.resolve_decisions_max_sources_per_merge`
+            for the config-resolved default (env > yaml > 20).
+    """
     rich = merge_to_rich(pm)
+    all_sources = rich["sources"]
+    if max_sources > 0 and len(all_sources) > max_sources:
+        shown_sources = all_sources[:max_sources]
+        omitted = len(all_sources) - max_sources
+    else:
+        shown_sources = all_sources
+        omitted = 0
     return {
         "type": "merge",
         "id": rich["id"],
@@ -192,7 +225,8 @@ def merge_to_decision(pm: PendingMerge) -> dict:
         "payload": {
             "merge_target_name": rich["merge_target_name"],
             "rationale": rich["rationale"],
-            "sources": rich["sources"],
+            "sources": shown_sources,
+            "sources_omitted": omitted,
         },
     }
 
@@ -227,13 +261,25 @@ def list_pending_merges_rich(merges_path: Path) -> list[dict]:
     ]
 
 
-def list_pending_decisions(wiki_root: Path, *, with_proposal: bool = False) -> list[dict]:
+def list_pending_decisions(
+    wiki_root: Path,
+    *,
+    with_proposal: bool = False,
+    max_sources_per_merge: int = _DECISIONS_MAX_SOURCES_DEFAULT,
+) -> list[dict]:
     """Unified list of pending questions + merges, oldest first.
 
     ``wiki_root`` is the directory holding ``_pending_questions.md`` and
     ``_pending_merges.md`` (i.e. ``<knowledge>/wiki``). Items are sorted by
     ``created_at`` ascending so the oldest decision — the one most at risk of
     rotting unseen — leads the list.
+
+    ``max_sources_per_merge`` (issue #431) caps how many sources are rendered
+    per merge item — see :func:`merge_to_decision` and
+    :func:`athenaeum.config.resolve_decisions_max_sources_per_merge` for the
+    config-resolved default (env > yaml > 20). Callers that already loaded
+    config (the CLI, the MCP tool) should resolve it there and pass it
+    through; this default keeps direct callers working unchanged.
     """
     questions = [
         pq
@@ -242,7 +288,7 @@ def list_pending_decisions(wiki_root: Path, *, with_proposal: bool = False) -> l
     ]
     decisions = [question_to_decision(pq, with_proposal=with_proposal) for pq in questions]
     decisions += [
-        merge_to_decision(pm)
+        merge_to_decision(pm, max_sources=max_sources_per_merge)
         for pm in parse_pending_merges(wiki_root / "_pending_merges.md")
         if not pm.resolved
     ]
