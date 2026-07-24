@@ -33,6 +33,19 @@ Memory taxonomy (issue #424):
   additionally gain ``memory_class: entity``. See
   ``docs/memory-taxonomy.md`` for the full axis-reconciliation writeup and
   merge-vs-cite semantics (enforcement of those semantics is #433).
+
+Axiom governance (issue #434):
+- ``memory_class: axiom`` additionally requires an explicit, recorded,
+  human-approved PROMOTION on file — a page carrying that value with no
+  active promotion record is flagged (see
+  :func:`athenaeum.axiom_governance.warn_if_unbacked_axiom`). That check
+  needs ledger I/O keyed by slug, which a ``field_validator`` here cannot
+  do (no filesystem access, no cross-page context) — see
+  :mod:`athenaeum.axiom_governance`'s module docstring for the full design
+  and why the check lives there instead of in ``_validate_memory_class``
+  below. This module's role in #434 is limited to the ``scope:`` field
+  (below) — the axiom-governance ledger, promotion/demotion, and audit
+  listing all live in :mod:`athenaeum.axiom_governance`.
 - Mirrors the #93 ``KNOWN_TYPES`` shape exactly: a recognized value is
   silent; an unrecognized non-empty value emits a :class:`UserWarning`
   (flagged, not silently accepted); an ABSENT ``memory_class`` is tolerated
@@ -133,6 +146,25 @@ class WikiBase(BaseModel):
     # no date coercion here, mirroring how ``source``/``field_sources``
     # keep their on-disk shape rather than normalizing to a Python type.
     observed_at: str | None = None
+
+    # Issue #434 (context scoping): an axiom (or any memory_class value) may
+    # carry a SCOPE narrowing where it should be treated as authoritative —
+    # e.g. "applies to resume work" is axiomatic there, noise elsewhere.
+    # Stored as the on-disk scalar (str), same round-trip-fidelity discipline
+    # as ``observed_at``/``source`` — no normalization, no enum. ENFORCEMENT
+    # (a consumer deciding whether the current context matches the scope) is
+    # explicitly out of scope for #434; this field only stores and surfaces
+    # it. Not restricted to axioms at the schema level — a ``fact`` or
+    # ``guideline`` scoped to a context is equally legible — but #434's
+    # governance (promotion/demotion/ledger) only concerns ``axiom``.
+    scope: str | None = None
+
+    @field_validator("scope", mode="before")
+    @classmethod
+    def _validate_scope(cls, v: Any) -> Any:
+        if v is None or v == "":
+            return None
+        return str(v)
 
     @field_validator("source", mode="before")
     @classmethod

@@ -877,6 +877,31 @@ def create_server(
         return _list_decisions(wiki_root, max_sources_per_merge=max_sources_per_merge)
 
     @mcp.tool()
+    def list_axiom_audit() -> list[dict]:
+        """Axiom assignment audit — every slug's status + promote/demote history (#434).
+
+        ``memory_class: axiom`` must never be minted silently — see
+        ``athenaeum axiom promote`` / ``athenaeum axiom demote`` (the
+        sanctioned, human-driven authorization surface; this MCP server
+        intentionally does not expose a ``promote_axiom`` / ``demote_axiom``
+        WRITE tool, so an agent session cannot self-authorize an axiom no
+        differently than it can widen its own read scope).
+
+        Returns one entry per distinct slug recorded in
+        ``wiki/_axiom_governance.jsonl``, each shaped
+        ``{"slug", "active", "history": [...]}`` where ``active`` is
+        whether the MOST RECENT action for that slug is a promotion (a
+        promote followed by a later demote is inactive; a re-promote after
+        that is active again), and ``history`` is the full list of
+        promote/demote records (``action``, ``reason``, ``by``, ``at``,
+        optional ``scope``) in chronological order — so "when/why/by-whom
+        promoted" is fully queryable without leaving the agent session.
+        """
+        from athenaeum.axiom_governance import list_axiom_audit as _list_axiom_audit
+
+        return _list_axiom_audit(wiki_root)
+
+    @mcp.tool()
     def resolve_merge(id: str, decision: str, note: str = "") -> dict:
         """Approve or reject a pending merge proposal (issue #169, #425).
 
