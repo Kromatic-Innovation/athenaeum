@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from athenaeum._lint import _strip_self_reference
-from athenaeum.clusters import resolve_cluster_output_path
+from athenaeum.clusters import resolve_cluster_output_path, resolve_cluster_threshold
 from athenaeum.config import (
     load_config,
     resolve_ephemeral_scopes,
@@ -60,6 +60,7 @@ from athenaeum.config import (
     resolve_min_cluster_cohesion,
     resolve_min_cluster_cohesion_scopes,
     resolve_min_merge_confidence,
+    resolve_min_merge_mean_similarity,
     resolve_operational_markers,
 )
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
@@ -431,6 +432,12 @@ class MergedWikiEntry:
     cluster_id: str
     cluster_centroid_score: float
     contradictions_detected: bool
+    # Issue #421: minimum pairwise cosine among cluster members (complete-
+    # linkage coherence). Carried from the cluster JSONL row; 1.0 for
+    # singletons and pre-#421 rows without the field. The merge-proposal gate
+    # suppresses a proposal whose min pairwise falls below the cluster
+    # threshold (a single-linkage chain, not a complete-linkage clique).
+    min_pairwise_score: float = 1.0
     origin_scopes: list[str] = field(default_factory=list)
     sources: list[dict[str, Any]] = field(default_factory=list)
     body: str = ""
@@ -879,6 +886,13 @@ def merge_cluster_row(
         centroid_score = float(centroid_score_raw)
     except (TypeError, ValueError):
         centroid_score = 1.0
+    # Issue #421: complete-linkage coherence metric. Pre-#421 rows lack the
+    # field; default 1.0 (treated as a clique — nothing to suppress).
+    min_pairwise_raw = row.get("min_pairwise_score", 1.0)
+    try:
+        min_pairwise_score = float(min_pairwise_raw)
+    except (TypeError, ValueError):
+        min_pairwise_score = 1.0
 
     members: list[tuple[str, AutoMemoryFile]] = []
     resolved_member_paths: list[str] = []
@@ -1058,6 +1072,7 @@ def merge_cluster_row(
         topic_slug=topic_slug,
         cluster_id=cluster_id,
         cluster_centroid_score=centroid_score,
+        min_pairwise_score=min_pairwise_score,
         # Default False here; merge_clusters_to_wiki() overrides based on
         # the C4 contradiction-detector result before rendering.
         contradictions_detected=False,
@@ -1106,38 +1121,76 @@ def _merge_proposal_suppression_reason(
     n_sources: int,
     confidence: float,
     config: dict[str, Any] | None,
+    mean_similarity: float = 1.0,
+    min_pairwise: float = 1.0,
+    cluster_threshold: float = 0.0,
 ) -> str | None:
     """Return a human-readable reason to SUPPRESS a resolver merge proposal, or None.
 
-    Issue #400. The resolver's ``propose_merge`` path had no floor or cap, so a
-    degenerate over-cluster (1,600+ sources at ~0.33 confidence) was written to
-    ``wiki/_pending_merges.md`` and re-proposed every run. This applies the two
-    merge-proposal gates the resolver was missing, checked BEFORE the proposal
-    is written (so it never reaches the human queue and is not re-emitted):
+    Issue #400 introduced the size cap + opt-in confidence floor here. Issue #421
+    tightens the mechanical guardrails so the resolver stops emitting garbage the
+    reasoning/human tiers would only have to reject. Every gate is checked BEFORE
+    the proposal is written, so a suppressed cluster never reaches
+    ``wiki/_pending_merges.md`` and is not re-emitted on the next run:
 
-    * size cap — ``librarian.max_merge_sources`` (default 25, active): a proposal
-      folding more than N sources is not a pairwise/small-group refinement.
+    * size cap — ``librarian.max_merge_sources`` (default **5**, active, #421):
+      a proposal folding more than N sources is not the pairwise/small-group
+      refinement a merge proposal is for.
+    * complete-linkage — ``min_pairwise < cluster_threshold`` (#421): single-
+      linkage only guarantees each member is transitively CONNECTED at the
+      threshold, so one weak ``cosine >= threshold`` bridge can chain dissimilar
+      members into a giant component (the 1,711-page incident). A genuine merge
+      is a complete-linkage clique — EVERY pair clears the threshold — so a
+      cluster whose minimum pairwise cosine falls below the clustering threshold
+      is a chain, not a merge, and is suppressed. ``cluster_threshold <= 0``
+      (the default when a caller does not supply it) disables this arm.
+    * mean-similarity floor — ``librarian.min_merge_mean_similarity`` (default
+      **0.6**, ACTIVE, #421): a proposal whose cluster mean pairwise cosine is
+      below the floor is too incohesive to be worth a human's review.
     * confidence floor — ``librarian.min_merge_confidence`` (default 0.0, opt-in):
-      a proposal below the floor is not confident enough to review.
+      a proposal below the resolver-confidence floor is not confident enough.
 
-    The third gate the issue names — the cohesion floor — is already enforced
-    UPSTREAM: :func:`_is_low_cohesion_cross_scope` drops low-cohesion cross-scope
-    clusters from ``entries`` before the C4 detect/resolve loop runs, so such a
-    cluster never produces a merge proposal in the first place. (The observed
-    degenerates were HIGH-cohesion — they passed that floor — which is exactly
-    why the size cap, not the cohesion floor, is the operative fix here.)
+    The cross-scope cohesion floor (:func:`_is_low_cohesion_cross_scope`) is a
+    separate, upstream gate on DURABLE wiki pages and is unchanged.
 
-    Suppression is deterministic in the cluster's shape (source count +
-    confidence), so the same over-cluster is suppressed on every run — stable
-    across runs without any new sidecar state.
+    Suppression is deterministic in the cluster's shape (source count + mean and
+    min pairwise similarity + confidence), so the same over-cluster is
+    suppressed on every run without any new sidecar state.
     """
     max_sources = resolve_max_merge_sources(config)
     if max_sources > 0 and n_sources > max_sources:
         return f"over-cluster: {n_sources} sources > max_merge_sources={max_sources}"
+    if cluster_threshold > 0.0 and min_pairwise < cluster_threshold:
+        return (
+            f"single-linkage chain: min pairwise {min_pairwise:.2f} < "
+            f"cluster_threshold {cluster_threshold:.2f} (not complete-linkage)"
+        )
+    min_mean = resolve_min_merge_mean_similarity(config)
+    if min_mean > 0.0 and mean_similarity < min_mean:
+        return (
+            f"low cohesion: mean pairwise {mean_similarity:.2f} < "
+            f"min_merge_mean_similarity={min_mean:.2f}"
+        )
     min_conf = resolve_min_merge_confidence(config)
     if min_conf > 0.0 and confidence < min_conf:
         return f"low confidence: {confidence:.2f} < min_merge_confidence={min_conf:.2f}"
     return None
+
+
+def _classify_merge_write_kind(merge_target_name: str, wiki_root: Path) -> str:
+    """Classify a merge proposal by whether its target slug already exists (#421).
+
+    Returns ``"fold-into-existing"`` when a wiki page already owns the derived
+    target slug, else ``"create-merged"``. The existence check mirrors
+    :func:`athenaeum.pending_merges.resolve_merge`'s approve-time target path
+    EXACTLY (``wiki_root / f"{slugify(name)}.md"``) so a ``create-merged``
+    proposal can never later fail ``target_exists`` at approve. Only the
+    CLASSIFICATION lives here; the fold WRITE path is #425.
+    """
+    target_slug = slugify(merge_target_name)
+    if (wiki_root / f"{target_slug}.md").exists():
+        return "fold-into-existing"
+    return "create-merged"
 
 
 def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
@@ -1384,6 +1437,13 @@ def merge_clusters_to_wiki(
     # no-op pass-through.
     cohesion_floor = resolve_min_cluster_cohesion(resolved_config)
     cohesion_min_scopes = resolve_min_cluster_cohesion_scopes(resolved_config)
+    # Issue #421: the clustering threshold the merge-proposal complete-linkage
+    # gate compares each cluster's minimum pairwise cosine against. Resolved
+    # once (same value the C2 cluster pass used) and closed over by
+    # ``_emit_escalation`` below.
+    merge_cluster_threshold = resolve_cluster_threshold(
+        knowledge_root, config=resolved_config
+    )
     if cohesion_floor > 0.0:
         kept: list[MergedWikiEntry] = []
         for entry in entries:
@@ -1523,6 +1583,9 @@ def merge_clusters_to_wiki(
                 n_sources=len(member_paths),
                 confidence=proposal.confidence,
                 config=resolved_config,
+                mean_similarity=entry.cluster_centroid_score,
+                min_pairwise=entry.min_pairwise_score,
+                cluster_threshold=merge_cluster_threshold,
             )
             if _suppress is not None:
                 log.info(
@@ -1532,6 +1595,14 @@ def merge_clusters_to_wiki(
                     _suppress,
                 )
                 return
+            # Issue #421: slug-collision precheck. Classify the proposal by
+            # whether its derived target slug already exists in wiki/ so a
+            # ``create-merged`` proposal can never fail ``target_exists`` at
+            # approve. Only the CLASSIFICATION lives here; the fold WRITE path
+            # is #425.
+            write_kind = _classify_merge_write_kind(
+                proposal.merge_target_name, wiki_root
+            )
             try:
                 write_pending_merge(
                     wiki_root / "_pending_merges.md",
@@ -1540,6 +1611,7 @@ def merge_clusters_to_wiki(
                     rationale=proposal.rationale,
                     draft_merged_body=proposal.draft_merged_body,
                     confidence=proposal.confidence,
+                    write_kind=write_kind,
                 )
                 log.info(
                     "resolutions: propose_merge written to _pending_merges.md "
@@ -1941,6 +2013,8 @@ def merge_clusters_to_wiki(
                     topic_slug=cand.a_path.stem,
                     cluster_id=f"similarity-{cand.a_path.stem}-{cand.b_path.stem}",
                     cluster_centroid_score=cand.similarity,
+                    # A 2-member pair's min pairwise IS its similarity.
+                    min_pairwise_score=cand.similarity,
                     contradictions_detected=True,
                     contradiction=result,
                 )
