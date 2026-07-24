@@ -28,6 +28,7 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum.config import load_config, resolve_decisions_max_sources_per_merge
 from athenaeum.decisions import age_days, list_pending_decisions
 
 
@@ -36,6 +37,10 @@ def _resolve_wiki_root(args: argparse.Namespace) -> Path:
         (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
     )
     return knowledge_root / "wiki"
+
+
+def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
+    return (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
 
 
 def _format_block(decision: dict) -> str:
@@ -52,6 +57,9 @@ def _format_block(decision: dict) -> str:
         for src in payload.get("sources", []):
             gist = f" — {src['gist']}" if src["gist"] else ""
             lines.append(f"    - {src['title']}{gist}")
+        omitted = payload.get("sources_omitted", 0)
+        if omitted:
+            lines.append(f"    - … and {omitted} more")
     else:
         if payload.get("description"):
             lines.append(f"  description: {payload['description']}")
@@ -86,7 +94,13 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 
     wiki_root = _resolve_wiki_root(args)
     with_proposal = getattr(args, "with_proposal", False)
-    decisions = list_pending_decisions(wiki_root, with_proposal=with_proposal)
+    config = load_config(_resolve_knowledge_root(args))
+    max_sources_per_merge = resolve_decisions_max_sources_per_merge(config)
+    decisions = list_pending_decisions(
+        wiki_root,
+        with_proposal=with_proposal,
+        max_sources_per_merge=max_sources_per_merge,
+    )
 
     if sub == "count":
         total, questions, merges, oldest = _counts(decisions)

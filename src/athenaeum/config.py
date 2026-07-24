@@ -914,6 +914,56 @@ def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
     )
 
 
+def resolve_merge_body_preview_chars(config: dict[str, Any] | None) -> int:
+    """Resolve the ``list_pending_merges`` draft-body preview cap (issue #431).
+
+    Complements the write-path suppression in :func:`resolve_max_merge_sources`
+    (#400): that gate keeps a degenerate over-cluster from ever reaching
+    ``_pending_merges.md``, but a single legitimate-looking proposal can still
+    carry an oversized ``draft_merged_body`` (the withdrawn runaway that
+    prompted this issue had a ~878 KB draft). The raw MCP tool returned that
+    body in full, unbounded, on every ``list_pending_merges`` call — this caps
+    it to a bounded preview by default. The full body stays retrievable via
+    ``list_pending_merges(full_body=True)`` for a caller that actually needs it
+    (e.g. immediately before ``resolve_merge`` writes it to disk).
+
+    Precedence: ``ATHENAEUM_MERGE_BODY_PREVIEW_CHARS`` env > yaml
+    ``librarian.merge_body_preview_chars`` > ``2000``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+    non-int / ``<= 0`` values fall through to the default).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "merge_body_preview_chars",
+        "ATHENAEUM_MERGE_BODY_PREVIEW_CHARS",
+        2000,
+    )
+
+
+def resolve_decisions_max_sources_per_merge(config: dict[str, Any] | None) -> int:
+    """Resolve the decisions-view per-merge source fan-out cap (issue #431).
+
+    The ``decisions`` view (:func:`athenaeum.decisions.merge_to_decision`)
+    rendered EVERY source of a pending merge with no cap — a merge proposal
+    with a very large source list (or the pathological over-cluster shape
+    #400 targets on the write path) would blow out a single decision item's
+    payload. This bounds the rendered source list to this many entries, with
+    the remainder surfaced as an accurate ``sources_omitted`` count rather
+    than silently dropped.
+
+    Precedence: ``ATHENAEUM_DECISIONS_MAX_SOURCES_PER_MERGE`` env > yaml
+    ``librarian.decisions_max_sources_per_merge`` > ``20``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+    non-int / ``<= 0`` values fall through to the default).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "decisions_max_sources_per_merge",
+        "ATHENAEUM_DECISIONS_MAX_SOURCES_PER_MERGE",
+        20,
+    )
+
+
 def _resolve_optional_positive_number(
     config: dict[str, Any] | None,
     block: str,
