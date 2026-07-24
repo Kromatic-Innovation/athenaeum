@@ -472,16 +472,20 @@ def resolve_max_merge_sources(config: dict[str, Any] | None) -> int:
     suppressed before it reaches ``_pending_merges.md`` (neither proposed nor
     escalated as a pending question).
 
-    DEFAULT 25 (active) — anchored to :func:`athenaeum.cross_scope.resolve_cluster_size_cap`
-    (also 25): 25 sources is already well beyond a pairwise/small-group merge,
-    and the observed degenerates carried 1,600-1,700, so the default excludes
-    them decisively with effectively zero risk of suppressing a legitimate merge.
+    DEFAULT 5 (active) — tightened from 25 (#421, settled design). A merge
+    PROPOSAL is a pairwise / small-group refinement; a fold of more than ~5
+    sources is not that shape, and complete-linkage (#421) means the members of
+    a genuine small merge are mutually similar, so 5 sits well inside the
+    legitimate-merge margin while excluding the observed 1,600-1,700-source
+    degenerates decisively. (The wider size-25 cap still governs the pooled
+    contradiction-cluster path via :func:`athenaeum.cross_scope.resolve_cluster_size_cap`
+    — this cap is specifically the merge-PROPOSAL fan-in.)
     Env ``ATHENAEUM_MAX_MERGE_SOURCES`` > yaml ``librarian.max_merge_sources`` >
     this default; ``0`` (or negative) disables the cap. No seed in ``_DEFAULTS``
     (#231) so the code default stays reachable. ``bool`` and non-numeric yaml
     values fall through to the default.
     """
-    default = 25
+    default = 5
     env = os.environ.get("ATHENAEUM_MAX_MERGE_SOURCES")
     if env is not None:
         try:
@@ -535,6 +539,48 @@ def resolve_min_merge_confidence(config: dict[str, Any] | None) -> float:
             if value > 0.0:
                 return value
     return 0.0
+
+
+def resolve_min_merge_mean_similarity(config: dict[str, Any] | None) -> float:
+    """Resolve the merge-proposal mean-pairwise-similarity floor (#421).
+
+    A merge proposal whose cluster mean pairwise cosine
+    (``cluster_centroid_score``) is strictly below this floor is suppressed
+    before it reaches ``_pending_merges.md``. This is the ACTIVE-by-default
+    cohesion gate the #421 settled design calls for: unlike the corpus-specific
+    :func:`resolve_min_cluster_cohesion` (which suppresses durable wiki pages
+    and so ships OFF), the merge-PROPOSAL path is a human review queue — a
+    low-mean-similarity fold is noise there regardless of corpus, so a modest
+    floor ships on.
+
+    DEFAULT 0.6 (ACTIVE) — a genuine small merge's members are mutually
+    similar; 0.6 sits below tight near-duplicate clusters (~0.7+) while
+    excluding the vague ~0.33-mean over-clusters. Complements the complete-
+    linkage MIN-pairwise gate (a chain can have high mean but a sub-threshold
+    min) and the size cap. Env ``ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY`` > yaml
+    ``librarian.min_merge_mean_similarity`` > this default; ``0`` (or negative)
+    disables the floor. No seed in ``_DEFAULTS`` (#231) so the code default
+    stays reachable. ``bool`` and non-numeric yaml values fall through to the
+    default.
+    """
+    default = 0.6
+    env = os.environ.get("ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY")
+    if env is not None:
+        try:
+            return float(env)
+        except (TypeError, ValueError):
+            pass
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("min_merge_mean_similarity")
+            if raw is None or isinstance(raw, bool):
+                return default
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return default
+    return default
 
 
 def resolve_delta_enabled(config: dict[str, Any] | None) -> bool:
@@ -1244,6 +1290,23 @@ search_backend: fts5
 #   observed over-clusters span 8-17 scopes, legitimate pages 1-3, so 4
 #   sits in the clean margin and a low-cohesion single-/few-scope cluster
 #   is never suppressed.
+# max_merge_sources: merge-PROPOSAL fan-in cap (#400, tightened #421).
+#   A propose_merge folding more than this many sources is suppressed before
+#   it reaches wiki/_pending_merges.md (a merge proposal is a pairwise /
+#   small-group refinement, not a mega-fold). DEFAULT 5 (active); env
+#   ATHENAEUM_MAX_MERGE_SOURCES > this key > default; 0/negative disables.
+# min_merge_mean_similarity: merge-PROPOSAL mean-pairwise-cohesion floor
+#   (#421). A proposal whose cluster mean pairwise cosine is strictly below
+#   this is suppressed. DEFAULT 0.6 (ACTIVE) -- the human merge queue is
+#   corpus-independent, so a modest floor ships on (unlike min_cluster_cohesion,
+#   which gates durable pages and ships OFF). env
+#   ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY > this key > default; 0/negative
+#   disables. Complements the complete-linkage MIN-pairwise gate (#421): a
+#   single-linkage chain with a sub-threshold pair is suppressed even if its
+#   mean clears this floor.
+# min_merge_confidence: optional merge-PROPOSAL resolver-confidence floor
+#   (#400). DEFAULT 0.0 (OFF); opt-in. env ATHENAEUM_MIN_MERGE_CONFIDENCE >
+#   this key > default.
 # page_warn_bytes: soft byte threshold above which a wiki entity page is
 #   reported as a WARN-level oversized page in `athenaeum status` (#310).
 #   Warn-only -- nothing is blocked or modified. Precedence:
@@ -1269,6 +1332,9 @@ search_backend: fts5
 #   operational_markers: []
 #   min_cluster_cohesion: 0.0
 #   min_cluster_cohesion_scopes: 4
+#   max_merge_sources: 5
+#   min_merge_mean_similarity: 0.6
+#   min_merge_confidence: 0.0
 #   page_warn_bytes: 8192
 #   page_flag_bytes: 16384
 

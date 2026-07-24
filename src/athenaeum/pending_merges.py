@@ -118,6 +118,11 @@ class PendingMerge:
     decision: Literal["approve", "reject", ""] = ""
     note: str = ""
     also_affects: list[str] = field(default_factory=list)
+    # Issue #421: mechanical slug-collision classification recorded at proposal
+    # time. ``create-merged`` (slug free) or ``fold-into-existing`` (slug taken
+    # by an existing wiki page). Pre-#421 blocks lack the line and default to
+    # ``create-merged``.
+    write_kind: str = "create-merged"
 
 
 def _make_id(sources: list[str], target_name: str) -> str:
@@ -181,8 +186,15 @@ def render_block(
     draft_merged_body: str,
     confidence: float,
     created_at: str | None = None,
+    write_kind: str = "create-merged",
 ) -> str:
-    """Render one pending-merge block as markdown."""
+    """Render one pending-merge block as markdown.
+
+    Issue #421: ``write_kind`` records the mechanical slug-collision
+    classification decided at proposal time — ``create-merged`` (the target
+    slug is free) or ``fold-into-existing`` (a wiki page already owns the
+    slug). It is CLASSIFICATION only; the fold WRITE path is #425.
+    """
     today = created_at or date.today().isoformat()
     target_escaped = _escape_quotes(merge_target_name)
     sources_line = ", ".join(Path(s).name for s in sources) or "(none)"
@@ -191,6 +203,7 @@ def render_block(
         f"- [ ] Approve this merge? Sources: {sources_line}",
         "",
         f"**Rationale**: {rationale or '(none provided)'}",
+        f"**Write kind**: {write_kind}",
         "**Sources**:",
     ]
     for src in sources:
@@ -320,6 +333,7 @@ def _parse_block(block_text: str) -> PendingMerge | None:
     draft_lines: list[str] = []
     decision = ""
     note = ""
+    write_kind = "create-merged"
 
     in_sources = False
     in_draft = False
@@ -349,6 +363,12 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         if s.startswith("**Rationale**:"):
             in_sources = False
             rationale = s.removeprefix("**Rationale**:").strip()
+            continue
+        if s.startswith("**Write kind**:"):
+            in_sources = False
+            parsed_kind = s.removeprefix("**Write kind**:").strip()
+            if parsed_kind:
+                write_kind = parsed_kind
             continue
         if s.startswith("**Confidence**:"):
             in_sources = False
@@ -396,6 +416,7 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         raw_block=block_text,
         decision=decision if decision in ("approve", "reject") else "",
         note=note,
+        write_kind=write_kind,
     )
 
 
@@ -416,6 +437,7 @@ def write_pending_merge(
     draft_merged_body: str,
     confidence: float,
     created_at: str | None = None,
+    write_kind: str = "create-merged",
 ) -> str:
     """Append one merge-proposal block to ``_pending_merges.md``.
 
@@ -423,6 +445,9 @@ def write_pending_merge(
     Creates the file lazily with a ``# Pending Merges`` header. Idempotent:
     if a block with the same id already exists in the file (resolved or
     not), nothing is appended.
+
+    Issue #421: ``write_kind`` carries the proposal-time slug-collision
+    classification (``create-merged`` | ``fold-into-existing``).
     """
     block = render_block(
         merge_target_name=merge_target_name,
@@ -431,6 +456,7 @@ def write_pending_merge(
         draft_merged_body=draft_merged_body,
         confidence=confidence,
         created_at=created_at,
+        write_kind=write_kind,
     )
     block_id = _make_id(sources, merge_target_name)
 
@@ -459,6 +485,7 @@ def list_pending_merges(merges_path: Path) -> list[dict]:
             "draft_merged_body": pm.draft_merged_body,
             "confidence": pm.confidence,
             "created_at": pm.created_at,
+            "write_kind": pm.write_kind,
         }
         for pm in parse_pending_merges(merges_path)
         if not pm.resolved
