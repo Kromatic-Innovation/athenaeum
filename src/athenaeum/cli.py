@@ -900,6 +900,13 @@ def main(argv: list[str] | None = None) -> int:
 
     add_decisions_subparser(subparsers)
 
+    # authority command (issue #426) — authority manifest lint + pointer-stub
+    # converter. Detects memories that duplicate a live source (skill file,
+    # code path, config) and converts them into one-line pointer stubs.
+    from athenaeum._cmd_authority import add_authority_subparser
+
+    add_authority_subparser(subparsers)
+
     # reindex command (issue #349) — rebuild the search index out-of-band.
     # ``rebuild-index`` is kept as a back-compat alias for the #348 spelling;
     # both dispatch to the identical handler (no duplicated index engine).
@@ -1223,6 +1230,11 @@ def main(argv: list[str] | None = None) -> int:
         from athenaeum._cmd_decisions import cmd_decisions
 
         return cmd_decisions(args)
+
+    if args.command == "authority":
+        from athenaeum._cmd_authority import cmd_authority
+
+        return cmd_authority(args)
 
     return 0
 
