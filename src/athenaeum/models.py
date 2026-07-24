@@ -676,6 +676,30 @@ def valid_until_expired(
     return (as_of or date.today()) > until
 
 
+# --- Staleness axis: observed_at (issue #424) ---
+#
+# ``observed_at:`` is a THIRD date-ish frontmatter field, distinct from both
+# ``created``/``updated`` (write-time bookkeeping) and ``valid_from``/
+# ``valid_until`` (the claim-VALIDITY window, #308). A standing-state fact
+# ("Acme has 40 employees") is true-WHEN-OBSERVED, not necessarily
+# currently-true — ``observed_at`` records the former without asserting the
+# latter. Data-model + validation only here (this issue); no reader treats
+# an old ``observed_at`` as inactive — that policy call is out of scope
+# (would belong with #433's enforcement work, not this data-model issue).
+
+
+def parse_observed_at(meta: dict[str, object] | None) -> date | None:
+    """Return the frontmatter ``observed_at`` as a date, or ``None`` if absent/unparseable.
+
+    Fail-open, same posture as :func:`parse_valid_from` /
+    :func:`parse_valid_until`: a missing, empty, or unparseable value
+    returns ``None`` rather than raising.
+    """
+    if not meta:
+        return None
+    return _coerce_iso_date(meta.get("observed_at"))
+
+
 def is_inactive_memory(
     meta: dict[str, object] | None, as_of: date | None = None
 ) -> bool:

@@ -24,6 +24,21 @@ Design:
 Out of scope here (Lane B / #90, Lane G / #91):
 - Per-claim ``source`` / ``field_sources`` provenance.
 - Conflict-resolution semantics on update.
+
+Memory taxonomy (issue #424):
+- ``memory_class:`` is a THIRD, orthogonal, LAYERED axis alongside ``type:``
+  (this module's ``KNOWN_TYPES``) and intake ``memory_type:``
+  (``models.py``: feedback/project/reference/user/recall). It is NOT a
+  replacement for either — a person page keeps ``type: person`` and may
+  additionally gain ``memory_class: entity``. See
+  ``docs/memory-taxonomy.md`` for the full axis-reconciliation writeup and
+  merge-vs-cite semantics (enforcement of those semantics is #433).
+- Mirrors the #93 ``KNOWN_TYPES`` shape exactly: a recognized value is
+  silent; an unrecognized non-empty value emits a :class:`UserWarning`
+  (flagged, not silently accepted); an ABSENT ``memory_class`` is tolerated
+  (legacy/untyped pages must not break) and is reported via
+  :func:`is_untyped_memory_class` so a linter/report can surface it as
+  "untyped" without that itself being a warning.
 """
 from __future__ import annotations
 
@@ -33,6 +48,21 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from athenaeum.provenance import validate_field_sources, validate_source_value
+
+#: The 7 recognized ``memory_class:`` values (issue #424). Deliberately does
+#: NOT include ``open-question`` / ``hypothesis`` — the settled taxonomy
+#: defers those rather than over-minting classes up front.
+MEMORY_CLASSES: frozenset[str] = frozenset(
+    {
+        "fact",
+        "guideline",
+        "axiom",
+        "reference",
+        "entity",
+        "decision",
+        "procedure",
+    }
+)
 
 
 class WikiBase(BaseModel):
@@ -64,10 +94,50 @@ class WikiBase(BaseModel):
     #   attribution for list-typed fields, issue #102).
     field_sources: dict[str, str | dict | list] | None = None
 
+    # Issue #424: the memory-taxonomy axis, layered on top of ``type:``.
+    # ``None`` (absent) is tolerated — legacy/untyped pages must not break —
+    # see :func:`is_untyped_memory_class`. A non-``None`` value outside
+    # :data:`MEMORY_CLASSES` is flagged via ``UserWarning`` in
+    # ``_validate_memory_class`` below (NOT silently accepted) but does not
+    # raise, matching the #93 ``KNOWN_TYPES`` precedent this axis is layered
+    # beside.
+    memory_class: str | None = None
+
+    # Issue #424 (staleness axis): standing-state facts carry ``observed_at``
+    # — the date the fact was TRUE-WHEN-OBSERVED, as distinct from
+    # ``created``/``updated`` (write-time bookkeeping) and from
+    # ``valid_from``/``valid_until`` (the claim-validity window, #308).
+    # Declared as an explicit field (rather than relying solely on
+    # ``extra="allow"``) so it is a first-class, documented part of the
+    # schema; stored as the on-disk scalar (str) for round-trip fidelity —
+    # no date coercion here, mirroring how ``source``/``field_sources``
+    # keep their on-disk shape rather than normalizing to a Python type.
+    observed_at: str | None = None
+
     @field_validator("source", mode="before")
     @classmethod
     def _validate_source(cls, v: Any) -> Any:
         return validate_source_value(v)
+
+    @field_validator("observed_at", mode="before")
+    @classmethod
+    def _validate_observed_at(cls, v: Any) -> Any:
+        if v is None or v == "":
+            return None
+        return str(v)
+
+    @field_validator("memory_class", mode="before")
+    @classmethod
+    def _validate_memory_class(cls, v: Any) -> Any:
+        if v is None or v == "":
+            return None
+        if not isinstance(v, str) or v not in MEMORY_CLASSES:
+            warnings.warn(
+                f"unknown memory_class: {v!r} (not in MEMORY_CLASSES)",
+                UserWarning,
+                stacklevel=2,
+            )
+        return v
 
     @field_validator("field_sources", mode="before")
     @classmethod
@@ -191,6 +261,21 @@ def validate_wiki_meta(meta: dict[str, Any]) -> WikiBase:
     return model_cls.model_validate(meta)
 
 
+def is_untyped_memory_class(meta: dict[str, Any]) -> bool:
+    """True when ``meta`` carries no (non-empty) ``memory_class:`` value.
+
+    Issue #424: an absent ``memory_class`` is TOLERATED by validation (a
+    legacy/untyped page must not fail to validate) but should still be
+    SURFACED — e.g. by a lint/report pass counting untyped pages — rather
+    than silently disappearing. This helper is the single predicate such a
+    surfacing pass should call so "untyped" has one definition. Does not
+    itself warn or raise; it is a pure read of the frontmatter dict, usable
+    before or after :func:`validate_wiki_meta`.
+    """
+    value = meta.get("memory_class")
+    return value is None or value == ""
+
+
 __all__ = [
     "WikiBase",
     "PersonWiki",
@@ -200,5 +285,7 @@ __all__ = [
     "SourceWiki",
     "FALLBACK_TYPES",
     "KNOWN_TYPES",
+    "MEMORY_CLASSES",
     "validate_wiki_meta",
+    "is_untyped_memory_class",
 ]
