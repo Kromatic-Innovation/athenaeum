@@ -58,8 +58,19 @@ from typing import Literal
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter, render_frontmatter, slugify
+from athenaeum.provenance import record_merge_provenance
 
 log = logging.getLogger(__name__)
+
+# Same overall grammar as :data:`athenaeum.resolutions._WIKILINK_RE`
+# (Obsidian-style ``[[slug]]`` / ``[[slug|alias]]``) but with the optional
+# ``|alias`` suffix captured as its own group (group 2, including the
+# leading ``|``) so a rewrite can repoint the target (group 1) while
+# preserving the rendered alias text verbatim. Kept as a SEPARATE pattern
+# object rather than adding a capturing group to the shared one — that
+# regex is a public module attribute other code may already rely on
+# matching group(1) as "the whole match's only group".
+_WIKILINK_REWRITE_RE = re.compile(r"\[\[([^\[\]|\n]+?)(\|[^\[\]\n]*)?\]\]")
 
 
 # Header grammar — ``## [ISO-DATE] Merge: "{name}"``.
@@ -550,6 +561,292 @@ def _add_refines_declaration(source_path: Path, other_name: str) -> bool:
     return True
 
 
+def _source_slugs(sources: list[str]) -> list[str]:
+    """Derive the wiki slug each source path would use, deduped, order-preserved.
+
+    Sources on a ``fold-into-existing`` proposal are wiki-tree pages being
+    folded away (see :func:`athenaeum.merge._classify_merge_write_kind` —
+    the pre-existing-target check that produced this write_kind implies the
+    cluster's members are themselves wiki entries, not raw intake). The
+    slug is derived from the filename stem exactly like
+    :func:`athenaeum.resolutions._build_sibling_index`'s fallback, so it
+    matches how the same file would be looked up as a wikilink target.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for src in sources:
+        stem = Path(src).stem
+        slug = slugify(stem)
+        if slug and slug not in seen:
+            seen.add(slug)
+            out.append(slug)
+    return out
+
+
+def _rewrite_inbound_wikilinks(
+    wiki_root: Path,
+    old_slugs: list[str],
+    canonical_slug: str,
+    *,
+    skip: Path | None = None,
+) -> int:
+    """Rewrite every ``[[old-slug]]`` / ``[[old-slug|text]]`` link to canonical.
+
+    Walks every ``*.md`` directly under ``wiki_root`` (sidecars like
+    ``_pending_merges.md`` are skipped — filenames starting with ``_`` are
+    never link targets) and repoints any wikilink whose slugified target
+    matches one of ``old_slugs`` at ``canonical_slug``. The rendered
+    ``|alias-text`` portion (if present) is preserved verbatim — only the
+    link TARGET changes, not the displayed text. ``skip`` excludes the
+    canonical page itself (it may legitimately reference its own former
+    slug in body prose describing the merge).
+
+    Returns the number of files modified. Best-effort: unreadable files are
+    skipped, not fatal.
+    """
+    if not old_slugs:
+        return 0
+    old_slug_set = set(old_slugs)
+    n = 0
+    try:
+        skip_resolved = skip.resolve() if skip is not None else None
+    except OSError:
+        skip_resolved = skip
+    for path in sorted(wiki_root.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        if skip is not None:
+            try:
+                if path.resolve() == skip_resolved:
+                    continue
+            except OSError:
+                if path == skip:
+                    continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        def _replace(m: "re.Match[str]") -> str:
+            target = m.group(1).strip()
+            if slugify(target) not in old_slug_set:
+                return m.group(0)
+            alias_suffix = m.group(2) or ""
+            return f"[[{canonical_slug}{alias_suffix}]]"
+
+        new_text = _WIKILINK_REWRITE_RE.sub(_replace, text)
+        if new_text != text:
+            atomic_write_text(path, new_text)
+            n += 1
+    return n
+
+
+def _add_aliases_to_frontmatter(meta: dict, new_aliases: list[str]) -> dict:
+    """Return ``meta`` with ``new_aliases`` unioned into ``aliases:``, deduped.
+
+    Existing ``aliases:`` entries are preserved in order; new ones are
+    appended, skipping any already present (by slug equivalence, so
+    ``"Old Topic"`` and ``"old-topic"`` are not both recorded). Non-list
+    (or absent) existing ``aliases:`` is treated as empty rather than
+    raising — a malformed sidecar field should not block the fold.
+    """
+    existing_raw = meta.get("aliases")
+    existing = [str(a) for a in existing_raw] if isinstance(existing_raw, list) else []
+    existing_slugs = {slugify(a) for a in existing}
+    merged = list(existing)
+    for alias in new_aliases:
+        if slugify(alias) not in existing_slugs:
+            existing_slugs.add(slugify(alias))
+            merged.append(alias)
+    out = dict(meta)
+    if merged:
+        out["aliases"] = merged
+    return out
+
+
+def resolve_alias_slug(wiki_root: Path, slug: str) -> str:
+    """Resolve ``slug`` to its canonical slug via wiki ``aliases:`` frontmatter.
+
+    Link-time resolution for issue #425: a ``[[old-slug]]`` wikilink in a
+    not-yet-processed ``raw/`` memory (or any body prose) should resolve to
+    the canonical page once ``old-slug`` has been folded away and recorded
+    in the canonical page's ``aliases:`` list. Scans every ``*.md`` directly
+    under ``wiki_root`` (sidecars excluded) for an ``aliases:`` entry whose
+    slugified form matches ``slug``; returns that page's own slug (its
+    filename stem) on a hit, else returns ``slug`` unchanged (not an alias,
+    or already canonical). First match wins on a (should-not-happen)
+    multi-hit; unreadable/malformed files are skipped.
+    """
+    target = slugify(slug)
+    if not target:
+        return slug
+    try:
+        candidates = sorted(wiki_root.glob("*.md"))
+    except OSError:
+        return slug
+    for path in candidates:
+        if path.name.startswith("_"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, _ = parse_frontmatter(text)
+        if not isinstance(meta, dict):
+            continue
+        aliases_raw = meta.get("aliases")
+        if not isinstance(aliases_raw, list):
+            continue
+        for alias in aliases_raw:
+            if slugify(str(alias)) == target:
+                return path.stem
+    return slug
+
+
+def _purge_vector_ids(
+    slugs: list[str],
+    *,
+    cache_dir: Path | None,
+    search_backend: str | None,
+    embedding_model: str | None,
+) -> int:
+    """Best-effort vector-store purge for deleted wiki slugs (issue #425).
+
+    A no-op (returns 0) when ``cache_dir`` is not supplied, the configured
+    backend is not ``"vector"``, or chromadb is unavailable — vector purge
+    is opportunistic hygiene, never a hard dependency of ``resolve_merge``.
+    Filenames are the vector store's id space (see
+    :meth:`athenaeum.search.VectorBackend._add_records`), so a slug's id is
+    ``"<slug>.md"``.
+    """
+    if not slugs or cache_dir is None:
+        return 0
+    if search_backend is not None and search_backend != "vector":
+        return 0
+    try:
+        from athenaeum.search import VectorBackend
+    except ImportError:
+        return 0
+    ids = [f"{slug}.md" for slug in slugs]
+    try:
+        return VectorBackend(embedding_model=embedding_model).purge_ids(ids, cache_dir)
+    except Exception:  # noqa: BLE001 — purge must never break the merge
+        log.debug("pending_merges: vector purge skipped for ids=%s", ids)
+        return 0
+
+
+def _apply_fold_into_existing(
+    pm: PendingMerge,
+    *,
+    target_path: Path,
+    target_slug: str,
+    wiki_root: Path,
+    cache_dir: Path | None,
+    search_backend: str | None,
+    embedding_model: str | None,
+) -> dict:
+    """Execute the ``fold-into-existing`` write path (issue #425).
+
+    The target IS the canonical existing page. Steps, in order:
+
+    1. Write ``draft_merged_body`` to ``target_path`` (the merged content —
+       same convention as the ``create-merged`` path's body write).
+    2. Derive the folded-away source slugs (the OTHER sources — a source
+       whose own slug already equals the target is the canonical page
+       itself reappearing in its own cluster and is not folded away).
+    3. Union those slugs into the canonical page's ``aliases:``
+       frontmatter, deduped.
+    4. Rewrite every inbound ``[[old-slug]]`` wikilink under ``wiki_root``
+       (excluding the canonical page itself) to ``target_slug``.
+    5. Delete the old source wiki files.
+    6. Best-effort purge their vectors from the search index.
+
+    Returns ``{"ok": True, "folded_sources", "aliases_added",
+    "links_rewritten"}`` on success. ``target_exists`` is unreachable from
+    here by construction — the caller only takes this path for
+    ``write_kind == "fold-into-existing"``, and #421's proposal-time
+    classification only assigns that write_kind when the slug already
+    exists; this function does not re-check.
+    """
+    # Read the PRE-EXISTING target's frontmatter first — its ``aliases:``
+    # (accumulated by any prior fold) must survive the draft-body overwrite
+    # in step 1 below, so this MUST happen before that write.
+    try:
+        prior_target_text = target_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        prior_target_text = ""
+    prior_meta, _ = parse_frontmatter(prior_target_text)
+    if not isinstance(prior_meta, dict):
+        prior_meta = {}
+    existing_alias_slugs = {
+        slugify(str(a)) for a in (prior_meta.get("aliases") or [])
+    }
+
+    # Step 1 — write the merged draft body to the canonical target.
+    target_path.write_text(pm.draft_merged_body, encoding="utf-8")
+
+    # Step 2 — folded-away source slugs, excluding the canonical page
+    # reappearing among its own sources.
+    all_source_slugs = _source_slugs(pm.sources)
+    folded_slugs = [s for s in all_source_slugs if s != target_slug]
+    folded_sources = [
+        src for src in pm.sources if slugify(Path(src).stem) != target_slug
+    ]
+
+    # Step 3 — alias map, deduped. The draft body just written in step 1 may
+    # carry its OWN frontmatter (a merge draft can legitimately open with
+    # one) — that becomes the base we add aliases: onto, with the prior
+    # target's aliases: carried forward first so a second fold accumulates
+    # rather than resetting.
+    target_text = target_path.read_text(encoding="utf-8")
+    target_meta, target_body = parse_frontmatter(target_text)
+    if not isinstance(target_meta, dict):
+        target_meta = {}
+    carried_meta = _add_aliases_to_frontmatter(
+        target_meta, list(prior_meta.get("aliases") or [])
+    )
+    new_meta = _add_aliases_to_frontmatter(carried_meta, folded_slugs)
+    if new_meta != target_meta:
+        new_target_text = render_frontmatter(new_meta) + target_body
+        atomic_write_text(target_path, new_target_text)
+    aliases_added = [s for s in folded_slugs if s not in existing_alias_slugs]
+
+    # Step 4 — rewrite inbound wikilinks pointing at any folded slug.
+    links_rewritten = _rewrite_inbound_wikilinks(
+        wiki_root, folded_slugs, target_slug, skip=target_path
+    )
+
+    # Step 5 — delete the old source wiki files (reference rewrite, not
+    # stub pages — a content-bearing stub would get re-embedded and create
+    # a near-duplicate retrieval hit).
+    deleted_paths: list[str] = []
+    for src in folded_sources:
+        src_path = Path(src)
+        try:
+            if src_path.is_file():
+                src_path.unlink()
+                deleted_paths.append(src)
+        except OSError as exc:
+            log.warning(
+                "pending_merges: could not delete folded source %s: %s", src_path, exc
+            )
+
+    # Step 6 — best-effort vector purge for the deleted slugs.
+    _purge_vector_ids(
+        [s for s in folded_slugs if any(slugify(Path(p).stem) == s for p in deleted_paths)],
+        cache_dir=cache_dir,
+        search_backend=search_backend,
+        embedding_model=embedding_model,
+    )
+
+    return {
+        "ok": True,
+        "folded_sources": deleted_paths,
+        "aliases_added": aliases_added,
+        "links_rewritten": links_rewritten,
+    }
+
+
 def resolve_merge(
     merges_path: Path,
     merge_id: str,
@@ -557,27 +854,73 @@ def resolve_merge(
     note: str = "",
     *,
     wiki_root: Path | None = None,
+    cache_dir: Path | None = None,
+    search_backend: str | None = None,
+    embedding_model: str | None = None,
 ) -> dict:
     """Mark a pending-merge block as resolved.
 
     Args:
         merges_path: Path to ``_pending_merges.md``.
         merge_id: Id returned by :func:`list_pending_merges`.
-        decision: ``"approve"`` writes ``wiki/<target-slug>.md`` (or under
-            ``wiki_root`` when supplied) with ``draft_merged_body`` and
-            then flips the checkbox; the source memories are NOT archived
-            here — the human reviews the wiki write before any source
-            deletion. ``"reject"`` flips the checkbox and writes a
-            ``refines:`` declaration into the first source memory so the
-            detector's declared-refinement short-circuit suppresses the
-            pair on future runs.
+        decision: ``"approve"`` dispatches on the proposal's ``write_kind``
+            (issue #421 classification, issue #425 write paths):
+
+            - ``"create-merged"`` (unchanged behavior): writes
+              ``wiki/<target-slug>.md`` (or under ``wiki_root`` when
+              supplied) with ``draft_merged_body``. Fails closed with
+              ``target_exists`` if the slug is already taken — including a
+              MISCLASSIFIED create-kind proposal, as defense in depth.
+            - ``"fold-into-existing"``: the target slug is the CANONICAL
+              existing page; sources fold INTO it. Writes
+              ``draft_merged_body`` to the existing target, rewrites every
+              inbound ``[[old-slug]]`` wikilink under ``wiki_root`` to the
+              canonical slug, adds the folded-away source slugs to the
+              canonical page's ``aliases:`` frontmatter (deduped), deletes
+              the old source wiki files, and (when ``cache_dir`` +
+              ``search_backend="vector"`` are supplied) purges their
+              vectors from the vector store. ``target_exists`` is
+              unreachable here for a correctly-classified proposal — the
+              precheck at proposal time (`_classify_merge_write_kind`)
+              already confirmed the slug exists.
+
+            Either way, on success a provenance record is appended (see
+            :func:`athenaeum.provenance.record_merge_provenance`) naming
+            the canonical slug, source paths, merge id, and write_kind.
+            The source memories are NOT archived/deleted for
+            ``create-merged`` — the human reviews the wiki write before
+            any source deletion; ``fold-into-existing`` DOES delete the
+            (wiki-tree) source files as part of consolidation, since the
+            merge target already existed and review has already happened
+            at approval time.
+
+            ``"reject"`` flips the checkbox and writes a ``refines:``
+            declaration into the first source memory so the detector's
+            declared-refinement short-circuit suppresses the pair on
+            future runs.
         note: Optional human note attached to the decision block.
         wiki_root: Optional wiki root override (defaults to
             ``merges_path.parent``).
+        cache_dir: Optional search-index cache dir. When supplied together
+            with ``search_backend="vector"``, a ``fold-into-existing``
+            approve purges the deleted sources' vectors from the store
+            (issue #425 embedding hygiene). ``None`` (default) skips the
+            purge — vector hygiene is opportunistic, never a hard
+            dependency of resolving a merge.
+        search_backend: The configured search backend name (``"vector"``
+            enables the purge above; anything else, including ``None``,
+            skips it).
+        embedding_model: Embedding model name passed through to the vector
+            backend purge call, matching the model the live index was
+            built with (see :class:`athenaeum.search.VectorBackend`).
 
     Returns:
         ``{"ok": bool, "error_code": str | None, "message": str,
-           "resolved_block": str | None}``.
+           "resolved_block": str | None}``. A ``fold-into-existing``
+        approve additionally sets ``"folded_sources"`` (the deleted source
+        paths), ``"aliases_added"`` (the new alias slugs recorded), and
+        ``"links_rewritten"`` (the count of sibling wiki files whose
+        inbound wikilinks were repointed).
     """
     if decision not in ("approve", "reject"):
         return {
@@ -631,25 +974,66 @@ def resolve_merge(
         }
 
     warning: str | None = None
+    extra_response: dict = {}
 
     # Apply the side-effect tied to the decision BEFORE flushing the file.
     if decision == "approve":
         root = wiki_root or merges_path.parent
         root.mkdir(parents=True, exist_ok=True)
-        target_path = root / f"{slugify(target_pm.merge_target_name)}.md"
-        if target_path.exists():
-            # Fail closed: do NOT flip the checkbox; the human must rename
-            # the merge_target_name or resolve the existing wiki entry.
-            return {
-                "ok": False,
-                "error_code": "target_exists",
-                "message": (
-                    f"{target_path} already exists; rename merge_target_name "
-                    "or resolve the existing memory first"
-                ),
-                "resolved_block": None,
+        target_slug = slugify(target_pm.merge_target_name)
+        target_path = root / f"{target_slug}.md"
+        write_kind = target_pm.write_kind
+
+        if write_kind == "fold-into-existing":
+            fold_result = _apply_fold_into_existing(
+                target_pm,
+                target_path=target_path,
+                target_slug=target_slug,
+                wiki_root=root,
+                cache_dir=cache_dir,
+                search_backend=search_backend,
+                embedding_model=embedding_model,
+            )
+            if not fold_result["ok"]:
+                return {
+                    "ok": False,
+                    "error_code": fold_result["error_code"],
+                    "message": fold_result["message"],
+                    "resolved_block": None,
+                }
+            extra_response = {
+                "folded_sources": fold_result["folded_sources"],
+                "aliases_added": fold_result["aliases_added"],
+                "links_rewritten": fold_result["links_rewritten"],
             }
-        target_path.write_text(target_pm.draft_merged_body, encoding="utf-8")
+        else:
+            # ``create-merged`` path — UNCHANGED behavior. A misclassified
+            # create-kind proposal that hits an existing slug still fails
+            # closed here (defense in depth): the #421 precheck should have
+            # classified it fold-into-existing, but a stale/hand-edited
+            # block's write_kind is not trusted blindly.
+            if target_path.exists():
+                # Fail closed: do NOT flip the checkbox; the human must
+                # rename the merge_target_name or resolve the existing
+                # wiki entry.
+                return {
+                    "ok": False,
+                    "error_code": "target_exists",
+                    "message": (
+                        f"{target_path} already exists; rename merge_target_name "
+                        "or resolve the existing memory first"
+                    ),
+                    "resolved_block": None,
+                }
+            target_path.write_text(target_pm.draft_merged_body, encoding="utf-8")
+
+        record_merge_provenance(
+            root,
+            merge_id=target_pm.id,
+            write_kind=write_kind,
+            canonical_slug=target_slug,
+            source_paths=list(target_pm.sources),
+        )
     elif decision == "reject" and len(target_pm.sources) >= 2:
         # Write a `refines:` declaration into the first source memory
         # naming the second one. Lane 1 / #167's declared-refinement
@@ -707,6 +1091,7 @@ def resolve_merge(
         "message": "ok",
         "resolved_block": resolved_text,
     }
+    response.update(extra_response)
     if warning is not None:
         response["warning"] = warning
     return response
