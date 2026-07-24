@@ -40,6 +40,7 @@ from athenaeum.models import (
     valid_until_expired,
     validity_bound_str,
 )
+from athenaeum.pii import is_pii_flagged
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -396,6 +397,14 @@ def _scan_indexed_records(
     are absent from both index and manifest — the incremental differ then treats
     an active→inactive flip as a deletion. Unreadable files are skipped.
 
+    Issue #427: a page carrying a truthy ``pii:`` frontmatter flag (see
+    :func:`athenaeum.pii.is_pii_flagged`) is ALSO filtered out here, same as
+    an inactive memory — belt-and-suspenders exclusion for PII inline in
+    narrative on a page an operator has not (or not yet, #437) moved to the
+    excluded storage surface. It never enters the index or the manifest, so a
+    page later un-flagged picks back up on the next incremental build exactly
+    like a re-activated memory would.
+
     ``as_of`` (issue #308 slice 3) pins the temporal view: a page outside its
     validity window relative to ``as_of`` (default today) is filtered out here,
     exactly like a #191 tombstone. Only an as-of BUILD passes this (and an as-of
@@ -450,6 +459,10 @@ def _scan_indexed_records(
         # Issue #308: an as-of build additionally drops pages outside their
         # validity window relative to ``as_of`` (default today).
         if is_inactive_memory(meta, as_of):
+            continue
+        # Issue #427: a ``pii: true``-flagged page never enters the index or
+        # the manifest (belt-and-suspenders — see the docstring above).
+        if is_pii_flagged(meta):
             continue
         vu = validity_bound_str(meta, "valid_until")
         yield indexed_name, path, content_hash, text, meta, (mtime_ns, size, vu)
@@ -1487,6 +1500,11 @@ class KeywordBackend:
             # Issue #308 slice 3: also skip pages outside their validity window
             # relative to ``as_of`` (default today) — the query-time as-of view.
             if is_inactive_memory(fm, as_of):
+                continue
+            # Issue #427: belt-and-suspenders — a ``pii: true``-flagged page is
+            # excluded from keyword recall too, even though this backend scans
+            # on query rather than a pre-built index.
+            if is_pii_flagged(fm):
                 continue
             # Issue #312 — Layer B (keyword): authorize BEFORE scoring so a
             # forbidden page never enters ``scored`` and cannot occupy a top-n

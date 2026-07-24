@@ -71,6 +71,7 @@ from athenaeum.config import load_config, resolve_heartbeat_interval
 from athenaeum.merge import derive_topic_slug, synthesize_body
 from athenaeum.models import AutoMemoryFile, parse_frontmatter, validity_bound_str
 from athenaeum.pending_merges import write_pending_merge
+from athenaeum.pii import is_pii_flagged
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.search import embed_texts
 from athenaeum.storage import is_merge_eligible
@@ -106,7 +107,11 @@ def discover_wiki_dedupe_candidates(
     carrying a truthy ``superseded_by`` key — those are already-resolved
     and must not be re-flagged. Also excludes pages carrying a truthy
     ``pointer_stub`` flag (issue #426) — a stub already points at its
-    authoritative live source and is not merge-eligible (stub hygiene).
+    authoritative live source and is not merge-eligible (stub hygiene). Also
+    excludes pages carrying a truthy ``pii`` flag (issue #427) —
+    belt-and-suspenders: a page an operator has hand-flagged as carrying PII
+    inline is never proposed as a merge source, even when it is not (yet)
+    routed to the excluded storage surface.
 
     When *config* is provided, the storage-adapter layer (#429) is also
     consulted: a page whose entity class resolves to a surface with
@@ -142,6 +147,10 @@ def discover_wiki_dedupe_candidates(
         # non-merge-eligible surface is dropped (fail-closed). No-op by default
         # (every class maps to the wiki surface, merge_eligible=True).
         if config is not None and not is_merge_eligible(page_type, config):
+            continue
+        # #427: belt-and-suspenders — a hand-flagged ``pii: true`` page is
+        # never a merge source, independent of the storage-adapter policy.
+        if is_pii_flagged(meta):
             continue
 
         tags_raw = meta.get("tags") or []
