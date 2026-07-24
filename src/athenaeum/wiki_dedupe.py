@@ -72,6 +72,7 @@ from athenaeum.models import AutoMemoryFile, parse_frontmatter, validity_bound_s
 from athenaeum.pending_merges import write_pending_merge
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.search import embed_texts
+from athenaeum.storage import is_merge_eligible
 
 log = logging.getLogger(__name__)
 
@@ -90,7 +91,11 @@ WIKI_ORIGIN_SCOPE = "wiki"
 EmbeddingProvider = Callable[[list[str]], "list[list[float]] | None"]
 
 
-def discover_wiki_dedupe_candidates(wiki_root: Path) -> list[AutoMemoryFile]:
+def discover_wiki_dedupe_candidates(
+    wiki_root: Path,
+    *,
+    config: dict[str, Any] | None = None,
+) -> list[AutoMemoryFile]:
     """Load ``wiki/*.md`` pages eligible for the dedup pass.
 
     Eligible: top-level ``wiki/<slug>.md`` files (not ``_pending_*.md``
@@ -99,6 +104,15 @@ def discover_wiki_dedupe_candidates(wiki_root: Path) -> list[AutoMemoryFile]:
     :data:`DEDUPE_CANDIDATE_TYPES`. Excludes pages tagged ``archived`` or
     carrying a truthy ``superseded_by`` key — those are already-resolved
     and must not be re-flagged.
+
+    When *config* is provided, the storage-adapter layer (#429) is also
+    consulted: a page whose entity class resolves to a surface with
+    ``merge_eligible=False`` is dropped even if it sits in ``wiki/`` and its
+    ``type`` is a dedup-candidate type — fail-closed defense-in-depth so a
+    class an operator routed to an excluded surface can never be proposed for a
+    merge. ``config=None`` (the default) skips this consult entirely, so
+    behavior is byte-identical to the pre-#429 pass for any caller that does not
+    thread config through.
 
     Returns records sorted by filename for deterministic ordering.
     """
@@ -120,6 +134,11 @@ def discover_wiki_dedupe_candidates(wiki_root: Path) -> list[AutoMemoryFile]:
             continue
         page_type = str(meta.get("type") or "")
         if page_type not in DEDUPE_CANDIDATE_TYPES:
+            continue
+        # #429: honor the storage-adapter corpus policy — a class routed to a
+        # non-merge-eligible surface is dropped (fail-closed). No-op by default
+        # (every class maps to the wiki surface, merge_eligible=True).
+        if config is not None and not is_merge_eligible(page_type, config):
             continue
 
         tags_raw = meta.get("tags") or []
@@ -180,6 +199,7 @@ def find_wiki_page_clusters(
     *,
     threshold: float,
     embedding_provider: EmbeddingProvider | None = None,
+    config: dict[str, Any] | None = None,
 ) -> list[Cluster]:
     """Cluster eligible wiki pages; returns only clusters of size >= 2.
 
@@ -187,8 +207,12 @@ def find_wiki_page_clusters(
     which returns them for a uniform report shape) — the wiki-page pass
     only ever acts on candidate duplicates, so a size-1 "cluster" carries
     no signal a caller needs.
+
+    *config* is threaded through to :func:`discover_wiki_dedupe_candidates` so
+    the storage-adapter merge-eligibility policy (#429) is honored; ``None``
+    keeps behavior byte-identical.
     """
-    files = discover_wiki_dedupe_candidates(wiki_root)
+    files = discover_wiki_dedupe_candidates(wiki_root, config=config)
     if len(files) < 2:
         return []
 
@@ -264,7 +288,7 @@ def propose_wiki_page_merges(
         else resolve_cluster_threshold(knowledge_root, resolved_config)
     )
 
-    files = discover_wiki_dedupe_candidates(wiki_root)
+    files = discover_wiki_dedupe_candidates(wiki_root, config=resolved_config)
     by_relpath: dict[str, AutoMemoryFile] = {}
     for am in files:
         try:
@@ -274,7 +298,10 @@ def propose_wiki_page_merges(
         by_relpath[relpath] = am
 
     clusters = find_wiki_page_clusters(
-        wiki_root, threshold=resolved_threshold, embedding_provider=embedding_provider
+        wiki_root,
+        threshold=resolved_threshold,
+        embedding_provider=embedding_provider,
+        config=resolved_config,
     )
 
     # Issue #398: this pass (#290) is one of the post-compile dark zones —
