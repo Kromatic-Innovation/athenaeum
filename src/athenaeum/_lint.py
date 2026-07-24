@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("athenaeum")
 
@@ -57,3 +58,38 @@ def _strip_self_reference(
         )
         supersedes = [s for s in supersedes if s.get("name") != name]
     return refines, supersedes
+
+
+# --- Memory-taxonomy lint (issue #424) ---
+#
+# ``memory_class:`` validity (unknown non-empty value -> flagged) is
+# enforced at the pydantic boundary: schemas.py's ``WikiBase`` field
+# validator emits a ``UserWarning`` via ``validate_wiki_meta``, mirroring
+# the #93 ``KNOWN_TYPES`` precedent — that stays the single source of truth
+# for "is this value one of the 7 recognized classes" so this module does
+# not need to import/duplicate ``MEMORY_CLASSES``.
+#
+# This module's complementary job is the "untyped" lint surface: reporting,
+# across a batch of frontmatter dicts (e.g. a wiki-tree scan), which pages
+# carry NO ``memory_class`` at all. Absence is tolerated by validation
+# (legacy/untyped pages must not break) but should not silently disappear
+# from an operator's lint output either.
+
+
+def lint_untyped_memory_class(
+    meta: dict[str, Any], fpath: Path | None = None
+) -> str | None:
+    """Return an "untyped" lint message when ``meta`` has no ``memory_class``.
+
+    Returns ``None`` when ``memory_class`` is present (regardless of
+    validity — an invalid value is flagged separately by
+    :func:`athenaeum.schemas.validate_wiki_meta`'s ``UserWarning``; this
+    helper only reports the ABSENT case). ``fpath`` is optional (mirrors
+    :func:`_strip_self_reference`) so the helper is trivially callable from
+    tests; production call sites should pass it so the report names the
+    file.
+    """
+    value = meta.get("memory_class")
+    if value is None or value == "":
+        return f"{fpath}: untyped (no memory_class)" if fpath else "untyped (no memory_class)"
+    return None
