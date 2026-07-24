@@ -907,6 +907,13 @@ def main(argv: list[str] | None = None) -> int:
 
     add_authority_subparser(subparsers)
 
+    # axiom command (issue #434) — explicit human-approved axiom
+    # promotion/demotion + the assignment audit. memory_class: axiom must
+    # never be minted silently by a librarian/LLM write path.
+    from athenaeum._cmd_axiom import add_axiom_subparser
+
+    add_axiom_subparser(subparsers)
+
     # reindex command (issue #349) — rebuild the search index out-of-band.
     # ``rebuild-index`` is kept as a back-compat alias for the #348 spelling;
     # both dispatch to the identical handler (no duplicated index engine).
@@ -1235,6 +1242,11 @@ def main(argv: list[str] | None = None) -> int:
         from athenaeum._cmd_authority import cmd_authority
 
         return cmd_authority(args)
+
+    if args.command == "axiom":
+        from athenaeum._cmd_axiom import cmd_axiom
+
+        return cmd_axiom(args)
 
     return 0
 
