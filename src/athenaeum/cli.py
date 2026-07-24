@@ -914,6 +914,12 @@ def main(argv: list[str] | None = None) -> int:
 
     add_axiom_subparser(subparsers)
 
+    # calibration command (issue #438) — tier-audit calibration: per-tier
+    # sampled/reviewed/overturned summary + record a human confirm/overturn.
+    from athenaeum._cmd_calibration import add_calibration_subparser
+
+    add_calibration_subparser(subparsers)
+
     # reindex command (issue #349) — rebuild the search index out-of-band.
     # ``rebuild-index`` is kept as a back-compat alias for the #348 spelling;
     # both dispatch to the identical handler (no duplicated index engine).
@@ -1247,6 +1253,11 @@ def main(argv: list[str] | None = None) -> int:
         from athenaeum._cmd_axiom import cmd_axiom
 
         return cmd_axiom(args)
+
+    if args.command == "calibration":
+        from athenaeum._cmd_calibration import cmd_calibration
+
+        return cmd_calibration(args)
 
     return 0
 

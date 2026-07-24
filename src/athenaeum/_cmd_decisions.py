@@ -65,6 +65,13 @@ def _format_block(decision: dict) -> str:
         lines.append(f"  retracted source: {payload.get('retracted_ref', '')}")
         if payload.get("reason"):
             lines.append(f"  reason: {payload['reason']}")
+    elif decision["type"] == "audit":
+        lines.append(
+            f"  tier {payload.get('tier', '')} verdict: {payload.get('verdict', '')}"
+        )
+        lines.append(f"  proposal: {payload.get('proposal_id', '')}")
+        if payload.get("reason"):
+            lines.append(f"  reason: {payload['reason']}")
     else:
         if payload.get("description"):
             lines.append(f"  description: {payload['description']}")
@@ -76,15 +83,16 @@ def _format_block(decision: dict) -> str:
     return "\n".join(lines)
 
 
-def _counts(decisions: list[dict]) -> tuple[int, int, int, int, str | None]:
-    """Return ``(total, questions, merges, retractions, oldest_created_at)``."""
+def _counts(decisions: list[dict]) -> tuple[int, int, int, int, int, str | None]:
+    """Return ``(total, questions, merges, retractions, audits, oldest_created_at)``."""
     questions = sum(1 for d in decisions if d["type"] == "question")
     merges = sum(1 for d in decisions if d["type"] == "merge")
     retractions = sum(1 for d in decisions if d["type"] == "retraction")
+    audits = sum(1 for d in decisions if d["type"] == "audit")
     # ``list_pending_decisions`` returns oldest-first, so the first item's
     # created_at is the oldest across all queues.
     oldest = decisions[0]["created_at"] if decisions else None
-    return len(decisions), questions, merges, retractions, oldest
+    return len(decisions), questions, merges, retractions, audits, oldest
 
 
 def _cmd_scan_retractions(args: argparse.Namespace) -> int:
@@ -146,7 +154,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     )
 
     if sub == "count":
-        total, questions, merges, retractions, oldest = _counts(decisions)
+        total, questions, merges, retractions, audits, oldest = _counts(decisions)
         oldest_age = age_days(oldest) if oldest else None
         if args.json:
             sys.stdout.write(
@@ -156,6 +164,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
                         "questions": questions,
                         "merges": merges,
                         "retractions": retractions,
+                        "audits": audits,
                         "oldest": oldest,
                         "oldest_age_days": oldest_age,
                     }
@@ -169,6 +178,8 @@ def cmd_decisions(args: argparse.Namespace) -> int:
             breakdown = f"{questions} questions, {merges} merges"
             if retractions:
                 breakdown += f", {retractions} retractions"
+            if audits:
+                breakdown += f", {audits} audits"
             print(f"{total} decisions pending ({breakdown}{age_str})")
         return 0
 

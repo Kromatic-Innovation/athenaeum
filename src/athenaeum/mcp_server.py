@@ -930,6 +930,47 @@ def create_server(
         return {"flagged": len(newly), "items": newly}
 
     @mcp.tool()
+    def calibration_summary() -> dict:
+        """Per-tier tier-audit calibration counts (issue #438).
+
+        The calibration loop for the tiered reasoning pass: a random audit
+        share of T1 rejects and T2 approvals is surfaced (as ``type:
+        "audit"`` items in ``list_pending_decisions``) for a human to confirm
+        or overturn. This returns, per tier, the counts of ``sampled`` /
+        ``reviewed`` / ``overturned`` — the calibration signal at a glance
+        (``{"T1": {...}, "T2": {...}}``). Reviewing an audit item never
+        re-executes the merge; an overturn is a calibration signal only.
+        """
+        from athenaeum.calibration import calibration_summary as _summary
+
+        return _summary(wiki_root)
+
+    @mcp.tool()
+    def review_audit_item(id: str, human_verdict: str, note: str = "") -> dict:
+        """Record a human's confirm/overturn of a sampled audit item (#438).
+
+        Args:
+            id: The audit item id (from ``list_pending_decisions``, ``type:
+                "audit"``).
+            human_verdict: The human's verdict. Equal to the tier's original
+                verdict = confirm (the original decision is left untouched);
+                different = overturn (recorded as a calibration signal only —
+                no merge is executed or unwound).
+            note: Optional free-text note on the review.
+
+        Returns the review record (including ``overturned``). Errors if the id
+        is unknown or already reviewed.
+        """
+        from athenaeum.calibration import record_audit_review
+
+        try:
+            return record_audit_review(
+                wiki_root, audit_id=id, human_verdict=human_verdict, note=note
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @mcp.tool()
     def resolve_merge(id: str, decision: str, note: str = "") -> dict:
         """Approve or reject a pending merge proposal (issue #169, #425).
 

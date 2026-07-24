@@ -36,6 +36,7 @@ from datetime import date
 from pathlib import Path
 
 from athenaeum.answers import PendingQuestion, parse_pending_questions
+from athenaeum.calibration import list_pending_audit
 from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
 from athenaeum.retraction_cascade import read_retraction_reviews
@@ -285,6 +286,40 @@ def retraction_to_decision(rec: dict) -> dict:
     }
 
 
+def audit_to_decision(rec: dict) -> dict:
+    """Convert a sampled tier-audit item to a unified decision dict (issue #438).
+
+    A ``type: "audit"`` item — distinguishable from an ordinary escalation —
+    surfaces a randomly-sampled T1 reject or T2 approval for human
+    calibration review. Confirming it leaves the tier's original decision
+    untouched; overturning it records a calibration signal (it does not
+    re-execute the merge). ``confidence`` is ``None``.
+    """
+    tier = rec.get("tier", "")
+    verdict = rec.get("verdict", "")
+    proposal_id = rec.get("proposal_id", "")
+    reason = rec.get("reason", "")
+    reason_tail = f" (tier reason: {_one_line(reason)})" if reason else ""
+    summary = (
+        f"Calibration audit: tier {tier} returned {verdict!r} on proposal "
+        f"{proposal_id} — confirm the verdict or overturn it.{reason_tail}"
+    )
+    return {
+        "type": "audit",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "tier": tier,
+            "verdict": verdict,
+            "proposal_id": proposal_id,
+            "reason": reason,
+            "sample_rate": rec.get("sample_rate"),
+        },
+    }
+
+
 def list_pending_merges_rich(merges_path: Path) -> list[dict]:
     """Unresolved merges as decidable dicts (title + gist + question)."""
     return [
@@ -328,6 +363,7 @@ def list_pending_decisions(
     decisions += [
         retraction_to_decision(rec) for rec in read_retraction_reviews(wiki_root)
     ]
+    decisions += [audit_to_decision(rec) for rec in list_pending_audit(wiki_root)]
     decisions.sort(key=lambda d: d["created_at"] or "")
     return decisions
 
