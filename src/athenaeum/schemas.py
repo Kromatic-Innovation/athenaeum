@@ -39,14 +39,34 @@ Memory taxonomy (issue #424):
   (legacy/untyped pages must not break) and is reported via
   :func:`is_untyped_memory_class` so a linter/report can surface it as
   "untyped" without that itself being a warning.
+
+PII off-corpus (issue #427):
+- Entity pages carry durable identifiers only (name, LinkedIn, record id,
+  Google-Contact id); inline archival contact data (``emails:`` / ``phones:``
+  frontmatter) does not belong on a page that stays in the embedded/recalled
+  corpus. ``WikiBase`` flags this via a :class:`UserWarning` — mirroring the
+  #93 ``KNOWN_TYPES`` / #424 ``memory_class`` precedent exactly (recoverable,
+  not a hard failure, since migrating pre-existing pages is #437's operator
+  task, not this validator's job). A page carrying a truthy ``pii:`` flag
+  (:func:`athenaeum.pii.is_pii_flagged`) is EXEMPT from this particular
+  warning — that flag is the explicit "yes, I know, and every corpus
+  consumer already excludes this page" acknowledgment (see
+  :mod:`athenaeum.pii`'s module docstring, point 3). See
+  :mod:`athenaeum.pii` for the full off-corpus design (contacts surface,
+  observation log, supersession fold); this module only hosts the
+  frontmatter-boundary half of the lint (body-text inline detection needs
+  the page body, which is out of scope for a frontmatter-only validator —
+  see :func:`athenaeum.pii.lint_inline_contact_fields` for the body-aware
+  batch-lint counterpart).
 """
 from __future__ import annotations
 
 import warnings
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from athenaeum.pii import CONTACT_FRONTMATTER_FIELDS, is_pii_flagged
 from athenaeum.provenance import validate_field_sources, validate_source_value
 
 #: The 7 recognized ``memory_class:`` values (issue #424). Deliberately does
@@ -143,6 +163,33 @@ class WikiBase(BaseModel):
     @classmethod
     def _validate_field_sources(cls, v: Any) -> Any:
         return validate_field_sources(v)
+
+    @model_validator(mode="after")
+    def _warn_inline_contact_fields(self) -> "WikiBase":
+        """Flag durable-identifier-only entity pages carrying inline PII (#427).
+
+        Recoverable — a :class:`UserWarning`, not a raise — mirroring the #93
+        ``KNOWN_TYPES`` / #424 ``memory_class`` precedent. Skips the check
+        entirely when the page is ``pii: true``-flagged: that flag is the
+        explicit acknowledgment every corpus consumer already keys off of
+        (:func:`athenaeum.pii.is_pii_flagged`), so warning here too would be
+        noise, not signal. Frontmatter-only (the ``emails``/``phones`` fields)
+        — inline body text is checked separately by
+        :func:`athenaeum.pii.lint_inline_contact_fields`, which has access to
+        the page body this schema-boundary validator does not.
+        """
+        meta = self.model_dump(exclude_none=True)
+        if is_pii_flagged(meta):
+            return self
+        present = [f for f in CONTACT_FRONTMATTER_FIELDS if meta.get(f)]
+        if present:
+            warnings.warn(
+                f"inline contact data on entity page: frontmatter field(s) "
+                f"{sorted(present)!r} (durable identifiers only — see #427)",
+                UserWarning,
+                stacklevel=2,
+            )
+        return self
 
     @field_validator("uid", "type", "name", mode="before")
     @classmethod
