@@ -1022,6 +1022,40 @@ def main(argv: list[str] | None = None) -> int:
         "be the live wiki/ directory.",
     )
 
+    # registry command (issue #453) — compile the source-handle registry.
+    # A deterministic, LLM-free read of the wiki tree that emits registry.json
+    # (entity uid → handle set) for the fact-mining adapters to consume. Emits
+    # a well-formed (possibly empty) registry regardless of how many handles
+    # are populated, so the operator-only seed (#454) is never a precondition.
+    registry_parser = subparsers.add_parser(
+        "registry",
+        help="Issue #453: compile the source-handle registry.json (entity uid "
+        "→ handle set) from wiki entity frontmatter. Deterministic, no LLM; "
+        "emits a well-formed registry even when no handles are populated yet.",
+    )
+    registry_parser.add_argument(
+        "--path",
+        "--knowledge-root",
+        dest="path",
+        type=Path,
+        default=Path("~/knowledge"),
+        help="Knowledge directory (default: ~/knowledge).",
+    )
+    registry_parser.add_argument(
+        "--out",
+        dest="out",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="Where to write registry.json (default: <knowledge-root>/"
+        "registry.json).",
+    )
+    registry_parser.add_argument(
+        "--stdout",
+        action="store_true",
+        help="Print the registry JSON to stdout instead of writing a file.",
+    )
+
     # ingest command (issue #349) — on-demand compile of new/changed raw
     # intake into the wiki. The manual escape hatch that makes a just-
     # remembered fact recallable now, decoupled from the nightly `run`.
@@ -1195,6 +1229,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "compile":
         return _cmd_compile_as_of(args)
+
+    if args.command == "registry":
+        return _cmd_registry(args)
 
     if args.command == "ingest":
         return _cmd_ingest(args)
@@ -2184,6 +2221,40 @@ def _cmd_compile_as_of(args: argparse.Namespace) -> int:
         f"{'y' if len(entries) == 1 else 'ies'} as of "
         f"{as_of.isoformat()} into {out_dir} "
         "(compile-as-of; live wiki untouched)"
+    )
+    return 0
+
+
+def _cmd_registry(args: argparse.Namespace) -> int:
+    """Issue #453: compile the source-handle registry.json.
+
+    Deterministic, LLM-free read of the wiki tree into an ``entity uid →
+    handle set`` index. A missing wiki dir or zero populated handles is not
+    an error — it yields a well-formed empty registry (issue #453/#454: the
+    seed lands later and must not gate the builder).
+    """
+    from athenaeum.atomic_io import atomic_write_text
+    from athenaeum.registry import build_registry, render_registry
+
+    knowledge_root = args.path.expanduser().resolve()
+    wiki_root = knowledge_root / "wiki"
+    registry = build_registry(wiki_root)
+    text = render_registry(registry)
+
+    if args.stdout:
+        sys.stdout.write(text)
+        return 0
+
+    out_path = (
+        args.out.expanduser().resolve()
+        if args.out is not None
+        else knowledge_root / "registry.json"
+    )
+    atomic_write_text(out_path, text)
+    print(
+        f"Wrote {registry['entity_count']} entit"
+        f"{'y' if registry['entity_count'] == 1 else 'ies'} with source handles "
+        f"to {out_path}"
     )
     return 0
 
