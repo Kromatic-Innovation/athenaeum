@@ -69,6 +69,7 @@ from athenaeum.clusters import (
 )
 from athenaeum.config import load_config, resolve_heartbeat_interval
 from athenaeum.merge import derive_topic_slug, synthesize_body
+from athenaeum.merge_type_gate import build_cite_proposal, cross_class_precheck
 from athenaeum.models import AutoMemoryFile, parse_frontmatter, validity_bound_str
 from athenaeum.pending_merges import write_pending_merge
 from athenaeum.pii import is_pii_flagged
@@ -352,6 +353,33 @@ def propose_wiki_page_merges(
         # stay stable across runs and are safe to use as the id-stability
         # key inside write_pending_merge.
         sources = [str(am.path.resolve()) for am in members]
+
+        # Issue #433: type-compatibility precheck. A cluster spanning >1
+        # distinct memory_class values may not be merged — same-class only
+        # (docs/memory-taxonomy.md #3). Rejected BEFORE the merge-target
+        # slug/draft body are even computed: a cross-class cluster never
+        # becomes a merge proposal, a cite proposal is built in its place.
+        rejection = cross_class_precheck(sources)
+        if rejection is not None:
+            cite = build_cite_proposal(sources, rejection)
+            log.info(
+                "wiki-page dedup: cross-class cluster rejected for merge "
+                "(%s); emitting cite proposal instead (citing=%d, cited=%d)",
+                rejection.reason,
+                len(cite.citing),
+                len(cite.cited),
+            )
+            proposals.append(
+                {
+                    "action": cite.action,
+                    "citing": cite.citing,
+                    "cited": cite.cited,
+                    "rationale": cite.rationale,
+                    "rejection": rejection.to_dict(),
+                }
+            )
+            continue
+
         merge_target_name = derive_topic_slug(cluster.member_paths, cluster.cluster_id)
         member_bodies = _member_bodies_for_cluster(cluster, by_relpath)
         draft_body = synthesize_body(member_bodies)
