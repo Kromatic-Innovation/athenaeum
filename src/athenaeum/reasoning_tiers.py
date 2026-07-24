@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tiered reasoning-pass pipeline for merge proposals (issue #423).
+"""Tiered reasoning-pass pipeline for merge proposals (issues #423, #432).
 
 NOT to be confused with :mod:`athenaeum.tiers` — that module is the T0-T4
 *entity-compilation* pipeline (raw intake -> wiki entity pages). This module
@@ -11,45 +11,57 @@ adding a cheap-to-expensive cascade of LLM "reasoning" tiers that can reject
 an obviously-bad proposal before it ever reaches a human, or pass it further
 up the cascade. To avoid any confusion with ``tiers.py``'s ``Tier1``/``Tier2``/
 etc. naming, every type here is prefixed ``Reasoning`` (:class:`ReasoningTier`,
-:class:`ReasoningTierDecision`, ...).
+:class:`ReasoningTierDecision`, :class:`ReasoningTierT2Decision`, ...).
 
 Governing rule (settled product decision, do not re-litigate): **write
 authority increases with tier; cheap tiers only reject and route, never
 approve.** Concretely:
 
-- **T1** (this issue): haiku/sonnet-class model, bounded input (titles +
+- **T1** (issue #423): haiku/sonnet-class model, bounded input (titles +
   frontmatter + first ~100 words per source — NEVER full bodies). Can only
   REJECT (with a logged reason) or PASS UP. Approval is structurally
   unrepresentable in its output type — see :class:`ReasoningTierVerdict`.
-- **T2** (issue #432, not built here): a more capable tier that may also
-  only reject or pass up, per the same governing rule — it is NOT gated
-  with approval authority either. The skeleton here is deliberately generic
-  ("a tier is anything that rejects or passes up") so #432 can slot a T2
-  handler into :data:`DEFAULT_TIER_CHAIN` (or an explicit chain the caller
-  builds) without reworking anything in this module.
-- **Human** — the only actor that can ever approve. Until #432 lands, a
-  T1 pass-up flows straight to the existing human queue
-  (:func:`athenaeum.decisions.list_pending_decisions` /
+- **T2** (issue #432): opus-class model, FULL bodies, T1 survivors (pass-ups)
+  only. Unlike T1, T2 DOES gain a form of write authority — but only inside
+  a narrow, structurally-enforced SAFE CLASS (same ``memory_class``, <=3
+  pages, no ``pii`` flag, no ``axiom`` member — see
+  :func:`safe_class_violation`). Outside the safe class, or when T2 tries to
+  pair an approval with rewritten content, the pipeline itself downgrades
+  the outcome (to escalate/draft) regardless of what the model returned —
+  see :func:`run_t2_tier` / :func:`_t2_decision_from_model_verdict` and
+  :class:`ReasoningTierT2Decision`'s own broader verdict space
+  (:data:`ReasoningTierT2Verdict`: approve / amend / draft / escalate).
+  T1's own type (:class:`ReasoningTierVerdict`) is untouched by this —
+  T2's authority is a NEW, separate type, not an extension of T1's.
+- **Human** — the only actor that can approve OUTSIDE the T2 safe class,
+  and the only actor that can ever approve a proposal whose content T2
+  amended/drafted. A T1 pass-up with no T2 configured flows straight to the
+  existing human queue (:func:`athenaeum.decisions.list_pending_decisions` /
   :func:`athenaeum.pending_merges.list_pending_merges`) UNCHANGED — see
-  :func:`run_reasoning_pipeline`.
+  :func:`run_reasoning_pipeline`. A T2 "escalate" or "draft" decision joins
+  that SAME queue (:func:`athenaeum.decisions.list_pending_decisions`) via
+  the caller's existing pass-up-to-human wiring; T2 does not add a second
+  queue.
 
-Every tier decision — reject or pass-up, at any tier — is recorded as a
+Every tier decision — at any tier, whatever its verdict — is recorded as a
 machine-readable, queryable event: ``(tier, decision, reason, model,
 proposal_id)`` plus a timestamp. The log format mirrors
 :mod:`athenaeum.provenance`'s merge-provenance ledger (append-only JSONL,
 ``O_APPEND`` + fsync, tolerant reader that skips a torn trailing line) —
 same durability discipline, same "queryable append-only sidecar" shape,
-just a different filename/record schema.
+just a different filename/record schema. T1 and T2 write into the exact
+same log file/schema (:func:`_build_log_record_fields` is the single shared
+record-shape builder) — only the ``tier`` tag and the set of legal
+``decision`` values differ per tier's own type.
 
 Out of scope here (see the issue body for the re-scope rationale):
 
-- T2 itself (#432).
 - The calibration sampler that watches T1/T2 accuracy over time (#438).
 - Wiring this pipeline into the live ``merge.py`` / ``wiki_dedupe.py`` call
-  sites that currently write straight to ``_pending_merges.md`` — that is a
-  follow-up once #432 exists (running only a T1-reject-or-pass-up tier with
-  no T2 is a real, useful configuration, but the issue scopes THIS change to
-  the pipeline + T1 tier building blocks, not the call-site rewiring).
+  sites that currently write straight to ``_pending_merges.md`` — a
+  T1(+T2)-reject-or-pass-up/approve-in-safe-class pipeline with no live
+  call-site wiring is a real, useful configuration; the issue scopes this
+  change to the pipeline + tier building blocks, not the call-site rewrite.
 """
 
 from __future__ import annotations
@@ -72,6 +84,7 @@ from athenaeum.authority import (
 from athenaeum.config import resolve_model
 from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge
+from athenaeum.pii import is_pii_flagged
 
 log = logging.getLogger("athenaeum")
 
@@ -279,22 +292,53 @@ def default_reasoning_tier_log_path(wiki_root: Path) -> Path:
     return Path(wiki_root) / REASONING_TIER_LOG_FILENAME
 
 
-def _build_log_record(
-    decision: ReasoningTierDecision, *, ts: datetime | None = None
+def _build_log_record_fields(
+    *,
+    tier: str,
+    verdict: str,
+    reason: str,
+    reason_code: str | None,
+    model: str | None,
+    proposal_id: str,
+    ts: datetime | None = None,
 ) -> dict[str, Any]:
+    """Build one log record dict from raw fields (the shared record shape).
+
+    Both T1 (:func:`record_reasoning_tier_decision`, fed from the
+    reject/pass_up-only :class:`ReasoningTierDecision`) and T2 (fed from the
+    broader approve/amend/draft/escalate :class:`ReasoningTierT2Decision`)
+    write through this SAME field shape/schema — only the allowed
+    ``verdict`` values differ per tier's own type, never the log record
+    shape itself. This is what "T2 logs in the same shape as T1" means
+    concretely: one schema, one file, a ``tier`` tag distinguishing rows.
+    """
     stamp = (ts if ts is not None else datetime.now(tz=timezone.utc)).astimezone(
         timezone.utc
     )
     return {
         "v": REASONING_TIER_LOG_VERSION,
         "ts": stamp.isoformat().replace("+00:00", "Z"),
-        "tier": decision.tier,
-        "decision": decision.verdict,
-        "reason": decision.reason,
-        "reason_code": decision.reason_code,
-        "model": decision.model,
-        "proposal_id": decision.proposal_id,
+        "tier": tier,
+        "decision": verdict,
+        "reason": reason,
+        "reason_code": reason_code,
+        "model": model,
+        "proposal_id": proposal_id,
     }
+
+
+def _build_log_record(
+    decision: ReasoningTierDecision, *, ts: datetime | None = None
+) -> dict[str, Any]:
+    return _build_log_record_fields(
+        tier=decision.tier,
+        verdict=decision.verdict,
+        reason=decision.reason,
+        reason_code=decision.reason_code,
+        model=decision.model,
+        proposal_id=decision.proposal_id,
+        ts=ts,
+    )
 
 
 def _append_jsonl_line(path: Path, line: str) -> None:
@@ -634,6 +678,501 @@ def run_t1_tier(
 
 
 # ---------------------------------------------------------------------------
+# T2 tier (issue #432) — opus-class model, FULL bodies, T1 survivors only.
+#
+# Governing rule still applies (write authority increases with tier), but
+# T2's decision space is DELIBERATELY BROADER than T1's reject/pass_up —
+# see :data:`ReasoningTierT2Verdict`. T2 may:
+#
+#   - APPROVE   — ONLY inside the SAFE CLASS (see
+#                 :func:`safe_class_violation` / :func:`run_t2_tier`):
+#                 same memory_class, <=3 pages, no `pii` flag, no `axiom`
+#                 member. Any violation makes the approve outcome
+#                 structurally unreachable for that proposal — see
+#                 :func:`_t2_decision_from_model_verdict` below, which is
+#                 the ONLY place an approving :class:`ReasoningTierT2Decision`
+#                 is ever constructed, and it refuses to do so when
+#                 ``safe_class_violation(...)`` is non-None, regardless of
+#                 what the model returned.
+#   - AMEND     — proposes a different source SET (drop/add sources), but
+#                 never rewrites body content. See
+#                 :class:`ReasoningTierT2Decision.amended_sources`.
+#   - DRAFT     — proposes a merge BODY for human review. See
+#                 :class:`ReasoningTierT2Decision.drafted_body`.
+#   - ESCALATE  — hands off to the human queue with a reason, no proposed
+#                 change.
+#
+# Rewrite-then-self-approve is structurally impossible: the approve outcome
+# and a populated ``drafted_body`` can never coexist on the same decision —
+# see :class:`ReasoningTierT2Decision.__post_init__`. A decision that
+# carries a drafted body is, by construction, always the draft outcome,
+# never the approve one — there is no field state representing "I rewrote
+# the content AND I approved it".
+# ---------------------------------------------------------------------------
+
+T2_TIER_NAME = "T2"
+
+#: T2 is the opus-class deep-reasoning tier. Overridable via
+#: ``ATHENAEUM_REASONING_T2_MODEL`` env or ``models.reasoning_t2`` yaml —
+#: same env/yaml/default precedence as :func:`get_t1_model` (issue #232).
+DEFAULT_T2_MODEL = "claude-opus-4-1-20250805"
+
+
+def get_t2_model(config: dict[str, Any] | None = None) -> str:
+    """Resolve the T2 tier's model id (env > yaml > default, issue #232)."""
+    return resolve_model(
+        "reasoning_t2", "ATHENAEUM_REASONING_T2_MODEL", DEFAULT_T2_MODEL, config
+    )
+
+
+#: T2's decision space — DIFFERENT and BROADER than T1's
+#: :data:`ReasoningTierVerdict`. T1's type is left untouched (per the
+#: governing rule, cheap tiers never gain approval authority); T2 gets its
+#: own, separate Literal so T1's guarantees cannot be weakened by extending
+#: its enum.
+ReasoningTierT2Verdict = Literal["approve", "amend", "draft", "escalate"]
+
+REASONING_TIER_T2_VERDICTS: frozenset[str] = frozenset(
+    {"approve", "amend", "draft", "escalate"}
+)
+
+#: Safe-class violation reason codes (one per predicate in the issue's safe
+#: class: same memory_class, <=3 pages, no pii flag, no axiom member).
+SAFE_CLASS_VIOLATION_CROSS_MEMORY_CLASS = "cross_memory_class"
+SAFE_CLASS_VIOLATION_TOO_MANY_PAGES = "too_many_pages"
+SAFE_CLASS_VIOLATION_PII_FLAGGED = "pii_flagged"
+SAFE_CLASS_VIOLATION_AXIOM_MEMBER = "axiom_member"
+#: Live-source duplicate is a T1 reject bin, but a T1 pass-up does not
+#: guarantee T1 even ran a manifest check (an absent authority_manifest is
+#: tolerated at T1) — T2 re-checks with its OWN (possibly supplied)
+#: manifest, per the issue's "T2 consults the #426 authority manifest"
+#: instruction, and treats a hit as a safe-class violation (never approve a
+#: duplicate of a live source, no matter how small/homogeneous the cluster).
+SAFE_CLASS_VIOLATION_LIVE_SOURCE_DUPLICATE = "live_source_duplicate"
+
+#: Maximum number of source pages a T2 approval may span (issue #432).
+SAFE_CLASS_MAX_PAGES = 3
+
+
+def safe_class_violation(
+    views: Sequence[BoundedSourceView],
+    *,
+    authority_manifest: AuthorityManifest | None = None,
+) -> str | None:
+    """Return the violated safe-class reason code, or ``None`` if all pass.
+
+    The SAFE CLASS (issue #432) is ALL of: same ``memory_class`` across
+    every source, at most :data:`SAFE_CLASS_MAX_PAGES` pages, no source
+    carrying a truthy ``pii`` flag (:func:`athenaeum.pii.is_pii_flagged`),
+    and no source with ``memory_class: axiom``. This function is the
+    SINGLE gate consulted by :func:`run_t2_tier` before an "approve" verdict
+    may be constructed — see that function for how a violation makes
+    approval structurally unreachable regardless of the model's own output.
+
+    Order of checks is cheapest/most-certain first (page count needs no
+    parsing; pii/axiom/cross-class need frontmatter already loaded in
+    *views*); the first violation found is returned (a decision only needs
+    ONE reason, and returning the first keeps behavior deterministic).
+    """
+    if len(views) > SAFE_CLASS_MAX_PAGES:
+        return SAFE_CLASS_VIOLATION_TOO_MANY_PAGES
+
+    for view in views:
+        if is_pii_flagged(view.frontmatter):
+            return SAFE_CLASS_VIOLATION_PII_FLAGGED
+
+    for view in views:
+        raw_class = view.frontmatter.get("memory_class")
+        if isinstance(raw_class, str) and raw_class.strip().lower() == "axiom":
+            return SAFE_CLASS_VIOLATION_AXIOM_MEMBER
+
+    cross_class_reason = _cross_memory_class_reason(views)
+    if cross_class_reason is not None:
+        return SAFE_CLASS_VIOLATION_CROSS_MEMORY_CLASS
+
+    if authority_manifest is not None:
+        dup_reason = _duplicate_check_reason(views, authority_manifest)
+        if dup_reason is not None:
+            return SAFE_CLASS_VIOLATION_LIVE_SOURCE_DUPLICATE
+
+    return None
+
+
+@dataclass(frozen=True)
+class ReasoningTierT2Decision:
+    """One T2 decision on one proposal.
+
+    Broader decision space than T1's :class:`ReasoningTierDecision` —
+    ``verdict`` ranges over :data:`ReasoningTierT2Verdict` (approve / amend
+    / draft / escalate), not just reject/pass_up. Kept as a SEPARATE
+    dataclass (not an extension of T1's) so T1's type is never weakened.
+
+    Structural (not merely conventional) guarantees, enforced in
+    ``__post_init__``:
+
+    - **No self-approve-rewrite.** ``drafted_body`` (a proposed rewrite of
+      the merge content) and ``verdict == "approve"`` can never coexist on
+      the same instance. A decision that carries drafted content is always
+      ``verdict == "draft"`` — routed to human review — never "approve".
+      This makes "T2 rewrote the draft and self-approved it" unrepresentable
+      in the type, not just discouraged by a prompt.
+    - **Approval always carries the safe-class fields as evidence.**
+      ``safe_class_violation`` must be ``None`` whenever ``verdict ==
+      "approve"`` — an approval can never be constructed while flagging its
+      own disqualifying violation (belt-and-suspenders alongside
+      :func:`run_t2_tier`'s gate, which is the actual enforcement point
+      callers rely on; this guards the type itself against a future
+      caller that tries to hand-construct an approval directly).
+    - ``amended_sources`` (a proposed different source SET) is allowed
+      alongside "amend" only — amending which sources are considered is
+      explicitly NOT the same act as rewriting content, but it still may
+      never coexist with "approve" in the same decision (an amendment
+      changes what a human/next pass reviews; it is not itself an
+      approval).
+    - ``reason`` is always non-empty, mirroring T1's contract.
+    """
+
+    tier: str
+    verdict: ReasoningTierT2Verdict
+    reason: str
+    model: str | None
+    proposal_id: str
+    reason_code: str | None = None
+    safe_class_violation: str | None = None
+    amended_sources: tuple[str, ...] | None = None
+    drafted_body: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.verdict not in REASONING_TIER_T2_VERDICTS:
+            raise ValueError(
+                f"invalid ReasoningTierT2Decision.verdict: {self.verdict!r} "
+                f"(must be one of {sorted(REASONING_TIER_T2_VERDICTS)!r})"
+            )
+        if not self.reason or not self.reason.strip():
+            raise ValueError("ReasoningTierT2Decision.reason must be non-empty")
+        if self.verdict == "approve":
+            if self.drafted_body is not None:
+                raise ValueError(
+                    "ReasoningTierT2Decision: an 'approve' verdict may never "
+                    "carry a drafted_body (rewrite-then-self-approve is "
+                    "structurally forbidden) — use verdict='draft' instead"
+                )
+            if self.amended_sources is not None:
+                raise ValueError(
+                    "ReasoningTierT2Decision: an 'approve' verdict may never "
+                    "carry amended_sources — use verdict='amend' instead"
+                )
+            if self.safe_class_violation is not None:
+                raise ValueError(
+                    "ReasoningTierT2Decision: an 'approve' verdict may never "
+                    f"carry a safe_class_violation ({self.safe_class_violation!r})"
+                )
+
+
+T2_SYSTEM_PROMPT = """You are a careful, deep-reasoning reviewer for a memory-merge proposal
+queue. You see proposals that a cheaper pre-screener already passed up as
+NOT confidently rejectable. You are shown FULL source bodies (not excerpts).
+
+You may return exactly one of:
+- "approve": the merge is correct and safe to finalize automatically. Only
+  ever appropriate for a small, homogeneous, non-sensitive cluster.
+- "amend": the merge is directionally right but the SOURCE SET should
+  change (drop or add sources) before anyone finalizes it. You may name a
+  revised source list. You may NOT rewrite the merge body content yourself.
+- "draft": write a proposed merged body for a human to review and finalize.
+  This is the ONLY way to propose new merged content — drafting NEVER
+  self-approves; a human still decides.
+- "escalate": you are not confident enough to do any of the above; hand off
+  to a human with your reasoning.
+
+Respond with ONLY a JSON object of the shape:
+{"verdict": "approve" | "amend" | "draft" | "escalate",
+ "reason": "<one or two sentences>",
+ "amended_sources": ["path", ...] | null,
+ "drafted_body": "<merged body text>" | null}"""
+
+
+def _render_full_source(view: BoundedSourceView, full_body: str) -> str:
+    fm_lines = "\n".join(f"  {k}: {v!r}" for k, v in sorted(view.frontmatter.items()))
+    return (
+        f"- path: {view.path}\n"
+        f"  title: {view.title}\n"
+        f"  frontmatter:\n{fm_lines or '  (none)'}\n"
+        f"  body (FULL):\n{full_body}"
+    )
+
+
+def _read_full_body(path: str) -> str:
+    """Read a source's full body text (post-frontmatter). T2-only privilege.
+
+    Degrades to an empty string on a missing/unreadable file, mirroring
+    :func:`build_bounded_source_view`'s own degrade-not-crash contract — a
+    vanished source should still let T2 reach a decision (most likely
+    escalate), not blow up the whole batch.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    _meta, body = parse_frontmatter(text)
+    return body.strip()
+
+
+def build_t2_request_params(
+    proposal: ReasoningProposal,
+    views: Sequence[BoundedSourceView],
+    *,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the Messages API kwargs for one T2 deep-reasoning call.
+
+    Unlike T1 (:func:`build_t1_request_params`, bounded-excerpt only), T2's
+    payload includes each source's FULL body — T2 sees "full bodies, T1
+    survivors only" per the issue's settled decision surface.
+    """
+    sources_block = "\n".join(
+        _render_full_source(v, _read_full_body(v.path)) for v in views
+    )
+    user_msg = (
+        f"## Candidate merge target\n{proposal.merge_target_name}\n\n"
+        f"## Candidate sources ({len(views)})\n{sources_block}\n\n"
+        "## Instructions\nDecide approve/amend/draft/escalate per the "
+        "system prompt. Return ONLY the JSON object."
+    )
+    return {
+        "model": get_t2_model(config),
+        "max_tokens": 4096,
+        "system": T2_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": user_msg}],
+    }
+
+
+def _parse_t2_response(
+    text: str,
+) -> tuple[ReasoningTierT2Verdict, str, tuple[str, ...] | None, str | None]:
+    """Parse the T2 model's JSON response.
+
+    Returns ``(verdict, reason, amended_sources, drafted_body)``. Defensive
+    parsing mirrors :func:`_parse_t1_response`: malformed/missing JSON, or a
+    verdict outside the four allowed values, degrades to ``"escalate"`` —
+    T2's failure mode is "ask a human", never a silent approval.
+    """
+    text = text.strip()
+    try:
+        start = text.index("{")
+        end = text.rindex("}") + 1
+        payload = json.loads(text[start:end])
+    except (ValueError, json.JSONDecodeError):
+        return "escalate", f"T2 response unparseable, escalating: {text[:200]!r}", None, None
+    if not isinstance(payload, dict):
+        return "escalate", "T2 response was not a JSON object; escalating", None, None
+
+    verdict = payload.get("verdict")
+    reason = payload.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        reason = "(no reason given by T2 model)"
+
+    amended_sources: tuple[str, ...] | None = None
+    raw_amended = payload.get("amended_sources")
+    if isinstance(raw_amended, list) and raw_amended:
+        amended_sources = tuple(str(s) for s in raw_amended)
+
+    drafted_body: str | None = None
+    raw_draft = payload.get("drafted_body")
+    if isinstance(raw_draft, str) and raw_draft.strip():
+        drafted_body = raw_draft
+
+    if verdict not in REASONING_TIER_T2_VERDICTS:
+        # Includes a model hallucinating some other string. Never coerced
+        # to "approve" — the safest fallback (escalate) is used instead,
+        # matching T1's "cannot parse confidently -> least-authority
+        # fallback" discipline.
+        return "escalate", reason, amended_sources, drafted_body
+    return verdict, reason, amended_sources, drafted_body
+
+
+def _t2_decision_from_model_verdict(
+    *,
+    proposal_id: str,
+    model: str,
+    verdict: ReasoningTierT2Verdict,
+    reason: str,
+    amended_sources: tuple[str, ...] | None,
+    drafted_body: str | None,
+    violation: str | None,
+) -> ReasoningTierT2Decision:
+    """Build the final T2 decision, enforcing both structural rules.
+
+    This is the ONLY place in the module that turns a model's raw verdict
+    into a :class:`ReasoningTierT2Decision`. Both structural guarantees are
+    enforced HERE, independent of what the (possibly mocked) model
+    returned:
+
+    1. **Safe-class gate.** If *violation* is non-None, "approve" is
+       downgraded to "escalate" — no matter what the model said. A
+       cross-class / >3-page / pii-flagged / axiom-member proposal cannot
+       reach an approved :class:`ReasoningTierT2Decision`, full stop.
+    2. **No self-approve-rewrite.** If the model tried to pair "approve"
+       with a ``drafted_body`` (rewriting content and approving in the same
+       breath), the verdict is downgraded to "draft" — the drafted content
+       is preserved for human review, but it can never carry approval
+       authority in the same decision.
+
+    Downgrades always route to the LOWER-authority option ("escalate" is
+    lower authority than "approve"; "draft" — human-reviewed — is lower
+    authority than a self-approval), never silently discarded.
+    """
+    reason_code = None
+    effective_verdict: ReasoningTierT2Verdict = verdict
+
+    if verdict == "approve" and violation is not None:
+        effective_verdict = "escalate"
+        reason_code = violation
+        reason = (
+            f"model returned 'approve' but safe-class violation "
+            f"{violation!r} makes approval structurally unreachable; "
+            f"escalating. Model reason was: {reason}"
+        )
+    elif verdict == "approve" and drafted_body is not None:
+        effective_verdict = "draft"
+        reason = (
+            "model returned 'approve' alongside a drafted_body; "
+            "rewrite-then-self-approve is structurally forbidden, so this "
+            "is routed to human review as a draft instead. Model reason "
+            f"was: {reason}"
+        )
+
+    # amended_sources/drafted_body are only meaningful on their own verdicts
+    # — strip them when the effective verdict does not carry that field, so
+    # __post_init__'s "approve never carries these" invariant holds and the
+    # log record only reflects the ACTUAL outcome.
+    final_amended = amended_sources if effective_verdict == "amend" else None
+    final_drafted = drafted_body if effective_verdict == "draft" else None
+
+    return ReasoningTierT2Decision(
+        tier=T2_TIER_NAME,
+        verdict=effective_verdict,
+        reason=reason,
+        reason_code=reason_code,
+        model=model,
+        proposal_id=proposal_id,
+        safe_class_violation=violation if effective_verdict == "escalate" else None,
+        amended_sources=final_amended,
+        drafted_body=final_drafted,
+    )
+
+
+def record_reasoning_tier_t2_decision(
+    wiki_root: Path,
+    decision: ReasoningTierT2Decision,
+    *,
+    log_path: Path | None = None,
+    ts: datetime | None = None,
+) -> bool:
+    """Append one T2 decision to the SAME decision log T1 writes to.
+
+    Same file, same JSONL record shape (:func:`_build_log_record_fields`),
+    same append/fsync/best-effort-never-raises discipline as
+    :func:`record_reasoning_tier_decision` — the only difference is the
+    source object's (broader) verdict type. Every T2 decision — approve,
+    amend, draft, or escalate — is logged, mirroring T1's "every decision
+    (reject or pass-up) is recorded" contract.
+    """
+    try:
+        record = _build_log_record_fields(
+            tier=decision.tier,
+            verdict=decision.verdict,
+            reason=decision.reason,
+            reason_code=decision.reason_code,
+            model=decision.model,
+            proposal_id=decision.proposal_id,
+            ts=ts,
+        )
+        target = (
+            log_path if log_path is not None else default_reasoning_tier_log_path(wiki_root)
+        )
+        _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
+        return True
+    except Exception as exc:  # noqa: BLE001 — ledger write must never break the pipeline
+        log.debug(
+            "T2 reasoning tier decision log write skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+
+def run_t2_tier(
+    proposal: ReasoningProposal,
+    *,
+    client: Any | None,
+    authority_manifest: AuthorityManifest | None = None,
+    config: dict[str, Any] | None = None,
+    usage: Any | None = None,
+) -> ReasoningTierT2Decision:
+    """Run the T2 (opus, full-bodies, T1-survivors-only) tier over one proposal.
+
+    T2 sees FULL source bodies (:func:`build_t2_request_params`) — a
+    materially different input scope than T1's bounded excerpts. Its output
+    space is also materially broader (:data:`ReasoningTierT2Verdict`), but
+    two rules are enforced STRUCTURALLY, not just by the system prompt:
+
+    1. **Approval requires the safe class.** :func:`safe_class_violation` is
+       evaluated BEFORE trusting the model's verdict; any violation
+       downgrades a would-be "approve" to "escalate" regardless of what the
+       model actually returned (see :func:`_t2_decision_from_model_verdict`).
+    2. **No self-approve-rewrite.** A model response pairing "approve" with
+       a ``drafted_body`` is downgraded to "draft", never surfaced as an
+       approval.
+
+    *client* ``None`` (no LLM configured) short-circuits straight to
+    "escalate" — mirroring T1's ``client is None`` degradation, except T2's
+    least-authority fallback is escalate (T1's is pass_up; T2 has no
+    pass_up option, so escalate — routing straight to the human queue — is
+    the equivalent floor).
+    """
+    views = bounded_views_for(proposal)
+    violation = safe_class_violation(views, authority_manifest=authority_manifest)
+
+    if client is None:
+        return ReasoningTierT2Decision(
+            tier=T2_TIER_NAME,
+            verdict="escalate",
+            reason="no LLM client configured for T2; escalating",
+            model=None,
+            proposal_id=proposal.proposal_id,
+        )
+
+    params = build_t2_request_params(proposal, views, config=config)
+    response = with_retry(
+        lambda: client.messages.create(**params),
+        description=f"t2_reasoning_tier {proposal.proposal_id}",
+    )
+    if usage is not None and hasattr(response, "usage"):
+        from athenaeum.models import cache_usage_counts
+
+        input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(
+            response
+        )
+        usage.add(
+            input_toks, output_toks, cache_creation, cache_read, model=params["model"]
+        )
+
+    verdict, reason, amended_sources, drafted_body = _parse_t2_response(
+        response.content[0].text
+    )
+    return _t2_decision_from_model_verdict(
+        proposal_id=proposal.proposal_id,
+        model=params["model"],
+        verdict=verdict,
+        reason=reason,
+        amended_sources=amended_sources,
+        drafted_body=drafted_body,
+        violation=violation,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pipeline skeleton — ordered tier handlers, tolerant of an absent T2.
 # ---------------------------------------------------------------------------
 
@@ -750,31 +1289,48 @@ def load_authority_manifest_for_pipeline(
 __all__ = [
     "BODY_EXCERPT_WORD_LIMIT",
     "DEFAULT_T1_MODEL",
+    "DEFAULT_T2_MODEL",
     "DEFAULT_TIER_CHAIN",
     "REASONING_TIER_LOG_FILENAME",
     "REASONING_TIER_LOG_VERSION",
+    "REASONING_TIER_T2_VERDICTS",
     "REASONING_TIER_VERDICTS",
     "REJECT_REASON_CODES",
     "REJECT_REASON_CROSS_MEMORY_CLASS",
     "REJECT_REASON_DIFFERENT_ENTITIES",
     "REJECT_REASON_LIVE_SOURCE_DUPLICATE",
     "REJECT_REASON_OTHER",
+    "SAFE_CLASS_MAX_PAGES",
+    "SAFE_CLASS_VIOLATION_AXIOM_MEMBER",
+    "SAFE_CLASS_VIOLATION_CROSS_MEMORY_CLASS",
+    "SAFE_CLASS_VIOLATION_LIVE_SOURCE_DUPLICATE",
+    "SAFE_CLASS_VIOLATION_PII_FLAGGED",
+    "SAFE_CLASS_VIOLATION_TOO_MANY_PAGES",
     "T1_SYSTEM_PROMPT",
     "T1_TIER_NAME",
+    "T2_SYSTEM_PROMPT",
+    "T2_TIER_NAME",
     "BoundedSourceView",
     "ReasoningPipelineResult",
     "ReasoningProposal",
     "ReasoningTierDecision",
+    "ReasoningTierT2Decision",
+    "ReasoningTierT2Verdict",
     "ReasoningTierVerdict",
     "TierHandler",
     "bounded_views_for",
     "build_bounded_source_view",
     "build_t1_request_params",
+    "build_t2_request_params",
     "default_reasoning_tier_log_path",
     "get_t1_model",
+    "get_t2_model",
     "load_authority_manifest_for_pipeline",
     "read_reasoning_tier_decisions",
     "record_reasoning_tier_decision",
+    "record_reasoning_tier_t2_decision",
     "run_reasoning_pipeline",
     "run_t1_tier",
+    "run_t2_tier",
+    "safe_class_violation",
 ]
