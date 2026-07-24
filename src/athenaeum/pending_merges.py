@@ -485,22 +485,82 @@ def write_pending_merge(
     return block
 
 
-def list_pending_merges(merges_path: Path) -> list[dict]:
-    """Return unresolved merges as MCP-friendly dicts."""
-    return [
-        {
-            "id": pm.id,
-            "merge_target_name": pm.merge_target_name,
-            "sources": list(pm.sources),
-            "rationale": pm.rationale,
-            "draft_merged_body": pm.draft_merged_body,
-            "confidence": pm.confidence,
-            "created_at": pm.created_at,
-            "write_kind": pm.write_kind,
-        }
-        for pm in parse_pending_merges(merges_path)
-        if not pm.resolved
-    ]
+def _preview_draft_body(draft_merged_body: str, preview_chars: int) -> tuple[str, bool]:
+    """Bound ``draft_merged_body`` to ``preview_chars``.
+
+    Returns ``(text, truncated)``. When the body already fits, ``text`` is
+    returned byte-identical (no truncation marker appended) so a normal-sized
+    merge's payload is unchanged from before this cap existed (issue #431).
+    ``preview_chars <= 0`` disables truncation (the resolver already coerces
+    non-positive config values back to the default, so this is a defensive
+    fallback, not a normal path).
+    """
+    if preview_chars <= 0 or len(draft_merged_body) <= preview_chars:
+        return draft_merged_body, False
+    return draft_merged_body[:preview_chars], True
+
+
+def list_pending_merges(
+    merges_path: Path,
+    *,
+    config: dict | None = None,
+    full_body: bool = False,
+) -> list[dict]:
+    """Return unresolved merges as MCP-friendly dicts.
+
+    Issue #431 (read-path defense-in-depth, complementing the #400 write-path
+    ``max_merge_sources`` suppression): a single oversized pending merge — the
+    withdrawn runaway that prompted this issue had a ~878 KB draft body — blew
+    out the payload of every ``list_pending_merges`` call because
+    ``draft_merged_body`` was returned in full, unbounded. By default this
+    truncates ``draft_merged_body`` to
+    :func:`athenaeum.config.resolve_merge_body_preview_chars` (env > yaml
+    ``librarian.merge_body_preview_chars`` > 2000) characters and adds
+    ``draft_merged_body_truncated: True`` plus the untruncated
+    ``draft_merged_body_full_length`` so a caller can tell a preview from the
+    real thing and decide whether to re-fetch in full.
+
+    Args:
+        merges_path: Path to ``wiki/_pending_merges.md``.
+        config: Resolved athenaeum config dict (as from
+            :func:`athenaeum.config.load_config`), or ``None`` to use the
+            resolver's env/default fallback with no yaml override.
+        full_body: When ``True``, skip truncation entirely and return the
+            complete ``draft_merged_body`` for every item — the on-demand
+            escape hatch for a caller that specifically needs the full draft
+            (e.g. immediately before approving a merge).
+
+    A body already at or under the cap is returned byte-identical to the
+    pre-#431 behavior (no truncation marker fields added beyond the two
+    always-present booleans/lengths), so normal-sized merges are unaffected.
+    """
+    from athenaeum.config import resolve_merge_body_preview_chars
+
+    preview_chars = resolve_merge_body_preview_chars(config)
+    out = []
+    for pm in parse_pending_merges(merges_path):
+        if pm.resolved:
+            continue
+        full = pm.draft_merged_body
+        if full_body:
+            body, truncated = full, False
+        else:
+            body, truncated = _preview_draft_body(full, preview_chars)
+        out.append(
+            {
+                "id": pm.id,
+                "merge_target_name": pm.merge_target_name,
+                "sources": list(pm.sources),
+                "rationale": pm.rationale,
+                "draft_merged_body": body,
+                "draft_merged_body_truncated": truncated,
+                "draft_merged_body_full_length": len(full),
+                "confidence": pm.confidence,
+                "created_at": pm.created_at,
+                "write_kind": pm.write_kind,
+            }
+        )
+    return out
 
 
 def _rewrite_block_resolved(
