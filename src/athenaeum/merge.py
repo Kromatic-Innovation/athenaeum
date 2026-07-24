@@ -84,6 +84,7 @@ from athenaeum.fingerprint import (
     record_resolution,
     resolve_not_a_conflict_ttl_days,
 )
+from athenaeum.merge_type_gate import build_cite_proposal, cross_class_precheck
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
     AutoMemoryFile,
@@ -1593,6 +1594,29 @@ def merge_clusters_to_wiki(
                     "cluster %s (%s); not written to _pending_merges.md",
                     entry.cluster_id,
                     _suppress,
+                )
+                return
+            # Issue #433: type-compatibility precheck. A cluster spanning >1
+            # distinct memory_class values (docs/memory-taxonomy.md #3) may
+            # not be mechanically merged — same-class only. Untyped members
+            # (the overwhelming majority of raw auto-memory intake, which
+            # carries no memory_class frontmatter) never trip this gate; it
+            # only fires when 2+ DISTINCT typed classes are present (e.g. a
+            # ``fact`` wiki page clustering with a ``guideline`` wiki page
+            # via the merge-time cluster shim). Rejected clusters get a cite
+            # proposal instead of a destructive merge.
+            _rejection = cross_class_precheck(member_paths)
+            if _rejection is not None:
+                cite = build_cite_proposal(member_paths, _rejection)
+                log.info(
+                    "resolutions: REJECTED cross-class merge proposal for "
+                    "cluster %s (%s); cite proposal built instead "
+                    "(citing=%d, cited=%d); dropping pending-question "
+                    "escalation",
+                    entry.cluster_id,
+                    _rejection.reason,
+                    len(cite.citing),
+                    len(cite.cited),
                 )
                 return
             # Issue #421: slug-collision precheck. Classify the proposal by
