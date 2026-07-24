@@ -29,6 +29,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from athenaeum.authority import is_pointer_stub
 from athenaeum.models import (
     AUDIENCE_PUBLIC_TOKEN,
     audience_index_string,
@@ -900,7 +901,19 @@ class VectorBackend:
             # the audience is stored as the same delimited string as FTS5 and
             # filtered in Python at query time (Layer B).
             ids.append(indexed_name)
-            documents.append(text[: self._DOC_LIMIT])
+            # Issue #426 (stub hygiene): a pointer stub contributes NOTHING
+            # beyond its one-line pointer body to embeddings — embedding the
+            # full frontmatter+body (like every other page) would defeat the
+            # point of converting a duplicate into a stub in the first place.
+            # Fall back to the full ``text`` when the page has no frontmatter
+            # (parse_frontmatter returned an empty dict) so a non-wiki-shaped
+            # file is unaffected.
+            if meta and is_pointer_stub(meta):
+                _fm, doc_body = parse_frontmatter(text)
+                doc_text = doc_body.strip()
+            else:
+                doc_text = text
+            documents.append(doc_text[: self._DOC_LIMIT])
             metadatas.append(
                 {
                     "name": name,
