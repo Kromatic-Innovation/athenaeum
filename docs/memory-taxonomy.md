@@ -3,8 +3,10 @@
 > **Status:** data model + validation only. This document locks the shape;
 > enforcement of the merge-vs-cite semantics described in §3 is
 > [#433](https://github.com/Kromatic-Innovation/athenaeum/issues/433) and has
-> not shipped yet. Governance over the `axiom` class is
-> [#434](https://github.com/Kromatic-Innovation/athenaeum/issues/434). Tier
+> not shipped yet. Governance over the `axiom` class
+> ([#434](https://github.com/Kromatic-Innovation/athenaeum/issues/434):
+> explicit human-approved promotion/demotion ledger + assignment audit) has
+> shipped — see `src/athenaeum/axiom_governance.py`. Tier
 > usage of `memory_class` is [#423](https://github.com/Kromatic-Innovation/athenaeum/issues/423)
 > / [#432](https://github.com/Kromatic-Innovation/athenaeum/issues/432).
 
@@ -141,5 +143,7 @@ consumer issue (most naturally #433), not this data-model issue.
 - Any change to `recall`, `merge`, or `embed` behavior.
 - Enforcing merge-vs-cite semantics (§3) — #433.
 - Inference-block retraction machinery (§4) — #433.
-- Axiom governance (elevated review/approval for the `axiom` class) — #434.
+- Axiom governance (elevated review/approval for the `axiom` class) — shipped
+  separately in #434 (`src/athenaeum/axiom_governance.py`; see that module's
+  docstring for the promotion/demotion ledger + assignment-audit design).
 - Tier (compile pipeline) usage of `memory_class` — #423 / #432.
