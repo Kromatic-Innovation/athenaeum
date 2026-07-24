@@ -60,6 +60,11 @@ def _format_block(decision: dict) -> str:
         omitted = payload.get("sources_omitted", 0)
         if omitted:
             lines.append(f"    - … and {omitted} more")
+    elif decision["type"] == "retraction":
+        lines.append(f"  merge: {payload.get('merge_id', '')}")
+        lines.append(f"  retracted source: {payload.get('retracted_ref', '')}")
+        if payload.get("reason"):
+            lines.append(f"  reason: {payload['reason']}")
     else:
         if payload.get("description"):
             lines.append(f"  description: {payload['description']}")
@@ -71,14 +76,46 @@ def _format_block(decision: dict) -> str:
     return "\n".join(lines)
 
 
-def _counts(decisions: list[dict]) -> tuple[int, int, int, str | None]:
-    """Return ``(total, questions, merges, oldest_created_at)``."""
+def _counts(decisions: list[dict]) -> tuple[int, int, int, int, str | None]:
+    """Return ``(total, questions, merges, retractions, oldest_created_at)``."""
     questions = sum(1 for d in decisions if d["type"] == "question")
     merges = sum(1 for d in decisions if d["type"] == "merge")
+    retractions = sum(1 for d in decisions if d["type"] == "retraction")
     # ``list_pending_decisions`` returns oldest-first, so the first item's
-    # created_at is the oldest across both queues.
+    # created_at is the oldest across all queues.
     oldest = decisions[0]["created_at"] if decisions else None
-    return len(decisions), questions, merges, oldest
+    return len(decisions), questions, merges, retractions, oldest
+
+
+def _cmd_scan_retractions(args: argparse.Namespace) -> int:
+    """Run the retraction cascade (issue #435): flag dependent merges for review.
+
+    Reads the merge-provenance ledger (under ``wiki/``) and the observation
+    supersession log (under the contacts/excluded surface) and appends a
+    review item for every completed merge that relied on a now-retracted
+    source. Idempotent — a re-scan emits only newly-flagged pairs. Never
+    unmerges anything.
+    """
+    from athenaeum.pii import contacts_surface_root
+    from athenaeum.retraction_cascade import scan_retraction_cascade
+
+    knowledge_root = _resolve_knowledge_root(args)
+    wiki_root = knowledge_root / "wiki"
+    config = load_config(knowledge_root)
+    contacts_root = contacts_surface_root(knowledge_root, config)
+    newly = scan_retraction_cascade(wiki_root, contacts_root)
+    if args.json:
+        sys.stdout.write(json.dumps({"flagged": len(newly), "items": newly}) + "\n")
+    elif not newly:
+        print("0 merges newly flagged for retraction review")
+    else:
+        print(f"{len(newly)} merge(s) newly flagged for retraction review:")
+        for rec in newly:
+            print(
+                f"  - merge {rec['merge_id']} into "
+                f'"{rec["canonical_slug"]}" (retracted source {rec["retracted_ref"]})'
+            )
+    return 0
 
 
 def cmd_decisions(args: argparse.Namespace) -> int:
@@ -88,9 +125,15 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     print nothing (or ``null`` JSON for ``next``) and exit 0.
     """
     sub = getattr(args, "decisions_target", None)
-    if sub not in ("list", "next", "count"):
-        print("usage: athenaeum decisions {list,next,count} [...]", file=sys.stderr)
+    if sub not in ("list", "next", "count", "scan-retractions"):
+        print(
+            "usage: athenaeum decisions {list,next,count,scan-retractions} [...]",
+            file=sys.stderr,
+        )
         return 2
+
+    if sub == "scan-retractions":
+        return _cmd_scan_retractions(args)
 
     wiki_root = _resolve_wiki_root(args)
     with_proposal = getattr(args, "with_proposal", False)
@@ -103,7 +146,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     )
 
     if sub == "count":
-        total, questions, merges, oldest = _counts(decisions)
+        total, questions, merges, retractions, oldest = _counts(decisions)
         oldest_age = age_days(oldest) if oldest else None
         if args.json:
             sys.stdout.write(
@@ -112,6 +155,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
                         "count": total,
                         "questions": questions,
                         "merges": merges,
+                        "retractions": retractions,
                         "oldest": oldest,
                         "oldest_age_days": oldest_age,
                     }
@@ -122,10 +166,10 @@ def cmd_decisions(args: argparse.Namespace) -> int:
             print("0 decisions pending")
         else:
             age_str = f"; oldest {oldest_age}d" if oldest_age is not None else ""
-            print(
-                f"{total} decisions pending "
-                f"({questions} questions, {merges} merges{age_str})"
-            )
+            breakdown = f"{questions} questions, {merges} merges"
+            if retractions:
+                breakdown += f", {retractions} retractions"
+            print(f"{total} decisions pending ({breakdown}{age_str})")
         return 0
 
     if sub == "next":
@@ -212,3 +256,12 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Print `N decisions pending (Q questions, M merges; oldest Xd)`.",
     )
     _add_common(count_p, with_proposal=False)
+
+    scan_p = d_sub.add_parser(
+        "scan-retractions",
+        help=(
+            "Flag any completed merge that relied on a now-retracted source "
+            "for human review (issue #435). Idempotent; never unmerges."
+        ),
+    )
+    _add_common(scan_p, with_proposal=False)

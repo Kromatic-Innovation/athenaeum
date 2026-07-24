@@ -902,6 +902,34 @@ def create_server(
         return _list_axiom_audit(wiki_root)
 
     @mcp.tool()
+    def scan_retraction_cascade() -> dict:
+        """Flag completed merges that relied on a now-retracted source (#435).
+
+        Walks the observation supersession log (issue #427) against the
+        merge-provenance ledger (issue #425): when a retracted observation is
+        listed among a merge's supporting ``source_paths``, a ``retraction``
+        review item is added to the human decisions queue (surfaced by
+        ``list_pending_decisions``) naming the dependent merge, the retracted
+        source, and the retraction reason.
+
+        The merge itself is never touched — there is deliberately **no
+        auto-unmerge**; whether a merge still holds without a retracted source
+        is a human call. Idempotent: a re-scan emits only newly-flagged
+        ``(merge, retracted source)`` pairs. Returns
+        ``{"flagged": N, "items": [...]}`` for the records newly emitted by
+        this scan.
+        """
+        from athenaeum.config import load_config
+        from athenaeum.pii import contacts_surface_root
+        from athenaeum.retraction_cascade import scan_retraction_cascade as _scan
+
+        knowledge_root = wiki_root.parent
+        config = load_config(knowledge_root)
+        contacts_root = contacts_surface_root(knowledge_root, config)
+        newly = _scan(wiki_root, contacts_root)
+        return {"flagged": len(newly), "items": newly}
+
+    @mcp.tool()
     def resolve_merge(id: str, decision: str, note: str = "") -> dict:
         """Approve or reject a pending merge proposal (issue #169, #425).
 
