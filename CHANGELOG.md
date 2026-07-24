@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Memory taxonomy — data model, validation, inference-block parser
+  (#424).** Adds `memory_class:` as a third, orthogonal frontmatter axis —
+  `fact | guideline | axiom | reference | entity | decision | procedure` —
+  layered BESIDE the existing entity-schema `type:` (#93's `KNOWN_TYPES`)
+  and intake `memory_type:`, both of which are untouched and remain
+  byte-identical.
+  - `WikiBase.memory_class` (`src/athenaeum/schemas.py`): a value outside
+    the 7 is flagged via `UserWarning` (mirrors the #93 `KNOWN_TYPES`
+    precedent); an absent value is tolerated (legacy pages don't break) and
+    reported via the new `schemas.is_untyped_memory_class` /
+    `_lint.lint_untyped_memory_class` predicates.
+  - New `src/athenaeum/inference_blocks.py`: schema + parser for
+    `## Inference` body blocks (`**Basis**:` wikilinks + `**Confidence**:`)
+    inside a `memory_class: fact` page, parsed to addressable
+    `InferenceBlock` units. Malformed blocks are flagged, not dropped or
+    silently accepted. Retraction machinery is out of scope — #433.
+  - `WikiBase.observed_at` + `models.parse_observed_at`: the staleness axis
+    for standing-state facts (true-when-observed vs. currently-true),
+    distinct from `created`/`updated` and from `valid_from`/`valid_until`
+    (#308). Round-trips through parse/render.
+  - New [`docs/memory-taxonomy.md`](docs/memory-taxonomy.md): axis
+    reconciliation, merge-vs-cite semantics (within-class merge,
+    across-class cite-never-destroy — enforcement is #433), and the
+    inference-block grammar.
+  - Data model + validation + parser + doc only — zero behavior change to
+    merge/recall/embed.
 - **Pluggable storage-adapter layer — entity class → surface + corpus policy
   (#429).** Generalizes "PII lives on an excluded path" (#427) into a
   config-swappable layer: each entity class (the wiki frontmatter `type:`)
