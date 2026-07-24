@@ -1329,6 +1329,33 @@ search_backend: fts5
 #   Defaults to claude-opus-4-7. Env override: ATHENAEUM_RESOLVE_MODEL.
 # resolve:
 #   model: claude-opus-4-7
+
+# Pluggable storage-surface layer (issue #429). Maps each entity class (the
+# wiki frontmatter `type`) onto a STORAGE ADAPTER — a backing store + a corpus
+# policy (embedded / recallable / merge_eligible). UNSET = every class uses the
+# built-in `wiki-markdown-embedded` surface (the flat wiki/, full corpus
+# participation) — byte-identical to pre-#429 behavior. Two adapters ship built
+# in and need no definition here: `wiki-markdown-embedded` (default) and
+# `excluded` (a surface OUTSIDE wiki/, no embed/recall/merge — what #427's PII
+# surface consumes). Adding a surface is config + a mapping, no core change.
+# NOTE: this is a STORAGE-surface adapter, NOT the source→raw-intake adapter of
+# docs/adapter-contract.md — different concept, opposite ends of the pipeline.
+#
+#   adapters:                      # custom adapters (built-ins are implicit)
+#     contacts-excluded:
+#       backing_store: markdown    # required
+#       surface_root: contacts     # required; relative to knowledge root,
+#                                  #   or absolute. Keep OUTSIDE wiki/ to be
+#                                  #   excluded by construction.
+#       corpus_policy:             # each key FAILS CLOSED (omitted => false)
+#         embedded: false
+#         recallable: false
+#         merge_eligible: false
+#   mapping:                       # entity `type` -> adapter name
+#     pii: excluded                # route the pii class to the built-in surface
+# storage:
+#   mapping:
+#     pii: excluded
 """
 
 
@@ -1424,3 +1451,60 @@ def resolve_embedding_model(config: dict[str, Any] | None) -> str | None:
     if isinstance(model, str) and model.strip():
         return model.strip()
     return None
+
+
+def resolve_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
+    """Resolve the ``storage.mapping`` entity-class → adapter-name table (#429).
+
+    Maps a wiki frontmatter ``type`` (``person``, ``pii``, …) onto the name of
+    a storage adapter (``wiki-markdown-embedded``, ``excluded``, or a custom
+    one). Returns an EMPTY dict when unset — the code default that keeps every
+    class on the default wiki surface, so an unconfigured base is byte-identical
+    (issue #231: no seed in ``_DEFAULTS`` so this default stays reachable).
+    Non-string keys/values and blank entries are dropped defensively.
+    """
+    if not isinstance(config, dict):
+        return {}
+    storage_cfg = config.get("storage") or {}
+    if not isinstance(storage_cfg, dict):
+        return {}
+    raw = storage_cfg.get("mapping")
+    if not isinstance(raw, dict):
+        return {}
+    mapping: dict[str, str] = {}
+    for cls, adapter_name in raw.items():
+        if not isinstance(cls, str) or not cls.strip():
+            continue
+        if not isinstance(adapter_name, str) or not adapter_name.strip():
+            continue
+        mapping[cls.strip()] = adapter_name.strip()
+    return mapping
+
+
+def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Resolve the ``storage.adapters`` custom-adapter definitions (#429).
+
+    Returns the raw (still-primitive) per-adapter mapping dicts keyed by adapter
+    name; :func:`athenaeum.storage.available_adapters` validates each and builds
+    the :class:`~athenaeum.storage.StorageAdapter` objects. Returns an EMPTY
+    dict when unset — the built-in ``wiki-markdown-embedded`` and ``excluded``
+    adapters are always available regardless. Non-string keys and non-mapping
+    values are dropped defensively (a malformed entry is surfaced loudly later,
+    at build time, with the adapter name in the message).
+    """
+    if not isinstance(config, dict):
+        return {}
+    storage_cfg = config.get("storage") or {}
+    if not isinstance(storage_cfg, dict):
+        return {}
+    raw = storage_cfg.get("adapters")
+    if not isinstance(raw, dict):
+        return {}
+    adapters: dict[str, dict[str, Any]] = {}
+    for name, definition in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(definition, dict):
+            continue
+        adapters[name.strip()] = definition
+    return adapters

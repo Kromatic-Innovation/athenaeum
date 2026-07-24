@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pluggable storage-adapter layer — entity class → surface + corpus policy
+  (#429).** Generalizes "PII lives on an excluded path" (#427) into a
+  config-swappable layer: each entity class (the wiki frontmatter `type:`)
+  resolves to a *storage surface* whose backing store AND corpus policy
+  (embedded / recallable / merge-eligible) are a configuration choice,
+  changeable later — not a hardcoded path.
+  - New internal module [`athenaeum/storage.py`](../src/athenaeum/storage.py):
+    `CorpusPolicy`, `StorageAdapter`, a built-in registry, `register_adapter`
+    (the in-process extension point), `resolve_adapter_for_class`, and the
+    consumer/writer helpers (`is_embedded` / `is_recallable` /
+    `is_merge_eligible` / `is_excluded` / `surface_root_for_class`). Loud
+    `StorageConfigError` on misconfiguration — never a silent fallback.
+  - Two adapters ship built in: **`wiki-markdown-embedded`** (the default —
+    today's flat `wiki/`, full corpus participation, so an unconfigured base is
+    byte-identical) and **`excluded`** (a surface outside `wiki/`, no
+    embed/recall/merge — what #427's PII surface consumes). An excluded surface
+    is excluded from the corpus **by construction** (its root is outside the
+    scanners' search set), the fail-closed property #427 requires — no change to
+    the embed/recall/merge core.
+  - Config-driven via a new `storage:` block in `athenaeum.yaml`
+    (`storage.mapping` entity-class → adapter, `storage.adapters` custom
+    definitions; `corpus_policy` keys fail closed). Adding a surface is config +
+    an adapter with no core change — the seam #426's deferred skill-file-sync
+    surface will consume.
+  - The wiki-dedup merge pass now consults the layer's `merge_eligible` policy
+    (`wiki_dedupe.discover_wiki_dedupe_candidates`) so a class routed to a
+    non-merge-eligible surface is dropped even if it sits in `wiki/` —
+    fail-closed defense-in-depth, byte-identical when unconfigured.
+  - New [`docs/storage-adapter-contract.md`](docs/storage-adapter-contract.md),
+    explicitly disambiguated from the source → raw-intake adapter contract.
 - **Documented the source → raw-intake adapter contract + a bundled
   adapter-authoring skill (#419).** The raw-intake write API is the seam any
   external source uses to feed data into the wiki, but it wasn't documented or
