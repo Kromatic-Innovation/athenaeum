@@ -140,6 +140,7 @@ def test_count_empty(tmp_path: Path) -> None:
         "questions": 0,
         "merges": 0,
         "retractions": 0,
+        "audits": 0,
         "oldest": None,
         "oldest_age_days": None,
     }

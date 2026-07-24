@@ -541,6 +541,73 @@ def resolve_min_merge_confidence(config: dict[str, Any] | None) -> float:
     return 0.0
 
 
+def _resolve_sample_rate(
+    config: dict[str, Any] | None, *, env_var: str, key: str, default: float
+) -> float:
+    """Resolve a bounded [0.0, 1.0] sampling rate (env > yaml > default).
+
+    Shared by the tier-audit sampler knobs (#438). Out-of-range values are
+    clamped into ``[0.0, 1.0]`` (a rate above 1 samples everything, below 0
+    nothing); ``bool`` / non-numeric values fall through to *default*. No seed
+    in ``_DEFAULTS`` (#231) — the sampler is ON by default, so *default* is a
+    real non-zero rate the resolver owns, not a disabled floor.
+    """
+
+    def _clamp(value: float) -> float:
+        return max(0.0, min(1.0, value))
+
+    env = os.environ.get(env_var)
+    if env is not None:
+        try:
+            return _clamp(float(env))
+        except (TypeError, ValueError):
+            pass
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get(key)
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    return _clamp(float(raw))
+                except (TypeError, ValueError):
+                    pass
+    return default
+
+
+def resolve_audit_sample_rate_t2_approvals(config: dict[str, Any] | None) -> float:
+    """Resolve the share of T2 approvals sampled for human audit (#438).
+
+    The calibration loop catches false-APPROVES: a random share of T2's
+    approve verdicts is surfaced for a human to confirm or overturn. Env
+    ``ATHENAEUM_AUDIT_SAMPLE_RATE_T2_APPROVALS`` > yaml
+    ``librarian.audit_sample_rate_t2_approvals`` > default ``0.075`` (7.5%,
+    the midpoint of the settled 5-10% band). Clamped to ``[0.0, 1.0]``.
+    """
+    return _resolve_sample_rate(
+        config,
+        env_var="ATHENAEUM_AUDIT_SAMPLE_RATE_T2_APPROVALS",
+        key="audit_sample_rate_t2_approvals",
+        default=0.075,
+    )
+
+
+def resolve_audit_sample_rate_t1_rejects(config: dict[str, Any] | None) -> float:
+    """Resolve the share of T1 rejects sampled for human audit (#438).
+
+    The calibration loop catches false-REJECTS: a random share of T1's reject
+    verdicts is surfaced for a human to confirm or overturn. Env
+    ``ATHENAEUM_AUDIT_SAMPLE_RATE_T1_REJECTS`` > yaml
+    ``librarian.audit_sample_rate_t1_rejects`` > default ``0.075`` (7.5%,
+    the midpoint of the settled 5-10% band). Clamped to ``[0.0, 1.0]``.
+    """
+    return _resolve_sample_rate(
+        config,
+        env_var="ATHENAEUM_AUDIT_SAMPLE_RATE_T1_REJECTS",
+        key="audit_sample_rate_t1_rejects",
+        default=0.075,
+    )
+
+
 def resolve_min_merge_mean_similarity(config: dict[str, Any] | None) -> float:
     """Resolve the merge-proposal mean-pairwise-similarity floor (#421).
 
