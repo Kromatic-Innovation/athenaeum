@@ -849,23 +849,32 @@ def create_server(
 
     @mcp.tool()
     def resolve_merge(id: str, decision: str, note: str = "") -> dict:
-        """Approve or reject a pending merge proposal (issue #169).
+        """Approve or reject a pending merge proposal (issue #169, #425).
 
         Args:
             id: The id returned by ``list_pending_merges``.
-            decision: ``"approve"`` writes the draft merged body to
-                ``wiki/<target-slug>.md`` and flips the checkbox. The
-                source memories are NOT archived here — the human reviews
-                the wiki write before any source deletion. ``"reject"``
-                flips the checkbox and writes a ``refines:`` declaration
-                into the first source memory so the detector's
-                declared-refinement short-circuit suppresses the pair on
-                future runs.
+            decision: ``"approve"`` dispatches on the proposal's write kind
+                (issue #421 classification). A ``create-merged`` proposal
+                writes the draft merged body to a fresh ``wiki/<target-
+                slug>.md``. A ``fold-into-existing`` proposal writes the
+                draft body to the ALREADY-EXISTING canonical page, rewrites
+                every inbound ``[[old-slug]]`` wikilink to the canonical
+                slug, records the folded-away slugs as ``aliases:`` on the
+                canonical page, deletes the old source wiki files, and
+                purges their vectors from the search index (when a vector
+                backend is configured). Either way, flips the checkbox and
+                records a provenance entry naming the sources folded/merged
+                in. ``"reject"`` flips the checkbox and writes a
+                ``refines:`` declaration into the first source memory so
+                the detector's declared-refinement short-circuit
+                suppresses the pair on future runs.
             note: Optional human note attached to the decision block.
 
         Returns:
             A dict with ``ok``, ``error_code``, ``message``,
-            ``resolved_block``.
+            ``resolved_block``. A successful ``fold-into-existing``
+            approve additionally includes ``folded_sources`` (deleted
+            source paths), ``aliases_added``, and ``links_rewritten``.
 
             For backward compatibility the dict also includes legacy
             aliases ``block`` (= ``resolved_block``) and ``error``
@@ -896,8 +905,10 @@ def create_server(
             decision=decision,  # type: ignore[arg-type]
             note=note,
             wiki_root=wiki_root,
+            cache_dir=cache_dir,
+            search_backend=search_backend,
         )
-        return {
+        response = {
             "ok": result["ok"],
             "error_code": result.get("error_code"),
             "message": result.get("message", ""),
@@ -906,5 +917,10 @@ def create_server(
             "block": result.get("resolved_block"),
             "error": (result.get("message", "") if not result.get("ok") else None),
         }
+        # Issue #425: present only on a fold-into-existing approve.
+        for key in ("folded_sources", "aliases_added", "links_rewritten"):
+            if key in result:
+                response[key] = result[key]
+        return response
 
     return mcp

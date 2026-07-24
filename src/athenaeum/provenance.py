@@ -32,10 +32,17 @@ round-trips.
 """
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
+
+log = logging.getLogger(__name__)
 
 # ``<type>:<ref>``. Type segment is restrictive (lowercase + dash + digit
 # + underscore); ref is permissive but cannot contain newlines and cannot
@@ -412,6 +419,165 @@ def resolve_remember_extras(sources: Any) -> dict[str, Any]:
     return extras
 
 
+# ---------------------------------------------------------------------------
+# Merge provenance ledger (issue #425)
+# ---------------------------------------------------------------------------
+#
+# Every executed merge (either write path — ``create-merged`` or
+# ``fold-into-existing``, see :func:`athenaeum.pending_merges.resolve_merge`)
+# records which source pages it relied on, in a queryable append-only JSONL
+# sidecar. This is the recording + read side only; issue #435's retraction
+# cascade (walking the ledger backwards from a retracted source to every
+# merge that consumed it) is a future consumer, not built here.
+#
+# Mirrors :mod:`athenaeum.spend`'s ledger shape (JSONL, O_APPEND + fsync,
+# tolerant reader that skips a torn trailing line) but lives under
+# ``wiki/`` next to ``_pending_merges.md`` — a merge record is wiki state,
+# not a cache artifact, so it belongs beside the other durable sidecars
+# (``_pending_merges.md``, ``_pending_merges_archive.md``) rather than under
+# the cache dir.
+
+#: Schema version stamped on every record so a future reader can migrate.
+MERGE_PROVENANCE_VERSION = 1
+
+#: Sidecar filename, alongside ``_pending_merges.md`` under ``wiki/``.
+MERGE_PROVENANCE_FILENAME = "_merge_provenance.jsonl"
+
+
+def default_merge_provenance_path(wiki_root: Path) -> Path:
+    """Default provenance ledger path: ``<wiki_root>/_merge_provenance.jsonl``."""
+    return Path(wiki_root) / MERGE_PROVENANCE_FILENAME
+
+
+def build_merge_provenance_record(
+    *,
+    merge_id: str,
+    write_kind: str,
+    canonical_slug: str,
+    source_paths: list[str],
+    ts: datetime | None = None,
+) -> dict[str, Any]:
+    """Build one merge-provenance record.
+
+    ``canonical_slug`` is the target wiki page's slug (the page the sources
+    were folded/merged into). ``source_paths`` are the source memory/page
+    paths the merge relied on, recorded verbatim (whatever path shape
+    :class:`athenaeum.pending_merges.PendingMerge.sources` carried).
+    """
+    stamp = (ts if ts is not None else datetime.now(tz=timezone.utc)).astimezone(
+        timezone.utc
+    )
+    return {
+        "v": MERGE_PROVENANCE_VERSION,
+        "ts": stamp.isoformat().replace("+00:00", "Z"),
+        "merge_id": merge_id,
+        "write_kind": write_kind,
+        "canonical_slug": canonical_slug,
+        "source_paths": list(source_paths),
+    }
+
+
+def _append_jsonl_line(path: Path, line: str) -> None:
+    """Append one line to *path* durably (``O_APPEND`` + fsync).
+
+    Same discipline as :func:`athenaeum.spend._append_line`: a single small
+    ``O_APPEND`` write is atomic on local filesystems, so a crash can at
+    worst leave a torn TRAILING line (which the reader skips), never
+    corrupt an already-written record.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def record_merge_provenance(
+    wiki_root: Path,
+    *,
+    merge_id: str,
+    write_kind: str,
+    canonical_slug: str,
+    source_paths: list[str],
+    provenance_path: Path | None = None,
+    ts: datetime | None = None,
+) -> bool:
+    """Append one provenance record for an executed merge. Best-effort.
+
+    Called from :func:`athenaeum.pending_merges.resolve_merge` on a
+    successful ``approve`` (both write kinds). Never raises — a provenance
+    write must not block the merge whose file-level side effects have
+    already happened by the time this runs; failures are logged and
+    swallowed, mirroring the spend ledger's crash-safety discipline.
+    Returns ``True`` when a record was written.
+    """
+    try:
+        record = build_merge_provenance_record(
+            merge_id=merge_id,
+            write_kind=write_kind,
+            canonical_slug=canonical_slug,
+            source_paths=source_paths,
+            ts=ts,
+        )
+        target = (
+            provenance_path
+            if provenance_path is not None
+            else default_merge_provenance_path(wiki_root)
+        )
+        _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
+        return True
+    except Exception as exc:  # noqa: BLE001 — ledger write must never break a merge
+        log.debug(
+            "merge provenance ledger write skipped (%s): %s", type(exc).__name__, exc
+        )
+        return False
+
+
+def read_merge_provenance(
+    wiki_root: Path,
+    *,
+    provenance_path: Path | None = None,
+    canonical_slug: str | None = None,
+    merge_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Read merge-provenance records, tolerating a torn/partial trailing line.
+
+    Optional ``canonical_slug`` / ``merge_id`` filter the returned records
+    (exact match). Returns ``[]`` when the ledger does not exist. Malformed
+    lines (a crash mid-write, or hand-editing) are skipped, not fatal.
+    """
+    target = (
+        provenance_path
+        if provenance_path is not None
+        else default_merge_provenance_path(wiki_root)
+    )
+    if not target.exists():
+        return []
+    try:
+        raw_text = target.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # torn trailing write or hand-edit; skip
+        if not isinstance(record, dict):
+            continue
+        if canonical_slug is not None and record.get("canonical_slug") != canonical_slug:
+            continue
+        if merge_id is not None and record.get("merge_id") != merge_id:
+            continue
+        records.append(record)
+    return records
+
+
 __all__ = [
     "SourceRef",
     "parse_source",
@@ -420,4 +586,10 @@ __all__ = [
     "validate_field_sources",
     "resolve_remember_sources",
     "resolve_remember_extras",
+    "MERGE_PROVENANCE_VERSION",
+    "MERGE_PROVENANCE_FILENAME",
+    "default_merge_provenance_path",
+    "build_merge_provenance_record",
+    "record_merge_provenance",
+    "read_merge_provenance",
 ]
