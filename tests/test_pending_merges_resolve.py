@@ -733,3 +733,66 @@ def test_ingest_resolved_merges_drains_orphan_fragments_from_fixture(
     archived2 = ingest_resolved_merges(merges)  # RUN 2
     assert archived2 == 0
     assert merges.read_text(encoding="utf-8") == after1
+
+
+def test_write_kind_round_trips(tmp_path: Path) -> None:
+    """Issue #421: write_kind persists and round-trips through the parser."""
+    from athenaeum.pending_merges import list_pending_merges, parse_pending_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    write_pending_merge(
+        merges,
+        merge_target_name="folded-topic",
+        sources=["a.md", "b.md"],
+        rationale="r",
+        draft_merged_body="body",
+        confidence=0.9,
+        write_kind="fold-into-existing",
+    )
+    parsed = parse_pending_merges(merges)
+    assert len(parsed) == 1
+    assert parsed[0].write_kind == "fold-into-existing"
+    assert list_pending_merges(merges)[0]["write_kind"] == "fold-into-existing"
+
+
+def test_write_kind_defaults_to_create_merged(tmp_path: Path) -> None:
+    """Issue #421: a proposal written without write_kind defaults to create-merged."""
+    from athenaeum.pending_merges import parse_pending_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    write_pending_merge(
+        merges,
+        merge_target_name="fresh-topic",
+        sources=["a.md", "b.md"],
+        rationale="r",
+        draft_merged_body="body",
+        confidence=0.9,
+    )
+    assert parse_pending_merges(merges)[0].write_kind == "create-merged"
+
+
+def test_pre_421_block_without_write_kind_parses_as_create_merged(
+    tmp_path: Path,
+) -> None:
+    """Issue #421: a legacy block missing the Write kind line defaults cleanly."""
+    from athenaeum.pending_merges import parse_pending_merges
+
+    merges = tmp_path / "_pending_merges.md"
+    merges.write_text(
+        "# Pending Merges\n\n"
+        '## [2026-01-01] Merge: "legacy-topic"\n'
+        "- [ ] Approve this merge? Sources: a.md, b.md\n\n"
+        "**Rationale**: r\n"
+        "**Sources**:\n"
+        "- a.md\n"
+        "- b.md\n"
+        "**Confidence**: 0.90\n"
+        "**Draft**:\n"
+        "```markdown\n"
+        "body\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    parsed = parse_pending_merges(merges)
+    assert len(parsed) == 1
+    assert parsed[0].write_kind == "create-merged"
