@@ -802,7 +802,7 @@ def create_server(
         }
 
     @mcp.tool()
-    def list_pending_merges() -> list[dict]:
+    def list_pending_merges(full_body: bool = False) -> list[dict]:
         """List unresolved merge proposals (issue #169).
 
         Returns the unresolved blocks from ``wiki/_pending_merges.md`` —
@@ -811,17 +811,36 @@ def create_server(
         source memories), ``rationale``, ``draft_merged_body``,
         ``confidence``, and ``created_at``.
 
+        Read-path bound (issue #431, complementing the #400 write-path
+        ``max_merge_sources`` suppression): by default ``draft_merged_body``
+        is truncated to a bounded preview (env
+        ``ATHENAEUM_MERGE_BODY_PREVIEW_CHARS`` > yaml
+        ``librarian.merge_body_preview_chars`` > 2000 chars) so a single
+        oversized proposal (the withdrawn runaway that prompted this issue
+        had a ~878 KB draft body) can't blow out this tool's payload. Each
+        item also carries ``draft_merged_body_truncated`` (bool) and
+        ``draft_merged_body_full_length`` (the untruncated length) so a
+        caller can tell a preview from the real thing.
+
+        Args:
+            full_body: Pass ``True`` to skip truncation and get the complete
+                ``draft_merged_body`` for every item — use this on demand
+                (e.g. right before deciding whether to approve a specific
+                merge), not as the default listing call.
+
         The ``id`` is stable across rationale / draft edits and changes
         only when the source set or target name changes, so an agent can
         call this tool, present the list, and then call ``resolve_merge``
         with the id of the chosen item.
         """
+        from athenaeum.config import load_config
         from athenaeum.pending_merges import (
             list_pending_merges as _list_pending_merges,
         )
 
         merges_path = wiki_root / "_pending_merges.md"
-        return _list_pending_merges(merges_path)
+        config = load_config(wiki_root.parent)
+        return _list_pending_merges(merges_path, config=config, full_body=full_body)
 
     @mcp.tool()
     def list_pending_decisions() -> list[dict]:
@@ -842,10 +861,20 @@ def create_server(
         gist, so the decision is answerable without opening the raw wiki
         files. Resolve items with the existing ``resolve_question`` /
         ``resolve_merge`` tools, dispatching on ``type``.
+
+        Read-path bound (issue #431): a merge item's ``payload["sources"]``
+        is capped (env ``ATHENAEUM_DECISIONS_MAX_SOURCES_PER_MERGE`` > yaml
+        ``librarian.decisions_max_sources_per_merge`` > 20 entries), with the
+        accurate remainder count in ``payload["sources_omitted"]`` — so a
+        merge proposal with a very large source list can't blow out this
+        tool's payload either.
         """
+        from athenaeum.config import load_config, resolve_decisions_max_sources_per_merge
         from athenaeum.decisions import list_pending_decisions as _list_decisions
 
-        return _list_decisions(wiki_root)
+        config = load_config(wiki_root.parent)
+        max_sources_per_merge = resolve_decisions_max_sources_per_merge(config)
+        return _list_decisions(wiki_root, max_sources_per_merge=max_sources_per_merge)
 
     @mcp.tool()
     def resolve_merge(id: str, decision: str, note: str = "") -> dict:
