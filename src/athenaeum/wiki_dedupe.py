@@ -60,6 +60,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from athenaeum.authority import is_pointer_stub
 from athenaeum.clusters import (
     Cluster,
     _fallback_embeddings,
@@ -103,7 +104,9 @@ def discover_wiki_dedupe_candidates(
     subdirectory) whose frontmatter ``type`` is in
     :data:`DEDUPE_CANDIDATE_TYPES`. Excludes pages tagged ``archived`` or
     carrying a truthy ``superseded_by`` key — those are already-resolved
-    and must not be re-flagged.
+    and must not be re-flagged. Also excludes pages carrying a truthy
+    ``pointer_stub`` flag (issue #426) — a stub already points at its
+    authoritative live source and is not merge-eligible (stub hygiene).
 
     When *config* is provided, the storage-adapter layer (#429) is also
     consulted: a page whose entity class resolves to a surface with
@@ -146,6 +149,11 @@ def discover_wiki_dedupe_candidates(
         if "archived" in tags:
             continue
         if meta.get("superseded_by"):
+            continue
+        # Issue #426: a pointer stub already points at ITS authoritative live
+        # source and contributes nothing beyond that one line — it must never
+        # be proposed as a merge source (stub hygiene).
+        if is_pointer_stub(meta):
             continue
 
         name = str(meta.get("name") or path.stem)
