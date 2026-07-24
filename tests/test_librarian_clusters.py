@@ -436,12 +436,14 @@ class TestClusterReportJSONL:
                 "cluster_id",
                 "member_paths",
                 "centroid_score",
+                "min_pairwise_score",
                 "rationale",
             }
             assert isinstance(row["cluster_id"], str)
             assert isinstance(row["member_paths"], list)
             assert all(isinstance(p, str) for p in row["member_paths"])
             assert isinstance(row["centroid_score"], float)
+            assert isinstance(row["min_pairwise_score"], float)
             assert isinstance(row["rationale"], str)
 
     def test_rotation_preserves_previous_run(self, tmp_path: Path) -> None:
@@ -831,3 +833,35 @@ class TestRotationPruneNonFatal:
         assert any(
             "cluster rotation prune failed" in rec.message for rec in caplog.records
         )
+
+
+class TestMinIntraSimilarity:
+    """Issue #421: the complete-linkage coherence metric (minimum pairwise)."""
+
+    def test_singleton_is_one(self) -> None:
+        from athenaeum.clusters import _min_intra_similarity
+
+        assert _min_intra_similarity([0], ["a"], {"a": [1.0, 0.0]}) == 1.0
+
+    def test_clique_reports_weakest_pair(self) -> None:
+        from athenaeum.clusters import _mean_intra_similarity, _min_intra_similarity
+
+        # Three unit vectors: a-b close, a-c close, b-c orthogonal (min ~0).
+        emb = {
+            "a": [1.0, 0.0, 0.0],
+            "b": [0.9, 0.1, 0.0],
+            "c": [0.0, 0.0, 1.0],
+        }
+        ids = ["a", "b", "c"]
+        idx = [0, 1, 2]
+        mn = _min_intra_similarity(idx, ids, emb)
+        mean = _mean_intra_similarity(idx, ids, emb)
+        # The b-c orthogonal pair drives the minimum to ~0, well below the mean.
+        assert mn < 0.1
+        assert mn < mean
+
+    def test_missing_embeddings_skipped(self) -> None:
+        from athenaeum.clusters import _min_intra_similarity
+
+        # No comparable pair (both vecs missing) → 1.0 (nothing to contradict).
+        assert _min_intra_similarity([0, 1], ["a", "b"], {}) == 1.0

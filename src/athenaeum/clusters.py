@@ -82,6 +82,12 @@ class Cluster:
     cluster_id: str
     member_paths: list[str] = field(default_factory=list)
     centroid_score: float = 0.0
+    # Issue #421: minimum pairwise cosine among members (complete-linkage
+    # coherence metric). 1.0 for singletons and pre-#421 rows that lack the
+    # field. A cluster is a complete-linkage clique at ``threshold`` iff this
+    # is ``>= threshold``; the merge-proposal gate uses it to suppress
+    # single-linkage chains without touching the single-linkage grouping.
+    min_pairwise_score: float = 1.0
     rationale: str = ""
 
     def to_row(self) -> dict[str, Any]:
@@ -89,6 +95,7 @@ class Cluster:
             "cluster_id": self.cluster_id,
             "member_paths": list(self.member_paths),
             "centroid_score": float(self.centroid_score),
+            "min_pairwise_score": float(self.min_pairwise_score),
             "rationale": self.rationale,
         }
 
@@ -296,6 +303,44 @@ def _mean_intra_similarity(
     return total / pairs if pairs else 1.0
 
 
+def _min_intra_similarity(
+    indices: Sequence[int],
+    file_ids: Sequence[str],
+    embeddings: dict[str, list[float]],
+) -> float:
+    """Minimum pairwise cosine among cluster members; 1.0 for singletons.
+
+    Issue #421: the complete-linkage coherence metric for the merge-proposal
+    path. Single-linkage (:func:`_single_linkage`) only guarantees each member
+    is transitively CONNECTED to the cluster at ``threshold`` — a weak
+    ``cosine >= threshold`` bridge can chain otherwise-dissimilar members into
+    one giant component (the 1,711-page incident). A cluster is a
+    complete-linkage clique iff EVERY pair clears the threshold, i.e. iff this
+    minimum pairwise cosine is ``>= threshold``. Recording it per cluster lets
+    the merge-proposal gate suppress single-linkage chains WITHOUT changing the
+    single-linkage grouping the compile/delta passes depend on.
+
+    Same O(n^2) cost already paid by :func:`_mean_intra_similarity`; missing
+    embeddings (``None`` vecs) are skipped, and a cluster with no comparable
+    pair returns 1.0 (nothing to contradict complete-linkage)."""
+    if len(indices) <= 1:
+        return 1.0
+    vecs = [embeddings.get(file_ids[i]) for i in indices]
+    lowest = 1.0
+    pairs = 0
+    for i in range(len(indices)):
+        vi = vecs[i]
+        if vi is None:
+            continue
+        for j in range(i + 1, len(indices)):
+            vj = vecs[j]
+            if vj is None:
+                continue
+            lowest = min(lowest, _cosine(vi, vj))
+            pairs += 1
+    return lowest if pairs else 1.0
+
+
 def _shared_tokens(files: Sequence[AutoMemoryFile], limit: int = 4) -> list[str]:
     """Find tokens that appear in every file's name+description — for rationale."""
     if not files:
@@ -424,6 +469,7 @@ def cluster_auto_memory_files(
         cluster_id = f"{scope_hint}-{digest}"
 
         centroid = _mean_intra_similarity(component, file_ids, embeddings)
+        min_pairwise = _min_intra_similarity(component, file_ids, embeddings)
         if len(component) == 1:
             rationale = f"singleton; scope={members[0].origin_scope}"
         else:
@@ -434,13 +480,15 @@ def cluster_auto_memory_files(
             rationale = (
                 f"cosine >= {threshold:.2f}; "
                 f"members share tokens: {token_blurb}; "
-                f"mean intra-sim {centroid:.2f}"
+                f"mean intra-sim {centroid:.2f}; "
+                f"min pairwise {min_pairwise:.2f}"
             )
         clusters.append(
             Cluster(
                 cluster_id=cluster_id,
                 member_paths=relpaths,
                 centroid_score=centroid,
+                min_pairwise_score=min_pairwise,
                 rationale=rationale,
             )
         )
