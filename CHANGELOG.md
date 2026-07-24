@@ -35,6 +35,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     inference-block grammar.
   - Data model + validation + parser + doc only — zero behavior change to
     merge/recall/embed.
+- **PII off-corpus — excluded contacts surface, entity-page lint, observation
+  log + supersession fold (#427).** Code-only slice: keeps durable identity
+  data on entity pages and archival contact data OUT of the
+  embedded/recalled/merged corpus — corpus hygiene + ambient-egress
+  reduction, NOT encryption (recall injects pages into arbitrary agent
+  prompts; retrieval-layer exclusion is the cheapest egress reduction).
+  Migrating live entity pages is operator task #437; the retraction cascade
+  is #435 — both out of scope here.
+  - New internal module [`athenaeum/pii.py`](../src/athenaeum/pii.py):
+    `contacts_surface_root` (thin convenience over #429's `excluded` adapter —
+    no hardcoded path), `is_pii_flagged` (the `pii: true` belt-and-suspenders
+    frontmatter flag, mirroring `authority.is_pointer_stub`'s coercion
+    contract), and the entity-page lint (`has_inline_contact_fields` /
+    `lint_inline_contact_fields` / `find_inline_emails` / `find_inline_phones`).
+  - `search.py`'s FTS5/vector index build (`_scan_indexed_records`) and the
+    keyword scan-on-query backend now also skip a `pii: true`-flagged page,
+    same as an inactive memory — belt-and-suspenders for PII inline in
+    narrative on a page not (yet) moved to the excluded surface.
+    `wiki_dedupe.discover_wiki_dedupe_candidates` does the same for merge
+    candidates. A page on the `excluded` storage surface was already outside
+    every consumer's scan set by construction (#429) — no code change needed
+    there; this slice adds a test per consumer proving it.
+  - `schemas.WikiBase` gains a model validator flagging inline `emails:` /
+    `phones:` frontmatter on any entity page via `UserWarning` — mirrors the
+    #93 `KNOWN_TYPES` / #424 `memory_class` precedent (recoverable, not a
+    hard failure; migrating pre-existing pages is #437). Silenced by
+    `pii: true` (the explicit "every corpus consumer already excludes this"
+    acknowledgment).
+  - Append-only observation log `(identifier, person_id, observed_at,
+    source_msg_id)` as JSONL (`_observations.jsonl`), mirroring
+    `provenance.py`'s merge-provenance ledger discipline (`O_APPEND` + fsync,
+    tolerant reader that skips a torn trailing line). Corrections are
+    supersession records `(retracts: obs_id, reason, at)` in a separate
+    append-only sidecar (`_observation_supersessions.jsonl`) — never edits or
+    tombstones of the original observation.
+  - `pii.fold_observations` resolves "latest uncontradicted" per identifier
+    via a deterministic fold (sort by `observed_at` then `obs_id`; drop any
+    observation a supersession retracts; keep one survivor per DISTINCT
+    `person_id`) — deliberately no clustering/similarity step, so a
+    genuinely shared address folds to ALL currently-attributed persons
+    rather than only the newest write, and a correction (e.g. an address
+    later reassigned to a different person) is expressed as an explicit
+    supersession, never a fold-time guess.
+  - New [`tests/test_pii_off_corpus.py`](../tests/test_pii_off_corpus.py):
+    a test per corpus consumer (FTS5, vector, keyword, merge) proving both
+    the excluded-surface by-construction exclusion and the `pii: true`
+    belt-and-suspenders exclusion; lint tests for inline emails/phones;
+    observation-log append/read/tolerant-reader tests; fold tests covering
+    the shared-address and Jason/Janice correction shapes.
 - **Pluggable storage-adapter layer — entity class → surface + corpus policy
   (#429).** Generalizes "PII lives on an excluded path" (#427) into a
   config-swappable layer: each entity class (the wiki frontmatter `type:`)
