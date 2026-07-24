@@ -89,6 +89,47 @@ def test_count_json(knowledge_root: Path) -> None:
     assert isinstance(payload["oldest_age_days"], int)
 
 
+def test_scan_retractions_empty(tmp_path: Path) -> None:
+    (tmp_path / "wiki").mkdir()
+    rc, out = _run(["decisions", "scan-retractions", "--path", str(tmp_path), "--json"])
+    assert rc == 0
+    assert json.loads(out) == {"flagged": 0, "items": []}
+
+
+def test_scan_retractions_flags_and_surfaces_in_queue(tmp_path: Path) -> None:
+    from athenaeum.config import load_config
+    from athenaeum.pii import append_supersession, contacts_surface_root
+    from athenaeum.provenance import record_merge_provenance
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    record_merge_provenance(
+        wiki,
+        merge_id="m1",
+        write_kind="create-merged",
+        canonical_slug="topic",
+        source_paths=["obs-1"],
+    )
+    contacts_root = contacts_surface_root(tmp_path, load_config(tmp_path))
+    append_supersession(
+        contacts_root, retracts="obs-1", reason="bad source", at="2026-07-24T00:00:00Z"
+    )
+
+    rc, out = _run(["decisions", "scan-retractions", "--path", str(tmp_path), "--json"])
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["flagged"] == 1
+    assert payload["items"][0]["merge_id"] == "m1"
+
+    # Now the unified count reflects the retraction item.
+    rc, out = _run(["decisions", "count", "--path", str(tmp_path), "--json"])
+    assert json.loads(out)["retractions"] == 1
+
+    # And a re-scan is idempotent — nothing newly flagged.
+    rc, out = _run(["decisions", "scan-retractions", "--path", str(tmp_path), "--json"])
+    assert json.loads(out)["flagged"] == 0
+
+
 def test_count_empty(tmp_path: Path) -> None:
     (tmp_path / "wiki").mkdir()
     rc, out = _run(["decisions", "count", "--path", str(tmp_path), "--json"])
@@ -98,6 +139,7 @@ def test_count_empty(tmp_path: Path) -> None:
         "count": 0,
         "questions": 0,
         "merges": 0,
+        "retractions": 0,
         "oldest": None,
         "oldest_age_days": None,
     }

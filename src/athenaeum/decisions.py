@@ -38,6 +38,7 @@ from pathlib import Path
 from athenaeum.answers import PendingQuestion, parse_pending_questions
 from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
+from athenaeum.retraction_cascade import read_retraction_reviews
 
 # Keys the resolver appends to a pending-question block tail (issue #126),
 # re-extracted verbatim when ``--with-proposal`` is requested. Kept in sync
@@ -252,6 +253,38 @@ def question_to_decision(pq: PendingQuestion, *, with_proposal: bool = False) ->
     }
 
 
+def retraction_to_decision(rec: dict) -> dict:
+    """Convert a retraction-cascade review record to a unified decision dict.
+
+    A ``type: "retraction"`` item (issue #435): a supporting source of a
+    completed merge was retracted, so the merge is flagged for a human to
+    decide whether it still holds. The merge is never auto-unmerged — this is
+    purely a "please look" signal. ``confidence`` is ``None`` (there is no
+    similarity score behind a retraction; it is a hard provenance fact).
+    """
+    slug = rec.get("canonical_slug") or "(unknown page)"
+    ref = rec.get("retracted_ref", "")
+    reason = rec.get("reason", "")
+    reason_tail = f" (retraction reason: {_one_line(reason)})" if reason else ""
+    summary = (
+        f'A retracted source "{ref}" supported the merge into "{slug}" — '
+        f"review whether that merge still holds.{reason_tail}"
+    )
+    return {
+        "type": "retraction",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "merge_id": rec.get("merge_id"),
+            "canonical_slug": rec.get("canonical_slug"),
+            "retracted_ref": ref,
+            "reason": reason,
+        },
+    }
+
+
 def list_pending_merges_rich(merges_path: Path) -> list[dict]:
     """Unresolved merges as decidable dicts (title + gist + question)."""
     return [
@@ -291,6 +324,9 @@ def list_pending_decisions(
         merge_to_decision(pm, max_sources=max_sources_per_merge)
         for pm in parse_pending_merges(wiki_root / "_pending_merges.md")
         if not pm.resolved
+    ]
+    decisions += [
+        retraction_to_decision(rec) for rec in read_retraction_reviews(wiki_root)
     ]
     decisions.sort(key=lambda d: d["created_at"] or "")
     return decisions
