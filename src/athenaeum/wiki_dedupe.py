@@ -68,7 +68,11 @@ from athenaeum.clusters import (
     resolve_cluster_threshold,
 )
 from athenaeum.config import load_config, resolve_heartbeat_interval
-from athenaeum.merge import derive_topic_slug, synthesize_body
+from athenaeum.merge import (
+    _merge_proposal_suppression_reason,
+    derive_topic_slug,
+    synthesize_body,
+)
 from athenaeum.merge_type_gate import build_cite_proposal, cross_class_precheck
 from athenaeum.models import AutoMemoryFile, parse_frontmatter, validity_bound_str
 from athenaeum.pending_merges import write_pending_merge
@@ -353,6 +357,38 @@ def propose_wiki_page_merges(
         # stay stable across runs and are safe to use as the id-stability
         # key inside write_pending_merge.
         sources = [str(am.path.resolve()) for am in members]
+
+        # Issue #478: the #400/#421 degenerate-over-cluster suppression gate
+        # must run on THIS write path too, not just merge.py's resolver path.
+        # ``find_wiki_page_clusters`` uses the SAME single-linkage clusterer
+        # (``cluster_auto_memory_files``) that merge.py's own docstring blames
+        # for the 1,711-page incident: one weak bridging edge can chain
+        # hundreds/thousands of loosely-related pages into a giant component.
+        # Before this gate those clusters were written straight to
+        # ``_pending_merges.md`` (the live 1,711-/1,746-source
+        # ``merge-workflow-pattern`` and 16-source ``contact-contacts-wiki``
+        # proposals), bypassing the active-by-default ``max_merge_sources`` (5)
+        # / ``min_merge_mean_similarity`` (0.6) guardrails. This mirrors
+        # merge.py ``_emit_escalation``'s call EXACTLY (size cap +
+        # complete-linkage + mean-cohesion + confidence floor), evaluated
+        # BEFORE the proposal is written — and before the ``dry_run`` branch,
+        # so a dry-run preview reflects what a real gated run would do.
+        suppression = _merge_proposal_suppression_reason(
+            n_sources=len(sources),
+            confidence=cluster.centroid_score,
+            config=resolved_config,
+            mean_similarity=cluster.centroid_score,
+            min_pairwise=cluster.min_pairwise_score,
+            cluster_threshold=resolved_threshold,
+        )
+        if suppression is not None:
+            log.info(
+                "wiki-page dedup: SUPPRESSED degenerate merge proposal for "
+                "cluster %s (%s); not written to _pending_merges.md",
+                cluster.cluster_id,
+                suppression,
+            )
+            continue
 
         # Issue #433: type-compatibility precheck. A cluster spanning >1
         # distinct memory_class values may not be merged — same-class only
