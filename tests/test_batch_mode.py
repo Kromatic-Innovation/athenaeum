@@ -199,10 +199,14 @@ def _scripted_responder(params: dict[str, Any]) -> str:
         name = re.search(r"^Name: (.+)$", user_msg, re.MULTILINE).group(1)
         return f"# {name}\n\nFacts about {name}.\n\n[^1]: src"
     if "## Existing page content" in user_msg:
-        existing = user_msg.split("## Existing page content\n", 1)[1]
-        existing = existing.split("\n\n## New observation", 1)[0]
+        # Issue #469: the merge contract is now anchored edit operations, not
+        # a full-page echo. An append_section op yields the same merged page
+        # ("...\n\nMerged note from {src}.") the full-echo responder produced,
+        # so every downstream content assertion is unchanged.
         src = re.search(r"## New observation \(source: (.+)\)", user_msg).group(1)
-        return existing.rstrip() + f"\n\nMerged note from {src}."
+        return json.dumps(
+            {"ops": [{"op": "append_section", "text": f"Merged note from {src}."}]}
+        )
     raise AssertionError(f"unrecognized request: {user_msg[:120]}")
 
 

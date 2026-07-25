@@ -16,6 +16,9 @@ from athenaeum.models import (
     RawFile,
 )
 from athenaeum.tiers import (
+    MergeOpsError,
+    apply_merge_ops,
+    parse_merge_ops_response,
     parse_tier2_entities,
     tier1_programmatic_match,
     tier3_create,
@@ -46,6 +49,26 @@ def _mock_client(response_text: str) -> MagicMock:
     mock_response = MagicMock()
     mock_response.content = [MagicMock(text=response_text)]
     client.messages.create.return_value = mock_response
+    return client
+
+
+def _sequenced_client(
+    texts: list[str], stop_reasons: list[str] | None = None
+) -> MagicMock:
+    """Mock client returning ``texts`` on successive ``messages.create`` calls.
+
+    Issue #469: the patch-mode merge makes a patch attempt first and falls
+    back to a full-echo retry on failure, so tests need distinct responses
+    per call. ``stop_reasons`` (default ``"end_turn"``) parallels ``texts``.
+    """
+    client = MagicMock()
+    responses = []
+    for i, text in enumerate(texts):
+        resp = MagicMock()
+        resp.content = [MagicMock(text=text)]
+        resp.stop_reason = stop_reasons[i] if stop_reasons else "end_turn"
+        responses.append(resp)
+    client.messages.create.side_effect = responses
     return client
 
 
@@ -921,6 +944,242 @@ class TestTier3Merge:
         assert esc is None
 
 
+class TestTier3MergePatchOps:
+    """Issue #469: the tier-3 merge returns ANCHORED EDIT OPERATIONS that the
+    librarian applies deterministically (cutting output ~80–90%), with a
+    full-echo fallback that guarantees quality is never worse than before.
+
+    These pin (a) the deterministic apply logic, (b) byte-identical
+    equivalence to a full-echo merge on the acceptance-criteria fixture set,
+    and (c) the fallback triggers (unparseable JSON, anchor miss, truncation).
+    """
+
+    @staticmethod
+    def _action() -> EntityAction:
+        return EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Acme raised Series C in Q1 2024.",
+        )
+
+    # --- apply_merge_ops: deterministic application (byte-identical fixtures) --
+
+    def test_append_only_matches_full_echo(self) -> None:
+        existing = "# Acme Corp\n\nFintech startup, Series B."
+        ops = [{"op": "append_section", "text": "Raised Series C in Q1 2024.[^2]"}]
+        # Byte-identical to what a full-echo merge would have produced.
+        assert apply_merge_ops(existing, ops) == (
+            "# Acme Corp\n\nFintech startup, Series B."
+            "\n\nRaised Series C in Q1 2024.[^2]"
+        )
+
+    def test_mid_page_edit_replace(self) -> None:
+        existing = "# Acme Corp\n\nHQ: SF.\n\nFounded 2019."
+        ops = [{"op": "replace", "anchor": "HQ: SF.", "text": "HQ: NYC.[^2]"}]
+        assert apply_merge_ops(existing, ops) == (
+            "# Acme Corp\n\nHQ: NYC.[^2]\n\nFounded 2019."
+        )
+
+    def test_insert_after_anchor(self) -> None:
+        existing = "# Acme\n\n- Series A[^1]\n- Series B[^1]"
+        ops = [
+            {
+                "op": "insert_after",
+                "anchor": "- Series B[^1]",
+                "text": "\n- Series C[^2]",
+            }
+        ]
+        assert apply_merge_ops(existing, ops) == (
+            "# Acme\n\n- Series A[^1]\n- Series B[^1]\n- Series C[^2]"
+        )
+
+    def test_dedup_no_op_returns_body_unchanged(self) -> None:
+        # #297 dedup: a re-confirming observation with nothing new → empty
+        # ops → body returned byte-for-byte unchanged.
+        existing = "# Acme\n\nFintech.[^1]"
+        assert apply_merge_ops(existing, []) == existing
+
+    def test_multi_op_applied_in_single_pass(self) -> None:
+        # replace + insert_after + append, given out of positional order —
+        # applied over the ORIGINAL body so order in the list never matters.
+        existing = "# Acme\n\nHQ: SF.\n\nStage: Series B."
+        ops = [
+            {
+                "op": "replace",
+                "anchor": "Stage: Series B.",
+                "text": "Stage: Series C.[^2]",
+            },
+            {"op": "insert_after", "anchor": "HQ: SF.", "text": " (moved 2024)[^2]"},
+            {"op": "append_section", "text": "See also: funding.[^2]"},
+        ]
+        assert apply_merge_ops(existing, ops) == (
+            "# Acme\n\nHQ: SF. (moved 2024)[^2]\n\nStage: Series C.[^2]"
+            "\n\nSee also: funding.[^2]"
+        )
+
+    def test_anchor_missing_raises(self) -> None:
+        with pytest.raises(MergeOpsError):
+            apply_merge_ops(
+                "# Acme\n\nFintech.",
+                [{"op": "replace", "anchor": "NOPE", "text": "x"}],
+            )
+
+    def test_ambiguous_anchor_raises(self) -> None:
+        with pytest.raises(MergeOpsError):
+            apply_merge_ops(
+                "aa aa", [{"op": "replace", "anchor": "aa", "text": "x"}]
+            )
+
+    def test_overlapping_replaces_raise(self) -> None:
+        with pytest.raises(MergeOpsError):
+            apply_merge_ops(
+                "abcdef",
+                [
+                    {"op": "replace", "anchor": "abcd", "text": "X"},
+                    {"op": "replace", "anchor": "cdef", "text": "Y"},
+                ],
+            )
+
+    def test_unknown_op_kind_raises(self) -> None:
+        with pytest.raises(MergeOpsError):
+            apply_merge_ops(
+                "body", [{"op": "delete", "anchor": "body", "text": ""}]
+            )
+
+    def test_missing_anchor_field_raises(self) -> None:
+        with pytest.raises(MergeOpsError):
+            apply_merge_ops("body", [{"op": "replace", "text": "x"}])
+
+    # --- parse_merge_ops_response: the fallback-signalling contract ----------
+
+    def test_parse_signals_fallback_on_unparseable(self) -> None:
+        body, esc, needs_fallback = parse_merge_ops_response(
+            "not json", self._action(), "ref", "existing"
+        )
+        assert (body, esc) == (None, None)
+        assert needs_fallback is True
+
+    def test_parse_signals_fallback_on_max_tokens(self) -> None:
+        body, esc, needs_fallback = parse_merge_ops_response(
+            '{"ops": [', self._action(), "ref", "existing", stop_reason="max_tokens"
+        )
+        assert needs_fallback is True
+
+    def test_parse_applies_valid_ops(self) -> None:
+        body, esc, needs_fallback = parse_merge_ops_response(
+            json.dumps({"ops": [{"op": "append_section", "text": "New.[^2]"}]}),
+            self._action(),
+            "ref",
+            "# Acme\n\nOld.",
+        )
+        assert needs_fallback is False
+        assert esc is None
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+
+    # --- tier3_merge: patch primary + full-echo fallback wiring --------------
+
+    def test_patch_response_applied_without_fallback(self) -> None:
+        client = _mock_client(
+            json.dumps(
+                {"ops": [{"op": "append_section", "text": "Raised Series C.[^2]"}]}
+            )
+        )
+        body, esc = tier3_merge(
+            self._action(), "# Acme Corp\n\nFintech, Series B.", "ref", client
+        )
+        assert esc is None
+        assert body == "# Acme Corp\n\nFintech, Series B.\n\nRaised Series C.[^2]"
+        assert client.messages.create.call_count == 1  # patch only, no fallback
+
+    def test_dedup_no_op_through_tier3_merge(self) -> None:
+        client = _mock_client(json.dumps({"ops": []}))
+        body, esc = tier3_merge(
+            self._action(), "# Acme Corp\n\nFintech.[^1]", "ref", client
+        )
+        assert esc is None
+        assert body == "# Acme Corp\n\nFintech.[^1]"  # unchanged
+        assert client.messages.create.call_count == 1
+
+    def test_malformed_ops_json_falls_back_to_full_echo(self) -> None:
+        client = _sequenced_client(
+            ["not json at all", "# Acme Corp\n\nFintech, Series B, Series C.[^2]"]
+        )
+        body, esc = tier3_merge(
+            self._action(), "# Acme Corp\n\nFintech, Series B.", "ref", client
+        )
+        assert esc is None
+        assert body == "# Acme Corp\n\nFintech, Series B, Series C.[^2]"
+        assert client.messages.create.call_count == 2  # patch + full-echo retry
+
+    def test_anchor_miss_falls_back_to_full_echo(self) -> None:
+        client = _sequenced_client(
+            [
+                json.dumps(
+                    {"ops": [{"op": "replace", "anchor": "NONEXISTENT", "text": "x"}]}
+                ),
+                "# Acme Corp\n\nFintech, Series B, Series C.[^2]",
+            ]
+        )
+        body, esc = tier3_merge(
+            self._action(), "# Acme Corp\n\nFintech, Series B.", "ref", client
+        )
+        assert body == "# Acme Corp\n\nFintech, Series B, Series C.[^2]"
+        assert client.messages.create.call_count == 2
+
+    def test_patch_truncation_falls_back_and_succeeds(self) -> None:
+        # A max_tokens cutoff of the ops list must NOT half-apply — it falls
+        # back to the full-echo path, which here completes normally.
+        client = _sequenced_client(
+            [
+                '{"ops": [{"op": "append_section", "text": "partial',  # truncated
+                "# Acme Corp\n\nFintech, Series B, Series C.[^2]",
+            ],
+            stop_reasons=["max_tokens", "end_turn"],
+        )
+        body, esc = tier3_merge(
+            self._action(), "# Acme Corp\n\nFintech, Series B.", "ref", client
+        )
+        assert esc is None
+        assert body == "# Acme Corp\n\nFintech, Series B, Series C.[^2]"
+        assert client.messages.create.call_count == 2
+
+    def test_escalate_handled_inline_without_fallback(self) -> None:
+        # A principled ESCALATE is handled in patch mode WITHOUT a fallback
+        # call (so batch mode, which forbids sync calls, escalates too).
+        client = _mock_client(
+            "ESCALATE: fintech vs pivot conflict\n---\n# Acme Corp\n\nFintech (disputed)."
+        )
+        body, esc = tier3_merge(
+            self._action(), "# Acme Corp\n\nFintech.", "ref", client
+        )
+        assert esc is not None and esc.conflict_type == "principled"
+        assert body == "# Acme Corp\n\nFintech (disputed)."
+        assert client.messages.create.call_count == 1
+
+    def test_live_shape_patch_output_is_small(self) -> None:
+        # Acceptance criterion: a 20k-char body + a small addition merges with
+        # a tiny patch response (a few edits + footnote), independent of page
+        # size — the whole point of #469. ~4 chars/token → < 4000 chars is
+        # comfortably under the 1k-output-token target.
+        big_body = "\n\n".join(f"Fact number {i} about Acme.[^1]" for i in range(700))
+        assert len(big_body) > 20_000
+        ops = [
+            {
+                "op": "append_section",
+                "text": "Raised Series C in Q1 2024.[^2]\n\n[^2]: sessions/raw.md",
+            }
+        ]
+        patch = json.dumps({"ops": ops})
+        assert len(patch) < 4_000  # < ~1k output tokens
+        merged = apply_merge_ops(big_body, ops)
+        assert big_body in merged  # nothing dropped
+        assert merged.endswith("[^2]: sessions/raw.md")
+
+
 class TestTier2And3SelfResolvingDocumentGuard:
     """Issue #300: Tier 2 classify and Tier 3 create must apply the same
     self-resolving-document skepticism the contradiction/resolution path
@@ -1051,12 +1310,21 @@ class TestTier3Write:
         create_response.content = [
             MagicMock(text="# Alice Zhang\n\nProduct lead at Acme.")
         ]
+        # Issue #469: the merge returns anchored edit ops. An append_section
+        # op folds in the new note without a full-echo fallback call.
         merge_response = MagicMock()
         merge_response.content = [
             MagicMock(
-                text="# Acme Corp\n\nFintech startup, Series B.\n\nNew partnership announced."
+                text=json.dumps(
+                    {
+                        "ops": [
+                            {"op": "append_section", "text": "New partnership announced."}
+                        ]
+                    }
+                )
             )
         ]
+        merge_response.stop_reason = "end_turn"
 
         client = MagicMock()
         client.messages.create.side_effect = [create_response, merge_response]
