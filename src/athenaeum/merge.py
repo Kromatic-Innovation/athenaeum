@@ -1303,6 +1303,7 @@ def merge_clusters_to_wiki(
     only_cluster_ids: set[str] | None = None,
     deadline: float | None = None,
     max_api_calls: int | None = None,
+    out_stats: dict | None = None,
 ) -> list[MergedWikiEntry]:
     """Read the canonical cluster JSONL and emit one wiki entry per cluster.
 
@@ -1366,6 +1367,16 @@ def merge_clusters_to_wiki(
             "budget-exhausted"``), so a run whose entity phase already spent
             the shared budget does not let C4 burn further past it. ``None``
             (the default) preserves today's unbounded behaviour byte-for-byte.
+        out_stats: Issue #464 (slice E of #460). Optional mutable out-param
+            (mirrors :func:`athenaeum.librarian._compile_auto_memory`'s
+            ``out_delta_taken`` convention). When given, populated immediately
+            before EITHER return site with the detector/resolver call-count
+            breakdown this call accumulated — ``haiku_calls``,
+            ``resolve_calls``, ``chunks_run``, ``pairs_added_via_similarity``,
+            ``entries_merged`` (``len(entries)``), and ``escalations_written``
+            (``len(escalations)``) — so the run-level profile summary (#464)
+            can thread these counters up without recomputing them. Purely
+            additive; ``None`` (every pre-#464 caller) is byte-identical.
 
     Returns:
         The list of :class:`MergedWikiEntry` records in cluster-file order.
@@ -2167,6 +2178,17 @@ def merge_clusters_to_wiki(
                 len(entry.sources),
                 entry.contradictions_detected,
             )
+        if out_stats is not None:
+            out_stats.update(
+                {
+                    "haiku_calls": haiku_calls,
+                    "resolve_calls": resolve_calls,
+                    "chunks_run": chunks_run,
+                    "pairs_added_via_similarity": pairs_added_via_similarity,
+                    "entries_merged": len(entries),
+                    "escalations_written": len(escalations),
+                }
+            )
         return entries
 
     # Issue #462: every page is already on disk — written unflagged before C4
@@ -2186,6 +2208,18 @@ def merge_clusters_to_wiki(
             escalations,
             wiki_root / "_pending_questions.md",
             config=resolved_config,
+        )
+
+    if out_stats is not None:
+        out_stats.update(
+            {
+                "haiku_calls": haiku_calls,
+                "resolve_calls": resolve_calls,
+                "chunks_run": chunks_run,
+                "pairs_added_via_similarity": pairs_added_via_similarity,
+                "entries_merged": len(entries),
+                "escalations_written": len(escalations),
+            }
         )
 
     return entries
