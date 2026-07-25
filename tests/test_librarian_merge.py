@@ -1221,6 +1221,105 @@ class TestContradictionFixture:
         assert "**Proposed resolution**" not in text
 
 
+class TestBudgetExhaustedC4Guard:
+    """Issue #461, AC3: the C4 detector/resolver call sites must not burn API
+    calls past an already-spent run-level ``max_api_calls`` budget.
+
+    After the #461 reorder, the entity phase claims the shared budget FIRST;
+    this guard is what stops the (whole-corpus) C4 pass from spending further
+    once that budget is gone, mirroring the existing deterministic
+    ``detected=False`` short-circuits (declared-pair, disjoint-validity).
+    """
+
+    def test_pre_spent_usage_skips_detector_with_budget_exhausted_rationale(
+        self,
+        contradiction_merge_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from athenaeum.models import TokenUsage
+
+        detect_spy = MagicMock(
+            side_effect=AssertionError(
+                "detect_contradictions must not be called once the budget is spent"
+            )
+        )
+        monkeypatch.setattr("athenaeum.merge.detect_contradictions", detect_spy)
+
+        # Usage already AT the ceiling before merge ever runs — exactly the
+        # post-#461 scenario where the entity phase spent the whole budget.
+        usage = TokenUsage()
+        usage.api_calls = 5
+
+        fake_client = MagicMock()
+
+        entries = merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+            usage=usage,
+            max_api_calls=5,
+        )
+
+        assert len(entries) == 1
+        # Degrades exactly like the deterministic short-circuits: no
+        # detection, no escalation, no client call.
+        assert entries[0].contradictions_detected is False
+        assert entries[0].contradiction is not None
+        assert entries[0].contradiction.rationale == "budget-exhausted"
+        detect_spy.assert_not_called()
+        assert fake_client.messages.create.call_count == 0
+        # The guard must not itself burn budget — usage.api_calls stays
+        # exactly at the pre-spent ceiling.
+        assert usage.api_calls == 5
+
+        wiki = contradiction_merge_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
+        assert meta["contradictions_detected"] is False
+        assert "status" not in meta
+        assert not (wiki / "_pending_questions.md").exists()
+
+    def test_max_api_calls_none_preserves_unbounded_behavior(
+        self,
+        contradiction_merge_root: Path,
+    ) -> None:
+        """``max_api_calls=None`` (the default) must be byte-identical to the
+        pre-#461 unbounded behaviour — the detector-positive path still fires
+        even with a pre-spent ``usage`` counter, since there is no ceiling."""
+        from unittest.mock import MagicMock
+
+        from athenaeum.models import TokenUsage
+
+        payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        response = MagicMock()
+        response.content = [MagicMock(text=payload)]
+        fake_client = MagicMock()
+        fake_client.messages.create.return_value = response
+
+        usage = TokenUsage()
+        usage.api_calls = 999  # would be "exhausted" under any real ceiling
+
+        entries = merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+            usage=usage,
+            max_api_calls=None,
+        )
+        assert len(entries) == 1
+        assert entries[0].contradictions_detected is True
+        assert fake_client.messages.create.call_count >= 1
+
+
 class TestEscalationDedupe:
     """Issue #146: dedup escalations by the flagged source-file SET, not
     by cluster slug, across the whole run."""

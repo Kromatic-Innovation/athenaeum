@@ -1302,6 +1302,7 @@ def merge_clusters_to_wiki(
     out_wiki_root: Path | None = None,
     only_cluster_ids: set[str] | None = None,
     deadline: float | None = None,
+    max_api_calls: int | None = None,
 ) -> list[MergedWikiEntry]:
     """Read the canonical cluster JSONL and emit one wiki entry per cluster.
 
@@ -1356,6 +1357,15 @@ def merge_clusters_to_wiki(
             similarity sweep is skipped (it is whole-corpus by nature and only
             runs on the full path). ``None`` (the default) merges every cluster
             — today's whole-corpus behaviour, byte-for-byte.
+        max_api_calls: Issue #461. Optional run-level API call ceiling. When
+            set AND not a dry-run AND ``usage`` is provided, the C4 detector
+            call sites (primary per-cluster pass and the cross-scope
+            similarity sweep) are skipped once ``usage.api_calls`` has already
+            reached this ceiling — degrading exactly like the deterministic
+            ``detected=False`` short-circuits above (``rationale=
+            "budget-exhausted"``), so a run whose entity phase already spent
+            the shared budget does not let C4 burn further past it. ``None``
+            (the default) preserves today's unbounded behaviour byte-for-byte.
 
     Returns:
         The list of :class:`MergedWikiEntry` records in cluster-file order.
@@ -1970,6 +1980,24 @@ def merge_clusters_to_wiki(
                     detected=False, rationale="disjoint-validity"
                 )
                 continue
+            # Issue #461: run-level budget guard. The entity phase now claims
+            # the shared ``max_api_calls`` ceiling FIRST (it runs before this
+            # whole-corpus C4 pass — see the librarian.run() reorder), so a
+            # spent budget must stop the detector here too, rather than
+            # burning further past the ceiling. Mirrors the deterministic
+            # ``detected=False`` short-circuits above — same degrade path,
+            # same pair-key bookkeeping, no escalation.
+            if (
+                max_api_calls is not None
+                and not dry_run
+                and usage is not None
+                and usage.api_calls >= max_api_calls
+            ):
+                _record_pair_keys(chunk)
+                result = ContradictionResult(
+                    detected=False, rationale="budget-exhausted"
+                )
+                continue
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
@@ -2087,6 +2115,17 @@ def merge_clusters_to_wiki(
             # Issue #324: skip validity-disjoint similarity pairs too — a
             # 2-member disjoint pair is settled and must not reach Haiku.
             if _all_pairs_disjoint(list(pair)):
+                continue
+            # Issue #461: same run-level budget guard as the primary detector
+            # call site above — a spent shared budget skips the similarity
+            # sweep's detector call too (degrades to a no-op: no escalation,
+            # since a "budget-exhausted" verdict is never `.detected`).
+            if (
+                max_api_calls is not None
+                and not dry_run
+                and usage is not None
+                and usage.api_calls >= max_api_calls
+            ):
                 continue
             haiku_calls += 1
             if usage is not None and client is not None:
