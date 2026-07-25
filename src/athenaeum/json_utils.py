@@ -170,3 +170,94 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
             "exhausted recursion depth"
         )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Lenient JSON repair — bare control characters inside string literals (#472)
+# ---------------------------------------------------------------------------
+#
+# Tier-2 classification (and, in principle, any LLM asked for JSON) periodically
+# emits a literal, unescaped newline inside a long free-text string value — most
+# often the ``observations`` field on a dense source file. Per the JSON spec a
+# bare control character (U+0000–U+001F) inside a string is illegal, so
+# ``json.loads`` rejects the WHOLE document — not just the offending value —
+# and every entity in the response is silently dropped (athenaeum#472: 20 of
+# 206 files, ~10%, in the 2026-07-25 production drain).
+#
+# :func:`repair_json_control_chars` walks the text with a minimal in-string
+# state machine and escapes ONLY the control characters that appear *inside*
+# string literals, leaving the structural whitespace between tokens untouched
+# (naively replacing every newline would corrupt the array/object formatting).
+# It is scoped deliberately narrowly to the one observed failure signature; it
+# is NOT a general "repair any broken JSON" pass and makes no attempt to close
+# unbalanced braces, add missing commas, etc.
+
+
+def repair_json_control_chars(text: str) -> str:
+    """Escape bare control characters that appear *inside* JSON string literals.
+
+    Walks ``text`` tracking whether the cursor is inside a ``"``-delimited
+    string (honoring backslash escapes so an escaped quote ``\\"`` does not end
+    the string). While inside a string, a raw control character — newline,
+    carriage return, tab, or any other C0 control (U+0000–U+001F) — is replaced
+    with its valid JSON escape (``\\n``, ``\\r``, ``\\t``, or ``\\uXXXX``).
+    Structural characters and any whitespace *outside* strings are returned
+    verbatim, so well-formed formatting is preserved.
+
+    This is a pure text transform: it never parses. Feed the result to
+    :func:`json.loads` (or use :func:`loads_lenient`, which does both). A
+    document with no in-string control characters is returned effectively
+    unchanged.
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if not in_string:
+            out.append(ch)
+            if ch == '"':
+                in_string = True
+            continue
+        # Inside a string literal.
+        if escaped:
+            # This char is the target of a preceding backslash — emit as-is;
+            # a control char here is already part of a (possibly odd) escape
+            # sequence and re-escaping it would corrupt it.
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            out.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            out.append(ch)
+            in_string = False
+            continue
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20:
+            out.append("\\u%04x" % ord(ch))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def loads_lenient(text: str) -> Any:
+    """``json.loads(text)``, retrying once through :func:`repair_json_control_chars`.
+
+    Returns the parsed value. Attempts a strict parse first (so a well-formed
+    document takes the identical fast path with no transformation); only on
+    :class:`json.JSONDecodeError` does it apply the control-character repair and
+    parse again. If the repaired text still fails to parse, the
+    :class:`json.JSONDecodeError` from the *repaired* attempt propagates — the
+    caller decides how to degrade.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return json.loads(repair_json_control_chars(text))

@@ -1601,6 +1601,10 @@ class ProcessingResult:
     updated: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     escalated: list[EscalationItem] = field(default_factory=list)
+    #: Count of Tier-2 classification responses that dropped ALL entities
+    #: because no parseable JSON array could be recovered (issue #472). Almost
+    #: always 0 or 1 per file; surfaced as ``degraded=N`` in the run summary.
+    degraded: int = 0
 
 
 # --- Schema loading ---
