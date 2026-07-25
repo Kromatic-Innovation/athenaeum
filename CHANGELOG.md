@@ -9,6 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Live-client delta-scoped auto-memory compile + periodic full-compile
+  cadence (#463, slice D of #460).** Extends the #370 PR2 delta-scoped
+  cluster/merge machinery — previously reachable ONLY on the deterministic
+  `client is None` path (session_end / ingest tier0; the original D5
+  fallback ALWAYS forced a whole-corpus compile under any live LLM client)
+  — to the nightly LIVE-client run, so a night with no (or few) auto-memory
+  changes no longer re-clusters and re-merges the entire corpus through the
+  contradiction detector.
+  - New config: `librarian.delta.live_client` (`resolve_live_delta_enabled`,
+    default `true`) opts the live-client path into delta scoping, and
+    `librarian.full_compile_every_days` (`resolve_full_compile_every_days`,
+    default `7`, NOT under `librarian.delta`) sets the periodic whole-corpus
+    reconciliation cadence that is delta's consistency backstop on the live
+    path. `_compile_auto_memory`'s gate is now `delta_eligible = not dry_run
+    and changed_paths is not None and delta_enabled and (client is None or
+    (resolve_live_delta_enabled(config) and not full_compile_due))` — every
+    existing fallback (F6 slug collision, the D2 affected-cluster/member
+    caps, the empty-delta no-op) is unchanged and still applies on the
+    live-client path.
+  - Two new cache-dir stamps (siblings of `ingest-manifest.json`, outside the
+    knowledge git repo): `auto-memory-manifest.json` (a content-hash
+    snapshot of the auto-memory intake, the nightly run's own delta baseline
+    — `ingest`/`session_end` already thread their own `changed_paths` and are
+    unaffected) and `full-compile-stamp.json`, which records the LAST
+    successful whole-corpus auto-memory compile as **`{"at": <ISO-8601 UTC
+    timestamp>, "head": <knowledge_root HEAD sha or null>}`** — the
+    timestamp drives the cadence; `head` is audit-only. `run()` computes
+    `changed_paths` (deletion-only changes count for their prior cluster —
+    a member removal must recompile that cluster) and `full_compile_due`
+    (due when the stamp is absent, stale past the cadence, or
+    `--full-compile`/`full_compile=True` forces it) before the auto-memory
+    block, and — on a successful, non-dry-run compile — refreshes the
+    auto-memory manifest and, ONLY when the compile that ran was actually
+    whole-corpus (a new `_compile_auto_memory(out_delta_taken=...)`
+    out-param reports this reliably, covering every internal fallback, not
+    just the cadence flag), resets the full-compile stamp. A delta compile
+    never resets the cadence clock. Both stamp reads/writes are best-effort
+    (log + continue on failure), mirroring the ingest manifest's tolerance.
+  - New `athenaeum run --full-compile` CLI flag (threaded into both the
+    dry-run and locked `run()` call sites in `_cmd_run`) — the manual escape
+    hatch for an immediate whole-corpus reconciliation.
+  - **Implementer decision:** issue #251 TTL expiry does **not**, by itself,
+    force affected-cluster re-detection on an otherwise-eligible delta
+    night — only the scheduled full-compile reconciliation re-enters
+    TTL-decayed auto `not_a_conflict` suppressions. Keeping this out of the
+    delta path avoids quietly widening the live-client delta scope beyond
+    what the closure computation already proves affected.
+  - `tests/test_delta.py`'s D5 suite is updated for the new default (a live
+    client is delta-eligible unless `full_compile_due` or
+    `librarian.delta.live_client: false`); new `tests/
+    test_live_delta_cadence.py` covers the end-to-end cadence contract
+    through the real `run()` entrypoint (detector call counts, not
+    detector text, per an internal deterministic hashing-trick-embedding
+    patch needed because the production fallback embedder's token bucketing
+    uses Python's per-process-salted `hash()`).
+
 - **Outbound-draft PII lint (emails/phones) — interim mitigation (#455, split
   from #428, epic #422).** A reusable, offline, deterministic lint that scans
   outbound-destined text (email draft, Buffer post, public issue) for PII
