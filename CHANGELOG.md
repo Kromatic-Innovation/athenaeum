@@ -169,6 +169,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New synthetic, runnable [`examples/adapters/minimal_adapter.py`](examples/adapters/minimal_adapter.py)
     (plus `examples/adapters/README.md`) — a generic Lane-A adapter, no private
     specifics or PII, usable as a starting point.
+
+### Fixed
+
+- **Librarian: persist the C3 merge output BEFORE C4 detection so a deadline
+  trip keeps the compiled pages (#462, slice B of #460).**
+  `merge_clusters_to_wiki` used to build every entry (C3, deterministic), run
+  the deadline-checked C4 detector/resolver loop, and only THEN write the
+  pages. When C4 tripped the wall-clock deadline — which it did on 10+
+  consecutive nights (#440) — the exception propagated before the write loop
+  and the ENTIRE C3 build was discarded: every night re-paid the full C3 build
+  and banked nothing.
+  - The merged pages are now written immediately after the C3 build (+ cohesion
+    floor + run-global slug resolution, so C3 stays atomic), UNFLAGGED —
+    byte-identical to what a deterministic `client=None` compile already writes.
+    C4 then re-writes only the entries whose contradiction state actually
+    changed (flag added or a stale flag cleared), per entry as detection
+    completes, so a later C4 trip leaves every already-detected entry persisted
+    with its flag and every unprocessed entry with its durable C3 page.
+  - The #145 contract holds: no `contradiction-flagged` status is ever written
+    without a pending question, because the flag is only rendered after
+    detection + escalation. A page flagged by a prior run whose cluster now
+    clears is overwritten unflagged. Dry-run still writes nothing. Escalations
+    stay a single end-of-pass `tier4_escalate` batch — a C4 trip loses only the
+    current run's pending-escalation batch (idempotently re-escalated next run
+    via the #157 open-block dedup + #249 resolved-records cache), never the
+    compiled pages. `out_wiki_root` (compile-as-of, #359) and `only_cluster_ids`
+    (delta, #370) semantics are unchanged.
   - README gains a "Building your own adapter" section; `AGENTS.md` references
     the skill by path and name so agent sessions surface it.
 

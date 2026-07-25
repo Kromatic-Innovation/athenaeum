@@ -1854,6 +1854,52 @@ def merge_clusters_to_wiki(
             usage.api_calls += 1
         return propose_resolution(result, members, client, usage=usage)
 
+    # Issue #462: FIRST WRITE — persist the deterministic C3 merge output to
+    # disk BEFORE C4 detection runs. Until this change the page write loop sat
+    # AFTER the deadline-checked C4 detector/resolver loop, so a C4 deadline
+    # trip (10+ consecutive nights per #440) raised before any page was
+    # written and threw away the ENTIRE C3 build — every night re-paid C3 and
+    # banked nothing. Writing here means a later C4 trip keeps the compiled
+    # pages on disk (``_stop_on_deadline`` commits them); C4 then re-writes
+    # only the entries whose contradiction state actually changed.
+    #
+    # C3 stays ATOMIC: the build loop + cohesion floor + run-global slug
+    # resolution all complete before this pass, so no page is written mid-build
+    # with a not-yet-final slug. Every page is written UNFLAGGED here
+    # (``contradiction`` defaults to ``detected=False``), byte-identical to
+    # what a deterministic ``client=None`` compile already writes — the #145
+    # contract ("no contradiction-flagged status without a pending question")
+    # holds because the flag is only rendered after detection + escalation.
+    # A page flagged by a PRIOR run whose cluster now clears is overwritten
+    # unflagged right here, so the flag-clear lifecycle is preserved too.
+    #
+    # ``first_write_render`` caches each page's rendered bytes so the C4 loop
+    # can re-write ONLY the entries whose render changed (flag added/cleared),
+    # keeping the "one extra write for flagged pages only" cost the issue
+    # budgeted. Dry-run writes nothing (guarded here and at every re-write).
+    first_write_render: dict[str, str] = {}
+    if not dry_run:
+        write_heartbeat = PhaseHeartbeat(
+            "merge-write", total=len(entries), interval_s=heartbeat_interval
+        )
+        write_heartbeat.start()
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        for entry in entries:
+            text = render_merged_entry(entry)
+            first_write_render[entry.filename] = text
+            page_path = wiki_root / entry.filename
+            page_path.write_text(text, encoding="utf-8")
+            log.info(
+                "merge: wrote %s (cluster %s, %d source(s), contradictions=%s) "
+                "[pre-C4 first write, #462]",
+                page_path,
+                entry.cluster_id,
+                len(entry.sources),
+                entry.contradictions_detected,
+            )
+            write_heartbeat.tick(entry.cluster_id or entry.topic_slug, compiled=1)
+        write_heartbeat.done()
+
     # Issue #398: the C4 contradiction-detection loop is the region that went
     # dark for 3.5h in the 2026-07-19 incident (per-cluster `claude -p`
     # detector/resolver subprocess calls with no progress logging). Emit a
@@ -1982,6 +2028,26 @@ def merge_clusters_to_wiki(
                 aggregate = result if chunks else ContradictionResult(detected=False)
         entry.contradiction = aggregate
         entry.contradictions_detected = bool(aggregate.detected)
+        # Issue #462: re-write this page IMMEDIATELY if C4 changed its rendered
+        # bytes (contradiction flag added, or a stale flag cleared) relative to
+        # the pre-C4 first write. Doing it per-entry inside the loop — rather
+        # than in a trailing batch — means a C4 deadline trip at a LATER chunk
+        # leaves every already-detected entry persisted with its flag, while
+        # the still-unprocessed entries keep their durable unflagged C3 page.
+        # A no-op re-render (the common case: an unflagged entry stays
+        # unflagged) is skipped, so cost stays at "flagged pages only".
+        if not dry_run:
+            new_text = render_merged_entry(entry)
+            if new_text != first_write_render.get(entry.filename):
+                (wiki_root / entry.filename).write_text(new_text, encoding="utf-8")
+                first_write_render[entry.filename] = new_text
+                log.info(
+                    "merge: re-wrote %s after C4 (cluster %s, contradictions=%s) "
+                    "[#462]",
+                    entry.filename,
+                    entry.cluster_id,
+                    entry.contradictions_detected,
+                )
     detect_heartbeat.done()
 
     # Similarity sweep (mode in {similarity, both}).
@@ -2064,30 +2130,18 @@ def merge_clusters_to_wiki(
             )
         return entries
 
-    # Issue #398: per-entry write-loop heartbeat. Every entry that reaches
-    # this loop is (re)written, so each counts as one `compiled` unit; there
-    # is no "unchanged" outcome here, and `error` is reserved for an actual
-    # write failure (not a C4-detected contradiction, which is an EXPECTED
-    # human-escalation outcome — surfacing it as an error would corrupt the
-    # liveness/health signal a watchdog reads off this heartbeat).
-    write_heartbeat = PhaseHeartbeat(
-        "merge-write", total=len(entries), interval_s=heartbeat_interval
-    )
-    write_heartbeat.start()
-    wiki_root.mkdir(parents=True, exist_ok=True)
-    for entry in entries:
-        page_path = wiki_root / entry.filename
-        page_path.write_text(render_merged_entry(entry), encoding="utf-8")
-        log.info(
-            "merge: wrote %s (cluster %s, %d source(s), contradictions=%s)",
-            page_path,
-            entry.cluster_id,
-            len(entry.sources),
-            entry.contradictions_detected,
-        )
-        write_heartbeat.tick(entry.cluster_id or entry.topic_slug, compiled=1)
-    write_heartbeat.done()
-
+    # Issue #462: every page is already on disk — written unflagged before C4
+    # (first write) and re-written per-entry as C4 changed its flag. The
+    # trailing write loop that used to live here (AFTER the deadline-checked C4
+    # loop) is gone: it was the sole reason a C4 trip discarded the compile.
+    # Only the escalation batch remains to flush.
+    #
+    # Escalations stay a single end-of-pass ``tier4_escalate`` batch (unchanged
+    # semantics). A C4 deadline trip therefore loses only THIS run's pending
+    # escalation batch, never the compiled pages — and the #157 open-block
+    # dedup + #249 resolved-records cache make a re-detection next run
+    # idempotent, so a dropped batch re-escalates cleanly rather than
+    # duplicating.
     if escalations:
         tier4_escalate(
             escalations,
