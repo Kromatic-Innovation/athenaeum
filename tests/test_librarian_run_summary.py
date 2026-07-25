@@ -171,6 +171,24 @@ class TestRenderRunSummary:
         line = _render_run_summary(profile)
         assert "total_secs=3.500" in line
 
+    def test_degraded_count_surfaced_when_present(self) -> None:
+        # Issue #472: when Tier-2 classification dropped all entities for some
+        # files (unparseable JSON, even after repair + retry), the count rides
+        # the entity phase so an operator sees it in the summary line instead
+        # of grepping warnings.
+        profile = [
+            ("entity", 4.2, {"calls": 6, "created": 2, "files": 5, "degraded": 3}),
+        ]
+        line = _render_run_summary(profile)
+        assert "degraded=3" in line
+
+    def test_degraded_absent_on_clean_run(self) -> None:
+        # A clean entity phase (the run loop omits degraded when 0) renders no
+        # degraded token — the clean-run summary line is unchanged.
+        profile = [("entity", 4.2, {"calls": 6, "created": 2, "files": 5})]
+        line = _render_run_summary(profile)
+        assert "degraded" not in line
+
 
 # ---------------------------------------------------------------------------
 # 1. Clean run: summary present, covers the phases that ran

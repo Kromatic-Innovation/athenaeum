@@ -107,6 +107,7 @@ from athenaeum.provider import (
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
+    Tier2ParseStats,
     tier1_programmatic_match,
     tier2_classify,
     tier3_write,
@@ -852,6 +853,10 @@ def process_one(
     raw._content = flag_self_resolving_claims(raw.content)
 
     # --- Tier 2: Classification ---
+    # #472: thread a stats object so a response that drops all entities on
+    # unparseable JSON (even after the repair pass + one retry) is counted and
+    # surfaced in the run summary instead of vanishing into a warning log.
+    t2_stats = Tier2ParseStats()
     classified = tier2_classify(
         raw,
         matched_names,
@@ -862,7 +867,9 @@ def process_one(
         wiki_root=wiki_root,
         usage=usage,
         config=config,
+        stats=t2_stats,
     )
+    result.degraded += t2_stats.degraded
     log.info("  T2 classified %d new entities", len(classified))
 
     # Enforce the sticky intake access (issue #320 §5) on every NEW entity the
@@ -2093,6 +2100,7 @@ def run(
     total_updated = 0
     total_escalated = 0
     total_skipped = 0
+    total_degraded = 0  # issue #472: files that dropped all entities on bad JSON
     failed_files: list[str] = []
     deferred_refs: list[str] = []
     processed_count = 0
@@ -2265,6 +2273,7 @@ def run(
                     total_updated = outcome.updated
                     total_escalated = outcome.escalated
                     total_skipped = outcome.skipped
+                    total_degraded = outcome.degraded
                     failed_files = outcome.failed_refs
                     deferred_refs = outcome.deferred_refs
                 else:
@@ -2359,6 +2368,10 @@ def run(
                         total_updated += len(result.updated)
                         total_escalated += len(result.escalated)
                         total_skipped += len(result.skipped)
+                        # #472: ``process_one`` is a widely-stubbed test seam;
+                        # tolerate a double that predates the ``degraded`` field
+                        # (the real ProcessingResult always carries it, default 0).
+                        total_degraded += getattr(result, "degraded", 0)
 
                         if not dry_run:
                             raw.path.unlink()
@@ -2448,6 +2461,11 @@ def run(
                     "updated": total_updated,
                     "escalated": total_escalated,
                     "files": processed_count,
+                    # #472: only render when non-zero so a clean run's summary
+                    # line is unchanged, but an operator watching a drain sees
+                    # "degraded=N" (files whose classification JSON dropped
+                    # every entity) without grepping warnings.
+                    **({"degraded": total_degraded} if total_degraded else {}),
                 },
             )
         )

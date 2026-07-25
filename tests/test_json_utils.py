@@ -20,9 +20,16 @@ reintroducing silent wrong-object extraction.
 
 from __future__ import annotations
 
+import json
 import sys
 
-from athenaeum.json_utils import extract_json_object
+import pytest
+
+from athenaeum.json_utils import (
+    extract_json_object,
+    loads_lenient,
+    repair_json_control_chars,
+)
 
 
 def _recursion_busting_depth() -> int:
@@ -305,3 +312,71 @@ def test_multi_object_top_level_array_is_ambiguous() -> None:
     objects under the ``{``-anchored scan → ``None`` via the
     exactly-one rule (pinned behavior)."""
     assert extract_json_object('[{"a": 1}, {"b": 2}]') is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #472 — control-character repair (bare newline inside a string value)
+#
+# Tier-2 classify silently dropped ALL entities for ~10% of files in the
+# 2026-07-25 production drain because the model emitted a literal, unescaped
+# newline inside the free-text ``observations`` value, which rejects the whole
+# JSON array. The repair pass escapes control chars *inside string literals
+# only*, recovering the data without corrupting structural formatting.
+# ---------------------------------------------------------------------------
+
+
+class TestRepairJsonControlChars:
+    def test_bare_newline_in_string_is_recovered(self) -> None:
+        # The exact failure signature from the issue: a raw newline inside the
+        # observations string rejects the entire array under a strict parse.
+        bad = (
+            "[\n"
+            '  {"name": "Paine", "entity_type": "reference",\n'
+            '   "observations": "Operator persona driving topic-run.mjs\n'
+            "  spanning several lines\"},\n"
+            '  {"name": "Second", "entity_type": "reference"}\n'
+            "]"
+        )
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(bad)
+        items = loads_lenient(bad)
+        assert [i["name"] for i in items] == ["Paine", "Second"]
+        # The newline survives as real text inside the recovered value.
+        assert "\n" in items[0]["observations"]
+
+    def test_tab_and_carriage_return_in_string_recovered(self) -> None:
+        bad = '[{"name": "X", "observations": "a\tb\rc"}]'
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(bad)
+        items = loads_lenient(bad)
+        assert items[0]["observations"] == "a\tb\rc"
+
+    def test_wellformed_json_is_returned_unchanged(self) -> None:
+        # Already-valid JSON (with a properly escaped \n) must be byte-identical
+        # after repair — the fast path takes the strict parse, and the transform
+        # itself is a no-op on it.
+        good = '[{"name": "X", "observations": "line1\\nline2"}]'
+        assert repair_json_control_chars(good) == good
+        assert loads_lenient(good) == [{"name": "X", "observations": "line1\nline2"}]
+
+    def test_escaped_quote_does_not_break_string_tracking(self) -> None:
+        # A backslash-escaped quote must NOT be read as the string terminator,
+        # or the state machine would treat following text as structural and
+        # miss the bare newline. This is the correctness-critical edge.
+        bad = '[{"name": "He said \\"hi\\" then\nleft", "entity_type": "reference"}]'
+        items = loads_lenient(bad)
+        assert items[0]["name"] == 'He said "hi" then\nleft'
+
+    def test_structural_whitespace_outside_strings_is_preserved(self) -> None:
+        # Newlines BETWEEN array elements are structural, not in-string — a
+        # naive "replace all newlines" would corrupt them. Repair must leave
+        # them untouched (the doc parses either way; assert the text is intact).
+        text = '[\n  {"a": 1},\n  {"b": 2}\n]'
+        assert repair_json_control_chars(text) == text
+
+    def test_unrepairable_json_still_raises(self) -> None:
+        # A genuinely broken (truncated) document is not something the
+        # control-char repair can fix — it must propagate, so callers degrade
+        # rather than silently accepting garbage.
+        with pytest.raises(json.JSONDecodeError):
+            loads_lenient('[{"name": "x"')

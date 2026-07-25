@@ -16,11 +16,14 @@ from athenaeum.models import (
     RawFile,
 )
 from athenaeum.tiers import (
+    TIER2_DEGRADED_MARKER,
     MergeOpsError,
+    Tier2ParseStats,
     apply_merge_ops,
     parse_merge_ops_response,
     parse_tier2_entities,
     tier1_programmatic_match,
+    tier2_classify,
     tier3_create,
     tier3_merge,
     tier3_write,
@@ -1658,3 +1661,156 @@ class TestTier4:
         tier4_escalate(items, pending)
         content = pending.read_text()
         assert "- [ ] Resolve ambiguous conflict for Silent Co" in content
+
+
+# ---------------------------------------------------------------------------
+# Issue #472 — Tier-2 classify no longer silently drops all entities on a
+# bare (unescaped) control character inside a JSON string value.
+# ---------------------------------------------------------------------------
+
+
+# The exact production failure signature: a raw newline (and a tab) inside the
+# free-text observations value, which rejects the WHOLE array under json.loads.
+_BARE_NEWLINE_PAYLOAD = (
+    "[\n"
+    '  {"name": "Paine", "entity_type": "reference", "access": "internal",\n'
+    '   "tags": [], "observations": "Operator persona driving topic-run.mjs\n'
+    '  spanning multiple paragraphs\twith a tab too"},\n'
+    '  {"name": "Second Entity", "entity_type": "reference",\n'
+    '   "access": "internal", "tags": [], "observations": "fine"}\n'
+    "]"
+)
+
+
+class TestTier2JsonRepair:
+    """The parse function repairs bare control chars before discarding."""
+
+    _TYPES = ["person", "reference"]
+
+    def test_bare_newline_response_recovered_not_dropped(self) -> None:
+        stats = Tier2ParseStats()
+        results = parse_tier2_entities(
+            _BARE_NEWLINE_PAYLOAD,
+            "sessions/x.md",
+            self._TYPES,
+            [],
+            ["internal"],
+            stats=stats,
+        )
+        # Both entities recovered (pre-fix this returned []).
+        assert [r.name for r in results] == ["Paine", "Second Entity"]
+        assert stats.repaired == 1
+        assert stats.degraded == 0
+
+    def test_repair_logs_recovery_not_degraded_marker(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("INFO"):
+            parse_tier2_entities(
+                _BARE_NEWLINE_PAYLOAD, "sessions/x.md", self._TYPES, [], ["internal"]
+            )
+        text = "\n".join(rec.message for rec in caplog.records)
+        assert "tier2-classify-repaired" in text
+        assert TIER2_DEGRADED_MARKER not in text
+
+    def test_unrepairable_json_degrades_and_marks(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Truncated array: not something the control-char repair can fix.
+        stats = Tier2ParseStats()
+        with caplog.at_level("WARNING"):
+            results = parse_tier2_entities(
+                '[{"name": "X", "entity_type": "reference"',
+                "sessions/x.md",
+                self._TYPES,
+                [],
+                ["internal"],
+                stats=stats,
+            )
+        assert results == []
+        assert stats.degraded == 1
+        assert any(TIER2_DEGRADED_MARKER in rec.message for rec in caplog.records)
+
+    def test_no_json_array_degrades(self) -> None:
+        stats = Tier2ParseStats()
+        results = parse_tier2_entities(
+            "I could not find any entities to classify.",
+            "sessions/x.md",
+            self._TYPES,
+            [],
+            ["internal"],
+            stats=stats,
+        )
+        assert results == []
+        assert stats.degraded == 1
+
+    def test_stats_optional_backward_compatible(self) -> None:
+        # No stats arg → behaves exactly as before (still recovers, no raise).
+        results = parse_tier2_entities(
+            _BARE_NEWLINE_PAYLOAD, "sessions/x.md", self._TYPES, [], ["internal"]
+        )
+        assert len(results) == 2
+
+
+class TestTier2ClassifyRetry:
+    """The sync transport retries once when the first response is unparseable
+    even after repair, rather than discarding the file's entities."""
+
+    _TYPES = ["person", "reference"]
+
+    def _valid_payload(self) -> str:
+        return json.dumps(
+            [
+                {
+                    "name": "Recovered",
+                    "entity_type": "reference",
+                    "access": "internal",
+                    "tags": [],
+                    "observations": "second try parsed",
+                }
+            ]
+        )
+
+    def test_retry_recovers_and_clears_degrade(self) -> None:
+        # First response is unrepairable (truncated); the retry returns valid
+        # JSON. tier2_classify must make a SECOND call and return the entities.
+        client = _sequenced_client(
+            ['[{"name": "X", "entity_type": "reference"', self._valid_payload()]
+        )
+        raw = _make_raw("Some rich source text with entities to classify.")
+        stats = Tier2ParseStats()
+        results = tier2_classify(
+            raw, [], self._TYPES, [], ["internal"], client, stats=stats
+        )
+        assert client.messages.create.call_count == 2
+        assert [r.name for r in results] == ["Recovered"]
+        assert stats.degraded == 0
+
+    def test_retry_still_degraded_counts_once(self) -> None:
+        # Both attempts unparseable → one degrade recorded, empty result, and
+        # exactly one retry (not an unbounded loop).
+        client = _sequenced_client(
+            [
+                '[{"name": "X", "entity_type": "reference"',
+                "still not valid json at all",
+            ]
+        )
+        raw = _make_raw("Some rich source text with entities to classify.")
+        stats = Tier2ParseStats()
+        results = tier2_classify(
+            raw, [], self._TYPES, [], ["internal"], client, stats=stats
+        )
+        assert client.messages.create.call_count == 2
+        assert results == []
+        assert stats.degraded == 1
+
+    def test_clean_response_does_not_retry(self) -> None:
+        client = _sequenced_client([self._valid_payload()])
+        raw = _make_raw("Some rich source text with entities to classify.")
+        stats = Tier2ParseStats()
+        results = tier2_classify(
+            raw, [], self._TYPES, [], ["internal"], client, stats=stats
+        )
+        assert client.messages.create.call_count == 1
+        assert [r.name for r in results] == ["Recovered"]
+        assert stats.degraded == 0
