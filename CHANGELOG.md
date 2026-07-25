@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Permanent per-phase run summary (#464, slice E of #460).** Pure
+  observability for the #440 nightly-cost profiling epic: `run()` now emits
+  ONE machine-greppable `librarian-run-summary` log line at the end of every
+  exit path — the normal finalize AND every `_stop_on_deadline` (issue #396)
+  124 trip — covering the phases that actually ran (wiki-dedup, the entity
+  loop, the auto-memory C2-C4 compile, retire, #188 reresolve), with each
+  phase's wall-clock seconds, LLM call counts, and work counts. Working
+  hypothesis this unblocks measuring: C4's nightly cost is dominated by
+  per-call latency of the `claude-cli` subprocess backend times the number
+  of non-cached detector/resolver calls, so the detector/resolver call
+  counts + phase seconds are the key signals.
+  - `athenaeum.merge.merge_clusters_to_wiki` gains a keyword-only
+    `out_stats: dict | None = None` out-param, populated immediately before
+    both return sites (the dry-run return and the normal write return) with
+    the counters the merge engine already tracks internally —
+    `haiku_calls`, `resolve_calls`, `chunks_run`,
+    `pairs_added_via_similarity`, `entries_merged`, `escalations_written` —
+    so callers thread the existing counts up instead of recomputing them.
+    Purely additive; every existing caller (`out_stats=None`) is
+    byte-identical.
+  - `athenaeum.librarian._compile_auto_memory` gains `out_merge_stats: dict
+    | None = None`, threaded straight through as the merge call's
+    `out_stats`.
+  - `run()` owns a small `run_profile: list[tuple[str, float, dict]]`
+    accumulator: each phase it controls is timed via `time.monotonic()`
+    deltas at the call site, and per-phase LLM call counts come from a
+    `usage.api_calls` before/after snapshot (the entity loop's delta is the
+    entity-tier call count; the auto-memory delta cross-checks
+    `out_merge_stats`). A new `_render_run_summary` helper renders the
+    accumulated profile into one stable-prefixed
+    (`RUN_SUMMARY_PREFIX = "librarian-run-summary"`), key=value line, e.g.
+    `librarian-run-summary total_secs=12.3 | wiki-dedup secs=0.1 | entity
+    secs=4.2 calls=6 created=2 updated=1 escalated=0 files=3 | auto-memory
+    secs=7.8 detector_haiku=4 resolver_opus=1 sweep_pairs=0
+    clusters_merged=2 escalations=0 | retire secs=0.1 | reresolve secs=0.05
+    calls=0`. Only phases that actually ran are included — a phase never
+    reached (e.g. after an early deadline trip) is simply absent, not
+    zero-filled. Emitted via `log.info`; a `_summary_emitted` guard makes
+    the emit idempotent (defense-in-depth — the `_stop_on_deadline` and
+    normal-finalize emit sites are mutually exclusive on any single run, so
+    in practice this fires exactly once).
+  - Zero behavior change: no phase's logic, ordering, exit code, commits,
+    or writes are affected. Additive log output + additive out-params only.
+
 - **Live-client delta-scoped auto-memory compile + periodic full-compile
   cadence (#463, slice D of #460).** Extends the #370 PR2 delta-scoped
   cluster/merge machinery — previously reachable ONLY on the deterministic
