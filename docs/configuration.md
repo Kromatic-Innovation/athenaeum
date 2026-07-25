@@ -48,6 +48,7 @@ Every default figure on this page is verified against the code under
 | Merge-proposal confidence floor | — | `ATHENAEUM_MIN_MERGE_CONFIDENCE` | `librarian.min_merge_confidence` | `0.0` | Optional confidence floor on resolver merge proposals (#400): a proposal below this confidence is dropped before `wiki/_pending_merges.md`. Default `0.0` = OFF (the review bar is corpus-specific), opt-in via yaml. Complements `max_merge_sources` — the cap catches over-clusters by shape, this keeps low-confidence small merges out of the queue. |
 | Page warn size | — | `ATHENAEUM_PAGE_WARN_BYTES` | `librarian.page_warn_bytes` | `8192` | Soft byte threshold above which a wiki entity page is reported as a **warn**-level oversized page in `athenaeum status` (#310). Warn-only: nothing is blocked or modified. A long page usually means poorly-factored knowledge that should be split into linked sub-entities. `bool` / non-int / `<= 0` values fall through to the default. |
 | Page flag size | — | `ATHENAEUM_PAGE_FLAG_BYTES` | `librarian.page_flag_bytes` | `16384` | Byte threshold above which a page is **flagged** for splitting — surfaced in `status` and logged as a non-fatal `WARNING` during `athenaeum run` (#310). Still warn-only (never blocks; the tier-3 merge body cap is separate and unchanged). A flagged page appears only in the flag bucket, not also in warn. Keep comfortably below the merge body cap. |
+| Backlog-drain warn threshold (days) | — | — | `librarian.drain_warn_days` | `3` | Backlog-drain ETA threshold in **days** (#470). At the end of any run that leaves raw intake undrained (and in `athenaeum status`), the advisor projects time-to-drain from **observed** throughput (the #378 spend ledger; falls back to this run's own rate) and emits a machine-greppable `backlog-drain-advisor:` `WARNING` — naming the copy-pastable `athenaeum drain` remedy — only when the projection **exceeds** this many days; below it the run stays silent. `bool` / non-int / `<= 0` values fall through to the default. |
 | Merge-read preview length | — | `ATHENAEUM_MERGE_BODY_PREVIEW_CHARS` | `librarian.merge_body_preview_chars` | `2000` | Read-path bound (#431) on the `list_pending_merges` MCP tool: `draft_merged_body` is truncated to this many characters by default (a single oversized pending merge — the withdrawn runaway that prompted this issue had a ~878 KB draft body — otherwise blows out the payload on every call). Each item also carries `draft_merged_body_truncated` and `draft_merged_body_full_length`; pass `full_body=True` to the tool to get the untruncated body on demand. Complements the write-path `max_merge_sources` cap above (#400), which suppresses the proposal entirely rather than bounding its rendering. `bool` / non-int / `<= 0` values fall through to the default. |
 | Decisions-view source cap | — | `ATHENAEUM_DECISIONS_MAX_SOURCES_PER_MERGE` | `librarian.decisions_max_sources_per_merge` | `20` | Read-path bound (#431) on the `decisions` view / `list_pending_decisions` MCP tool: a merge item renders at most this many sources, with the exact remainder in `payload["sources_omitted"]` (and an "… and N more" line in the plain-text CLI rendering). `bool` / non-int / `<= 0` values fall through to the default. |
 | T2-approval audit rate | — | `ATHENAEUM_AUDIT_SAMPLE_RATE_T2_APPROVALS` | `librarian.audit_sample_rate_t2_approvals` | `0.075` | Share of T2 (opus) approvals randomly sampled into the human decisions queue as `type: "audit"` calibration items (#438) — the false-approve half of the tier calibration loop. Deterministic per `(tier, proposal)`. Clamped to `[0.0, 1.0]` (`0.0` = OFF, `1.0` = audit everything); default `0.075` is the midpoint of the settled 5-10% band. `bool` / non-numeric values fall through to the default. |
@@ -117,6 +118,51 @@ network filesystems, so this guard makes no attempt at multi-machine
 coordination (use `librarian.push_after_run` + a single scheduler host for
 multi-machine setups). On non-POSIX platforms without `fcntl`, the lock
 degrades gracefully: a warning is logged and the command runs unlocked.
+
+## Backlog drain (`athenaeum drain`, #470)
+
+When the raw-intake backlog outgrows the nightly caps, `athenaeum run`'s
+DEGRADED summary reports **counts**, not time-to-drain, and the supervised
+API+batch remedy used to live as tribal knowledge spread across env vars and
+flags. Two capabilities close that gap.
+
+**ETA advisor.** At the end of any run that leaves raw intake undrained (and in
+`athenaeum status`), an advisor projects nights-to-drain from the **observed**
+throughput recorded in the #378 spend ledger (files consumed per run — now
+persisted as `files_processed`) — never a hardcoded guess; it falls back to this
+run's own rate when there is no history. When the projection exceeds
+`librarian.drain_warn_days` (default 3) it emits one machine-greppable
+`WARNING` naming the copy-pastable drain command, e.g.:
+
+```
+backlog-drain-advisor: 202 deferred file(s) ≈ 18 night(s) to drain at current caps/provider (ledger rate) — consider: athenaeum drain --max-usd 20 --yes
+```
+
+Below the threshold it stays silent. The estimate promises **cost plus "hours,
+not nights"**, never a wall-clock guarantee (same-page merges serialize on the
+batch path, the deliberate #236 grouping).
+
+**`athenaeum drain` — one-command supervised drain.** A thin orchestration over
+the existing `run()` machinery (run-lock, git snapshots, deferred manifest, and
+per-phase run summary all reused unchanged — drain is just a caller):
+
+```
+athenaeum drain --max-usd 50 --yes
+```
+
+| Flag | Required | Default | What it does |
+|---|---|---|---|
+| `--max-usd N` | **yes** | — | Mandatory cost ceiling in USD applied **cumulatively across the whole drain** (not per window). Maps onto the #378 `spend.max_usd_per_run` ceiling for each window as the remaining budget. |
+| `--max-files N` | no | `librarian.max_files` / 50 | Intake window size — files compiled per window. The drain loops windows until the backlog empties or the cost ceiling trips. |
+| `--yes` | no | off | Proceed without the interactive cost confirmation (**required** to run non-interactively — the drain incurs real API spend). |
+| `--path` / `--knowledge-root` | no | `~/knowledge` | Knowledge directory (`--raw-root` / `--wiki-root` override the sub-roots). |
+
+Behavior and guards:
+
+- **Forces the API + Batch path** (`provider=api` + batch mode, the #236 path at a 50% token discount) and an **unbounded run** (`max_runtime=0`). Batch mode block-polls the Batch API; a finite deadline is the known cwc#615 failure mode, so the drain **refuses to start** when a finite `max_runtime` is in effect (via `ATHENAEUM_MAX_RUNTIME` / `librarian.max_runtime`).
+- **No credential handling** (#284/#330): requires `ANTHROPIC_API_KEY` in the environment and errors out naming that requirement if it is absent.
+- **Cost guard is mandatory:** prints an up-front cost **estimate** (backlog × observed avg tokens/file × current model prices, batch discount applied) and requires `--yes` to proceed non-interactively.
+- **Loops intake windows** until the raw backlog is empty, the cumulative `--max-usd` ceiling trips, or a window makes **zero progress** (stops loudly — never spins).
 
 ## Models
 
@@ -425,6 +471,7 @@ librarian:
   lock_timeout: 0               # run-lock wait seconds; 0 = fail-fast (#309)
   page_warn_bytes: 8192         # warn on wiki pages over this size (#310)
   page_flag_bytes: 16384        # flag pages over this size for splitting (#310)
+  drain_warn_days: 3            # backlog-drain ETA WARNING threshold in days (#470)
   merge_body_preview_chars: 2000            # list_pending_merges draft_merged_body preview cap (#431)
   decisions_max_sources_per_merge: 20       # decisions-view per-merge source fan-out cap (#431)
   audit_sample_rate_t2_approvals: 0.075     # share of T2 approvals sampled for human audit (#438)
