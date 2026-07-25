@@ -81,18 +81,31 @@ if [ "$WAIT_FOR_CI" = "1" ]; then
   done
 fi
 
+# workflow_dispatch does not hand back a run id synchronously, so record
+# whatever run is currently newest BEFORE triggering. Polling for "any run
+# id" after triggering is not enough — promote-main.yml has run before, so
+# the very first poll would immediately return that PRIOR, already-completed
+# run, and `gh run watch` would return success instantly without ever
+# checking the run we just fired. Instead poll until the newest run id
+# actually CHANGES from the pre-trigger snapshot (run ids are monotonically
+# increasing, so a changed top-of-list id is a new run).
+prior_run_id="$(gh run list --repo "$REPO" --workflow promote-main.yml --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
+
 echo "==> triggering promote-main.yml on ${REPO}"
 gh workflow run promote-main.yml --repo "$REPO" -f reason="$REASON"
 
-echo "==> waiting for the run to appear..."
+echo "==> waiting for the new run to appear..."
 run_id=""
 for _ in $(seq 1 30); do
-  run_id="$(gh run list --repo "$REPO" --workflow promote-main.yml --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
-  [ -n "$run_id" ] && break
+  candidate="$(gh run list --repo "$REPO" --workflow promote-main.yml --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
+  if [ -n "$candidate" ] && [ "$candidate" != "$prior_run_id" ]; then
+    run_id="$candidate"
+    break
+  fi
   sleep 2
 done
 if [ -z "$run_id" ]; then
-  echo "error: could not find the triggered promote-main.yml run" >&2
+  echo "error: could not find the newly triggered promote-main.yml run (still seeing prior run ${prior_run_id:-<none>})" >&2
   exit 1
 fi
 echo "==> run id: ${run_id} — waiting for completion"
