@@ -172,6 +172,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Librarian: run the entity compile loop BEFORE the auto-memory block so a
+  slow C2-C4 pass can no longer starve entity intake (#461).** `run()` used
+  to sequence the whole-corpus auto-memory block (C1 discover, C2 cluster,
+  C3 merge, C4 detect) BEFORE the per-file entity tier loop. On a slow night
+  the auto-memory block could consume the entire shared `max_runtime`
+  deadline before the entity loop ever got a turn, deferring the whole
+  entity intake even though it is typically far cheaper to compile.
+  - The entity phase (raw-file discovery, `EntityIndex` load, the per-file
+    tier loop and its SIGTERM/SIGINT partial-commit guard, the terminal
+    commit) now runs immediately after the #290 wiki-dedup pass and its
+    deadline check (and after the `merge_only` early return), claiming the
+    shared deadline and `max_api_calls` budget FIRST. The auto-memory block
+    then runs after, consuming whatever budget/time remains — skipped
+    entirely when the entity phase itself trips the deadline. `cluster_only`
+    still skips the entity phase and returns after the auto-memory block's
+    C2 cluster pass, unchanged; `merge_only` is unaffected (it already
+    returns before either phase).
+  - An empty entity/raw intake no longer short-circuits the whole run: the
+    auto-memory block is independent of raw entity intake and always ran
+    regardless in the pre-#461 ordering, so the empty-intake path now falls
+    through to it instead of returning early.
+  - New `max_api_calls` guard on `merge_clusters_to_wiki` (both the primary
+    per-cluster C4 detector call site and the cross-scope similarity sweep):
+    once the shared run-level `usage.api_calls` has already reached the
+    ceiling — which the entity phase, running first, can now do — the C4
+    detector call is skipped with a deterministic `rationale=
+    "budget-exhausted"` result, mirroring the existing declared-pair /
+    disjoint-validity short-circuits. `None` (the default; every existing
+    caller) preserves the pre-#461 unbounded behaviour byte-for-byte.
+  - Natural consequence of the reorder: the `EntityIndex` load now happens
+    before this run's own C3 merge (re)writes `wiki/auto-*.md` pages, so the
+    entity tiers see auto-memory pages as they stood at the end of the
+    PREVIOUS run — one cycle stale. Does not affect entity-tier correctness.
+  - The run-summary `Token usage:` log line and the `spend.record_spend`
+    ledger write are moved from the entity phase to the finalize section so
+    they run AFTER both phases. Because the entity phase now runs first, the
+    shared run-level `TokenUsage` keeps accruing the auto-memory C4
+    detector/resolver spend after the entity loop — recording at the end of
+    the entity phase (its pre-#461 home, when it ran last) would silently
+    undercount every run by the entire C4 cost, defeating the observability
+    the #460 epic depends on. Both now reflect the WHOLE run's spend, as they
+    did pre-#461.
+
 - **Librarian: persist the C3 merge output BEFORE C4 detection so a deadline
   trip keeps the compiled pages (#462, slice B of #460).**
   `merge_clusters_to_wiki` used to build every entry (C3, deterministic), run
