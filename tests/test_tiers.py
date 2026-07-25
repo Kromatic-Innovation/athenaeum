@@ -17,6 +17,7 @@ from athenaeum.models import (
 )
 from athenaeum.tiers import (
     TIER2_DEGRADED_MARKER,
+    TIER2_TRUNCATED_MARKER,
     MergeOpsError,
     Tier2ParseStats,
     apply_merge_ops,
@@ -24,6 +25,8 @@ from athenaeum.tiers import (
     parse_tier2_entities,
     tier1_programmatic_match,
     tier2_classify,
+    tier2_reclassify_larger_budget,
+    tier2_request_params,
     tier3_create,
     tier3_merge,
     tier3_write,
@@ -1814,3 +1817,233 @@ class TestTier2ClassifyRetry:
         assert client.messages.create.call_count == 1
         assert [r.name for r in results] == ["Recovered"]
         assert stats.degraded == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #476 — Tier-2 classify no longer silently drops all entities when the
+# response is TRUNCATED at max_tokens on entity-dense files. The raised output
+# budget removes the trigger; a truncation-specific retry + a distinct
+# ``truncated`` marker/counter keep it from being conflated with a #472 parse
+# failure ever again.
+# ---------------------------------------------------------------------------
+
+
+# A truncated array — exactly what a max_tokens cutoff mid-object looks like:
+# valid JSON as far as it goes, but missing its closing brackets, which no
+# control-char repair can fix.
+_TRUNCATED_PAYLOAD = (
+    '[{"name": "Alpha", "entity_type": "reference", "access": "internal", '
+    '"tags": [], "observations": "some facts"}, '
+    '{"name": "Beta", "entity_type": "reference", "access": "internal", '
+    '"tags": [], "observ'
+)
+
+
+class TestTier2RequestBudget:
+    """Issue #476 fix 1: the classify output budget was raised off 1024."""
+
+    def test_classify_max_tokens_raised_above_1024(self) -> None:
+        raw = _make_raw("Some rich source text with entities.")
+        params = tier2_request_params(raw, [], ["person", "reference"], [], ["internal"])
+        # The original 1024 truncated entity-dense files; the fix raises it.
+        assert params["max_tokens"] > 1024
+
+
+class TestTier2TruncationParse:
+    """``parse_tier2_entities`` classes a max_tokens drop as truncated, not
+    degraded, so the two failure modes are never conflated (#472's mistake)."""
+
+    _TYPES = ["person", "reference"]
+
+    def test_truncated_response_counts_truncated_not_degraded(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        stats = Tier2ParseStats()
+        with caplog.at_level("WARNING"):
+            results = parse_tier2_entities(
+                _TRUNCATED_PAYLOAD,
+                "sessions/x.md",
+                self._TYPES,
+                [],
+                ["internal"],
+                stats=stats,
+                stop_reason="max_tokens",
+            )
+        assert results == []
+        assert stats.truncated == 1
+        assert stats.degraded == 0
+        text = "\n".join(rec.message for rec in caplog.records)
+        assert TIER2_TRUNCATED_MARKER in text
+        assert TIER2_DEGRADED_MARKER not in text
+
+    def test_no_json_at_max_tokens_is_truncated(self) -> None:
+        # A response that ran out of budget before emitting any array at all.
+        stats = Tier2ParseStats()
+        results = parse_tier2_entities(
+            "Here are the entities I found:",
+            "sessions/x.md",
+            self._TYPES,
+            [],
+            ["internal"],
+            stats=stats,
+            stop_reason="max_tokens",
+        )
+        assert results == []
+        assert stats.truncated == 1
+        assert stats.degraded == 0
+
+    def test_same_bad_json_without_max_tokens_still_degrades(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Identical unparseable text, but NOT a truncation (stop_reason absent)
+        # → the pre-#476 degraded path, unchanged. This is the exact ambiguity
+        # #472 tripped on: the JSON error alone cannot tell the two apart.
+        stats = Tier2ParseStats()
+        with caplog.at_level("WARNING"):
+            results = parse_tier2_entities(
+                _TRUNCATED_PAYLOAD,
+                "sessions/x.md",
+                self._TYPES,
+                [],
+                ["internal"],
+                stats=stats,
+            )
+        assert results == []
+        assert stats.degraded == 1
+        assert stats.truncated == 0
+        text = "\n".join(rec.message for rec in caplog.records)
+        assert TIER2_DEGRADED_MARKER in text
+        assert TIER2_TRUNCATED_MARKER not in text
+
+    def test_complete_array_at_max_tokens_still_parses(self) -> None:
+        # A response that happened to finish exactly at the budget still yields
+        # its entities — truncation is only inferred on a PARSE failure.
+        payload = json.dumps(
+            [{"name": "Fits", "entity_type": "reference", "access": "internal",
+              "tags": [], "observations": "ok"}]
+        )
+        stats = Tier2ParseStats()
+        results = parse_tier2_entities(
+            payload, "sessions/x.md", self._TYPES, [], ["internal"],
+            stats=stats, stop_reason="max_tokens",
+        )
+        assert [r.name for r in results] == ["Fits"]
+        assert stats.truncated == 0
+        assert stats.degraded == 0
+
+
+class TestTier2ClassifyTruncationRetry:
+    """The sync transport retries a truncated response with a LARGER budget,
+    not the #472 escaping instruction (the wrong fix for a truncation)."""
+
+    _TYPES = ["person", "reference"]
+
+    def _valid_payload(self) -> str:
+        return json.dumps(
+            [{"name": "Recovered", "entity_type": "reference",
+              "access": "internal", "tags": [], "observations": "second try"}]
+        )
+
+    def test_truncation_retry_uses_larger_budget_and_recovers(self) -> None:
+        # First response truncated (stop_reason=max_tokens), retry succeeds.
+        client = _sequenced_client(
+            [_TRUNCATED_PAYLOAD, self._valid_payload()],
+            stop_reasons=["max_tokens", "end_turn"],
+        )
+        raw = _make_raw("Entity-dense source text worth classifying.")
+        stats = Tier2ParseStats()
+        results = tier2_classify(
+            raw, [], self._TYPES, [], ["internal"], client, stats=stats
+        )
+        assert client.messages.create.call_count == 2
+        assert [r.name for r in results] == ["Recovered"]
+        # Recovered → the first-attempt truncation is cleared from the summary.
+        assert stats.truncated == 0
+        assert stats.degraded == 0
+        # The retry carried a LARGER max_tokens than the first attempt.
+        first_budget = client.messages.create.call_args_list[0].kwargs["max_tokens"]
+        retry_budget = client.messages.create.call_args_list[1].kwargs["max_tokens"]
+        assert retry_budget > first_budget
+        # And it did NOT append the #472 escaping-instruction turn — the retry
+        # message list is unchanged from the first call's.
+        retry_messages = client.messages.create.call_args_list[1].kwargs["messages"]
+        assert len(retry_messages) == 1
+
+    def test_truncation_retry_still_truncated_counts_once(self) -> None:
+        # Both attempts truncate → exactly one retry, one truncation recorded,
+        # NOT counted as degraded, file preserved for the next run.
+        client = _sequenced_client(
+            [_TRUNCATED_PAYLOAD, _TRUNCATED_PAYLOAD],
+            stop_reasons=["max_tokens", "max_tokens"],
+        )
+        raw = _make_raw("Entity-dense source text worth classifying.")
+        stats = Tier2ParseStats()
+        results = tier2_classify(
+            raw, [], self._TYPES, [], ["internal"], client, stats=stats
+        )
+        assert client.messages.create.call_count == 2
+        assert results == []
+        assert stats.truncated == 1
+        assert stats.degraded == 0
+
+    def test_non_truncation_parse_failure_still_takes_escaping_retry(self) -> None:
+        # A NON-truncation parse failure (stop_reason end_turn, unrepairable)
+        # must still take the #472 escaping retry (append instruction turns),
+        # not the bigger-budget path.
+        client = _sequenced_client(
+            ['[{"name": "X", "entity_type": "reference"', self._valid_payload()],
+            stop_reasons=["end_turn", "end_turn"],
+        )
+        raw = _make_raw("Some rich source text with entities to classify.")
+        stats = Tier2ParseStats()
+        results = tier2_classify(
+            raw, [], self._TYPES, [], ["internal"], client, stats=stats
+        )
+        assert client.messages.create.call_count == 2
+        assert [r.name for r in results] == ["Recovered"]
+        assert stats.degraded == 0
+        assert stats.truncated == 0
+        retry_messages = client.messages.create.call_args_list[1].kwargs["messages"]
+        # Escaping retry appends assistant + user instruction turns.
+        assert len(retry_messages) == 3
+        # And the escaping retry keeps the ORIGINAL (raised) budget — it does
+        # not bump max_tokens (that is the truncation path's fix, not this).
+        first_budget = client.messages.create.call_args_list[0].kwargs["max_tokens"]
+        retry_budget = client.messages.create.call_args_list[1].kwargs["max_tokens"]
+        assert retry_budget == first_budget
+
+
+class TestTier2ReclassifyLargerBudget:
+    """The shared bigger-budget retry helper both transports delegate to
+    (issue #476) — so the batch path gets a real retry too, not just sync."""
+
+    _TYPES = ["person", "reference"]
+
+    def _valid_payload(self) -> str:
+        return json.dumps(
+            [{"name": "Bigger", "entity_type": "reference",
+              "access": "internal", "tags": [], "observations": "fit now"}]
+        )
+
+    def test_uses_retry_budget_and_returns_stats(self) -> None:
+        client = _sequenced_client([self._valid_payload()], stop_reasons=["end_turn"])
+        raw = _make_raw("Entity-dense source text worth classifying.")
+        entities, retry_stats = tier2_reclassify_larger_budget(
+            raw, [], self._TYPES, [], ["internal"], client
+        )
+        assert [e.name for e in entities] == ["Bigger"]
+        assert retry_stats.degraded == 0
+        assert retry_stats.truncated == 0
+        # Called once, with the larger retry budget (well above the old 1024).
+        assert client.messages.create.call_count == 1
+        assert client.messages.create.call_args.kwargs["max_tokens"] > 1024
+
+    def test_retry_that_still_truncates_reports_it(self) -> None:
+        client = _sequenced_client([_TRUNCATED_PAYLOAD], stop_reasons=["max_tokens"])
+        raw = _make_raw("Entity-dense source text worth classifying.")
+        entities, retry_stats = tier2_reclassify_larger_budget(
+            raw, [], self._TYPES, [], ["internal"], client
+        )
+        assert entities == []
+        assert retry_stats.truncated == 1
+        assert retry_stats.degraded == 0
