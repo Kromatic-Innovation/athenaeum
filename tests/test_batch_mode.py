@@ -57,9 +57,11 @@ def _msg(
     output_tokens: int = 50,
     cache_creation: int = 0,
     cache_read: int = 0,
+    stop_reason: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         content=[SimpleNamespace(text=text)],
+        stop_reason=stop_reason,
         usage=SimpleNamespace(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -80,12 +82,18 @@ class _FakeBatches:
         never_end: bool = False,
         fail_marker: str | None = None,
         create_error: Exception | None = None,
+        truncate_marker: str | None = None,
     ) -> None:
         self._responder = responder
         self._polls_until_end = polls_until_end
         self._never_end = never_end
         self._fail_marker = fail_marker
         self._create_error = create_error
+        # Issue #476: a request whose content contains this marker is returned
+        # from the batch TRUNCATED (unterminated array + stop_reason
+        # max_tokens), so a run-level test can exercise the batch-path
+        # bigger-budget retry (the sync ``messages.create`` recovers it).
+        self._truncate_marker = truncate_marker
         self.submitted: list[list[dict[str, Any]]] = []
         self.cancelled: list[str] = []
         self._retrieve_counts: dict[str, int] = {}
@@ -132,6 +140,18 @@ class _FakeBatches:
                     result=SimpleNamespace(
                         type="errored",
                         error=SimpleNamespace(type="invalid_request"),
+                    ),
+                )
+            elif self._truncate_marker and self._truncate_marker in user_msg:
+                # #476: an unterminated array cut off at the output budget.
+                yield SimpleNamespace(
+                    custom_id=req["custom_id"],
+                    result=SimpleNamespace(
+                        type="succeeded",
+                        message=_msg(
+                            '[{"name": "WidgetTrunc", "entity_type": "concept"',
+                            stop_reason="max_tokens",
+                        ),
                     ),
                 )
             else:
@@ -1204,3 +1224,50 @@ class TestBatchDryRun:
         assert rc == 0
         assert client.batches.submitted == []
         assert client.sync_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #476 — a Tier-2 batch result truncated at max_tokens is retried
+# SYNCHRONOUSLY with a larger budget at finalize (closing #472's sync-only
+# gap), so an entity-dense file recovers instead of silently degrading.
+# ---------------------------------------------------------------------------
+
+
+class TestBatchTruncationRetry:
+    def test_truncated_batch_result_retried_with_larger_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The raw content carries TRUNCATEME → the fake batch returns the tier2
+        # classification TRUNCATED (stop_reason=max_tokens). The finalize path
+        # must retry that one file synchronously with a bigger budget, which
+        # the scripted responder answers cleanly with the WidgetTrunc entity.
+        contents = ["Standalone fact about WidgetTrunc gadget. TRUNCATEME\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        _clean_env(monkeypatch)
+        # sync allowed: the truncation retry is a live messages.create call.
+        client = _FakeClient(_scripted_responder, truncate_marker="TRUNCATEME")
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            batch_mode=True,
+        )
+        assert rc == 0
+        # Tier-2 went through the Batch API (first, truncated, attempt).
+        assert client.batches.submitted
+        # A synchronous classify retry fired with a LARGER budget than the
+        # batch attempt used — the #476 fix, on the batch path.
+        batch_t2_budget = client.batches.submitted[0][0]["params"]["max_tokens"]
+        classify_retries = [
+            c
+            for c in client.sync_calls
+            if c["model"] == DEFAULT_CLASSIFY_MODEL
+            and c["max_tokens"] > batch_t2_budget
+        ]
+        assert classify_retries, "expected a bigger-budget classify retry"
+        # And the file RECOVERED: the WidgetTrunc page was written, not dropped.
+        pages = list((root / "wiki").glob("*.md"))
+        assert any("WidgetTrunc" in p.read_text(encoding="utf-8") for p in pages)

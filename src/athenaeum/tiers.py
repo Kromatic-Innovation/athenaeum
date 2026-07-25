@@ -219,6 +219,21 @@ If no entities worth creating, return `[]`.
 Return ONLY the JSON array, no other text."""
 
 
+# Issue #476: Tier-2 classify output budget. The original 1024 truncated
+# entity-dense files — ~40% of dense-file attempts came back with
+# ``stop_reason == "max_tokens"`` and an unterminated array once the REAL
+# (non-trivial) schema lists were in the prompt, silently dropping every
+# entity in the file. That is a truncation the #472 control-character repair
+# pass could never fix, because a JSON document missing its closing brackets
+# cannot be repaired. Raised to give a substantive multi-entity
+# classification room to complete. When a response still truncates, the sync
+# path retries once with the larger ``_TIER2_CLASSIFY_RETRY_MAX_TOKENS``
+# budget (see :func:`tier2_classify`) rather than the #472 escaping
+# instruction, which is the wrong fix for a truncation.
+_TIER2_CLASSIFY_MAX_TOKENS = 4096
+_TIER2_CLASSIFY_RETRY_MAX_TOKENS = 8192
+
+
 def tier2_request_params(
     raw: RawFile,
     matched_names: list[str],
@@ -250,7 +265,7 @@ def tier2_request_params(
     )
     return {
         "model": _get_classify_model(config),
-        "max_tokens": 1024,
+        "max_tokens": _TIER2_CLASSIFY_MAX_TOKENS,
         "system": CLASSIFY_SYSTEM,
         "messages": [{"role": "user", "content": user_msg}],
     }
@@ -277,9 +292,22 @@ def tier2_classify(
     control-character repair pass (``stats.degraded`` was incremented), the
     call is retried EXACTLY ONCE with an explicit instruction to escape
     newlines inside string values, rather than silently discarding every
-    entity in the file. The optional *stats* out-param records the final
-    outcome (a recovered retry clears the degrade); callers pass one to
-    surface a per-run degraded count in ``librarian-run-summary``.
+    entity in the file.
+
+    #476: when the first response instead dropped every entity because it was
+    TRUNCATED at the output-token budget (``stop_reason == "max_tokens"`` →
+    ``stats.truncated`` incremented), the call is retried EXACTLY ONCE with a
+    LARGER ``max_tokens`` budget — the correct fix for a truncation, where the
+    #472 escaping instruction would do nothing (a JSON document missing its
+    closing brackets cannot be repaired by escaping). The two failure modes
+    are mutually exclusive per response and are never conflated: a truncation
+    takes the bigger-budget retry, a bare-control-char parse failure takes the
+    escaping retry.
+
+    The optional *stats* out-param records the final outcome (a recovered
+    retry of either kind clears its degrade/truncation); callers pass one to
+    surface per-run ``degraded`` / ``truncated`` counts in
+    ``librarian-run-summary``.
     """
     if not raw.content.strip():
         return []
@@ -304,8 +332,13 @@ def tier2_classify(
 
     owner = resolve_owner(config)
     first_text = response.content[0].text
+    first_stop_reason = getattr(response, "stop_reason", None)
     if stats is None:
         stats = Tier2ParseStats()
+    # Capture baselines so the first-response outcome is detected as a delta,
+    # robust to a caller that passes a stats accumulator shared across files.
+    degraded_before = stats.degraded
+    truncated_before = stats.truncated
     entities = parse_tier2_entities(
         first_text,
         raw.ref,
@@ -314,13 +347,48 @@ def tier2_classify(
         valid_access,
         owner=owner,
         stats=stats,
+        stop_reason=first_stop_reason,
     )
+    first_truncated = stats.truncated > truncated_before
+    first_degraded = stats.degraded > degraded_before
 
-    # #472 step 2: repair failed and we dropped everything — retry once,
-    # telling the model exactly what went wrong. Bounded to a single extra
-    # call per degraded file. (The batch transport cannot retry synchronously;
-    # there the repair pass alone is the recovery mechanism.)
-    if stats.degraded:
+    # #476: the first response was TRUNCATED at max_tokens and dropped every
+    # entity — the array is missing its closing brackets, which no escaping or
+    # repair can fix. Retry ONCE with a LARGER output budget (NOT the #472
+    # escaping instruction, which is the wrong fix for a truncation). Bounded
+    # to a single extra call per file; a retry that still truncates leaves the
+    # truncation recorded and the file preserved on disk for the next run.
+    if first_truncated:
+        retry_entities, retry_stats = tier2_reclassify_larger_budget(
+            raw,
+            matched_names,
+            valid_types,
+            valid_tags,
+            valid_access,
+            client,
+            wiki_root=wiki_root,
+            usage=usage,
+            config=config,
+            owner=owner,
+        )
+        if not retry_stats.degraded and not retry_stats.truncated:
+            # Recovered — clear the truncation recorded on the first attempt so
+            # the run summary does not count a file we ultimately parsed.
+            log.info(
+                "tier2-classify-truncation-retry-recovered ref=%s: retry with "
+                "a larger max_tokens budget parsed successfully",
+                raw.ref,
+            )
+            stats.truncated -= 1
+            stats.repaired += retry_stats.repaired
+            entities = retry_entities
+
+    # #472 step 2: a NON-truncation parse failure (a bare control character
+    # inside a string value) dropped everything — retry once, telling the
+    # model exactly what went wrong. Bounded to a single extra call per
+    # degraded file. (The batch transport cannot retry synchronously; there
+    # the repair pass alone is the recovery mechanism.)
+    elif first_degraded:
         retry_params = dict(params)
         retry_params["messages"] = [
             *params["messages"],
@@ -351,8 +419,9 @@ def tier2_classify(
             valid_access,
             owner=owner,
             stats=retry_stats,
+            stop_reason=getattr(retry_response, "stop_reason", None),
         )
-        if not retry_stats.degraded:
+        if not retry_stats.degraded and not retry_stats.truncated:
             # Recovered — clear the degrade recorded on the first attempt so
             # the run summary does not count a file we ultimately parsed.
             log.info(
@@ -375,6 +444,17 @@ def tier2_classify(
 #: (``degraded=N``, issue #464/#472).
 TIER2_DEGRADED_MARKER = "tier2-classify-degraded"
 
+#: Stable, greppable marker logged (WARNING) whenever a Tier-2 classification
+#: response drops ALL of a file's entities because it was TRUNCATED at the
+#: output-token budget (``stop_reason == "max_tokens"``), leaving an
+#: unterminated JSON array. Kept DISTINCT from :data:`TIER2_DEGRADED_MARKER`
+#: (a genuine parse failure) because the two have different causes and
+#: different fixes — a bigger output budget vs. escaping — and #472
+#: misdiagnosed exactly this truncation as malformed escaping. The per-run
+#: count is surfaced in ``librarian-run-summary`` (``truncated=N``, issue
+#: #476).
+TIER2_TRUNCATED_MARKER = "tier2-classify-truncated"
+
 
 @dataclass
 class Tier2ParseStats:
@@ -391,10 +471,18 @@ class Tier2ParseStats:
     ``degraded`` — responses that dropped ALL entities because no parseable
     JSON array could be recovered (genuine, silent file loss — the bug #472
     exists to make visible).
+
+    ``truncated`` — responses that dropped ALL entities because they were cut
+    off at the output-token budget (``stop_reason == "max_tokens"``), leaving
+    an unterminated array (issue #476). Kept SEPARATE from ``degraded`` so a
+    truncation (fixed by a bigger budget) is never conflated with a genuine
+    parse failure (the #472 mistake). Mutually exclusive with ``degraded`` for
+    any single response.
     """
 
     repaired: int = 0
     degraded: int = 0
+    truncated: int = 0
 
 
 def parse_tier2_entities(
@@ -405,6 +493,7 @@ def parse_tier2_entities(
     valid_access: list[str],
     owner: dict[str, Any] | None = None,
     stats: Tier2ParseStats | None = None,
+    stop_reason: str | None = None,
 ) -> list[ClassifiedEntity]:
     """Parse a Tier-2 classification response into entities.
 
@@ -414,11 +503,21 @@ def parse_tier2_entities(
     inside string values) before giving up, since that is the one observed
     failure mode that was silently discarding ~10% of files in production.
 
-    When *stats* is supplied, its ``repaired`` / ``degraded`` counters are
-    incremented so callers can retry (sync path) and surface a per-run count
-    (``librarian-run-summary``). A degrade — dropping every entity because no
-    parseable array could be recovered — also emits the greppable
-    :data:`TIER2_DEGRADED_MARKER` at WARNING level.
+    When *stats* is supplied, its ``repaired`` / ``degraded`` / ``truncated``
+    counters are incremented so callers can retry (sync path) and surface a
+    per-run count (``librarian-run-summary``). A drop of every entity emits a
+    greppable WARNING marker:
+
+    - :data:`TIER2_TRUNCATED_MARKER` when *stop_reason* is ``"max_tokens"`` —
+      the response was cut off mid-array (issue #476); the array is missing
+      its closing brackets, which no escaping/repair can fix. Recorded in
+      ``truncated``, NOT ``degraded``.
+    - :data:`TIER2_DEGRADED_MARKER` otherwise — a genuine unparseable
+      response (issue #472). Recorded in ``degraded``.
+
+    *stop_reason* is the API response's ``stop_reason`` (``None`` when the
+    caller cannot supply it — e.g. legacy callers/fixtures — in which case a
+    drop is always classed as ``degraded``, preserving pre-#476 behavior).
 
     When *owner* is configured (issue #263), an owner-namespace operational
     memory (e.g. ``user_*_family_relationships``) is routed to a standalone
@@ -427,16 +526,40 @@ def parse_tier2_entities(
     """
     text = text.strip()
 
+    # #476: a response truncated at the output-token budget dropped every
+    # entity for a DIFFERENT reason than a genuine parse failure (a bigger
+    # budget is the fix, not escaping). Route such a drop to the distinct
+    # truncated marker/counter so the two are never conflated (the #472
+    # misdiagnosis). ``stop_reason is None`` (legacy callers) always classes a
+    # drop as degraded, preserving pre-#476 behavior.
+    _truncated = stop_reason == "max_tokens"
+
+    def _record_drop(reason: str) -> None:
+        if _truncated:
+            log.warning(
+                "%s ref=%s reason=%s stop_reason=max_tokens "
+                "dropped_all_entities: %s",
+                TIER2_TRUNCATED_MARKER,
+                ref,
+                reason,
+                text[:200],
+            )
+            if stats is not None:
+                stats.truncated += 1
+        else:
+            log.warning(
+                "%s ref=%s reason=%s dropped_all_entities: %s",
+                TIER2_DEGRADED_MARKER,
+                ref,
+                reason,
+                text[:200],
+            )
+            if stats is not None:
+                stats.degraded += 1
+
     json_match = re.search(r"\[.*\]", text, re.DOTALL)
     if not json_match:
-        log.warning(
-            "%s ref=%s reason=no-json dropped_all_entities: %s",
-            TIER2_DEGRADED_MARKER,
-            ref,
-            text[:200],
-        )
-        if stats is not None:
-            stats.degraded += 1
+        _record_drop("no-json")
         return []
 
     raw_json = json_match.group()
@@ -451,15 +574,10 @@ def parse_tier2_entities(
         try:
             items = loads_lenient(raw_json)
         except json.JSONDecodeError:
-            log.warning(
-                "%s ref=%s reason=invalid-json dropped_all_entities "
-                "(repair pass failed): %s",
-                TIER2_DEGRADED_MARKER,
-                ref,
-                text[:200],
-            )
-            if stats is not None:
-                stats.degraded += 1
+            # #476: an unterminated array from a max_tokens truncation lands
+            # here too (repair cannot add the missing brackets) — _record_drop
+            # routes it to the truncated marker when stop_reason says so.
+            _record_drop("invalid-json (repair pass failed)")
             return []
         else:
             log.info(
@@ -513,6 +631,62 @@ def parse_tier2_entities(
         )
 
     return results
+
+
+def tier2_reclassify_larger_budget(
+    raw: RawFile,
+    matched_names: list[str],
+    valid_types: list[str],
+    valid_tags: list[str],
+    valid_access: list[str],
+    client: anthropic.Anthropic,
+    wiki_root: Path | None = None,
+    usage: TokenUsage | None = None,
+    config: dict[str, Any] | None = None,
+    owner: dict[str, Any] | None = None,
+) -> tuple[list[ClassifiedEntity], Tier2ParseStats]:
+    """Re-run one Tier-2 classify with the LARGER retry budget (issue #476).
+
+    A single bigger-``max_tokens`` call for a file whose first classify was
+    TRUNCATED at the output-token budget — the correct fix for a truncation,
+    where the #472 escaping instruction would do nothing. Returns the parsed
+    entities and the retry's own :class:`Tier2ParseStats` (so the caller can
+    tell whether the truncation recovered: a clean ``degraded == truncated ==
+    0`` means it did).
+
+    Shared by the synchronous retry (:func:`tier2_classify`) and the Batch API
+    finalize fallback (:mod:`athenaeum.batch`), mirroring how
+    :func:`tier3_merge_full` backs the tier-3 batch fallback — so the batch
+    path gets a real bigger-budget retry too, not just the sync path (the
+    exact gap #472 left).
+    """
+    params = tier2_request_params(
+        raw,
+        matched_names,
+        valid_types,
+        valid_tags,
+        valid_access,
+        wiki_root=wiki_root,
+        config=config,
+    )
+    params["max_tokens"] = _TIER2_CLASSIFY_RETRY_MAX_TOKENS
+    response = with_retry(
+        lambda: client.messages.create(**params),
+        description=f"tier2_classify-truncation-retry {raw.ref}",
+    )
+    _record_usage(response, usage, model=params["model"])
+    retry_stats = Tier2ParseStats()
+    entities = parse_tier2_entities(
+        response.content[0].text,
+        raw.ref,
+        valid_types,
+        valid_tags,
+        valid_access,
+        owner=owner,
+        stats=retry_stats,
+        stop_reason=getattr(response, "stop_reason", None),
+    )
+    return entities, retry_stats
 
 
 # ---------------------------------------------------------------------------

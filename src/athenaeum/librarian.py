@@ -870,6 +870,7 @@ def process_one(
         stats=t2_stats,
     )
     result.degraded += t2_stats.degraded
+    result.truncated += t2_stats.truncated  # issue #476
     log.info("  T2 classified %d new entities", len(classified))
 
     # Enforce the sticky intake access (issue #320 §5) on every NEW entity the
@@ -2101,6 +2102,7 @@ def run(
     total_escalated = 0
     total_skipped = 0
     total_degraded = 0  # issue #472: files that dropped all entities on bad JSON
+    total_truncated = 0  # issue #476: files that dropped all entities on truncation
     failed_files: list[str] = []
     deferred_refs: list[str] = []
     processed_count = 0
@@ -2274,6 +2276,7 @@ def run(
                     total_escalated = outcome.escalated
                     total_skipped = outcome.skipped
                     total_degraded = outcome.degraded
+                    total_truncated = outcome.truncated  # issue #476
                     failed_files = outcome.failed_refs
                     deferred_refs = outcome.deferred_refs
                 else:
@@ -2372,6 +2375,7 @@ def run(
                         # tolerate a double that predates the ``degraded`` field
                         # (the real ProcessingResult always carries it, default 0).
                         total_degraded += getattr(result, "degraded", 0)
+                        total_truncated += getattr(result, "truncated", 0)  # #476
 
                         if not dry_run:
                             raw.path.unlink()
@@ -2466,6 +2470,10 @@ def run(
                     # "degraded=N" (files whose classification JSON dropped
                     # every entity) without grepping warnings.
                     **({"degraded": total_degraded} if total_degraded else {}),
+                    # #476: a truncation drop (max_tokens) is surfaced
+                    # separately from a parse ``degraded`` so the two are
+                    # never conflated in the summary either.
+                    **({"truncated": total_truncated} if total_truncated else {}),
                 },
             )
         )
