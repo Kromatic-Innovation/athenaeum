@@ -1180,6 +1180,7 @@ def _compile_auto_memory(
     max_api_calls: int | None = None,
     full_compile_due: bool = False,
     out_delta_taken: dict[str, bool] | None = None,
+    out_merge_stats: dict | None = None,
 ) -> list:
     """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
 
@@ -1232,6 +1233,14 @@ def _compile_auto_memory(
     collision) uniformly, unlike re-deriving it from the input arguments.
     ``run()`` uses it to decide whether to reset the full-compile cadence
     stamp. ``None`` (the default) skips the out-param write entirely.
+
+    ``out_merge_stats`` (issue #464, slice E of #460) is threaded straight
+    through as :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``out_stats``
+    out-param, so the caller gets the detector/resolver call-count breakdown
+    (``haiku_calls``, ``resolve_calls``, ``chunks_run``,
+    ``pairs_added_via_similarity``, ``entries_merged``,
+    ``escalations_written``) without recomputing it. ``None`` (the default)
+    skips the out-param write entirely.
     """
     delta_enabled = resolve_delta_enabled(config)
     live_delta_enabled = resolve_live_delta_enabled(config) and not full_compile_due
@@ -1303,6 +1312,7 @@ def _compile_auto_memory(
         only_cluster_ids=only_cluster_ids,
         deadline=deadline,
         max_api_calls=max_api_calls,
+        out_stats=out_merge_stats,
     )
 
 
@@ -1584,6 +1594,58 @@ def _write_deferred_manifest(
         ]
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+# ---------------------------------------------------------------------------
+# Issue #464 (slice E of #460) — permanent per-phase run summary.
+#
+# The #440 nightly-cost profiling epic needs a durable, greppable record of
+# where a run's wall-clock and LLM-call spend actually went. This is pure
+# observability: `run()` times each phase it controls (wiki-dedup, the
+# per-file entity loop, the auto-memory C2-C4 compile, retire, #188
+# reresolve) and snapshots `usage.api_calls` before/after each phase for a
+# call-count delta; the auto-memory phase's detector/resolver/similarity-
+# sweep breakdown comes from `merge_clusters_to_wiki`'s `out_stats` (threaded
+# via `_compile_auto_memory`'s `out_merge_stats`), not from re-deriving it.
+# The stable ``librarian-run-summary`` prefix lets a watchdog / log-scraper
+# grep it out of a busy nightly log without parsing prose. No phase logic,
+# ordering, or exit code is affected by any of this.
+# ---------------------------------------------------------------------------
+
+#: Stable prefix for the one-line, key=value, machine-greppable run summary.
+RUN_SUMMARY_PREFIX = "librarian-run-summary"
+
+
+def _render_run_summary(profile: "list[tuple[str, float, dict]]") -> str:
+    """Render the accumulated per-phase *profile* into ONE greppable line.
+
+    ``profile`` is an ordered list of ``(phase_name, elapsed_seconds,
+    fields)`` tuples — only phases that actually ran are included (an early
+    deadline trip naturally omits phases that never got a turn). ``fields``
+    is a flat ``dict[str, object]`` of the extra key=value tokens to render
+    for that phase (call counts, work counts); order is preserved via normal
+    dict iteration so the rendered line is stable given the same input.
+
+    Format::
+
+        librarian-run-summary total_secs=12.3 | wiki-dedup secs=0.1 | \
+            entity secs=4.2 calls=6 created=2 updated=1 escalated=0 files=3 | \
+            auto-memory secs=7.8 detector_haiku=4 resolver_opus=1 \
+            sweep_pairs=0 clusters_merged=2 escalations=0 | retire secs=0.1 | \
+            reresolve secs=0.05 calls=0
+
+    ``total_secs`` sums the per-phase elapsed times (NOT independently timed)
+    so it is always internally consistent with the phase breakdown.
+    """
+    total_secs = sum(secs for _phase, secs, _fields in profile)
+    parts = [f"{RUN_SUMMARY_PREFIX} total_secs={total_secs:.3f}"]
+    for phase, secs, fields in profile:
+        tokens = " ".join(f"{k}={v}" for k, v in fields.items())
+        segment = f"{phase} secs={secs:.3f}"
+        if tokens:
+            segment += f" {tokens}"
+        parts.append(segment)
+    return " | ".join(parts)
 
 
 def run(
@@ -1869,6 +1931,22 @@ def run(
     def _deadline_exceeded() -> bool:
         return run_deadline is not None and time.monotonic() >= run_deadline
 
+    # Issue #464: per-phase run summary accumulator. `run()` appends one
+    # ``(phase_name, elapsed_seconds, fields)`` tuple per phase it actually
+    # ran (a phase never reached — e.g. after an early deadline trip — is
+    # simply absent, not zero-filled) and renders + logs ONE summary line on
+    # every exit path via `_emit_run_summary` below. `_summary_emitted` guards
+    # against a double-emit (defense-in-depth only: `_stop_on_deadline` and
+    # the normal finalize path are mutually exclusive on any single run).
+    run_profile: list[tuple[str, float, dict]] = []
+    _summary_emitted = {"done": False}
+
+    def _emit_run_summary() -> None:
+        if _summary_emitted["done"]:
+            return
+        _summary_emitted["done"] = True
+        log.info("%s", _render_run_summary(run_profile))
+
     def _stop_on_deadline(phase: str) -> int:
         """Commit partial progress and return 124 when the deadline trips in a
         pre-entity phase — mirrors the #337 interrupt-checkpoint path (greppable
@@ -1887,6 +1965,10 @@ def run(
                 f"librarian: partial run (deadline {max_runtime}s exceeded "
                 f"during {phase})",
             )
+        # Issue #464: emit the per-phase summary for whatever ran BEFORE the
+        # trip — the 124 exit paths are exactly the case the #440 profiling
+        # epic most needs visibility into (a run that stopped early).
+        _emit_run_summary()
         return 124
 
     # Issue #290: wiki-page dedup pass. Clusters compiled wiki/*.md
@@ -1900,12 +1982,19 @@ def run(
     # (it only appends human-reviewed proposals), not load-bearing for
     # the rest of the pipeline.
     if wiki_root.is_dir():
+        _wiki_dedup_start = time.monotonic()
         try:
             from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
             propose_wiki_page_merges(knowledge_root, config=config, dry_run=dry_run)
         except Exception:
             log.exception("wiki-page dedup pass failed; continuing run")
+        finally:
+            # Issue #464: recorded even on the swallowed-exception path so the
+            # summary still reflects the wall-clock this phase actually spent.
+            run_profile.append(
+                ("wiki-dedup", time.monotonic() - _wiki_dedup_start, {})
+            )
 
     # Issue #396: deadline boundary check after the #290 wiki-dedup pass. That
     # pass swallows its own exceptions (diagnostic, non-load-bearing), so a
@@ -1920,6 +2009,8 @@ def run(
         # the canonical cluster JSONL written by a prior C2 run and
         # compiles ``wiki/auto-*.md`` entries from it. Discovery still
         # happens inside merge_clusters_to_wiki() for source propagation.
+        _merge_only_stats: dict = {}
+        _merge_only_start = time.monotonic()
         try:
             merged_entries = merge_clusters_to_wiki(
                 knowledge_root,
@@ -1929,14 +2020,31 @@ def run(
                 usage=usage,
                 deadline=run_deadline,  # issue #396
                 max_api_calls=max_api_calls,  # issue #461
+                out_stats=_merge_only_stats,  # issue #464
             )
         except RunDeadlineExceeded as exc:
             return _stop_on_deadline(exc.phase)
+        run_profile.append(
+            (
+                "auto-memory",
+                time.monotonic() - _merge_only_start,
+                {
+                    "detector_haiku": _merge_only_stats.get("haiku_calls", 0),
+                    "resolver_opus": _merge_only_stats.get("resolve_calls", 0),
+                    "sweep_pairs": _merge_only_stats.get(
+                        "pairs_added_via_similarity", 0
+                    ),
+                    "clusters_merged": _merge_only_stats.get("entries_merged", 0),
+                    "escalations": _merge_only_stats.get("escalations_written", 0),
+                },
+            )
+        )
         # Issue #261 (slice B of #259): move-then-retire. Non-contradictory
         # raw is moved into its wiki entry (origin-traced footnote) and git
         # rm'd; contradictory raw is held in the queue. No-op without .git.
         # Skipped entirely when retire is disabled (#259 opt-out).
         if retire:
+            _retire_start = time.monotonic()
             _run_retire(
                 merged_entries,
                 knowledge_root,
@@ -1944,12 +2052,22 @@ def run(
                 dry_run=dry_run,
                 projects_root=projects_root,
             )
+            run_profile.append(("retire", time.monotonic() - _retire_start, {}))
         # Issue #188: self-heal proposal-less open questions (a prior
         # budget-exhausted / offline run leaves raw blocks; re-resolve them
         # now that this run has budget). No-op on dry-run / offline.
         if not dry_run:
+            _reresolve_start = time.monotonic()
+            _reresolve_calls_before = usage.api_calls
             _run_reresolve_pass(
                 knowledge_root, config=config, client=merge_client, usage=usage
+            )
+            run_profile.append(
+                (
+                    "reresolve",
+                    time.monotonic() - _reresolve_start,
+                    {"calls": usage.api_calls - _reresolve_calls_before},
+                )
             )
             # A merge-only run is a clean run from the manifest's
             # perspective: clear a stale deferred-work manifest left by a
@@ -1962,6 +2080,7 @@ def run(
             dry_run=dry_run,
             head_at_start=head_at_start,
         )
+        _emit_run_summary()
         return 0
 
     # Issue #461: shared state hoisted above BOTH the entity phase and the
@@ -2001,6 +2120,8 @@ def run(
     # the entity phase's budget first and does not affect entity-tier
     # correctness (the entity tiers do not depend on this run's auto-memory
     # output).
+    _entity_phase_start = time.monotonic()  # issue #464
+    _entity_phase_calls_before = usage.api_calls  # issue #464
     if not cluster_only:
         raw_files = discover_raw_files(raw_root)
         if not raw_files:
@@ -2313,6 +2434,24 @@ def run(
                     signal.signal(_s, _prev)
                 _prev_handlers = []
 
+        # Issue #464: recorded once for the WHOLE entity phase (not per-file)
+        # — matches the profile's phase granularity. Skipped entirely when
+        # ``cluster_only`` (the phase never ran, so it is absent from the
+        # summary rather than a misleading zero).
+        run_profile.append(
+            (
+                "entity",
+                time.monotonic() - _entity_phase_start,
+                {
+                    "calls": usage.api_calls - _entity_phase_calls_before,
+                    "created": total_created,
+                    "updated": total_updated,
+                    "escalated": total_escalated,
+                    "files": processed_count,
+                },
+            )
+        )
+
     # ------------------------------------------------------------------
     # Issue #461: auto-memory block (C1 discover + C2 cluster / C3 merge /
     # C4 detect, then the post-compile deadline check, then retire, then
@@ -2401,6 +2540,8 @@ def run(
             # per-cluster loops (the #396 wedge site); a trip there raises
             # RunDeadlineExceeded, caught here.
             _delta_taken_out: dict[str, bool] = {}
+            _merge_stats: dict = {}  # issue #464
+            _auto_memory_start = time.monotonic()  # issue #464
             try:
                 merged_entries = _compile_auto_memory(
                     auto_memory_files,
@@ -2414,9 +2555,47 @@ def run(
                     max_api_calls=max_api_calls,  # issue #461
                     full_compile_due=full_compile_due,  # issue #463
                     out_delta_taken=_delta_taken_out,  # issue #463
+                    out_merge_stats=_merge_stats,  # issue #464
                 )
             except RunDeadlineExceeded as exc:
+                # Issue #464: record the auto-memory phase's partial elapsed
+                # time (and whatever detector/resolver counts landed in
+                # ``_merge_stats`` before the trip — usually none, since the
+                # merge call raised, but this stays correct either way)
+                # before the deadline-stop path emits the summary.
+                run_profile.append(
+                    (
+                        "auto-memory",
+                        time.monotonic() - _auto_memory_start,
+                        {
+                            "detector_haiku": _merge_stats.get("haiku_calls", 0),
+                            "resolver_opus": _merge_stats.get("resolve_calls", 0),
+                            "sweep_pairs": _merge_stats.get(
+                                "pairs_added_via_similarity", 0
+                            ),
+                            "clusters_merged": _merge_stats.get("entries_merged", 0),
+                            "escalations": _merge_stats.get(
+                                "escalations_written", 0
+                            ),
+                        },
+                    )
+                )
                 return _stop_on_deadline(exc.phase)
+            run_profile.append(
+                (
+                    "auto-memory",
+                    time.monotonic() - _auto_memory_start,
+                    {
+                        "detector_haiku": _merge_stats.get("haiku_calls", 0),
+                        "resolver_opus": _merge_stats.get("resolve_calls", 0),
+                        "sweep_pairs": _merge_stats.get(
+                            "pairs_added_via_similarity", 0
+                        ),
+                        "clusters_merged": _merge_stats.get("entries_merged", 0),
+                        "escalations": _merge_stats.get("escalations_written", 0),
+                    },
+                )
+            )
 
             # Issue #463: on a successful (no deadline trip, not dry_run)
             # auto-memory compile that computed its OWN delta baseline (i.e.
@@ -2469,6 +2648,7 @@ def run(
             # the cluster_only diagnostic mode, when retire is disabled
             # (#259 opt-out), and a no-op without a git repo.
             if retire and not cluster_only:
+                _retire_start = time.monotonic()  # issue #464
                 _run_retire(
                     merged_entries,
                     knowledge_root,
@@ -2476,13 +2656,25 @@ def run(
                     dry_run=dry_run,
                     projects_root=projects_root,
                 )
+                run_profile.append(
+                    ("retire", time.monotonic() - _retire_start, {})
+                )
 
             # Issue #188: re-resolve open, proposal-less pending questions
             # so a prior cap-hit / offline escalation self-heals on this
             # (budgeted) run.
             if not dry_run:
+                _reresolve_start = time.monotonic()  # issue #464
+                _reresolve_calls_before = usage.api_calls
                 _run_reresolve_pass(
                     knowledge_root, config=config, client=merge_client, usage=usage
+                )
+                run_profile.append(
+                    (
+                        "reresolve",
+                        time.monotonic() - _reresolve_start,
+                        {"calls": usage.api_calls - _reresolve_calls_before},
+                    )
                 )
 
     if cluster_only:
@@ -2497,6 +2689,7 @@ def run(
             dry_run=dry_run,
             head_at_start=head_at_start,
         )
+        _emit_run_summary()  # issue #464
         return 0
 
     # Issue #461: run-level spend summary + #378 ledger write, moved here from
@@ -2553,6 +2746,15 @@ def run(
             )
     except Exception as exc:  # noqa: BLE001 — guardrail must never break a run
         log.warning("page-size guardrail check failed (non-fatal): %s", exc)
+
+    # Issue #464: normal finalize path — every return below this point
+    # (the entity-loop deadline_tripped 124, the failed-files 1, the
+    # strict-budget 1, and the clean 0) shares this one emit. `_emit_run_summary`
+    # is idempotent (`_summary_emitted` guard), so this is safe even though
+    # `_stop_on_deadline` above already emits on its own early-return paths —
+    # those paths `return` before reaching here, so in practice this only ever
+    # fires once per run.
+    _emit_run_summary()
 
     # Issue #396: the entity loop hit the wall-clock deadline and deferred the
     # remaining intake. The partial progress is committed (terminal commit
