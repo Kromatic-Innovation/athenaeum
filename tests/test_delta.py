@@ -223,16 +223,69 @@ def _capture_compile(monkeypatch):
 
 
 @pytest.mark.parametrize("cross_scope_mode", ["ancestor", "off"])
-def test_d5_live_client_forces_whole_corpus(
+def test_d5_live_client_delta_eligible_by_default(
     tmp_path: Path, monkeypatch, cross_scope_mode: str
 ) -> None:
-    """ANY live client → delta vetoed (whole-corpus), REGARDLESS of the mode.
+    """Issue #463 supersedes the original D5 fallback: a live client is now
+    delta-ELIGIBLE by default (``librarian.delta.live_client`` defaults True,
+    ``full_compile_due`` defaults False), REGARDLESS of the cross-scope mode.
 
-    The gate keys on ``client is None``, not the cross-scope mode, because the
-    PRIMARY per-cluster contradiction detector runs even at ``mode='off'`` — so
-    a scoped merge under a live client would diverge the escalation sidecars
-    from a full compile. Both ``ancestor`` (sweep active) and ``off`` (sweep
-    disabled, but the per-cluster detector still fires) must stay whole-corpus.
+    Historical note: prior to #463, ANY live client unconditionally forced a
+    whole-corpus compile (the original D5 fallback trigger). #463 replaces
+    that blanket veto with the periodic full-compile cadence backstop
+    (``full_compile_due``) — see ``test_d5_live_client_full_compile_due_forces_
+    whole_corpus`` below for the case that still forces whole-corpus.
+    """
+    root = tmp_path
+    (root / "athenaeum.yaml").write_text(
+        "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n"
+        f"contradiction:\n  cross_scope_mode: {cross_scope_mode}\n"
+    )
+    (root / "wiki").mkdir(parents=True, exist_ok=True)
+    p = _write_am(root, "alpha", "project_x.md", "content")
+    from athenaeum.config import load_config
+    from athenaeum.librarian import discover_auto_memory_files
+
+    config = load_config(root)
+    files = discover_auto_memory_files(root, config=config)
+    seen: dict[str, object] = {}
+
+    def fake_cluster(files, kr, *, config=None, dry_run=False, changed_paths=None):
+        seen["cluster_changed_paths"] = changed_paths
+        return {"alpha-new"}  # pretend one cluster was affected
+
+    def fake_collision(kr, cfg, ids):
+        return False
+
+    def fake_merge(kr, **kwargs):
+        seen["only_cluster_ids"] = kwargs.get("only_cluster_ids")
+        return []
+
+    monkeypatch.setattr(lib, "_run_cluster_pass", fake_cluster)
+    monkeypatch.setattr(lib, "_delta_slug_collision", fake_collision)
+    monkeypatch.setattr(lib, "merge_clusters_to_wiki", fake_merge)
+    lib._compile_auto_memory(
+        files,
+        root,
+        config=config,
+        dry_run=False,
+        client=_FakeClient(),
+        usage=None,
+        changed_paths={p},
+    )
+    # #463: the cluster pass DOES receive changed_paths and the merge DOES
+    # scope to the affected cluster — the live client no longer vetoes delta.
+    assert seen["cluster_changed_paths"] == {p}
+    assert seen["only_cluster_ids"] == {"alpha-new"}
+
+
+@pytest.mark.parametrize("cross_scope_mode", ["ancestor", "off"])
+def test_d5_live_client_full_compile_due_forces_whole_corpus(
+    tmp_path: Path, monkeypatch, cross_scope_mode: str
+) -> None:
+    """A live client WITH ``full_compile_due=True`` still forces whole-corpus,
+    regardless of the cross-scope mode — the periodic reconciliation cadence
+    (issue #463) is the backstop that replaces the old blanket D5 veto.
     """
     root = tmp_path
     (root / "athenaeum.yaml").write_text(
@@ -255,8 +308,43 @@ def test_d5_live_client_forces_whole_corpus(
         client=_FakeClient(),
         usage=None,
         changed_paths={p},
+        full_compile_due=True,
     )
-    # D5: the cluster pass ran WHOLE-CORPUS (changed_paths not threaded through).
+    # The cluster pass ran WHOLE-CORPUS (changed_paths not threaded through).
+    assert seen["cluster_changed_paths"] is None
+    assert seen["only_cluster_ids"] is None
+
+
+@pytest.mark.parametrize("cross_scope_mode", ["ancestor", "off"])
+def test_d5_live_client_delta_disabled_via_config_forces_whole_corpus(
+    tmp_path: Path, monkeypatch, cross_scope_mode: str
+) -> None:
+    """``librarian.delta.live_client: false`` keeps the pre-#463 whole-corpus-
+    only behaviour for a live client, regardless of the cross-scope mode.
+    """
+    root = tmp_path
+    (root / "athenaeum.yaml").write_text(
+        "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n"
+        f"contradiction:\n  cross_scope_mode: {cross_scope_mode}\n"
+        "librarian:\n  delta:\n    live_client: false\n"
+    )
+    (root / "wiki").mkdir(parents=True, exist_ok=True)
+    p = _write_am(root, "alpha", "project_x.md", "content")
+    from athenaeum.config import load_config
+    from athenaeum.librarian import discover_auto_memory_files
+
+    config = load_config(root)
+    files = discover_auto_memory_files(root, config=config)
+    seen = _capture_compile(monkeypatch)
+    lib._compile_auto_memory(
+        files,
+        root,
+        config=config,
+        dry_run=False,
+        client=_FakeClient(),
+        usage=None,
+        changed_paths={p},
+    )
     assert seen["cluster_changed_paths"] is None
     assert seen["only_cluster_ids"] is None
 

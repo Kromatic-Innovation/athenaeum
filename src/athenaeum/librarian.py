@@ -56,6 +56,8 @@ from athenaeum.config import (
     resolve_delta_max_affected_members,
     resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
+    resolve_full_compile_every_days,
+    resolve_live_delta_enabled,
     resolve_operational_markers,
     resolve_pull_before_run,
     resolve_push_after_run,
@@ -1176,6 +1178,8 @@ def _compile_auto_memory(
     changed_paths: set[Path] | None,
     deadline: float | None = None,
     max_api_calls: int | None = None,
+    full_compile_due: bool = False,
+    out_delta_taken: dict[str, bool] | None = None,
 ) -> list:
     """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
 
@@ -1185,33 +1189,69 @@ def _compile_auto_memory(
     pre-flight refuses a keyless ``api``-provider full pipeline, so the test
     cannot reach this logic through run()).
 
-    Delta is enabled ONLY on the deterministic ``client is None`` path
-    (session_end / ingest tier0, no LLM). The nightly LLM run — any live client —
-    MUST stay whole-corpus (fallback trigger D5). This gates on ``client is
-    None`` rather than the cross-scope mode because the PRIMARY per-cluster
-    contradiction detector (``detect_contradictions`` inside the merge loop) runs
-    for EVERY mode, including ``cross_scope_mode == 'off'`` — only the extra
-    cross-scope similarity sweep is mode-gated. Scoping the merge to the affected
-    clusters would therefore make a live-client run's escalation sidecars
-    (``_pending_questions.md`` / ``_pending_merges.md`` / the resolved cache)
-    diverge from a full compile. All new params default to the whole-corpus
-    behaviour, so a call with ``changed_paths=None`` is byte-identical to the
+    Delta cadence contract (issue #463, slice D of #460, supersedes the
+    original #370 PR2 D5 fallback): the deterministic ``client is None`` path
+    (session_end / ingest tier0, no LLM) is delta-eligible whenever
+    ``librarian.delta.enabled`` allows it, unconditionally. The nightly LLM
+    run — a live client — is now ALSO delta-eligible by default, gated by BOTH
+    ``librarian.delta.live_client`` (:func:`athenaeum.config.
+    resolve_live_delta_enabled`, default True) AND ``not full_compile_due``.
+    ``full_compile_due`` is ``True`` when the periodic whole-corpus
+    reconciliation cadence (:func:`athenaeum.config.
+    resolve_full_compile_every_days`, default every 7 days — see :func:`run`'s
+    ``full_compile_due`` computation) is due, or when the caller forces it
+    (``--full-compile`` / ``full_compile=True``). This periodic full compile is
+    the corpus-consistency backstop for the live-client delta path: it is the
+    ONLY mechanism that re-enters TTL-decayed (#251) auto ``not_a_conflict``
+    suppressions and reconciles any drift a scoped delta merge could not see
+    (the cross-scope contradiction sweep, run-global slug resolution, etc.).
+    Issue #251 TTL expiry does NOT, by itself, force affected-cluster
+    re-detection on an otherwise-eligible delta night — only the scheduled
+    full-compile reconciliation does. All existing delta fallbacks (F6 slug
+    collision, the D2 affected-cluster/member caps inside
+    :func:`_run_cluster_pass`, the empty-delta no-op) are unchanged and still
+    apply on the live-client delta path exactly as they do on the deterministic
+    path — any uncertainty in the delta closure still falls back to a full
+    whole-corpus compile. All new params default to the whole-corpus
+    behaviour, so a call with ``changed_paths=None`` (or
+    ``full_compile_due=False`` with no live client) is byte-identical to the
     pre-#370 pipeline.
 
     ``max_api_calls`` (issue #461) is threaded straight through to
     :func:`athenaeum.merge.merge_clusters_to_wiki`'s C4 budget guard — see
     there for the degrade semantics. ``None`` (the default) preserves the
     pre-#461 unbounded C4 behaviour byte-for-byte.
+
+    ``out_delta_taken`` (issue #463) is an optional mutable out-param
+    (mirrors :func:`_raw_hash_snapshot`'s ``out_stats`` convention): when
+    given, this function sets ``out_delta_taken["taken"]`` to whether the
+    merge that just ran was ACTUALLY delta-scoped (``only_cluster_ids is not
+    None`` at the merge call site) rather than whole-corpus. This is the one
+    reliable signal for "whole-corpus ran" — it reflects every fallback
+    (ineligible gate, D1-D3 inside :func:`_run_cluster_pass`, F6 slug
+    collision) uniformly, unlike re-deriving it from the input arguments.
+    ``run()`` uses it to decide whether to reset the full-compile cadence
+    stamp. ``None`` (the default) skips the out-param write entirely.
     """
     delta_enabled = resolve_delta_enabled(config)
+    live_delta_enabled = resolve_live_delta_enabled(config) and not full_compile_due
     delta_eligible = (
-        not dry_run and changed_paths is not None and delta_enabled and client is None
+        not dry_run
+        and changed_paths is not None
+        and delta_enabled
+        and (client is None or live_delta_enabled)
     )
     if changed_paths is not None and not delta_eligible and not dry_run:
-        if client is not None:
+        if client is not None and full_compile_due:
+            log.info(
+                "delta: periodic full-compile reconciliation due "
+                "(librarian.full_compile_every_days) — whole-corpus compile"
+            )
+        elif client is not None:
             log.warning(
-                "delta: live LLM client — whole-corpus compile so contradiction "
-                "escalations stay corpus-consistent (D5)"
+                "delta: live LLM client delta disabled via "
+                "librarian.delta.live_client — whole-corpus compile so "
+                "contradiction escalations stay corpus-consistent"
             )
         elif not delta_enabled:
             log.info(
@@ -1241,6 +1281,13 @@ def _compile_auto_memory(
             auto_memory_files, knowledge_root, config=config, dry_run=dry_run
         )
         only_cluster_ids = None
+
+    # Issue #463: report whether this compile actually took the delta path
+    # (reflects every fallback uniformly — see the ``out_delta_taken`` docstring
+    # above) BEFORE the merge call, since ``only_cluster_ids`` is fully settled
+    # here.
+    if out_delta_taken is not None:
+        out_delta_taken["taken"] = only_cluster_ids is not None
 
     # C3: merge clusters into canonical wiki/auto-*.md entries. C4 contradiction
     # detection runs inside merge_clusters_to_wiki and reuses the shared client.
@@ -1557,6 +1604,8 @@ def run(
     projects_root: Path | None = None,
     install_signal_handlers: bool = False,
     changed_paths: set[Path] | None = None,
+    full_compile: bool = False,
+    now: datetime | None = None,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error.
 
@@ -1637,6 +1686,22 @@ def run(
     tree; ``--autostash`` protects the librarian's routine dirty-tree
     starting state. Athenaeum performs no credential handling; the
     operator's ambient git auth is used.
+
+    ``full_compile`` (issue #463, slice D of #460, CLI ``--full-compile``)
+    forces a whole-corpus auto-memory compile regardless of the delta gate or
+    the ``librarian.full_compile_every_days`` cadence — the manual escape
+    hatch for an operator who wants an immediate full reconciliation. DEFAULT
+    ``False``. Only meaningful for a real (non-``cluster_only``/``merge_only``,
+    non-dry-run) compile; see the ``full_compile_due`` computation ahead of
+    the auto-memory block for the full cadence contract (also driven by the
+    ``FULL_COMPILE_STAMP_NAME`` cache-dir stamp and
+    :func:`athenaeum.config.resolve_full_compile_every_days`, default 7 days).
+
+    ``now`` (issue #463) is an optional injected "run start" timestamp for
+    the full-compile cadence check, mirroring
+    :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``now=`` parameter.
+    Defaults to ``datetime.now(timezone.utc)`` (frozen once here); tests pass
+    a fixed value so no wall-clock leaks into cadence assertions.
     """
     skip_entity_tiers = cluster_only or merge_only
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -2278,14 +2343,64 @@ def run(
                         "  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count
                     )
 
+            # Issue #463 (slice D of #460): the nightly run's own delta
+            # baseline. A caller that already threads an explicit
+            # ``changed_paths`` (ingest / session_end, issue #370 PR2) is left
+            # untouched — this only computes a baseline when the run wasn't
+            # already given one, so every existing caller's behaviour is
+            # unaffected. ``full_compile_due`` gates the live-client delta
+            # path (see :func:`_compile_auto_memory`); ``run_changed_paths``
+            # is threaded through instead of the raw ``changed_paths`` arg so
+            # the manifest-stamp write below can tell whether THIS run
+            # computed its own baseline.
+            run_changed_paths = changed_paths
+            full_compile_due = full_compile
+            auto_memory_manifest_path = (
+                _resolve_cache_dir(None) / AUTO_MEMORY_MANIFEST_NAME
+            )
+            full_compile_stamp_path = _resolve_cache_dir(None) / FULL_COMPILE_STAMP_NAME
+            run_now = now if now is not None else datetime.now(timezone.utc)
+            if not dry_run and not cluster_only and changed_paths is None:
+                try:
+                    run_changed_paths = _auto_memory_changed_paths(
+                        auto_memory_files, knowledge_root, auto_memory_manifest_path
+                    )
+                except Exception as exc:  # noqa: BLE001 — stamp read must not break the run
+                    log.warning(
+                        "auto-memory delta baseline read failed (non-fatal, "
+                        "falling back to whole-corpus): %s",
+                        exc,
+                    )
+                    run_changed_paths = None
+                if not full_compile_due:
+                    try:
+                        full_compile_every_days = resolve_full_compile_every_days(config)
+                        stamp = _load_full_compile_stamp(full_compile_stamp_path)
+                        if stamp is None:
+                            full_compile_due = True
+                        else:
+                            stamp_at = datetime.strptime(
+                                stamp["at"], "%Y-%m-%dT%H:%M:%SZ"
+                            ).replace(tzinfo=timezone.utc)
+                            age_days = (run_now - stamp_at).total_seconds() / 86400.0
+                            full_compile_due = age_days >= full_compile_every_days
+                    except Exception as exc:  # noqa: BLE001 — must not break the run
+                        log.warning(
+                            "full-compile stamp read failed (non-fatal, forcing "
+                            "whole-corpus reconciliation this run): %s",
+                            exc,
+                        )
+                        full_compile_due = True
+
             # C2 + C3 + C4: cluster, merge, and detect. Issue #370 PR2
             # threads the optional ``changed_paths`` delta through this one
             # call — see :func:`_compile_auto_memory` for the
-            # delta-eligibility (D5) gate, the cluster pass, the F6
-            # slug-collision guard, and the merge. Issue #396: ``deadline``
-            # is threaded into the merge pass's per-cluster loops (the #396
-            # wedge site); a trip there raises RunDeadlineExceeded, caught
-            # here.
+            # delta-eligibility gate (issue #463 cadence contract), the
+            # cluster pass, the F6 slug-collision guard, and the merge. Issue
+            # #396: ``deadline`` is threaded into the merge pass's
+            # per-cluster loops (the #396 wedge site); a trip there raises
+            # RunDeadlineExceeded, caught here.
+            _delta_taken_out: dict[str, bool] = {}
             try:
                 merged_entries = _compile_auto_memory(
                     auto_memory_files,
@@ -2294,12 +2409,52 @@ def run(
                     dry_run=dry_run,
                     client=merge_client,
                     usage=usage,
-                    changed_paths=changed_paths,
+                    changed_paths=run_changed_paths,
                     deadline=run_deadline,
                     max_api_calls=max_api_calls,  # issue #461
+                    full_compile_due=full_compile_due,  # issue #463
+                    out_delta_taken=_delta_taken_out,  # issue #463
                 )
             except RunDeadlineExceeded as exc:
                 return _stop_on_deadline(exc.phase)
+
+            # Issue #463: on a successful (no deadline trip, not dry_run)
+            # auto-memory compile that computed its OWN delta baseline (i.e.
+            # not an ingest/session_end call that threads its own
+            # ``changed_paths``), refresh the auto-memory manifest stamp so
+            # the next nightly run's delta baseline is fresh. When the compile
+            # that just ran was ACTUALLY whole-corpus (``out_delta_taken`` —
+            # covers every path: an ineligible gate, ``full_compile_due``, and
+            # any mid-flight fallback such as D1-D3/F6 that made
+            # ``_compile_auto_memory`` fall back internally even though the
+            # gate looked delta-eligible), also reset the full-compile cadence
+            # stamp. A delta compile must NOT reset the full-compile stamp —
+            # only a real whole-corpus pass resets the cadence clock.
+            # Best-effort: a write failure never breaks the run (mirrors the
+            # ingest manifest's tolerance).
+            if not dry_run and not cluster_only and changed_paths is None:
+                try:
+                    current_snapshot = _auto_memory_hash_snapshot(
+                        auto_memory_files, knowledge_root
+                    )
+                    _write_auto_memory_manifest(
+                        auto_memory_manifest_path, current_snapshot
+                    )
+                except Exception as exc:  # noqa: BLE001 — stamp write must not break the run
+                    log.warning(
+                        "auto-memory delta baseline write failed (non-fatal): %s", exc
+                    )
+                if not _delta_taken_out.get("taken", False):
+                    try:
+                        _write_full_compile_stamp(
+                            full_compile_stamp_path,
+                            run_now,
+                            _capture_head(knowledge_root),
+                        )
+                    except Exception as exc:  # noqa: BLE001 — must not break the run
+                        log.warning(
+                            "full-compile stamp write failed (non-fatal): %s", exc
+                        )
 
             # Issue #396: deadline check at the post-compile phase boundary,
             # before the retire + reresolve passes (both can commit / make
@@ -2619,6 +2774,168 @@ def _write_ingest_manifest(
     payload: dict[str, Any] = {"version": version, "hashes": hashes}
     if stats is not None:
         payload["stats"] = {k: [v[0], v[1]] for k, v in stats.items()}
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(path)
+
+
+# ---------------------------------------------------------------------------
+# Live-client delta cadence (issue #463, slice D of #460). Two more cache-dir
+# stamps, siblings of ``ingest-manifest.json`` (same "outside the knowledge git
+# repo" rationale): a content-hash snapshot of the auto-memory intake (the
+# delta baseline for computing ``changed_paths`` on the nightly run, which —
+# unlike ingest/session_end — never received an explicit caller-supplied
+# delta), and a "last successful whole-corpus auto-memory compile" stamp that
+# drives the periodic full-compile reconciliation cadence.
+# ---------------------------------------------------------------------------
+
+#: Content-hash stamp over the auto-memory intake files, keyed by path relative
+#: to ``knowledge_root`` (mirrors :data:`INGEST_MANIFEST_NAME`'s shape:
+#: ``{"version": 1, "hashes": {relpath: sha256}}``). Used by
+#: :func:`_auto_memory_changed_paths` to compute the nightly run's delta
+#: baseline.
+AUTO_MEMORY_MANIFEST_NAME = "auto-memory-manifest.json"
+
+#: Stamp recording the LAST successful whole-corpus (non-delta) auto-memory
+#: compile: ``{"at": <ISO-8601 UTC timestamp>, "head": <knowledge_root HEAD
+#: sha or null>}``. ``at`` drives the :func:`athenaeum.config.
+#: resolve_full_compile_every_days` cadence; ``head`` is audit-only.
+FULL_COMPILE_STAMP_NAME = "full-compile-stamp.json"
+
+
+def _auto_memory_hash_snapshot(
+    auto_memory_files: list[AutoMemoryFile],
+    knowledge_root: Path,
+) -> dict[str, str]:
+    """Map ``relpath -> sha256`` for the given auto-memory intake files.
+
+    Keys are POSIX paths relative to *knowledge_root*, mirroring
+    :func:`_raw_hash_snapshot`'s shape so the two stamp families stay
+    consistent. Takes the already-discovered/filtered
+    :class:`AutoMemoryFile` list (issue #278 ephemeral drop already applied)
+    rather than re-walking the filesystem, so the hashed set is exactly what
+    this run considers auto-memory intake. Unreadable files are skipped
+    (best-effort, mirrors the ingest snapshot's tolerance).
+    """
+    snapshot: dict[str, str] = {}
+    for am in auto_memory_files:
+        try:
+            data = am.path.read_bytes()
+        except OSError:
+            continue
+        try:
+            rel = am.path.relative_to(knowledge_root).as_posix()
+        except ValueError:
+            rel = str(am.path)
+        snapshot[rel] = hashlib.sha256(data).hexdigest()
+    return snapshot
+
+
+def _load_auto_memory_manifest(path: Path) -> dict[str, str] | None:
+    """Load the auto-memory stamp's ``relpath -> hash`` map.
+
+    Returns ``None`` when the manifest is absent/unreadable/malformed (no
+    prior successful stamp — the delta baseline is unknown), or the
+    ``{relpath: hash}`` map (possibly empty) when a stamp exists. Mirrors
+    :func:`_load_ingest_manifest`.
+    """
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    hashes = data.get("hashes")
+    if isinstance(hashes, dict):
+        return {str(k): str(v) for k, v in hashes.items()}
+    return {}
+
+
+def _write_auto_memory_manifest(path: Path, hashes: dict[str, str]) -> None:
+    """Atomically write the auto-memory stamp manifest (temp file + rename).
+
+    Mirrors :func:`_write_ingest_manifest`.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {"version": 1, "hashes": hashes}
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _auto_memory_changed_paths(
+    auto_memory_files: list[AutoMemoryFile],
+    knowledge_root: Path,
+    manifest_path: Path,
+) -> set[Path] | None:
+    """Compute the nightly run's auto-memory delta baseline (issue #463).
+
+    Compares the current auto-memory intake hash snapshot against the loaded
+    :data:`AUTO_MEMORY_MANIFEST_NAME` stamp. ``changed = added ∪
+    (hash-differs)``. Deletion-only deltas count too: a file present in the
+    prior manifest but absent from the current snapshot is included (by its
+    prior, now-nonexistent absolute path) so its former cluster is still
+    considered "touched" and recompiles — a member removal must recompile
+    that cluster, not be silently ignored because the file itself is gone.
+
+    Returns ``None`` when no prior manifest exists (unknown baseline — the
+    caller's gate must fall back to whole-corpus; this run establishes the
+    baseline via :func:`_write_auto_memory_manifest`). Returns a (possibly
+    empty) absolute-path ``set[Path]`` otherwise — an empty set is a valid
+    delta ("nothing changed"), distinct from ``None``.
+    """
+    stored = _load_auto_memory_manifest(manifest_path)
+    if stored is None:
+        return None
+    current = _auto_memory_hash_snapshot(auto_memory_files, knowledge_root)
+    changed: set[Path] = set()
+    for rel, h in current.items():
+        prior_h = stored.get(rel)
+        if prior_h is None or prior_h != h:
+            changed.add((knowledge_root / rel).resolve())
+    for rel in stored:
+        if rel not in current:
+            changed.add((knowledge_root / rel).resolve())
+    return changed
+
+
+def _load_full_compile_stamp(path: Path) -> dict[str, Any] | None:
+    """Load the last-whole-corpus-compile stamp (issue #463).
+
+    Returns ``None`` when absent/unreadable/malformed/missing ``at`` — treated
+    by the caller as "never full-compiled" (a full compile is due). ``head``
+    defaults to ``None`` when absent (pre-existing / hand-edited stamp).
+    """
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    at = data.get("at")
+    if not isinstance(at, str) or not at:
+        return None
+    head = data.get("head")
+    return {"at": at, "head": head if isinstance(head, str) else None}
+
+
+def _write_full_compile_stamp(path: Path, at: datetime, head: str | None) -> None:
+    """Atomically write the last-whole-corpus-compile stamp (issue #463).
+
+    ``at`` is stored as an ISO-8601 UTC timestamp (``%Y-%m-%dT%H:%M:%SZ``,
+    matching the deferred-manifest convention at :func:`_write_deferred_manifest`
+    et al.); ``head`` is the knowledge_root git HEAD sha (or ``None``) for
+    audit purposes only — the cadence itself is timestamp-driven.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "at": at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "head": head,
+    }
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     tmp.replace(path)
