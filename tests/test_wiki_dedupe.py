@@ -314,3 +314,108 @@ class TestProposeWikiPageMerges:
             tmp_path, config={}, threshold=0.8, embedding_provider=_boom
         )
         assert proposals == []
+
+
+# --- Issue #478: degenerate-over-cluster suppression on the wiki-dedupe path ---
+#
+# The #400/#421 gates (``max_merge_sources`` default 5, ``min_merge_mean_similarity``
+# default 0.6 — both active out of the box) were only wired into ``merge.py``'s
+# resolver write path, NOT ``propose_wiki_page_merges``. Because this pass uses the
+# SAME single-linkage clusterer, one weak bridging edge could chain hundreds/
+# thousands of pages into a giant component (the live 1,711-/1,746-source
+# ``merge-workflow-pattern`` proposals) that was written straight to
+# ``_pending_merges.md``, bypassing the gates entirely. These tests exercise the
+# suppression gate through the REAL wiki-dedupe call path — the gap
+# ``test_merge_proposal_gates.py`` (which calls the gate function in isolation)
+# could not catch.
+
+
+def _identical_embed(texts: list[str]) -> list[list[float]]:
+    """Every page embeds to the same unit vector → one cohesive cluster of all pages.
+
+    Mean/min pairwise cosine are both 1.0, so the ONLY gate arm that can fire is
+    the ``max_merge_sources`` size cap — isolating it from the cohesion arms.
+    """
+    return [[1.0, 0.0] for _ in texts]
+
+
+class TestSuppressionGates:
+    """Issue #478: the #400/#421 suppression gates apply on the wiki-dedupe path."""
+
+    def _seed_cohesive_cluster(self, tmp_path: Path, n: int) -> Path:
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        for i in range(n):
+            _write_page(
+                wiki_root,
+                f"dup-{i}.md",
+                body=f"Cohesive duplicate-topic wiki page number {i}.",
+            )
+        return wiki_root.parent  # knowledge_root
+
+    def test_over_cluster_suppressed_not_written(self, tmp_path: Path) -> None:
+        """n_sources (6) > max_merge_sources (5, default) → nothing written.
+
+        The exact regression the issue asks for: a cluster over the default size
+        cap, fed through the path that produced the live degenerate entries,
+        must reach ``_pending_merges.md`` as ZERO blocks.
+        """
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            config={},  # defaults: max_merge_sources=5, min_merge_mean_similarity=0.6
+            threshold=0.8,
+            embedding_provider=_identical_embed,
+        )
+        assert proposals == []
+        merges_path = knowledge_root / "wiki" / "_pending_merges.md"
+        # Either the sidecar was never created, or it exists with no merge block.
+        if merges_path.is_file():
+            assert "## [" not in merges_path.read_text(encoding="utf-8")
+
+    def test_over_cluster_suppressed_in_dry_run(self, tmp_path: Path) -> None:
+        """dry-run reflects the gated real run — the over-cluster is not previewed."""
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            config={},
+            threshold=0.8,
+            embedding_provider=_identical_embed,
+            dry_run=True,
+        )
+        assert proposals == []
+
+    def test_raising_max_merge_sources_admits_the_cluster(self, tmp_path: Path) -> None:
+        """The gate is config-driven: a higher cap admits the same 6-page cluster,
+        proving the suppression is the size cap firing (not clustering collapsing
+        the group) and that the wiki-dedupe path honors ``librarian`` config."""
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            config={"librarian": {"max_merge_sources": 10}},
+            threshold=0.8,
+            embedding_provider=_identical_embed,
+        )
+        assert len(proposals) == 1
+        assert len(proposals[0]["sources"]) == 6
+
+    def test_low_mean_cohesion_suppressed_via_config(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        """The mean-cohesion arm is wired too: a floor above the cluster's mean
+        pairwise cohesion (~0.97 for the 3 venture pages) suppresses an
+        otherwise size-legal 3-page cluster on the wiki-dedupe path."""
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        proposals = propose_wiki_page_merges(
+            duplicate_topic_wiki,
+            config={"librarian": {"min_merge_mean_similarity": 0.99}},
+            threshold=0.8,
+            embedding_provider=_fake_embed,
+        )
+        assert proposals == []
