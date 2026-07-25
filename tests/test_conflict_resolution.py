@@ -319,10 +319,46 @@ class TestTier3WriteAtomicity:
                 observations="new info B",
             ),
         ]
+        # Issue #469: merge responses are anchored edit ops (a replace on the
+        # original body line), applied deterministically — no full-echo call.
         client = MagicMock()
         client.messages.create.side_effect = [
-            MagicMock(content=[MagicMock(text="# Alice\n\nUpdated A.")]),
-            MagicMock(content=[MagicMock(text="# Bob\n\nUpdated B.")]),
+            MagicMock(
+                content=[
+                    MagicMock(
+                        text=json.dumps(
+                            {
+                                "ops": [
+                                    {
+                                        "op": "replace",
+                                        "anchor": "Original A.",
+                                        "text": "Updated A.",
+                                    }
+                                ]
+                            }
+                        )
+                    )
+                ],
+                stop_reason="end_turn",
+            ),
+            MagicMock(
+                content=[
+                    MagicMock(
+                        text=json.dumps(
+                            {
+                                "ops": [
+                                    {
+                                        "op": "replace",
+                                        "anchor": "Original B.",
+                                        "text": "Updated B.",
+                                    }
+                                ]
+                            }
+                        )
+                    )
+                ],
+                stop_reason="end_turn",
+            ),
         ]
         new_entities, updated_uids, escalations = tier3_write(
             raw,
