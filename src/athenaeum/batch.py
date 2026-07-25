@@ -68,14 +68,15 @@ from athenaeum.models import (
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
+    parse_merge_ops_response,
     parse_tier2_entities,
-    parse_tier3_merge,
     stamp_merge_provenance,
     tier1_programmatic_match,
     tier2_request_params,
     tier3_create_params,
     tier3_entity_from_text,
     tier3_merge,
+    tier3_merge_full,
     tier3_merge_params,
     tier4_escalate,
 )
@@ -234,8 +235,12 @@ class _FileState:
     actions: list[EntityAction] = field(default_factory=list)
     t2_id: str | None = None
     create_ids: list[tuple[str, EntityAction]] = field(default_factory=list)
-    # (custom_id, action, page_path, meta-parsed-at-assembly)
-    merge_ids: list[tuple[str, EntityAction, Path, dict]] = field(default_factory=list)
+    # (custom_id, action, page_path, meta-parsed-at-assembly,
+    #  existing_body-read-at-assembly). Issue #469: existing_body is retained
+    #  so the patch-mode ops can be applied deterministically at finalize.
+    merge_ids: list[tuple[str, EntityAction, Path, dict, str]] = field(
+        default_factory=list
+    )
     sync_merges: list[EntityAction] = field(default_factory=list)
     created: list[WikiEntity] = field(default_factory=list)
     failed: bool = False
@@ -513,7 +518,9 @@ def process_batch_run(
                             ),
                         )
                     )
-                    st.merge_ids.append((cid, action, existing_path, meta))
+                    st.merge_ids.append(
+                        (cid, action, existing_path, meta, existing_body)
+                    )
             if len(t3_requests) > requests_mark or st.sync_merges:
                 phase2_spent = True
         except Exception:
@@ -590,16 +597,29 @@ def process_batch_run(
                     tier3_entity_from_text(action, msg.content[0].text, config=config)
                 )
 
-            for cid, action, page_path, meta in st.merge_ids:
+            for cid, action, page_path, meta, existing_body in st.merge_ids:
                 msg = t3_results.get(cid)
                 if msg is None:
                     raise _BatchItemError(cid)
-                updated_body, esc = parse_tier3_merge(
+                # Issue #469: apply the batched patch-mode ops deterministically;
+                # a live full-echo fallback runs only when the patch response is
+                # unparseable, truncated, or fails to apply.
+                updated_body, esc, needs_fallback = parse_merge_ops_response(
                     msg.content[0].text,
                     action,
                     st.raw.ref,
+                    existing_body,
                     stop_reason=getattr(msg, "stop_reason", None),
                 )
+                if needs_fallback:
+                    updated_body, esc = tier3_merge_full(
+                        action,
+                        existing_body,
+                        st.raw.ref,
+                        client,
+                        usage=usage,
+                        config=config,
+                    )
                 if esc:
                     escalations.append(esc)
                 if updated_body:
