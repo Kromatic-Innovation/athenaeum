@@ -73,6 +73,7 @@ from athenaeum.tiers import (
     parse_tier2_entities,
     stamp_merge_provenance,
     tier1_programmatic_match,
+    tier2_reclassify_larger_budget,
     tier2_request_params,
     tier3_create_params,
     tier3_entity_from_text,
@@ -265,6 +266,14 @@ class BatchRunResult:
     #: retry a single request synchronously, so repair is its only recovery
     #: mechanism — the sync path additionally retries once.)
     degraded: int = 0
+    #: Files that dropped ALL entities because the Tier-2 response was
+    #: TRUNCATED at the output-token budget (``stop_reason == "max_tokens"``),
+    #: leaving an unterminated array (issue #476). Kept SEPARATE from
+    #: ``degraded`` (a genuine parse failure). The batch transport cannot retry
+    #: a single request with a bigger budget synchronously, so a truncated
+    #: file is preserved and retried on the next run — but the raised default
+    #: ``max_tokens`` (#476) makes a truncation far rarer to begin with.
+    truncated: int = 0
     failed_refs: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
 
@@ -405,7 +414,9 @@ def process_batch_run(
                 continue
             # #472: repair bare control chars inside string values before
             # discarding a whole file's entities, and count any that still
-            # degrade so the run summary can surface it.
+            # degrade so the run summary can surface it. #476: pass the
+            # response's stop_reason so a max_tokens truncation is counted as
+            # ``truncated`` (distinct from a genuine parse ``degraded``).
             t2_stats = Tier2ParseStats()
             classified = parse_tier2_entities(
                 text,
@@ -415,8 +426,41 @@ def process_batch_run(
                 valid_access,
                 owner=owner,
                 stats=t2_stats,
+                stop_reason=getattr(msg, "stop_reason", None),
             )
+            # #476: a batch response TRUNCATED at max_tokens dropped every
+            # entity — retry ONCE synchronously with a LARGER budget (the same
+            # bigger-budget retry the sync path uses). This closes the gap #472
+            # left, where the retry existed only on the sync path; the tier-3
+            # full-echo fallback below is the established precedent for a live
+            # call at batch finalize. A retry that recovers clears the
+            # truncation; one that still truncates leaves the file preserved
+            # (never unlinked) for the next run.
+            if t2_stats.truncated:
+                retry_names = [name for name, _, _ in st.matched]
+                retry_entities, retry_stats = tier2_reclassify_larger_budget(
+                    st.raw,
+                    retry_names,
+                    valid_types,
+                    valid_tags,
+                    valid_access,
+                    client,
+                    wiki_root=wiki_root,
+                    usage=usage,
+                    config=config,
+                    owner=owner,
+                )
+                if not retry_stats.degraded and not retry_stats.truncated:
+                    log.info(
+                        "tier2-classify-truncation-retry-recovered ref=%s: batch "
+                        "retry with a larger max_tokens budget parsed successfully",
+                        st.raw.ref,
+                    )
+                    classified = retry_entities
+                    t2_stats.truncated -= 1
+                    t2_stats.repaired += retry_stats.repaired
             result.degraded += t2_stats.degraded
+            result.truncated += t2_stats.truncated
             log.info(
                 "  T2 classified %d new entities (%s)", len(classified), st.raw.ref
             )
