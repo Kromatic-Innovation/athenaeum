@@ -1175,6 +1175,7 @@ def _compile_auto_memory(
     usage: TokenUsage | None,
     changed_paths: set[Path] | None,
     deadline: float | None = None,
+    max_api_calls: int | None = None,
 ) -> list:
     """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
 
@@ -1196,6 +1197,11 @@ def _compile_auto_memory(
     diverge from a full compile. All new params default to the whole-corpus
     behaviour, so a call with ``changed_paths=None`` is byte-identical to the
     pre-#370 pipeline.
+
+    ``max_api_calls`` (issue #461) is threaded straight through to
+    :func:`athenaeum.merge.merge_clusters_to_wiki`'s C4 budget guard — see
+    there for the degrade semantics. ``None`` (the default) preserves the
+    pre-#461 unbounded C4 behaviour byte-for-byte.
     """
     delta_enabled = resolve_delta_enabled(config)
     delta_eligible = (
@@ -1249,6 +1255,7 @@ def _compile_auto_memory(
         usage=usage,
         only_cluster_ids=only_cluster_ids,
         deadline=deadline,
+        max_api_calls=max_api_calls,
     )
 
 
@@ -1856,6 +1863,7 @@ def run(
                 client=merge_client,
                 usage=usage,
                 deadline=run_deadline,  # issue #396
+                max_api_calls=max_api_calls,  # issue #461
             )
         except RunDeadlineExceeded as exc:
             return _stop_on_deadline(exc.phase)
@@ -1891,71 +1899,436 @@ def run(
         )
         return 0
 
-    # C1 + C2: auto-memory discovery followed by the C2 cluster pass.
-    # Clustering must run BEFORE any tier routing so that downstream C3
-    # merge has a fresh grouping to consume. Scope identity is preserved
-    # on each record so the tier pipeline and the cluster pass both see
-    # the same routing key.
-    auto_memory_files = discover_auto_memory_files(knowledge_root, config=config)
-    if auto_memory_files:
-        by_scope: dict[str, int] = {}
-        for am in auto_memory_files:
-            by_scope[am.origin_scope] = by_scope.get(am.origin_scope, 0) + 1
-        log.info(
-            "Discovered %d auto-memory file(s) across %d scope(s)",
-            len(auto_memory_files),
-            len(by_scope),
-        )
-        if dry_run:
-            for scope, count in sorted(by_scope.items()):
-                log.info("  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count)
+    # Issue #461: shared state hoisted above BOTH the entity phase and the
+    # auto-memory block. Safe defaults so the finalize return-code logic
+    # (deadline_tripped / failed_files / deferred_refs, below) is well-defined
+    # even on cluster_only (which skips the entity phase entirely) and on an
+    # empty raw intake (which now falls through to auto-memory instead of
+    # returning early — see the entity phase below).
+    total_created = 0
+    total_updated = 0
+    total_escalated = 0
+    total_skipped = 0
+    failed_files: list[str] = []
+    deferred_refs: list[str] = []
+    processed_count = 0
+    deadline_tripped = False  # issue #396: set when the entity loop hits the deadline
+    raw_files: list[Any] = []
 
-        # C2 + C3 + C4: cluster, merge, and detect. Issue #370 PR2 threads the
-        # optional ``changed_paths`` delta through this one call — see
-        # :func:`_compile_auto_memory` for the delta-eligibility (D5) gate, the
-        # cluster pass, the F6 slug-collision guard, and the merge. Issue #396:
-        # ``deadline`` is threaded into the merge pass's per-cluster loops (the
-        # #396 wedge site); a trip there raises RunDeadlineExceeded, caught here.
-        try:
-            merged_entries = _compile_auto_memory(
-                auto_memory_files,
-                knowledge_root,
-                config=config,
-                dry_run=dry_run,
-                client=merge_client,
-                usage=usage,
-                changed_paths=changed_paths,
-                deadline=run_deadline,
+    # ------------------------------------------------------------------
+    # Issue #461: ENTITY phase moved ahead of the auto-memory block (C2
+    # cluster / C3 merge / C4 detect). Before this reorder, the whole-corpus
+    # auto-memory compile ran FIRST and could consume the entire shared
+    # ``max_runtime`` deadline before the per-file entity loop ever got a
+    # turn — on a slow night the entity intake starved completely. Running
+    # entity first guarantees it gets first claim on the shared deadline (and
+    # the shared ``max_api_calls`` budget — see the new guard in
+    # ``merge.merge_clusters_to_wiki``); the auto-memory block then runs
+    # after, consuming whatever budget/time remains. Skipped entirely for
+    # ``cluster_only`` (merge_only already returned above and can't reach
+    # here).
+    #
+    # Semantic shift (#461, no code changes needed beyond this reorder): the
+    # EntityIndex load below now happens BEFORE the C3 merge that (re)writes
+    # ``wiki/auto-*.md`` pages, so the entity tier sees auto-memory pages as
+    # they stood at the END of the PREVIOUS run — one cycle stale relative to
+    # this run's own C2-C4 pass. This is a natural consequence of claiming
+    # the entity phase's budget first and does not affect entity-tier
+    # correctness (the entity tiers do not depend on this run's auto-memory
+    # output).
+    if not cluster_only:
+        raw_files = discover_raw_files(raw_root)
+        if not raw_files:
+            # An empty entity intake is no longer a whole-run early return
+            # (issue #461): auto-memory compiles independently of raw
+            # entity intake and must still run below. Only clear the stale
+            # deferred-work manifest here and skip the per-file machinery;
+            # the manifest-clear also happens again (harmlessly) after a
+            # clean auto-memory pass, but doing it here too preserves the
+            # pre-#461 "empty intake is a clean run" contract even if the
+            # auto-memory block below is skipped for some reason.
+            if not dry_run:
+                _clear_stale_deferred_manifest(wiki_root)
+            log.info("No raw files to process. Nothing to do.")
+        else:
+            total_intake = len(raw_files)
+            log.info("Found %d raw file(s) to process", total_intake)
+
+            if total_intake > max_files:
+                log.info(
+                    "Budget cap: processing %d of %d files this run",
+                    max_files,
+                    total_intake,
+                )
+                raw_files = raw_files[:max_files]
+            # Files discovery found but the max_files window excluded from
+            # this run entirely. Counted into the deferred manifest on a
+            # budget trip so the manifest reports the TRUE backlog, not just
+            # the in-window remainder.
+            beyond_window = total_intake - len(raw_files)
+
+            schema_path = wiki_root / "_schema"
+            valid_types = load_schema_list(schema_path, "types.md") or FALLBACK_TYPES
+            valid_tags = load_schema_list(schema_path, "tags.md") or FALLBACK_TAGS
+            valid_access = (
+                load_schema_list(schema_path, "access-levels.md") or FALLBACK_ACCESS
             )
-        except RunDeadlineExceeded as exc:
-            return _stop_on_deadline(exc.phase)
 
-        # Issue #396: deadline check at the post-compile phase boundary, before
-        # the retire + reresolve passes (both can commit / make LLM calls).
-        if _deadline_exceeded():
-            return _stop_on_deadline("post-compile (before retire/reresolve)")
+            index = EntityIndex(wiki_root)
+            log.info("Loaded %d wiki entries into index", len(index))
 
-        # Issue #261 (slice B of #259): move-then-retire lifecycle. Runs after
-        # merge + C4 detection. Non-contradictory raw is moved into its wiki
-        # entry (origin-traced footnote) and git rm'd; contradictory raw is
-        # held for human confirmation. Skipped for the cluster_only diagnostic
-        # mode, when retire is disabled (#259 opt-out), and a no-op without a
-        # git repo.
-        if retire and not cluster_only:
-            _run_retire(
-                merged_entries,
-                knowledge_root,
-                config=config,
-                dry_run=dry_run,
-                projects_root=projects_root,
+            client = merge_client  # shared with C4 contradiction detector
+
+            if not dry_run:
+                git_snapshot(knowledge_root, "librarian: pre-processing snapshot")
+
+            # Issue #337: a wall-clock timeout (the pre-dawn sweep's
+            # `timeout`, which SIGTERMs then, after a grace, KILLs) would
+            # otherwise kill the run between the pre-processing snapshot
+            # above and the terminal `processed N file(s)` commit below,
+            # stranding every wiki page written so far as an uncommitted
+            # tree for the NEXT run's `git add -A` snapshot to absorb under
+            # a misleading "pre-processing snapshot" message. Install a
+            # SIGTERM/SIGINT handler for the writing phase that commits the
+            # partial progress with a distinct, greppable message and exits
+            # 124 (matching coreutils `timeout`). A normally-completing run
+            # restores the handlers right after the terminal commit and
+            # commits exactly once, unchanged. Opt-in (CLI-only via
+            # `install_signal_handlers`) so in-process callers (the MCP
+            # server, tests) never have their signal handling hijacked.
+            _prev_handlers: list[tuple[int, Any]] = []
+
+            def _commit_partial_and_exit(signum: int, _frame: Any) -> None:
+                log.warning(
+                    "librarian: interrupted by signal %d after %d file(s) — "
+                    "committing partial progress (issue #337)",
+                    signum,
+                    processed_count,
+                )
+                # Restore first so a second signal during the commit can't
+                # recurse into this handler.
+                for _s, _prev in _prev_handlers:
+                    signal.signal(_s, _prev)
+                git_snapshot(
+                    knowledge_root,
+                    f"librarian: partial run (interrupted after {processed_count} "
+                    f"file(s), {total_created}C {total_updated}U {total_escalated}E "
+                    f"{len(failed_files)}F)",
+                )
+                sys.exit(124)
+
+            if install_signal_handlers and not dry_run:
+                try:
+                    for _s in (signal.SIGTERM, signal.SIGINT):
+                        _prev_handlers.append(
+                            (_s, signal.signal(_s, _commit_partial_and_exit))
+                        )
+                except ValueError:
+                    # Not the main thread (e.g. an in-process caller) —
+                    # signal handlers can't be installed here. Skip the
+                    # guard rather than fail an otherwise-valid run.
+                    log.debug(
+                        "librarian: interrupt-commit guard skipped (not main thread)"
+                    )
+                    _prev_handlers = []
+
+            # Issue #337: the interrupt handler installed above stays active
+            # through the terminal commit; the `finally` restores it on
+            # EVERY exit path (normal, interrupt, or an exception from
+            # `rebuild_index` / the terminal `git_snapshot`), so it can
+            # never outlive the run for an in-process caller. A no-op when
+            # no handler was installed (dry-run / not opt-in / not the main
+            # thread).
+            try:
+                if batch_mode and dry_run:
+                    log.info(
+                        "Batch mode requested but --dry-run makes no API calls — "
+                        "using the synchronous dry-run path"
+                    )
+
+                if batch_mode and not dry_run and client is not None:
+                    # Issue #236: phased fan-out via the Messages Batch API.
+                    # The synchronous loop below is untouched when the flag
+                    # is off. Issue #337 note: `processed_count` is
+                    # incremented only by the synchronous loop, so an
+                    # interrupt during a BATCH run reports "0 file(s)" in
+                    # the partial-commit message even though any pages
+                    # already written are still committed by the handler's
+                    # `git_snapshot` (git add -A) — the tree stays clean.
+                    # Accurate batch-interrupt accounting is #236-adjacent
+                    # and out of scope for #337 (batch mode is API-only and
+                    # off for the nightly run).
+                    from athenaeum.batch import process_batch_run
+
+                    log.info(
+                        "Batch mode: tier-2/tier-3 calls via the Messages Batch API"
+                    )
+                    outcome = process_batch_run(
+                        raw_files,
+                        index,
+                        wiki_root,
+                        client,
+                        valid_types,
+                        valid_tags,
+                        valid_access,
+                        usage=usage,
+                        config=config,
+                        max_api_calls=max_api_calls,
+                    )
+                    total_created = outcome.created
+                    total_updated = outcome.updated
+                    total_escalated = outcome.escalated
+                    total_skipped = outcome.skipped
+                    failed_files = outcome.failed_refs
+                    deferred_refs = outcome.deferred_refs
+                else:
+                    for i, raw in enumerate(raw_files):
+                        if not dry_run and usage.api_calls >= max_api_calls:
+                            log.warning(
+                                "API call budget exhausted (%d/%d) — stopping early",
+                                usage.api_calls,
+                                max_api_calls,
+                            )
+                            # Issue #220: everything from here on is
+                            # deferred to the next run — record it so the
+                            # manifest + summary surface it.
+                            deferred_refs = [r.ref for r in raw_files[i:]]
+                            break
+
+                        # Issue #396: wall-clock deadline check at the
+                        # per-file boundary. Mirrors the budget-exhaustion
+                        # path — defer the remaining intake and record it in
+                        # the manifest — but marks the run as
+                        # deadline-tripped so it exits 124 (resumable), not
+                        # 0. Placed BEFORE the file's LLM work so a run
+                        # already past the deadline does not start another
+                        # (potentially slow) file.
+                        if not dry_run and _deadline_exceeded():
+                            log.warning(
+                                "librarian: wall-clock deadline (%ds) exceeded after "
+                                "%d file(s) — deferring %d remaining file(s) and "
+                                "stopping (resumable, issue #396)",
+                                max_runtime,
+                                i,
+                                len(raw_files) - i,
+                            )
+                            deferred_refs = [r.ref for r in raw_files[i:]]
+                            deadline_tripped = True
+                            break
+
+                        # Issue #378: the spend ceiling is the actual
+                        # mitigation — a monitor reports after the fact,
+                        # this STOPS the burn. Tokens bound the subscription
+                        # path, dollars the API path. On breach we log
+                        # loudly and defer the rest (never silently
+                        # continue).
+                        if not dry_run:
+                            _ceiling = spend.ceiling_tripped(
+                                usage, provider=provider, config=config
+                            )
+                            if _ceiling is not None:
+                                log.error(
+                                    "Spend ceiling reached (%s) — stopping early",
+                                    _ceiling,
+                                )
+                                deferred_refs = [r.ref for r in raw_files[i:]]
+                                break
+
+                        log.info("Processing: %s", raw.ref)
+                        try:
+                            result = process_one(
+                                raw,
+                                index,
+                                wiki_root,
+                                client,
+                                valid_types,
+                                valid_tags,
+                                valid_access,
+                                dry_run=dry_run,
+                                usage=usage,
+                                config=config,
+                            )
+                        except TransientAPIError as exc:
+                            # Issue #193: the Anthropic API was overloaded
+                            # (429/529) and the bounded retry was exhausted.
+                            # Defer to the next run exactly like a
+                            # malformed-file failure, but log it distinctly
+                            # so health reporting can tell "API was
+                            # overloaded" (transient) apart from "this file
+                            # is broken".
+                            log.error(
+                                "Gave up after %d retries (transient API overload) %s: %s",
+                                exc.attempts,
+                                raw.ref,
+                                type(exc.last_error).__name__,
+                            )
+                            failed_files.append(raw.ref)
+                            continue
+                        except Exception:
+                            log.exception("Failed to process %s", raw.ref)
+                            failed_files.append(raw.ref)
+                            continue
+
+                        total_created += len(result.created)
+                        total_updated += len(result.updated)
+                        total_escalated += len(result.escalated)
+                        total_skipped += len(result.skipped)
+
+                        if not dry_run:
+                            raw.path.unlink()
+                            log.info("  Deleted: %s", raw.path)
+                            processed_count += 1
+
+                # Issue #220: a budget-tripped run must be visibly DEGRADED,
+                # not "Done". Exit code stays 0 (not a crash — the deferred
+                # files are picked up by the next run), but the summary line
+                # is machine-greppable and a manifest records exactly what
+                # was deferred. A clean run clears any stale manifest left
+                # by a previous tripped run.
+                if deferred_refs:
+                    # Issue #396: the entity loop defers remaining intake
+                    # for either reason; label the manifest + summary with
+                    # the actual trigger.
+                    degraded_reason = (
+                        "wall-clock deadline exceeded" if deadline_tripped
+                        else "budget exhausted"
+                    )
+                    manifest_path = _write_deferred_manifest(
+                        wiki_root,
+                        deferred_refs,
+                        api_calls=usage.api_calls,
+                        budget=max_api_calls,
+                        beyond_window=beyond_window,
+                        failed_refs=failed_files,
+                        reason="deadline" if deadline_tripped else "budget",
+                    )
+                    log.warning(
+                        "Done (DEGRADED — %s): %d created, %d updated, "
+                        "%d escalated, %d skipped, %d failed, %d deferred (manifest: %s)",
+                        degraded_reason,
+                        total_created,
+                        total_updated,
+                        total_escalated,
+                        total_skipped,
+                        len(failed_files),
+                        len(deferred_refs) + beyond_window,
+                        manifest_path,
+                    )
+                else:
+                    if not dry_run:
+                        _clear_stale_deferred_manifest(wiki_root)
+                    log.info(
+                        "Done: %d created, %d updated, %d escalated, %d skipped, %d failed",
+                        total_created,
+                        total_updated,
+                        total_escalated,
+                        total_skipped,
+                        len(failed_files),
+                    )
+                # Issue #461: the run-level "Token usage:" summary log and the
+                # #378 spend-ledger write are DELIBERATELY not here. The entity
+                # phase now runs BEFORE the auto-memory (C2-C4) block, and the
+                # shared ``usage`` keeps accruing the C4 detector/resolver spend
+                # after this point — the exact spend the #460 epic exists to
+                # observe. Recording here would drop all of it. Both moved to
+                # the finalize section below so they reflect the WHOLE run.
+                if not dry_run and (total_created > 0 or total_updated > 0):
+                    rebuild_index(wiki_root)
+
+                if not dry_run:
+                    _processed_n = len(raw_files) - len(deferred_refs)
+                    msg = (
+                        f"librarian: processed {_processed_n} file(s) "
+                        f"({total_created}C {total_updated}U "
+                        f"{total_escalated}E {len(failed_files)}F)"
+                    )
+                    git_snapshot(knowledge_root, msg)
+            finally:
+                for _s, _prev in _prev_handlers:
+                    signal.signal(_s, _prev)
+                _prev_handlers = []
+
+    # ------------------------------------------------------------------
+    # Issue #461: auto-memory block (C1 discover + C2 cluster / C3 merge /
+    # C4 detect, then the post-compile deadline check, then retire, then
+    # #188 reresolve) now runs AFTER the entity phase above, consuming
+    # whatever run-level deadline/budget the entity phase left. Gated on
+    # ``not deadline_tripped`` — if the entity loop already tripped the
+    # wall-clock deadline, the run exits 124 below without spending any more
+    # time here.
+    if not deadline_tripped:
+        # C1 + C2: auto-memory discovery followed by the C2 cluster pass.
+        # Clustering must run BEFORE any tier routing so that downstream C3
+        # merge has a fresh grouping to consume. Scope identity is preserved
+        # on each record so the tier pipeline and the cluster pass both see
+        # the same routing key.
+        auto_memory_files = discover_auto_memory_files(knowledge_root, config=config)
+        if auto_memory_files:
+            by_scope: dict[str, int] = {}
+            for am in auto_memory_files:
+                by_scope[am.origin_scope] = by_scope.get(am.origin_scope, 0) + 1
+            log.info(
+                "Discovered %d auto-memory file(s) across %d scope(s)",
+                len(auto_memory_files),
+                len(by_scope),
             )
+            if dry_run:
+                for scope, count in sorted(by_scope.items()):
+                    log.info(
+                        "  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count
+                    )
 
-        # Issue #188: re-resolve open, proposal-less pending questions so a
-        # prior cap-hit / offline escalation self-heals on this (budgeted) run.
-        if not dry_run:
-            _run_reresolve_pass(
-                knowledge_root, config=config, client=merge_client, usage=usage
-            )
+            # C2 + C3 + C4: cluster, merge, and detect. Issue #370 PR2
+            # threads the optional ``changed_paths`` delta through this one
+            # call — see :func:`_compile_auto_memory` for the
+            # delta-eligibility (D5) gate, the cluster pass, the F6
+            # slug-collision guard, and the merge. Issue #396: ``deadline``
+            # is threaded into the merge pass's per-cluster loops (the #396
+            # wedge site); a trip there raises RunDeadlineExceeded, caught
+            # here.
+            try:
+                merged_entries = _compile_auto_memory(
+                    auto_memory_files,
+                    knowledge_root,
+                    config=config,
+                    dry_run=dry_run,
+                    client=merge_client,
+                    usage=usage,
+                    changed_paths=changed_paths,
+                    deadline=run_deadline,
+                    max_api_calls=max_api_calls,  # issue #461
+                )
+            except RunDeadlineExceeded as exc:
+                return _stop_on_deadline(exc.phase)
+
+            # Issue #396: deadline check at the post-compile phase boundary,
+            # before the retire + reresolve passes (both can commit / make
+            # LLM calls).
+            if _deadline_exceeded():
+                return _stop_on_deadline("post-compile (before retire/reresolve)")
+
+            # Issue #261 (slice B of #259): move-then-retire lifecycle. Runs
+            # after merge + C4 detection. Non-contradictory raw is moved
+            # into its wiki entry (origin-traced footnote) and git rm'd;
+            # contradictory raw is held for human confirmation. Skipped for
+            # the cluster_only diagnostic mode, when retire is disabled
+            # (#259 opt-out), and a no-op without a git repo.
+            if retire and not cluster_only:
+                _run_retire(
+                    merged_entries,
+                    knowledge_root,
+                    config=config,
+                    dry_run=dry_run,
+                    projects_root=projects_root,
+                )
+
+            # Issue #188: re-resolve open, proposal-less pending questions
+            # so a prior cap-hit / offline escalation self-heals on this
+            # (budgeted) run.
+            if not dry_run:
+                _run_reresolve_pass(
+                    knowledge_root, config=config, client=merge_client, usage=usage
+                )
 
     if cluster_only:
         # Same contract as the merge-only early return above: a clean
@@ -1971,315 +2344,29 @@ def run(
         )
         return 0
 
-    raw_files = discover_raw_files(raw_root)
-    if not raw_files:
-        # An empty intake is a clean run: clear any stale deferred-work
-        # manifest left by a previous budget-tripped run. Without this the
-        # early return below would preserve the stale manifest forever once
-        # the backlog drains without new intake.
-        if not dry_run:
-            _clear_stale_deferred_manifest(wiki_root)
-        log.info("No raw files to process. Nothing to do.")
-        _maybe_push_after_run(
-            knowledge_root,
-            config=config,
-            push_after_run=push_after_run,
-            dry_run=dry_run,
-            head_at_start=head_at_start,
-        )
-        return 0
-
-    total_intake = len(raw_files)
-    log.info("Found %d raw file(s) to process", total_intake)
-
-    if total_intake > max_files:
+    # Issue #461: run-level spend summary + #378 ledger write, moved here from
+    # the (now-earlier) entity phase so ``usage`` reflects BOTH phases — the
+    # entity tiers AND the auto-memory C2-C4 detector/resolver spend that
+    # accrues after the entity loop. Recording inside the entity phase (its
+    # pre-#461 home, when it ran LAST) would silently undercount every run by
+    # the entire C4 cost, defeating the observability the #460 epic needs.
+    # Kept after the merge_only/cluster_only early returns, matching the
+    # pre-#461 placement (those paths never recorded run spend). Best-effort
+    # (#378): never breaks the run; skipped on dry-run (counters are zero).
+    if usage.api_calls > 0:
         log.info(
-            "Budget cap: processing %d of %d files this run",
-            max_files,
-            total_intake,
+            "Token usage: %d API calls, %d input + %d output = %d total"
+            " (cache: %d written, %d read) (~$%.4f estimated)",
+            usage.api_calls,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.total_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+            usage.estimated_cost_usd,
         )
-        raw_files = raw_files[:max_files]
-    # Files discovery found but the max_files window excluded from this run
-    # entirely. Counted into the deferred manifest on a budget trip so the
-    # manifest reports the TRUE backlog, not just the in-window remainder.
-    beyond_window = total_intake - len(raw_files)
-
-    schema_path = wiki_root / "_schema"
-    valid_types = load_schema_list(schema_path, "types.md") or FALLBACK_TYPES
-    valid_tags = load_schema_list(schema_path, "tags.md") or FALLBACK_TAGS
-    valid_access = load_schema_list(schema_path, "access-levels.md") or FALLBACK_ACCESS
-
-    index = EntityIndex(wiki_root)
-    log.info("Loaded %d wiki entries into index", len(index))
-
-    client = merge_client  # shared with C4 contradiction detector
-
     if not dry_run:
-        git_snapshot(knowledge_root, "librarian: pre-processing snapshot")
-
-    total_created = 0
-    total_updated = 0
-    total_escalated = 0
-    total_skipped = 0
-    failed_files: list[str] = []
-    deferred_refs: list[str] = []
-    processed_count = 0
-    deadline_tripped = False  # issue #396: set when the entity loop hits the deadline
-
-    # Issue #337: a wall-clock timeout (the pre-dawn sweep's `timeout`, which
-    # SIGTERMs then, after a grace, KILLs) would otherwise kill the run
-    # between the pre-processing snapshot above and the terminal
-    # `processed N file(s)` commit below, stranding every wiki page written
-    # so far as an uncommitted tree for the NEXT run's `git add -A` snapshot
-    # to absorb under a misleading "pre-processing snapshot" message. Install
-    # a SIGTERM/SIGINT handler for the writing phase that commits the partial
-    # progress with a distinct, greppable message and exits 124 (matching
-    # coreutils `timeout`). A normally-completing run restores the handlers
-    # right after the terminal commit and commits exactly once, unchanged.
-    # Opt-in (CLI-only via `install_signal_handlers`) so in-process callers
-    # (the MCP server, tests) never have their signal handling hijacked.
-    _prev_handlers: list[tuple[int, Any]] = []
-
-    def _commit_partial_and_exit(signum: int, _frame: Any) -> None:
-        log.warning(
-            "librarian: interrupted by signal %d after %d file(s) — "
-            "committing partial progress (issue #337)",
-            signum,
-            processed_count,
-        )
-        # Restore first so a second signal during the commit can't recurse
-        # into this handler.
-        for _s, _prev in _prev_handlers:
-            signal.signal(_s, _prev)
-        git_snapshot(
-            knowledge_root,
-            f"librarian: partial run (interrupted after {processed_count} "
-            f"file(s), {total_created}C {total_updated}U {total_escalated}E "
-            f"{len(failed_files)}F)",
-        )
-        sys.exit(124)
-
-    if install_signal_handlers and not dry_run:
-        try:
-            for _s in (signal.SIGTERM, signal.SIGINT):
-                _prev_handlers.append((_s, signal.signal(_s, _commit_partial_and_exit)))
-        except ValueError:
-            # Not the main thread (e.g. an in-process caller) — signal
-            # handlers can't be installed here. Skip the guard rather than
-            # fail an otherwise-valid run.
-            log.debug("librarian: interrupt-commit guard skipped (not main thread)")
-            _prev_handlers = []
-
-    # Issue #337: the interrupt handler installed above stays active through
-    # the terminal commit; the `finally` restores it on EVERY exit path
-    # (normal, interrupt, or an exception from `rebuild_index` / the terminal
-    # `git_snapshot`), so it can never outlive the run for an in-process
-    # caller. A no-op when no handler was installed (dry-run / not opt-in /
-    # not the main thread).
-    try:
-        if batch_mode and dry_run:
-            log.info(
-                "Batch mode requested but --dry-run makes no API calls — "
-                "using the synchronous dry-run path"
-            )
-
-        if batch_mode and not dry_run and client is not None:
-            # Issue #236: phased fan-out via the Messages Batch API. The
-            # synchronous loop below is untouched when the flag is off.
-            # Issue #337 note: `processed_count` is incremented only by the
-            # synchronous loop, so an interrupt during a BATCH run reports
-            # "0 file(s)" in the partial-commit message even though any pages
-            # already written are still committed by the handler's
-            # `git_snapshot` (git add -A) — the tree stays clean. Accurate
-            # batch-interrupt accounting is #236-adjacent and out of scope
-            # for #337 (batch mode is API-only and off for the nightly run).
-            from athenaeum.batch import process_batch_run
-
-            log.info("Batch mode: tier-2/tier-3 calls via the Messages Batch API")
-            outcome = process_batch_run(
-                raw_files,
-                index,
-                wiki_root,
-                client,
-                valid_types,
-                valid_tags,
-                valid_access,
-                usage=usage,
-                config=config,
-                max_api_calls=max_api_calls,
-            )
-            total_created = outcome.created
-            total_updated = outcome.updated
-            total_escalated = outcome.escalated
-            total_skipped = outcome.skipped
-            failed_files = outcome.failed_refs
-            deferred_refs = outcome.deferred_refs
-        else:
-            for i, raw in enumerate(raw_files):
-                if not dry_run and usage.api_calls >= max_api_calls:
-                    log.warning(
-                        "API call budget exhausted (%d/%d) — stopping early",
-                        usage.api_calls,
-                        max_api_calls,
-                    )
-                    # Issue #220: everything from here on is deferred to the
-                    # next run — record it so the manifest + summary surface it.
-                    deferred_refs = [r.ref for r in raw_files[i:]]
-                    break
-
-                # Issue #396: wall-clock deadline check at the per-file boundary.
-                # Mirrors the budget-exhaustion path — defer the remaining
-                # intake and record it in the manifest — but marks the run as
-                # deadline-tripped so it exits 124 (resumable), not 0. Placed
-                # BEFORE the file's LLM work so a run already past the deadline
-                # does not start another (potentially slow) file.
-                if not dry_run and _deadline_exceeded():
-                    log.warning(
-                        "librarian: wall-clock deadline (%ds) exceeded after "
-                        "%d file(s) — deferring %d remaining file(s) and "
-                        "stopping (resumable, issue #396)",
-                        max_runtime,
-                        i,
-                        len(raw_files) - i,
-                    )
-                    deferred_refs = [r.ref for r in raw_files[i:]]
-                    deadline_tripped = True
-                    break
-
-                # Issue #378: the spend ceiling is the actual mitigation — a
-                # monitor reports after the fact, this STOPS the burn. Tokens
-                # bound the subscription path, dollars the API path. On breach
-                # we log loudly and defer the rest (never silently continue).
-                if not dry_run:
-                    _ceiling = spend.ceiling_tripped(
-                        usage, provider=provider, config=config
-                    )
-                    if _ceiling is not None:
-                        log.error(
-                            "Spend ceiling reached (%s) — stopping early", _ceiling
-                        )
-                        deferred_refs = [r.ref for r in raw_files[i:]]
-                        break
-
-                log.info("Processing: %s", raw.ref)
-                try:
-                    result = process_one(
-                        raw,
-                        index,
-                        wiki_root,
-                        client,
-                        valid_types,
-                        valid_tags,
-                        valid_access,
-                        dry_run=dry_run,
-                        usage=usage,
-                        config=config,
-                    )
-                except TransientAPIError as exc:
-                    # Issue #193: the Anthropic API was overloaded (429/529)
-                    # and the bounded retry was exhausted. Defer to the next
-                    # run exactly like a malformed-file failure, but log it
-                    # distinctly so health reporting can tell "API was
-                    # overloaded" (transient) apart from "this file is broken".
-                    log.error(
-                        "Gave up after %d retries (transient API overload) %s: %s",
-                        exc.attempts,
-                        raw.ref,
-                        type(exc.last_error).__name__,
-                    )
-                    failed_files.append(raw.ref)
-                    continue
-                except Exception:
-                    log.exception("Failed to process %s", raw.ref)
-                    failed_files.append(raw.ref)
-                    continue
-
-                total_created += len(result.created)
-                total_updated += len(result.updated)
-                total_escalated += len(result.escalated)
-                total_skipped += len(result.skipped)
-
-                if not dry_run:
-                    raw.path.unlink()
-                    log.info("  Deleted: %s", raw.path)
-                    processed_count += 1
-
-        # Issue #220: a budget-tripped run must be visibly DEGRADED, not
-        # "Done". Exit code stays 0 (not a crash — the deferred files are
-        # picked up by the next run), but the summary line is machine-
-        # greppable and a manifest records exactly what was deferred. A clean
-        # run clears any stale manifest left by a previous tripped run.
-        if deferred_refs:
-            # Issue #396: the entity loop defers remaining intake for either
-            # reason; label the manifest + summary with the actual trigger.
-            degraded_reason = (
-                "wall-clock deadline exceeded" if deadline_tripped
-                else "budget exhausted"
-            )
-            manifest_path = _write_deferred_manifest(
-                wiki_root,
-                deferred_refs,
-                api_calls=usage.api_calls,
-                budget=max_api_calls,
-                beyond_window=beyond_window,
-                failed_refs=failed_files,
-                reason="deadline" if deadline_tripped else "budget",
-            )
-            log.warning(
-                "Done (DEGRADED — %s): %d created, %d updated, "
-                "%d escalated, %d skipped, %d failed, %d deferred (manifest: %s)",
-                degraded_reason,
-                total_created,
-                total_updated,
-                total_escalated,
-                total_skipped,
-                len(failed_files),
-                len(deferred_refs) + beyond_window,
-                manifest_path,
-            )
-        else:
-            if not dry_run:
-                _clear_stale_deferred_manifest(wiki_root)
-            log.info(
-                "Done: %d created, %d updated, %d escalated, %d skipped, %d failed",
-                total_created,
-                total_updated,
-                total_escalated,
-                total_skipped,
-                len(failed_files),
-            )
-        if usage.api_calls > 0:
-            log.info(
-                "Token usage: %d API calls, %d input + %d output = %d total"
-                " (cache: %d written, %d read) (~$%.4f estimated)",
-                usage.api_calls,
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.total_tokens,
-                usage.cache_creation_input_tokens,
-                usage.cache_read_input_tokens,
-                usage.estimated_cost_usd,
-            )
-        # Issue #378: persist this run's spend to the durable ledger so it is
-        # answerable from data (not from grep) how much — and whether real
-        # money — athenaeum spent. Best-effort: never breaks the run. Skipped
-        # on dry-run (no real work) — the counters are all zero there anyway.
-        if not dry_run:
-            spend.record_spend(usage, run_type="librarian", provider=provider)
-
-        if not dry_run and (total_created > 0 or total_updated > 0):
-            rebuild_index(wiki_root)
-
-        if not dry_run:
-            msg = (
-                f"librarian: processed {len(raw_files) - len(deferred_refs)} file(s) "
-                f"({total_created}C {total_updated}U {total_escalated}E {len(failed_files)}F)"
-            )
-            git_snapshot(knowledge_root, msg)
-    finally:
-        for _s, _prev in _prev_handlers:
-            signal.signal(_s, _prev)
-        _prev_handlers = []
+        spend.record_spend(usage, run_type="librarian", provider=provider)
 
     _maybe_push_after_run(
         knowledge_root,

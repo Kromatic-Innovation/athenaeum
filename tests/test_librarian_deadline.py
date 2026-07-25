@@ -307,18 +307,32 @@ def test_run_catches_merge_deadline_and_exits_124(
 ) -> None:
     """run() wraps the post-compile phase: a RunDeadlineExceeded from the merge
     pass is caught, partial progress is committed, and the run exits 124."""
-    root = _seed_knowledge_root(tmp_path, n_files=1)
+    # Issue #461: the entity phase now runs BEFORE the auto-memory block, so
+    # an empty entity intake (n_files=0) isolates this test's actual target
+    # (the auto-memory/merge deadline-catch) from the entity loop — a
+    # nonempty intake here would have the entity loop's `process_one` make a
+    # real (fake-keyed) API call before the auto-memory block is ever
+    # reached.
+    root = _seed_knowledge_root(tmp_path, n_files=0)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
 
     # Force the auto-memory compile branch to run, then have it trip the
-    # deadline exactly as the real merge loop would.
+    # deadline exactly as the real merge loop would — but first write a file
+    # to disk (mirroring a real C3 merge partially writing wiki/auto-*.md
+    # pages before the deadline trips), so there is genuine partial progress
+    # for `_stop_on_deadline`'s `git_snapshot` to commit. Without this the
+    # entity phase (now a no-op on n_files=0) leaves the tree clean and
+    # `git_snapshot` no-ops, making "committed" unobservable.
     monkeypatch.setattr(
         "athenaeum.librarian.discover_auto_memory_files",
         lambda *_a, **_k: [SimpleNamespace(origin_scope="scope-a")],
     )
 
     def _boom(*_a, **_k):
+        (root / "wiki" / "auto-partial.md").write_text(
+            "---\nname: partial\n---\npartial C3 output\n", encoding="utf-8"
+        )
         raise RunDeadlineExceeded("C4 contradiction detector / resolver")
 
     monkeypatch.setattr("athenaeum.librarian._compile_auto_memory", _boom)
@@ -336,6 +350,137 @@ def test_run_catches_merge_deadline_and_exits_124(
     subject = _last_subject(root)
     assert subject.startswith("librarian: partial run (deadline 3600s exceeded during")
     assert "C4 contradiction detector / resolver" in subject
+
+
+# ---------------------------------------------------------------------------
+# Issue #461 — entity phase moved ahead of the auto-memory block
+# ---------------------------------------------------------------------------
+
+
+def test_461_entity_runs_first_then_automemory_deadline_trips_124(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC1: entity intake is compiled FIRST; a deadline that only trips
+    during the (later) auto-memory phase still exits 124 with the
+    auto-memory phase name — proving the entity phase got to run before the
+    shared deadline was spent, which is the whole point of the #461 reorder.
+    """
+    root = _seed_knowledge_root(tmp_path, n_files=2)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+    monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+    # Real (unmocked) entity loop via the writing stand-in — no clock bump
+    # here, so both files process cleanly and quickly, well within budget.
+    monkeypatch.setattr(
+        "athenaeum.librarian.process_one",
+        _writing_process_one_factory(root / "wiki"),
+    )
+
+    # Auto-memory discovery finds one scope; the compile itself is a slow
+    # stand-in that trips the (already-armed) deadline exactly like the real
+    # merge loop would once entity has already consumed some wall-clock time.
+    fake_am = SimpleNamespace(origin_scope="scope-a")
+    monkeypatch.setattr(
+        "athenaeum.librarian.discover_auto_memory_files",
+        lambda *_a, **_k: [fake_am],
+    )
+
+    clock = _FakeClock(start=0.0)
+    monkeypatch.setattr("athenaeum.librarian.time.monotonic", clock.monotonic)
+
+    def _slow_compile(*_a, **_k):
+        # Simulate the auto-memory compile running long enough to blow the
+        # deadline — mirrors the real merge loop's per-cluster deadline
+        # check raising RunDeadlineExceeded, after partially writing a wiki
+        # page (like a real C3 merge would before it trips). Without this
+        # write there is nothing left uncommitted for `_stop_on_deadline`'s
+        # `git_snapshot` to catch, since the entity phase above already
+        # committed its own work cleanly.
+        (root / "wiki" / "auto-partial.md").write_text(
+            "---\nname: partial\n---\npartial C3 output\n", encoding="utf-8"
+        )
+        clock.now = 5000.0
+        raise RunDeadlineExceeded("C4 contradiction detector / resolver")
+
+    monkeypatch.setattr("athenaeum.librarian._compile_auto_memory", _slow_compile)
+
+    rc = run(
+        raw_root=root / "raw",
+        wiki_root=root / "wiki",
+        knowledge_root=root,
+        max_api_calls=100,
+        max_runtime=1000,
+    )
+
+    # Entity intake was consumed FIRST — both files compiled before the
+    # auto-memory phase (and the deadline trip) ever ran.
+    assert (root / "wiki" / "entity-1.md").exists()
+    assert (root / "wiki" / "entity-2.md").exists()
+    remaining = sorted((root / "raw" / "sessions").glob("2024041*.md"))
+    assert remaining == [], "entity intake must be fully consumed, not deferred"
+
+    # The trip happened in the auto-memory phase, after entity succeeded.
+    assert rc == 124
+    subject = _last_subject(root)
+    assert subject.startswith("librarian: partial run (deadline 1000s exceeded during")
+    assert "C4 contradiction detector / resolver" in subject
+
+
+def test_461_entity_deadline_trip_skips_automemory_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2: a deadline trip DURING the entity phase skips the auto-memory
+    block entirely (gated on ``not deadline_tripped``) and exits 124 —
+    proving `_compile_auto_memory` is never invoked once the entity loop has
+    already spent the shared deadline.
+    """
+    root = _seed_knowledge_root(tmp_path, n_files=3)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+    monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+    clock = _FakeClock(start=0.0)
+    monkeypatch.setattr("athenaeum.librarian.time.monotonic", clock.monotonic)
+
+    # First entity file processes, then the clock jumps past the deadline —
+    # the second iteration's boundary check trips deadline_tripped=True.
+    def _bump() -> None:
+        clock.now = 5000.0
+
+    monkeypatch.setattr(
+        "athenaeum.librarian.process_one",
+        _writing_process_one_factory(root / "wiki", bump_clock=_bump, bump_after=1),
+    )
+
+    # Spy on _compile_auto_memory — it must NEVER be called once the entity
+    # loop has tripped the deadline.
+    compile_calls: list[object] = []
+
+    def _spy_compile(*args, **kwargs):
+        compile_calls.append((args, kwargs))
+        return []
+
+    monkeypatch.setattr("athenaeum.librarian._compile_auto_memory", _spy_compile)
+    # Auto-memory discovery would find a scope if reached — proving the
+    # skip is about the auto-memory BLOCK (gated on deadline_tripped), not
+    # merely an empty discovery result.
+    monkeypatch.setattr(
+        "athenaeum.librarian.discover_auto_memory_files",
+        lambda *_a, **_k: [SimpleNamespace(origin_scope="scope-a")],
+    )
+
+    rc = run(
+        raw_root=root / "raw",
+        wiki_root=root / "wiki",
+        knowledge_root=root,
+        max_api_calls=100,
+        max_runtime=1000,
+    )
+
+    assert rc == 124
+    assert compile_calls == [], "auto-memory compile must be skipped after an entity deadline trip"
+    # Only the first file was processed; the deadline trip deferred the rest.
+    assert (root / "wiki" / "entity-1.md").exists()
+    assert not (root / "wiki" / "entity-2.md").exists()
 
 
 # ---------------------------------------------------------------------------
