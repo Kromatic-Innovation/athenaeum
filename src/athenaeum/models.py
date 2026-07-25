@@ -1605,6 +1605,12 @@ class ProcessingResult:
     #: because no parseable JSON array could be recovered (issue #472). Almost
     #: always 0 or 1 per file; surfaced as ``degraded=N`` in the run summary.
     degraded: int = 0
+    #: Count of Tier-2 classification responses that dropped ALL entities
+    #: because they were TRUNCATED at the output-token budget
+    #: (``stop_reason == "max_tokens"``, issue #476). Kept SEPARATE from
+    #: ``degraded`` — a truncation is fixed by a bigger budget, not escaping —
+    #: and surfaced as ``truncated=N`` in the run summary.
+    truncated: int = 0
 
 
 # --- Schema loading ---
