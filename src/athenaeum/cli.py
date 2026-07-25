@@ -941,6 +941,13 @@ def main(argv: list[str] | None = None) -> int:
 
     add_drain_subparser(subparsers)
 
+    # storage command (issue #479) — storage-surface operator tasks; currently
+    # ``migrate-pii`` moves a live entity page's contact data to the #427
+    # excluded surface, leaving durable identifiers only.
+    from athenaeum._cmd_storage import add_storage_subparser
+
+    add_storage_subparser(subparsers)
+
     # reindex command (issue #349) — rebuild the search index out-of-band.
     # ``rebuild-index`` is kept as a back-compat alias for the #348 spelling;
     # both dispatch to the identical handler (no duplicated index engine).
@@ -1326,6 +1333,11 @@ def main(argv: list[str] | None = None) -> int:
         from athenaeum._cmd_drain import cmd_drain
 
         return cmd_drain(args)
+
+    if args.command == "storage":
+        from athenaeum._cmd_storage import cmd_storage
+
+        return cmd_storage(args)
 
     return 0
 
