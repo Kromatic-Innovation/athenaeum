@@ -68,6 +68,7 @@ from athenaeum.models import (
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
+    Tier2ParseStats,
     parse_merge_ops_response,
     parse_tier2_entities,
     stamp_merge_provenance,
@@ -259,6 +260,11 @@ class BatchRunResult:
     updated: int = 0
     escalated: int = 0
     skipped: int = 0
+    #: Files that dropped ALL entities on unparseable Tier-2 JSON, even after
+    #: the #472 control-character repair pass. (The batch transport cannot
+    #: retry a single request synchronously, so repair is its only recovery
+    #: mechanism — the sync path additionally retries once.)
+    degraded: int = 0
     failed_refs: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
 
@@ -397,9 +403,20 @@ def process_batch_run(
                 log.exception("Failed to process %s", st.raw.ref)
                 st.failed = True
                 continue
+            # #472: repair bare control chars inside string values before
+            # discarding a whole file's entities, and count any that still
+            # degrade so the run summary can surface it.
+            t2_stats = Tier2ParseStats()
             classified = parse_tier2_entities(
-                text, st.raw.ref, valid_types, valid_tags, valid_access, owner=owner
+                text,
+                st.raw.ref,
+                valid_types,
+                valid_tags,
+                valid_access,
+                owner=owner,
+                stats=t2_stats,
             )
+            result.degraded += t2_stats.degraded
             log.info(
                 "  T2 classified %d new entities (%s)", len(classified), st.raw.ref
             )
