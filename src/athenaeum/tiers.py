@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,7 @@ from athenaeum.fingerprint import (
     record_resolution,
     resolve_resolved_similarity_threshold,
 )
-from athenaeum.json_utils import extract_json_object
+from athenaeum.json_utils import extract_json_object, loads_lenient
 from athenaeum.models import (
     AutoMemoryFile,
     ClassifiedEntity,
@@ -265,10 +266,20 @@ def tier2_classify(
     wiki_root: Path | None = None,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
+    stats: Tier2ParseStats | None = None,
 ) -> list[ClassifiedEntity]:
     """Use a fast LLM to classify entities in the raw text.
 
-    Returns list of ClassifiedEntity with is_new=True (Tier 2 only finds new entities).
+    Returns list of ClassifiedEntity with is_new=True (Tier 2 only finds new
+    entities).
+
+    #472: when the first response cannot be parsed even after the
+    control-character repair pass (``stats.degraded`` was incremented), the
+    call is retried EXACTLY ONCE with an explicit instruction to escape
+    newlines inside string values, rather than silently discarding every
+    entity in the file. The optional *stats* out-param records the final
+    outcome (a recovered retry clears the degrade); callers pass one to
+    surface a per-run degraded count in ``librarian-run-summary``.
     """
     if not raw.content.strip():
         return []
@@ -291,14 +302,99 @@ def tier2_classify(
 
     from athenaeum.config import resolve_owner
 
-    return parse_tier2_entities(
-        response.content[0].text,
+    owner = resolve_owner(config)
+    first_text = response.content[0].text
+    if stats is None:
+        stats = Tier2ParseStats()
+    entities = parse_tier2_entities(
+        first_text,
         raw.ref,
         valid_types,
         valid_tags,
         valid_access,
-        owner=resolve_owner(config),
+        owner=owner,
+        stats=stats,
     )
+
+    # #472 step 2: repair failed and we dropped everything — retry once,
+    # telling the model exactly what went wrong. Bounded to a single extra
+    # call per degraded file. (The batch transport cannot retry synchronously;
+    # there the repair pass alone is the recovery mechanism.)
+    if stats.degraded:
+        retry_params = dict(params)
+        retry_params["messages"] = [
+            *params["messages"],
+            {"role": "assistant", "content": first_text},
+            {
+                "role": "user",
+                "content": (
+                    "That response was not valid JSON — it contained bare "
+                    "control characters (e.g. a literal newline) inside a "
+                    "string value. Re-emit the SAME classification as a "
+                    "single JSON array, escaping every newline inside a "
+                    "string value as \\n (and other control characters "
+                    "likewise). Return ONLY the JSON array, no prose."
+                ),
+            },
+        ]
+        retry_response = with_retry(
+            lambda: client.messages.create(**retry_params),
+            description=f"tier2_classify-retry {raw.ref}",
+        )
+        _record_usage(retry_response, usage, model=retry_params["model"])
+        retry_stats = Tier2ParseStats()
+        retry_entities = parse_tier2_entities(
+            retry_response.content[0].text,
+            raw.ref,
+            valid_types,
+            valid_tags,
+            valid_access,
+            owner=owner,
+            stats=retry_stats,
+        )
+        if not retry_stats.degraded:
+            # Recovered — clear the degrade recorded on the first attempt so
+            # the run summary does not count a file we ultimately parsed.
+            log.info(
+                "tier2-classify-retry-recovered ref=%s: retry with explicit "
+                "escaping instruction parsed successfully",
+                raw.ref,
+            )
+            stats.degraded -= 1
+            stats.repaired += retry_stats.repaired
+            entities = retry_entities
+
+    return entities
+
+
+#: Stable, greppable marker logged (WARNING) whenever a Tier-2 classification
+#: response drops ALL of a file's entities because no parseable JSON array
+#: could be recovered — even after the #472 control-character repair pass. A
+#: watchdog / log-scraper can grep this out of a busy drain without parsing
+#: prose; the per-run count is also surfaced in ``librarian-run-summary``
+#: (``degraded=N``, issue #464/#472).
+TIER2_DEGRADED_MARKER = "tier2-classify-degraded"
+
+
+@dataclass
+class Tier2ParseStats:
+    """Out-param visibility counters for :func:`parse_tier2_entities` (#472).
+
+    Optional: pass an instance to have the parser record how a response fared,
+    without changing its ``list[ClassifiedEntity]`` return type. Both counters
+    are *incremented* (never reset) so a single instance can accumulate across
+    every file in a run.
+
+    ``repaired`` — responses whose JSON was invalid on a strict parse but were
+    salvaged by the control-character repair pass (data recovered, no loss).
+
+    ``degraded`` — responses that dropped ALL entities because no parseable
+    JSON array could be recovered (genuine, silent file loss — the bug #472
+    exists to make visible).
+    """
+
+    repaired: int = 0
+    degraded: int = 0
 
 
 def parse_tier2_entities(
@@ -308,12 +404,21 @@ def parse_tier2_entities(
     valid_tags: list[str],
     valid_access: list[str],
     owner: dict[str, Any] | None = None,
+    stats: Tier2ParseStats | None = None,
 ) -> list[ClassifiedEntity]:
     """Parse a Tier-2 classification response into entities.
 
-    Shared by the synchronous and batch transports. Malformed or missing
-    JSON degrades to an empty list with a warning, exactly like the
-    pre-#236 inline parsing.
+    Shared by the synchronous and batch transports. Missing JSON (no array at
+    all) still degrades to an empty list with a warning; invalid JSON is first
+    run through the #472 control-character repair pass (bare newlines/tabs
+    inside string values) before giving up, since that is the one observed
+    failure mode that was silently discarding ~10% of files in production.
+
+    When *stats* is supplied, its ``repaired`` / ``degraded`` counters are
+    incremented so callers can retry (sync path) and surface a per-run count
+    (``librarian-run-summary``). A degrade — dropping every entity because no
+    parseable array could be recovered — also emits the greppable
+    :data:`TIER2_DEGRADED_MARKER` at WARNING level.
 
     When *owner* is configured (issue #263), an owner-namespace operational
     memory (e.g. ``user_*_family_relationships``) is routed to a standalone
@@ -324,14 +429,46 @@ def parse_tier2_entities(
 
     json_match = re.search(r"\[.*\]", text, re.DOTALL)
     if not json_match:
-        log.warning("Classification returned no JSON for %s: %s", ref, text[:200])
+        log.warning(
+            "%s ref=%s reason=no-json dropped_all_entities: %s",
+            TIER2_DEGRADED_MARKER,
+            ref,
+            text[:200],
+        )
+        if stats is not None:
+            stats.degraded += 1
         return []
 
+    raw_json = json_match.group()
     try:
-        items = json.loads(json_match.group())
+        items = json.loads(raw_json)
     except json.JSONDecodeError:
-        log.warning("Classification returned invalid JSON for %s: %s", ref, text[:200])
-        return []
+        # #472: the model emitted a bare (unescaped) control character —
+        # typically a newline inside the free-text ``observations`` value —
+        # which is illegal per spec and rejects the WHOLE array. Attempt a
+        # scoped repair (escape control chars inside string literals) before
+        # discarding every entity in the response.
+        try:
+            items = loads_lenient(raw_json)
+        except json.JSONDecodeError:
+            log.warning(
+                "%s ref=%s reason=invalid-json dropped_all_entities "
+                "(repair pass failed): %s",
+                TIER2_DEGRADED_MARKER,
+                ref,
+                text[:200],
+            )
+            if stats is not None:
+                stats.degraded += 1
+            return []
+        else:
+            log.info(
+                "tier2-classify-repaired ref=%s: recovered malformed "
+                "classification JSON via control-character repair",
+                ref,
+            )
+            if stats is not None:
+                stats.repaired += 1
 
     results: list[ClassifiedEntity] = []
     for item in items:
