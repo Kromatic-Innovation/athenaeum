@@ -718,6 +718,59 @@ def resolve_delta_max_affected_members(config: dict[str, Any] | None) -> int:
     return default
 
 
+def resolve_live_delta_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the live-client delta-scoped-compile opt-in from
+    ``librarian.delta.live_client`` (issue #463, slice D of #460).
+
+    When TRUE (the default), the nightly LLM ``run`` (a live client) MAY also
+    take the delta-scoped cluster + merge path — previously (#370 PR2) delta
+    was gated to the deterministic ``client is None`` path ONLY (fallback
+    trigger D5). The live-client delta path is additionally gated by
+    ``full_compile_due`` (the periodic whole-corpus reconciliation, see
+    :func:`athenaeum.config.resolve_full_compile_every_days`) regardless of
+    this flag — see :func:`athenaeum.librarian._compile_auto_memory`. Set
+    ``librarian.delta.live_client: false`` to keep the nightly run
+    whole-corpus-only (the pre-#463 behaviour) even when a live client is
+    present. ``bool`` yaml values are honored; anything else falls through to
+    the TRUE default.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            delta_cfg = cfg.get("delta")
+            if isinstance(delta_cfg, dict):
+                raw = delta_cfg.get("live_client")
+                if isinstance(raw, bool):
+                    return raw
+    return True
+
+
+def resolve_full_compile_every_days(config: dict[str, Any] | None) -> int:
+    """Resolve the periodic whole-corpus reconciliation cadence (issue #463,
+    default 7 days) from ``librarian.full_compile_every_days``.
+
+    The live-client delta path (#463) is a corpus-consistency optimization
+    over the auto-memory C2-C4 compile; this cadence is its backstop. When the
+    last successful whole-corpus compile (:func:`athenaeum.librarian.
+    _load_full_compile_stamp`) is at least this many days old — or there has
+    never been one — the next run forces a whole-corpus compile regardless of
+    the delta gate, re-entering any TTL-decayed auto-suppressions and
+    resolving drift a delta pass could not see. Note this key lives directly
+    under ``librarian``, NOT under ``librarian.delta`` (it also bounds the
+    non-live delta path indirectly via the stamp, but is a run-cadence
+    setting, not a delta-mechanism setting). ``bool`` and non-positive /
+    non-int values fall through to the default.
+    """
+    default = 7
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("full_compile_every_days")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                return raw
+    return default
+
+
 def resolve_reindex_full_rehash_max_age_days(
     knowledge_root: Path,
     config: dict[str, Any] | None = None,
