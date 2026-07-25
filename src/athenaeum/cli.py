@@ -395,6 +395,15 @@ def main(argv: list[str] | None = None) -> int:
         "warning; the run proceeds against the local tree.",
     )
     run_parser.add_argument(
+        "--full-compile",
+        action="store_true",
+        help="Force a whole-corpus auto-memory compile this run, bypassing "
+        "both the delta gate and the librarian.full_compile_every_days "
+        "cadence (issue #463). Use for an immediate full reconciliation "
+        "(e.g. after suspecting delta drift) without waiting for the "
+        "periodic backstop.",
+    )
+    run_parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -1985,6 +1994,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             retire=getattr(args, "retire", None),
             push_after_run=getattr(args, "push_after_run", None),
             pull_before_run=getattr(args, "pull_before_run", None),
+            full_compile=getattr(args, "full_compile", False),
         )
 
     from athenaeum.config import load_config
@@ -2009,6 +2019,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             push_after_run=getattr(args, "push_after_run", None),
             pull_before_run=getattr(args, "pull_before_run", None),
             install_signal_handlers=True,
+            full_compile=getattr(args, "full_compile", False),
         )
     finally:
         lock.release()
