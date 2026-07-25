@@ -935,6 +935,12 @@ def main(argv: list[str] | None = None) -> int:
 
     add_outbound_subparser(subparsers)
 
+    # drain command (issue #470) — one-command supervised API+batch drain of the
+    # raw-intake backlog, cost-guarded by a mandatory cumulative --max-usd.
+    from athenaeum._cmd_drain import add_drain_subparser
+
+    add_drain_subparser(subparsers)
+
     # reindex command (issue #349) — rebuild the search index out-of-band.
     # ``rebuild-index`` is kept as a back-compat alias for the #348 spelling;
     # both dispatch to the identical handler (no duplicated index engine).
@@ -1315,6 +1321,11 @@ def main(argv: list[str] | None = None) -> int:
         from athenaeum._cmd_outbound import cmd_outbound
 
         return cmd_outbound(args)
+
+    if args.command == "drain":
+        from athenaeum._cmd_drain import cmd_drain
+
+        return cmd_drain(args)
 
     return 0
 

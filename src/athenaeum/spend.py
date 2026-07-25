@@ -113,6 +113,7 @@ def build_record(
     run_type: str,
     provider: str,
     session_id: str | None = None,
+    files_processed: int | None = None,
     ts: datetime | None = None,
 ) -> dict[str, Any]:
     """Build one ledger record from a :class:`TokenUsage` accumulator.
@@ -122,11 +123,17 @@ def build_record(
     is provider-tagged — ``0.0`` on the subscription path regardless of the
     accumulator's ``subscription_covered`` flag — so subscription rows can
     never be summed into a dollar total downstream.
+
+    *files_processed* (issue #470) is the count of raw intake files the run
+    actually drained (compiled + removed from the queue). Added only when given
+    so pre-#470 readers and non-file run types (``answers`` / ``query-topics``)
+    are unaffected; the backlog-drain advisor reads it to derive observed
+    files-per-run throughput across runs.
     """
     prov = ledger_provider(provider)
     usd = 0.0 if prov == PROVIDER_CLAUDE_CLI else round(usage.estimated_cost_usd, 6)
     stamp = (ts if ts is not None else _now_utc()).astimezone(timezone.utc)
-    return {
+    record = {
         "v": LEDGER_VERSION,
         "ts": stamp.isoformat().replace("+00:00", "Z"),
         "run_type": run_type,
@@ -144,6 +151,9 @@ def build_record(
         "total_tokens": usage.total_tokens,
         "estimated_cost_usd": usd,
     }
+    if files_processed is not None:
+        record["files_processed"] = int(files_processed)
+    return record
 
 
 def _append_line(path: Path, line: str) -> None:
@@ -168,6 +178,7 @@ def record_spend(
     run_type: str,
     provider: str,
     session_id: str | None = None,
+    files_processed: int | None = None,
     config: dict[str, Any] | None = None,
     cache_dir: Path | None = None,
     ledger_path: Path | None = None,
@@ -188,7 +199,11 @@ def record_spend(
         if usage.api_calls == 0 and usage.total_tokens == 0:
             return False
         record = build_record(
-            usage, run_type=run_type, provider=provider, session_id=session_id
+            usage,
+            run_type=run_type,
+            provider=provider,
+            session_id=session_id,
+            files_processed=files_processed,
         )
         target = ledger_path if ledger_path is not None else resolve_ledger_path(
             config, cache_dir=cache_dir

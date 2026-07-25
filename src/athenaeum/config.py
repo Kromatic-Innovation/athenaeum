@@ -771,6 +771,29 @@ def resolve_full_compile_every_days(config: dict[str, Any] | None) -> int:
     return default
 
 
+def resolve_drain_warn_days(config: dict[str, Any] | None) -> int:
+    """Resolve the backlog-drain ETA warning threshold in days (issue #470,
+    default 3) from ``librarian.drain_warn_days``.
+
+    At the end of any run that leaves raw intake undrained (and in ``athenaeum
+    status``), the backlog-drain advisor (:func:`athenaeum.drain.build_advisory`)
+    projects time-to-drain from observed throughput and emits a WARNING — naming
+    the one-command ``athenaeum drain`` remedy — only when that projection
+    EXCEEDS this many days. Below the threshold the run stays silent. Lives
+    directly under ``librarian`` (a run-cadence advisory, not a delta/merge
+    knob). ``bool`` and non-positive / non-int values fall through to the
+    default.
+    """
+    default = 3
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("drain_warn_days")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                return raw
+    return default
+
+
 def resolve_reindex_full_rehash_max_age_days(
     knowledge_root: Path,
     config: dict[str, Any] | None = None,
@@ -1487,6 +1510,12 @@ search_backend: fts5
 #   during `athenaeum run` (#310). Still warn-only (the tier-3 merge body
 #   cap is separate and unchanged). Precedence: ATHENAEUM_PAGE_FLAG_BYTES
 #   env, then this key, then 16384. Keep comfortably below the merge cap.
+# drain_warn_days: backlog-drain ETA threshold in days (issue #470). At the
+#   end of any run that leaves raw intake undrained (and in `athenaeum
+#   status`), the advisor projects time-to-drain from OBSERVED throughput
+#   (the #378 spend ledger) and emits a WARNING naming the `athenaeum drain`
+#   remedy only when the projection EXCEEDS this many days; below it stays
+#   silent. Precedence: this key, then 3. bool/non-positive fall through.
 # librarian:
 #   cluster_threshold: 0.55
 #   cluster_output: raw/_librarian-clusters.jsonl
@@ -1507,6 +1536,7 @@ search_backend: fts5
 #   min_merge_confidence: 0.0
 #   page_warn_bytes: 8192
 #   page_flag_bytes: 16384
+#   drain_warn_days: 3
 
 # LLM provider selection (issue #330). Chooses the backend the librarian
 # compile path (tiers, contradiction detector, resolver) talks to.

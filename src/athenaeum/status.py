@@ -39,6 +39,12 @@ class StatusInfo(TypedDict):
     # ``pages_flag`` only.
     pages_warn: list[tuple[str, int]]
     pages_flag: list[tuple[str, int]]
+    # Issue #470: backlog-drain ETA advisory — a human sentence projecting
+    # time-to-drain and naming the ``athenaeum drain`` remedy, or ``None`` when
+    # the backlog is empty or its projected ETA is at/below
+    # ``librarian.drain_warn_days``. Surfaces the same signal the end-of-run
+    # WARNING emits, so status/MCP surfaces show it BETWEEN runs.
+    drain_advisory: str | None
 
 
 def scan_page_sizes(
@@ -152,6 +158,29 @@ def status(knowledge_root: Path) -> StatusInfo:
     flag_bytes = resolve_page_flag_bytes(config)
     pages_warn, pages_flag = scan_page_sizes(wiki_root, warn_bytes, flag_bytes)
 
+    # Backlog-drain ETA advisor (issue #470): surface the same projection the
+    # end-of-run WARNING emits, so status/MCP surfaces show it between runs.
+    # Best-effort — a ledger/estimator hiccup must never break status.
+    drain_advisory: str | None = None
+    try:
+        from athenaeum import drain as _drain
+        from athenaeum import spend as _spend
+        from athenaeum.config import resolve_drain_warn_days
+
+        advisory = _drain.build_advisory(
+            backlog=raw_pending,
+            ledger_records=_spend.read_ledger(_spend.resolve_ledger_path(config)),
+            warn_days=resolve_drain_warn_days(config),
+        )
+        if advisory is not None:
+            drain_advisory = advisory.summary
+    except Exception as exc:  # noqa: BLE001 — advisor must never break status
+        log.debug(
+            "status: backlog-drain advisor skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+
     return {
         "raw_pending": raw_pending,
         "entity_count": entity_count,
@@ -161,6 +190,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "pending_questions": pending_questions,
         "pages_warn": pages_warn,
         "pages_flag": pages_flag,
+        "drain_advisory": drain_advisory,
     }
 
 
@@ -176,6 +206,13 @@ def format_status(info: StatusInfo) -> str:
             lines.append(f"  {etype}: {info['entities_by_type'][etype]}")
 
     lines.append(f"Pending questions:    {info['pending_questions']}")
+
+    # Issue #470: backlog-drain ETA advisory. Use ``.get`` so pre-#470 status
+    # dicts (missing the key) still format cleanly; shown only when set (a
+    # non-empty backlog projected to exceed librarian.drain_warn_days).
+    drain_advisory = info.get("drain_advisory")
+    if drain_advisory:
+        lines.append(f"Backlog drain:        {drain_advisory}")
 
     # Issue #310: oversized-page summary. Use ``.get`` so pre-#310 status
     # dicts (missing these keys) still format cleanly.
