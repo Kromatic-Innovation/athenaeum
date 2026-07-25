@@ -2713,8 +2713,18 @@ def run(
             usage.cache_read_input_tokens,
             usage.estimated_cost_usd,
         )
+    # Issue #470: files actually drained this run (removed from intake) — the
+    # in-window count minus what was deferred (budget/deadline/ceiling trip) and
+    # what failed (not consumed). Recorded on the ledger so the backlog-drain
+    # advisor can read observed files-per-run throughput across runs.
+    files_processed_count = max(0, len(raw_files) - len(deferred_refs) - len(failed_files))
     if not dry_run:
-        spend.record_spend(usage, run_type="librarian", provider=provider)
+        spend.record_spend(
+            usage,
+            run_type="librarian",
+            provider=provider,
+            files_processed=files_processed_count,
+        )
 
     _maybe_push_after_run(
         knowledge_root,
@@ -2755,6 +2765,32 @@ def run(
     # those paths `return` before reaching here, so in practice this only ever
     # fires once per run.
     _emit_run_summary()
+
+    # Issue #470: backlog-drain ETA advisor. At the end of any real run that
+    # leaves raw intake undrained, project time-to-drain from OBSERVED
+    # throughput (the #378 ledger — including THIS run's record just written
+    # above) and WARN when it exceeds ``librarian.drain_warn_days``, naming the
+    # one-command ``athenaeum drain`` remedy. Uses the TRUE remaining backlog
+    # (live intake count), so it also catches a run that cleanly processed its
+    # ``max_files`` window but left files beyond it — the silent-backlog-growth
+    # case the DEGRADED summary never surfaced. Best-effort: never breaks a run.
+    if not dry_run and not cluster_only:
+        try:
+            from athenaeum import drain as _drain
+            from athenaeum.config import resolve_drain_warn_days
+
+            _advisory = _drain.build_advisory(
+                backlog=len(discover_raw_files(raw_root)),
+                ledger_records=spend.read_ledger(spend.resolve_ledger_path(config)),
+                warn_days=resolve_drain_warn_days(config),
+                this_run_files=files_processed_count,
+            )
+            if _advisory is not None:
+                log.warning("%s", _advisory.line)
+        except Exception as exc:  # noqa: BLE001 — advisor must never break a run
+            log.debug(
+                "backlog-drain advisor skipped (%s): %s", type(exc).__name__, exc
+            )
 
     # Issue #396: the entity loop hit the wall-clock deadline and deferred the
     # remaining intake. The partial progress is committed (terminal commit
