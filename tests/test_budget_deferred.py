@@ -212,6 +212,49 @@ class TestDeferredManifest:
         messages = [r.getMessage() for r in caplog.records]
         assert any("No raw files to process" in m for m in messages), messages
 
+    def test_461_empty_entity_intake_still_runs_automemory_block(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Issue #461, AC4: an empty entity/raw intake must NOT return early
+        anymore — the auto-memory block (independent of raw entity intake)
+        still runs. Regression guard for the pre-#461 `if not raw_files:
+        ... return 0` early return, which the #461 reorder removed in favor
+        of falling through to the (now second) auto-memory block.
+        """
+        root = _seed_knowledge_root(tmp_path, n_files=0)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        fake_am = SimpleNamespace(origin_scope="scope-a")
+        monkeypatch.setattr(
+            "athenaeum.librarian.discover_auto_memory_files",
+            lambda *_a, **_k: [fake_am],
+        )
+        compile_calls: list[object] = []
+
+        def _spy_compile(*args, **kwargs):
+            compile_calls.append((args, kwargs))
+            return []
+
+        monkeypatch.setattr("athenaeum.librarian._compile_auto_memory", _spy_compile)
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+        )
+
+        assert rc == 0
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("No raw files to process" in m for m in messages), messages
+        # The auto-memory block ran despite the empty entity intake — proving
+        # the old whole-run early return is gone.
+        assert len(compile_calls) == 1, "auto-memory compile must still run on empty raw intake"
+
     def test_dry_run_trip_writes_no_manifest_and_keeps_stale(
         self,
         tmp_path: Path,
@@ -615,17 +658,20 @@ class TestZeroBudgetStartupWarning:
 
 
 class TestRunLevelBudgetThreading:
-    def test_merge_phase_spend_counts_against_entity_budget(
+    def test_entity_phase_spend_counts_against_merge_budget(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """API calls burned by the merge pass count against max_api_calls.
+        """API calls burned by the entity phase count against max_api_calls.
 
-        The merge stand-in burns the whole budget via the threaded
-        run-level TokenUsage; the entity loop must then trip at file 0
-        and defer the ENTIRE raw intake.
+        Issue #461: the entity phase now runs BEFORE the auto-memory block
+        and gets first claim on the shared run-level budget (inverted from
+        the pre-#461 ordering, where the merge pass ran first and could
+        starve the entity loop). The entity stand-in burns the whole budget
+        via the threaded run-level TokenUsage; the merge pass must then see
+        an already-exhausted budget when it runs afterward.
         """
         root = _seed_knowledge_root(tmp_path, n_files=2)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -642,21 +688,24 @@ class TestRunLevelBudgetThreading:
             "athenaeum.librarian._run_cluster_pass", lambda *a, **k: None
         )
 
+        merge_calls = []
+
         def fake_merge(knowledge_root, **kwargs):
-            kwargs["usage"].api_calls += 5
+            merge_calls.append(kwargs["usage"].api_calls)
             return []
 
         monkeypatch.setattr("athenaeum.librarian.merge_clusters_to_wiki", fake_merge)
         monkeypatch.setattr(
             "athenaeum.librarian._run_reresolve_pass", lambda *a, **k: 0
         )
-        process_calls = []
-
-        def counting_process_one(raw, *args, **kwargs):
-            process_calls.append(raw.ref)
-            return _fake_process_one_factory()(raw, *args, **kwargs)
-
-        monkeypatch.setattr("athenaeum.librarian.process_one", counting_process_one)
+        # Entity stand-in burns 3 calls/file: the pre-file budget check (< 5)
+        # lets both files run (0 -> 3 -> 6), so the entity phase completes
+        # normally (no entity-side "budget exhausted" trip) but leaves 6
+        # calls already spent on the shared TokenUsage before the
+        # auto-memory block — and its merge call — ever run.
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one", _fake_process_one_factory(calls_per_file=3)
+        )
         caplog.set_level(logging.INFO, logger="athenaeum")
 
         rc = run(
@@ -667,12 +716,10 @@ class TestRunLevelBudgetThreading:
         )
 
         assert rc == 0
-        # Merge burned the budget — no entity file may be processed.
-        assert process_calls == []
-        text = (root / "wiki" / "_deferred_work.md").read_text(encoding="utf-8")
-        assert "deferred_count: 2" in text
-        messages = [r.getMessage() for r in caplog.records]
-        assert any("budget exhausted (5/5)" in m for m in messages), messages
+        # The merge pass ran AFTER the entity phase and observed its spend
+        # via the shared TokenUsage — proving budget threading survives the
+        # #461 reorder: the entity phase's 6 calls are visible to merge.
+        assert merge_calls == [6]
 
     def test_merge_counts_detector_and_resolver_calls(
         self,
@@ -854,6 +901,13 @@ class TestRunLevelBudgetThreading:
         ``usage.api_calls > 0`` gate on the "Token usage:" INFO line must be
         satisfied by the merge phase's attempt counting — pinning that
         resolver-only runs still surface their cache spend in the summary.
+
+        Issue #461: this invariant is preserved by the reorder. The entity
+        phase now runs BEFORE the auto-memory/merge block, but the run-level
+        "Token usage:" line and the #378 spend-ledger write were moved to the
+        finalize section (AFTER both phases) precisely so the shared
+        ``usage`` still reflects the WHOLE run — including merge-phase
+        detector/resolver traffic — exactly as it did pre-#461.
         """
         import json
         from unittest.mock import MagicMock
@@ -934,6 +988,10 @@ class TestRunLevelBudgetThreading:
         monkeypatch.setattr(
             "athenaeum.librarian._run_cluster_pass", lambda *a, **k: None
         )
+        # Issue #461: the entity phase makes zero API calls here; the
+        # "Token usage:" gate (``usage.api_calls > 0``) is satisfied by the
+        # merge phase's detector+resolver traffic, which is now folded in
+        # because the log line moved to finalize (after the merge block).
         monkeypatch.setattr(
             "athenaeum.librarian.process_one",
             _fake_process_one_factory(calls_per_file=0),
@@ -953,7 +1011,9 @@ class TestRunLevelBudgetThreading:
         assert token_lines, messages
         line = token_lines[0]
         # Gate satisfied purely by merge-phase attempt counts (1 detector
-        # + 1 resolver); cache counters rendered nonzero in the summary.
+        # + 1 resolver); cache counters rendered nonzero in the summary. The
+        # #461 reorder moved this log line to finalize (after merge), so the
+        # merge-phase spend is still folded in — the #239 guarantee holds.
         assert "2 API calls" in line, line
         assert "(cache: 1200 written, 2400 read)" in line, line
 
