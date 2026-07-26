@@ -216,6 +216,74 @@ def test_normal_completion_is_unchanged(
     assert _porcelain(root) == ""
 
 
+def test_interrupt_records_partial_spend_to_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #483: an interrupted run still writes a spend-ledger record.
+
+    The terminal ``record_spend`` (end of a clean run) never runs on the
+    SIGTERM/SIGINT path, so before #483 a killed run — or one the spend
+    ceiling itself tripped — left NO ledger entry and ``athenaeum spend``
+    reported $0 for it forever. The interrupt handler now records whatever
+    spend accrued before exiting 124.
+    """
+    import json
+
+    root = _seed_knowledge_root(tmp_path, n_files=3)
+    ledger = tmp_path / "spend.jsonl"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+    monkeypatch.setenv("ATHENAEUM_SPEND_LEDGER", str(ledger))
+    monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+    # A process_one that accrues real token usage (so record_spend has
+    # something to write — it no-ops on an empty accumulator) and sends
+    # SIGTERM to itself after the 2nd file, mid-run.
+    state = {"n": 0}
+
+    def fake_process_one(raw, index, wiki_root_arg, client, *args, **kwargs):
+        state["n"] += 1
+        kwargs["usage"].add_tokens(100, 50, model="claude-test")
+        (root / "wiki" / f"entity-{state['n']}.md").write_text(
+            f"# Entity {state['n']}\n", encoding="utf-8"
+        )
+        if state["n"] == 2:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return SimpleNamespace(
+            created=[f"entity-{state['n']}.md"], updated=[], escalated=[], skipped=[]
+        )
+
+    monkeypatch.setattr("athenaeum.librarian.process_one", fake_process_one)
+
+    def _sentinel(signum: int, frame: object) -> None:
+        raise AssertionError("run() did not install a SIGTERM handler (#337 regression)")
+
+    prev = signal.signal(signal.SIGTERM, _sentinel)
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            run(
+                raw_root=root / "raw",
+                wiki_root=root / "wiki",
+                knowledge_root=root,
+                max_api_calls=100,
+                install_signal_handlers=True,
+            )
+    finally:
+        signal.signal(signal.SIGTERM, prev)
+
+    assert excinfo.value.code == 124
+    # The whole point of #483: a killed run leaves a ledger record rather
+    # than silently reporting $0 for spend it actually incurred.
+    assert ledger.exists(), "interrupt must write a spend-ledger record"
+    records = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["run_type"] == "librarian"
+    assert rec["provider"] == "anthropic"
+    # Two files accrued 150 tokens each before the interrupt fired.
+    assert rec["total_tokens"] == 300
+    assert rec["estimated_cost_usd"] > 0
+
+
 def test_default_does_not_install_signal_handler(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
