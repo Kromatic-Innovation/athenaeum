@@ -53,6 +53,7 @@ from typing import Any, Callable
 
 import anthropic
 
+from athenaeum import spend
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.models import (
     EntityAction,
@@ -290,6 +291,7 @@ def process_batch_run(
     usage: TokenUsage,
     config: dict[str, object] | None,
     max_api_calls: int,
+    provider: str = "api",
     sleep: Callable[[float], None] = time.sleep,
 ) -> BatchRunResult:
     """Process the intake window through the Batch API phases (issue #236).
@@ -300,6 +302,17 @@ def process_batch_run(
     fanning the tier-2/tier-3 LLM calls out into two Messages Batch API
     submissions. See the module docstring for phase layout, budget
     semantics, and documented divergences from the synchronous loop.
+
+    Issue #483: the configured spend ceiling (#378) is enforced at each
+    phase boundary — before the tier-2 submit and before the tier-3 submit
+    — since a submitted batch runs to completion server-side and cannot be
+    halted mid-flight. A breach defers every not-yet-written file rather
+    than submitting the next (potentially large) batch, mirroring the sync
+    loop's "log loudly and defer the rest, never silently continue". The
+    check is per-phase, so overshoot is bounded to at most one phase's cost
+    instead of the whole run. *provider* selects the ceiling UNIT (dollars
+    for the metered ``api`` path — always the case in batch mode, which is
+    Anthropic-endpoint-only; tokens for ``claude-cli``).
     """
     from athenaeum.config import load_config, resolve_owner
     from athenaeum.librarian import tier0_passthrough
@@ -378,8 +391,25 @@ def process_batch_run(
             st.failed = True
 
     # --- Phase 1: tier-2 classification batch ---
+    # Issue #483: enforce the spend ceiling BEFORE submitting tier-2. Any
+    # spend already accrued (the synchronous auto-memory merge/resolver phase
+    # runs before the entity tiers) is reflected in ``usage`` by now; if it
+    # has breached the ceiling we must not submit another batch that would run
+    # to completion server-side. Defer every not-yet-resolved file and fall
+    # through to finalize (which still writes the zero-cost T0 passthroughs).
     t2_results: dict[str, Any] = {}
-    if t2_requests:
+    t2_ceiling = spend.ceiling_tripped(usage, provider=provider, config=config)
+    if t2_ceiling is not None:
+        pending = [st for st in states if not st.done and not st.failed]
+        log.error(
+            "Spend ceiling reached (%s) before the tier-2 batch — deferring "
+            "%d file(s), not submitting (issue #483)",
+            t2_ceiling,
+            len(pending),
+        )
+        for st in pending:
+            st.deferred = True
+    elif t2_requests:
         try:
             t2_results = execute_batch(
                 client,
@@ -394,7 +424,7 @@ def process_batch_run(
     # Parse classifications and build per-file actions (same shape as
     # process_one: creates from tier-2, updates from tier-1 matches).
     for st in states:
-        if st.failed or st.done:
+        if st.failed or st.done or st.deferred:
             continue
         classified = []
         if st.t2_id is not None:
@@ -500,7 +530,7 @@ def process_batch_run(
     # in intake order during finalization below.
     merge_uid_counts: dict[str, int] = {}
     for st in states:
-        if st.failed or st.done:
+        if st.failed or st.done or st.deferred:
             continue
         for action in st.actions:
             if action.kind == "update" and action.existing_uid:
@@ -521,7 +551,7 @@ def process_batch_run(
     # re-classifies it.
     phase2_spent = False
     for i, st in enumerate(states):
-        if st.failed or st.done:
+        if st.failed or st.done or st.deferred:
             continue
         if phase2_spent and usage.api_calls >= max_api_calls:
             log.warning(
@@ -594,8 +624,34 @@ def process_batch_run(
             st.failed = True
 
     # --- Phase 2: tier-3 batch ---
+    # Issue #483: re-check the spend ceiling before the tier-3 submit. The
+    # tier-2 batch's cost is now in ``usage``, so a run that stayed under the
+    # ceiling through tier-2 but would blow it on tier-3 stops here: the
+    # assembled tier-3 requests are dropped (never submitted) and every file
+    # with pending tier-3 work — batched creates/merges OR finalize-time sync
+    # merges — is deferred rather than half-written. Finalize checks
+    # ``st.deferred`` first, so a deferred file never tries to read a result
+    # from the (unsubmitted) batch.
     t3_results: dict[str, Any] = {}
-    if t3_requests:
+    t3_ceiling = spend.ceiling_tripped(usage, provider=provider, config=config)
+    t3_pending = [
+        st
+        for st in states
+        if not st.failed
+        and not st.done
+        and not st.deferred
+        and (st.create_ids or st.merge_ids or st.sync_merges)
+    ]
+    if t3_ceiling is not None and t3_pending:
+        log.error(
+            "Spend ceiling reached (%s) before the tier-3 batch — deferring "
+            "%d file(s) with pending writes, not submitting (issue #483)",
+            t3_ceiling,
+            len(t3_pending),
+        )
+        for st in t3_pending:
+            st.deferred = True
+    elif t3_requests:
         try:
             t3_results = execute_batch(
                 client,

@@ -2205,6 +2205,21 @@ def run(
                 # recurse into this handler.
                 for _s, _prev in _prev_handlers:
                     signal.signal(_s, _prev)
+                # Issue #483: record whatever spend accrued before the
+                # interrupt. The terminal `record_spend` (end of a clean run)
+                # is skipped on this path, so without this an operator who
+                # kills a run that is spending too much — or a run the spend
+                # ceiling itself tripped — leaves NO ledger entry, and
+                # `athenaeum spend` reports $0 for it forever. Best-effort
+                # (record_spend swallows every error and no-ops when nothing
+                # was spent), so it can never block the partial-progress
+                # commit below or the exit.
+                spend.record_spend(
+                    usage,
+                    run_type="librarian",
+                    provider=provider,
+                    files_processed=processed_count,
+                )
                 git_snapshot(
                     knowledge_root,
                     f"librarian: partial run (interrupted after {processed_count} "
@@ -2270,6 +2285,7 @@ def run(
                         usage=usage,
                         config=config,
                         max_api_calls=max_api_calls,
+                        provider=provider,
                     )
                     total_created = outcome.created
                     total_updated = outcome.updated
