@@ -802,6 +802,99 @@ class TestPhase2BudgetGate:
 
 
 # ---------------------------------------------------------------------------
+# Spend ceiling enforced at batch phase boundaries (issue #483)
+# ---------------------------------------------------------------------------
+
+
+class TestBatchSpendCeiling:
+    """The #378 spend ceiling must halt a batch-mode run at a phase boundary.
+
+    Before #483 ``spend.ceiling_tripped`` was called only from the synchronous
+    per-file loop, so a ``--batch-mode`` run — the exact path #470's ``drain``
+    forces — ran both tier batches to completion with ZERO dollar check.
+    """
+
+    def test_ceiling_blocks_tier3_submit_after_tier2_spend(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # A tiny per-run USD ceiling is NOT breached before tier-2 (no spend
+        # yet), so tier-2 submits; the tier-2 batch's own cost then breaches
+        # it, so the next phase (tier-3) must NOT submit and every file with a
+        # pending create/merge defers instead of being half-written.
+        contents = [f"Standalone fact about Widget{i} gadget.\n" for i in range(2)]
+        root = _seed_root(tmp_path, "k", contents)
+        _clean_env(monkeypatch)
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "0.000001")
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+        caplog.set_level(logging.ERROR, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+            batch_mode=True,
+        )
+        assert rc == 0
+        # Exactly ONE batch submitted (tier-2 classify); tier-3 was gated.
+        assert len(client.batches.submitted) == 1
+        # No entity page created — every tier-3 create was deferred, not written
+        # (the only wiki/ file is the #220 deferred-work manifest).
+        assert "widget" not in " ".join(_wiki_snapshot(root)).lower()
+        # Both files deferred; their raws stay on disk for the next run.
+        text = (root / "wiki" / "_deferred_work.md").read_text(encoding="utf-8")
+        assert "deferred_count: 2" in text
+        remaining = sorted(p.name for p in (root / "raw" / "sessions").glob("*.md"))
+        assert remaining == [
+            "20240410T120000Z-aabbccd0.md",
+            "20240411T120000Z-aabbccd1.md",
+        ]
+        assert any(
+            "Spend ceiling reached" in r.getMessage() and "tier-3" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_ceiling_before_tier2_submits_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Spend already over the ceiling BEFORE tier-2 (e.g. the synchronous
+        # auto-memory merge phase, which runs first, already breached it):
+        # not even the tier-2 batch may be submitted. Forcing ``ceiling_tripped``
+        # to read breached at the first boundary keeps this independent of the
+        # exact token pricing exercised by the tier-3 test above.
+        contents = ["Standalone fact about WidgetSolo gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        _clean_env(monkeypatch)
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+        _patch_uids(monkeypatch)
+        monkeypatch.setattr(
+            "athenaeum.spend.ceiling_tripped",
+            lambda *a, **k: "per-run API dollar ceiling reached (forced)",
+        )
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+            batch_mode=True,
+        )
+        assert rc == 0
+        # Ceiling already breached → NO batch submitted at all.
+        assert client.batches.submitted == []
+        assert "widget" not in " ".join(_wiki_snapshot(root)).lower()
+        text = (root / "wiki" / "_deferred_work.md").read_text(encoding="utf-8")
+        assert "deferred_count: 1" in text
+        assert list((root / "raw" / "sessions").glob("*.md"))
+
+
+# ---------------------------------------------------------------------------
 # Non-transient batch errors → BatchExecutionError → per-file failure path
 # (QA blocker 2)
 # ---------------------------------------------------------------------------
