@@ -2271,6 +2271,11 @@ def run(
     # output).
     _entity_phase_start = time.monotonic()  # issue #464
     _entity_phase_calls_before = usage.api_calls  # issue #464
+    # Issue #490 (slice A): snapshot output tokens too, so the entity segment
+    # can render output-tokens-per-call — the one figure that makes the silent
+    # full-page-echo fallback (a ~10x output-cost degrade) visible in the run
+    # summary without a by-hand token-ratio calculation next time.
+    _entity_phase_output_before = usage.output_tokens
     if not cluster_only:
         raw_files = discover_raw_files(raw_root)
         if not raw_files:
@@ -2610,16 +2615,28 @@ def run(
         # — matches the profile's phase granularity. Skipped entirely when
         # ``cluster_only`` (the phase never ran, so it is absent from the
         # summary rather than a misleading zero).
+        _entity_calls = usage.api_calls - _entity_phase_calls_before
+        # #490 (slice A): output tokens per entity call. A silent full-page-echo
+        # fallback re-emits a whole 16-23KB page, so this figure spikes when the
+        # fallback fires often — the entity-cost regression the WARNINGs above
+        # now name is visible here in one number. Integer division; 0 when the
+        # phase made no calls (avoids a divide-by-zero).
+        _entity_out_tok_per_call = (
+            (usage.output_tokens - _entity_phase_output_before) // _entity_calls
+            if _entity_calls
+            else 0
+        )
         run_profile.append(
             (
                 "entity",
                 time.monotonic() - _entity_phase_start,
                 {
-                    "calls": usage.api_calls - _entity_phase_calls_before,
+                    "calls": _entity_calls,
                     "created": total_created,
                     "updated": total_updated,
                     "escalated": total_escalated,
                     "files": processed_count,
+                    "out_tok_per_call": _entity_out_tok_per_call,
                     # #472: only render when non-zero so a clean run's summary
                     # line is unchanged, but an operator watching a drain sees
                     # "degraded=N" (files whose classification JSON dropped
@@ -2927,13 +2944,24 @@ def run(
         _pw_bytes = resolve_page_warn_bytes(config)
         _pf_bytes = resolve_page_flag_bytes(config)
         _, _pages_flag = scan_page_sizes(wiki_root, _pw_bytes, _pf_bytes)
-        for _name, _size in _pages_flag:
+        # Issue #490 (slice A) / #310: aggregate into ONE health-signal count
+        # line rather than one WARNING per page — a corpus with ~35 oversized
+        # pages previously buried the rest of the nightly log under 35 near-
+        # identical lines. The count leads (the greppable health signal); the
+        # per-page names/sizes trail on the same line so a purge stays
+        # auditable. Emitted only when at least one page is over the flag.
+        if _pages_flag:
             log.warning(
-                "oversized wiki page %s (%d bytes > flag %d): consider "
-                "splitting into linked sub-entities",
-                _name,
-                _size,
+                "oversized wiki pages: %d over flag %d bytes — consider "
+                "splitting into linked sub-entities: %s",
+                len(_pages_flag),
                 _pf_bytes,
+                ", ".join(
+                    f"{_name} ({_size}B)"
+                    for _name, _size in sorted(
+                        _pages_flag, key=lambda p: p[1], reverse=True
+                    )
+                ),
             )
     except Exception as exc:  # noqa: BLE001 — guardrail must never break a run
         log.warning("page-size guardrail check failed (non-fatal): %s", exc)

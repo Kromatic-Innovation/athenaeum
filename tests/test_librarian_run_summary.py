@@ -189,6 +189,26 @@ class TestRenderRunSummary:
         line = _render_run_summary(profile)
         assert "degraded" not in line
 
+    def test_out_tok_per_call_rendered_in_entity_segment(self) -> None:
+        # Issue #490 (slice A): output-tokens-per-call rides the entity
+        # segment so the silent full-page-echo fallback's ~10x output-cost
+        # spike is visible in the one-line summary without a by-hand ratio
+        # calc. The value is a known figure derived for this call set.
+        profile = [
+            (
+                "entity",
+                4.2,
+                {"calls": 6, "created": 2, "files": 5, "out_tok_per_call": 2750},
+            ),
+        ]
+        line = _render_run_summary(profile)
+        assert "out_tok_per_call=2750" in line
+        # Renders in dict order — after files, before any degraded/truncated.
+        assert (
+            "entity secs=4.200 calls=6 created=2 files=5 out_tok_per_call=2750"
+            in line
+        )
+
 
 # ---------------------------------------------------------------------------
 # 1. Clean run: summary present, covers the phases that ran
@@ -664,3 +684,103 @@ class TestNoBehaviorChange:
         ), "Expected budget exhaustion log message"
         # AND the new observability line is present alongside it.
         assert _summary_lines(caplog), "summary line must also be emitted"
+
+
+# ---------------------------------------------------------------------------
+# 5. Output-tokens-per-call (issue #490, slice A)
+# ---------------------------------------------------------------------------
+
+
+class TestEntityOutputTokensPerCall:
+    """The entity segment carries output-tokens-per-call, computed as the
+    phase's output-token delta // its call delta — the figure that makes the
+    silent full-page-echo fallback (a ~10x output-cost degrade) visible in the
+    run summary. Correct for a known call set, and 0-guarded on no calls."""
+
+    def _entity_field(self, line: str, key: str) -> int:
+        # Parse `key=<int>` out of the entity segment of the summary line.
+        entity_seg = next(
+            seg for seg in line.split(" | ") if seg.startswith("entity ")
+        )
+        token = next(t for t in entity_seg.split() if t.startswith(f"{key}="))
+        return int(token.split("=", 1)[1])
+
+    def test_entity_segment_reports_output_tokens_per_call(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A fake entity loop adds a KNOWN output-token and call delta to the
+        run's usage; the summary's entity ``out_tok_per_call`` must equal the
+        injected output delta // the reported call delta."""
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        # process_one is the sole source of entity-phase usage here: it bumps
+        # api_calls by 4 and output_tokens by 2400 for the one file. Any extra
+        # api_calls the loop makes (indexing, etc.) only widen the denominator,
+        # so we assert against the REPORTED call count, not a hard-coded 4.
+        def fake_process_one(raw, index, wiki_root_arg, client, *args, **kwargs):
+            usage = kwargs["usage"]
+            usage.api_calls += 4
+            usage.output_tokens += 2400
+            page = wiki_root_arg / "entity-alice.md"
+            page.write_text("# Alice\n", encoding="utf-8")
+            return SimpleNamespace(
+                created=[page.name], updated=[], escalated=[], skipped=[]
+            )
+
+        monkeypatch.setattr("athenaeum.librarian.process_one", fake_process_one)
+        # Keep the auto-memory phase out of the way (it runs AFTER the entity
+        # snapshot, but stubbing it keeps the test hermetic and fast).
+        monkeypatch.setattr(
+            "athenaeum.librarian.discover_auto_memory_files", lambda *_a, **_k: []
+        )
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+        )
+
+        assert rc == 0
+        lines = _summary_lines(caplog)
+        assert len(lines) == 1
+        line = lines[0]
+        assert "out_tok_per_call=" in line, line
+        calls = self._entity_field(line, "calls")
+        out_per_call = self._entity_field(line, "out_tok_per_call")
+        assert calls >= 4
+        # 2400 output tokens spread across the phase's `calls` calls.
+        assert out_per_call == 2400 // calls, line
+
+    def test_out_tok_per_call_is_zero_when_no_entity_calls(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """No entity intake => no calls => out_tok_per_call renders 0, never a
+        divide-by-zero."""
+        root = _seed_knowledge_root(tmp_path, n_files=0)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+        monkeypatch.setattr(
+            "athenaeum.librarian.discover_auto_memory_files", lambda *_a, **_k: []
+        )
+        caplog.set_level(logging.INFO, logger="athenaeum")
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+        )
+
+        assert rc == 0
+        line = _summary_lines(caplog)[0]
+        assert self._entity_field(line, "out_tok_per_call") == 0
