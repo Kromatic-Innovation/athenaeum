@@ -254,6 +254,86 @@ def lint_inline_contact_fields(
 
 
 # ---------------------------------------------------------------------------
+# 2b. Corpus-wide PII lint — any file under wiki/, not only entity pages (#495)
+# ---------------------------------------------------------------------------
+#
+# The entity-page lint above (:func:`lint_inline_contact_fields`) only ever
+# looks at entity pages — the pydantic boundary (:class:`athenaeum.schemas.PersonWiki`)
+# runs it per-page, and #479's migration walks the same ``wiki/*.md`` entity
+# set. #495 measured the gap that leaves: 790 pages carry an email in *body
+# text with no ``emails:`` frontmatter*, and the sample is dominated by the
+# corpus's own ``_``-prefixed queue/index/archive files and a stale ``.bak`` —
+# none of which the entity-page lint or the entity-page migration ever open.
+# ``_pending_merges_archive.md`` in particular embeds full draft bodies (every
+# contact datum copied verbatim) inside ``wiki/``, so it is in the corpus and
+# recallable while sitting in the *least* obvious place anyone would look.
+#
+# This lint closes that by scanning the WHOLE text of EVERY file under
+# ``wiki/`` (recursively — ``_``-prefixed files, ``.bak`` files, nested dirs),
+# reusing the same :func:`find_inline_emails` / :func:`find_inline_phones`
+# detectors so there is one definition of "looks like contact data". It is a
+# hard gate (the CLI exits non-zero on any finding — see
+# :mod:`athenaeum._cmd_storage`'s ``storage lint-pii``) so a body-text email
+# cannot silently regrow after the sweep. The excluded surface lives OUTSIDE
+# ``wiki/`` by construction (#427/#429), so migrated contact records are never
+# scanned here — exactly the property that makes the exclusion worth its cost.
+
+
+@dataclass(frozen=True)
+class CorpusPiiFinding:
+    """Inline contact data found in one corpus file (issue #495).
+
+    ``emails``/``phones`` are the deduped, order-preserving tokens
+    :func:`find_inline_emails` / :func:`find_inline_phones` matched anywhere in
+    the file's text (frontmatter or body — the corpus-wide sweep does not
+    distinguish, since AC is "zero files under ``wiki/`` contain an inline
+    email or phone").
+    """
+
+    path: Path
+    emails: list[str]
+    phones: list[str]
+
+
+def iter_corpus_files(wiki_root: Path) -> list[Path]:
+    """Return every regular file under *wiki_root*, recursively, sorted.
+
+    Unlike the entity-page scans (:func:`athenaeum.storage_migrate.iter_entity_pages`,
+    :func:`athenaeum.search._iter_wiki_entries`) this deliberately does NOT skip
+    ``_``-prefixed files, does NOT restrict to ``*.md``, and DOES descend into
+    subdirectories — the whole point of #495 is that the excluded surface is
+    only worth as much as the completeness of the sweep, so ``_``-prefixed queue
+    files, ``.bak`` backups and anything else living in the corpus are all in
+    scope. Missing root yields ``[]`` (never raises).
+    """
+    if not wiki_root.is_dir():
+        return []
+    return sorted(p for p in wiki_root.rglob("*") if p.is_file())
+
+
+def scan_corpus_pii(wiki_root: Path) -> list[CorpusPiiFinding]:
+    """Scan every file under *wiki_root* for inline email/phone tokens.
+
+    Returns one :class:`CorpusPiiFinding` per file that carries any
+    email/phone-shaped token in its text, in sorted path order. Files that
+    cannot be read as UTF-8 text (binary assets) are skipped rather than
+    treated as findings — the lint is about text-visible contact data, not
+    byte-level scanning. A clean corpus returns ``[]``.
+    """
+    findings: list[CorpusPiiFinding] = []
+    for path in iter_corpus_files(wiki_root):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue  # unreadable / binary asset — not a text PII finding
+        emails = find_inline_emails(text)
+        phones = find_inline_phones(text)
+        if emails or phones:
+            findings.append(CorpusPiiFinding(path=path, emails=emails, phones=phones))
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # 4. Observation log (append-only JSONL) + supersession + deterministic fold
 # ---------------------------------------------------------------------------
 #
@@ -607,6 +687,9 @@ __all__ = [
     "find_inline_phones",
     "has_inline_contact_fields",
     "lint_inline_contact_fields",
+    "CorpusPiiFinding",
+    "iter_corpus_files",
+    "scan_corpus_pii",
     "default_observation_log_path",
     "default_supersession_log_path",
     "build_observation_record",
