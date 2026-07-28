@@ -420,6 +420,156 @@ class TestSpendCommand:
 
 
 # ---------------------------------------------------------------------------
+# Schema v2 (issue #487) — per-model attribution, billing_mode, notional_usd,
+# and the unpriceable pre-v2 contract. cwc#1629 accounting conformance.
+# ---------------------------------------------------------------------------
+
+
+def _mixed_model_api_usage() -> TokenUsage:
+    """A metered run spanning two models, as a librarian pass does — Haiku for
+    the tier-2 classify and Sonnet for the tier-3 write — each tagged so the
+    accumulator carries per-model attribution (#247). No batch traffic, so the
+    row reprices cleanly from input/output/cache alone."""
+    u = TokenUsage()
+    u.add(300_000, 40_000, 100_000, 5_000, model="claude-haiku-4-5-20251001")
+    u.add(80_000, 120_000, 0, 0, model="claude-sonnet-4-6")
+    return u
+
+
+class TestSchemaV2:
+    def test_two_model_run_is_repriceable_per_model(self, ledger: Path) -> None:
+        """A mixed Haiku/Sonnet run writes per-model token counts, and the row
+        can be repriced per model — the defect a flat aggregate row cannot fix
+        (issue #487 acceptance #1). Exercises the real write path end to end:
+        record_spend -> build_record -> _append_line -> read_ledger off disk."""
+        assert spend.record_spend(_mixed_model_api_usage(), run_type="librarian", provider="api")
+        rec = spend.read_ledger(ledger)[0]
+
+        assert rec["v"] == 2
+        tbm = rec["tokens_by_model"]
+        assert set(tbm) == {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}
+        # Hestia cost-ledger.ts core shape: {input, output, total}.
+        assert tbm["claude-haiku-4-5-20251001"]["input"] == 300_000
+        assert tbm["claude-haiku-4-5-20251001"]["output"] == 40_000
+        assert tbm["claude-haiku-4-5-20251001"]["total"] == 340_000
+        assert tbm["claude-sonnet-4-6"]["input"] == 80_000
+        assert tbm["claude-sonnet-4-6"]["total"] == 200_000
+        # The two models carry genuinely different attribution — a blended
+        # single total could not recover this.
+        assert tbm["claude-haiku-4-5-20251001"]["input"] != tbm["claude-sonnet-4-6"]["input"]
+
+        # Repriceable per model: reconstruct each model's spend from ITS row
+        # entry and price it at ITS own rate; the sum reproduces the row's
+        # notional (no untagged remainder, no batch). A flat row cannot do this.
+        def _reprice(model: str, entry: dict[str, Any]) -> float:
+            u = TokenUsage()
+            u.add(
+                entry["input"],
+                entry["output"],
+                entry["cache_creation_input_tokens"],
+                entry["cache_read_input_tokens"],
+                model=model,
+            )
+            return u.estimated_cost_usd
+
+        per_model_sum = sum(_reprice(m, e) for m, e in tbm.items())
+        assert rec["notional_usd"] > 0.0
+        assert round(per_model_sum, 6) == rec["notional_usd"]
+
+    def test_tokens_by_model_preserves_cache_and_batch_splits(self, ledger: Path) -> None:
+        """The per-model entry is a SUPERSET of hestia's core shape — it keeps
+        athenaeum's cache/batch splits (#487 scope; #239/#236 cost relevance)."""
+        u = TokenUsage()
+        u.add(1_000, 500, 200, 50, model="claude-sonnet-4-6")
+        u.add_batch_tokens(400, 100, 0, 0, model="claude-sonnet-4-6")
+        assert spend.record_spend(u, run_type="librarian", provider="api")
+        entry = spend.read_ledger(ledger)[0]["tokens_by_model"]["claude-sonnet-4-6"]
+        # input/output include the batch share (folded into the scalar counters).
+        assert entry["input"] == 1_400
+        assert entry["output"] == 600
+        assert entry["cache_creation_input_tokens"] == 200
+        assert entry["cache_read_input_tokens"] == 50
+        assert entry["batch_input_tokens"] == 400
+        assert entry["batch_output_tokens"] == 100
+
+    def test_billing_mode_and_real_vs_notional_never_summed(self, ledger: Path) -> None:
+        """Every row carries billing_mode; real API dollars and subscription
+        notional are two separate metrics (#487 acceptance #2)."""
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+        sub_rec, api_rec = spend.read_ledger(ledger)
+
+        assert sub_rec["billing_mode"] == "subscription"
+        assert sub_rec["estimated_cost_usd"] == 0.0  # nothing paid...
+        assert sub_rec["notional_usd"] > 0.0  # ...but utilization is visible
+
+        assert api_rec["billing_mode"] == "api"
+        # On an api row the paid figure and the counterfactual coincide.
+        assert api_rec["estimated_cost_usd"] > 0.0
+        assert api_rec["estimated_cost_usd"] == api_rec["notional_usd"]
+
+        # The invariant: a real-dollar total sums only api rows' estimated_cost,
+        # never a subscription row's notional. They are never added together.
+        real_dollars = sum(
+            r["estimated_cost_usd"] for r in (sub_rec, api_rec) if r["billing_mode"] == "api"
+        )
+        assert real_dollars == api_rec["estimated_cost_usd"]
+
+    def test_pre_v2_rows_readable_and_counted_unpriceable(self, ledger: Path) -> None:
+        """A pre-v2 row (no per-model attribution) stays readable and is counted
+        as unpriceable — never silently dropped or repriced (#487 acceptance
+        #3, cwc#1627's failure mode)."""
+        # A genuine v1 row, exactly as an older athenaeum wrote it (no
+        # tokens_by_model / billing_mode / notional_usd).
+        v1 = {
+            "v": 1,
+            "ts": "2026-07-20T00:00:00Z",
+            "run_type": "librarian",
+            "provider": "anthropic",
+            "subscription_covered": False,
+            "models": ["claude-haiku-4-5-20251001", "claude-sonnet-4-6"],
+            "api_calls": 500,
+            "input_tokens": 2_000_000,
+            "output_tokens": 500_000,
+            "total_tokens": 2_500_000,
+            "estimated_cost_usd": 12.5,
+        }
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps(v1, separators=(",", ":")) + "\n", encoding="utf-8")
+        # A conforming v2 row appended after it.
+        spend.record_spend(_mixed_model_api_usage(), run_type="librarian", provider="api")
+
+        records = spend.read_ledger(ledger)
+        assert len(records) == 2  # the v1 row is NOT dropped
+        summary = spend.summarize(records)
+        assert summary["record_count"] == 2
+        assert summary["unpriceable_records"] == 1  # only the v1 row
+        # The v1 row is still present in its billing bucket (its own historical
+        # figure is retained; only its per-model repriceability is absent).
+        assert summary["api"]["records"] == 2
+
+    def test_spend_json_shape_is_additive(
+        self, ledger: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`athenaeum spend --json` keeps its existing top-level shape (cwc#1218
+        /good-morning must not regress) and only ADDS unpriceable_records
+        (#487 acceptance #4)."""
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+        rc = main(["spend", "--since", "30d", "--json", "--ledger", str(ledger)])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        # Existing keys /good-morning consumes — unchanged.
+        assert payload["subscription"]["total_tokens"] == 1200
+        assert payload["subscription"]["estimated_cost_usd"] == 0.0
+        assert payload["api"]["estimated_cost_usd"] > 0.0
+        assert payload["record_count"] == 2
+        assert "ledger_path" in payload  # surfaced for the cwc#1627 reader
+        # Additive v2 field.
+        assert payload["unpriceable_records"] == 0  # both rows are v2
+
+
+# ---------------------------------------------------------------------------
 # query_topics ledger integration — the metered hot path is recorded
 # ---------------------------------------------------------------------------
 
@@ -463,3 +613,10 @@ class TestQueryTopicsLedger:
         assert recs[0]["provider"] == "anthropic"  # metered API path
         assert recs[0]["input_tokens"] == 120
         assert recs[0]["estimated_cost_usd"] > 0.0
+        # v2 conformance on a genuinely LLM-driven write (issue #487): the row
+        # carries billing_mode, per-model attribution, and the notional figure.
+        assert recs[0]["v"] == 2
+        assert recs[0]["billing_mode"] == "api"
+        assert recs[0]["notional_usd"] == recs[0]["estimated_cost_usd"]
+        tbm = recs[0]["tokens_by_model"]
+        assert list(tbm) and tbm[next(iter(tbm))]["input"] == 120

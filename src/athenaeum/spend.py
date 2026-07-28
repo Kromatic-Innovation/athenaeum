@@ -28,6 +28,23 @@ This module appends **one JSONL record per pipeline run** to
   subscription path so subscription rows can never be summed into the dollar
   total.
 
+Schema v2 (issue #487, conforming to cwc#1629's accounting contract) adds,
+additively — pre-v2 readers keep working:
+
+* ``billing_mode`` — ``subscription`` | ``api``. The canonical vocabulary
+  alongside ``subscription_covered``; real ``api`` dollars and ``subscription``
+  notional are two metrics that are NEVER summed.
+* ``tokens_by_model`` — per-model token attribution (``tokens x model`` is the
+  fact; dollars are derived). A mixed-model row stays repriceable per model
+  instead of collapsing into an unrepriceable blended total. A superset of
+  hestia's ``cost-ledger.ts`` ``{input, output, total}`` shape (one reader
+  serves both) plus athenaeum's cache/batch splits.
+* ``notional_usd`` — the counterfactual API-rate cost of the run's tokens,
+  so a subscription row reports utilization instead of reading as $0.
+
+Pre-v2 rows (and any row with no per-model attribution) stay readable and are
+counted as *unpriceable* by :func:`summarize` — never silently dropped.
+
 The ledger is append-only and crash-safe: each record is a single
 ``O_APPEND`` write of one small line, and the reader tolerates a torn
 trailing line. It records ONLY counts, model ids, run type, provider,
@@ -50,7 +67,17 @@ if TYPE_CHECKING:  # avoid an import cycle at runtime (models imports nothing he
 log = logging.getLogger(__name__)
 
 #: Schema version stamped on every record so a future reader can migrate.
-LEDGER_VERSION = 1
+#: v2 (issue #487) adds per-model token attribution (``tokens_by_model``),
+#: the ``billing_mode`` vocabulary, and the ``notional_usd`` counterfactual —
+#: all ADDITIVE. Pre-v2 rows stay readable and are counted as *unpriceable*
+#: (they lack per-model attribution, so they cannot be repriced), never
+#: dropped. See the module docstring and :func:`summarize`.
+LEDGER_VERSION = 2
+
+#: The two billing modes, in cwc#1629's vocabulary. ``subscription`` notional
+#: dollars and ``api`` real dollars are two metrics that are NEVER summed.
+BILLING_MODE_SUBSCRIPTION = "subscription"
+BILLING_MODE_API = "api"
 
 #: Ledger filename under the cache dir.
 LEDGER_FILENAME = "spend.jsonl"
@@ -107,6 +134,44 @@ def _now_utc() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
+#: Per-model counters carried on ``tokens_by_model`` beyond hestia's core
+#: ``{input, output, total}`` — athenaeum's cache/batch splits (#487 keeps
+#: them; #239/#236 make them cost-relevant). A hestia-shaped reader that only
+#: reads ``input``/``output``/``total`` ignores these extra keys, so one reader
+#: serves both ledgers.
+_PER_MODEL_DETAIL_KEYS: tuple[str, ...] = (
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "batch_input_tokens",
+    "batch_output_tokens",
+    "batch_cache_creation_input_tokens",
+    "batch_cache_read_input_tokens",
+)
+
+
+def tokens_by_model(usage: "TokenUsage") -> dict[str, dict[str, int]]:
+    """Per-model token attribution for a ledger row (issue #487).
+
+    Keyed by model-id, each value is a SUPERSET of hestia's
+    ``cost-ledger.ts`` ``CostLedgerTokens`` shape — the core
+    ``{input, output, total}`` (``total`` excludes cache, matching hestia so
+    cwc#1627's one reader serves both ledgers) plus athenaeum's cache/batch
+    detail. Sourced from :attr:`TokenUsage.per_model`, which the tier/batch
+    call sites populate with the ``model=`` kwarg (#247). Empty when the run
+    tagged no model — such a row carries no per-model attribution and is
+    therefore *unpriceable* (see :func:`summarize`).
+    """
+    out: dict[str, dict[str, int]] = {}
+    for model, bucket in usage.per_model.items():
+        inp = int(bucket.get("input_tokens", 0) or 0)
+        outp = int(bucket.get("output_tokens", 0) or 0)
+        entry = {"input": inp, "output": outp, "total": inp + outp}
+        for key in _PER_MODEL_DETAIL_KEYS:
+            entry[key] = int(bucket.get(key, 0) or 0)
+        out[model] = entry
+    return out
+
+
 def build_record(
     usage: "TokenUsage",
     *,
@@ -131,16 +196,26 @@ def build_record(
     files-per-run throughput across runs.
     """
     prov = ledger_provider(provider)
-    usd = 0.0 if prov == PROVIDER_CLAUDE_CLI else round(usage.estimated_cost_usd, 6)
+    is_subscription = prov == PROVIDER_CLAUDE_CLI
+    usd = 0.0 if is_subscription else round(usage.estimated_cost_usd, 6)
     stamp = (ts if ts is not None else _now_utc()).astimezone(timezone.utc)
     record = {
         "v": LEDGER_VERSION,
         "ts": stamp.isoformat().replace("+00:00", "Z"),
         "run_type": run_type,
         "provider": prov,
-        "subscription_covered": prov == PROVIDER_CLAUDE_CLI,
+        # ``billing_mode`` (issue #487, cwc#1629) is the canonical vocabulary;
+        # ``subscription_covered`` is retained ADDITIVELY so pre-v2 readers keep
+        # working. Real ``api`` dollars and ``subscription`` notional are never
+        # summed.
+        "billing_mode": BILLING_MODE_SUBSCRIPTION if is_subscription else BILLING_MODE_API,
+        "subscription_covered": is_subscription,
         "session_id": session_id,
         "models": sorted(usage.per_model.keys()),
+        # Per-model token attribution (issue #487): the fact is
+        # tokens x model x timestamp, so a mixed-model row stays repriceable per
+        # model instead of collapsing into an unrepriceable blended total.
+        "tokens_by_model": tokens_by_model(usage),
         "api_calls": usage.api_calls,
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
@@ -149,7 +224,13 @@ def build_record(
         "batch_input_tokens": usage.batch_input_tokens,
         "batch_output_tokens": usage.batch_output_tokens,
         "total_tokens": usage.total_tokens,
+        # ``estimated_cost_usd`` stays provider-tagged (0 on the subscription
+        # path — never summed into a dollar total). ``notional_usd`` (issue
+        # #487) is the counterfactual API-rate cost of the same tokens: it
+        # equals ``estimated_cost_usd`` on an api row and reveals a subscription
+        # row's utilization instead of leaving it reading as $0 of activity.
         "estimated_cost_usd": usd,
+        "notional_usd": round(usage.notional_cost_usd, 6),
     }
     if files_processed is not None:
         record["files_processed"] = int(files_processed)
@@ -339,11 +420,19 @@ def summarize(
     api = _blank_bucket()
     per_model: dict[str, dict[str, Any]] = {}
     per_run_type: dict[str, dict[str, Any]] = {}
+    unpriceable = 0
 
     for record in records:
         prov = record.get("provider")
         bucket = subscription if prov == PROVIDER_CLAUDE_CLI else api
         _accumulate(bucket, record)
+        # A row with no per-model attribution (pre-v2, or a v2 run that tagged
+        # no model) cannot be repriced at a new rate table (issue #487,
+        # cwc#1627's failure mode). Count it as unpriceable — it is NOT dropped
+        # and stays in ``record_count`` and its billing bucket; the count just
+        # tells a repricing consumer how many rows it must treat as opaque.
+        if not record.get("tokens_by_model"):
+            unpriceable += 1
         if by_model:
             for model in record.get("models") or ["(untagged)"]:
                 slot = per_model.setdefault(
@@ -367,6 +456,11 @@ def summarize(
     subscription["estimated_cost_usd"] = 0.0
     summary: dict[str, Any] = {
         "record_count": len(records),
+        # Count of rows with no per-model attribution — pre-v2 rows and any v2
+        # run that tagged no model (issue #487). Additive; the existing
+        # ``subscription``/``api``/``record_count`` shape is unchanged so
+        # cwc#1218's /good-morning section does not regress.
+        "unpriceable_records": unpriceable,
         "subscription": subscription,
         "api": api,
     }
