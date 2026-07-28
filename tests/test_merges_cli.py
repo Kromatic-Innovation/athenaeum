@@ -219,3 +219,79 @@ def test_list_text_multiple_blocks_separated(tmp_path: Path) -> None:
     assert rc == 0
     assert 'Merge: \'one\'' in out and 'Merge: \'two\'' in out
     assert "rationale: r1" in out
+
+
+# --- issue #481: `merges revalidate [--apply]` -----------------------------
+
+
+def _over_cap_sidecar(tmp_path: Path) -> Path:
+    """A sidecar with one over-cap (7-source) block + one legal (2) block."""
+    from athenaeum.pending_merges import render_block
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    over_cap = render_block(
+        merge_target_name="merge-workflow-pattern",
+        sources=[f"/k/src-{i}.md" for i in range(7)],
+        rationale="chained",
+        draft_merged_body="draft",
+        confidence=0.33,
+        created_at="2026-06-20",
+    )
+    legal = render_block(
+        merge_target_name="acme-corp",
+        sources=["/k/a.md", "/k/b.md"],
+        rationale="tight",
+        draft_merged_body="draft",
+        confidence=0.9,
+        created_at="2026-07-05",
+    )
+    (wiki / "_pending_merges.md").write_text(
+        "# Pending Merges\n\n" + over_cap + "\n\n---\n\n" + legal + "\n",
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def test_revalidate_dry_run_text_reports_but_does_not_write(tmp_path: Path) -> None:
+    root = _over_cap_sidecar(tmp_path)
+    before = (root / "wiki" / "_pending_merges.md").read_text(encoding="utf-8")
+
+    rc, out = _run(["merges", "revalidate", "--path", str(root)])
+
+    assert rc == 0
+    assert "Would retire 1" in out
+    assert "merge-workflow-pattern" in out
+    assert "over-cluster" in out
+    assert "Dry-run" in out
+    # Nothing written on a dry-run.
+    assert (root / "wiki" / "_pending_merges.md").read_text(encoding="utf-8") == before
+    assert not (root / "wiki" / "_pending_merges_archive.md").exists()
+
+
+def test_revalidate_apply_json_archives_stale(tmp_path: Path) -> None:
+    root = _over_cap_sidecar(tmp_path)
+
+    rc, out = _run(["merges", "revalidate", "--path", str(root), "--apply", "--json"])
+
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["applied"] is True
+    assert [r["merge_target_name"] for r in payload["retired"]] == [
+        "merge-workflow-pattern"
+    ]
+    assert payload["retired"][0]["n_sources"] == 7
+    assert "over-cluster" in payload["retired"][0]["reason"]
+    # The stale block is now in the archive; the legal block stays in primary.
+    primary = (root / "wiki" / "_pending_merges.md").read_text(encoding="utf-8")
+    assert "acme-corp" in primary
+    assert "merge-workflow-pattern" not in primary
+    archive = (root / "wiki" / "_pending_merges_archive.md").read_text(encoding="utf-8")
+    assert "merge-workflow-pattern" in archive
+
+
+def test_revalidate_empty_is_clean(tmp_path: Path) -> None:
+    (tmp_path / "wiki").mkdir()
+    rc, out = _run(["merges", "revalidate", "--path", str(tmp_path)])
+    assert rc == 0
+    assert "0 stale proposals" in out
