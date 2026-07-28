@@ -991,6 +991,62 @@ class TestRunIntegration:
         for page in (page_a, page_b, page_c):
             assert page in line
 
+    def test_pending_merge_revalidation_advisor_warns_dry_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Issue #481: a run surfaces stale pending-merge proposals the current
+        gate would retire with a WARNING naming the remedy — WITHOUT mutating
+        the queue (the nightly advisor runs dry-run)."""
+        import logging
+
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+        from athenaeum.pending_merges import render_block
+
+        root = self._seed_knowledge_root(tmp_path)
+        over_cap = render_block(
+            merge_target_name="merge-workflow-pattern",
+            sources=[f"/k/src-{i}.md" for i in range(9)],  # over the cap of 5
+            rationale="chained",
+            draft_merged_body="draft",
+            confidence=0.3,
+            created_at="2026-06-20",
+        )
+        merges_path = root / "wiki" / "_pending_merges.md"
+        merges_path.write_text(
+            "# Pending Merges\n\n" + over_cap + "\n", encoding="utf-8"
+        )
+        before = merges_path.read_text(encoding="utf-8")
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = MagicMock(
+            content=[MagicMock(text="[]")]
+        )
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-key")
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+
+        exit_code = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+        )
+
+        assert exit_code == 0
+        advisor = [
+            rec.message
+            for rec in caplog.records
+            if "pending-merge queue" in rec.message
+        ]
+        assert len(advisor) == 1
+        assert "revalidate --apply" in advisor[0]
+        # Advisor is dry-run: the sidecar is untouched.
+        assert merges_path.read_text(encoding="utf-8") == before
+
     def test_page_size_scan_error_is_swallowed(
         self,
         tmp_path: Path,

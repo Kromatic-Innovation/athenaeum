@@ -12,7 +12,7 @@ named by their human title (frontmatter ``name:``, not the uuid-slug) with a
 one-line gist each, and a ``question`` field phrases the decision plainly —
 so a human can decide approve/reject without opening the raw wiki files.
 
-Four modes:
+Five modes:
 
 - ``list``        all unresolved merges (optionally ``--limit``, ``--json``)
 - ``next``        the OLDEST unresolved merge (one block)
@@ -20,6 +20,9 @@ Four modes:
 - ``provenance``  EXECUTED merges from ``wiki/_merge_provenance.jsonl``
                    (issue #425) — which source pages a merge relied on,
                    queryable by ``--canonical-slug`` / ``--merge-id``.
+- ``revalidate``  re-validate existing unresolved proposals against the
+                   CURRENT suppression gate and archive stale ones (issue
+                   #481). Dry-run by default; ``--apply`` writes.
 """
 
 from __future__ import annotations
@@ -77,6 +80,67 @@ def _format_provenance_record(record: dict) -> str:
     return "\n".join(lines)
 
 
+def _cmd_revalidate(args: argparse.Namespace) -> int:
+    """``athenaeum merges revalidate [--apply]`` — issue #481.
+
+    Re-validate existing unresolved ``_pending_merges.md`` blocks against the
+    CURRENT suppression gate and archive stale ones. Dry-run by default,
+    mirroring ``authority convert``'s shape: it reports what WOULD be retired
+    and writes nothing unless ``--apply`` is passed.
+    """
+    from athenaeum.config import load_config
+    from athenaeum.pending_merges import revalidate_pending_merges
+
+    knowledge_root = (
+        (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
+    )
+    merges_path = knowledge_root / "wiki" / "_pending_merges.md"
+    config = load_config(knowledge_root)
+    apply = getattr(args, "apply", False)
+
+    result = revalidate_pending_merges(merges_path, config=config, apply=apply)
+
+    if args.json:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "applied": result.applied,
+                    "kept": result.kept,
+                    "retired": [
+                        {
+                            "id": r.id,
+                            "merge_target_name": r.merge_target_name,
+                            "n_sources": r.n_sources,
+                            "confidence": r.confidence,
+                            "reason": r.reason,
+                        }
+                        for r in result.retired
+                    ],
+                }
+            )
+            + "\n"
+        )
+        return 0
+
+    if not result.retired:
+        print("0 stale proposals — nothing to retire against the current gate")
+        return 0
+
+    verb = "Retired" if result.applied else "Would retire"
+    print(
+        f"{verb} {len(result.retired)} stale proposal(s) against the current "
+        f"suppression gate:"
+    )
+    for r in result.retired:
+        print(f"  - {r.merge_target_name!r} ({r.n_sources} sources): {r.reason}")
+    if not result.applied:
+        print(
+            "\nDry-run — no changes written. Re-run with --apply to archive "
+            "them to _pending_merges_archive.md."
+        )
+    return 0
+
+
 def cmd_merges(args: argparse.Namespace) -> int:
     """Dispatch ``athenaeum merges {list,next,count,provenance}``.
 
@@ -86,12 +150,16 @@ def cmd_merges(args: argparse.Namespace) -> int:
     ``_merge_provenance.jsonl``.
     """
     sub = getattr(args, "merges_target", None)
-    if sub not in ("list", "next", "count", "provenance"):
+    if sub not in ("list", "next", "count", "provenance", "revalidate"):
         print(
-            "usage: athenaeum merges {list,next,count,provenance} [...]",
+            "usage: athenaeum merges "
+            "{list,next,count,provenance,revalidate} [...]",
             file=sys.stderr,
         )
         return 2
+
+    if sub == "revalidate":
+        return _cmd_revalidate(args)
 
     if sub == "provenance":
         wiki_root = _resolve_wiki_root(args)
@@ -202,6 +270,24 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         "count", help="Print `N unresolved (oldest: <iso-date>)`."
     )
     _add_common(count_p)
+
+    revalidate_p = m_sub.add_parser(
+        "revalidate",
+        help=(
+            "Re-validate existing unresolved merge proposals against the "
+            "CURRENT suppression gate and archive stale ones (issue #481). "
+            "Dry-run by default; pass --apply to write."
+        ),
+    )
+    _add_common(revalidate_p)
+    revalidate_p.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Archive proposals the current gate would suppress. Default: "
+            "dry-run — report only, write nothing."
+        ),
+    )
 
     provenance_p = m_sub.add_parser(
         "provenance",

@@ -2966,6 +2966,32 @@ def run(
     except Exception as exc:  # noqa: BLE001 — guardrail must never break a run
         log.warning("page-size guardrail check failed (non-fatal): %s", exc)
 
+    # Issue #481: pending-merge revalidation advisor. #480 stopped NEW
+    # degenerate over-cluster proposals from being written; this surfaces
+    # entries queued BEFORE the #400/#421 gate tightened that the pipeline
+    # would never propose today. Runs in DRY-RUN here (never mutates the queue
+    # unprompted) so a withdrawn-and-regrown queue's junk is visible from the
+    # first night, and names the one-command ``athenaeum merges revalidate
+    # --apply`` remedy. Best-effort: never breaks a run.
+    if not dry_run:
+        try:
+            from athenaeum.pending_merges import revalidate_pending_merges
+
+            _merges_path = wiki_root / "_pending_merges.md"
+            _reval = revalidate_pending_merges(
+                _merges_path, config=config, apply=False
+            )
+            if _reval.retired:
+                log.warning(
+                    "pending-merge queue: %d unresolved proposal(s) the current "
+                    "suppression gate would retire (queued before the gate "
+                    "tightened) — run `athenaeum merges revalidate --apply` to "
+                    "archive them",
+                    len(_reval.retired),
+                )
+        except Exception as exc:  # noqa: BLE001 — advisor must never break a run
+            log.warning("pending-merge revalidation advisor failed (non-fatal): %s", exc)
+
     # Issue #464: normal finalize path — every return below this point
     # (the entity-loop deadline_tripped 124, the failed-files 1, the
     # strict-budget 1, and the clean 0) shares this one emit. `_emit_run_summary`
