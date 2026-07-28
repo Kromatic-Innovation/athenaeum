@@ -148,9 +148,65 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 # numbers (years, page counts, issue numbers) don't false-positive.
 _PHONE_RE = re.compile(r"(?<!\w)([+(]?\d[\d\-.\s()]{6,}\d)(?!\w)")
 
+# The phone regex above is intentionally permissive, which means digit runs
+# that are NOT phone numbers slip through: ISO dates, year ranges, and bare
+# analytics/uid id fragments (issue #500 — confirmed against the live corpus,
+# where `2015-12-03`-style CRM-timeline dates and `00075741`/`387473359`-style
+# id fragments dominated the "phone" false positives). The two exclusions
+# below narrow the match WITHOUT touching genuine phone tokens: every real
+# fixture phone carries a '+', parens, or internal separators, so it is never
+# a bare digit run, and none is date-shaped.
+
+# ISO 8601 date: exactly `YYYY-MM-DD`. Validated (month/day in range) in
+# :func:`_looks_like_date` so a hypothetical phone like `5551-23-4567` — same
+# shape but not a real date — is NOT silently dropped.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Year range: `YYYY-YYYY` where both halves are plausible calendar years
+# (19xx/20xx), e.g. `2019-2020`. Restricting both halves to real-year prefixes
+# keeps a local number like `2015-9988` (2nd half not a year) matchable.
+_YEAR_RANGE_RE = re.compile(r"^(?:19|20)\d{2}-(?:19|20)\d{2}$")
+
+# A bare digit run (no '+', no separators) is only phone-shaped when its digit
+# count falls in the E.164-plausible band: a national number is >= 10 digits
+# (NANP) and the international maximum is 15. The corpus's bare-run false
+# positives (`00075741` = 8 digits, GA4 property id `387473359` = 9 digits)
+# fall below that band, while a genuine bare-typed phone number (>= 10 digits)
+# still matches. Runs with a '+' or separators bypass this entirely.
+_BARE_PHONE_MIN_DIGITS = 10
+_BARE_PHONE_MAX_DIGITS = 15
+
 
 def _has_enough_digits(candidate: str, *, minimum: int = 7) -> bool:
     return sum(ch.isdigit() for ch in candidate) >= minimum
+
+
+def _looks_like_date(candidate: str) -> bool:
+    """True when *candidate* is an ISO date or a plausible year range.
+
+    Excludes the two date shapes issue #500 found the phone regex matching in
+    the live corpus — ISO dates (`2015-12-03`) and year ranges (`2019-2020`) —
+    without excluding phone-shaped tokens that merely resemble them (an ISO
+    match is accepted only when its month/day are in calendar range).
+    """
+    if _ISO_DATE_RE.match(candidate):
+        _, month, day = candidate.split("-")
+        return 1 <= int(month) <= 12 and 1 <= int(day) <= 31
+    return bool(_YEAR_RANGE_RE.match(candidate))
+
+
+def _is_bare_id_fragment(candidate: str) -> bool:
+    """True when *candidate* is a separator-free digit run too short to be a phone.
+
+    Page uid prefixes and analytics/property ids (issue #500's `00075741`,
+    `387473359`) are bare digit runs below the E.164-plausible length band; a
+    genuine bare-typed phone number (>= 10 digits) is kept. Any '+' or
+    separator character means it is not a bare run, so real fixtures like
+    `+1-555-0100` and `(555) 010-0100` are never treated as id fragments.
+    """
+    if not candidate.isdigit():
+        return False
+    return not (_BARE_PHONE_MIN_DIGITS <= len(candidate) <= _BARE_PHONE_MAX_DIGITS)
 
 
 def is_pii_flagged(meta: dict[str, Any] | None) -> bool:
@@ -184,11 +240,21 @@ def find_inline_emails(text: str) -> list[str]:
 
 
 def find_inline_phones(text: str) -> list[str]:
-    """Return every phone-shaped token found in *text*, in order, deduped."""
+    """Return every phone-shaped token found in *text*, in order, deduped.
+
+    Excludes the corpus false positives issue #500 documented — ISO dates,
+    year ranges, and bare id/analytics fragments — via :func:`_looks_like_date`
+    and :func:`_is_bare_id_fragment`; every genuine phone fixture (carrying a
+    '+', parens, or separators) still matches.
+    """
     seen: list[str] = []
     for m in _PHONE_RE.finditer(text or ""):
         token = m.group(1)
-        if _has_enough_digits(token) and token not in seen:
+        if not _has_enough_digits(token):
+            continue
+        if _looks_like_date(token) or _is_bare_id_fragment(token):
+            continue
+        if token not in seen:
             seen.append(token)
     return seen
 

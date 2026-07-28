@@ -160,6 +160,40 @@ class TestPlanPiiMigration:
         assert plan.rewritten_page_text is None
         assert plan.excluded_page_text is None
 
+    def test_crm_timeline_dates_are_not_phone_migrations(self, tmp_path: Path) -> None:
+        # Issue #500: migrate-pii's phone detector matched CRM-timeline ISO
+        # dates and the page's own uid, so a dry-run "found phones" and --apply
+        # would strip real dates into the excluded surface as if they were
+        # contact PII. Reproduces the two live pages named in #500
+        # (`00075741-blekinge-business-incubator-2016.md`, `000a36e4-dawn-b.md`):
+        # a page whose only digit runs are timeline dates + an id prefix must
+        # report ZERO phone hits and be a no-op migration.
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        page = root / "wiki" / "00075741-blekinge-business-incubator-2016.md"
+        page.write_text(
+            "---\n"
+            "uid: '00075741'\n"
+            "name: Blekinge Business Incubator\n"
+            "type: organization\n"
+            "created: 2015-12-03\n"
+            "updated: 2026-04-16\n"
+            "ga4_property_id: '387473359'\n"
+            "---\n"
+            "## CRM Timeline\n"
+            "- First contact: 2015-12-03\n"
+            "- Last CRM update: 2021-07-16\n"
+            "- Last email: 2016-03-14\n",
+            encoding="utf-8",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+
+        assert plan.phones == []  # no dates/ids misread as phones
+        assert plan.changed is False  # nothing to migrate — a true no-op
+        assert plan.rewritten_page_text is None
+        assert plan.excluded_page_text is None
+
 
 # ---------------------------------------------------------------------------
 # CLI — athenaeum storage migrate-pii
