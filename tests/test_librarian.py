@@ -880,19 +880,21 @@ class TestRunIntegration:
         # run() returns 1 when any files failed (partial failure)
         assert exit_code == 1
 
-    def _write_oversized_entity(self, root: Path) -> str:
+    def _write_oversized_entity(
+        self, root: Path, uid: str = "bigbig01", *, fill: int = 20000
+    ) -> str:
         """Drop an oversized (>flag) wiki entity page; return its filename."""
-        name = "bigbig01-big-page.md"
+        name = f"{uid}-big-page.md"
         header = (
             "---\n"
-            "uid: bigbig01\n"
+            f"uid: {uid}\n"
             "type: person\n"
             "name: Big Page\n"
             "access: internal\n"
             "---\n\n"
             "# Big Page\n\n"
         )
-        (root / "wiki" / name).write_text(header + "x" * 20000)
+        (root / "wiki" / name).write_text(header + "x" * fill)
         return name
 
     def test_flag_page_warns_nonfatally(
@@ -901,7 +903,9 @@ class TestRunIntegration:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Issue #310: run() logs one WARNING per flagged page (non-fatal)."""
+        """Issue #310 / #490 (slice A): run() surfaces a flagged page in the
+        single aggregated oversized-pages WARNING (non-fatal). With one page
+        over the flag, exactly one such WARNING names it."""
         import logging
 
         import anthropic as anthropic_mod
@@ -936,6 +940,56 @@ class TestRunIntegration:
             "expected exactly one oversized-page WARNING for the flagged page, "
             f"got {[r.message for r in caplog.records]}"
         )
+
+    def test_multiple_oversized_pages_aggregate_to_single_line(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Issue #490 (slice A) / #310: with several pages over the flag,
+        run() emits exactly ONE aggregated WARNING carrying the count and
+        every page name — not one line per page (which buried a ~35-page
+        corpus's log)."""
+        import logging
+
+        import anthropic as anthropic_mod
+
+        from athenaeum.librarian import run
+
+        root = self._seed_knowledge_root(tmp_path)
+        page_a = self._write_oversized_entity(root, "aaaaaa01")
+        page_b = self._write_oversized_entity(root, "bbbbbb02")
+        page_c = self._write_oversized_entity(root, "cccccc03")
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = MagicMock(
+            content=[MagicMock(text="[]")]
+        )
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-key")
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+
+        exit_code = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+        )
+
+        assert exit_code == 0
+        oversized_lines = [
+            rec.message
+            for rec in caplog.records
+            if "oversized wiki page" in rec.message
+        ]
+        assert len(oversized_lines) == 1, (
+            "expected a SINGLE aggregated oversized-pages WARNING, got "
+            f"{oversized_lines}"
+        )
+        line = oversized_lines[0]
+        assert "3 over flag" in line
+        for page in (page_a, page_b, page_c):
+            assert page in line
 
     def test_page_size_scan_error_is_swallowed(
         self,
