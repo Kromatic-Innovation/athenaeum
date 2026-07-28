@@ -278,7 +278,7 @@ def _recall_via_backend(
     caller_audience: set[str] | None = None,
 ) -> str:
     """Delegate recall to a registered search backend, then format results."""
-    from athenaeum.search import get_backend
+    from athenaeum.search import DegradedIndexError, get_backend
 
     try:
         backend = get_backend(backend_name)
@@ -297,6 +297,13 @@ def _recall_via_backend(
         )
     except NotImplementedError as exc:
         return str(exc)
+    except DegradedIndexError as exc:
+        # #489: a degraded/unavailable index must surface as an explicit,
+        # actionable error — never as silently-wrong flat-scored hits.
+        return (
+            f"recall index unavailable: {exc} "
+            "Rebuild it with `athenaeum reindex` and retry."
+        )
 
     if not hits:
         return f"No wiki pages matched query: {query!r}"

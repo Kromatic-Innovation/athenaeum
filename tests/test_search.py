@@ -289,6 +289,171 @@ class TestVectorBackend:
         assert isinstance(score, float)
 
 
+class TestHitsFromQueryResults:
+    """#489 AC3/AC4: hardened parsing of a chromadb query result — no crash on
+    a None metadata, and a degenerate flat-score set surfaces explicitly.
+    Pure/deterministic, so no chromadb is needed."""
+
+    def test_none_metadata_entry_does_not_crash(self) -> None:
+        # AC4: a stale/corrupt collection can return a None metadata entry;
+        # `'NoneType' object has no attribute 'get'` must NOT reach the caller.
+        from athenaeum.search import _hits_from_query_results
+
+        results = {
+            "ids": [["a.md", "b.md"]],
+            "metadatas": [[None, {"name": "Bee"}]],
+            "distances": [[0.1, 0.9]],
+        }
+        hits = _hits_from_query_results(results, n=5, caller_audience=None)
+        assert hits == [("a.md", "a", 0.1), ("b.md", "Bee", 0.9)]
+
+    def test_none_metadatas_list_does_not_crash(self) -> None:
+        from athenaeum.search import _hits_from_query_results
+
+        results = {
+            "ids": [["a.md"]],
+            "metadatas": None,
+            "distances": [[0.2]],
+        }
+        hits = _hits_from_query_results(results, n=5, caller_audience=None)
+        assert hits == [("a.md", "a", 0.2)]
+
+    def test_flat_scores_raise_degraded(self) -> None:
+        # AC3: six unrelated results all at an identical distance is the
+        # degenerate fallback (the pre-reindex `score: 1.5` failure mode).
+        from athenaeum.search import DegradedIndexError, _hits_from_query_results
+
+        results = {
+            "ids": [[f"c{i}.md" for i in range(6)]],
+            "metadatas": [[{"name": f"C{i}"} for i in range(6)]],
+            "distances": [[1.5] * 6],
+        }
+        with pytest.raises(DegradedIndexError, match="degraded"):
+            _hits_from_query_results(results, n=5, caller_audience=None)
+
+    def test_distinct_scores_are_ranked_normally(self) -> None:
+        from athenaeum.search import _hits_from_query_results
+
+        results = {
+            "ids": [["a.md", "b.md"]],
+            "metadatas": [[{"name": "A"}, {"name": "B"}]],
+            "distances": [[0.3, 0.7]],
+        }
+        hits = _hits_from_query_results(results, n=5, caller_audience=None)
+        assert [h[0] for h in hits] == ["a.md", "b.md"]
+
+    def test_single_hit_is_not_treated_as_degraded(self) -> None:
+        from athenaeum.search import _hits_from_query_results
+
+        results = {
+            "ids": [["only.md"]],
+            "metadatas": [[{"name": "Only"}]],
+            "distances": [[1.5]],
+        }
+        hits = _hits_from_query_results(results, n=5, caller_audience=None)
+        assert hits == [("only.md", "Only", 1.5)]
+
+    def test_empty_results(self) -> None:
+        from athenaeum.search import _hits_from_query_results
+
+        assert _hits_from_query_results({"ids": [[]]}, 5, None) == []
+        assert _hits_from_query_results({}, 5, None) == []
+
+
+class TestReindexUnderLiveServer:
+    """#489: a long-lived process must observe an out-of-process reindex and
+    re-open its stale chromadb handle — no restart, no degraded/None results."""
+
+    def test_build_index_writes_generation_stamp(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        from athenaeum.search import _VECTOR_DIR, _read_generation
+
+        cache = tmp_path / "cache"
+        VectorBackend().build_index(wiki_with_pages, cache, incremental=False)
+        gen = _read_generation(cache / _VECTOR_DIR)
+        assert gen  # a non-empty token was stamped for readers to observe
+
+    def test_query_reopens_after_out_of_process_reindex(
+        self, tmp_path: Path
+    ) -> None:
+        # Faithful reproduction of the live incident: the reindex runs in a
+        # SEPARATE process, so this ("server") process's chromadb SharedSystem
+        # cache stays pinned to the pre-reindex collection. Without the #489
+        # re-open, the second query serves the stale (deleted) page at the
+        # degenerate ~1.5 distance; with it, recall reflects the new corpus.
+        import subprocess
+        import sys
+
+        cache = tmp_path / "cache"
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+
+        def reindex_in_subprocess() -> None:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import pathlib,sys;"
+                    "from athenaeum.search import VectorBackend;"
+                    "VectorBackend().build_index("
+                    "pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]),"
+                    " incremental=False)",
+                    str(wiki),
+                    str(cache),
+                ],
+                check=True,
+            )
+
+        (wiki / "a.md").write_text(
+            "---\nname: Alpha\ntype: concept\n---\napple orchard harvest cider\n"
+        )
+        reindex_in_subprocess()
+
+        server = VectorBackend()  # long-lived, like the MCP server process
+        first = server.query("apple orchard cider", cache, n=3)
+        assert first and first[0][0] == "a.md"  # warms this process's cache
+
+        # Out-of-process reindex replaces the corpus entirely.
+        (wiki / "a.md").unlink()
+        (wiki / "b.md").write_text(
+            "---\nname: Beta\ntype: concept\n---\nbanana tropical fruit smoothie\n"
+        )
+        reindex_in_subprocess()
+
+        # SAME long-lived backend — must reflect the new corpus, not the stale
+        # deleted page, and must not crash.
+        second = server.query("banana tropical smoothie", cache, n=3)
+        assert second and second[0][0] == "b.md"
+        assert all(fname != "a.md" for fname, _n, _s in second)
+
+
+class TestRecallSurfacesDegradedIndex:
+    """#489 AC3: a DegradedIndexError from the backend surfaces to the recall
+    caller as an explicit, actionable message — never as ranked hits."""
+
+    def test_recall_reports_degraded_index(self, tmp_path: Path) -> None:
+        import athenaeum.search as search_mod
+        from athenaeum.mcp_server import _recall_via_backend
+        from athenaeum.search import DegradedIndexError
+
+        class _DegradedBackend:
+            def query(self, *a, **k):  # type: ignore[no-untyped-def]
+                raise DegradedIndexError("all 6 results at identical distance 1.5")
+
+        original = search_mod.get_backend
+        search_mod.get_backend = lambda name: _DegradedBackend()  # type: ignore[assignment]
+        try:
+            out = _recall_via_backend(
+                tmp_path, "spartacus persona", 5, "vector", tmp_path, []
+            )
+        finally:
+            search_mod.get_backend = original
+
+        assert "unavailable" in out.lower()
+        assert "reindex" in out.lower()
+
+
 @pytest.fixture
 def wiki_and_auto_memory(tmp_path: Path) -> tuple[Path, Path]:
     """Create a wiki + auto-memory intake tree for extra-roots tests.
