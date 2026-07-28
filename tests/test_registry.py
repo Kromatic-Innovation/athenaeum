@@ -128,6 +128,163 @@ def test_handles_roundtrip_through_tier0_passthrough(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# Structured seed onto an EXISTING entity survives compile as frontmatter
+# (issue #486 — a re-seed must not be flattened into prose by the LLM tiers)
+# --------------------------------------------------------------------------
+
+
+def _cbusa_seed_raw(raw_dir: Path) -> "RawFile":  # noqa: F821 (local import below)
+    """A raw-intake seed carrying #453's source-handle block for CBUSA.
+
+    Uses the CBUSA shape the live incident (2026-07-27) hit — note ``cbusa.us``,
+    not ``.com`` — so this fixture pins the exact case that had to be hand-edited.
+    """
+    from athenaeum.models import RawFile
+
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = raw_dir / "seed-cbusa.md"
+    raw_path.write_text(
+        "---\n"
+        "uid: company-cbusa\n"
+        "type: company\n"
+        "name: CBUSA\n"
+        "domains:\n  - cbusa.us\n"
+        "slack_channels:\n  - cbusa-team\n"
+        "linkedin_url: https://www.linkedin.com/company/cbusa\n"
+        "handles_verified: '2026-07-27'\n"
+        "---\n\n# CBUSA\n\nseed body — must not become the entity's prose.\n",
+        encoding="utf-8",
+    )
+    return RawFile(path=raw_path, source="contact-wiki", timestamp="", uuid8="")
+
+
+def _existing_cbusa_page(wiki: Path) -> Path:
+    """A CBUSA company page that exists but has NO handles yet (pre-seed state)."""
+    wiki.mkdir(parents=True, exist_ok=True)
+    page = wiki / "company-cbusa-cbusa.md"
+    page.write_text(
+        "---\nuid: company-cbusa\ntype: company\nname: CBUSA\n"
+        "access: internal\ntags:\n  - client\n---\n\n# CBUSA\n\nA client account.\n",
+        encoding="utf-8",
+    )
+    return page
+
+
+def _run_seed(wiki: Path, raw: "RawFile"):  # noqa: F821
+    """Compile ``raw`` through ``process_one`` with a client that MUST NOT run.
+
+    A structured source-handle seed onto a known entity is handled by the
+    deterministic Tier-0 upsert (#486); if any LLM call fires, the handles would
+    be classified into prose — so the mock raises, turning that regression into a
+    hard test failure rather than a silent quality loss.
+    """
+    from unittest.mock import MagicMock
+
+    from athenaeum.librarian import process_one
+    from athenaeum.models import EntityIndex
+
+    client = MagicMock()
+    client.messages.create.side_effect = AssertionError(
+        "LLM tiers must not run for a structured source-handle seed (#486)"
+    )
+    result = process_one(
+        raw,
+        EntityIndex(wiki),
+        wiki,
+        client,
+        valid_types=["company", "person"],
+        valid_tags=["client"],
+        valid_access=["open", "internal", "confidential", "personal"],
+    )
+    client.messages.create.assert_not_called()
+    return result
+
+
+def test_seed_onto_existing_entity_lands_as_frontmatter_not_prose(tmp_path: Path) -> None:
+    """A raw-intake source-handle seed for an entity that already exists compiles
+    onto the page's frontmatter (matching #453's schema) — never folded into the
+    body prose — and the registry resolves it end to end (issue #486 acceptance)."""
+    wiki = tmp_path / "wiki"
+    page = _existing_cbusa_page(wiki)
+    raw = _cbusa_seed_raw(tmp_path / "raw" / "contact-wiki")
+
+    result = _run_seed(wiki, raw)
+    assert result.updated == ["company-cbusa"]
+    assert not result.created
+
+    written = page.read_text(encoding="utf-8")
+    frontmatter, _, body = written.partition("\n---\n")
+    # Handles land as frontmatter keys...
+    for needle in (
+        "domains:",
+        "cbusa.us",
+        "slack_channels:",
+        "cbusa-team",
+        "linkedin_url:",
+        "handles_verified:",
+    ):
+        assert needle in frontmatter, f"seed dropped {needle!r} from frontmatter"
+    # ...and the seed body did NOT replace / pollute the entity's own prose.
+    assert "A client account." in body
+    assert "must not become the entity's prose" not in written
+
+    # registry.json resolves the seeded entity end to end (#453 index builder).
+    registry = build_registry(wiki)
+    assert registry["entities"]["company-cbusa"]["handles"] == {
+        "domains": ["cbusa.us"],
+        "slack_channels": ["cbusa-team"],
+        "linkedin_url": "https://www.linkedin.com/company/cbusa",
+        "handles_verified": "2026-07-27",
+    }
+
+
+def test_reseeding_the_same_handles_is_a_noop(tmp_path: Path) -> None:
+    """Idempotent re-seed (issue #486 AC #4): seeding the same handles twice must
+    not duplicate, re-flatten, or otherwise change the compiled page — the second
+    pass is a byte-for-byte no-op and reports no update."""
+    wiki = tmp_path / "wiki"
+    page = _existing_cbusa_page(wiki)
+
+    _run_seed(wiki, _cbusa_seed_raw(tmp_path / "raw" / "contact-wiki"))
+    after_first = page.read_text(encoding="utf-8")
+
+    # Second, identical seed (fresh raw dir so it is a distinct intake file).
+    result2 = _run_seed(wiki, _cbusa_seed_raw(tmp_path / "raw" / "contact-wiki-2"))
+
+    assert result2.updated == []  # no handle delta → nothing reported as updated
+    assert page.read_text(encoding="utf-8") == after_first  # byte-for-byte stable
+
+
+def test_seed_updates_a_changed_handle_value(tmp_path: Path) -> None:
+    """A seed that CHANGES a handle re-lands it as frontmatter (not a stale
+    no-op) while leaving untouched handle keys intact (issue #486)."""
+    wiki = tmp_path / "wiki"
+    _existing_cbusa_page(wiki)
+    _run_seed(wiki, _cbusa_seed_raw(tmp_path / "raw" / "contact-wiki"))
+
+    # Re-seed with an added slack channel.
+    from athenaeum.models import RawFile
+
+    raw_dir = tmp_path / "raw" / "contact-wiki-3"
+    raw_dir.mkdir(parents=True)
+    raw_path = raw_dir / "seed-cbusa.md"
+    raw_path.write_text(
+        "---\nuid: company-cbusa\ntype: company\nname: CBUSA\n"
+        "slack_channels:\n  - cbusa-team\n  - cbusa-exec\n---\n\n# CBUSA\n\nseed\n",
+        encoding="utf-8",
+    )
+    result = _run_seed(wiki, RawFile(path=raw_path, source="contact-wiki", timestamp="", uuid8=""))
+
+    assert result.updated == ["company-cbusa"]
+    registry = build_registry(wiki)
+    handles = registry["entities"]["company-cbusa"]["handles"]
+    assert handles["slack_channels"] == ["cbusa-team", "cbusa-exec"]
+    # Untouched handle keys from the first seed survive the second seed.
+    assert handles["domains"] == ["cbusa.us"]
+    assert handles["linkedin_url"] == "https://www.linkedin.com/company/cbusa"
+
+
+# --------------------------------------------------------------------------
 # collect_handles unit behaviour
 # --------------------------------------------------------------------------
 

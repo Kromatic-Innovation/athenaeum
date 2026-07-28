@@ -104,6 +104,7 @@ from athenaeum.provider import (
     preflight_provider,
     resolve_provider,
 )
+from athenaeum.registry import collect_handles
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
@@ -767,6 +768,115 @@ def tier0_passthrough(
     return entity
 
 
+def tier0_handle_upsert(
+    raw: RawFile,
+    index: EntityIndex,
+    wiki_root: Path,
+    valid_types: list[str],
+    dry_run: bool = False,
+) -> tuple[WikiEntity, bool] | None:
+    """Deterministically merge a pre-structured seed's source-handle keys onto
+    an EXISTING entity page, LLM-free (issue #486).
+
+    #454 seeds source handles (#453's schema) by writing raw intake that carries
+    ``uid``/``type``/``name`` plus the source-handle frontmatter keys. When the
+    entity is NEW, :func:`tier0_passthrough` promotes it verbatim and the handles
+    land as frontmatter. When it already EXISTS, tier0 declines (uid in index,
+    the idempotency gate) and — before this path existed — the raw fell through
+    to the Tier 2/3 LLM tiers, which classify the handle block as prose and fold
+    it into the page body. The structured ``source_handles`` schema (#453) was
+    lost, so ``registry.json`` could not resolve the seeded entity and #454's
+    "seed via raw intake, no hand-edit" acceptance was unreachable.
+
+    This path applies the seed's populated source-handle keys directly onto the
+    existing page's frontmatter, verbatim — never through the LLM — so a re-seed
+    onto a known entity lands as frontmatter, exactly like a first seed does
+    through tier0 passthrough.
+
+    Eligibility (ALL required, else return ``None`` so the caller falls through
+    to Tier 1/2/3 with today's behaviour intact): frontmatter parses;
+    ``uid``/``type``/``name`` are non-empty; ``type`` is in the allowlist; the
+    uid ALREADY exists in the index (the complement of ``tier0_passthrough``);
+    and the raw carries at least one *populated* source handle. A pre-structured
+    raw that carries no source handle (an ordinary note re-intake) is left to the
+    LLM tiers untouched.
+
+    Idempotent (AC #4 — "re-running the same seed is a no-op"): the write is
+    gated on an actual source-handle delta. When the seed introduces no new or
+    changed handle value, the page is left byte-for-byte unchanged and this
+    returns ``(entity, False)`` — no rewrite, no ``updated`` bump. When a handle
+    is added or changed, the page is rewritten with the merged frontmatter (and
+    ``updated`` stamped to today) and ``(entity, True)`` is returned.
+    """
+    meta, _ = parse_frontmatter(raw.content)
+    if not meta:
+        return None
+    uid = str(meta.get("uid", "") or "").strip()
+    etype = str(meta.get("type", "") or "").strip()
+    name = str(meta.get("name", "") or "").strip()
+    if not uid or not etype or not name:
+        return None
+    if etype not in valid_types:
+        return None
+
+    existing_path = index.get_by_uid(uid)
+    if existing_path is None or not existing_path.exists():
+        # New entity — tier0_passthrough owns it; nothing to upsert onto.
+        return None
+
+    incoming = collect_handles(meta)
+    if not incoming:
+        # Not a handle seed — leave it to the LLM tiers unchanged.
+        return None
+
+    existing_meta, existing_body = parse_frontmatter(existing_path.read_text(encoding="utf-8"))
+    if not existing_meta:
+        return None
+
+    # Merge the seed's populated handle keys onto the existing frontmatter, in
+    # cleaned/canonical form (so the compiled page matches #453's schema and the
+    # registry resolves it). Only keys the seed actually populates are touched.
+    existing_handles = collect_handles(existing_meta)
+    changed = any(existing_handles.get(key) != value for key, value in incoming.items())
+
+    merged_meta = dict(existing_meta)
+    for key, value in incoming.items():
+        merged_meta[key] = value
+
+    entity = WikiEntity(
+        uid=uid,
+        type=etype,
+        name=name,
+        aliases=[str(a) for a in (existing_meta.get("aliases") or []) if a],
+        access=str(existing_meta.get("access", "internal")),
+        tags=[str(t) for t in (existing_meta.get("tags") or []) if t],
+        created=str(existing_meta.get("created", date.today().isoformat())),
+        updated=str(existing_meta.get("updated", date.today().isoformat())),
+        body=existing_body,
+    )
+
+    if not changed:
+        # True no-op: the handles already match. Do not rewrite (byte-for-byte
+        # stable across re-seeds), do not bump ``updated``.
+        return entity, False
+
+    merged_meta["updated"] = date.today().isoformat()
+    entity.updated = merged_meta["updated"]
+
+    # Schema-gate the merged frontmatter before write — same guarantee tier0
+    # passthrough gives. Source-handle keys ride through via extra="allow".
+    validate_wiki_meta(merged_meta)
+
+    if dry_run:
+        return entity, True
+
+    existing_path.write_text(
+        render_frontmatter(merged_meta) + "\n" + existing_body,
+        encoding="utf-8",
+    )
+    return entity, True
+
+
 def process_one(
     raw: RawFile,
     index: EntityIndex,
@@ -816,6 +926,35 @@ def process_one(
             passthrough.filename,
         )
         result.created.append(passthrough)
+        return result
+
+    # --- Tier 0 (upsert): deterministic source-handle seed onto an existing
+    # entity (issue #486). A pre-structured raw carrying #453's source-handle
+    # keys for a uid already in the wiki merges those keys onto the page's
+    # frontmatter directly, instead of falling through to the LLM tiers (which
+    # would flatten the handle block into prose and lose the structured schema).
+    upsert = tier0_handle_upsert(
+        raw,
+        index,
+        wiki_root,
+        valid_types,
+        dry_run=dry_run,
+    )
+    if upsert is not None:
+        entity, changed = upsert
+        if changed:
+            log.info(
+                "  T0 handle-upsert: %s → %s (source handles merged)",
+                entity.name,
+                entity.filename,
+            )
+            result.updated.append(entity.uid)
+        else:
+            log.info(
+                "  T0 handle-upsert: %s → %s (no handle delta, no-op)",
+                entity.name,
+                entity.filename,
+            )
         return result
 
     # --- Tier 1: Programmatic matching ---
