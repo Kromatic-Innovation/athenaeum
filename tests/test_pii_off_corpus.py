@@ -323,6 +323,61 @@ class TestEntityPageLint:
 
 
 # ---------------------------------------------------------------------------
+# Phone detector — corpus false positives must NOT match (issue #500)
+# ---------------------------------------------------------------------------
+#
+# The permissive phone regex matched ISO dates, year ranges, and bare id/
+# analytics fragments — confirmed 2026-07-28 against the live corpus, where a
+# lint-pii pass flagged 1,885 pages on "phone" hits dominated by CRM-timeline
+# dates (e.g. `2015-12-03`) and id fragments (page uid prefixes, GA4 property
+# ids). These are the concrete corpus samples from #500, pinned as non-matches
+# alongside the true-positive fixtures so the detector cannot regress.
+
+
+class TestPhoneDetectorFalsePositives:
+    #: The exact "phone" hits migrate-pii reported on the two live pages named
+    #: in #500 — all CRM-timeline / frontmatter dates, no real phone numbers.
+    ISO_DATE_FALSE_POSITIVES = (
+        "2015-12-03",  # blekinge page: "First contact"
+        "2021-07-16",  # blekinge page: "Last CRM update"
+        "2016-03-14",  # blekinge page: "Last email"
+        "2026-04-16",  # dawn-b page: its own `updated:` frontmatter date
+    )
+
+    #: Bare digit runs #500 calls out: a page uid prefix and a GA4 property id.
+    ID_FRAGMENT_FALSE_POSITIVES = ("00075741", "387473359")
+
+    def test_iso_dates_not_matched(self) -> None:
+        for date in self.ISO_DATE_FALSE_POSITIVES:
+            assert find_inline_phones(f"Last contact: {date} per CRM") == [], date
+
+    def test_year_range_not_matched(self) -> None:
+        assert find_inline_phones("Active 2019-2020 season") == []
+
+    def test_bare_id_fragments_not_matched(self) -> None:
+        for frag in self.ID_FRAGMENT_FALSE_POSITIVES:
+            assert find_inline_phones(f"uid {frag} tail") == [], frag
+
+    def test_crm_timeline_block_reports_no_phones(self) -> None:
+        # The exact shape #500 flags: a CRM Timeline of dates, zero phones.
+        body = (
+            "## CRM Timeline\n"
+            "- First contact: 2015-12-03\n"
+            "- Last CRM update: 2021-07-16\n"
+            "- Last email: 2016-03-14\n"
+        )
+        assert find_inline_phones(body) == []
+
+    def test_genuine_phones_still_matched(self) -> None:
+        # The pre-existing true positives must be unaffected by the tightening.
+        assert find_inline_phones("call +1-555-0100 now") == ["+1-555-0100"]
+        assert find_inline_phones("(555) 010-0100") == ["(555) 010-0100"]
+        # A bare, separator-free run in the E.164-plausible band is still a phone.
+        assert find_inline_phones("cell 5551234567 anytime") == ["5551234567"]
+        assert find_inline_phones("intl +447911123456 ok") == ["+447911123456"]
+
+
+# ---------------------------------------------------------------------------
 # Observation log — append, read, supersession, deterministic fold
 # ---------------------------------------------------------------------------
 
