@@ -52,6 +52,23 @@ sources:
 """
 
 
+# Mirrors the live authority-manifest from issue #488's reproduction: a single
+# source owning a bare entity topic ("spartacus") AND qualified topics
+# ("spartacus persona", "product-strategy persona"). The bare topic is what
+# makes AC2 (do NOT flag the rich `Spartacus` entity page) non-trivial.
+_SPARTACUS_MANIFEST_YAML = """\
+version: 1
+sources:
+  - slug: spartacus-skill
+    location: /Code/code-workspace-config/.claude/skills/spartacus/SKILL.md
+    kind: skill
+    topics:
+      - spartacus
+      - spartacus persona
+      - product-strategy persona
+"""
+
+
 def _write_page(
     wiki_root: Path,
     filename: str,
@@ -271,6 +288,59 @@ class TestFindDuplicateSource:
         assert find_duplicate_source(meta, manifest) is None
 
 
+class TestFindDuplicateViaName:
+    """#488: page `name` is matched against manifest topics, not only via an
+    explicit `topics`/`tags` field — the never-fires bug was that entity /
+    concept pages carry `name:` but no `topics:`, so nothing was collected."""
+
+    @pytest.fixture
+    def spartacus(self) -> AuthorityManifest:
+        return parse_authority_manifest(_SPARTACUS_MANIFEST_YAML)
+
+    def test_name_matches_qualified_topic_is_flagged(
+        self, spartacus: AuthorityManifest
+    ) -> None:
+        # AC1: `47400778-spartacus-persona.md` (name "Spartacus persona", no
+        # `topics:` field) is a duplicate of `spartacus-skill`.
+        meta = {"name": "Spartacus persona", "type": "concept"}
+        source = find_duplicate_source(meta, spartacus)
+        assert source is not None
+        assert source.slug == "spartacus-skill"
+
+    def test_name_match_is_case_and_whitespace_insensitive(
+        self, spartacus: AuthorityManifest
+    ) -> None:
+        # AC3: the matching contract is normalized (case + surrounding
+        # whitespace); a single internal space is preserved, matching the
+        # owned topic "spartacus persona".
+        meta = {"name": "  Spartacus Persona  "}
+        source = find_duplicate_source(meta, spartacus)
+        assert source is not None
+        assert source.slug == "spartacus-skill"
+
+    def test_bare_entity_name_does_not_flag(
+        self, spartacus: AuthorityManifest
+    ) -> None:
+        # AC2 (the direction that matters most): `f357a107-spartacus.md`
+        # (name "Spartacus", a rich accumulated entity record) must NOT be
+        # flagged even though the manifest owns the bare topic "spartacus" —
+        # a false positive here would destroy the richest record in the wiki.
+        meta = {"name": "Spartacus", "type": "entity"}
+        assert find_duplicate_source(meta, spartacus) is None
+
+    def test_explicit_bare_topic_still_matches(
+        self, spartacus: AuthorityManifest
+    ) -> None:
+        # The qualified-topic gate is scoped to NAME matches only. A page that
+        # explicitly tags itself `topics: [spartacus]` has deliberately claimed
+        # that subject and is still flagged — the author's explicit claim is a
+        # stronger signal than a bare title.
+        meta = {"name": "Something Else", "topics": ["spartacus"]}
+        source = find_duplicate_source(meta, spartacus)
+        assert source is not None
+        assert source.slug == "spartacus-skill"
+
+
 class TestFindDuplicatesInWiki:
     def test_scans_wiki_and_flags_duplicates_only(
         self, tmp_path: Path, manifest: AuthorityManifest
@@ -307,6 +377,37 @@ class TestFindDuplicatesInWiki:
         self, tmp_path: Path, manifest: AuthorityManifest
     ) -> None:
         assert find_duplicates_in_wiki(tmp_path / "nope", manifest) == []
+
+    def test_reproduction_scan_flags_persona_not_entity(
+        self, tmp_path: Path
+    ) -> None:
+        # #488 reproduction, both directions in one corpus scan:
+        # - the persona summary (name "Spartacus persona") IS flagged (AC1)
+        # - the rich "Spartacus" entity record is NOT flagged (AC2)
+        spartacus = parse_authority_manifest(_SPARTACUS_MANIFEST_YAML)
+        wiki_root = tmp_path / "wiki"
+        _write_page(
+            wiki_root,
+            "47400778-spartacus-persona.md",
+            name="Spartacus persona",
+            body="Restates the SKILL.md Mindset section: default-A/B rule, "
+            "the fallback ladder, the qualitative-evidence exception.",
+        )
+        _write_page(
+            wiki_root,
+            "f357a107-spartacus.md",
+            name="Spartacus",
+            page_type="entity",
+            body="20KB of accumulated session history that duplicates nothing "
+            "in SKILL.md. " * 200,
+        )
+        matches = find_duplicates_in_wiki(wiki_root, spartacus)
+        names = {m.page_path.name for m in matches}
+        assert names == {"47400778-spartacus-persona.md"}
+        # AC4: the match names the source slug and the reason (matched topic).
+        (match,) = matches
+        assert match.source.slug == "spartacus-skill"
+        assert match.matched_topic == "Spartacus persona"
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +633,38 @@ class TestAuthorityLintCLI:
         after = page.read_text(encoding="utf-8")
         assert after == before
         assert page.stat().st_mtime_ns == before_mtime
+
+    def test_lint_flags_name_match_and_names_slug_and_reason(
+        self, tmp_path: Path
+    ) -> None:
+        # #488 end-to-end (AC1 + AC4): a page duplicating a source only via its
+        # `name` is reported, and the output names both the matched source slug
+        # and the reason (the matched topic) so an operator can judge the hit.
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        knowledge_root.mkdir(parents=True)
+        (knowledge_root / "authority-manifest.yaml").write_text(
+            _SPARTACUS_MANIFEST_YAML, encoding="utf-8"
+        )
+        _write_page(
+            wiki_root,
+            "47400778-spartacus-persona.md",
+            name="Spartacus persona",
+            body="Restates SKILL.md Mindset.",
+        )
+        # The rich entity page must stay silent (AC2).
+        _write_page(
+            wiki_root, "f357a107-spartacus.md", name="Spartacus", page_type="entity"
+        )
+
+        result = _run_cli("authority", "lint", "--path", str(knowledge_root))
+
+        assert result.returncode == 0
+        assert "1 duplicate" in result.stdout
+        assert "47400778-spartacus-persona.md" in result.stdout
+        assert "spartacus-skill" in result.stdout  # source slug named
+        assert "Spartacus persona" in result.stdout  # reason (matched topic)
+        assert "f357a107-spartacus.md" not in result.stdout  # AC2: no false hit
 
     def test_lint_json_output_is_a_list(self, tmp_path: Path) -> None:
         knowledge_root = tmp_path / "knowledge"
