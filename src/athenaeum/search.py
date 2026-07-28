@@ -832,6 +832,104 @@ class FTS5Backend:
 
 _VECTOR_DIR = "wiki-vectors"
 _VECTOR_COLLECTION = "wiki"
+# A build-generation token written into the collection dir on every completed
+# build_index (issue #489). A long-lived server process reads it before each
+# query; when it changes, the process's chromadb SharedSystemClient cache is
+# stale (an out-of-process reindex replaced the on-disk collection) and must be
+# cleared so the next open re-reads the true on-disk state instead of serving
+# degraded/None-yielding results from the pinned old handle.
+_VECTOR_GENERATION = ".generation"
+
+
+class DegradedIndexError(RuntimeError):
+    """The vector index returned a degenerate (non-ranked) result set (#489).
+
+    A collection that yields every neighbour at an identical distance is not
+    ranking — it is a degraded/unavailable index (the pre-reindex failure mode
+    that returned six unrelated pages all at ``score: 1.5``). Surfacing this as
+    an explicit, actionable error is required by #489 so the silent failure —
+    confidently-formatted, completely wrong results with no signal — can never
+    reach the caller as if it were a real ranked answer.
+    """
+
+
+def _read_generation(vector_dir: Path) -> str | None:
+    """Return the collection's build-generation token, or ``None`` if absent."""
+    try:
+        return (vector_dir / _VECTOR_GENERATION).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def _write_generation(vector_dir: Path) -> None:
+    """Stamp a fresh build-generation token into *vector_dir* (issue #489).
+
+    Called at the end of every completed build_index. A new random token per
+    build guarantees a running server observes the change and re-opens its
+    stale handle, even for an incremental rebuild that changed the collection
+    in place (same path, same collection name).
+    """
+    import uuid
+
+    try:
+        (vector_dir / _VECTOR_GENERATION).write_text(
+            uuid.uuid4().hex, encoding="utf-8"
+        )
+    except OSError:  # pragma: no cover - best-effort stamp; a missing stamp
+        # only degrades to the pre-#489 "no auto-reopen" behaviour, never worse.
+        pass
+
+
+def _hits_from_query_results(
+    results: dict[str, Any],
+    n: int,
+    caller_audience: set[str] | None,
+) -> list[tuple[str, str, float]]:
+    """Turn a chromadb ``collection.query`` result into ranked recall hits.
+
+    Pure/deterministic so it is unit-testable without chromadb (issue #489).
+    Two hardenings over the pre-#489 inline loop:
+
+    - **No ``NoneType`` crash (AC4).** A stale/corrupt collection can return a
+      ``None`` metadata entry (or a ``None`` ``metadatas`` list); every access
+      is guarded so ``'NoneType' object has no attribute 'get'`` can never
+      reach the caller — a missing metadata degrades to an empty dict.
+    - **Degenerate result sets surface explicitly (AC3).** When two or more
+      neighbours come back at an identical distance, the index is not ranking;
+      raise :class:`DegradedIndexError` instead of returning flat-scored,
+      confidently-wrong hits.
+    """
+    ids_rows = results.get("ids") or []
+    if not ids_rows or not ids_rows[0]:
+        return []
+    id_row = ids_rows[0]
+    meta_rows = results.get("metadatas") or []
+    meta_row = meta_rows[0] if meta_rows else []
+    dist_rows = results.get("distances") or []
+    dist_row = dist_rows[0] if dist_rows else []
+
+    distances = [dist_row[i] if i < len(dist_row) else 0.0 for i in range(len(id_row))]
+    if len(distances) >= 2 and len({round(d, 6) for d in distances}) == 1:
+        raise DegradedIndexError(
+            f"vector index returned {len(distances)} results at an identical "
+            f"distance ({distances[0]}); this is a degraded/unavailable index, "
+            "not a ranking. Rebuild it with `athenaeum reindex`."
+        )
+
+    hits: list[tuple[str, str, float]] = []
+    for i, doc_id in enumerate(id_row):
+        meta = meta_row[i] if i < len(meta_row) else None
+        if not isinstance(meta, dict):
+            meta = {}
+        if caller_audience is not None:
+            audience_str = str(meta.get("audience", "|"))
+            if not audience_string_authorized(audience_str, caller_audience):
+                continue
+        name = meta.get("name", doc_id.replace(".md", ""))
+        hits.append((doc_id, name, distances[i]))
+        if len(hits) >= n:
+            break
+    return hits
 
 
 class VectorBackend:
@@ -858,6 +956,39 @@ class VectorBackend:
         opportunity noted at DEFAULT_EMBEDDING_MODEL).
         """
         self.embedding_model = embedding_model or DEFAULT_EMBEDDING_MODEL
+        # Build-generation this process last opened a client for (issue #489).
+        # ``None`` forces a cache-clear on the first query so a process that
+        # started before an out-of-process reindex never serves stale results.
+        self._seen_generation: str | None = None
+
+    def _refresh_on_reindex(self, vector_dir: Path) -> None:
+        """Clear chromadb's process-global cache if the index was rebuilt (#489).
+
+        chromadb caches ``PersistentClient`` *systems* per-path at the module
+        level (``SharedSystemClient``). An out-of-process ``athenaeum reindex``
+        replaces the on-disk collection but leaves THIS process's cached system
+        pinned to the old (now-deleted) state — so a subsequent open serves
+        silently-degraded results, then hard-crashes with ``'NoneType' object
+        has no attribute 'get'``, until the process is restarted.
+
+        Compare the on-disk build-generation token against what we last opened;
+        on any change, drop the cached system so the next ``PersistentClient``
+        re-reads the true on-disk state. This is the same reset ``build_index``
+        performs in the *reindexing* process — done here for the *reading*
+        (server) process, which never sees that reindex.
+        """
+        generation = _read_generation(vector_dir)
+        if generation == self._seen_generation:
+            return
+        try:
+            from chromadb.api.client import SharedSystemClient
+
+            SharedSystemClient.clear_system_cache()
+        except Exception:  # pragma: no cover - chromadb internals moved
+            # If the internal moved, we simply don't get auto-reopen — the
+            # pre-#489 behaviour — never a crash from the fix itself.
+            pass
+        self._seen_generation = generation
 
     def _get_chromadb(self) -> Any:
         try:
@@ -1082,6 +1213,7 @@ class VectorBackend:
                 stats=current_stats,
                 last_full_rehash_at=now,
             )
+            _write_generation(vector_dir)  # #489: mark this rebuild for readers
             return len(current)
 
         # Incremental path — diff and apply only the delta.
@@ -1105,6 +1237,7 @@ class VectorBackend:
             stats=current_stats,
             last_full_rehash_at=(now if stale else last_rehash),
         )
+        _write_generation(vector_dir)  # #489: mark this rebuild for readers
         return total
 
     def query(
@@ -1126,6 +1259,9 @@ class VectorBackend:
         vector_dir = cache_dir / _VECTOR_DIR
         if not vector_dir.is_dir():
             return []
+
+        # #489: re-open if an out-of-process reindex replaced the collection.
+        self._refresh_on_reindex(vector_dir)
 
         client = chromadb.PersistentClient(path=str(vector_dir))
         try:
@@ -1181,21 +1317,9 @@ class VectorBackend:
             where=where,
         )
 
-        hits: list[tuple[str, str, float]] = []
-        if results["ids"] and results["ids"][0]:
-            for i, doc_id in enumerate(results["ids"][0]):
-                meta = results["metadatas"][0][i] if results["metadatas"] else {}
-                if caller_audience is not None:
-                    audience_str = str(meta.get("audience", "|"))
-                    if not audience_string_authorized(audience_str, caller_audience):
-                        continue
-                name = meta.get("name", doc_id.replace(".md", ""))
-                distance = results["distances"][0][i] if results["distances"] else 0.0
-                hits.append((doc_id, name, distance))
-                if len(hits) >= n:
-                    break
-
-        return hits
+        # #489 AC3/AC4: guard None metadata (no 'NoneType'.get crash) and
+        # surface a degenerate flat-score result set as an explicit error.
+        return _hits_from_query_results(results, n, caller_audience)
 
     def fetch_embeddings(
         self,
@@ -1225,6 +1349,9 @@ class VectorBackend:
         id_list = list(ids)
         if not id_list:
             return {}
+
+        # #489: re-open if an out-of-process reindex replaced the collection.
+        self._refresh_on_reindex(vector_dir)
 
         client = chromadb.PersistentClient(path=str(vector_dir))
         try:
