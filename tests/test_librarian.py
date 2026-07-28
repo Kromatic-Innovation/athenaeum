@@ -424,6 +424,134 @@ class TestTier0Passthrough:
         assert {e["value"] for e in emails_fs} == {"pat@one.com", "pat@two.com"}
 
 
+class TestTier0HandleUpsert:
+    """Deterministic source-handle seed onto an EXISTING entity (issue #486).
+
+    The end-to-end round-trip (raw intake → compile → frontmatter → registry)
+    and idempotency are covered in ``tests/test_registry.py``; these lock the
+    eligibility gate so a re-seed engages the upsert and everything else falls
+    through to the LLM tiers unchanged.
+    """
+
+    def _make_raw(self, tmp_path: Path, content: str) -> RawFile:
+        raw_dir = tmp_path / "raw" / "contact-wiki"
+        raw_dir.mkdir(parents=True)
+        path = raw_dir / "seed.md"
+        path.write_text(content, encoding="utf-8")
+        return RawFile(path=path, source="contact-wiki", timestamp="", uuid8="")
+
+    def _existing(self, wiki: Path, extra_fm: str = "") -> Path:
+        wiki.mkdir(parents=True, exist_ok=True)
+        page = wiki / "company-x-x.md"
+        page.write_text(
+            "---\nuid: company-x\ntype: company\nname: X\naccess: internal\n"
+            f"{extra_fm}---\n\n# X\n\nBody.\n",
+            encoding="utf-8",
+        )
+        return page
+
+    def test_merges_handles_onto_existing_page(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        page = self._existing(wiki)
+        raw = self._make_raw(
+            tmp_path,
+            "---\nuid: company-x\ntype: company\nname: X\n"
+            "domains:\n  - x.example\n---\n\n# X\n\nseed\n",
+        )
+        index = EntityIndex(wiki)
+
+        out = tier0_handle_upsert(raw, index, wiki, ["company"])
+        assert out is not None
+        entity, changed = out
+        assert changed is True
+        assert entity.uid == "company-x"
+        assert "domains:" in page.read_text()
+        assert "x.example" in page.read_text()
+        # Body untouched — not flattened into it.
+        assert "Body." in page.read_text()
+
+    def test_reseed_no_delta_is_noop(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        page = self._existing(wiki, extra_fm="domains:\n  - x.example\n")
+        before = page.read_text(encoding="utf-8")
+        raw = self._make_raw(
+            tmp_path,
+            "---\nuid: company-x\ntype: company\nname: X\n"
+            "domains:\n  - x.example\n---\n\n# X\n\nseed\n",
+        )
+        out = tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company"])
+        assert out is not None
+        _, changed = out
+        assert changed is False
+        assert page.read_text(encoding="utf-8") == before  # byte-for-byte stable
+
+    def test_dry_run_does_not_write(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        page = self._existing(wiki)
+        before = page.read_text(encoding="utf-8")
+        raw = self._make_raw(
+            tmp_path,
+            "---\nuid: company-x\ntype: company\nname: X\n"
+            "domains:\n  - x.example\n---\n\n# X\n\nseed\n",
+        )
+        out = tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company"], dry_run=True)
+        assert out is not None and out[1] is True  # reports a delta...
+        assert page.read_text(encoding="utf-8") == before  # ...but writes nothing
+
+    def test_new_entity_falls_through(self, tmp_path: Path) -> None:
+        """No existing page → tier0_passthrough owns it; upsert declines."""
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        raw = self._make_raw(
+            tmp_path,
+            "---\nuid: company-x\ntype: company\nname: X\n"
+            "domains:\n  - x.example\n---\n\n# X\n\nseed\n",
+        )
+        assert tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company"]) is None
+
+    def test_prestructured_but_no_handles_falls_through(self, tmp_path: Path) -> None:
+        """An ordinary note re-intake (no source handles) is left to the LLM tiers."""
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        self._existing(wiki)
+        raw = self._make_raw(
+            tmp_path,
+            "---\nuid: company-x\ntype: company\nname: X\n---\n\n# X\n\nnew note\n",
+        )
+        assert tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company"]) is None
+
+    def test_unstructured_and_wrong_type_fall_through(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        self._existing(wiki)
+        index = EntityIndex(wiki)
+        # No frontmatter at all.
+        raw_none = self._make_raw(tmp_path, "just prose, no frontmatter\n")
+        assert tier0_handle_upsert(raw_none, index, wiki, ["company"]) is None
+        # type not in the allowlist.
+        raw_bad = RawFile(
+            path=self._make_raw(
+                tmp_path / "b",
+                "---\nuid: company-x\ntype: alien\nname: X\n"
+                "domains:\n  - x.example\n---\n\nseed\n",
+            ).path,
+            source="contact-wiki",
+            timestamp="",
+            uuid8="",
+        )
+        assert tier0_handle_upsert(raw_bad, index, wiki, ["company"]) is None
+
+
 # ---------------------------------------------------------------------------
 # rebuild_index
 # ---------------------------------------------------------------------------
