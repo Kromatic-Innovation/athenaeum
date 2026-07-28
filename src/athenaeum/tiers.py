@@ -1108,6 +1108,16 @@ def apply_merge_ops(existing_body: str, ops: list[dict[str, Any]]) -> str:
     return body
 
 
+#: Stable, greppable prefix for the WARNING each patch-mode → full-echo
+#: fallback emits (issue #490, slice A). The full-page-echo fallback is a
+#: ~10x output-token cost multiplier that until now degraded silently; every
+#: fallback now names the page, the source ref, and a machine-parseable
+#: ``cause=`` (``max_tokens`` | ``parse-fail`` | ``anchor-miss``) so a nightly
+#: log can be grepped for which trigger dominates on the real corpus — the
+#: observation #496 (slice B) consumes to pick the targeted reduction fix.
+MERGE_FALLBACK_LOG_PREFIX = "tier3-merge-fallback"
+
+
 def parse_merge_ops_response(
     text: str,
     action: EntityAction,
@@ -1136,6 +1146,13 @@ def parse_merge_ops_response(
     empty ops list leaves the body unchanged).
     """
     if stop_reason == "max_tokens":
+        log.warning(
+            "%s page=%s source=%s cause=max_tokens — patch-mode response "
+            "truncated; retrying via full-page echo (~10x output cost)",
+            MERGE_FALLBACK_LOG_PREFIX,
+            action.name,
+            source_ref,
+        )
         return None, None, True
 
     stripped = text.strip()
@@ -1153,12 +1170,27 @@ def parse_merge_ops_response(
 
     obj = extract_json_object(stripped)
     if obj is None or not isinstance(obj.get("ops"), list):
+        log.warning(
+            "%s page=%s source=%s cause=parse-fail — patch-mode response "
+            "unparseable (no valid ops list); retrying via full-page echo "
+            "(~10x output cost)",
+            MERGE_FALLBACK_LOG_PREFIX,
+            action.name,
+            source_ref,
+        )
         return None, None, True
 
     try:
         return apply_merge_ops(existing_body, obj["ops"]), None, False
     except MergeOpsError as exc:
-        log.debug("patch-mode merge failed, falling back to full echo: %s", exc)
+        log.warning(
+            "%s page=%s source=%s cause=anchor-miss — patch-mode ops failed to "
+            "apply (%s); retrying via full-page echo (~10x output cost)",
+            MERGE_FALLBACK_LOG_PREFIX,
+            action.name,
+            source_ref,
+            exc,
+        )
         return None, None, True
 
 

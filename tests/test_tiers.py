@@ -4,6 +4,7 @@ tier3 create/merge/write (mocked LLM), tier4 escalation."""
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -16,6 +17,7 @@ from athenaeum.models import (
     RawFile,
 )
 from athenaeum.tiers import (
+    MERGE_FALLBACK_LOG_PREFIX,
     TIER2_DEGRADED_MARKER,
     TIER2_TRUNCATED_MARKER,
     MergeOpsError,
@@ -1085,6 +1087,84 @@ class TestTier3MergePatchOps:
         assert needs_fallback is False
         assert esc is None
         assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+
+    # --- #490 (slice A): each fallback names the page + a distinct cause ------
+
+    def _fallback_warnings(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> list[str]:
+        return [
+            rec.message
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and MERGE_FALLBACK_LOG_PREFIX in rec.message
+        ]
+
+    def test_max_tokens_fallback_warns_naming_page_and_cause(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        parse_merge_ops_response(
+            '{"ops": [', self._action(), "sess-ref", "existing",
+            stop_reason="max_tokens",
+        )
+        warnings = self._fallback_warnings(caplog)
+        assert len(warnings) == 1
+        assert "cause=max_tokens" in warnings[0]
+        assert "page=Acme Corp" in warnings[0]
+        assert "source=sess-ref" in warnings[0]
+
+    def test_parse_fail_fallback_warns_naming_page_and_cause(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        parse_merge_ops_response("not json", self._action(), "sess-ref", "existing")
+        warnings = self._fallback_warnings(caplog)
+        assert len(warnings) == 1
+        assert "cause=parse-fail" in warnings[0]
+        assert "page=Acme Corp" in warnings[0]
+        assert "source=sess-ref" in warnings[0]
+
+    def test_anchor_miss_fallback_warns_naming_page_and_cause(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        parse_merge_ops_response(
+            json.dumps(
+                {"ops": [{"op": "replace", "anchor": "NONEXISTENT", "text": "x"}]}
+            ),
+            self._action(),
+            "sess-ref",
+            "# Acme\n\nBody.",
+        )
+        warnings = self._fallback_warnings(caplog)
+        assert len(warnings) == 1
+        assert "cause=anchor-miss" in warnings[0]
+        assert "page=Acme Corp" in warnings[0]
+        assert "source=sess-ref" in warnings[0]
+
+    def test_patch_mode_success_emits_no_fallback_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The signal must stay meaningful: a clean patch-mode apply (and the
+        # dedup no-op / inline ESCALATE paths) emit NO fallback warning.
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        parse_merge_ops_response(
+            json.dumps({"ops": [{"op": "append_section", "text": "New.[^2]"}]}),
+            self._action(),
+            "sess-ref",
+            "# Acme\n\nOld.",
+        )
+        parse_merge_ops_response(
+            json.dumps({"ops": []}), self._action(), "sess-ref", "# Acme\n\nOld."
+        )
+        parse_merge_ops_response(
+            "ESCALATE: conflict\n---\n# Acme\n\nDisputed.",
+            self._action(),
+            "sess-ref",
+            "# Acme\n\nOld.",
+        )
+        assert self._fallback_warnings(caplog) == []
 
     # --- tier3_merge: patch primary + full-echo fallback wiring --------------
 
