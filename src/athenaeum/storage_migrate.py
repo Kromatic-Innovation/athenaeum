@@ -26,6 +26,7 @@ second detector.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -194,3 +195,65 @@ def plan_pii_migration(
         rewritten_page_text=rewritten_page_text,
         excluded_page_text=excluded_page_text,
     )
+
+
+# ---------------------------------------------------------------------------
+# Bulk target-set resolution (issue #495)
+# ---------------------------------------------------------------------------
+#
+# #479 shipped the single-page path (``--page``); the live corpus needs the
+# same transform over ~11.5k entity pages. Bulk mode is a thin driver over
+# :func:`plan_pii_migration` — the transform stays per-page and pure, so the
+# whole-run properties the issue asks for fall out of the single-page
+# guarantees rather than from a second, batch-shaped code path:
+#
+# * **Idempotent / resumable.** A migrated origin page carries no archival
+#   contact data, so its next plan's :attr:`~PiiMigrationPlan.changed` is
+#   ``False`` — a re-run (whether after a clean finish or a crash halfway)
+#   simply skips every already-migrated page and applies the remainder. There
+#   is no run ledger to keep in sync and nothing to double-write: the corpus
+#   itself is the checkpoint. (The excluded record is written under a
+#   deterministic ``page_path.name``, so even a crash *between* the two writes
+#   of one page re-converges — the re-run rewrites the same record and scrubs
+#   the still-dirty origin.)
+#
+# Bulk mode migrates ENTITY pages (top-level ``wiki/*.md``, ``_``-prefixed
+# queue/index/archive files excluded — those need per-file-kind operator
+# decisions, not the entity-page transform; see the corpus-wide lint in
+# :mod:`athenaeum.pii` for how they are surfaced). An operator who wants to
+# redact a specific archive in place can still name it explicitly via a glob.
+
+
+def iter_entity_pages(wiki_root: Path) -> Iterator[Path]:
+    """Yield top-level ``wiki/*.md`` entity pages, skipping ``_``-prefixed files.
+
+    The same flat, shallow entity-page scan the rest of the codebase uses
+    (mirrors :func:`athenaeum.repair._iter_wiki_files` /
+    :func:`athenaeum.search._iter_wiki_entries`): ``_``-prefixed queue, index
+    and archive files are NOT entity pages and are deliberately excluded here —
+    they are handled by the corpus-wide PII lint (:func:`athenaeum.pii.scan_corpus_pii`),
+    which decides per file kind rather than running the entity-page transform.
+    Missing wiki root yields nothing (never raises) so bulk mode is safe against
+    an unconfigured knowledge base.
+    """
+    if not wiki_root.is_dir():
+        return
+    for path in sorted(wiki_root.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        yield path
+
+
+def iter_glob_pages(wiki_root: Path, pattern: str) -> Iterator[Path]:
+    """Yield files under *wiki_root* matching *pattern* (an operator-named set).
+
+    Supports recursive ``**`` globs and is not restricted to ``*.md`` — an
+    operator targeting a specific archive to redact in place (e.g.
+    ``--glob '_*_archive.md'``) names exactly the file(s) they mean. Directories
+    matched by the pattern are skipped; only regular files are yielded.
+    """
+    if not wiki_root.is_dir():
+        return
+    for path in sorted(wiki_root.glob(pattern)):
+        if path.is_file():
+            yield path
