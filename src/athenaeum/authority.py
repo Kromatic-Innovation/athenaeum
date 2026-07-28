@@ -125,6 +125,26 @@ def _normalize_topic(topic: str) -> str:
     return topic.strip().lower()
 
 
+def _is_qualified_topic(normalized_topic: str) -> bool:
+    """True when a topic is *qualified* rather than a bare single word (#488).
+
+    A qualified topic carries a discriminator beyond a lone entity token — it
+    contains whitespace (``spartacus persona``) or a hyphen
+    (``lean-development-workflow``, ``product-strategy persona``). A bare
+    single word (``spartacus``) is treated as an *entity-level* token.
+
+    This gate is applied ONLY to ``name``-derived matches (see
+    :func:`_page_duplicate_candidates`): a page whose entire ``name`` is a
+    lone entity token (e.g. a 20KB accumulated ``Spartacus`` entity record)
+    is the entity, not a topical summary of a source, and must not be flagged
+    as a duplicate on that name alone — the false positive AC2 of #488 forbids
+    (acting on it would destroy the richest record in the wiki). Explicit
+    ``topics``/``topic``/``tags`` metadata is the author's deliberate claim of
+    subject and is matched without this gate, exactly as before #488.
+    """
+    return " " in normalized_topic or "-" in normalized_topic
+
+
 def _require_nonempty_str(value: Any, field_name: str, *, where: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise AuthorityManifestError(
@@ -251,6 +271,69 @@ class DuplicateMatch:
     source: AuthoritySource
 
 
+def _page_duplicate_candidates(meta: dict[str, Any]) -> list[tuple[str, bool]]:
+    """Collect ``(candidate_string, from_name)`` pairs from page frontmatter.
+
+    Single source of truth for what a page declares as its subject, so
+    :func:`find_duplicate_source` and :func:`find_duplicates_in_wiki` cannot
+    drift apart (before #488 each collected candidates independently).
+
+    Explicit ``topics`` (list or scalar), ``topic`` (scalar), and ``tags``
+    (list) entries are the author's deliberate subject claim and yield
+    ``from_name=False``. The page ``name`` (issue #488) is a weaker title
+    signal and yields ``from_name=True`` so the caller can apply the
+    qualified-topic gate to it — a bare single-word ``name`` on a rich entity
+    page must not flag as a duplicate (AC2), while a qualified name such as
+    ``Spartacus persona`` (matching the owned topic ``spartacus persona``)
+    correctly does (AC1).
+    """
+    candidates: list[tuple[str, bool]] = []
+
+    raw_topics = meta.get("topics")
+    if isinstance(raw_topics, list):
+        candidates.extend((str(t), False) for t in raw_topics if isinstance(t, str))
+    elif isinstance(raw_topics, str) and raw_topics.strip():
+        candidates.append((raw_topics, False))
+
+    single_topic = meta.get("topic")
+    if isinstance(single_topic, str) and single_topic.strip():
+        candidates.append((single_topic, False))
+
+    raw_tags = meta.get("tags")
+    if isinstance(raw_tags, list):
+        candidates.extend((str(t), False) for t in raw_tags if isinstance(t, str))
+
+    name = meta.get("name")
+    if isinstance(name, str) and name.strip():
+        candidates.append((name, True))
+
+    return candidates
+
+
+def _match_duplicate(
+    meta: dict[str, Any] | None,
+    index: dict[str, AuthoritySource],
+) -> tuple[AuthoritySource, str] | None:
+    """Return ``(source, matched_topic)`` for the first candidate that hits.
+
+    ``matched_topic`` is the ORIGINAL candidate string that matched (so the
+    lint output can name what it saw). Name-derived candidates only match a
+    *qualified* topic (:func:`_is_qualified_topic`); explicit topic/tag
+    candidates match any owned topic. Returns ``None`` when nothing matches.
+    """
+    if not meta or not index:
+        return None
+    for candidate, from_name in _page_duplicate_candidates(meta):
+        normalized = _normalize_topic(candidate)
+        source = index.get(normalized)
+        if source is None:
+            continue
+        if from_name and not _is_qualified_topic(normalized):
+            continue
+        return source, candidate
+    return None
+
+
 def find_duplicate_source(
     meta: dict[str, Any] | None,
     manifest: AuthorityManifest,
@@ -260,37 +343,17 @@ def find_duplicate_source(
     Deterministic LOOKUP against the manifest's owned topics/slugs — NEVER
     semantic similarity. A memory page is considered to duplicate a live
     source when its frontmatter carries a ``topics:`` list (or a single
-    ``topic:`` scalar) or a ``tags:`` list with an entry that matches (case-
-    insensitively, whitespace-trimmed) one of the manifest's owned topic
-    strings for some source. Returns ``None`` when nothing matches (or
-    *meta* is empty/missing) — a non-duplicate passes.
+    ``topic:`` scalar), a ``tags:`` list, or a ``name:`` (issue #488) with an
+    entry that matches (case-insensitively, whitespace-trimmed) one of the
+    manifest's owned topic strings for some source. A ``name`` matches only a
+    *qualified* topic (see :func:`_is_qualified_topic`) so a bare entity name
+    does not false-positive. Returns ``None`` when nothing matches (or *meta*
+    is empty/missing) — a non-duplicate passes.
     """
     if not meta:
         return None
-    index = manifest.topic_index()
-    if not index:
-        return None
-
-    candidates: list[str] = []
-    raw_topics = meta.get("topics")
-    if isinstance(raw_topics, list):
-        candidates.extend(str(t) for t in raw_topics if isinstance(t, str))
-    elif isinstance(raw_topics, str) and raw_topics.strip():
-        candidates.append(raw_topics)
-
-    single_topic = meta.get("topic")
-    if isinstance(single_topic, str) and single_topic.strip():
-        candidates.append(single_topic)
-
-    raw_tags = meta.get("tags")
-    if isinstance(raw_tags, list):
-        candidates.extend(str(t) for t in raw_tags if isinstance(t, str))
-
-    for candidate in candidates:
-        source = index.get(_normalize_topic(candidate))
-        if source is not None:
-            return source
-    return None
+    match = _match_duplicate(meta, manifest.topic_index())
+    return match[0] if match else None
 
 
 def find_duplicates_in_wiki(
@@ -309,6 +372,7 @@ def find_duplicates_in_wiki(
     """
     if not wiki_root.is_dir():
         return []
+    index = manifest.topic_index()
     matches: list[DuplicateMatch] = []
     for path in sorted(wiki_root.glob("*.md")):
         if path.name.startswith("_"):
@@ -322,25 +386,10 @@ def find_duplicates_in_wiki(
             continue
         if is_pointer_stub(meta):
             continue
-        source = find_duplicate_source(meta, manifest)
-        if source is None:
+        match = _match_duplicate(meta, index)
+        if match is None:
             continue
-        candidates: list[str] = []
-        raw_topics = meta.get("topics")
-        if isinstance(raw_topics, list):
-            candidates.extend(str(t) for t in raw_topics if isinstance(t, str))
-        elif isinstance(raw_topics, str):
-            candidates.append(raw_topics)
-        single_topic = meta.get("topic")
-        if isinstance(single_topic, str):
-            candidates.append(single_topic)
-        raw_tags = meta.get("tags")
-        if isinstance(raw_tags, list):
-            candidates.extend(str(t) for t in raw_tags if isinstance(t, str))
-        matched_topic = next(
-            (c for c in candidates if _normalize_topic(c) in source.topics_norm()),
-            "",
-        )
+        source, matched_topic = match
         matches.append(
             DuplicateMatch(page_path=path, matched_topic=matched_topic, source=source)
         )
