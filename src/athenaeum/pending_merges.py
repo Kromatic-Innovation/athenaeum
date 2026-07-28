@@ -54,7 +54,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter, render_frontmatter, slugify
@@ -1233,3 +1233,154 @@ def ingest_resolved_merges(merges_path: Path) -> int:
         combined = "# Archived Merges\n\n" + new_section + "\n"
     atomic_write_text(archive_path, combined)
     return len(archived)
+
+
+@dataclass
+class RetiredProposal:
+    """One unresolved block the current suppression gate would now retire."""
+
+    id: str
+    merge_target_name: str
+    n_sources: int
+    confidence: float
+    reason: str
+
+
+@dataclass
+class RevalidationResult:
+    """Outcome of :func:`revalidate_pending_merges`.
+
+    ``retired`` lists the unresolved blocks the CURRENT gate would suppress;
+    ``kept`` counts the blocks left in the primary file (unresolved-and-legal
+    + resolved + unparseable). ``applied`` is True only when the sweep wrote.
+    """
+
+    retired: list[RetiredProposal]
+    kept: int
+    applied: bool
+
+
+def revalidate_pending_merges(
+    merges_path: Path,
+    *,
+    config: dict[str, Any] | None = None,
+    apply: bool = False,
+    now: datetime | None = None,
+) -> RevalidationResult:
+    """Re-validate EXISTING unresolved ``_pending_merges.md`` blocks against
+    the CURRENT suppression gate and archive ones that now fail it (issue #481).
+
+    #480 closed the write-path bypass, so no NEW degenerate over-cluster
+    proposal can be appended. This is the complement: it retires entries that
+    were queued BEFORE the #400/#421 gate tightened — the class the pipeline
+    would never propose today (the reported 1,711/1,746-source
+    ``merge-workflow-pattern`` and 16-source ``contact-contacts-wiki``, and the
+    font-name / year-range / hash-fragment over-clusters). Without it, a
+    withdrawn-and-regrown queue simply re-accumulates that junk until a human
+    does a manual purge.
+
+    Non-destructive by construction:
+
+    * A retired block is MOVED to ``_pending_merges_archive.md`` with the gate
+      reason recorded — never deleted — so a surprising purge is auditable.
+    * It writes NO ``refines:`` suppression on the source pages (the #437
+      trap). Retiring a stale proposal leaves the pair free to be re-proposed
+      if a future, healthy pipeline would emit it — this is a queue-hygiene
+      sweep, NOT a per-pair rejection and NOT a queue-clearing tool.
+    * Genuine (non-suppressed) unresolved blocks, already-resolved blocks, and
+      any block that fails to parse are left byte-for-byte untouched.
+
+    Only the gate arms whose inputs survive in the STORED block are applied:
+    the size cap (``n_sources`` = number of listed sources) and the
+    resolver-confidence floor. The cohesion / complete-linkage arms need the
+    clustering-time pairwise-similarity data that a block does not persist, so
+    they stay at their permissive defaults — the sweep only ever retires what
+    it can prove stale from the block alone. The size cap is exactly what the
+    reported over-cluster evidence trips, so this covers the driving case.
+
+    Dry-run by default (reports what WOULD be retired, writes nothing); pass
+    ``apply=True`` to write. ``now`` is injectable for deterministic tests.
+    """
+    # Lazy import: merge.py imports write_pending_merge from this module, so a
+    # module-level import of the gate would be circular.
+    from athenaeum.merge import _merge_proposal_suppression_reason
+
+    result = RevalidationResult(retired=[], kept=0, applied=False)
+    if not merges_path.exists():
+        return result
+
+    text = merges_path.read_text(encoding="utf-8")
+    blocks = _split_blocks(text)
+
+    ts = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    remaining: list[str] = []
+    retired_blocks: list[str] = []
+
+    for block_text in blocks:
+        pm = _parse_block(block_text)
+        # Only unresolved, parseable blocks are candidates. Everything else
+        # (resolved, or unparseable) is preserved exactly.
+        if pm is None or pm.resolved:
+            remaining.append(block_text)
+            continue
+        reason = _merge_proposal_suppression_reason(
+            n_sources=len(pm.sources),
+            confidence=pm.confidence,
+            config=config,
+        )
+        if reason is None:
+            remaining.append(block_text)
+            continue
+        result.retired.append(
+            RetiredProposal(
+                id=pm.id,
+                merge_target_name=pm.merge_target_name,
+                n_sources=len(pm.sources),
+                confidence=pm.confidence,
+                reason=reason,
+            )
+        )
+        retired_blocks.append(
+            f"{block_text}\n\n**Retired**: {ts} — gate: {reason}\n"
+        )
+
+    result.kept = len(remaining)
+
+    if not apply or not retired_blocks:
+        return result
+
+    # --- apply: rewrite primary (retired blocks removed) + append archive ---
+    primary_parts = ["# Pending Merges", *remaining]
+    new_primary = "\n\n---\n\n".join(primary_parts) + "\n"
+    atomic_write_text(merges_path, new_primary)
+
+    archive_path = merges_path.parent / "_pending_merges_archive.md"
+    new_section = "\n\n---\n\n".join(retired_blocks)
+    existing_archive = ""
+    if archive_path.exists():
+        existing_archive = archive_path.read_text(encoding="utf-8")
+    if existing_archive.strip():
+        if existing_archive.startswith("# Archived Merges"):
+            _, _, rest = existing_archive.partition("\n")
+            combined = (
+                "# Archived Merges\n\n" + new_section + "\n\n---\n\n" + rest.lstrip()
+            )
+        else:
+            combined = (
+                "# Archived Merges\n\n"
+                + new_section
+                + "\n\n---\n\n"
+                + existing_archive.lstrip()
+            )
+    else:
+        combined = "# Archived Merges\n\n" + new_section + "\n"
+    atomic_write_text(archive_path, combined)
+
+    result.applied = True
+    log.info(
+        "pending_merges: revalidation retired %d stale proposal(s) to %s "
+        "(current suppression gate)",
+        len(retired_blocks),
+        archive_path.name,
+    )
+    return result
