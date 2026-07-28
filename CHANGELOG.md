@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bulk PII migration + corpus-wide PII lint (#495).** #479 shipped
+  `athenaeum storage migrate-pii` as a single-page tool, but the live corpus
+  needs the transform over ~11.5k entity pages, and 790 pages carry an email in
+  body text of `_`-prefixed queue/index/archive files the entity-page lint
+  never opens. Two additions close both gaps:
+  - `storage migrate-pii` gains bulk modes: `--all` (every top-level
+    `wiki/*.md` entity page carrying contact data; `_`-prefixed queue/index
+    files are deliberately excluded — they need per-file-kind operator
+    decisions, not the entity-page transform) and `--glob PATTERN` (an
+    operator-named set, e.g. one archive to redact in place). The single-page
+    `--page` path is byte-for-byte unchanged. Bulk is **idempotent and
+    resumable by construction** — a migrated origin page carries no contact
+    data, so a re-run (after a clean finish or a crash halfway) skips it and
+    applies only the remaining dirty pages, with no run ledger and no
+    double-writes. Dry-run prints a summary (pages affected, records to
+    create), not 11.5k diffs; apply reports progress every 500 pages.
+  - `storage lint-pii` is a new corpus-wide gate: it scans the whole text of
+    **every** file under `wiki/` — `_`-prefixed queue/index/archive files and
+    stray `.bak` files included, recursing into subdirectories — for an inline
+    email/phone token, and exits non-zero (2) on any finding so a body-text
+    email cannot silently regrow after the sweep. Reuses the #427/#455
+    `find_inline_emails` / `find_inline_phones` detectors (one definition of
+    "looks like contact data"). The excluded surface lives outside `wiki/` by
+    construction, so migrated records are never scanned. Library entry points:
+    `athenaeum.storage_migrate.iter_entity_pages` / `iter_glob_pages` and
+    `athenaeum.pii.scan_corpus_pii` / `iter_corpus_files` /
+    `CorpusPiiFinding`.
 - **Permanent per-phase run summary (#464, slice E of #460).** Pure
   observability for the #440 nightly-cost profiling epic: `run()` now emits
   ONE machine-greppable `librarian-run-summary` log line at the end of every
