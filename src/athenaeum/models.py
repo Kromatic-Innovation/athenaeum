@@ -1514,6 +1514,30 @@ class TokenUsage:
         """
         if self.subscription_covered:
             return 0.0
+        return self._cost_at_api_rates()
+
+    @property
+    def notional_cost_usd(self) -> float:
+        """Counterfactual API-rate cost of this run's tokens (issue #487).
+
+        The same per-model pricing as :attr:`estimated_cost_usd` but WITHOUT the
+        subscription short-circuit — what these tokens WOULD have cost at API
+        list rates even when the operator's Claude Code subscription actually
+        paid $0 for them. It lets a subscription ledger row report a labelled
+        counterfactual (``notional_usd``) instead of reading as $0 of activity,
+        while ``estimated_cost_usd`` stays the real-dollars-paid figure ($0 on
+        the subscription path). The two are NEVER summed — a reader keys on the
+        row's ``billing_mode`` to choose which applies.
+        """
+        return self._cost_at_api_rates()
+
+    def _cost_at_api_rates(self) -> float:
+        """Price every accumulated token at API list rates, per model (#247).
+
+        Extracted from :attr:`estimated_cost_usd` so the provider-tagged
+        estimate and the notional counterfactual (#487) share one
+        implementation rather than drifting apart.
+        """
         total = 0.0
         # Per-model tagged share at each model's own rates.
         tagged = {
