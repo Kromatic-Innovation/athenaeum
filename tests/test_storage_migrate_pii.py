@@ -16,6 +16,7 @@ from athenaeum.cli import main
 from athenaeum.config import load_config
 from athenaeum.librarian import reindex
 from athenaeum.models import parse_frontmatter
+from athenaeum.pii import is_service_address
 from athenaeum.search import query_fts5_index
 from athenaeum.storage import surface_root_for_class
 from athenaeum.storage_migrate import (
@@ -675,6 +676,191 @@ class TestDetectorDrivenKeyCoverage:
         assert plan.emails == ["jack.prose@corp.example"]
         assert "jack.prose@corp.example" not in (plan.rewritten_page_text or "")
         assert INLINE_REDACTION_MARKER in (plan.rewritten_page_text or "")
+
+
+class TestNestedFrontmatterCoverage:
+    """Issue #507 — recurse into nested lists/dicts, targeting the exact leaf.
+
+    The #502 sweep scanned only the top level of each frontmatter value, so PII
+    inside a *list of dicts* (``sources[].claim`` provenance blocks,
+    ``apollo_employment_history[].title`` enrichment payloads) was invisible to
+    the migrator. These pin the recursive walk, the leaf-precise rewrite, and
+    the service-address carve-out.
+    """
+
+    def test_migrates_email_in_sources_claim_preserving_provenance_block(
+        self, tmp_path: Path
+    ) -> None:
+        # sources[].claim — an auto-memory provenance block. The address is
+        # redacted IN PLACE; the block's session/scope/date survive byte-identical.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "auto-calendar-emily.md",
+            "uid: n1\n"
+            "name: Auto Calendar\n"
+            "type: memory\n"
+            "sources:\n"
+            "  - session: sess-2026-07-01\n"
+            "    scope: work\n"
+            "    claim: Reached Emily at emily@novo.co and emilycc@gmail.com\n",
+            "Auto-memory page.",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+        meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
+
+        assert plan.changed is True
+        assert plan.emails == ["emily@novo.co", "emilycc@gmail.com"]
+        block = meta["sources"][0]
+        # Surrounding provenance fields survive untouched...
+        assert block["session"] == "sess-2026-07-01"
+        assert block["scope"] == "work"
+        # ...only the address in `claim` is replaced (redacted in place).
+        assert "emily@novo.co" not in block["claim"]
+        assert "emilycc@gmail.com" not in block["claim"]
+        assert INLINE_REDACTION_MARKER in block["claim"]
+        assert "Reached Emily at" in block["claim"]
+        # ...and both addresses are archived on the excluded record.
+        assert "emily@novo.co" in (plan.excluded_page_text or "")
+        assert "emilycc@gmail.com" in (plan.excluded_page_text or "")
+
+    def test_migrates_email_in_apollo_employment_history_title(
+        self, tmp_path: Path
+    ) -> None:
+        # apollo_employment_history[].title — an address pasted into a job-title
+        # field upstream. The leaf is scrubbed; the rest of the entry survives.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "ad1b80ad-phil-haake.md",
+            "uid: n2\n"
+            "name: Phil Haake\n"
+            "type: person\n"
+            "apollo_employment_history:\n"
+            "  - organization: First50\n"
+            "    title: Phil@first50.com\n"
+            "    start_date: 2015\n",
+            "Enriched via Apollo.",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+        meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
+
+        assert plan.changed is True
+        assert plan.emails == ["Phil@first50.com"]
+        entry = meta["apollo_employment_history"][0]
+        # The rest of the employment entry is byte-identical...
+        assert entry["organization"] == "First50"
+        assert entry["start_date"] == 2015
+        # ...and the address no longer appears anywhere on the origin page.
+        assert "Phil@first50.com" not in (plan.rewritten_page_text or "")
+        # ...but is archived on the excluded record.
+        assert "Phil@first50.com" in (plan.excluded_page_text or "")
+
+    def test_service_address_is_not_migrated(self, tmp_path: Path) -> None:
+        # AC: a service identifier (git@github.com) is email-shaped but NOT
+        # contact data — migrating it would break a clone URL. It is left in
+        # place, and a page carrying ONLY service addresses is a no-op.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "auto-cwc-git-ssh.md",
+            "uid: n3\n"
+            "name: CWC Git SSH\n"
+            "type: memory\n"
+            "sources:\n"
+            "  - session: sess-cwc\n"
+            "    claim: clone with git@github.com over SSH\n"
+            "calendar: standup@group.calendar.google.com\n",
+            "Repo access note.",
+        )
+        before = page.read_text(encoding="utf-8")
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+
+        assert plan.changed is False  # nothing migratable
+        assert plan.emails == []
+        assert plan.rewritten_page_text is None
+        assert page.read_text(encoding="utf-8") == before  # untouched
+
+    def test_service_and_real_address_side_by_side_migrates_only_real(
+        self, tmp_path: Path
+    ) -> None:
+        # A claim carrying BOTH a service address and a real one: only the real
+        # address is redacted; the service identifier survives byte-identical.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "mixed.md",
+            "uid: n4\n"
+            "name: Mixed\n"
+            "type: memory\n"
+            "sources:\n"
+            "  - claim: mailed founder@acme.example after cloning git@github.com\n",
+            "Mixed note.",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+        meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
+        claim = meta["sources"][0]["claim"]
+
+        assert plan.emails == ["founder@acme.example"]
+        assert "founder@acme.example" not in claim
+        assert "git@github.com" in claim  # service address preserved in place
+        assert INLINE_REDACTION_MARKER in claim
+
+    def test_arbitrary_nesting_depth_is_reached(self, tmp_path: Path) -> None:
+        # Not just one-level list-of-dicts: an address buried several levels deep
+        # (list > dict > list > dict > string) must still be detected/redacted.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "deep.md",
+            "uid: n5\n"
+            "name: Deep Nest\n"
+            "type: memory\n"
+            "layers:\n"
+            "  - inner:\n"
+            "      - leaf:\n"
+            "          claim: buried deep@corp.example far down\n"
+            "          label: keep-me\n",
+            "Deeply nested.",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+        meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
+
+        assert plan.changed is True
+        assert plan.emails == ["deep@corp.example"]
+        leaf = meta["layers"][0]["inner"][0]["leaf"]
+        # The sibling leaf at the same depth is untouched...
+        assert leaf["label"] == "keep-me"
+        # ...the buried address is redacted in place...
+        assert "deep@corp.example" not in leaf["claim"]
+        assert INLINE_REDACTION_MARKER in leaf["claim"]
+        assert "buried" in leaf["claim"] and "far down" in leaf["claim"]
+        # ...and archived on the excluded record.
+        assert "deep@corp.example" in (plan.excluded_page_text or "")
+
+
+class TestServiceAddressPredicate:
+    """Issue #507 — the explicit, named service-address carve-out."""
+
+    def test_git_ssh_pseudo_user_is_a_service_address(self) -> None:
+        assert is_service_address("git@github.com") is True
+        assert is_service_address("git@gitlab.com") is True
+        # case-insensitive on the whole address
+        assert is_service_address("GIT@GitHub.com") is True
+
+    def test_calendar_group_domain_is_a_service_address(self) -> None:
+        assert (
+            is_service_address("abc123@group.calendar.google.com") is True
+        )
+
+    def test_a_real_contact_address_is_not_a_service_address(self) -> None:
+        assert is_service_address("founder@acme.example") is False
+        assert is_service_address("realbook@kromatic.com") is False
 
 
 class TestBulkSurfacesNameIsEmailPopulation:
