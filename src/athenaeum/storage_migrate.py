@@ -7,10 +7,21 @@ built-in ``excluded`` surface (all corpus-policy flags false) that a
 single-page migration CLI for a *different* shape (``authority convert``, a
 pointer-stub rewrite). This module is the missing operator tool #437's
 migration step needs: read a live entity page, extract its archival contact
-data (``emails``/``phones`` frontmatter + inline email/phone-shaped tokens in
-the body), write that contact data to a page under the excluded surface, and
-rewrite the original page down to durable identifiers only (name, LinkedIn,
-record id, Google-Contact id — everything *except* the archival contact fields).
+data and write it to a page under the excluded surface, rewriting the original
+page down to durable identifiers only (name, LinkedIn, record id,
+Google-Contact id — everything *except* the archival contact data).
+
+Contact-data detection is DETECTOR-DRIVEN across the whole page (issue #502).
+#479 read only the ``emails:`` / ``phones:`` frontmatter keys; the live sweep
+then found the residual PII lives mostly *elsewhere* — ``aliases:`` (dominant),
+``former_emails:`` / ``alt_emails:`` / ``source:`` provenance strings, and body
+prose. So the migrator now scans EVERY frontmatter value (and the body) with
+the email/phone detectors rather than an allow-list of keys — a newly-invented
+contact key cannot reopen the hole. The :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS`
+(name, ``linkedin_url``, ``handles_verified``, record IDs, …) are PRESERVED
+verbatim, and pages whose only PII is in ``name:`` / ``preferred_name:`` are
+EXCLUDED from this automatic path (renaming breaks slugs/edges — its own
+slice); see :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS`.
 
 This module is a pure transform: it reads a page and returns the two would-be
 file texts (:class:`PiiMigrationPlan`); it never writes. The thin CLI
@@ -19,7 +30,7 @@ mirroring the read / transform / write split ``authority.py`` /
 ``_cmd_authority.py`` use for ``authority convert``.
 
 Detection reuses :mod:`athenaeum.pii` verbatim (``find_inline_emails`` /
-``find_inline_phones`` / ``CONTACT_FRONTMATTER_FIELDS``) — the #455 outbound-lint
+``find_inline_phones`` / ``DURABLE_IDENTIFIER_FIELDS``) — the #455 outbound-lint
 scanner's single source of truth for the patterns — rather than defining a
 second detector.
 """
@@ -33,12 +44,12 @@ from typing import Any
 
 from athenaeum.models import parse_frontmatter, render_frontmatter
 from athenaeum.pii import (
-    CONTACT_FRONTMATTER_FIELDS,
+    DURABLE_IDENTIFIER_FIELDS,
     PII_ENTITY_CLASS,
     PII_FLAG,
-    _frontmatter_contact_values,
     find_inline_emails,
     find_inline_phones,
+    name_field_holds_pii,
 )
 from athenaeum.storage import surface_root_for_class
 
@@ -72,6 +83,14 @@ class PiiMigrationPlan:
     #: The archival contact-record text for the excluded surface. ``None`` when
     #: :attr:`changed` is False.
     excluded_page_text: str | None
+    #: True when the page's ``name:`` / ``preferred_name:`` is itself an email
+    #: (or phone). Such pages are the #502 name-is-an-email population — EXCLUDED
+    #: from this automatic path (renaming breaks slugs/edges) and handled in a
+    #: separate slice. The migrator never rewrites the name field; this flag
+    #: lets the bulk driver COUNT the excluded population so it is visible, not
+    #: silently dropped. Independent of :attr:`changed` — a page can both carry
+    #: a migratable alias AND be named after an email.
+    name_field_pii: bool = False
 
     @property
     def changed(self) -> bool:
@@ -98,6 +117,83 @@ def _redact_inline_tokens(body: str, tokens: list[str]) -> str:
     for token in sorted(tokens, key=len, reverse=True):
         new_body = new_body.replace(token, INLINE_REDACTION_MARKER)
     return new_body
+
+
+def _migrate_str_value(value: str) -> tuple[str | None, list[str], list[str]]:
+    """Extract contact tokens from one frontmatter string value.
+
+    Returns ``(new_value, emails, phones)``:
+
+    * ``emails`` / ``phones`` — the contact tokens detected in *value*.
+    * ``new_value`` — the value with those tokens handled:
+      - no PII → *value* unchanged.
+      - the value is ENTIRELY contact data (a bare ``foo@bar.com`` alias, or a
+        scalar that is just the address) → ``None``, signalling the caller to
+        DROP this list entry / frontmatter key (nothing archival is lost — the
+        token is preserved on the excluded record).
+      - PII embedded in surrounding text (a ``source:`` provenance string like
+        ``"imported from foo@bar.com via Streak"``) → the token redacted
+        in place with :data:`INLINE_REDACTION_MARKER`, keeping the non-PII
+        context so the field stays meaningful.
+    """
+    emails = find_inline_emails(value)
+    phones = find_inline_phones(value)
+    if not (emails or phones):
+        return value, [], []
+    redacted = _redact_inline_tokens(value, emails + phones)
+    # If nothing but the marker(s)/whitespace survives, the value WAS pure
+    # contact data — drop it rather than leave a content-free marker behind.
+    residual = redacted.replace(INLINE_REDACTION_MARKER, "").strip()
+    if not residual:
+        return None, emails, phones
+    return redacted, emails, phones
+
+
+def _migrate_frontmatter(
+    meta: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Rewrite frontmatter, extracting contact data from every non-durable field.
+
+    Detector-driven (issue #502): scans EVERY frontmatter value — not just
+    ``emails:`` / ``phones:`` — so contact data in ``aliases:``,
+    ``former_emails:``, ``source:`` etc. is migrated, while a newly-invented
+    contact key cannot reopen the hole. :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS`
+    (identity + the name-is-an-email carve-out) are preserved verbatim. List
+    values keep their non-PII entries (a real alias survives even when a sibling
+    entry was an email); scalar values keep their non-PII context.
+
+    Returns ``(new_meta, emails, phones)`` — the rewritten frontmatter dict
+    (key order preserved) and the deduped-later contact tokens pulled out of it.
+    """
+    new_meta: dict[str, Any] = {}
+    emails: list[str] = []
+    phones: list[str] = []
+    for key, value in meta.items():
+        if key in DURABLE_IDENTIFIER_FIELDS:
+            new_meta[key] = value
+            continue
+        if isinstance(value, list):
+            new_list: list[Any] = []
+            for item in value:
+                if isinstance(item, str):
+                    new_item, em, ph = _migrate_str_value(item)
+                    emails += em
+                    phones += ph
+                    if new_item is not None:
+                        new_list.append(new_item)
+                else:
+                    new_list.append(item)
+            if new_list:  # drop a key whose every entry was contact data
+                new_meta[key] = new_list
+        elif isinstance(value, str):
+            new_value, em, ph = _migrate_str_value(value)
+            emails += em
+            phones += ph
+            if new_value is not None:
+                new_meta[key] = new_value
+        else:
+            new_meta[key] = value  # non-string scalar (int/bool/date/dict): keep
+    return new_meta, emails, phones
 
 
 def _render_excluded_record(
@@ -156,17 +252,24 @@ def plan_pii_migration(
     if not isinstance(meta, dict):
         meta = {}
 
-    fm_contacts = _frontmatter_contact_values(meta)
+    # Detector-driven frontmatter scan (#502): pull contact tokens from EVERY
+    # non-durable field, preserving durable identifiers and the name-is-an-email
+    # carve-out. Then the body inline tokens.
+    new_meta, fm_emails, fm_phones = _migrate_frontmatter(meta)
     inline_emails = find_inline_emails(body)
     inline_phones = find_inline_phones(body)
 
-    emails = _dedupe_preserving_order(fm_contacts.get("emails", []) + inline_emails)
-    phones = _dedupe_preserving_order(fm_contacts.get("phones", []) + inline_phones)
+    emails = _dedupe_preserving_order(fm_emails + inline_emails)
+    phones = _dedupe_preserving_order(fm_phones + inline_phones)
+    name_field_pii = name_field_holds_pii(meta)
 
     excluded_root = surface_root_for_class(PII_ENTITY_CLASS, config, knowledge_root)
     excluded_page_path = excluded_root / page_path.name
 
     if not (emails or phones):
+        # No migratable contact data. A page whose only PII is in its name is
+        # NOT migrated here (renaming is a separate slice) — but the flag lets
+        # the bulk driver surface the excluded population rather than lose it.
         return PiiMigrationPlan(
             page_path=page_path,
             excluded_page_path=excluded_page_path,
@@ -174,14 +277,12 @@ def plan_pii_migration(
             phones=[],
             rewritten_page_text=None,
             excluded_page_text=None,
+            name_field_pii=name_field_pii,
         )
 
-    # Rewrite origin: drop the archival contact frontmatter fields (durable
-    # identifiers — name/linkedin/uid/google_contact/type/etc. — are untouched),
-    # then redact the inline tokens found in the body.
-    new_meta = {
-        k: v for k, v in meta.items() if k not in CONTACT_FRONTMATTER_FIELDS
-    }
+    # Rewrite origin: frontmatter with contact data stripped/redacted (durable
+    # identifiers untouched, real aliases preserved), then the body inline
+    # tokens redacted.
     new_body = _redact_inline_tokens(body, inline_emails + inline_phones)
     rewritten_page_text = render_frontmatter(new_meta) + "\n" + new_body
 
@@ -194,6 +295,7 @@ def plan_pii_migration(
         phones=phones,
         rewritten_page_text=rewritten_page_text,
         excluded_page_text=excluded_page_text,
+        name_field_pii=name_field_pii,
     )
 
 
