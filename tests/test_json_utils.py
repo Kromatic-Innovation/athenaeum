@@ -29,6 +29,7 @@ from athenaeum.json_utils import (
     extract_json_object,
     loads_lenient,
     repair_json_control_chars,
+    scan_json_objects,
 )
 
 
@@ -51,6 +52,27 @@ def _recursion_busting_depth() -> int:
 def test_plain_strict_json() -> None:
     """Regression: strict bare-object output keeps parsing."""
     assert extract_json_object('{"detected": true}') == {"detected": True}
+
+
+# --- scan_json_objects: the multi-candidate view used by #496 --------------
+
+
+def test_scan_returns_all_balanced_objects() -> None:
+    # Where extract_json_object refuses two balanced objects as ambiguous,
+    # scan_json_objects returns both so the caller can disambiguate itself.
+    text = '{"a": 1}\nprose\n{"ops": [], "b": 2}'
+    assert extract_json_object(text) is None
+    found = scan_json_objects(text)
+    assert found == [{"a": 1}, {"ops": [], "b": 2}]
+
+
+def test_scan_no_object_returns_empty_list() -> None:
+    assert scan_json_objects("no json here at all") == []
+
+
+def test_scan_respects_limit() -> None:
+    text = '{"a": 1} {"b": 2} {"c": 3}'
+    assert scan_json_objects(text, limit=2) == [{"a": 1}, {"b": 2}]
 
 
 def test_json_fenced_object() -> None:
