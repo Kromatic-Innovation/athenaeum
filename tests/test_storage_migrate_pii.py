@@ -13,7 +13,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from athenaeum.cli import main
+from athenaeum.config import load_config
+from athenaeum.librarian import reindex
 from athenaeum.models import parse_frontmatter
+from athenaeum.search import query_fts5_index
 from athenaeum.storage import surface_root_for_class
 from athenaeum.storage_migrate import (
     INLINE_REDACTION_MARKER,
@@ -469,3 +472,302 @@ class TestBulkMigrateCLI:
 
         with pytest.raises(SystemExit):
             main(["storage", "migrate-pii", "--path", "/tmp/x"])
+
+
+# ---------------------------------------------------------------------------
+# Detector-driven key coverage — the #502 residual key shapes
+# ---------------------------------------------------------------------------
+#
+# #479 read only ``emails:`` / ``phones:``; the live sweep left 690 pages whose
+# PII lives in OTHER frontmatter keys (``aliases:`` dominant, then ``source:``,
+# ``former_emails:``, ``alt_emails:``) and in body prose. The migrator now
+# detector-scans every non-durable frontmatter value; these pin each residual
+# shape #502 measured, plus the durable-identifier preservation contract (#427)
+# and the name-is-an-email carve-out.
+
+
+def _write_page(wiki_root: Path, filename: str, frontmatter: str, body: str) -> Path:
+    wiki_root.mkdir(parents=True, exist_ok=True)
+    path = wiki_root / filename
+    path.write_text(f"---\n{frontmatter}---\n{body}\n", encoding="utf-8")
+    return path
+
+
+class TestDetectorDrivenKeyCoverage:
+    def test_migrates_email_in_aliases_preserving_real_aliases(
+        self, tmp_path: Path
+    ) -> None:
+        # aliases:86 is the dominant residual — an email recorded AS an alias
+        # (a matching key, so directly reachable by name resolution/recall).
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "dana.md",
+            "uid: d1\n"
+            "name: Dana Example\n"
+            "type: person\n"
+            "aliases:\n"
+            "  - Dana E.\n"
+            "  - dana.example@corp.example\n",
+            "Dana leads sales.",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+        meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
+
+        assert plan.changed is True
+        assert plan.emails == ["dana.example@corp.example"]
+        # The real, non-PII alias survives; the email alias is gone.
+        assert meta["aliases"] == ["Dana E."]
+        assert "dana.example@corp.example" not in (plan.rewritten_page_text or "")
+        # ...and it is archived on the excluded record.
+        assert "dana.example@corp.example" in (plan.excluded_page_text or "")
+
+    def test_migrates_former_emails_and_alt_emails(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "eve.md",
+            "uid: e1\n"
+            "name: Eve Example\n"
+            "type: person\n"
+            "former_emails:\n"
+            "  - old@acme.example\n"
+            "alt_emails:\n"
+            "  - alt@acme.example\n",
+            "Eve.",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+        meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
+
+        assert plan.emails == ["old@acme.example", "alt@acme.example"]
+        # Pure-contact keys are dropped from the origin entirely.
+        assert "former_emails" not in meta
+        assert "alt_emails" not in meta
+        record_meta, _ = parse_frontmatter(plan.excluded_page_text or "")
+        assert record_meta["emails"] == ["old@acme.example", "alt@acme.example"]
+
+    def test_migrates_email_in_source_redacts_in_place(self, tmp_path: Path) -> None:
+        # source:6 — a provenance STRING that embeds an address. The non-PII
+        # context must survive (redact in place), not drop the whole field.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "finn.md",
+            "uid: f1\n"
+            "name: Finn Example\n"
+            "type: person\n"
+            'source: "Streak import 2016 via founder@acme.example"\n',
+            "Finn.",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+        meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
+
+        assert plan.emails == ["founder@acme.example"]
+        # Field kept, email redacted in place, provenance context preserved.
+        assert "source" in meta
+        assert "founder@acme.example" not in meta["source"]
+        assert INLINE_REDACTION_MARKER in meta["source"]
+        assert "Streak import 2016" in meta["source"]
+
+    def test_preserves_durable_identifiers_even_when_email_shaped(
+        self, tmp_path: Path
+    ) -> None:
+        # #427: durable identifiers (linkedin_url, handles_verified, record IDs,
+        # google_contact*) are PRESERVED verbatim even if a value is email-
+        # shaped, and are never pulled onto the excluded contact record.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "gwen.md",
+            "uid: g1\n"
+            "name: Gwen Example\n"
+            "type: person\n"
+            "linkedin_url: https://linkedin.com/in/gwen\n"
+            "google_contact_kromatic: people/c42\n"
+            "handles_verified:\n"
+            "  - handle@social.example\n"
+            "aliases:\n"
+            "  - real.migrate@corp.example\n",
+            "Gwen.",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+        meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
+
+        # Only the alias email is migrated; the durable-field email is NOT.
+        assert plan.emails == ["real.migrate@corp.example"]
+        assert "handle@social.example" not in plan.emails
+        # Durable fields preserved verbatim on the origin page.
+        assert meta["linkedin_url"] == "https://linkedin.com/in/gwen"
+        assert meta["google_contact_kromatic"] == "people/c42"
+        assert meta["handles_verified"] == ["handle@social.example"]
+        # ...and the durable-field email never leaks onto the excluded record.
+        assert "handle@social.example" not in (plan.excluded_page_text or "")
+
+    def test_name_is_email_page_excluded_from_automatic_path(
+        self, tmp_path: Path
+    ) -> None:
+        # ~80 pages are NAMED after an email (Streak email-only import). Renaming
+        # breaks slugs/edges — so a page whose ONLY PII is in name: is a NO-OP
+        # here, flagged for the separate slice, never silently renamed.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "person-at-streak.md",
+            "uid: h1\nname: person@streak.example\ntype: person\n",
+            "Contact-only record.",
+        )
+        before = page.read_text(encoding="utf-8")
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+
+        assert plan.changed is False  # not migrated
+        assert plan.name_field_pii is True  # but flagged for the follow-up slice
+        assert plan.rewritten_page_text is None
+        assert page.read_text(encoding="utf-8") == before  # never renamed
+
+    def test_name_is_email_with_alias_keeps_name_migrates_alias(
+        self, tmp_path: Path
+    ) -> None:
+        # A page can be BOTH named after an email AND carry a migratable alias.
+        # The alias migrates; the name: is preserved untouched (not renamed).
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "ivy.md",
+            "uid: i1\n"
+            "name: ivy@streak.example\n"
+            "type: person\n"
+            "aliases:\n"
+            "  - ivy.real@corp.example\n",
+            "Ivy.",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+        meta, _body = parse_frontmatter(plan.rewritten_page_text or "")
+
+        assert plan.changed is True
+        assert plan.name_field_pii is True
+        # The alias is migrated; the name-email is NOT treated as migrated PII.
+        assert plan.emails == ["ivy.real@corp.example"]
+        assert "ivy@streak.example" not in plan.emails
+        # name: preserved verbatim (no rename), aliases scrubbed.
+        assert meta["name"] == "ivy@streak.example"
+        assert "aliases" not in meta
+
+    def test_body_prose_email_on_entity_page_is_redacted(self, tmp_path: Path) -> None:
+        # AC: body-text redaction covers entity pages. ~113/300 sampled pages
+        # carry the address in prose only.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "jack.md",
+            "uid: j1\nname: Jack Example\ntype: person\n",
+            "Reach Jack at jack.prose@corp.example for intros.",
+        )
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root)
+
+        assert plan.changed is True
+        assert plan.emails == ["jack.prose@corp.example"]
+        assert "jack.prose@corp.example" not in (plan.rewritten_page_text or "")
+        assert INLINE_REDACTION_MARKER in (plan.rewritten_page_text or "")
+
+
+class TestBulkSurfacesNameIsEmailPopulation:
+    def test_bulk_dry_run_reports_excluded_name_population(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = tmp_path / "knowledge"
+        _write_page(
+            root / "wiki",
+            "named-email.md",
+            "uid: k1\nname: k@streak.example\ntype: person\n",
+            "Contact-only.",
+        )
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--all"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "1 page(s) are named after an email" in out
+
+
+# ---------------------------------------------------------------------------
+# Search-index invalidation after --apply (issue #502 comment scope addition)
+# ---------------------------------------------------------------------------
+#
+# --apply rewrites the markdown but does NOT itself touch the search index, so
+# the pre-migration text stays recallable until a reindex runs. These pin the
+# AC that would have caught the hole: a migrated page's contact data is
+# unreachable THROUGH the configured search backend (fts5 indexes the aliases:
+# column — the dominant residual), not merely absent from the markdown.
+
+
+def _seed_indexable_root(tmp_path: Path) -> Path:
+    root = tmp_path / "knowledge"
+    (root / "wiki").mkdir(parents=True)
+    (root / "athenaeum.yaml").write_text(
+        "storage:\n  mapping:\n    pii: excluded\nsearch_backend: fts5\n",
+        encoding="utf-8",
+    )
+    # A distinctive local-part in aliases: (an INDEXED fts5 column) so a MATCH
+    # on the token is a clean reachable/unreachable probe. Flow style — the
+    # fts5 frontmatter scanner reads inline ``aliases: [...]`` into its indexed
+    # column (block-style list items land on separate lines it doesn't parse).
+    _write_page(
+        root / "wiki",
+        "luna.md",
+        "uid: l1\nname: Luna Example\ntype: person\n"
+        "aliases: [zzuniquehandle@corp.example]\n",
+        "Luna leads research.",
+    )
+    return root
+
+
+class TestMigratePiiSearchIndex:
+    def test_migrated_alias_unreachable_through_search_after_reindex(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        root = _seed_indexable_root(tmp_path)
+        cache = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache))
+
+        # Baseline: build the index, confirm the alias email IS reachable.
+        reindex(root, config=load_config(root))
+        assert query_fts5_index("zzuniquehandle", cache, n=5)  # reachable
+
+        # Migrate + reindex in one shot.
+        rc = main(
+            [
+                "storage", "migrate-pii", "--path", str(root),
+                "--all", "--apply", "--reindex",
+            ]
+        )
+        assert rc == 0
+
+        # Now unreachable through the backend — not merely absent from markdown.
+        assert query_fts5_index("zzuniquehandle", cache, n=5) == []
+        # ...but archived off-corpus on the excluded (never-indexed) surface.
+        excluded = surface_root_for_class("pii", EXCLUDED_CONFIG, root) / "luna.md"
+        assert "zzuniquehandle@corp.example" in excluded.read_text(encoding="utf-8")
+
+    def test_apply_without_reindex_warns_index_still_dirty(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # AC: --apply must NOT print an unqualified success while the data is
+        # still recallable — it must instruct a reindex.
+        root = _seed_indexable_root(tmp_path)
+
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--all", "--apply"])
+
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "still carries the pre-migration page text" in err
+        assert "athenaeum reindex" in err

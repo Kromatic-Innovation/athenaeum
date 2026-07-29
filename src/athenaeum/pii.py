@@ -136,6 +136,47 @@ PII_FLAG = "pii"
 #: scope) — this module only flags, never rewrites, a page.
 CONTACT_FRONTMATTER_FIELDS: tuple[str, ...] = ("emails", "phones")
 
+#: Frontmatter fields whose values are DURABLE IDENTIFIERS (#427) and are
+#: PRESERVED VERBATIM on an entity page even when a value is email/phone-shaped
+#: — they are identity, not archival contact data. The #479 migrator originally
+#: read only ``emails:`` / ``phones:``; #502 found the live residual lives
+#: mostly in *other* keys (``aliases:``, ``former_emails:``, ``source:``, …),
+#: so the migrator now detector-scans EVERY frontmatter value — but must NOT
+#: rewrite these identity fields. Two distinct reasons:
+#:
+#: * ``uid`` / ``type`` / ``linkedin_url`` / ``google_contact*`` /
+#:   ``handles_verified`` are durable identifiers (#427). An email that has
+#:   landed in one of these (a data-quality anomaly — #502 saw one page each in
+#:   ``google_contact_kromatic`` / ``linkedin_connected_on``) is NOT auto-
+#:   migrated: rewriting an identity field is not mechanically safe, so it is
+#:   left for the corpus-wide lint to surface and an operator to hand-fix.
+#: * ``name`` / ``preferred_name`` are the ~80 pages NAMED after an email
+#:   address (#502, from the Streak email-only import). Renaming an entity page
+#:   changes its slug and breaks inbound ``related:`` edges + alias resolution,
+#:   so the name-is-an-email population is EXCLUDED from this automatic path and
+#:   handled in its own slice. Preserving these here is exactly what keeps the
+#:   migrator from silently renaming those live pages.
+DURABLE_IDENTIFIER_FIELDS: frozenset[str] = frozenset(
+    {
+        "uid",
+        "type",
+        "name",
+        "preferred_name",
+        "linkedin_url",
+        "linkedin",
+        "handles_verified",
+        "google_contact",
+        "google_contact_kromatic",
+    }
+)
+
+#: The two frontmatter fields that hold an entity page's NAME. When one of
+#: these IS an email address the page is excluded from the #502 automatic
+#: migration path (renaming is unsafe — see :data:`DURABLE_IDENTIFIER_FIELDS`);
+#: :func:`name_field_holds_pii` reports the population so the separate slice can
+#: pick it up.
+NAME_FIELDS: tuple[str, ...] = ("name", "preferred_name")
+
 # A conservative email-shaped token — good enough to flag a body/narrative
 # line as "looks like inline contact data" without trying to be a fully
 # RFC 5322-correct validator (a lint, not a hard gate).
@@ -257,6 +298,30 @@ def find_inline_phones(text: str) -> list[str]:
         if token not in seen:
             seen.append(token)
     return seen
+
+
+def name_field_holds_pii(meta: dict[str, Any]) -> bool:
+    """True when a ``name:`` / ``preferred_name:`` value is email/phone-shaped.
+
+    The #502 name-is-an-email population: ~80 live pages whose NAME is a raw
+    contact address (Streak email-only import). These are deliberately EXCLUDED
+    from the automatic migration path — renaming a page changes its slug and
+    breaks inbound edges (:data:`DURABLE_IDENTIFIER_FIELDS`) — and handled in a
+    separate slice. This predicate lets the bulk migrator COUNT and surface the
+    excluded population so the operator sees exactly how many pages the
+    follow-up slice must cover, rather than the class silently vanishing.
+    """
+    if not meta:
+        return False
+    for field in NAME_FIELDS:
+        raw = meta.get(field)
+        if raw is None:
+            continue
+        for value in raw if isinstance(raw, list) else [raw]:
+            s = str(value)
+            if find_inline_emails(s) or find_inline_phones(s):
+                return True
+    return False
 
 
 def _frontmatter_contact_values(meta: dict[str, Any]) -> dict[str, list[str]]:
@@ -741,6 +806,9 @@ __all__ = [
     "PII_ENTITY_CLASS",
     "PII_FLAG",
     "CONTACT_FRONTMATTER_FIELDS",
+    "DURABLE_IDENTIFIER_FIELDS",
+    "NAME_FIELDS",
+    "name_field_holds_pii",
     "OBSERVATION_LOG_VERSION",
     "OBSERVATION_LOG_FILENAME",
     "SUPERSESSION_LOG_FILENAME",
