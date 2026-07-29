@@ -300,6 +300,54 @@ def find_inline_phones(text: str) -> list[str]:
     return seen
 
 
+#: Domains whose addresses are ALWAYS service identifiers, regardless of
+#: localpart (issue #507). A ``…@group.calendar.google.com`` address is a Google
+#: Calendar group id, not a person's contact address — migrating it off the page
+#: (redacting the leaf, archiving it as "contact data") would corrupt a calendar
+#: reference and lose no real PII. Matched by domain because the localpart is an
+#: opaque calendar id.
+SERVICE_ADDRESS_DOMAINS: frozenset[str] = frozenset(
+    {
+        "group.calendar.google.com",
+    }
+)
+
+#: Exact ``localpart@domain`` pseudo-addresses that are service identifiers, not
+#: contact data (issue #507). ``git@github.com`` (and its GitLab/Bitbucket
+#: siblings) is the SSH pseudo-user in a clone URL — email-*shaped* but a
+#: transport identifier. Redacting it out of an entity page would damage a repo
+#: reference; it is not a person's address, so nothing archival is lost by
+#: leaving it in place.
+SERVICE_ADDRESSES: frozenset[str] = frozenset(
+    {
+        "git@github.com",
+        "git@gitlab.com",
+        "git@bitbucket.org",
+    }
+)
+
+
+def is_service_address(token: str) -> bool:
+    """True when an email-shaped *token* is a SERVICE identifier, not contact data.
+
+    The email/phone detectors (:func:`find_inline_emails`) are deliberately
+    permissive — they match anything email-*shaped*. Some matches are transport
+    or service identifiers rather than a person's address: an SSH clone-URL
+    pseudo-user (``git@github.com``) or a Google Calendar group id
+    (``…@group.calendar.google.com``). Migrating one would damage the page (a
+    broken clone URL / calendar ref) while archiving no real PII. This is the
+    EXPLICIT, auditable predicate the #507 recursive frontmatter sweep consults
+    before treating a detected address as migratable — the excluded set is the
+    two named sources above, not a silent heuristic. Matching is
+    case-insensitive on the whole address and on the domain.
+    """
+    normalized = token.strip().lower()
+    if normalized in SERVICE_ADDRESSES:
+        return True
+    domain = normalized.rsplit("@", 1)[-1] if "@" in normalized else ""
+    return domain in SERVICE_ADDRESS_DOMAINS
+
+
 def name_field_holds_pii(meta: dict[str, Any]) -> bool:
     """True when a ``name:`` / ``preferred_name:`` value is email/phone-shaped.
 
@@ -819,6 +867,9 @@ __all__ = [
     "is_pii_flagged",
     "find_inline_emails",
     "find_inline_phones",
+    "SERVICE_ADDRESS_DOMAINS",
+    "SERVICE_ADDRESSES",
+    "is_service_address",
     "has_inline_contact_fields",
     "lint_inline_contact_fields",
     "CorpusPiiFinding",

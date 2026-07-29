@@ -17,11 +17,23 @@ then found the residual PII lives mostly *elsewhere* — ``aliases:`` (dominant)
 ``former_emails:`` / ``alt_emails:`` / ``source:`` provenance strings, and body
 prose. So the migrator now scans EVERY frontmatter value (and the body) with
 the email/phone detectors rather than an allow-list of keys — a newly-invented
-contact key cannot reopen the hole. The :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS`
-(name, ``linkedin_url``, ``handles_verified``, record IDs, …) are PRESERVED
-verbatim, and pages whose only PII is in ``name:`` / ``preferred_name:`` are
-EXCLUDED from this automatic path (renaming breaks slugs/edges — its own
-slice); see :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS`.
+contact key cannot reopen the hole. The scan RECURSES into nested lists and
+dicts to arbitrary depth (issue #507): the #502 sweep walked only the top level
+of each value, so an address buried in a *list of dicts* — ``sources[].claim``
+provenance blocks (the compiler copies claim text verbatim into frontmatter) or
+``apollo_employment_history[].title`` enrichment payloads — survived. The
+recursive walk targets the exact leaf and leaves every sibling structure
+byte-identical: a ``sources[]`` block keeps its session/scope/date intact while
+only the address in ``claim`` is redacted. Service identifiers that are
+email-*shaped* but not contact data — ``git@github.com`` (an SSH clone-URL
+pseudo-user) and ``…@group.calendar.google.com`` (a calendar group id) — are
+EXCLUDED from migration by the explicit :func:`~athenaeum.pii.is_service_address`
+predicate, so migrating them can't damage a repo/calendar reference. The
+:data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS` (name, ``linkedin_url``,
+``handles_verified``, record IDs, …) are PRESERVED verbatim at every level, and
+pages whose only PII is in ``name:`` / ``preferred_name:`` are EXCLUDED from
+this automatic path (renaming breaks slugs/edges — its own slice); see
+:data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS`.
 
 This module is a pure transform: it reads a page and returns the two would-be
 file texts (:class:`PiiMigrationPlan`); it never writes. The thin CLI
@@ -49,6 +61,7 @@ from athenaeum.pii import (
     PII_FLAG,
     find_inline_emails,
     find_inline_phones,
+    is_service_address,
     name_field_holds_pii,
 )
 from athenaeum.storage import surface_root_for_class
@@ -119,24 +132,39 @@ def _redact_inline_tokens(body: str, tokens: list[str]) -> str:
     return new_body
 
 
+def _migratable_emails(text: str) -> list[str]:
+    """Email-shaped tokens in *text* that are genuine contact data.
+
+    Filters out service identifiers (``git@github.com``, Google Calendar group
+    addresses, …) via :func:`~athenaeum.pii.is_service_address` (issue #507): a
+    naïve sweep that migrated those would damage the page (a broken clone URL /
+    calendar ref) while archiving no real PII. Order and dedup follow
+    :func:`~athenaeum.pii.find_inline_emails`.
+    """
+    return [e for e in find_inline_emails(text) if not is_service_address(e)]
+
+
 def _migrate_str_value(value: str) -> tuple[str | None, list[str], list[str]]:
     """Extract contact tokens from one frontmatter string value.
 
     Returns ``(new_value, emails, phones)``:
 
-    * ``emails`` / ``phones`` — the contact tokens detected in *value*.
+    * ``emails`` / ``phones`` — the contact tokens detected in *value*
+      (service identifiers excluded — see :func:`_migratable_emails`).
     * ``new_value`` — the value with those tokens handled:
-      - no PII → *value* unchanged.
+      - no migratable PII → *value* unchanged (a bare ``git@github.com`` service
+        address is left byte-identical, not redacted).
       - the value is ENTIRELY contact data (a bare ``foo@bar.com`` alias, or a
         scalar that is just the address) → ``None``, signalling the caller to
         DROP this list entry / frontmatter key (nothing archival is lost — the
         token is preserved on the excluded record).
       - PII embedded in surrounding text (a ``source:`` provenance string like
-        ``"imported from foo@bar.com via Streak"``) → the token redacted
+        ``"imported from foo@bar.com via Streak"``, or a ``sources[].claim``
+        like ``"Reached Priya at priya@example.com"``) → the token redacted
         in place with :data:`INLINE_REDACTION_MARKER`, keeping the non-PII
         context so the field stays meaningful.
     """
-    emails = find_inline_emails(value)
+    emails = _migratable_emails(value)
     phones = find_inline_phones(value)
     if not (emails or phones):
         return value, [], []
@@ -149,6 +177,62 @@ def _migrate_str_value(value: str) -> tuple[str | None, list[str], list[str]]:
     return redacted, emails, phones
 
 
+def _migrate_value(
+    value: Any,
+) -> tuple[Any, list[str], list[str]]:
+    """Recursively migrate one frontmatter value of arbitrary nesting depth.
+
+    The #502 sweep scanned only the TOP level of each frontmatter value: a
+    string was detector-scanned and a list had its string entries scanned, but a
+    value that was a *list of dicts* or a *nested dict* was copied through
+    untouched — so contact data at ``sources[].claim`` or
+    ``apollo_employment_history[].title`` was invisible to the migrator (issue
+    #507). This walks strings, lists AND dicts to arbitrary depth so every leaf
+    is reached, while every sibling leaf is preserved byte-identical (the
+    rewrite targets the exact leaf — e.g. ``sources[].claim`` — rather than
+    replacing a whole structure).
+
+    Returns ``(new_value, emails, phones)``. ``new_value is None`` signals the
+    caller to DROP this leaf — a list entry or dict key whose value was ENTIRELY
+    contact data (a bare ``foo@bar.com``) — exactly the scalar contract in
+    :func:`_migrate_str_value`; an emptied container is likewise dropped, mirror-
+    ing the top-level "drop a key whose every entry was contact data" rule. Non-
+    string, non-container scalars (int/bool/date) are returned unchanged.
+    Nested dicts honour :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS` too, so
+    a durable identifier nested inside a structure is preserved verbatim.
+    """
+    if isinstance(value, str):
+        return _migrate_str_value(value)
+
+    emails: list[str] = []
+    phones: list[str] = []
+
+    if isinstance(value, list):
+        new_list: list[Any] = []
+        for item in value:
+            new_item, em, ph = _migrate_value(item)
+            emails += em
+            phones += ph
+            if new_item is not None:
+                new_list.append(new_item)
+        return (new_list if new_list else None), emails, phones
+
+    if isinstance(value, dict):
+        new_dict: dict[Any, Any] = {}
+        for key, item in value.items():
+            if key in DURABLE_IDENTIFIER_FIELDS:
+                new_dict[key] = item
+                continue
+            new_item, em, ph = _migrate_value(item)
+            emails += em
+            phones += ph
+            if new_item is not None:
+                new_dict[key] = new_item
+        return (new_dict if new_dict else None), emails, phones
+
+    return value, [], []  # non-string scalar (int/bool/date/None): keep verbatim
+
+
 def _migrate_frontmatter(
     meta: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], list[str]]:
@@ -157,10 +241,15 @@ def _migrate_frontmatter(
     Detector-driven (issue #502): scans EVERY frontmatter value — not just
     ``emails:`` / ``phones:`` — so contact data in ``aliases:``,
     ``former_emails:``, ``source:`` etc. is migrated, while a newly-invented
-    contact key cannot reopen the hole. :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS`
-    (identity + the name-is-an-email carve-out) are preserved verbatim. List
+    contact key cannot reopen the hole. Recurses into nested lists AND dicts to
+    arbitrary depth (issue #507), so an address buried at ``sources[].claim`` or
+    ``apollo_employment_history[].title`` is reached — targeting the exact leaf
+    and leaving every sibling structure byte-identical.
+    :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS` (identity + the
+    name-is-an-email carve-out) are preserved verbatim at every level. List
     values keep their non-PII entries (a real alias survives even when a sibling
-    entry was an email); scalar values keep their non-PII context.
+    entry was an email); scalar values keep their non-PII context; service
+    identifiers (``git@github.com``, calendar group addresses) are left in place.
 
     Returns ``(new_meta, emails, phones)`` — the rewritten frontmatter dict
     (key order preserved) and the deduped-later contact tokens pulled out of it.
@@ -172,27 +261,11 @@ def _migrate_frontmatter(
         if key in DURABLE_IDENTIFIER_FIELDS:
             new_meta[key] = value
             continue
-        if isinstance(value, list):
-            new_list: list[Any] = []
-            for item in value:
-                if isinstance(item, str):
-                    new_item, em, ph = _migrate_str_value(item)
-                    emails += em
-                    phones += ph
-                    if new_item is not None:
-                        new_list.append(new_item)
-                else:
-                    new_list.append(item)
-            if new_list:  # drop a key whose every entry was contact data
-                new_meta[key] = new_list
-        elif isinstance(value, str):
-            new_value, em, ph = _migrate_str_value(value)
-            emails += em
-            phones += ph
-            if new_value is not None:
-                new_meta[key] = new_value
-        else:
-            new_meta[key] = value  # non-string scalar (int/bool/date/dict): keep
+        new_value, em, ph = _migrate_value(value)
+        emails += em
+        phones += ph
+        if new_value is not None:
+            new_meta[key] = new_value
     return new_meta, emails, phones
 
 
@@ -256,7 +329,9 @@ def plan_pii_migration(
     # non-durable field, preserving durable identifiers and the name-is-an-email
     # carve-out. Then the body inline tokens.
     new_meta, fm_emails, fm_phones = _migrate_frontmatter(meta)
-    inline_emails = find_inline_emails(body)
+    # Body: same service-identifier exclusion as the frontmatter path (#507) —
+    # a `git@github.com` in prose is left byte-identical, not redacted.
+    inline_emails = _migratable_emails(body)
     inline_phones = find_inline_phones(body)
 
     emails = _dedupe_preserving_order(fm_emails + inline_emails)
