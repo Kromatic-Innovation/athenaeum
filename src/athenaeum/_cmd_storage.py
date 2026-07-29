@@ -115,6 +115,19 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
             "one diff per page."
         ),
     )
+    migrate_p.add_argument(
+        "--reindex",
+        action="store_true",
+        help=(
+            "After a successful --apply, rebuild the search index so the "
+            "migrated contact data is no longer recallable (issue #502). "
+            "Rewriting a page changes its content hash, so an incremental "
+            "reindex evicts the stale index entry and re-embeds the scrubbed "
+            "text — WITHOUT this, --apply leaves the pre-migration text live in "
+            "the index and every migrated address stays reachable via recall. "
+            "Ignored on a dry-run (nothing changed to reindex)."
+        ),
+    )
 
     lint_p = s_sub.add_parser(
         "lint-pii",
@@ -160,6 +173,61 @@ def _apply_plan(plan: PiiMigrationPlan) -> None:
     plan.excluded_page_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(plan.excluded_page_path, plan.excluded_page_text or "")
     atomic_write_text(plan.page_path, plan.rewritten_page_text or "")
+
+
+def _post_apply_index_step(
+    args: argparse.Namespace, knowledge_root: Path, config: dict | None
+) -> None:
+    """Reindex (if --reindex) and/or emit the required-follow-up notice (#502).
+
+    ``migrate-pii --apply`` rewrites the markdown but does NOT itself touch the
+    search index: with the vector backend the embeddings still carry the
+    PRE-migration page text, so every migrated address stays recallable until a
+    reindex runs. An operator who sees only "migrated N page(s)" and stops has
+    moved nothing out of reach of ``recall`` (issue #502, live-sweep finding).
+
+    So after a successful apply this NEVER prints an unqualified success on its
+    own — the caller's "migrated" line is always followed here by either the
+    reindex result (``--reindex``) or an explicit instruction to run one. An
+    incremental reindex suffices: a rewritten page's whole-file content hash
+    changes, so the differ evicts its stale index entry and re-embeds the
+    scrubbed text (a ``--full`` rebuild is not required).
+    """
+    if not args.reindex:
+        print(
+            "NOTE: the search index still carries the pre-migration page text — "
+            "the migrated contact data remains recallable until you reindex. Run:\n"
+            f"  athenaeum reindex --path {knowledge_root}\n"
+            "(incremental is sufficient; rewritten pages change content hash).",
+            file=sys.stderr,
+        )
+        return
+    try:
+        from athenaeum.librarian import reindex as _reindex
+    except ImportError as exc:  # pragma: no cover - defensive
+        print(
+            f"warning: could not import the reindexer ({exc}); run "
+            f"`athenaeum reindex --path {knowledge_root}` manually so the "
+            "migrated data leaves the search index.",
+            file=sys.stderr,
+        )
+        return
+    try:
+        backend_name, pages = _reindex(knowledge_root, config=config)
+    except ImportError as exc:
+        # e.g. the `vector` backend configured but chromadb not installed.
+        backend = config.get("search_backend") if config else "?"
+        print(
+            f"warning: reindex failed to load the '{backend}' backend ({exc}); "
+            f"run `athenaeum reindex --path {knowledge_root}` manually so the "
+            "migrated data leaves the search index.",
+            file=sys.stderr,
+        )
+        return
+    print(
+        f"reindexed ({backend_name}, {pages} page(s)) — migrated contact data "
+        "is no longer in the search index."
+    )
 
 
 def _cmd_storage_migrate_pii(args: argparse.Namespace) -> int:
@@ -225,6 +293,7 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
 
     _apply_plan(plan)
     print(f"migrated PII off {page_path}\n{summary}")
+    _post_apply_index_step(args, knowledge_root, config)
     return 0
 
 
@@ -280,12 +349,15 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     records = 0
     total_emails = 0
     total_phones = 0
+    name_pii_excluded = 0
     for i, page_path in enumerate(pages, start=1):
         try:
             plan = plan_pii_migration(page_path, config, knowledge_root)
         except (OSError, UnicodeDecodeError) as exc:
             print(f"[migrate-pii] skip {page_path}: {exc}", file=sys.stderr)
             continue
+        if plan.name_field_pii:
+            name_pii_excluded += 1
         if plan.changed:
             affected += 1
             records += 1
@@ -306,8 +378,19 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
         f"{records} excluded contact record(s) to create; "
         f"{total_emails} email(s), {total_phones} phone(s)."
     )
+    if name_pii_excluded:
+        # The name-is-an-email population (#502): EXCLUDED from this automatic
+        # path (renaming breaks slugs/edges) and handled in a separate slice.
+        # Surface it so it is visible, not silently dropped.
+        print(
+            f"NOTE: {name_pii_excluded} page(s) are named after an email "
+            "address (name:/preferred_name:) and were NOT migrated — renaming "
+            "is unsafe and is handled by the separate name-is-an-email slice."
+        )
     if not args.apply and affected:
         print("re-run with --apply to write the changes.")
+    if args.apply and affected:
+        _post_apply_index_step(args, knowledge_root, config)
     return 0
 
 

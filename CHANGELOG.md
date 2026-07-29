@@ -299,6 +299,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`storage migrate-pii`: detect PII in ANY frontmatter value, not only
+  `emails:` / `phones:`, and invalidate the search index after `--apply`
+  (#502).** After the live bulk sweep (#495) 690 pages still carried inline
+  contact data the migrator never looked at — #479's `plan_pii_migration` read
+  only the `emails:` / `phones:` keys, but the residual lived in `aliases:`
+  (dominant — and *more* exposed than `emails:`, since aliases are recall
+  matching keys), `former_emails:` / `alt_emails:` / `source:` provenance
+  strings, and body prose.
+  - The migrator is now **detector-driven**: it scans every frontmatter value
+    (and the body) with the shared `find_inline_emails` / `find_inline_phones`
+    detectors, so a newly-invented contact key can't reopen the hole. Durable
+    identifiers (`athenaeum.pii.DURABLE_IDENTIFIER_FIELDS` — name,
+    `linkedin_url`, `handles_verified`, record IDs, `google_contact*`) are
+    **preserved verbatim** per #427; real aliases and non-PII provenance
+    context survive (list entries that are pure contact data are dropped; an
+    address embedded in a `source:` string is redacted in place).
+  - The **name-is-an-email population** (~80 pages whose `name:` /
+    `preferred_name:` is itself an address) is **excluded** from this automatic
+    path — renaming an entity page changes its slug and breaks inbound
+    `related:` / alias edges — and is filed as its own slice (#505). Bulk mode
+    reports the excluded count so it is visible, not silently dropped.
+  - `--apply` no longer prints an unqualified success while the migrated data is
+    still recallable: it now instructs a reindex (incremental suffices — a
+    rewritten page's content hash changes, so the differ evicts the stale index
+    entry), and a new `--reindex` flag runs it in one shot. Without this step
+    the vector embeddings keep the pre-migration text and every migrated address
+    stays reachable via `recall`.
+
 - **Librarian: run the entity compile loop BEFORE the auto-memory block so a
   slow C2-C4 pass can no longer starve entity intake (#461).** `run()` used
   to sequence the whole-corpus auto-memory block (C1 discover, C2 cluster,
