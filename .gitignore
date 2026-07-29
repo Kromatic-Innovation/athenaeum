@@ -46,3 +46,8 @@ eval-summary.json
 
 # Agent worktrees (transient)
 .claude/worktrees/
+
+# uv lockfile — CI installs via `pip install -e ".[dev,vector]"` (no uv, no
+# frozen-lock policy) and the lockfile has never been tracked. If the team
+# later adopts `uv sync --frozen` in CI, remove this line and commit uv.lock.
+uv.lock
