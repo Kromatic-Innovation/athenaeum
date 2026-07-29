@@ -172,6 +172,24 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def scan_json_objects(text: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Return up to ``limit`` balanced top-level JSON objects embedded in ``text``.
+
+    A thin public view over the same balanced-object scan
+    :func:`extract_json_object` uses, WITHOUT its exactly-one ambiguity rule
+    (clauses 3-4). Where :func:`extract_json_object` deliberately refuses
+    (returns ``None``) when a whole-text scan finds more than one balanced
+    object, this returns every candidate it found so a caller can apply its
+    OWN disambiguation — e.g. "prefer the object carrying an ``ops`` key"
+    (issue #496) — at the call site, leaving the shared util's refusal intact
+    for the many callers that rely on it. Fences are not treated specially
+    here; the whole text is scanned. Nested objects are not counted
+    separately. Returns ``[]`` when no parseable object exists.
+    """
+    found, _last_err, _hit_recursion = _scan_objects(text, limit=limit)
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Lenient JSON repair — bare control characters inside string literals (#472)
 # ---------------------------------------------------------------------------

@@ -35,7 +35,11 @@ from athenaeum.fingerprint import (
     record_resolution,
     resolve_resolved_similarity_threshold,
 )
-from athenaeum.json_utils import extract_json_object, loads_lenient
+from athenaeum.json_utils import (
+    extract_json_object,
+    loads_lenient,
+    scan_json_objects,
+)
 from athenaeum.models import (
     AutoMemoryFile,
     ClassifiedEntity,
@@ -50,6 +54,7 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
+from athenaeum.outbound_pii import redact_outbound_text
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.search import embed_texts
 
@@ -1117,6 +1122,49 @@ def apply_merge_ops(existing_body: str, ops: list[dict[str, Any]]) -> str:
 #: observation #496 (slice B) consumes to pick the targeted reduction fix.
 MERGE_FALLBACK_LOG_PREFIX = "tier3-merge-fallback"
 
+#: The single ``cause=parse-fail`` branch (issue #490) collapsed three distinct
+#: sub-causes with different fixes. Issue #496 splits it into these discriminated,
+#: greppable ``cause=`` values so a nightly log names WHICH residual remains after
+#: the (a)/(b) recovery below — mirroring the Tier-2 ``degraded``/``truncated``
+#: split (#472/#476). Each keeps the ``parse-fail`` stem, so a broad
+#: ``grep 'cause=parse-fail'`` still matches every sub-cause.
+#:
+#: - ``parse-fail-ambiguous`` — multiple balanced top-level objects and no single
+#:   ``ops``-bearing candidate to prefer (fix (a) could not disambiguate).
+#: - ``parse-fail-shape`` — an object parsed, but ``ops`` is missing / not a list
+#:   or dict / under no recognized key (fix (b)'s normalization did not apply).
+#: - ``parse-fail-no-json`` — no JSON object in the response at all; the model
+#:   emitted prose. Blind-unfixable — still falls back to full-echo, never a no-op.
+MERGE_PARSE_FAIL_AMBIGUOUS = "parse-fail-ambiguous"
+MERGE_PARSE_FAIL_SHAPE = "parse-fail-shape"
+MERGE_PARSE_FAIL_NO_JSON = "parse-fail-no-json"
+
+#: How many leading chars of the (redacted) patch-mode response to append to a
+#: ``parse-fail-*`` WARNING so the next nightly can eyeball what the model
+#: actually returned without dumping a whole 16-23KB page or any PII into the log.
+MERGE_RESP_PREFIX_CHARS = 200
+
+
+def _coerce_merge_ops(obj: dict[str, Any]) -> list[Any] | None:
+    """Normalize a parsed merge object's ops field to a list, or ``None`` (#496).
+
+    Fix (b): a patch-mode object sometimes parses cleanly but carries ``ops`` in
+    a shape the strict ``isinstance(obj.get("ops"), list)`` check rejected —
+    a single op emitted as a bare dict, or the list under the obvious alternate
+    key ``operations``. Coerce those to a list here; :func:`apply_merge_ops`
+    still validates every op and raises :class:`MergeOpsError` on a bad shape,
+    so a wrong guess degrades to ``anchor-miss`` + full-echo, never a bad write.
+    Returns ``None`` when no recognizable ops field is present (shape failure).
+    """
+    ops = obj.get("ops")
+    if ops is None:
+        ops = obj.get("operations")
+    if isinstance(ops, list):
+        return ops
+    if isinstance(ops, dict):
+        return [ops]
+    return None
+
 
 def parse_merge_ops_response(
     text: str,
@@ -1135,8 +1183,23 @@ def parse_merge_ops_response(
     path (:func:`tier3_merge_full`):
 
     - a ``max_tokens`` truncation — a partial ops list must never half-apply;
-    - unparseable JSON, or a missing / non-list ``ops`` field;
+    - unparseable JSON, or a missing / non-normalizable ``ops`` field;
     - any op that fails to apply (anchor miss, ambiguous anchor, overlap).
+
+    Issue #496 hardens the JSON path before declaring a parse failure and, when
+    one still occurs, splits the former single ``cause=parse-fail`` WARNING into
+    discriminated, greppable sub-causes (see :data:`MERGE_PARSE_FAIL_AMBIGUOUS`
+    / :data:`MERGE_PARSE_FAIL_SHAPE` / :data:`MERGE_PARSE_FAIL_NO_JSON`), each
+    carrying a truncated, PII-redacted prefix of the response:
+
+    - fix (a) recovers an ``ops``-bearing object that :func:`extract_json_object`
+      refused as ambiguous (multiple balanced objects), without relaxing the
+      shared util's exactly-one rule;
+    - fix (b) normalizes a dict-valued ``ops`` or the alternate ``operations``
+      key via :func:`_coerce_merge_ops`.
+
+    A residual sub-cause still falls back to full-echo — a prose / "no changes
+    needed" reply is NEVER silently no-op'd, so no merge is dropped.
 
     An ``ESCALATE:`` response is handled INLINE (no fallback call needed), so
     escalation works identically on the sync and batch transports: the
@@ -1169,29 +1232,66 @@ def parse_merge_ops_response(
         return body, escalation, False
 
     obj = extract_json_object(stripped)
-    if obj is None or not isinstance(obj.get("ops"), list):
-        log.warning(
-            "%s page=%s source=%s cause=parse-fail — patch-mode response "
-            "unparseable (no valid ops list); retrying via full-page echo "
-            "(~10x output cost)",
-            MERGE_FALLBACK_LOG_PREFIX,
-            action.name,
-            source_ref,
-        )
-        return None, None, True
 
-    try:
-        return apply_merge_ops(existing_body, obj["ops"]), None, False
-    except MergeOpsError as exc:
-        log.warning(
-            "%s page=%s source=%s cause=anchor-miss — patch-mode ops failed to "
-            "apply (%s); retrying via full-page echo (~10x output cost)",
-            MERGE_FALLBACK_LOG_PREFIX,
-            action.name,
-            source_ref,
-            exc,
-        )
-        return None, None, True
+    # Fix (a), issue #496: extract_json_object refuses (returns None) when a
+    # whole-text scan finds MULTIPLE balanced top-level objects — its clause-4
+    # ambiguity rule, shared by other callers and deliberately left intact. But
+    # a patch-mode response legitimately carries exactly one ops-bearing object,
+    # sometimes preceded by a prose example object. Re-scan HERE (call site only)
+    # and prefer the single candidate that carries an "ops" key.
+    sub_cause: str | None = None
+    if obj is None:
+        candidates = scan_json_objects(stripped)
+        ops_bearing = [c for c in candidates if "ops" in c or "operations" in c]
+        if len(ops_bearing) == 1:
+            obj = ops_bearing[0]
+        elif not candidates:
+            sub_cause = MERGE_PARSE_FAIL_NO_JSON
+        else:
+            # Multiple candidates but zero or several ops-bearing — genuinely
+            # ambiguous; do not guess.
+            sub_cause = MERGE_PARSE_FAIL_AMBIGUOUS
+
+    if obj is not None:
+        # Fix (b): normalize a non-list ops field (dict-valued, or the alternate
+        # `operations` key) before declaring failure.
+        ops = _coerce_merge_ops(obj)
+        if ops is not None:
+            try:
+                return apply_merge_ops(existing_body, ops), None, False
+            except MergeOpsError as exc:
+                log.warning(
+                    "%s page=%s source=%s cause=anchor-miss — patch-mode ops "
+                    "failed to apply (%s); retrying via full-page echo "
+                    "(~10x output cost)",
+                    MERGE_FALLBACK_LOG_PREFIX,
+                    action.name,
+                    source_ref,
+                    exc,
+                )
+                return None, None, True
+        sub_cause = MERGE_PARSE_FAIL_SHAPE
+
+    # A parse-fail sub-cause fired. Log the discriminated cause plus a truncated,
+    # PII-redacted prefix of the response so the next nightly can either prove
+    # zero parse-fails or name exactly what is left, then fall back to full-echo
+    # (never a silent no-op — a "no changes needed" prose reply must still be
+    # completed by the full-echo path, not dropped).
+    redacted_prefix, _findings = redact_outbound_text(
+        stripped[:MERGE_RESP_PREFIX_CHARS]
+    )
+    log.warning(
+        "%s page=%s source=%s cause=%s — patch-mode response unparseable "
+        "(no valid ops list); retrying via full-page echo (~10x output cost) "
+        "| resp[:%d]=%r",
+        MERGE_FALLBACK_LOG_PREFIX,
+        action.name,
+        source_ref,
+        sub_cause,
+        MERGE_RESP_PREFIX_CHARS,
+        redacted_prefix,
+    )
+    return None, None, True
 
 
 def tier3_merge(
