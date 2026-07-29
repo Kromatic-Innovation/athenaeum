@@ -18,6 +18,9 @@ from athenaeum.models import (
 )
 from athenaeum.tiers import (
     MERGE_FALLBACK_LOG_PREFIX,
+    MERGE_PARSE_FAIL_AMBIGUOUS,
+    MERGE_PARSE_FAIL_NO_JSON,
+    MERGE_PARSE_FAIL_SHAPE,
     TIER2_DEGRADED_MARKER,
     TIER2_TRUNCATED_MARKER,
     MergeOpsError,
@@ -1165,6 +1168,130 @@ class TestTier3MergePatchOps:
             "# Acme\n\nOld.",
         )
         assert self._fallback_warnings(caplog) == []
+
+    # --- #496: parse-fail hardening (fix a/b) + discriminated sub-causes ------
+
+    def test_fix_a_recovers_ops_object_from_ambiguous_response(self) -> None:
+        # Two balanced top-level objects — a prose example object precedes the
+        # real answer — so extract_json_object refuses (clause-4 ambiguity).
+        # Fix (a) prefers the single ops-bearing candidate and applies it: no
+        # fallback, no relaxing of the shared util's exactly-one rule.
+        text = (
+            'Here is an example: {"note": "ignore me"}\n'
+            'Answer:\n{"ops": [{"op": "append_section", "text": "New.[^2]"}]}'
+        )
+        body, esc, needs_fallback = parse_merge_ops_response(
+            text, self._action(), "ref", "# Acme\n\nOld."
+        )
+        assert needs_fallback is False
+        assert esc is None
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+
+    def test_fix_b_wraps_dict_valued_ops(self) -> None:
+        # A single op emitted as a bare dict (not wrapped in a list). Fix (b)
+        # coerces it to a one-element list; apply_merge_ops still validates it.
+        body, esc, needs_fallback = parse_merge_ops_response(
+            json.dumps({"ops": {"op": "append_section", "text": "New.[^2]"}}),
+            self._action(),
+            "ref",
+            "# Acme\n\nOld.",
+        )
+        assert needs_fallback is False
+        assert esc is None
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+
+    def test_fix_b_accepts_operations_alternate_key(self) -> None:
+        body, esc, needs_fallback = parse_merge_ops_response(
+            json.dumps(
+                {"operations": [{"op": "append_section", "text": "New.[^2]"}]}
+            ),
+            self._action(),
+            "ref",
+            "# Acme\n\nOld.",
+        )
+        assert needs_fallback is False
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+
+    def test_ambiguous_no_ops_candidate_warns_sub_cause_and_falls_back(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Multiple balanced objects, none carrying ops — genuinely ambiguous;
+        # fix (a) must NOT guess. Distinct greppable sub-cause + fallback.
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        text = '{"foo": 1}\n{"bar": 2}'
+        _b, _e, needs_fallback = parse_merge_ops_response(
+            text, self._action(), "sess-ref", "existing"
+        )
+        assert needs_fallback is True
+        warnings = self._fallback_warnings(caplog)
+        assert len(warnings) == 1
+        assert f"cause={MERGE_PARSE_FAIL_AMBIGUOUS}" in warnings[0]
+        assert "page=Acme Corp" in warnings[0]
+
+    def test_shape_failure_warns_sub_cause_and_falls_back(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # An object parsed, but ops is neither a list nor a dict nor under a
+        # recognized alternate key — a shape failure, not ambiguity/no-json.
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        _b, _e, needs_fallback = parse_merge_ops_response(
+            json.dumps({"ops": "append_section"}),
+            self._action(),
+            "sess-ref",
+            "existing",
+        )
+        assert needs_fallback is True
+        warnings = self._fallback_warnings(caplog)
+        assert len(warnings) == 1
+        assert f"cause={MERGE_PARSE_FAIL_SHAPE}" in warnings[0]
+
+    def test_no_json_prose_reply_preserves_full_echo_fallback(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Sub-cause (c): the model emitted prose with no JSON object at all
+        # (e.g. "No changes needed."). This MUST still signal a full-echo
+        # fallback — never a silent no-op that would drop the merge.
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        body, esc, needs_fallback = parse_merge_ops_response(
+            "No changes are needed for this page.",
+            self._action(),
+            "sess-ref",
+            "# Acme\n\nOld.",
+        )
+        assert needs_fallback is True
+        assert (body, esc) == (None, None)
+        warnings = self._fallback_warnings(caplog)
+        assert len(warnings) == 1
+        assert f"cause={MERGE_PARSE_FAIL_NO_JSON}" in warnings[0]
+
+    def test_parse_fail_warning_carries_redacted_response_prefix(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The WARNING appends a truncated prefix of the response so the next
+        # nightly can eyeball what came back — with PII (e.g. an email) redacted.
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        parse_merge_ops_response(
+            "No JSON here. Contact alice@example.com for details.",
+            self._action(),
+            "sess-ref",
+            "existing",
+        )
+        warnings = self._fallback_warnings(caplog)
+        assert len(warnings) == 1
+        assert "resp[:" in warnings[0]
+        assert "alice@example.com" not in warnings[0]
+
+    def test_single_ops_object_still_applies_directly(self) -> None:
+        # Regression guard: a single, unambiguous ops object never enters the
+        # fix-(a) recovery path — extract_json_object returns it outright.
+        body, _esc, needs_fallback = parse_merge_ops_response(
+            json.dumps({"ops": [{"op": "append_section", "text": "New.[^2]"}]}),
+            self._action(),
+            "ref",
+            "# Acme\n\nOld.",
+        )
+        assert needs_fallback is False
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
 
     # --- tier3_merge: patch primary + full-echo fallback wiring --------------
 
