@@ -4,9 +4,11 @@
 Covers:
 - ``--max-files`` gains ``ATHENAEUM_MAX_FILES`` env + ``librarian.max_files``
   yaml, mirroring the #220 ``--max-api-calls`` precedence chain.
-- New ``models:`` yaml section for the three previously env-only model knobs
+- New ``models:`` yaml section for the previously env-only model knobs
   (``models.classify`` / ``models.write`` / ``models.topic``). Env wins over
-  yaml per knob; the resolver model stays at ``resolve.model`` (untouched).
+  yaml per knob. The resolver model joined the same block as
+  ``models.resolve`` in the #232 follow-up (issue #513); the pre-#232
+  ``resolve.model`` key is still honored as a lower-precedence fallback.
 - Regression guard: none of the new keys are seeded into ``config._DEFAULTS``
   (the #231 shadowing bug) — yaml is read only when the operator set it.
 
@@ -595,29 +597,106 @@ class TestModelPlumbingProductionPath:
 
 
 # ---------------------------------------------------------------------------
-# Resolver model stays at resolve.model — NOT routed through models:
+# Resolver model: env > models.resolve > resolve.model (legacy) > default
 # ---------------------------------------------------------------------------
 
 
-class TestResolverModelUntouched:
-    """The contradiction-resolver model must ignore the new ``models:``
-    section and keep resolving from env > ``resolve.model`` > default."""
+class TestResolverModelPrecedence:
+    """The contradiction-resolver model reads ``models.resolve`` like every
+    other knob, with the pre-#232 ``resolve.model`` key kept working as a
+    lower-precedence fallback (issue #513).
 
+    Ordering under test, highest first: ``ATHENAEUM_RESOLVE_MODEL`` env >
+    ``models.resolve`` > ``resolve.model`` > ``DEFAULT_RESOLVE_MODEL``.
+    """
+
+    # A ``models:`` block that sets the OTHER three knobs but not ``resolve``.
     _MODELS_ONLY = {"models": {"classify": "x", "write": "y", "topic": "z"}}
 
-    def test_models_section_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_other_knobs_do_not_leak_into_resolver(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """classify/write/topic must never be mistaken for the resolver knob."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
         assert (
             resolutions_mod._get_model(self._MODELS_ONLY)
             == resolutions_mod.DEFAULT_RESOLVE_MODEL
         )
 
-    def test_resolve_model_still_resolves(
+    def test_models_resolve_is_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        cfg = {"models": {**self._MODELS_ONLY["models"], "resolve": "new-resolver"}}
+        assert resolutions_mod._get_model(cfg) == "new-resolver"
+
+    def test_legacy_resolve_model_still_resolves(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Backward compat: pre-#232 configs keep working untouched."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
         cfg = {**self._MODELS_ONLY, "resolve": {"model": "my-resolver"}}
         assert resolutions_mod._get_model(cfg) == "my-resolver"
+
+    def test_models_resolve_wins_over_legacy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        cfg = {
+            "models": {"resolve": "new-resolver"},
+            "resolve": {"model": "legacy-resolver"},
+        }
+        assert resolutions_mod._get_model(cfg) == "new-resolver"
+
+    def test_env_wins_over_both_yaml_keys(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_RESOLVE_MODEL", "env-resolver")
+        cfg = {
+            "models": {"resolve": "new-resolver"},
+            "resolve": {"model": "legacy-resolver"},
+        }
+        assert resolutions_mod._get_model(cfg) == "env-resolver"
+
+    @pytest.mark.parametrize("bad", ["", "   ", 42, None, ["claude"], {"a": 1}])
+    def test_blank_or_non_string_models_resolve_falls_through_to_legacy(
+        self, monkeypatch: pytest.MonkeyPatch, bad: Any
+    ) -> None:
+        """Matches the other three knobs: junk at the yaml layer falls through
+        rather than being passed to the SDK as a model id."""
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        cfg = {"models": {"resolve": bad}, "resolve": {"model": "legacy-resolver"}}
+        assert resolutions_mod._get_model(cfg) == "legacy-resolver"
+
+    @pytest.mark.parametrize("bad", ["", "   ", 42, None])
+    def test_blank_legacy_falls_through_to_default(
+        self, monkeypatch: pytest.MonkeyPatch, bad: Any
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        cfg = {"resolve": {"model": bad}}
+        assert resolutions_mod._get_model(cfg) == resolutions_mod.DEFAULT_RESOLVE_MODEL
+
+    def test_non_dict_sections_degrade_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        cfg = {"models": "not-a-dict", "resolve": "not-a-dict"}
+        assert resolutions_mod._get_model(cfg) == resolutions_mod.DEFAULT_RESOLVE_MODEL
+
+    def test_no_config_uses_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        assert resolutions_mod._get_model(None) == resolutions_mod.DEFAULT_RESOLVE_MODEL
+
+    def test_end_to_end_through_load_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """models.resolve must survive load_config's merge (issue #231:
+        the key is NOT seeded into _DEFAULTS, so it passes through only
+        when the operator actually set it)."""
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
+        (tmp_path / "athenaeum.yaml").write_text(
+            "models:\n  resolve: claude-opus-test\n", encoding="utf-8"
+        )
+        cfg = load_config(tmp_path)
+        assert resolutions_mod._get_model(cfg) == "claude-opus-test"
 
 
 # ---------------------------------------------------------------------------
@@ -663,3 +742,5 @@ class TestTemplateAdvertisesNewKeys:
         assert "#   classify:" in _DEFAULT_CONFIG_CONTENT
         assert "#   write:" in _DEFAULT_CONFIG_CONTENT
         assert "#   topic:" in _DEFAULT_CONFIG_CONTENT
+        # Issue #513: the resolver knob joined the same block.
+        assert "#   resolve: claude-opus-4-7" in _DEFAULT_CONFIG_CONTENT

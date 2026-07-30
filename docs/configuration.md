@@ -167,8 +167,9 @@ Behavior and guards:
 ## Models
 
 All model values are free-form model-id strings passed to the Anthropic SDK.
-All four live under the `models:` yaml block (#232); the resolver model
-additionally accepts the legacy `resolve.model` key for backward compatibility.
+All four live under the `models:` yaml block (#232, #513) and share one
+resolver helper (`config.resolve_model`). The resolver model additionally
+accepts the pre-#232 `resolve.model` key for backward compatibility.
 
 | Knob | Env var | YAML key | Default | Used by |
 |---|---|---|---|---|
@@ -313,8 +314,10 @@ spend:
 
 ## Contradiction detection and resolver
 
-Detection knobs live under the `contradiction:` yaml block; resolver knobs
-under `resolve:`. Pipeline walkthrough:
+Detection knobs live under the `contradiction:` yaml block; resolver behavior
+knobs under `resolve:`. The resolver *model* lives under `models.resolve` with
+the other model knobs (`resolve.model` is the legacy fallback — see
+[Models](#models)). Pipeline walkthrough:
 [contradiction-detection.md](contradiction-detection.md); auto-apply lane:
 [auto-resolve.md](auto-resolve.md).
 
@@ -489,6 +492,7 @@ models:
   classify: claude-haiku-4-5-20251001
   write: claude-sonnet-4-6
   topic: claude-haiku-4-5-20251001
+  resolve: claude-opus-4-7
 
 contradiction:
   cross_scope_mode: ancestor
@@ -499,7 +503,7 @@ contradiction:
   not_a_conflict_ttl_days: 0  # 0 = disabled; >0 decays stale auto not_a_conflict (#251)
 
 resolve:
-  model: claude-opus-4-7
+  # model: claude-opus-4-7   # legacy — prefer models.resolve above
   auto_apply: true
   auto_apply_threshold: 0.90
   full_body_token_cap: 1500
