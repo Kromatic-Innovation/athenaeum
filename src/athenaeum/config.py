@@ -1263,8 +1263,10 @@ def resolve_model(
     single run without editing config, and the yaml key is read only when
     the operator actually set it — no seed in ``_DEFAULTS`` (issue #231).
     Non-string or blank yaml values fall through to *default*. The
-    contradiction-resolver model is NOT routed through here; it stays at
-    ``resolve.model`` (see :func:`athenaeum.resolutions._get_model`).
+    contradiction-resolver model routes through here too, via
+    :func:`athenaeum.resolutions._get_model` (knob ``resolve``); that
+    wrapper threads the legacy ``resolve.model`` yaml key in as *default*
+    so it sits below ``models.resolve`` but above the code default.
     """
     env = os.environ.get(env_var)
     if env:
@@ -1559,12 +1561,14 @@ search_backend: fts5
 #   (env: ATHENAEUM_CLASSIFY_MODEL).
 # write: Tier-3 writer (env: ATHENAEUM_WRITE_MODEL).
 # topic: recall query-topic extraction (env: ATHENAEUM_TOPIC_MODEL).
-# The contradiction-resolver model is configured separately under
-# ``resolve.model`` below (env: ATHENAEUM_RESOLVE_MODEL).
+# resolve: contradiction resolver (env: ATHENAEUM_RESOLVE_MODEL). The legacy
+#   ``resolve.model`` key below still works, but is checked only when
+#   ``models.resolve`` is unset. Prefer this block for all four knobs.
 # models:
 #   classify: claude-haiku-4-5-20251001
 #   write: claude-sonnet-4-6
 #   topic: claude-haiku-4-5-20251001
+#   resolve: claude-opus-4-7
 
 # Cross-scope contradiction detection (issue #125).
 # cross_scope_mode: off | ancestor (default) | similarity | both.
@@ -1591,7 +1595,9 @@ search_backend: fts5
 
 # Contradiction resolver (issue #126). See docs/auto-resolve.md for the
 # full knob set (auto_apply, auto_apply_threshold, full_body_token_cap).
-# model: model used to propose a winner once Haiku flags a contradiction.
+# model: LEGACY key for the model used to propose a winner once Haiku flags a
+#   contradiction. Prefer ``models.resolve`` above; this key is read only when
+#   ``models.resolve`` is unset, and is kept working for pre-existing configs.
 #   Defaults to claude-opus-4-7. Env override: ATHENAEUM_RESOLVE_MODEL.
 # resolve:
 #   model: claude-opus-4-7

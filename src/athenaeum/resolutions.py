@@ -63,6 +63,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from athenaeum.config import resolve_model as _resolve_model_knob
 from athenaeum.contradictions import ContradictionResult
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
@@ -610,22 +611,42 @@ _JSON_REPAIR_NUDGE = (
 
 
 def _get_model(config: dict[str, Any] | None = None) -> str:
-    """Resolve the resolver model from env > config > default.
+    """Resolve the resolver model from env > yaml > default.
 
-    Mirrors the env > yaml > default precedence used elsewhere. Env wins
-    so an operator can swap models for a single run without editing the
-    yaml.
+    Routed through the shared :func:`athenaeum.config.resolve_model` helper
+    (issue #232) so the resolver reads ``models.resolve`` from the same
+    ``models:`` block as the classifier, writer, and topic knobs instead of
+    hand-rolling a second copy of the precedence chain. #232 originally left
+    this knob at the standalone ``resolve.model`` key; that split was a
+    config-surface inconsistency, not a design decision worth keeping
+    (issue #513).
+
+    Full precedence, highest first:
+
+    1. ``ATHENAEUM_RESOLVE_MODEL`` env var
+    2. ``models.resolve`` yaml key (preferred)
+    3. ``resolve.model`` yaml key (legacy, pre-#232 — still honored so
+       existing ``athenaeum.yaml`` files keep working unchanged)
+    4. :data:`DEFAULT_RESOLVE_MODEL`
+
+    The legacy key is threaded in as the *default* passed to the shared
+    helper, which is what places it below ``models.resolve`` but above the
+    code default. Non-string or blank values at either yaml layer fall
+    through, matching the other three knobs.
     """
-    env = os.environ.get("ATHENAEUM_RESOLVE_MODEL")
-    if env:
-        return env
+    legacy = ""
     if isinstance(config, dict):
         resolve_cfg = config.get("resolve")
         if isinstance(resolve_cfg, dict):
             raw = resolve_cfg.get("model")
             if isinstance(raw, str) and raw.strip():
-                return raw.strip()
-    return DEFAULT_RESOLVE_MODEL
+                legacy = raw.strip()
+    return _resolve_model_knob(
+        "resolve",
+        "ATHENAEUM_RESOLVE_MODEL",
+        legacy or DEFAULT_RESOLVE_MODEL,
+        config,
+    )
 
 
 def resolve_auto_apply(config: dict[str, Any] | None = None) -> bool:
