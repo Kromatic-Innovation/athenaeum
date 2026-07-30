@@ -347,6 +347,38 @@ def resolve_drain_runtime(
     return 0
 
 
+def _ledger_writable(ledger_path: Path) -> bool:
+    """Return True if the spend ledger at *ledger_path* can be appended to.
+
+    Issue #568 (H1): :func:`run_drain`'s MANDATORY cumulative dollar ceiling is
+    computed by re-reading this ledger every window (:func:`drain_spend_usd`).
+    If ledger writes fail silently — bad ``ATHENAEUM_SPEND_LEDGER`` path, wrong
+    permissions, a full disk — ``drain_spend_usd`` returns ``0.0`` forever and
+    the total spend becomes ``max_usd × number_of_windows``: unbounded real
+    dollars, with the guard the docstring calls MANDATORY reading blind. So we
+    probe writability up front using the same ``O_APPEND | O_CREAT`` open the
+    real writer (:func:`spend._append_line`) uses, and abort loudly on failure
+    rather than proceed. Creating an empty ledger file here is harmless — an
+    empty ledger is valid and is exactly what the first real write would make.
+    """
+    try:
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(ledger_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        os.close(fd)
+        return True
+    except OSError as exc:
+        log.error(
+            "athenaeum drain: spend ledger %s is NOT writable (%s) — the "
+            "cumulative dollar ceiling re-reads this ledger every window, so "
+            "proceeding would spend up to $max_usd PER WINDOW with no "
+            "cumulative bound. Aborting (issue #568). Fix ATHENAEUM_SPEND_LEDGER "
+            "/ permissions / free disk space and retry.",
+            ledger_path,
+            exc,
+        )
+        return False
+
+
 def drain_spend_usd(ledger_path: Path, *, since: datetime) -> float:
     """Sum metered API dollars recorded in the ledger since *since*.
 
@@ -395,6 +427,14 @@ def run_drain(
     run_fn = run_fn or librarian_run
     backlog_fn = backlog_fn or (lambda root: len(discover_raw_files(root)))
     ledger_path = ledger_path or spend.resolve_ledger_path(config)
+
+    # Issue #568 (H1): the cumulative dollar ceiling below is only as trustworthy
+    # as the ledger it reads. Verify the ledger is writable BEFORE spending a
+    # cent — abort rather than run a blind drain whose per-window ceiling would
+    # never sum to a cumulative bound (see :func:`_ledger_writable`).
+    if not _ledger_writable(ledger_path):
+        return 1
+
     drain_start = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
 
     # Force the API path: batch mode is Anthropic-endpoint-only (issue #330), so

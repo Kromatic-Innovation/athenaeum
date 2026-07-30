@@ -292,7 +292,19 @@ def record_spend(
         _append_line(target, json.dumps(record, separators=(",", ":")) + "\n")
         return True
     except Exception as exc:  # noqa: BLE001 — ledger must never break a run
-        log.debug("spend ledger write skipped (%s): %s", type(exc).__name__, exc)
+        # Issue #568 (H1): a failed ledger write was invisible at debug level,
+        # yet ``drain.run_drain``'s MANDATORY cumulative dollar ceiling is
+        # computed by re-reading this ledger — a silent failure makes it read
+        # $0 forever (unbounded real spend), and reports $0 to the cross-repo
+        # accounting contract (#487), indistinguishable from an idle day. Log
+        # LOUDLY (WARNING) and keep returning ``False`` so callers can act.
+        log.warning(
+            "spend ledger write FAILED (%s): %s — cumulative spend ceilings "
+            "that read this ledger will under-count; the drain guard verifies "
+            "writability at startup (issue #568)",
+            type(exc).__name__,
+            exc,
+        )
         return False
 
 
