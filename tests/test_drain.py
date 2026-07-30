@@ -11,6 +11,7 @@ zero-progress stop), the ledger `files_processed` roundtrip, the
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from datetime import datetime, timedelta, timezone
@@ -384,6 +385,38 @@ class TestRunDrainLoop:
         kwargs, _calls, _ = self._harness(tmp_path, 50, [(50, 0.0)])
         drain.run_drain(max_usd=10.0, **kwargs)
         assert os.environ["ATHENAEUM_LLM_PROVIDER"] == "api"
+
+    def test_aborts_when_ledger_unwritable(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Issue #568 (H1): the cumulative dollar ceiling is only trustworthy if
+        # the ledger it re-reads can be written. An unwritable ledger must abort
+        # the drain (return 1, run zero windows) rather than spend blind — a
+        # blind drain spends up to max_usd PER WINDOW with no cumulative bound.
+        kwargs, calls, backlog = self._harness(tmp_path, 100, [(50, 6.0)])
+        # Make the ledger path unwritable: its parent is an existing FILE, so
+        # mkdir(parents=True) / open both fail with a NotADirectoryError.
+        not_a_dir = tmp_path / "blocker"
+        not_a_dir.write_text("x", encoding="utf-8")
+        kwargs["ledger_path"] = not_a_dir / "nested" / "spend.jsonl"
+        with caplog.at_level(logging.ERROR, logger="athenaeum"):
+            rc = drain.run_drain(max_usd=10.0, **kwargs)
+        assert rc == 1
+        assert calls["n"] == 0  # never spent a cent
+        assert any(
+            "spend ledger" in r.getMessage() and "not writable" in r.getMessage().lower()
+            for r in caplog.records
+        )
+
+    def test_writable_ledger_probe_does_not_disturb_normal_run(
+        self, tmp_path: Path
+    ) -> None:
+        # The writability probe must be transparent to a healthy drain: creating
+        # an empty ledger file up front is harmless and the loop proceeds.
+        kwargs, calls, backlog = self._harness(tmp_path, 100, [(50, 0.0), (50, 0.0)])
+        assert drain.run_drain(max_usd=10.0, **kwargs) == 0
+        assert calls["n"] == 2
+        assert backlog[0] == 0
 
 
 # ---------------------------------------------------------------------------
