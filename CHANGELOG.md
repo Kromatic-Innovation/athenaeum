@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`models.resolve` — the resolver model joins the `models:` block (#513).**
+  #232 introduced the `models:` yaml section and the shared
+  `config.resolve_model()` precedence helper, but routed only three of the four
+  model knobs through it; the contradiction resolver kept a hand-rolled
+  env/yaml/default chain reading a standalone `resolve.model` key. That was a
+  config-surface inconsistency (users set three model ids in one block and the
+  fourth somewhere else) and a drift hazard (two copies of the same precedence
+  logic, so a future change to the shared helper would silently skip the
+  resolver). `resolutions._get_model` now delegates to `config.resolve_model`
+  with knob `resolve`. **Backward compatible — no config edit required:** the
+  pre-#232 `resolve.model` key is still honored, threaded in as the helper's
+  default so it sits below `models.resolve` but above the code default. Full
+  precedence, highest first: `ATHENAEUM_RESOLVE_MODEL` env >
+  `models.resolve` > `resolve.model` (legacy) > `DEFAULT_RESOLVE_MODEL`.
+  The config template and `docs/configuration.md` now advertise
+  `models.resolve` as the preferred key and mark `resolve.model` legacy.
+  Not to be confused with #234 (multi-provider support) — all four knobs
+  remain free-form model-id strings passed to the Anthropic SDK.
+
 - **Bulk PII migration + corpus-wide PII lint (#495).** #479 shipped
   `athenaeum storage migrate-pii` as a single-page tool, but the live corpus
   needs the transform over ~11.5k entity pages, and 790 pages carry an email in
