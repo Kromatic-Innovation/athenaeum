@@ -1320,6 +1320,101 @@ class TestBudgetExhaustedC4Guard:
         assert fake_client.messages.create.call_count >= 1
 
 
+class TestSpendCeilingC4Guard:
+    """Issue #568 (H7): the C4 pass — the most expensive phase, running the
+    Haiku detector AND the Opus resolver — must honor the operator's spend
+    ceiling, not just the ``max_api_calls`` count. Historically ``merge.py``
+    contained zero ``ceiling_tripped`` checks, so an operator who set
+    ``ATHENAEUM_SPEND_MAX_USD_PER_RUN`` got it honored everywhere except here.
+    """
+
+    def test_tripped_ceiling_skips_detector_with_ceiling_tripped_rationale(
+        self,
+        contradiction_merge_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from athenaeum.models import TokenUsage
+
+        detect_spy = MagicMock(
+            side_effect=AssertionError(
+                "detect_contradictions must not be called once the spend "
+                "ceiling has tripped"
+            )
+        )
+        monkeypatch.setattr("athenaeum.merge.detect_contradictions", detect_spy)
+        # Force the ceiling tripped deterministically — the intricate per-model
+        # cost model is spend.py's own concern; here we assert merge.py CONSULTS
+        # the ceiling and acts on a breach exactly like the budget guard.
+        monkeypatch.setattr(
+            "athenaeum.spend.ceiling_tripped",
+            lambda *_a, **_k: "per-run API dollar ceiling reached ($2.00/$2.00)",
+        )
+
+        usage = TokenUsage()
+        usage.api_calls = 1  # well under any max_api_calls; ceiling is the stop
+        fake_client = MagicMock()
+
+        entries = merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+            usage=usage,
+            max_api_calls=None,  # no call-count budget — the ceiling must stop it
+        )
+
+        assert len(entries) == 1
+        # Degrades exactly like the budget-exhausted short-circuit, but tagged
+        # with its own rationale so the cause is legible in the entry.
+        assert entries[0].contradictions_detected is False
+        assert entries[0].contradiction is not None
+        assert entries[0].contradiction.rationale == "ceiling-tripped"
+        detect_spy.assert_not_called()
+        assert fake_client.messages.create.call_count == 0
+        # The guard must not itself burn budget.
+        assert usage.api_calls == 1
+
+    def test_no_ceiling_lets_detector_run(
+        self,
+        contradiction_merge_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``ceiling_tripped`` returning ``None`` (no ceiling configured, the
+        default) must leave the detector path byte-identical — the new guard
+        must never over-block."""
+        from unittest.mock import MagicMock
+
+        from athenaeum.models import TokenUsage
+
+        monkeypatch.setattr(
+            "athenaeum.spend.ceiling_tripped", lambda *_a, **_k: None
+        )
+        payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        response = MagicMock()
+        response.content = [MagicMock(text=payload)]
+        fake_client = MagicMock()
+        fake_client.messages.create.return_value = response
+
+        entries = merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=fake_client,
+            usage=TokenUsage(),
+            max_api_calls=None,
+        )
+        assert len(entries) == 1
+        assert entries[0].contradictions_detected is True
+        assert fake_client.messages.create.call_count >= 1
+
+
 class TestEscalationDedupe:
     """Issue #146: dedup escalations by the flagged source-file SET, not
     by cluster slug, across the whole run."""

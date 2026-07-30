@@ -49,6 +49,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from athenaeum import spend
 from athenaeum._lint import _strip_self_reference
 from athenaeum.clusters import resolve_cluster_output_path, resolve_cluster_threshold
 from athenaeum.config import (
@@ -104,6 +105,7 @@ from athenaeum.models import (
 )
 from athenaeum.pending_merges import write_pending_merge
 from athenaeum.progress import PhaseHeartbeat
+from athenaeum.provider import resolve_provider
 from athenaeum.resolutions import (
     ATTRIBUTE_BOTH_ACTION,
     PROPOSE_MERGE_ACTION,
@@ -1382,6 +1384,11 @@ def merge_clusters_to_wiki(
         The list of :class:`MergedWikiEntry` records in cluster-file order.
     """
     resolved_config = config if config is not None else load_config(knowledge_root)
+    # Issue #568 (H7): the active provider, resolved once so both C4 loop heads
+    # below can consult ``spend.ceiling_tripped`` (the ceiling's UNIT — tokens
+    # for the subscription path, dollars for the metered API path — is keyed on
+    # it). Mirrors ``librarian.run``'s single ``resolve_provider(config)`` read.
+    resolved_provider = resolve_provider(resolved_config)
     # Issue #398: resolved once and threaded into every dark-zone
     # PhaseHeartbeat below (merge-detect, merge-write) so an operator can
     # tune the tick cadence via ATHENAEUM_HEARTBEAT_INTERVAL / yaml without
@@ -2009,6 +2016,27 @@ def merge_clusters_to_wiki(
                     detected=False, rationale="budget-exhausted"
                 )
                 continue
+            # Issue #568 (H7): the shared ``max_api_calls`` count is not the
+            # only bound — an operator's spend ceiling (tokens or dollars) must
+            # STOP this phase too. The C4 pass runs the Haiku detector AND the
+            # Opus resolver, the most expensive phase, yet historically checked
+            # no ceiling. Mirrors ``librarian.py``'s ``spend.ceiling_tripped``
+            # early-exit exactly: same log-line shape, degrade to the settled
+            # ``detected=False`` path used by the co-located budget guard above
+            # (no escalation, same pair-key bookkeeping).
+            if not dry_run and usage is not None:
+                _ceiling = spend.ceiling_tripped(
+                    usage, provider=resolved_provider, config=resolved_config
+                )
+                if _ceiling is not None:
+                    log.error(
+                        "Spend ceiling reached (%s) — stopping early", _ceiling
+                    )
+                    _record_pair_keys(chunk)
+                    result = ContradictionResult(
+                        detected=False, rationale="ceiling-tripped"
+                    )
+                    continue
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
@@ -2138,6 +2166,19 @@ def merge_clusters_to_wiki(
                 and usage.api_calls >= max_api_calls
             ):
                 continue
+            # Issue #568 (H7): same spend-ceiling guard as the primary detector
+            # call site above — a breached ceiling skips the similarity sweep's
+            # detector call too (a no-op degrade: no escalation is written when
+            # the detector never runs). Mirrors ``librarian.py``'s early-exit.
+            if not dry_run and usage is not None:
+                _ceiling = spend.ceiling_tripped(
+                    usage, provider=resolved_provider, config=resolved_config
+                )
+                if _ceiling is not None:
+                    log.error(
+                        "Spend ceiling reached (%s) — stopping early", _ceiling
+                    )
+                    continue
             haiku_calls += 1
             if usage is not None and client is not None:
                 usage.api_calls += 1
