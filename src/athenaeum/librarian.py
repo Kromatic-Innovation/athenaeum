@@ -2917,12 +2917,30 @@ def run(
     # advisor can read observed files-per-run throughput across runs.
     files_processed_count = max(0, len(raw_files) - len(deferred_refs) - len(failed_files))
     if not dry_run:
-        spend.record_spend(
+        # Issue #568 (H1): do NOT discard record_spend's return. When this run
+        # actually spent budget and the ledger is enabled, a False return means
+        # the append FAILED (spend.record_spend logs the cause at WARNING) — the
+        # cumulative drain ceiling (drain.run_drain) and the #487 cross-repo
+        # accounting contract both re-read this ledger, so an unrecorded run
+        # makes them silently under-count. Surface it loudly at the run level.
+        _ledger_written = spend.record_spend(
             usage,
             run_type="librarian",
             provider=provider,
             files_processed=files_processed_count,
         )
+        if not _ledger_written and (usage.api_calls > 0 or usage.total_tokens > 0):
+            from athenaeum.config import resolve_spend_ledger_enabled
+
+            if resolve_spend_ledger_enabled(config):
+                log.warning(
+                    "spend ledger did NOT record this librarian run despite "
+                    "%d API call(s) / %d token(s) spent — cumulative spend "
+                    "ceilings and the #487 cross-repo accounting contract will "
+                    "under-count this run (issue #568)",
+                    usage.api_calls,
+                    usage.total_tokens,
+                )
 
     _maybe_push_after_run(
         knowledge_root,

@@ -10,6 +10,7 @@ the ledger tolerates a torn trailing line, and the ceiling halts on breach.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -116,6 +117,21 @@ class TestRecordSpend:
         monkeypatch.setenv("ATHENAEUM_SPEND_LEDGER", "/proc/nonexistent/cannot/spend.jsonl")
         wrote = spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
         assert wrote is False
+
+    def test_write_failure_logs_loudly_at_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Issue #568 (H1): a failed ledger write used to be invisible at
+        # log.debug, blinding the cumulative drain ceiling (and reporting $0 to
+        # the #487 cross-repo accounting contract). It must now be LOUD.
+        monkeypatch.setenv("ATHENAEUM_SPEND_LEDGER", "/proc/nonexistent/cannot/spend.jsonl")
+        with caplog.at_level(logging.WARNING, logger="athenaeum"):
+            wrote = spend.record_spend(
+                _sub_usage(), run_type="librarian", provider="claude-cli"
+            )
+        assert wrote is False
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("spend ledger write FAILED" in r.getMessage() for r in warnings)
 
     def test_appends_multiple_records(self, ledger: Path) -> None:
         spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
