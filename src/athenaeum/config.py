@@ -1263,8 +1263,9 @@ def resolve_model(
     single run without editing config, and the yaml key is read only when
     the operator actually set it — no seed in ``_DEFAULTS`` (issue #231).
     Non-string or blank yaml values fall through to *default*. The
-    contradiction-resolver model is NOT routed through here; it stays at
-    ``resolve.model`` (see :func:`athenaeum.resolutions._get_model`).
+    contradiction-resolver model resolves via
+    :func:`athenaeum.resolutions._get_model`, which checks
+    ``models.resolve`` first, then falls back to ``resolve.model``.
     """
     env = os.environ.get(env_var)
     if env:

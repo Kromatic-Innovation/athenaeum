@@ -167,15 +167,17 @@ Behavior and guards:
 ## Models
 
 All model values are free-form model-id strings passed to the Anthropic SDK.
-The first three live under the `models:` yaml block (#232); the resolver model
-is configured separately under `resolve:`.
+All four live under the `models:` yaml block (#232); the resolver model
+additionally accepts the legacy `resolve.model` key for backward compatibility.
 
 | Knob | Env var | YAML key | Default | Used by |
 |---|---|---|---|---|
 | Classifier | `ATHENAEUM_CLASSIFY_MODEL` | `models.classify` | `claude-haiku-4-5-20251001` | Tier-2 classifier **and** the C4 contradiction detector — one knob by design. |
 | Writer | `ATHENAEUM_WRITE_MODEL` | `models.write` | `claude-sonnet-4-6` | Tier-3 wiki writer. |
 | Topic extractor | `ATHENAEUM_TOPIC_MODEL` | `models.topic` | `claude-haiku-4-5-20251001` | `athenaeum query-topics` recall query rewriting. |
-| Resolver | `ATHENAEUM_RESOLVE_MODEL` | `resolve.model` | `claude-opus-4-7` | Contradiction resolver (proposes a winner once the detector flags a conflict). |
+| Resolver | `ATHENAEUM_RESOLVE_MODEL` | `models.resolve` (_also_ `resolve.model`¹) | `claude-opus-4-7` | Contradiction resolver (proposes a winner once the detector flags a conflict). |
+
+> ¹ The legacy `resolve.model` key is checked as a fallback when neither the `ATHENAEUM_RESOLVE_MODEL` env var nor `models.resolve` is set. Prefer `models.resolve` for consistency with the other model knobs.
 
 ## LLM provider selection (#330)
 

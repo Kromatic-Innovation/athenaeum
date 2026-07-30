@@ -612,14 +612,23 @@ _JSON_REPAIR_NUDGE = (
 def _get_model(config: dict[str, Any] | None = None) -> str:
     """Resolve the resolver model from env > config > default.
 
-    Mirrors the env > yaml > default precedence used elsewhere. Env wins
-    so an operator can swap models for a single run without editing the
-    yaml.
+    Mirrors the env > yaml > default precedence used in
+    :func:`athenaeum.config.resolve_model` so users can set the resolver
+    model under the ``models:`` block (``models.resolve``) alongside the
+    classifier, writer, and topic knobs. The legacy ``resolve.model`` yaml
+    key is supported as a backward-compatible fallback.
     """
     env = os.environ.get("ATHENAEUM_RESOLVE_MODEL")
     if env:
         return env
     if isinstance(config, dict):
+        # models.resolve — consistent with the other model knobs.
+        models = config.get("models")
+        if isinstance(models, dict):
+            raw = models.get("resolve")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+        # Legacy fallback: resolve.model (pre-#232 yaml path).
         resolve_cfg = config.get("resolve")
         if isinstance(resolve_cfg, dict):
             raw = resolve_cfg.get("model")
