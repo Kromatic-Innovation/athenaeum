@@ -233,12 +233,32 @@ class TestClaudeCliCreate:
         argv = cap["argv"]
         assert "--system-prompt" in argv
         assert "SYSTEM-TEXT" in argv
-        # user text is the -p prompt; model + json format present.
-        assert "USER-TEXT" in argv
+        # Issue #543 (L4): the user prompt goes on STDIN, never argv/`ps`.
+        assert "USER-TEXT" not in argv
+        assert cap["kwargs"]["input"] == "USER-TEXT"
+        # ``-p`` is present but carries no positional prompt (stdin does).
+        assert "-p" in argv
         assert "--model" in argv and "m-1" in argv
         assert "--output-format" in argv and "json" in argv
         # ``--append-system-prompt`` must NOT be used (would inherit persona).
         assert "--append-system-prompt" not in argv
+
+    def test_user_prompt_passed_on_stdin_not_argv(self, monkeypatch):
+        # Issue #543 (L4): the user's own notes must never sit in the process
+        # table. The prompt rides subprocess stdin (`input=`), and no element of
+        # argv equals or contains it — pinning that a future refactor can't
+        # quietly reintroduce ``-p <prompt>``.
+        cap = {}
+        _stub_run(monkeypatch, stdout=_envelope(), capture=cap)
+        secret = "my private note about acme's Series B and bob@x.example"
+        client = ClaudeCliClient()
+        client.messages.create(
+            model="m-1",
+            system="s",
+            messages=[{"role": "user", "content": secret}],
+        )
+        assert cap["kwargs"]["input"] == secret
+        assert all(secret not in element for element in cap["argv"])
 
     def test_suppresses_host_desktop_notification(self, monkeypatch):
         # #377: every programmatic ``claude -p`` call must set
@@ -287,11 +307,15 @@ class TestClaudeCliCreate:
         )
         argv = cap["argv"]
         flat = " ".join(argv)
-        # The prompt TEXT survives; cache_control / block structure does not.
+        # The system prompt TEXT survives on argv; cache_control / block
+        # structure does not.
         assert "RESOLVER-SYSTEM" in flat
-        assert "USER-BLOCK" in flat
         assert "cache_control" not in flat
         assert "ephemeral" not in flat
+        # Issue #543 (L4): the user block's text rides stdin, not argv, and is
+        # flattened to plain text (no cache_control / block structure).
+        assert "USER-BLOCK" not in flat
+        assert cap["kwargs"]["input"] == "USER-BLOCK"
 
     def test_malformed_result_json_still_leniently_extracted(self, monkeypatch):
         # The model fenced its JSON answer in prose — extract_json_object (the
@@ -346,6 +370,20 @@ class TestClaudeCliErrors:
             client.messages.create(
                 model="m", system="s", messages=[{"role": "user", "content": "u"}]
             )
+
+    def test_unparseable_envelope_redacts_pii_in_error(self, monkeypatch):
+        # Issue #543 (L5): raw model output embedded in the unparseable-envelope
+        # RuntimeError must be run through redact_outbound_text first, so a PII
+        # email in the (non-JSON) stdout does not leak into logs/exceptions.
+        _stub_run(monkeypatch, stdout="oops not json, contact bob@secret.example")
+        client = ClaudeCliClient()
+        with pytest.raises(RuntimeError) as excinfo:
+            client.messages.create(
+                model="m", system="s", messages=[{"role": "user", "content": "u"}]
+            )
+        msg = str(excinfo.value)
+        assert "bob@secret.example" not in msg
+        assert "[redacted-email]" in msg
 
     def test_envelope_is_error_retryable_maps_transient(self, monkeypatch):
         _stub_run(

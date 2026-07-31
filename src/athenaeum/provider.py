@@ -55,6 +55,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from athenaeum._retry import TransientAPIError
+from athenaeum.outbound_pii import redact_outbound_text
 
 log = logging.getLogger(__name__)
 
@@ -281,8 +282,14 @@ class ClaudeCliClient:
         self.cwd = cwd or os.environ.get("TMPDIR") or "/tmp"
         self.messages = _CliMessages(self)
 
-    def _build_argv(self, model: str, system_text: str, user_text: str) -> list[str]:
-        argv = [self.binary, "-p", user_text, "--output-format", "json"]
+    def _build_argv(self, model: str, system_text: str) -> list[str]:
+        # Issue #543 (L4): the USER prompt is passed on STDIN (see ``_create``),
+        # NOT as a ``-p`` argv element — so the user's own notes never sit in the
+        # process table (visible to any local user via ``ps`` for the up-to-300s
+        # life of the call). ``claude -p`` with no positional prompt reads the
+        # prompt from stdin. ``--system-prompt`` still carries the tier
+        # instruction text (not user content), so it stays on argv.
+        argv = [self.binary, "-p", "--output-format", "json"]
         if model:
             argv += ["--model", model]
         if system_text:
@@ -306,10 +313,12 @@ class ClaudeCliClient:
                 "Code (set ATHENAEUM_CLAUDE_CLI_BIN to override the binary)"
             )
 
-        argv = self._build_argv(model, system_text, user_text)
+        argv = self._build_argv(model, system_text)
         try:
             proc = subprocess.run(
                 argv,
+                # Issue #543 (L4): user prompt on stdin, never in argv/`ps`.
+                input=user_text,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
@@ -355,9 +364,13 @@ class ClaudeCliClient:
         try:
             envelope = json.loads(stdout)
         except json.JSONDecodeError as exc:
+            # Issue #543 (L5): redact the raw model output before it lands in an
+            # error message — the sibling response-log site (tiers.py) already
+            # does this; this was the one that didn't.
+            redacted_prefix, _findings = redact_outbound_text(stdout[:200])
             raise RuntimeError(
                 f"claude CLI returned unparseable envelope: {exc}; "
-                f"first 200 chars: {stdout[:200]!r}"
+                f"first 200 chars: {redacted_prefix!r}"
             ) from exc
 
         if not isinstance(envelope, dict):
