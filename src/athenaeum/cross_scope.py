@@ -101,6 +101,7 @@ from athenaeum.models import (
     parse_supersedes,
     validity_bound_str,
 )
+from athenaeum.vecmath import cosine
 
 log = logging.getLogger(__name__)
 
@@ -333,23 +334,6 @@ class SimilarityCandidate:
     b_scope: str = ""
 
 
-def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    if len(a) != len(b):
-        return 0.0
-    import math
-
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b):
-        dot += x * y
-        na += x * x
-        nb += y * y
-    if na == 0.0 or nb == 0.0:
-        return 0.0
-    return dot / (math.sqrt(na) * math.sqrt(nb))
-
-
 def _wiki_indexed_id(wiki_path: Path, wiki_root: Path) -> str | None:
     """Recall index id for a wiki page, or None if not under wiki_root."""
     try:
@@ -491,7 +475,7 @@ def cross_scope_similarity_pairs(
         idx_i, path_i, scope_i, vec_i = items[i]
         for j in range(i + 1, len(items)):
             idx_j, path_j, scope_j, vec_j = items[j]
-            sim = _cosine(vec_i, vec_j)
+            sim = cosine(vec_i, vec_j)
             if sim < threshold:
                 continue
             # Issue #262: drop wiki-vs-wiki pairs. Re-detection targets new
