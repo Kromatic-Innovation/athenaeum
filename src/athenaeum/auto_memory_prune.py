@@ -11,6 +11,14 @@ the listed files in one labeled commit so the removal is fully git-recoverable.
 Dry-run is the DEFAULT (mirrors ``repair`` / ``dedupe``): it prints the full
 kill-list AND the retained-list with per-page reasons for human sign-off and
 writes nothing.
+
+Layering: L4 domain/pipeline module. May import L3 services (``ephemeral``,
+``models``) freely. Factoring rule: this module only BUILDS and (on
+``--apply``) executes the kill-list via ``git rm``; the ephemeral/operational
+classification rule itself lives in :mod:`athenaeum.ephemeral` and must not be
+duplicated here — always reuse
+:func:`athenaeum.ephemeral.classify_ephemeral_page` rather than re-deriving a
+looser keyword match.
 """
 
 from __future__ import annotations

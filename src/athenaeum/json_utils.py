@@ -18,6 +18,12 @@ whole-text fallback when fences yield no object, and an ambiguous
 multi-object scan yields ``None`` rather than a guess (see the function
 docstring for the precise contract).
 Retry-on-parse-failure is deliberately out of scope for #219.
+
+Layering: L0 primitive (leaf). May import only stdlib (``json``, ``re``,
+``logging``). This module owns lenient extraction/repair of JSON *text*
+produced by an LLM — it must never grow athenaeum-specific parsing (e.g.
+frontmatter shape); that belongs in :mod:`athenaeum.models`. Nothing above L0
+may leak into this module's imports.
 """
 
 from __future__ import annotations

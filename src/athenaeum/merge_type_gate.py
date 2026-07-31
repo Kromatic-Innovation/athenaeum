@@ -37,6 +37,20 @@ typed ``guideline`` page.
 Inference-block retraction (the third #433 deliverable) lives in
 :mod:`athenaeum.inference_blocks` (:func:`retract_inference_block`)
 alongside the parser it retracts blocks parsed by, not here.
+
+Enforcement contract, stated plainly: this module IS the gate — no cross-class
+merge may reach a write path without first calling
+:func:`cross_class_precheck` and honoring a non-``None`` rejection (routing to
+:func:`build_cite_proposal` instead of a fold). Bypassing this module for a
+merge decision would silently reintroduce the pre-#433 gap.
+
+Layering: L0/L1-boundary primitive. Imports only :mod:`athenaeum.models` (the
+L1 hub, for :func:`~athenaeum.models.parse_frontmatter`) plus stdlib — no
+config, no LLM client, no merge-engine imports. Factoring rule: this module
+owns ONLY classification (same-class? cross-class?) and cite-vs-merge
+routing; it must never itself perform a merge, fold, or file write — that
+stays in :mod:`athenaeum.merge` / :mod:`athenaeum.wiki_dedupe`, which import
+this module, never the reverse.
 """
 
 from __future__ import annotations

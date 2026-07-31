@@ -28,6 +28,16 @@ Complexity: embedding is a single batched provider call; the cosine matrix is
 vectorized via numpy when available (pure-Python ``_cosine`` fallback). The
 greedy complete-linkage pass is O(N^2) in the worst case over occurrence
 count — fine for a per-wiki sweep; revisit if claim counts grow large.
+
+Layering: L4 domain/pipeline module (READ-ONLY detector). Imports
+:mod:`athenaeum.merge` (``_parse_one_source``) at top level — that is part of
+the merge SCC's normal cross-module wiring here (not deferred, unlike some
+siblings' cycle-avoidance imports); do not "fix" it into a deferred import
+without checking for an actual cycle first. Also imports L3 services
+(``cross_scope``, ``fingerprint``, ``models``, ``search``) freely. Factoring
+rule: this module only DETECTS and reports cross-entity recurrence; it never
+mutates ``wiki/`` — any merge/consolidation action on a reported group is a
+separate, human-or-pipeline-driven step elsewhere.
 """
 
 from __future__ import annotations

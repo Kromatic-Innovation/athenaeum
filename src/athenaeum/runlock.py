@@ -66,6 +66,26 @@ complementary mechanisms close that gap:
   class; the CLI wires in concrete defaults (see
   :func:`athenaeum.config.resolve_lock_break_stale_after` and
   :func:`athenaeum.config.resolve_lock_warn_stale_after`).
+
+**Single-writer guarantee, stated plainly:** while one process holds the
+``flock``, no other cooperating athenaeum process may proceed past
+:meth:`RunLock.acquire` on the same ``knowledge_root`` — that is the entire
+guard against interleaved wiki/sidecar writes. It breaks only three ways: (1)
+the holder dies (kernel drops the ``flock`` automatically — safe, self-healing);
+(2) an operator passes ``--force`` (unconditional break — safe only if the
+holder is actually dead/hung, since two concurrent ``--force`` calls both
+"succeed" and defeat the guard); (3) ``break_stale_after`` auto-breaks a
+heartbeat-stale-but-alive holder (safe by construction, gated on staleness).
+A process that mutates the knowledge root WITHOUT going through
+:class:`RunLock` is invisible to this guard entirely — the lock only protects
+cooperating callers.
+
+Layering: L0 primitive (leaf). May import only stdlib (``fcntl``/``os``/
+``socket``/``time``/``datetime``). Factoring rule: this module owns ONLY the
+lock/heartbeat mechanism — it has no knowledge of what a "run" does; that
+belongs to :mod:`athenaeum.librarian` and the CLI, which call
+:meth:`RunLock.acquire` / :meth:`RunLock.heartbeat` around their own logic.
+Nothing above L0 may leak into this module's imports.
 """
 
 from __future__ import annotations

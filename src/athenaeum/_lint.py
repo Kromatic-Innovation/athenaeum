@@ -8,6 +8,13 @@ function-local imports back into ``librarian.py`` (which would otherwise
 create an import cycle: merge -> librarian -> merge).
 
 This module intentionally has no athenaeum-internal imports.
+
+Layering: L0 primitive (leaf). May import only stdlib. Factoring rule: this
+module holds ONLY the shared lint-and-strip / lint-and-report helpers reused
+across multiple ``AutoMemoryFile`` construction sites — it must never import
+:mod:`athenaeum.librarian`, :mod:`athenaeum.cross_scope`, or
+:mod:`athenaeum.merge` (that would recreate the import cycle #183 extracted
+this module to avoid). Higher layers import this module, never the reverse.
 """
 
 from __future__ import annotations

@@ -1,10 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pending-merge proposal sidecar (issue #169, Lane 3).
+"""Pending-merge proposal sidecar (issue #169, Lane 3) — L4 domain/pipeline.
 
-Mirrors the ``_pending_questions.md`` sidecar but for resolver-proposed
-memory merges. When the resolver returns ``action="propose_merge"``, the
+Contract: owns the ``wiki/_pending_merges.md`` sidecar file end to end —
+its block format, parsing, writing (with idempotent id-based dedup),
+archiving, and revalidation/retirement of stale queued proposals. Mirrors
+the ``_pending_questions.md`` sidecar but for resolver-proposed memory
+merges. When the resolver returns ``action="propose_merge"``, the
 proposal is appended to ``wiki/_pending_merges.md`` for human approval —
 NOT auto-applied.
+
+Factoring rule: this module owns the SIDECAR FILE FORMAT AND STORAGE only
+— it does not decide WHETHER a merge should be proposed (that judgment
+lives in ``merge.py`` / ``wiki_dedupe.py`` / the resolver) and it does not
+decide whether a QUEUED proposal is still valid under today's gates beyond
+what ``revalidate_pending_merges`` can prove from the stored block alone
+(see that function's own docstring for the narrow, deliberately-incomplete
+gate set it re-checks).
+
+SCC membership (L4, one of 8 mutually-recursive modules — librarian,
+merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
+as one ~12,000-line module split for readability, not independence). This
+module is imported at top level by ``merge.py`` (``write_pending_merge``),
+``wiki_dedupe.py``, and ``librarian.py`` (all normal downward dependencies
+from their side). It owns the deferred (function-local) side of the
+merge<->pending_merges cycle:
+
+- ``revalidate_pending_merges`` (~line 1316): local ``from athenaeum.merge
+  import _merge_proposal_suppression_reason`` — the code comment at the
+  call site states the reason directly: "merge.py imports
+  write_pending_merge from this module, so a module-level import of the
+  gate would be circular." Since ``merge.py`` already imports THIS module
+  at top level, this side must stay deferred.
 
 Block format (mirrors ``_pending_questions.md``):
 

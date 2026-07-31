@@ -31,6 +31,16 @@ fsync, tolerant reader that skips a torn trailing line). Review items live in
 and the other durable ``wiki/`` sidecars, and are surfaced through
 :func:`athenaeum.decisions.list_pending_decisions` as ``type: "retraction"``
 items.
+
+Layering: L4 domain/pipeline module. Reads two other L4/L3 ledgers
+(:mod:`athenaeum.pii`'s supersessions, :mod:`athenaeum.provenance`'s merge
+records) and may import L3 services freely. :mod:`athenaeum.decisions` (a
+peer L4 module) imports FROM here to surface review items — this module does
+not import ``decisions`` back, keeping the dependency one-directional.
+Factoring rule: this module only DETECTS the retraction/merge-dependency
+relationship and emits review items; it never touches a completed merge —
+"was this merge still right" is explicitly a human judgement call, not
+something this module decides or automates.
 """
 
 from __future__ import annotations

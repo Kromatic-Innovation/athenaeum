@@ -21,6 +21,15 @@ Resolution rules (see ``policies/auto-memory-citation.md``):
   → ``("inferred", <best-effort session ref>)`` — never the raw filename.
 
 This module is strictly read-only; it never writes transcripts.
+
+Layering: L0/L1-boundary primitive. Imports only :mod:`athenaeum.models` (the
+L1 hub, for :data:`~athenaeum.models.DEFAULT_SOURCE_TYPE`) plus stdlib — no
+config, no LLM client, no writes anywhere. Factoring rule: this module owns
+ONLY reading + classifying a claim against ITS OWN originating-session
+transcript; it must never write, mutate, or delete a transcript file, and
+must never widen its read scope beyond the one ``{session_id}.jsonl`` named
+by the caller (see the Quine S1 note above) — a wider scan risks
+misattributing a claim to the wrong session.
 """
 
 from __future__ import annotations

@@ -24,6 +24,15 @@ if it is absent — it never mints, guesses, or hardcodes a credential.
 The estimate promises COST plus "hours, not nights", never wall-clock precision:
 same-page merges serialize on the batch path (the deliberate #236 grouping), so
 the advisor's night count is a caps/provider projection, not a runtime promise.
+
+Layering: L4 domain/pipeline module — a thin orchestration wrapper ABOVE
+:mod:`athenaeum.librarian` (imported here via a deferred/function-local
+import to avoid a top-level cycle with the librarian's own module graph;
+keep it deferred, don't hoist it). May otherwise import L3 services
+(``spend``, ``config``, ``models``, ``tiers``) freely. Factoring rule: only
+ETA estimation and the supervised-loop orchestration belong here; the actual
+intake/merge machinery stays in :mod:`athenaeum.librarian`, and CLI arg
+parsing/gating stays in :mod:`athenaeum._cmd_drain`.
 """
 
 from __future__ import annotations

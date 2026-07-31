@@ -1,13 +1,47 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Search backend abstraction for athenaeum.
+"""Search backend abstraction for athenaeum — the recall/query L3 service.
 
-Provides pluggable search backends for wiki recall queries. The default
-``fts5`` backend uses SQLite FTS5 with BM25 ranking and porter stemming.
-The ``vector`` backend uses chromadb with ``all-MiniLM-L6-v2``. When the
-vector backend is configured, the example recall hook performs a hybrid
-FTS5+vector merge so that short proper-noun queries still resolve
-cleanly — see ``docs/recall-architecture.md`` for why each backend is
+**Contract:** given a query string (or an already-embedded vector), return
+ranked ``(filename, page_name, score)`` hits over the wiki + configured
+intake roots; given a corpus, (re)build whichever on-disk index a backend
+needs to answer that query cheaply.
+
+**Factoring rule:** this module owns QUERY and RANKING — tokenizing/
+embedding a query, scoring or kNN-ranking candidates, and the incremental
+index-build bookkeeping (manifests, stat pre-filter, schema versioning) that
+makes ranking cheap to keep current. It does NOT own storage: it never
+decides where a page lives, what its frontmatter means, or how it is
+authorized — those are read from :mod:`athenaeum.models` /
+:mod:`athenaeum.authority` and merely filtered on here. Fan-in is high (the
+recall hook, the clusterer, the delta compiler, and the cross-scope sweep
+all call into this module) — resist adding capability-specific branches;
+callers adapt to the three backends' shared ``SearchBackend`` Protocol.
+
+**Layering:** L3 service. Imports only L1 (:mod:`athenaeum.models`) and L2
+(:mod:`athenaeum.authority`, :mod:`athenaeum.pii`) at module scope; never
+imports L4 (the domain/pipeline modules — :mod:`athenaeum.tiers`,
+:mod:`athenaeum.librarian`, etc.). ``chromadb`` (the ``vector`` backend's
+engine) is an optional ``[vector]`` extra: every chromadb import in this
+module is function-local so importing ``athenaeum.search`` itself never
+requires chromadb to be installed — only calling into ``VectorBackend``
+does.
+
+Three backends, one ``SearchBackend`` Protocol: the default ``fts5`` backend
+uses SQLite FTS5 with BM25 ranking and porter stemming; ``vector`` uses
+chromadb with ``all-MiniLM-L6-v2``; ``keyword`` is a zero-setup scan-on-query
+fallback. When the vector backend is configured, the example recall hook
+performs a hybrid FTS5+vector merge so that short proper-noun queries still
+resolve cleanly — see ``docs/recall-architecture.md`` for why each backend is
 load-bearing.
+
+**Invariant:** every query path enforces the SAME three exclusions before a
+page can occupy a result slot — inactive/expired (:func:`athenaeum.models.is_inactive_memory`),
+PII-flagged (:func:`athenaeum.pii.is_pii_flagged`), and audience-unauthorized
+(:func:`athenaeum.models.is_page_authorized` / the per-backend audience
+predicate) — pushed INSIDE the backend query (not post-filtered) so a
+forbidden or excluded page can never occupy a top-k slot or push a permitted
+page past the limit. A new backend MUST replicate all three or silently
+regress #191/#312/#427.
 
 Shell hook scripts can call the module-level convenience functions
 (``build_fts5_index``, ``query_fts5_index``, ``build_vector_index``,
