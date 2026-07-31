@@ -32,20 +32,21 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 from athenaeum.decisions import list_pending_merges_rich
 from athenaeum.provenance import read_merge_provenance
 
 
 def _resolve_merges_path(args: argparse.Namespace) -> Path:
     knowledge_root = (
-        (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
+        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     )
     return knowledge_root / "wiki" / "_pending_merges.md"
 
 
 def _resolve_wiki_root(args: argparse.Namespace) -> Path:
     knowledge_root = (
-        (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
+        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     )
     return knowledge_root / "wiki"
 
@@ -92,7 +93,7 @@ def _cmd_revalidate(args: argparse.Namespace) -> int:
     from athenaeum.pending_merges import revalidate_pending_merges
 
     knowledge_root = (
-        (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
+        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     )
     merges_path = knowledge_root / "wiki" / "_pending_merges.md"
     config = load_config(knowledge_root)
@@ -243,7 +244,7 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         parser.add_argument(
             "--path",
             type=Path,
-            default=Path("~/knowledge"),
+            default=DEFAULT_KNOWLEDGE_ROOT,
             help="Knowledge directory (default: ~/knowledge)",
         )
         parser.add_argument(

@@ -51,6 +51,9 @@ from athenaeum.clusters import (
     write_cluster_report,
 )
 from athenaeum.config import (
+    DEFAULT_KNOWLEDGE_ROOT as _DEFAULT_KNOWLEDGE_ROOT_TEMPLATE,
+)
+from athenaeum.config import (
     load_config,
     resolve_delta_enabled,
     resolve_delta_max_affected_clusters,
@@ -122,8 +125,14 @@ from athenaeum.tiers import (
 log = logging.getLogger(__name__)
 
 
-# Defaults — can be overridden via CLI args or the run() API
-DEFAULT_KNOWLEDGE_ROOT = Path.home() / "knowledge"
+# Defaults — can be overridden via CLI args or the run() API.
+# The pre-expanded runtime default, derived from the single tilde-template
+# source of truth in ``config`` (issue #537). ``.expanduser()`` yields the same
+# value as the former ``Path.home() / "knowledge"`` literal, but the
+# ``~/knowledge`` string now lives in exactly one module. These constants are
+# used directly as real filesystem paths (function defaults below), so they must
+# be expanded here rather than left in tilde form.
+DEFAULT_KNOWLEDGE_ROOT = _DEFAULT_KNOWLEDGE_ROOT_TEMPLATE.expanduser()
 DEFAULT_RAW_ROOT = DEFAULT_KNOWLEDGE_ROOT / "raw"
 DEFAULT_WIKI_ROOT = DEFAULT_KNOWLEDGE_ROOT / "wiki"
 

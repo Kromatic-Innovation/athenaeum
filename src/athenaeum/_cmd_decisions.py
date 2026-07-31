@@ -28,19 +28,23 @@ import json
 import sys
 from pathlib import Path
 
-from athenaeum.config import load_config, resolve_decisions_max_sources_per_merge
+from athenaeum.config import (
+    DEFAULT_KNOWLEDGE_ROOT,
+    load_config,
+    resolve_decisions_max_sources_per_merge,
+)
 from athenaeum.decisions import age_days, list_pending_decisions
 
 
 def _resolve_wiki_root(args: argparse.Namespace) -> Path:
     knowledge_root = (
-        (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
+        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     )
     return knowledge_root / "wiki"
 
 
 def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
-    return (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
+    return (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
 
 
 def _format_block(decision: dict) -> str:
@@ -230,7 +234,7 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
         parser.add_argument(
             "--path",
             type=Path,
-            default=Path("~/knowledge"),
+            default=DEFAULT_KNOWLEDGE_ROOT,
             help="Knowledge directory (default: ~/knowledge)",
         )
         parser.add_argument(

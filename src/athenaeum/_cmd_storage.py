@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import load_config
+from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
 from athenaeum.pii import is_pii_class_excluded, scan_corpus_pii
 from athenaeum.storage_migrate import (
     PiiMigrationPlan,
@@ -50,7 +50,7 @@ _PROGRESS_EVERY = 500
 
 
 def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
-    return (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
+    return (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
 
 
 def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
@@ -72,7 +72,7 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
     migrate_p.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge root (default: ~/knowledge).",
     )
     # Exactly one target selector. --page keeps #479's single-page behavior
@@ -140,7 +140,7 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
     lint_p.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge root (default: ~/knowledge).",
     )
     lint_p.add_argument(

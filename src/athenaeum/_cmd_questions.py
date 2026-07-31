@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 from athenaeum.answers import PendingQuestion, parse_pending_questions
+from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 # Keys the resolver appends to a block tail (locked by issue #126 and the
 # resolutions.py module docstring). Order matters for re-extraction.
@@ -90,7 +91,7 @@ def _format_block(pq: PendingQuestion, *, with_proposal: bool) -> str:
 
 def _resolve_pending_path(args: argparse.Namespace) -> Path:
     knowledge_root = (
-        (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
+        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     )
     return knowledge_root / "wiki" / "_pending_questions.md"
 
@@ -185,7 +186,7 @@ def add_questions_subparser(subparsers: argparse._SubParsersAction) -> None:
             "--path",
             {
                 "type": Path,
-                "default": Path("~/knowledge"),
+                "default": DEFAULT_KNOWLEDGE_ROOT,
                 "help": "Knowledge directory (default: ~/knowledge)",
             },
         ),

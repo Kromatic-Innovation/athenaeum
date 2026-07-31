@@ -40,6 +40,16 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# The single source of truth for the default knowledge-directory root (issue
+# #537). This is the *tilde template* form used as the CLI ``--path`` default
+# and as the fallback in resolver helpers; every consumer expands it via
+# ``.expanduser()`` (directly, or through the argparse value it seeds). Keeping
+# it here — rather than as 38 copies of ``Path("~/knowledge")`` scattered across
+# the ``_cmd_*`` modules — means relocating the default is a one-line edit.
+# ``librarian.py`` derives its own pre-expanded runtime default from this
+# constant, so the ``~/knowledge`` literal lives in exactly one module.
+DEFAULT_KNOWLEDGE_ROOT = Path("~/knowledge")
+
 _T = TypeVar("_T")
 
 
