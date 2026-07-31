@@ -304,6 +304,13 @@ def _parse_response(
             rationale="detector-returned-no-json",
         )
 
+    # Observe-only schema validation (#570, M17 phase 1): log the delta from the
+    # accepted detector-output shape without altering any of the tolerant reads
+    # below. Lazy import keeps pydantic off the import graph until first use.
+    from athenaeum.llm_schemas import observe_contradictions
+
+    observe_contradictions(payload, call_site="contradictions._parse_response")
+
     detected = bool(payload.get("detected"))
     if not detected:
         return ContradictionResult(

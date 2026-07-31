@@ -202,6 +202,14 @@ def extract_topics(
     except json.JSONDecodeError:
         return []
 
+    # Observe-only schema validation (#570, M17 phase 1): log the delta between
+    # what the model returned and the accepted ``list[str]`` shape, WITHOUT
+    # changing behavior. Imported lazily so pydantic never loads on this recall
+    # hot-path's import graph. The existing normalization below is untouched.
+    from athenaeum.llm_schemas import observe_query_topics
+
+    observe_query_topics(items, call_site="query_topics.extract_topics")
+
     if not isinstance(items, list):
         return []
 

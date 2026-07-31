@@ -174,6 +174,13 @@ def classify_claim_kind(
     if not isinstance(payload, dict):
         log.warning("claim_kind: no JSON object in classify response; unclassified")
         return ""
+    # Observe-only schema validation (#570, M17 phase 1): log any delta from the
+    # accepted ``{"claim_kind": <CLAIM_KINDS>}`` shape without changing the
+    # unclassified-fallback behavior below. Lazy import keeps pydantic off the
+    # import graph until first use.
+    from athenaeum.llm_schemas import observe_claim_kind
+
+    observe_claim_kind(payload, call_site="claim_kind.classify_claim_kind")
     value = payload.get("claim_kind")
     if isinstance(value, str) and value in CLAIM_KINDS:
         return value

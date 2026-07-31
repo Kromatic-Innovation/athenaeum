@@ -621,6 +621,16 @@ def parse_tier2_entities(
             if stats is not None:
                 stats.repaired += 1
 
+    # Observe-only schema validation (#570, M17 phase 1): log the delta from the
+    # accepted Tier-2 entity-array shape without changing the per-item
+    # default/coerce/skip handling below. Runs after the #472 repair pass so the
+    # log reflects genuine model drift. Shared by the sync AND batch transports,
+    # so a single response is observed exactly once (no double-counting). Lazy
+    # import keeps pydantic off ``import tiers`` (the recall hot-path graph).
+    from athenaeum.llm_schemas import observe_tier2_classify
+
+    observe_tier2_classify(items, call_site="tiers.parse_tier2_entities")
+
     results: list[ClassifiedEntity] = []
     for item in items:
         if not isinstance(item, dict) or not item.get("name"):
@@ -1370,6 +1380,14 @@ def parse_merge_ops_response(
         # `operations` key) before declaring failure.
         ops = _coerce_merge_ops(obj)
         if ops is not None:
+            # Observe-only schema validation (#570, M17 phase 1): log op-shape
+            # drift after the container normalization above, without changing
+            # the apply/fallback behavior. Shared by the sync AND batch
+            # transports, so a single response is observed once. Lazy import
+            # keeps pydantic off ``import tiers`` (the recall hot-path graph).
+            from athenaeum.llm_schemas import observe_tier3_merge_ops
+
+            observe_tier3_merge_ops(ops, call_site="tiers.parse_merge_ops_response")
             try:
                 return apply_merge_ops(existing_body, ops), None, False
             except MergeOpsError as exc:
