@@ -71,6 +71,7 @@ from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
     Tier2ParseStats,
+    existing_body_needs_full_echo,
     parse_merge_ops_response,
     parse_tier2_entities,
     stamp_merge_provenance,
@@ -600,6 +601,13 @@ def process_batch_run(
                         continue
                     text = existing_path.read_text(encoding="utf-8")
                     meta, existing_body = parse_frontmatter(text)
+                    # Anchor safety (issue #562 / audit M20): a body that would
+                    # break the <existing_page> fence can't use the batched patch
+                    # path — hand it to the synchronous merge, which routes it to
+                    # the anchor-free full-echo fallback.
+                    if existing_body_needs_full_echo(existing_body):
+                        st.sync_merges.append(action)
+                        continue
                     cid = f"t3-{i}-m{j}"
                     usage.api_calls += 1
                     t3_requests.append(

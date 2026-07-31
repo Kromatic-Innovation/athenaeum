@@ -3,9 +3,7 @@
 # To change this prompt, edit `athenaeum.tiers.CLASSIFY_USER_TEMPLATE`, then run: python -m athenaeum.prompt_registry --write
 # ===8<=== prompt bytes below this line are asserted verbatim ===8<===
 ## Raw observation
-<user_document>
 {content}
-</user_document>
 
 ## Already matched entities (skip these)
 {matched_names}
