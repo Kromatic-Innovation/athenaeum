@@ -75,6 +75,7 @@ from athenaeum.models import (
     validity_bound_str,
 )
 from athenaeum.pii import is_pii_flagged
+from athenaeum.storage import is_embedded
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -104,6 +105,7 @@ class SearchBackend(Protocol):
         exclude_globs: Iterable[str] | None = None,
         as_of: date | None = None,
         full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
+        config: dict[str, Any] | None = None,
     ) -> int:
         """Build or rebuild the search index.
 
@@ -155,6 +157,14 @@ class SearchBackend(Protocol):
                 ``0`` / negative = always re-hash; a very large value =
                 effectively never. Ignored on a full or as-of build (both
                 already re-hash everything).
+            config: Issue #532 — the resolved ``athenaeum.yaml`` config, used to
+                honor the storage-adapter corpus policy: a page whose entity
+                class (wiki ``type:``) routes to a surface with ``embedded:
+                false`` is dropped from the index at scan time, the same way
+                a ``pii:``-flagged page (#427) is. ``None`` (default) preserves
+                the pre-#532 behavior — every page is indexed — and is what the
+                shell-hook convenience builders pass. A no-op for the default
+                configuration (every class maps to the all-true wiki surface).
 
         Returns the total number of pages in the index across all roots.
         """
@@ -421,6 +431,7 @@ def _scan_indexed_records(
     exclude_globs: Iterable[str] | None = None,
     as_of: date | None = None,
     prior: dict[str, tuple[int, int, str, str]] | None = None,
+    config: dict[str, Any] | None = None,
 ) -> Iterator[tuple[str, Path, str, str, dict[str, Any], tuple[int, int, str]]]:
     """Yield ``(indexed_name, path, hash, text, meta, statrec)`` per active page.
 
@@ -498,6 +509,20 @@ def _scan_indexed_records(
         # the manifest (belt-and-suspenders — see the docstring above).
         if is_pii_flagged(meta):
             continue
+        # Issue #532 (H4): honor the storage-adapter corpus policy at index
+        # build. A page whose entity class routes to a surface with
+        # ``embedded: false`` never enters the FTS5 / vector store — the
+        # ``embedded`` capability the storage contract promises, enforced the
+        # same way #427 excludes PII and ``wiki_dedupe`` drops
+        # non-``merge_eligible`` classes. NO-OP by default: with no ``storage:``
+        # config every class maps to the all-true wiki surface, so
+        # ``is_embedded`` is ``True`` for every page and nothing is dropped.
+        # ``config is None`` (callers that don't thread config, e.g. shell-hook
+        # convenience builds) also short-circuits to today's behavior.
+        if config is not None:
+            page_type = str(meta.get("type") or "")
+            if not is_embedded(page_type, config):
+                continue
         vu = validity_bound_str(meta, "valid_until")
         yield indexed_name, path, content_hash, text, meta, (mtime_ns, size, vu)
 
@@ -712,6 +737,7 @@ class FTS5Backend:
         exclude_globs: Iterable[str] | None = None,
         as_of: date | None = None,
         full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
+        config: dict[str, Any] | None = None,
     ) -> int:
         """Scan wiki + extra intake roots and build an FTS5 index.
 
@@ -797,6 +823,7 @@ class FTS5Backend:
                 exclude_globs=exclude_globs,
                 as_of=as_of,
                 prior=prior,
+                config=config,
             )
         )
         current_hashes = {name: h for name, _p, h, _t, _m, _s in current}
@@ -1190,6 +1217,7 @@ class VectorBackend:
         exclude_globs: Iterable[str] | None = None,
         as_of: date | None = None,
         full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
+        config: dict[str, Any] | None = None,
     ) -> int:
         """Build a chromadb collection from wiki + extra intake roots.
 
@@ -1252,6 +1280,7 @@ class VectorBackend:
                     exclude_globs=exclude_globs,
                     as_of=as_of,
                     prior=with_prior,
+                    config=config,
                 )
             )
             return (
@@ -1658,6 +1687,7 @@ class KeywordBackend:
         exclude_globs: Iterable[str] | None = None,
         as_of: date | None = None,
         full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
+        config: dict[str, Any] | None = None,
     ) -> int:
         """No-op: the keyword backend rescans on every query.
 
@@ -1672,6 +1702,12 @@ class KeywordBackend:
         """
         del cache_dir, incremental, include_globs, exclude_globs, as_of
         del full_rehash_max_age_days
+        # Issue #532: the storage-adapter ``embedded`` policy is a persisted-index
+        # concept; the keyword backend has no persisted index, so it is inert
+        # here. Recall-time enforcement of the ``recallable`` policy applies to
+        # keyword results the same as every backend, at the recall render layer
+        # (``mcp_server._recall_via_backend``).
+        del config
         count = sum(
             1
             for p in wiki_root.rglob("*.md")
@@ -1804,6 +1840,7 @@ def build_fts5_index(
     exclude_globs: Iterable[str] | None = None,
     as_of: date | str | None = None,
     full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
+    config: dict[str, Any] | None = None,
 ) -> int:
     """Build an FTS5 index. Callable from shell hooks via ``python3 -c``.
 
@@ -1829,6 +1866,7 @@ def build_fts5_index(
         exclude_globs=exclude_globs,
         as_of=_coerce_as_of(as_of),
         full_rehash_max_age_days=full_rehash_max_age_days,
+        config=config,
     )
 
 
@@ -1854,6 +1892,7 @@ def build_vector_index(
     embedding_model: str | None = None,
     as_of: date | str | None = None,
     full_rehash_max_age_days: float = _DEFAULT_FULL_REHASH_MAX_AGE_DAYS,
+    config: dict[str, Any] | None = None,
 ) -> int:
     """Build a chromadb vector index. Callable from shell hooks.
 
@@ -1876,6 +1915,7 @@ def build_vector_index(
         exclude_globs=exclude_globs,
         as_of=_coerce_as_of(as_of),
         full_rehash_max_age_days=full_rehash_max_age_days,
+        config=config,
     )
 
 
