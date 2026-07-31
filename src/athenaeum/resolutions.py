@@ -82,12 +82,19 @@ from athenaeum.models import (
     validity_windows_disjoint,
 )
 from athenaeum.prompt_safety import data_only_clause, defang_tag
+from athenaeum.provider import resolve_max_tokens
 from athenaeum.scoped_claims import ScopeTree, ScopeVerdict, scope_comparison
 
 if TYPE_CHECKING:
     import anthropic
 
 log = logging.getLogger(__name__)
+
+# Per-stage output budgets (issue #575): formerly bare literals at the call
+# sites below; named and resolved through the provider seam so each is a
+# config-overridable knob. Values unchanged.
+_RESOLVER_MAX_TOKENS = 1024
+_FREETEXT_EDIT_MAX_TOKENS = 4096
 
 # Default model is the most capable available; users CAN configure a
 # cheaper one. Both env var and athenaeum.yaml key are honored.
@@ -1736,7 +1743,12 @@ def propose_resolution(
             response = with_retry(
                 lambda: client.messages.create(
                     model=resolve_model,
-                    max_tokens=1024,
+                    max_tokens=resolve_max_tokens(
+                        "resolve",
+                        "ATHENAEUM_RESOLVE_MAX_TOKENS",
+                        _RESOLVER_MAX_TOKENS,
+                        config,
+                    ),
                     system=[
                         {
                             "type": "text",
@@ -2640,7 +2652,12 @@ def propose_freetext_source_edits(
         response = with_retry(
             lambda: client.messages.create(
                 model=freetext_model,
-                max_tokens=4096,
+                max_tokens=resolve_max_tokens(
+                    "freetext_edit",
+                    "ATHENAEUM_FREETEXT_EDIT_MAX_TOKENS",
+                    _FREETEXT_EDIT_MAX_TOKENS,
+                    config,
+                ),
                 system=_FREETEXT_EDIT_SYSTEM,
                 messages=[{"role": "user", "content": user_msg}],
             ),

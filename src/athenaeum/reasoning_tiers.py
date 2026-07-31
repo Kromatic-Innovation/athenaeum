@@ -86,9 +86,16 @@ from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge
 from athenaeum.pii import is_pii_flagged
 from athenaeum.prompt_safety import data_only_clause, fence_untrusted
+from athenaeum.provider import resolve_max_tokens
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 log = logging.getLogger(__name__)
+
+# Reasoning-tier output budgets (issue #575): formerly bare literals in the
+# request-param dicts below; named and resolved through the provider seam so
+# each is a config-overridable knob. Values unchanged.
+_T1_MAX_TOKENS = 256
+_T2_MAX_TOKENS = 4096
 
 # ---------------------------------------------------------------------------
 # Model selection (issue #423) — resolves via the existing provider-aware
@@ -500,7 +507,9 @@ def build_t1_request_params(
     )
     return {
         "model": get_t1_model(config),
-        "max_tokens": 256,
+        "max_tokens": resolve_max_tokens(
+            "reasoning_t1", "ATHENAEUM_REASONING_T1_MAX_TOKENS", _T1_MAX_TOKENS, config
+        ),
         "system": T1_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_msg}],
     }
@@ -969,7 +978,9 @@ def build_t2_request_params(
     )
     return {
         "model": get_t2_model(config),
-        "max_tokens": 4096,
+        "max_tokens": resolve_max_tokens(
+            "reasoning_t2", "ATHENAEUM_REASONING_T2_MAX_TOKENS", _T2_MAX_TOKENS, config
+        ),
         "system": T2_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_msg}],
     }

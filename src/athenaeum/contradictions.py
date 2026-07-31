@@ -50,6 +50,7 @@ from athenaeum.models import (
     validity_bound_str,
 )
 from athenaeum.prompt_safety import defang_tag
+from athenaeum.provider import resolve_max_tokens
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 if TYPE_CHECKING:
@@ -97,6 +98,11 @@ class ContradictionResult:
     # False, so a normal not-detected / detected verdict never re-queues.
     incomplete: bool = False
 
+
+# Contradiction-detect output budget (issue #575): a short JSON verdict.
+# Formerly a bare ``1024`` literal; named and resolved through the seam.
+# Value unchanged.
+_DETECT_MAX_TOKENS = 1024
 
 _DETECT_SYSTEM = """You are an auditor for an AI agent's long-term memory system.
 
@@ -398,7 +404,12 @@ def detect_contradictions(
         response = with_retry(
             lambda: client.messages.create(
                 model=detect_model,
-                max_tokens=1024,
+                max_tokens=resolve_max_tokens(
+                    "contradiction_detect",
+                    "ATHENAEUM_CONTRADICTION_DETECT_MAX_TOKENS",
+                    _DETECT_MAX_TOKENS,
+                    config,
+                ),
                 system=_DETECT_SYSTEM,
                 messages=[{"role": "user", "content": user_msg}],
             ),

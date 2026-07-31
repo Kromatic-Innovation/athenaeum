@@ -30,6 +30,7 @@ from athenaeum.provider import (
     build_llm_client,
     capabilities_for,
     reported_stop_reason,
+    resolve_max_tokens,
     resolve_provider,
 )
 from athenaeum.tiers import _record_usage
@@ -620,3 +621,54 @@ class TestReportedStopReason:
 
     def test_missing_stop_reason_is_none(self):
         assert reported_stop_reason(SimpleNamespace(), capabilities_for("api")) is None
+
+
+# ---------------------------------------------------------------------------
+# resolve_max_tokens — per-stage budget, env > yaml > default (#575)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveMaxTokens:
+    _ENV = "ATHENAEUM_CLASSIFY_MAX_TOKENS"
+
+    def test_default_when_nothing_set(self, monkeypatch):
+        monkeypatch.delenv(self._ENV, raising=False)
+        assert resolve_max_tokens("classify", self._ENV, 4096, None) == 4096
+        assert resolve_max_tokens("classify", self._ENV, 4096, {}) == 4096
+
+    def test_env_wins_over_yaml_and_default(self, monkeypatch):
+        monkeypatch.setenv(self._ENV, "1500")
+        config = {"max_tokens": {"classify": 999}}
+        assert resolve_max_tokens("classify", self._ENV, 4096, config) == 1500
+
+    def test_yaml_over_default(self, monkeypatch):
+        monkeypatch.delenv(self._ENV, raising=False)
+        config = {"max_tokens": {"classify": 2222}}
+        assert resolve_max_tokens("classify", self._ENV, 4096, config) == 2222
+
+    def test_invalid_env_falls_through_with_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv(self._ENV, "not-a-number")
+        with caplog.at_level("WARNING"):
+            got = resolve_max_tokens("classify", self._ENV, 4096, None)
+        assert got == 4096
+        assert any("not a positive integer" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("bad", ["0", "-10"])
+    def test_non_positive_env_falls_through(self, monkeypatch, bad):
+        # A budget of 0 would truncate every response — never honor it.
+        monkeypatch.setenv(self._ENV, bad)
+        assert resolve_max_tokens("classify", self._ENV, 4096, None) == 4096
+
+    @pytest.mark.parametrize("bad", [0, -5, True, "2048", 3.5])
+    def test_invalid_yaml_falls_through_to_default(self, monkeypatch, bad):
+        # Non-positive, bool (an int subclass), and non-int yaml values are all
+        # rejected in favor of the code default.
+        monkeypatch.delenv(self._ENV, raising=False)
+        config = {"max_tokens": {"classify": bad}}
+        assert resolve_max_tokens("classify", self._ENV, 4096, config) == 4096
+
+    def test_only_the_named_knob_is_read(self, monkeypatch):
+        monkeypatch.delenv(self._ENV, raising=False)
+        config = {"max_tokens": {"merge_full": 8192}}
+        # A knob absent from the section falls to the default, not another knob.
+        assert resolve_max_tokens("classify", self._ENV, 4096, config) == 4096
