@@ -196,6 +196,88 @@ class TestParsePendingQuestions:
         err = capsys.readouterr().err
         assert "without `- [ ]` line" in err
 
+    def test_fenced_answer_with_hr_and_heading_is_not_split(
+        self, pending_path: Path
+    ) -> None:
+        # Regression for #527 (audit M11): the #394 fence fix lived only in
+        # pending_merges, so answers._split_blocks split naively on bare
+        # ``---`` / ``## ``. A human whose answer contains a fenced block that
+        # itself holds a ``---`` divider and a ``## `` heading had the block
+        # split and the tail past the fence SILENTLY DROPPED — taking the
+        # answer with it. With the shared fence-aware splitter the whole
+        # answer, fence contents and all, survives as one block.
+        content = (
+            "# Pending Questions\n\n"
+            '## [2026-04-20] Entity: "Acme Corp" '
+            "(from sessions/20240406T120000Z-aabb0011.md)\n"
+            "- [x] Is Acme still Series A after the 2026 recap?\n"
+            "**Conflict type**: principled\n"
+            "**Description**: Wiki says Series A; new raw implies Series B.\n"
+            "\n"
+            "Series B, closed March 2026. Example manifest:\n"
+            "```yaml\n"
+            "---\n"
+            "name: acme\n"
+            "## series metadata (a heading INSIDE the fenced answer)\n"
+            "stage: series-b\n"
+            "```\n"
+            "That closes it — please file the update.\n"
+        )
+        pending_path.write_text(content)
+
+        parsed = parse_pending_questions(pending_path)
+
+        # Exactly one block — the fenced ``---`` / ``## `` did not spawn a
+        # phantom second block that then gets dropped as malformed.
+        assert len(parsed) == 1
+        pq = parsed[0]
+        assert pq.entity == "Acme Corp"
+        assert pq.answered is True
+
+        answer = "\n".join(pq.answer_lines)
+        # The tail AFTER the fenced block — the part the old naive splitter
+        # dropped — must survive.
+        assert "That closes it — please file the update." in answer
+        # And the fenced content itself (the divider + the in-fence heading)
+        # round-trips verbatim rather than being treated as block delimiters.
+        assert "## series metadata (a heading INSIDE the fenced answer)" in answer
+        assert "stage: series-b" in answer
+
+    def test_fenced_answer_does_not_leak_into_a_following_block(
+        self, pending_path: Path
+    ) -> None:
+        # A second, well-formed block after a fenced answer must still be
+        # recognized — the fenced ``## `` in the first block's answer must not
+        # consume or mis-start the boundary of the block that follows.
+        content = (
+            "# Pending Questions\n\n"
+            '## [2026-04-20] Entity: "Acme Corp" (from sessions/a.md)\n'
+            "- [x] Series?\n"
+            "**Conflict type**: principled\n"
+            "**Description**: A vs B.\n"
+            "\n"
+            "Series B. See:\n"
+            "```md\n"
+            "## in-fence heading\n"
+            "---\n"
+            "```\n"
+            "Done.\n"
+            "\n"
+            "---\n"
+            "\n"
+            '## [2026-04-21] Entity: "Globex" (from sessions/b.md)\n'
+            "- [ ] Still HQ in Cypress Creek?\n"
+            "**Conflict type**: ambiguous\n"
+            "**Description**: Address changed?\n"
+        )
+        pending_path.write_text(content)
+
+        parsed = parse_pending_questions(pending_path)
+        assert [pq.entity for pq in parsed] == ["Acme Corp", "Globex"]
+        acme = parsed[0]
+        assert "Done." in "\n".join(acme.answer_lines)
+        assert "## in-fence heading" in "\n".join(acme.answer_lines)
+
 
 # ---------------------------------------------------------------------------
 # ingest_answers — round-trip + idempotency + mixed state
@@ -247,6 +329,54 @@ class TestIngestAnswers:
         primary_text = pending_path.read_text()
         assert "Acme Corp" not in primary_text
         assert "# Pending Questions" in primary_text
+
+    def test_ingest_preserves_fenced_answer_through_the_ingest_path(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        # Regression for #527 (audit M11) THROUGH the answers ingest path.
+        # answers.py:732 applies a returned body by overwriting a source file,
+        # so a truncation upstream of ingest is unrecoverable from the file. A
+        # human answers with a fenced block containing a ``---`` divider and a
+        # ``## `` heading; before the shared fence-aware splitter the answer was
+        # split and its tail silently dropped. ingest must now carry the WHOLE
+        # answer into the written raw intake file.
+        answered = (
+            '## [2026-04-20] Entity: "Acme Corp" '
+            "(from sessions/20240406T120000Z-aabb0011.md)\n"
+            "- [x] Is Acme still Series A after the 2026 recap?\n"
+            "**Conflict type**: principled\n"
+            "**Description**: Wiki says Series A; new raw implies Series B.\n"
+            "\n"
+            "correct_b — Series B, closed March 2026. Manifest:\n"
+            "```yaml\n"
+            "---\n"
+            "name: acme\n"
+            "## series metadata inside the fenced answer\n"
+            "stage: series-b\n"
+            "```\n"
+            "That closes it — please file the update.\n"
+        )
+        pending_path.write_text("# Pending Questions\n\n" + answered)
+
+        count = ingest_answers(pending_path, raw_root)
+        # The block is recognized as one answered question, not split into a
+        # truncated block plus a dropped malformed fragment.
+        assert count == 1
+
+        answer_files = list((raw_root / "answers").glob("*.md"))
+        assert len(answer_files) == 1
+        raw_answer = answer_files[0].read_text()
+        # The full answer — including everything AFTER the fenced block — is
+        # preserved in the ingested raw intake, not truncated at the fence.
+        assert "That closes it — please file the update." in raw_answer
+        assert "## series metadata inside the fenced answer" in raw_answer
+        assert "stage: series-b" in raw_answer
+
+        # The archive keeps the block verbatim too (audit trail intact).
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "That closes it — please file the update." in archive_text
 
     def test_mixed_state_leaves_unanswered_blocks(
         self, pending_path: Path, raw_root: Path
