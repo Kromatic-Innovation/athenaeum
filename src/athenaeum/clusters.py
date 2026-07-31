@@ -208,11 +208,11 @@ def _resolve_embeddings(
     hit_ids: set[str] = set()
     if id_to_file:
         try:
-            from athenaeum.search import VectorBackend  # noqa: WPS433
+            from athenaeum.search import VectorBackend
 
             backend = VectorBackend()
             raw_hits = backend.fetch_embeddings(id_to_file.keys(), cache_dir)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("VectorBackend.fetch_embeddings failed: %s", exc)
             raw_hits = {}
         for idx_id, vec in raw_hits.items():
@@ -463,7 +463,7 @@ def cluster_auto_memory_files(
 
         scope_hint = min(am.origin_scope for am in members).lstrip("-_") or "unscoped"
         digest = (
-            hashlib.sha1(  # noqa: S324 — non-crypto content-address, not a signature
+            hashlib.sha1(
                 "\n".join(sorted(relpaths)).encode("utf-8")
             ).hexdigest()[:8]
         )

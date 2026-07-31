@@ -777,7 +777,7 @@ def _writeback_source(
                 atomic_write_text(path, new_body)
             edited += 1
         return edited
-    except Exception:  # noqa: BLE001 -- write-back must not block provenance
+    except Exception:
         log.exception("answers: source write-back failed for entity=%s", pq.entity)
         return 0
 
@@ -839,7 +839,7 @@ def ingest_answers(
         for extra in resolve_extra_intake_roots(knowledge_root, cfg):
             if extra not in source_roots:
                 source_roots.append(extra)
-    except Exception:  # noqa: BLE001 -- config is best-effort; defaults suffice
+    except Exception:
         pass
 
     # #248: meter the LLM calls this run makes (the free-text proposer is the

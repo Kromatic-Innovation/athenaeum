@@ -1697,7 +1697,7 @@ def _rebuild_recall_index(
         else:
             count = build_fts5_index(wiki_root, cache_dir, extra_roots=extra_roots)
         print(f"  recall index rebuilt ({backend}): {count} page(s).")
-    except Exception as exc:  # noqa: BLE001 - rebuild failure must not fail prune
+    except Exception as exc:
         print(
             f"  WARN recall index rebuild failed ({type(exc).__name__}): {exc}",
             file=sys.stderr,
@@ -2102,7 +2102,7 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
         # exiting 0 — the exact silent-backend-fallback provider.py forbids.
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except Exception:  # noqa: BLE001 — a genuine construction error (e.g. no
+    except Exception:
         # API key for the api backend) is the intended offline fallback: leave
         # the client None and let the caller degrade. Only ProviderConfigError
         # (a misconfig) is fatal, handled above.
@@ -2115,7 +2115,7 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
         count = ingest_answers(
             pending_path, raw_root, client=anthropic_client, config=cfg
         )
-    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+    except Exception as exc:
         print(
             f"Fatal error ingesting answers ({type(exc).__name__}): {exc}",
             file=sys.stderr,
@@ -2154,7 +2154,7 @@ def _cmd_ingest_merges(args: argparse.Namespace) -> int:
         return lock
     try:
         count = ingest_resolved_merges(merges_path)
-    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+    except Exception as exc:
         print(
             f"Fatal error ingesting merges ({type(exc).__name__}): {exc}",
             file=sys.stderr,
@@ -2202,7 +2202,7 @@ def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
         # exiting 0 — the exact silent-backend-fallback provider.py forbids.
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except Exception:  # noqa: BLE001 — a genuine construction error (e.g. no
+    except Exception:
         # API key for the api backend) is the intended offline fallback: leave
         # the client None and let the caller degrade. Only ProviderConfigError
         # (a misconfig) is fatal, handled above.
@@ -2215,7 +2215,7 @@ def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
         count = reresolve_open_questions(
             pending_path, client=anthropic_client, config=cfg
         )
-    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+    except Exception as exc:
         print(
             f"Fatal error re-resolving questions ({type(exc).__name__}): {exc}",
             file=sys.stderr,
@@ -2483,7 +2483,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             install_signal_handlers=not args.dry_run,
         )
-    except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
+    except Exception as exc:
         print(
             json.dumps(
                 {
@@ -2571,7 +2571,7 @@ def _cmd_session_end(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             install_signal_handlers=not args.dry_run,
         )
-    except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
+    except Exception as exc:
         print(
             json.dumps(
                 {

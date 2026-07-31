@@ -94,7 +94,7 @@ def extract_topics(
 
         provider = resolve_provider(config)
         client = build_llm_client(config, timeout=timeout, max_retries=0)
-    except Exception as exc:  # noqa: BLE001 — never raise out of the recall hook
+    except Exception as exc:
         # Missing SDK, a bad ``llm.provider`` value, etc. — collapse to the
         # regex-extractor fallback, same guarantee the whole module makes.
         log.warning(
@@ -170,7 +170,7 @@ def extract_topics(
                 session_id=os.environ.get("CLAUDE_SESSION_ID"),
                 config=config,
             )
-        except Exception:  # noqa: BLE001 — ledger must never break recall
+        except Exception:
             # Issue #540 (L19): the swallow is correct (a ledger hiccup must not
             # break the 3s recall path), but it must not be FULLY silent — a
             # debug line makes a recurring spend-recording failure diagnosable
