@@ -12,12 +12,47 @@ from __future__ import annotations
 import copy
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import yaml
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+
+def _env_number(name: str, cast: Callable[[str], _T]) -> _T | None:
+    """Parse env var *name* via *cast*, or ``None`` if unset **or malformed**.
+
+    The one place numeric env overrides are read (issue #519/#524). A ``None``
+    return means "no usable env value — fall through to yaml/default"; a
+    non-``None`` return is the parsed override and is **authoritative over
+    yaml** (M1), including a parsed ``0``.
+
+    On a malformed value it logs a WARNING naming the variable (M2) and returns
+    ``None`` instead of silently swallowing the typo — every numeric knob
+    previously resolved a mistyped ``ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY=0.85x``
+    to its default with no signal at any level.
+
+    This settles the malformed-value policy for numeric knobs — WARN and fall
+    back — that #528 sweeps across the remaining hand-rolled resolvers.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Ignoring malformed %s=%r (expected %s); falling back to "
+            "yaml/default.",
+            name,
+            raw,
+            getattr(cast, "__name__", str(cast)),
+        )
+        return None
 
 # Issue #519/#521 (H9 + L3): the single canonical default cache-dir location
 # and the single resolver honouring the ``ATHENAEUM_CACHE_DIR`` override.
@@ -513,12 +548,12 @@ def resolve_max_merge_sources(config: dict[str, Any] | None) -> int:
     values fall through to the default.
     """
     default = 5
-    env = os.environ.get("ATHENAEUM_MAX_MERGE_SOURCES")
-    if env is not None:
-        try:
-            return int(env)
-        except (TypeError, ValueError):
-            pass
+    # Issue #524 (M2): a parsed env value is authoritative (0/negative disables
+    # the cap); a malformed value now logs a WARNING instead of silently
+    # falling back to the default.
+    value = _env_number("ATHENAEUM_MAX_MERGE_SOURCES", int)
+    if value is not None:
+        return value
     if isinstance(config, dict):
         cfg = config.get("librarian")
         if isinstance(cfg, dict):
@@ -542,17 +577,22 @@ def resolve_min_merge_confidence(config: dict[str, Any] | None) -> float:
     ships disabled and is opt-in via ``athenaeum.yaml`` — mirroring
     :func:`resolve_min_cluster_cohesion`. Env ``ATHENAEUM_MIN_MERGE_CONFIDENCE`` >
     yaml ``librarian.min_merge_confidence`` > this default. No seed in
-    ``_DEFAULTS`` (#231). ``bool`` and non-numeric / negative values fall through
+    ``_DEFAULTS`` (#231). Issue #524 (M1): a parsed env value is authoritative
+    over yaml — ``ATHENAEUM_MIN_MERGE_CONFIDENCE=0`` (or negative) disables the
+    floor even when yaml sets one, instead of silently falling through. A
+    malformed env value logs a WARNING (M2, via :func:`_env_number`) and falls
+    back to yaml. A ``bool`` / non-numeric / ``<= 0`` yaml value falls through
     to 0.0 (off).
     """
-    env = os.environ.get("ATHENAEUM_MIN_MERGE_CONFIDENCE")
-    if env is not None:
-        try:
-            value = float(env)
-            if value > 0.0:
-                return value
-        except (TypeError, ValueError):
-            pass
+    value = _env_number("ATHENAEUM_MIN_MERGE_CONFIDENCE", float)
+    if value is not None:
+        # Issue #524 (M1): the parsed env value is authoritative over yaml.
+        # ATHENAEUM_MIN_MERGE_CONFIDENCE=0 disables the floor even when yaml
+        # sets one — an emergency override that previously failed the `> 0.0`
+        # guard and silently fell through to the yaml value. A negative value
+        # clamps to 0.0 (off). This reconciles the knob with its neighbour
+        # resolve_max_merge_sources, where 0 already disables authoritatively.
+        return max(0.0, value)
     if isinstance(config, dict):
         cfg = config.get("librarian")
         if isinstance(cfg, dict):
@@ -1068,14 +1108,13 @@ def _resolve_positive_int_knob(
     yes`` cannot become ``1`` and a nonsensical zero/negative byte count cannot
     silently disable the guardrail. No seed in ``_DEFAULTS`` (issue #231).
     """
-    env = os.environ.get(env_var)
-    if env is not None:
-        try:
-            value = int(env)
-        except (TypeError, ValueError):
-            value = None
-        if value is not None and value > 0:
-            return value
+    # Issue #524 (M2): malformed env values now WARN (via _env_number) instead
+    # of silently falling through. The `> 0` rejection is deliberate and kept
+    # (a zero/negative byte count must not disable the guardrail), so 0 is NOT
+    # authoritative here — unlike the disable-semantics knobs (M1).
+    value = _env_number(env_var, int)
+    if value is not None and value > 0:
+        return value
 
     if isinstance(config, dict):
         cfg = config.get("librarian")
@@ -1188,14 +1227,13 @@ def _resolve_optional_positive_number(
     become ``1`` and a nonsensical zero/negative ceiling cannot silently pin the
     pass to a no-op. No seed in ``_DEFAULTS`` (issue #231).
     """
-    env = os.environ.get(env_var)
-    if env is not None:
-        try:
-            value = cast(env)
-        except (TypeError, ValueError):
-            value = None
-        if value is not None and value > 0:
-            return value
+    # Issue #524 (M2): malformed env values now WARN (via _env_number) instead
+    # of silently falling through. The `> 0` rejection is deliberate and kept
+    # (a zero/negative ceiling must not silently pin the pass to a no-op), so 0
+    # is NOT authoritative here — unlike the disable-semantics knobs (M1).
+    value = _env_number(env_var, cast)
+    if value is not None and value > 0:
+        return value
 
     if isinstance(config, dict):
         cfg = config.get(block)
