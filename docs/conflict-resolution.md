@@ -161,10 +161,11 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   contract is to surface contradictions for human review; it returns a
   `ContradictionResult` and the caller writes both the merged entry AND an
   escalation. The cluster's body is unchanged regardless of detector output.
-- **Resolution boundary:** Two contradiction types are distinguished — `factual`
-  (incompatible facts about the same thing) and `prescriptive` (opposing guidance).
-  Tier 3's `principled` class is intentionally separate: it lives in the
-  entity-wiki path, not the auto-memory path.
+- **Resolution boundary:** Three contradiction types are distinguished — `factual`
+  (incompatible facts about the same thing), `prescriptive` (opposing guidance),
+  and `stance` (opinion attribution — see §13; issue #327). Tier 3's `principled`
+  class is intentionally separate: it lives in the entity-wiki path, not the
+  auto-memory path.
 - **Provenance behavior (post-#90):** N/A — operates over auto-memory bodies.
 - **Known edge cases:**
   - Singleton clusters return `detected=False` without a network call.
