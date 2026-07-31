@@ -44,7 +44,7 @@ from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 if TYPE_CHECKING:
     import anthropic
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 # Char budget for the snippet shown to the classifier. A claim's epistemic
 # shape is legible from the opening; we do not need the whole body.

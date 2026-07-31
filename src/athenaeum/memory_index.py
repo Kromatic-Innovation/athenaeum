@@ -35,7 +35,7 @@ from typing import Callable
 
 from athenaeum.atomic_io import atomic_write_text
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 # The per-scope index file name (mirrors the ``MEMORY.md`` skip-name every
 # intake scanner already excludes — see ``librarian._AUTO_MEMORY_SKIP_NAMES``

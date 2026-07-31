@@ -29,7 +29,7 @@ from typing import Callable, TypeVar
 import anthropic
 from anthropic._exceptions import OverloadedError
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 

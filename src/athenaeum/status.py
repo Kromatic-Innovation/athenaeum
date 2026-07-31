@@ -16,7 +16,7 @@ from athenaeum.config import (
 from athenaeum.librarian import discover_raw_files
 from athenaeum.models import parse_frontmatter
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 
 class StatusInfo(TypedDict):

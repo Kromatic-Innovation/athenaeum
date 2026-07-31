@@ -36,7 +36,7 @@ from pathlib import Path
 
 from athenaeum.atomic_io import atomic_write_text
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 #: Sidecar filename under the cache dir.
 _STORE_NAME = "detection_incomplete.json"

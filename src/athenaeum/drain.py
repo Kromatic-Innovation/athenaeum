@@ -41,7 +41,7 @@ from athenaeum.config import resolve_model
 from athenaeum.models import _rates_for_model
 from athenaeum.tiers import DEFAULT_WRITE_MODEL
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 #: Stable, machine-greppable prefix for the end-of-run backlog-drain advisor
 #: WARNING (mirrors ``RUN_SUMMARY_PREFIX`` in :mod:`athenaeum.librarian`).
