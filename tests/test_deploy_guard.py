@@ -164,46 +164,148 @@ def test_check_error_when_ref_unresolvable(tmp_path: Path) -> None:
     assert "error" in r.stdout
 
 
-def test_drift_syncs_with_stubbed_commands(tmp_path: Path) -> None:
-    # AC: on drift, fast-forward then refresh the venv then stamp. All three
-    # steps are stubbed to `true` so the case stays fully offline.
+def _new_commit(repo: Path, content: str) -> str:
+    """Add a commit on top of HEAD and return its sha (for drift/rewind cases)."""
+    (repo / "f.txt").write_text(content)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "c2")
+    return _head(repo)
+
+
+def test_forward_drift_reconciles_to_newer_ref(tmp_path: Path) -> None:
+    # Common case: the deploy checkout is BEHIND the ref (a normal forward
+    # deploy). The guard reconciles HEAD up to origin/<ref>, refreshes the venv,
+    # stamps, and reports the OBSERVED head. All side-effect steps are stubbed to
+    # stay offline; the reconcile does a real (in-repo) reset so HEAD truly moves.
     repo = _make_repo(tmp_path)
+    c1 = _head(repo)
+    c2 = _new_commit(repo, "v2\n")
+    _git(repo, "reset", "--hard", c1)  # move the checkout BEHIND the ref
+    assert _head(repo) == c1
     env = {
         "ATHENAEUM_DEPLOY_DIR": str(repo),
-        "ATHENAEUM_GUARD_REF_SHA": ZERO_SHA,
-        "ATHENAEUM_GUARD_FF_CMD": "true",
+        "ATHENAEUM_GUARD_REF_SHA": c2,
+        "ATHENAEUM_GUARD_RECONCILE_CMD": f'git -C "{repo}" reset --hard {c2}',
         "ATHENAEUM_GUARD_INSTALL_CMD": "true",
         "ATHENAEUM_GUARD_STAMP_CMD": "true",
     }
     r = _run([], env)
-    assert r.returncode == 0
+    assert r.returncode == 0, r.stderr
     assert "drift" in r.stderr
     assert "synced" in r.stderr
     assert "refreshed .venv" in r.stderr
+    assert c2 in r.stderr  # reports the OBSERVED head, not a stale target
+    assert _head(repo) == c2
 
 
-def test_abort_loud_on_ff_failure(tmp_path: Path) -> None:
-    # AC: fails loudly with a recovery hint on a non-fast-forward condition
-    # rather than force-resetting the checkout.
+def test_rewind_reconciles_backward_and_reports_observed_head(tmp_path: Path) -> None:
+    # athenaeum#614 happy path: origin/<ref> was REWOUND to an ancestor, so HEAD
+    # is AHEAD of the ref -- a case `merge --ff-only` cannot express. `reset
+    # --hard` moves HEAD BACKWARD to the ref; the guard reports the observed
+    # (moved) HEAD.
     repo = _make_repo(tmp_path)
+    c1 = _head(repo)
+    c2 = _new_commit(repo, "v2\n")  # HEAD now at c2 (descendant of c1)
+    assert _head(repo) == c2
     env = {
         "ATHENAEUM_DEPLOY_DIR": str(repo),
-        "ATHENAEUM_GUARD_REF_SHA": ZERO_SHA,
-        "ATHENAEUM_GUARD_FF_CMD": "false",
+        "ATHENAEUM_GUARD_REF_SHA": c1,  # ref is the ANCESTOR (a rewind/rollback)
+        "ATHENAEUM_GUARD_RECONCILE_CMD": f'git -C "{repo}" reset --hard {c1}',
+        "ATHENAEUM_GUARD_INSTALL_CMD": "true",
+        "ATHENAEUM_GUARD_STAMP_CMD": "true",
+    }
+    r = _run([], env)
+    assert r.returncode == 0, r.stderr
+    assert "synced" in r.stderr
+    assert c1 in r.stderr  # observed HEAD == the (older) ref
+    assert _head(repo) == c1  # HEAD actually moved BACKWARD
+
+
+def test_rewind_noop_reconcile_fails_loud_not_false_sync(tmp_path: Path) -> None:
+    # THE regression for athenaeum#614. origin/<ref> was rewound to an ancestor
+    # and the reconcile is a NO-OP -- exactly what `merge --ff-only` was against
+    # an ancestor: exit 0, HEAD unchanged. The post-condition must detect that
+    # HEAD never reached the ref and abort LOUDLY, naming both SHAs -- never a
+    # silent false "synced" while the deploy serves stale code.
+    repo = _make_repo(tmp_path)
+    c1 = _head(repo)
+    c2 = _new_commit(repo, "v2\n")  # HEAD at c2; ref (c1) is behind it
+    env = {
+        "ATHENAEUM_DEPLOY_DIR": str(repo),
+        "ATHENAEUM_GUARD_REF_SHA": c1,
+        "ATHENAEUM_GUARD_RECONCILE_CMD": "true",  # succeeds but moves nothing
+        "ATHENAEUM_GUARD_INSTALL_CMD": "true",
+        "ATHENAEUM_GUARD_STAMP_CMD": "true",
     }
     r = _run([], env)
     assert r.returncode != 0
     assert "ABORT" in r.stderr
-    assert "never force-resets" in r.stderr
+    assert "post-condition" in r.stderr.lower()
+    assert c1 in r.stderr and c2 in r.stderr  # names both expected ref and stuck HEAD
+    assert "synced" not in r.stderr  # never a false success
+    assert _head(repo) == c2  # HEAD unchanged by the no-op reconcile
+
+
+def test_ff_cmd_accepted_as_reconcile_alias(tmp_path: Path) -> None:
+    # ATHENAEUM_GUARD_FF_CMD is kept as a deprecated alias for the reconcile
+    # command so older callers/tests keep working after the rename.
+    repo = _make_repo(tmp_path)
+    c1 = _head(repo)
+    _new_commit(repo, "v2\n")
+    env = {
+        "ATHENAEUM_DEPLOY_DIR": str(repo),
+        "ATHENAEUM_GUARD_REF_SHA": c1,
+        "ATHENAEUM_GUARD_FF_CMD": f'git -C "{repo}" reset --hard {c1}',  # deprecated alias
+        "ATHENAEUM_GUARD_INSTALL_CMD": "true",
+        "ATHENAEUM_GUARD_STAMP_CMD": "true",
+    }
+    r = _run([], env)
+    assert r.returncode == 0, r.stderr
+    assert _head(repo) == c1
+
+
+def test_head_at_ref_but_unstamped_rebuilds_and_stamps(tmp_path: Path) -> None:
+    # HEAD already at the ref but the build marker is stale/absent: the running
+    # code is correct, the venv/stamp are not. The guard rebuilds venv + stamp
+    # WITHOUT moving git, and the post-condition (HEAD == ref) holds trivially.
+    repo = _make_repo(tmp_path)
+    head = _head(repo)  # no stamp written => marker absent
+    env = {
+        "ATHENAEUM_DEPLOY_DIR": str(repo),
+        "ATHENAEUM_GUARD_REF_SHA": head,
+        "ATHENAEUM_GUARD_INSTALL_CMD": "true",
+        "ATHENAEUM_GUARD_STAMP_CMD": "true",
+    }
+    r = _run([], env)
+    assert r.returncode == 0, r.stderr
+    assert "refreshed .venv" in r.stderr
+    assert _head(repo) == head
+
+
+def test_abort_loud_on_reconcile_failure(tmp_path: Path) -> None:
+    # A reconcile that FAILS (not a no-op) aborts loudly with a recovery hint.
+    repo = _make_repo(tmp_path)
+    c1 = _head(repo)
+    _new_commit(repo, "v2\n")  # HEAD ahead of ref => drift => reconcile runs
+    env = {
+        "ATHENAEUM_DEPLOY_DIR": str(repo),
+        "ATHENAEUM_GUARD_REF_SHA": c1,
+        "ATHENAEUM_GUARD_RECONCILE_CMD": "false",  # reconcile fails
+    }
+    r = _run([], env)
+    assert r.returncode != 0
+    assert "ABORT" in r.stderr
+    assert "reconcile to origin/" in r.stderr
     assert "Recovery:" in r.stderr
 
 
 def test_abort_loud_on_install_failure(tmp_path: Path) -> None:
+    # HEAD at ref, unstamped => reach the venv-refresh step; make it fail.
     repo = _make_repo(tmp_path)
+    head = _head(repo)
     env = {
         "ATHENAEUM_DEPLOY_DIR": str(repo),
-        "ATHENAEUM_GUARD_REF_SHA": ZERO_SHA,
-        "ATHENAEUM_GUARD_FF_CMD": "true",
+        "ATHENAEUM_GUARD_REF_SHA": head,
         "ATHENAEUM_GUARD_INSTALL_CMD": "false",
     }
     r = _run([], env)
@@ -214,10 +316,10 @@ def test_abort_loud_on_install_failure(tmp_path: Path) -> None:
 
 def test_abort_loud_on_stamp_failure(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
+    head = _head(repo)
     env = {
         "ATHENAEUM_DEPLOY_DIR": str(repo),
-        "ATHENAEUM_GUARD_REF_SHA": ZERO_SHA,
-        "ATHENAEUM_GUARD_FF_CMD": "true",
+        "ATHENAEUM_GUARD_REF_SHA": head,
         "ATHENAEUM_GUARD_INSTALL_CMD": "true",
         "ATHENAEUM_GUARD_STAMP_CMD": "false",
     }
@@ -285,3 +387,11 @@ def test_default_install_cmd_uses_athenaeum_extras() -> None:
 def test_deploy_extras_override_flows_into_install() -> None:
     out = _source_and_eval("_dg_default_install_cmd", {"ATHENAEUM_DEPLOY_EXTRAS": "mcp"})
     assert out == 'python3 -m venv .venv && .venv/bin/pip install -q -e ".[mcp]"'
+
+
+def test_default_reconcile_cmd_is_hard_reset_to_origin_ref() -> None:
+    # The drift reconcile is a `reset --hard origin/<ref>`, NOT `merge --ff-only`
+    # -- so a rewind to an ancestor is actually applied, not a silent no-op
+    # (athenaeum#614). This locks the fix's key behavior change.
+    out = _source_and_eval("_dg_default_reconcile_cmd /tmp/deploy main", {})
+    assert out == 'git -C "/tmp/deploy" reset --hard "origin/main"'

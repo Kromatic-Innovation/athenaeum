@@ -32,17 +32,26 @@ by `scripts/deploy-guard.sh` and stamped after every rebuild.
 - **What runs there:** the worktree's `.venv` runs the athenaeum MCP stdio
   server (`~/local-deploys/athenaeum/.venv/bin/athenaeum serve`, spawned fresh
   per Claude Code session per `~/.claude.json`) and the nightly librarian. The
-  venv installs athenaeum **editable** (`pip install -e ".[mcp,vector]"`), so a
-  fast-forward of the worktree updates the running code without a reinstall;
-  the venv refresh only needs to run when dependencies/entry points change.
+  venv installs athenaeum **editable** (`pip install -e ".[mcp,vector]"`), so
+  moving the worktree to the deploy ref updates the running code without a
+  reinstall; the venv refresh only needs to run when dependencies/entry points
+  change.
 - **Sync flow (`scripts/deploy-guard.sh`, default mode):** resolve the deploy
-  dir → refuse to touch a dirty worktree (loud abort, never a force-reset) →
-  resolve `origin/main` (configurable via `ATHENAEUM_DEPLOY_REF`) → if the
-  worktree's `dist/.build-sha` stamp already matches, no-op → on drift,
-  fast-forward (`--ff-only`) the worktree, refresh the `.venv`, then re-stamp
-  `dist/.build-sha` via `scripts/write_build_sha.py`. Any failure at any step
-  (dirty tree, non-fast-forward divergence, venv refresh, or stamp write)
-  aborts loudly with a recovery hint rather than force-resetting anything.
+  dir → refuse to touch a **dirty** worktree (loud abort; a tree with local
+  edits is never force-reset) → resolve `origin/main` (configurable via
+  `ATHENAEUM_DEPLOY_REF`) → decide against **HEAD**, the running code, *not*
+  the `dist/.build-sha` stamp (a derived output that a stale writer could leave
+  matching the ref while HEAD did not): in-sync only when HEAD **and** the
+  stamp are already at the ref → otherwise reconcile the worktree to the ref
+  with `git reset --hard`, which — unlike `--ff-only` — moves HEAD forward **or
+  backward**, so a rewind/rollback to an ancestor is actually applied instead
+  of a silent no-op (athenaeum#614) → refresh the `.venv` → **re-read HEAD and
+  require it to equal the ref** → re-stamp `dist/.build-sha` via
+  `scripts/write_build_sha.py`. Any failure (dirty tree, reconcile failure, a
+  HEAD that did not reach the ref, venv refresh, or stamp write) aborts loudly
+  with a recovery hint, and the success line reports the **observed** HEAD, not
+  the intended target. The hard reset is safe because a clean deploy checkout
+  owns no local work; a dirty tree is refused first.
 - **`scripts/deploy-guard.sh --check`** reports `pre-activation` / `in-sync` /
   `drift` / `error` and mutates nothing (exit `0` / `0` / `10` / `20`).
 - **Why this file exists at all:** `hestia redeploy`'s guard discovery
@@ -76,9 +85,10 @@ checkout:
   scripts/deploy-sync.sh --check  # report drift only, mutate nothing
   ```
 
-Both scripts fast-forward + reinstall/refresh + stamp the same way and share
-the same `write_build_sha.py` stamp writer, so they are interchangeable in
-what they produce; `deploy-guard.sh` is what the automated `hestia redeploy`
+Both share the same `write_build_sha.py` stamp writer and produce the same
+stamped, reinstalled checkout; they differ only in how they move the worktree —
+`deploy-guard.sh` reconciles to the deploy ref with `git reset --hard` (so a
+rewind is applied, athenaeum#614), while `deploy-sync.sh` fast-forwards. `deploy-guard.sh` is what the automated `hestia redeploy`
 cadence runs against the worktree above, `deploy-sync.sh` is the manual
 single-checkout path.
 
