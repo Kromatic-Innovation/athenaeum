@@ -28,15 +28,19 @@ The module deliberately has NO heavy imports so both the escalation path
 (:mod:`athenaeum.tiers`) and the resolution path (:mod:`athenaeum.answers`,
 auto-apply in :mod:`athenaeum.tiers`) can import it without a cycle.
 
-**Layering:** L3 service. Module scope imports only stdlib. The two
-``from athenaeum.search import ...`` / ``from athenaeum.cross_scope import
-_cosine`` imports inside :func:`find_resolved_record` (below) are function-
-local for IMPORT COST, NOT to break a cycle: neither :mod:`athenaeum.search`
-nor :mod:`athenaeum.cross_scope` imports this module at module scope, so no
-cycle exists either way. They are deferred so a caller who never reaches the
+**Layering:** L3 service. Module scope imports only stdlib. The
+``from athenaeum.search import ...`` import inside :func:`find_resolved_record`
+(below) is function-local for IMPORT COST, NOT to break a cycle:
+:mod:`athenaeum.search` does not import this module at module scope, so no
+cycle exists either way. It is deferred so a caller who never reaches the
 embedding-similarity strategy (fingerprint / member-key matches resolve
 first) never pays ``search``'s optional ``chromadb`` import cost just to use
-this module's cheap hashing/JSONL helpers.
+this module's cheap hashing/JSONL helpers. The sibling
+``from athenaeum.vecmath import cosine`` import in the same function is ALSO
+function-local (for locality with the strategy-3 block it serves), but
+:mod:`athenaeum.vecmath` is dependency-free (pure stdlib), so it carries none
+of the optional-``chromadb``-extra import cost the ``search`` deferral exists
+to avoid.
 """
 
 from __future__ import annotations
@@ -623,9 +627,10 @@ def find_resolved_record(
     if vecs is None or len(vecs) < 2:
         return None
 
-    # Deferred for IMPORT COST (this is the one call site that needs cosine
-    # similarity), not a cycle — cross_scope does not import this module.
-    from athenaeum.cross_scope import _cosine
+    # Local for locality with this block; athenaeum.vecmath is dependency-free
+    # (pure stdlib) so this import carries none of the chromadb-extra cost the
+    # ``search`` deferral above exists to avoid — see the module docstring.
+    from athenaeum.vecmath import cosine
 
     new_vec = vecs[0]
     stored_recs_with_pt = [
@@ -635,7 +640,7 @@ def find_resolved_record(
     ]
     for idx, rec in enumerate(stored_recs_with_pt):
         stored_vec = vecs[idx + 1]
-        sim = _cosine(new_vec, stored_vec)
+        sim = cosine(new_vec, stored_vec)
         if sim >= threshold:
             candidates.append((sim, rec))
 

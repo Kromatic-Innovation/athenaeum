@@ -25,9 +25,9 @@ claim set (mirrors :func:`athenaeum.fingerprint.claim_pair_fingerprint`), so
 repeated runs over an unchanged wiki yield identical keys.
 
 Complexity: embedding is a single batched provider call; the cosine matrix is
-vectorized via numpy when available (pure-Python ``_cosine`` fallback). The
-greedy complete-linkage pass is O(N^2) in the worst case over occurrence
-count — fine for a per-wiki sweep; revisit if claim counts grow large.
+vectorized via numpy when available (pure-Python :func:`athenaeum.vecmath.cosine`
+fallback). The greedy complete-linkage pass is O(N^2) in the worst case over
+occurrence count — fine for a per-wiki sweep; revisit if claim counts grow large.
 
 Layering: L4 domain/pipeline module (READ-ONLY detector). Imports
 :mod:`athenaeum.merge` (``_parse_one_source``) at top level — that is part of
@@ -50,11 +50,11 @@ from typing import Callable
 
 import yaml
 
-from athenaeum.cross_scope import _cosine
 from athenaeum.fingerprint import normalize_side
 from athenaeum.merge import _parse_one_source
 from athenaeum.models import is_inactive_memory, parse_frontmatter
 from athenaeum.search import _iter_wiki_entries
+from athenaeum.vecmath import cosine
 
 # Injected embedding provider: maps a list of texts to a list of vectors, or
 # returns None when no embedding backend is available (graceful degradation).
@@ -234,8 +234,8 @@ def _cosine_matrix(vectors: list[list[float]]):
 
     Vectorizes the O(N^2 * dim) pairwise cosine into batched numpy ops. Returns
     ``None`` when numpy is unavailable so the caller falls back to the
-    pure-Python :func:`athenaeum.cross_scope._cosine`. Zero-norm rows yield 0
-    similarity (never group), matching ``_cosine``'s zero-vector contract.
+    pure-Python :func:`athenaeum.vecmath.cosine`. Zero-norm rows yield 0
+    similarity (never group), matching ``cosine``'s zero-vector contract.
     """
     try:
         import numpy as np
@@ -283,7 +283,7 @@ def group_recurring_claims(
             return float(sims[i][j])
     else:
         def _sim(i: int, j: int) -> float:
-            return _cosine(vectors[i], vectors[j])
+            return cosine(vectors[i], vectors[j])
 
     # Greedy complete-linkage: an index joins the first cluster it clears
     # threshold against ALL members of; otherwise it seeds a new cluster.

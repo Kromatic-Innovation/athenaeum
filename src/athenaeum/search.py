@@ -1794,21 +1794,27 @@ class KeywordBackend:
 # ---------------------------------------------------------------------------
 
 _BACKENDS: dict[str, type[SearchBackend]] = {
-    "fts5": FTS5Backend,  # type: ignore[dict-item]
-    "vector": VectorBackend,  # type: ignore[dict-item]
-    "keyword": KeywordBackend,  # type: ignore[dict-item]
+    "fts5": FTS5Backend,
+    "vector": VectorBackend,
+    "keyword": KeywordBackend,
 }
 
 
-def get_backend(name: str) -> SearchBackend:
-    """Return a backend instance by name. Raises ``KeyError`` for unknown names."""
+def get_backend(name: str, **kwargs: Any) -> SearchBackend:
+    """Return a backend instance by name. Raises ``KeyError`` for unknown names.
+
+    ``kwargs`` are forwarded to the backend's constructor (issue #542) — e.g.
+    ``get_backend("vector", embedding_model="...")`` — so callers that need a
+    non-default constructor arg go through the registry instead of
+    instantiating a concrete backend class directly.
+    """
     cls = _BACKENDS.get(name)
     if cls is None:
         raise KeyError(
             f"Unknown search backend {name!r}. "
             f"Available: {', '.join(sorted(_BACKENDS))}"
         )
-    return cls()
+    return cls(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1906,7 +1912,7 @@ def build_vector_index(
     backstop for the stat pre-filter.
     """
     roots = [Path(r) for r in extra_roots] if extra_roots else None
-    return VectorBackend(embedding_model=embedding_model).build_index(
+    return get_backend("vector", embedding_model=embedding_model).build_index(
         Path(wiki_root),
         Path(cache_dir),
         extra_roots=roots,
@@ -1927,7 +1933,7 @@ def query_vector_index(
     exclude: set[str] | None = None,
 ) -> list[tuple[str, str, float]]:
     """Query the chromadb vector index. Callable from shell hooks."""
-    return VectorBackend().query(query, Path(cache_dir), n=n, exclude=exclude)
+    return get_backend("vector").query(query, Path(cache_dir), n=n, exclude=exclude)
 
 
 # ---------------------------------------------------------------------------

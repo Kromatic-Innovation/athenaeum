@@ -56,6 +56,7 @@ from typing import Any
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import resolve_cache_dir
 from athenaeum.models import AutoMemoryFile
+from athenaeum.vecmath import cosine
 
 log = logging.getLogger(__name__)
 
@@ -111,22 +112,6 @@ class Cluster:
             "min_pairwise_score": float(self.min_pairwise_score),
             "rationale": self.rationale,
         }
-
-
-def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    """Cosine similarity between two equal-length vectors. Zero on 0-norm."""
-    if len(a) != len(b):
-        return 0.0
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b):
-        dot += x * y
-        na += x * x
-        nb += y * y
-    if na == 0.0 or nb == 0.0:
-        return 0.0
-    return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
 def _indexed_id_for(am: AutoMemoryFile, extra_roots: Sequence[Path]) -> str | None:
@@ -270,7 +255,7 @@ def _build_adjacency(
             vj = vecs[j]
             if vj is None:
                 continue
-            if _cosine(vi, vj) >= threshold:
+            if cosine(vi, vj) >= threshold:
                 adj[i].add(j)
                 adj[j].add(i)
     return adj
@@ -316,7 +301,7 @@ def _mean_intra_similarity(
             vj = vecs[j]
             if vj is None:
                 continue
-            total += _cosine(vi, vj)
+            total += cosine(vi, vj)
             pairs += 1
     return total / pairs if pairs else 1.0
 
@@ -354,7 +339,7 @@ def _min_intra_similarity(
             vj = vecs[j]
             if vj is None:
                 continue
-            lowest = min(lowest, _cosine(vi, vj))
+            lowest = min(lowest, cosine(vi, vj))
             pairs += 1
     return lowest if pairs else 1.0
 
