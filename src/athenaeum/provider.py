@@ -364,6 +364,69 @@ def capabilities_for(provider: str) -> ProviderCapabilities:
 
 
 # ---------------------------------------------------------------------------
+# Per-stage params contract (issue #575 / epic #515)
+#
+# Each LLM stage's ``max_tokens`` budget used to be a literal baked into its
+# call-site params dict (the audit counted them "scattered across nine call-site
+# dicts", none config-overridable). Resolving them through the seam makes a
+# stage's budget a KNOB a backend can normalize — and, mirroring the model-knob
+# convention (:func:`athenaeum.config.resolve_model`, env > yaml > default),
+# makes each one config-overridable. Today's values are unchanged: this moves
+# WHERE the value lives, not what it is. A backend that cannot honor
+# ``max_tokens`` (``claude-cli``) still drops it downstream — see
+# ``ProviderCapabilities.honors_max_tokens`` (#573/#574).
+# ---------------------------------------------------------------------------
+
+
+def _coerce_positive_int(raw: str) -> int | None:
+    """Parse *raw* as a positive int, or ``None`` if it is not one."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def resolve_max_tokens(
+    knob: str,
+    env_var: str,
+    default: int,
+    config: dict[str, Any] | None = None,
+) -> int:
+    """Resolve a stage's ``max_tokens`` from env > yaml ``max_tokens.<knob>`` >
+    code default (issue #575).
+
+    Mirrors :func:`athenaeum.config.resolve_model`'s precedence, but for a
+    stage's OUTPUT-TOKEN budget: the ``env_var`` wins over the yaml
+    ``max_tokens.<knob>`` key (read only when the operator set it), and
+    *default* — today's baked-in literal, unchanged — is the code default. No
+    seed in config ``_DEFAULTS`` so the code default stays reachable (issue
+    #231). A non-integer or non-positive override is IGNORED with a warning:
+    the code default is far safer than a budget of ``0``, which would truncate
+    every response.
+    """
+    env = os.environ.get(env_var)
+    if env is not None and env.strip():
+        parsed = _coerce_positive_int(env.strip())
+        if parsed is not None:
+            return parsed
+        log.warning(
+            "%s=%r is not a positive integer; using default max_tokens=%d",
+            env_var,
+            env,
+            default,
+        )
+    if isinstance(config, dict):
+        section = config.get("max_tokens")
+        if isinstance(section, dict):
+            raw = section.get(knob)
+            # Reject bool (a subtype of int) and non-positive values.
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                return raw
+    return default
+
+
+# ---------------------------------------------------------------------------
 # claude-cli adapter — response shapes mirroring the anthropic SDK surface
 # the four call sites consume (``.content[0].text`` + ``.usage`` counters).
 # ---------------------------------------------------------------------------

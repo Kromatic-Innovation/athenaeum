@@ -17,7 +17,11 @@ from athenaeum.models import (
     RawFile,
 )
 from athenaeum.tiers import (
+    _MERGE_MAX_TOKENS,
+    _MERGE_PATCH_MAX_TOKENS,
+    _TIER2_CLASSIFY_MAX_TOKENS,
     _TIER2_CLASSIFY_RETRY_MAX_TOKENS,
+    _TIER3_CREATE_MAX_TOKENS,
     MERGE_FALLBACK_LOG_PREFIX,
     MERGE_PARSE_FAIL_AMBIGUOUS,
     MERGE_PARSE_FAIL_NO_JSON,
@@ -2365,3 +2369,45 @@ class TestClaudeCliParamDropGating:
             if c.kwargs.get("max_tokens") == _TIER2_CLASSIFY_RETRY_MAX_TOKENS
         ]
         assert len(retry_budget_calls) == 1
+
+
+class TestPerStageMaxTokensThroughSeam:
+    """#575: each stage's max_tokens is resolved through the provider seam
+    (env > yaml > default), moving the value out of a baked-in call-site
+    literal. Today's values are preserved as the defaults."""
+
+    _TYPES = ["person", "reference"]
+
+    def _raw(self):
+        return _make_raw("Some rich source text with entities.")
+
+    def test_classify_default_is_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_CLASSIFY_MAX_TOKENS", raising=False)
+        params = tier2_request_params(self._raw(), [], self._TYPES, [], ["internal"])
+        assert params["max_tokens"] == _TIER2_CLASSIFY_MAX_TOKENS
+
+    def test_env_override_flows_through_builder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_CLASSIFY_MAX_TOKENS", "1234")
+        params = tier2_request_params(self._raw(), [], self._TYPES, [], ["internal"])
+        assert params["max_tokens"] == 1234
+
+    def test_yaml_override_flows_through_builder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_CLASSIFY_MAX_TOKENS", raising=False)
+        params = tier2_request_params(
+            self._raw(), [], self._TYPES, [], ["internal"],
+            config={"max_tokens": {"classify": 3210}},
+        )
+        assert params["max_tokens"] == 3210
+
+    def test_merge_stage_defaults_unchanged(self) -> None:
+        # Value preservation guard for the tier-3 merge budgets: the historical
+        # literals stay the defaults, resolved through the seam.
+        assert _MERGE_MAX_TOKENS == 8192
+        assert _MERGE_PATCH_MAX_TOKENS == 2048
+        assert _TIER3_CREATE_MAX_TOKENS == 2048
+        assert _TIER2_CLASSIFY_MAX_TOKENS == 4096
+        assert _TIER2_CLASSIFY_RETRY_MAX_TOKENS == 8192
