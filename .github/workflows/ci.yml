@@ -17,6 +17,14 @@ on:
   pull_request:
     branches: [develop]
 
+# Cancel a superseded run when a newer commit lands on the same ref (M23,
+# hestia#548). Keyed on workflow + ref so a PR's push run and the post-merge
+# develop run stay independent, but stacked pushes to the same PR/branch
+# cancel the in-flight run instead of queueing a duplicate 3-leg matrix.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Least-privilege default (Scorecard Token-Permissions, #405). CI only reads
 # the repo and runs tests, so `contents: read` is sufficient; jobs that need
 # more can widen this at the job level.
@@ -51,12 +59,21 @@ jobs:
 
   # hestia#557 — a single, always-present aggregate status that is intended to
   # be the ONE required check on develop/main. It runs on every event
-  # (`if: always()`) so it reports a concrete conclusion even when the real
-  # `test` job is legitimately skipped. Making the matrix `test` job itself
-  # required would name per-leg checks (`test (3.11)` …) and would wedge on a
-  # legitimately skipped run, since a *skipped* job never satisfies a required
-  # check. This synthesized gate is green exactly when the test matrix is truly
-  # green OR was skipped.
+  # (`if: always()`) so it reports a concrete conclusion instead of vanishing
+  # when an upstream job is skipped/cancelled. Making the matrix `test` job
+  # itself required would name per-leg checks (`test (3.11)` …) and would wedge
+  # on any run where a leg is absent, since a missing required check never
+  # resolves. This synthesized gate is the single required check instead.
+  #
+  # hestia#548 (M24): a *skipped* `test` is NO LONGER treated as green. The
+  # `test` job carries no `if:` and no `paths:` filter, so it cannot be
+  # legitimately skipped today — a skipped result therefore means zero tests
+  # ran, and `promote-main.yml` accepts `CI Required == success` as the sole
+  # promotion gate, so a skipped-is-green aggregate would promote `main` with
+  # no tests the day a path filter is added. The gate is green ONLY when the
+  # test matrix truly succeeded. If a future change adds a legitimate skip
+  # condition to `test`, whoever adds it must whitelist that exact condition
+  # here explicitly — not restore a blanket `skipped)` branch.
   ci-required:
     name: CI Required
     needs: [test]
@@ -68,11 +85,11 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
         run: |
           echo "test=$TEST_RESULT"
-          # `success`  → the test matrix ran and every leg passed.
-          # `skipped`  → the test job was legitimately skipped.
-          # anything else (failure/cancelled) → fail the gate.
+          # `success` → the test matrix ran and every leg passed.
+          # anything else (skipped/failure/cancelled) → fail the gate; no job
+          # is permitted to skip today (see the hestia#548 note above).
           case "$TEST_RESULT" in
-            success|skipped)
+            success)
               echo "CI Required: green (test=$TEST_RESULT)"
               exit 0
               ;;
