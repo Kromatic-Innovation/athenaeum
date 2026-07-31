@@ -61,6 +61,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from athenaeum.config import resolve_cache_dir
+
 if TYPE_CHECKING:  # avoid an import cycle at runtime (models imports nothing here)
     from athenaeum.models import TokenUsage
 
@@ -96,8 +98,14 @@ def ledger_provider(resolved_provider: str | None) -> str:
 
 
 def default_cache_dir() -> Path:
-    """Default athenaeum cache dir (``~/.cache/athenaeum``)."""
-    return (Path("~/.cache/athenaeum").expanduser()).resolve()
+    """Default athenaeum cache dir (``ATHENAEUM_CACHE_DIR`` env, else
+    ``~/.cache/athenaeum``).
+
+    Issue #521: routes through the shared resolver so the spend ledger lands
+    under the same cache dir the rest of athenaeum honours, instead of ignoring
+    ``ATHENAEUM_CACHE_DIR``.
+    """
+    return resolve_cache_dir().resolve()
 
 
 def default_ledger_path(cache_dir: Path | None = None) -> Path:
