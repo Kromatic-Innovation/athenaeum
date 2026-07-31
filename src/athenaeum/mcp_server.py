@@ -35,6 +35,7 @@ import logging
 import re
 from pathlib import Path
 
+from athenaeum.config import resolve_cache_dir
 from athenaeum.killswitch import is_disabled
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
@@ -329,7 +330,7 @@ def _recall_via_backend(
     except KeyError as exc:
         return str(exc)
 
-    effective_cache = cache_dir or Path.home() / ".cache" / "athenaeum"
+    effective_cache = resolve_cache_dir(cache_dir)
 
     try:
         hits = backend.query(

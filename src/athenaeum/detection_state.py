@@ -30,10 +30,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Iterable
 from pathlib import Path
 
+from athenaeum import config
 from athenaeum.atomic_io import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -51,9 +51,7 @@ def resolve_cache_dir() -> Path:
     via :func:`incomplete_member_paths`) always agree on the same file across
     runs.
     """
-    return Path(
-        os.environ.get("ATHENAEUM_CACHE_DIR") or (Path.home() / ".cache" / "athenaeum")
-    )
+    return config.resolve_cache_dir()
 
 
 def _store_path(cache_dir: Path) -> Path:
