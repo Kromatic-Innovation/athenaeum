@@ -1011,6 +1011,24 @@ def create_server(
         (``{"T1": {...}, "T2": {...}}``). Reviewing an audit item never
         re-executes the merge; an overturn is a calibration signal only.
         """
+        # Issue #518: gate behind the reasoning-tier opt-in. When off, return
+        # an explicit not-enabled state instead of a permanent 0/0/0 all-clear
+        # that reads as "the tiers ran and are well calibrated".
+        from athenaeum.config import (
+            load_config,
+            resolve_reasoning_tier_auditing_enabled,
+        )
+
+        if not resolve_reasoning_tier_auditing_enabled(load_config(wiki_root.parent)):
+            return {
+                "enabled": False,
+                "error": (
+                    "tier auditing not enabled (set "
+                    "librarian.reasoning_tier_auditing_enabled: true, or "
+                    "ATHENAEUM_REASONING_TIER_AUDITING_ENABLED=1)"
+                ),
+            }
+
         from athenaeum.calibration import calibration_summary as _summary
 
         return _summary(wiki_root)
@@ -1034,6 +1052,20 @@ def create_server(
         # Issue #538: adjudicating the human-decision queue is owner-only.
         if caller_audience is not None:
             return {"ok": False, "error_code": "forbidden", "error": _FORBIDDEN_MSG}
+
+        # Issue #518: reviewing tier audits is meaningless when the tiers are
+        # disabled — gate behind the same opt-in as the summary surface.
+        from athenaeum.config import (
+            load_config,
+            resolve_reasoning_tier_auditing_enabled,
+        )
+
+        if not resolve_reasoning_tier_auditing_enabled(load_config(wiki_root.parent)):
+            return {
+                "ok": False,
+                "enabled": False,
+                "error": "tier auditing not enabled",
+            }
 
         from athenaeum.calibration import record_audit_review
 

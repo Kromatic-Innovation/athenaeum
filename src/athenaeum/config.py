@@ -608,6 +608,41 @@ def resolve_audit_sample_rate_t1_rejects(config: dict[str, Any] | None) -> float
     )
 
 
+def resolve_reasoning_tier_auditing_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the reasoning-tier opt-in (issue #518). DEFAULT OFF.
+
+    Gates BOTH halves of the tiered-reasoning subsystem behind one explicit
+    switch:
+
+    - the T1 reasoning screen in the merge path
+      (:func:`athenaeum.merge.merge_clusters_to_wiki`) — a confident T1 reject
+      drops a merge proposal before it reaches the human queue; and
+    - the calibration display surface (``athenaeum calibration summary`` and
+      the ``calibration_summary`` MCP tool), which reports an explicit "tier
+      auditing not enabled" state when this is OFF instead of a permanent
+      0-sampled / 0-overturned all-clear that reads as "well calibrated" when
+      the tiers never actually ran.
+
+    Env ``ATHENAEUM_REASONING_TIER_AUDITING_ENABLED`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.reasoning_tier_auditing_enabled`` >
+    default ``False``. No seed in ``_DEFAULTS`` (issue #231). Default OFF is
+    deliberate: wiring the T1 screen changes what reaches the human merge
+    queue, so it stays opt-in until an operator turns it on — production merge
+    behavior is byte-identical to today until then. Non-bool yaml values and
+    unrecognized env strings fall through to off.
+    """
+    env = os.environ.get("ATHENAEUM_REASONING_TIER_AUDITING_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("reasoning_tier_auditing_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 def resolve_min_merge_mean_similarity(config: dict[str, Any] | None) -> float:
     """Resolve the merge-proposal mean-pairwise-similarity floor (#421).
 

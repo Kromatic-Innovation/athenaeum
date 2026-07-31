@@ -25,6 +25,17 @@ import sys
 from pathlib import Path
 
 from athenaeum.calibration import calibration_summary, record_audit_review
+from athenaeum.config import load_config, resolve_reasoning_tier_auditing_enabled
+
+# Issue #518: the message shown when the reasoning-tier subsystem is not
+# enabled — an explicit state so an operator never mistakes a permanent
+# 0/0/0 all-clear for "the tiers ran and are well calibrated".
+_NOT_ENABLED_MSG = (
+    "tier auditing not enabled "
+    "(set librarian.reasoning_tier_auditing_enabled: true, or "
+    "ATHENAEUM_REASONING_TIER_AUDITING_ENABLED=1, to enable the reasoning "
+    "tiers and their calibration loop)"
+)
 
 
 def _resolve_wiki_root(args: argparse.Namespace) -> Path:
@@ -42,6 +53,18 @@ def cmd_calibration(args: argparse.Namespace) -> int:
         return 2
 
     wiki_root = _resolve_wiki_root(args)
+
+    # Issue #518: gate the calibration surface behind the explicit opt-in.
+    # When off, report the not-enabled state rather than an empty-but-"green"
+    # summary that lies about a subsystem that never ran.
+    if not resolve_reasoning_tier_auditing_enabled(load_config(wiki_root.parent)):
+        if getattr(args, "json", False):
+            sys.stdout.write(
+                json.dumps({"enabled": False, "error": _NOT_ENABLED_MSG}) + "\n"
+            )
+        else:
+            print(_NOT_ENABLED_MSG, file=sys.stderr)
+        return 0 if sub == "summary" else 1
 
     if sub == "summary":
         summary = calibration_summary(wiki_root)

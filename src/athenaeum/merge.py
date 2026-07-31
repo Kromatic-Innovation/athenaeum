@@ -39,6 +39,7 @@ Out of scope (deliberate — later lanes):
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -52,6 +53,7 @@ from typing import TYPE_CHECKING, Any
 from athenaeum import detection_state, spend
 from athenaeum._lint import _strip_self_reference
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.calibration import sample_tier_decision
 from athenaeum.clusters import resolve_cluster_output_path, resolve_cluster_threshold
 from athenaeum.config import (
     load_config,
@@ -64,6 +66,7 @@ from athenaeum.config import (
     resolve_min_merge_confidence,
     resolve_min_merge_mean_similarity,
     resolve_operational_markers,
+    resolve_reasoning_tier_auditing_enabled,
 )
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
 from athenaeum.cross_scope import (
@@ -104,9 +107,15 @@ from athenaeum.models import (
     validity_bound_str,
     validity_windows_disjoint,
 )
-from athenaeum.pending_merges import write_pending_merge
+from athenaeum.pending_merges import _make_id, write_pending_merge
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.provider import resolve_provider
+from athenaeum.reasoning_tiers import (
+    ReasoningProposal,
+    load_authority_manifest_for_pipeline,
+    run_reasoning_pipeline,
+    run_t1_tier,
+)
 from athenaeum.resolutions import (
     ATTRIBUTE_BOTH_ACTION,
     PROPOSE_MERGE_ACTION,
@@ -1197,6 +1206,93 @@ def _classify_merge_write_kind(merge_target_name: str, wiki_root: Path) -> str:
     return "create-merged"
 
 
+def t1_screen_rejects_merge_proposal(
+    *,
+    member_paths: list[str],
+    merge_target_name: str,
+    cluster_id: str,
+    client: "anthropic.Anthropic | None",
+    usage: TokenUsage | None,
+    wiki_root: Path,
+    config: dict[str, Any] | None,
+    provider: str,
+    authority_manifest: Any,
+    enabled: bool,
+    dry_run: bool,
+) -> bool:
+    """Run the T1 reasoning tier over one merge proposal (issue #518).
+
+    Returns ``True`` when the proposal should be DROPPED before the human queue
+    — i.e. the tier returned a confident ``reject``. Returns ``False`` (write
+    the proposal to ``_pending_merges.md`` as usual) in every other case:
+    disabled, dry-run, no client, no members, a tripped spend ceiling (#568 —
+    degrade to an unscreened write rather than block the queue), or a pass-up.
+
+    On a reject it also surfaces the decision for the human-audit calibration
+    loop via :func:`athenaeum.calibration.sample_tier_decision` (a no-op below
+    the configured sample rate), so the governance loop actually fires. The
+    ``proposal_id`` is derived with the SAME :func:`_make_id` that
+    :func:`write_pending_merge` uses, so the tier log / audit sample correlate
+    with the human-facing :class:`~athenaeum.pending_merges.PendingMerge`.
+    """
+    if not (enabled and client is not None and not dry_run and member_paths):
+        return False
+
+    # Issue #568: the reasoning screen adds LLM calls to the merge phase, so it
+    # participates in the spend ceiling. A tripped budget degrades to today's
+    # unscreened write — it must never block the merge queue.
+    if usage is not None:
+        ceiling = spend.ceiling_tripped(usage, provider=provider, config=config)
+        if ceiling is not None:
+            log.warning(
+                "resolutions: spend ceiling reached (%s) — skipping T1 reasoning "
+                "screen for cluster %s; writing proposal unscreened",
+                ceiling,
+                cluster_id,
+            )
+            return False
+
+    proposal = ReasoningProposal(
+        proposal_id=_make_id(member_paths, merge_target_name),
+        merge_target_name=merge_target_name,
+        sources=tuple(member_paths),
+    )
+    # Count the attempt against the run budget, mirroring the Opus-resolver
+    # convention in _maybe_propose (run_t1_tier itself only adds token counts
+    # via usage.add, not api_calls).
+    if usage is not None:
+        usage.api_calls += 1
+    tier_chain = (
+        functools.partial(
+            run_t1_tier,
+            client=client,
+            config=config,
+            usage=usage,
+            authority_manifest=authority_manifest,
+        ),
+    )
+    result = run_reasoning_pipeline(proposal, tier_chain=tier_chain, wiki_root=wiki_root)
+    if result.rejected and result.rejecting_decision is not None:
+        decision = result.rejecting_decision
+        sample_tier_decision(
+            wiki_root,
+            tier=decision.tier,
+            verdict=decision.verdict,
+            proposal_id=decision.proposal_id,
+            reason=decision.reason,
+            config=config,
+        )
+        log.info(
+            "resolutions: T1 reasoning tier REJECTED merge proposal for cluster "
+            "%s (%s: %s); dropped before the human queue",
+            cluster_id,
+            decision.reason_code or "reject",
+            decision.reason,
+        )
+        return True
+    return False
+
+
 def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
     """Render ``[^name]: **Source:** ...`` footnotes for a source list (#260).
 
@@ -1390,6 +1486,18 @@ def merge_clusters_to_wiki(
     # for the subscription path, dollars for the metered API path — is keyed on
     # it). Mirrors ``librarian.run``'s single ``resolve_provider(config)`` read.
     resolved_provider = resolve_provider(resolved_config)
+    # Issue #518: the reasoning-tier screen, resolved once. DEFAULT OFF —
+    # production merge behavior is byte-identical to today until an operator
+    # opts in. When on, T1 screens each merge proposal before it reaches the
+    # human queue (a confident reject drops it; a pass-up flows through
+    # unchanged). The authority manifest (loaded once, only when enabled) feeds
+    # T1's live-source-duplicate check; a missing manifest is an inert empty one.
+    reasoning_tier_enabled = resolve_reasoning_tier_auditing_enabled(resolved_config)
+    reasoning_authority_manifest = (
+        load_authority_manifest_for_pipeline(knowledge_root)
+        if reasoning_tier_enabled
+        else None
+    )
     # Issue #398: resolved once and threaded into every dark-zone
     # PhaseHeartbeat below (merge-detect, merge-write) so an operator can
     # tune the tick cadence via ATHENAEUM_HEARTBEAT_INTERVAL / yaml without
@@ -1647,6 +1755,26 @@ def merge_clusters_to_wiki(
                     len(cite.citing),
                     len(cite.cited),
                 )
+                return
+            # Issue #518: T1 reasoning-tier screen (opt-in, default OFF). A
+            # confident reject drops the proposal before the human queue —
+            # mirroring the _suppress / cross_class_precheck drops above —
+            # rather than spending human review on a merge the tier is certain
+            # is wrong. A pass-up (or a disabled/ceiling-tripped screen) flows
+            # through to write_pending_merge below unchanged.
+            if t1_screen_rejects_merge_proposal(
+                member_paths=member_paths,
+                merge_target_name=proposal.merge_target_name,
+                cluster_id=entry.cluster_id,
+                client=client,
+                usage=usage,
+                wiki_root=wiki_root,
+                config=resolved_config,
+                provider=resolved_provider,
+                authority_manifest=reasoning_authority_manifest,
+                enabled=reasoning_tier_enabled,
+                dry_run=dry_run,
+            ):
                 return
             # Issue #421: slug-collision precheck. Classify the proposal by
             # whether its derived target slug already exists in wiki/ so a
