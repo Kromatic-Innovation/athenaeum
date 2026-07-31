@@ -27,7 +27,7 @@ import re
 from athenaeum.config import resolve_model
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 # Single-sourced from ``tiers.DEFAULT_CLASSIFY_MODEL`` (issue #571, M19) rather
 # than a fourth copy of the literal — a haiku-class bump now touches one file.
@@ -171,7 +171,11 @@ def extract_topics(
                 config=config,
             )
         except Exception:  # noqa: BLE001 — ledger must never break recall
-            pass
+            # Issue #540 (L19): the swallow is correct (a ledger hiccup must not
+            # break the 3s recall path), but it must not be FULLY silent — a
+            # debug line makes a recurring spend-recording failure diagnosable
+            # on the highest-frequency path instead of vanishing without trace.
+            log.debug("query-topics: ledger spend recording failed", exc_info=True)
 
     try:
         text = response.content[0].text.strip()

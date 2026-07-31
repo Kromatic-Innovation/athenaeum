@@ -88,6 +88,54 @@ def test_returns_empty_when_api_raises(
     assert any("RuntimeError" in r.getMessage() for r in warning_records)
 
 
+def test_ledger_failure_logs_debug_not_fully_silent(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Issue #540 (L19): a spend-ledger failure on the recall hot path must not
+    # be FULLY silent. The swallow is correct (a ledger hiccup must not break
+    # the 3s recall path), but it must emit at least a DEBUG line so a recurring
+    # failure is diagnosable instead of vanishing without a trace.
+    import logging
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    resp = SimpleNamespace(
+        content=[SimpleNamespace(text='["Return Path"]')],
+        usage=SimpleNamespace(
+            input_tokens=10,
+            output_tokens=5,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        ),
+    )
+
+    class _FakeClient:
+        def __init__(self, **_: Any) -> None:
+            self.messages = self
+
+        def create(self, **_: Any) -> Any:
+            return resp
+
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
+
+    import athenaeum.spend as spend_mod
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(spend_mod, "record_spend", _boom)
+
+    with caplog.at_level(logging.DEBUG, logger="athenaeum.query_topics"):
+        # Recall still succeeds despite the ledger failure.
+        topics = query_topics.extract_topics("Tell me about Return Path")
+
+    assert topics == ["Return Path"]
+    debug_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("ledger spend recording failed" in m for m in debug_msgs)
+
+
 def test_returns_empty_on_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 

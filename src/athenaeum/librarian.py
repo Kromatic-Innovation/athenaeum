@@ -116,7 +116,7 @@ from athenaeum.tiers import (
     tier4_escalate,
 )
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 
 # Defaults — can be overridden via CLI args or the run() API
@@ -1935,6 +1935,14 @@ def run(
     Defaults to ``datetime.now(timezone.utc)`` (frozen once here); tests pass
     a fixed value so no wall-clock leaks into cadence assertions.
     """
+    # Issue #540 (M25): stamp a fresh per-run correlation id so every log line
+    # this run emits carries the same id (via the logconf run-id filter) — even
+    # in a long-lived process that performs several runs — making a run's lines
+    # attributable and untangleable from an overlapping run's.
+    from athenaeum.logconf import new_run_id
+
+    new_run_id()
+
     skip_entity_tiers = cluster_only or merge_only
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     config = load_config(knowledge_root)

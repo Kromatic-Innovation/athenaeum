@@ -2,13 +2,14 @@
 """Athenaeum CLI entry point."""
 
 import argparse
-import logging
 import os
 import sys
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from athenaeum.logconf import configure_logging
 
 if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
@@ -1883,6 +1884,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     )
     from athenaeum.mcp_server import create_server
 
+    # Issue #540 (M25): the MCP server process previously configured NO logging
+    # at all — every mcp_server log line was dropped. Configure the shared
+    # ISO-dated, name-tagged, run-id format here so the server's lines are
+    # attributable, same as the CLI's.
+    configure_logging(verbose=getattr(args, "verbose", False))
+
     target = args.path.expanduser().resolve()
     raw_root, wiki_root = _resolve_serve_roots(target)
 
@@ -1988,11 +1995,7 @@ def _warn_if_backend_cache_missing(backend: str, cache_dir: Path) -> None:
 def _cmd_run(args: argparse.Namespace) -> int:
     from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, run
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    configure_logging(verbose=getattr(args, "verbose", False))
 
     knowledge_root = args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT
     raw_root = args.raw_root or (knowledge_root / "raw")
@@ -2067,7 +2070,7 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
     """
     from athenaeum.answers import ingest_answers
     from athenaeum.config import load_config
-    from athenaeum.provider import build_llm_client
+    from athenaeum.provider import ProviderConfigError, build_llm_client
 
     target = args.path.expanduser().resolve()
     if not target.exists():
@@ -2091,7 +2094,18 @@ def _cmd_ingest_answers(args: argparse.Namespace) -> int:
     anthropic_client = None
     try:
         anthropic_client = build_llm_client(cfg)
-    except Exception:  # noqa: BLE001
+    except ProviderConfigError as exc:
+        # Issue #540 (M14): a provider MISCONFIGURATION (e.g. a typo in the
+        # backend name) is raised loudly by build_llm_client precisely so it
+        # never silently falls back to a different backend. Surface it and
+        # exit nonzero rather than swallowing it into the offline fallback and
+        # exiting 0 — the exact silent-backend-fallback provider.py forbids.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except Exception:  # noqa: BLE001 — a genuine construction error (e.g. no
+        # API key for the api backend) is the intended offline fallback: leave
+        # the client None and let the caller degrade. Only ProviderConfigError
+        # (a misconfig) is fatal, handled above.
         pass
 
     lock = _acquire_or_exit(target, args, cfg)  # issue #309
@@ -2163,7 +2177,7 @@ def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
     delegates to :func:`athenaeum.tiers.reresolve_open_questions`.
     """
     from athenaeum.config import load_config
-    from athenaeum.provider import build_llm_client
+    from athenaeum.provider import ProviderConfigError, build_llm_client
     from athenaeum.tiers import reresolve_open_questions
 
     target = args.path.expanduser().resolve()
@@ -2180,7 +2194,18 @@ def _cmd_reresolve_questions(args: argparse.Namespace) -> int:
     anthropic_client = None
     try:
         anthropic_client = build_llm_client(cfg)
-    except Exception:  # noqa: BLE001
+    except ProviderConfigError as exc:
+        # Issue #540 (M14): a provider MISCONFIGURATION (e.g. a typo in the
+        # backend name) is raised loudly by build_llm_client precisely so it
+        # never silently falls back to a different backend. Surface it and
+        # exit nonzero rather than swallowing it into the offline fallback and
+        # exiting 0 — the exact silent-backend-fallback provider.py forbids.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except Exception:  # noqa: BLE001 — a genuine construction error (e.g. no
+        # API key for the api backend) is the intended offline fallback: leave
+        # the client None and let the caller degrade. Only ProviderConfigError
+        # (a misconfig) is fatal, handled above.
         pass
 
     lock = _acquire_or_exit(target, args, cfg)  # issue #309
@@ -2427,11 +2452,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     from athenaeum.config import load_config
     from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, ingest
 
-    logging.basicConfig(
-        level=logging.DEBUG if getattr(args, "verbose", False) else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    configure_logging(verbose=getattr(args, "verbose", False))
 
     knowledge_root = (
         args.path.expanduser().resolve() if args.path else DEFAULT_KNOWLEDGE_ROOT
@@ -2496,11 +2517,7 @@ def _cmd_session_end(args: argparse.Namespace) -> int:
     from athenaeum.config import load_config
     from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, session_end
 
-    logging.basicConfig(
-        level=logging.DEBUG if getattr(args, "verbose", False) else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    configure_logging(verbose=getattr(args, "verbose", False))
 
     knowledge_root = (
         args.path.expanduser().resolve() if args.path else DEFAULT_KNOWLEDGE_ROOT

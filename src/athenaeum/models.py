@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 import yaml
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 # --- UID generation ---
 
