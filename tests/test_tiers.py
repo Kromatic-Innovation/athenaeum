@@ -17,6 +17,7 @@ from athenaeum.models import (
     RawFile,
 )
 from athenaeum.tiers import (
+    _TIER2_CLASSIFY_RETRY_MAX_TOKENS,
     MERGE_FALLBACK_LOG_PREFIX,
     MERGE_PARSE_FAIL_AMBIGUOUS,
     MERGE_PARSE_FAIL_NO_JSON,
@@ -2254,3 +2255,113 @@ class TestTier2ReclassifyLargerBudget:
         assert entities == []
         assert retry_stats.truncated == 1
         assert retry_stats.degraded == 0
+
+
+class TestClaudeCliParamDropGating:
+    """#574 (M15): the capability declaration surfaces the two claude-cli param
+    drops — the max_tokens truncation retry (a no-op on the CLI) and the
+    unreliable envelope stop_reason — instead of burning a byte-identical call
+    or taking the wrong retry path on a spurious value."""
+
+    _TYPES = ["person", "reference"]
+    _CLI_CONFIG = {"llm": {"provider": "claude-cli"}}
+
+    def test_truncation_retry_short_circuits_on_cli(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        client = _sequenced_client([_TRUNCATED_PAYLOAD], stop_reasons=["max_tokens"])
+        raw = _make_raw("Entity-dense source text worth classifying.")
+        with caplog.at_level("WARNING"):
+            entities, retry_stats = tier2_reclassify_larger_budget(
+                raw, [], self._TYPES, [], ["internal"], client,
+                config=self._CLI_CONFIG,
+            )
+        # The retry's ONLY change is raising max_tokens, which claude-cli drops:
+        # it would re-send a byte-identical request. Short-circuited, no call.
+        assert client.messages.create.call_count == 0
+        assert entities == []
+        # A still-truncated stat signals NO recovery, so the caller preserves
+        # the file and keeps the original truncation recorded.
+        assert retry_stats.truncated == 1
+        assert any(
+            "does not honor max_tokens" in r.getMessage() for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+    def test_truncation_retry_runs_on_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        payload = json.dumps(
+            [{"name": "Bigger", "entity_type": "reference",
+              "access": "internal", "tags": [], "observations": "fit"}]
+        )
+        client = _sequenced_client([payload], stop_reasons=["end_turn"])
+        raw = _make_raw("Entity-dense source text worth classifying.")
+        entities, retry_stats = tier2_reclassify_larger_budget(
+            raw, [], self._TYPES, [], ["internal"], client,
+            config={"llm": {"provider": "api"}},
+        )
+        # api honors max_tokens -> the retry proceeds with the larger budget.
+        assert client.messages.create.call_count == 1
+        assert (
+            client.messages.create.call_args.kwargs["max_tokens"]
+            == _TIER2_CLASSIFY_RETRY_MAX_TOKENS
+        )
+        assert [e.name for e in entities] == ["Bigger"]
+
+    def test_cli_truncated_first_response_never_takes_max_tokens_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        # A first response truncated at the model cap (envelope stop_reason
+        # "max_tokens") must NOT route to the bigger-budget retry on claude-cli:
+        # the capability says stop_reason is unreliable, so the drop is classed
+        # as a generic degrade and the futile 8192-budget retry never issues.
+        client = _sequenced_client(
+            [_TRUNCATED_PAYLOAD, _TRUNCATED_PAYLOAD],
+            stop_reasons=["max_tokens", "max_tokens"],
+        )
+        raw = _make_raw("Entity-dense source text worth classifying.")
+        stats = Tier2ParseStats()
+        tier2_classify(
+            raw, [], self._TYPES, [], ["internal"], client,
+            config=self._CLI_CONFIG, stats=stats,
+        )
+        retry_budget_calls = [
+            c
+            for c in client.messages.create.call_args_list
+            if c.kwargs.get("max_tokens") == _TIER2_CLASSIFY_RETRY_MAX_TOKENS
+        ]
+        assert retry_budget_calls == []
+        # Classed as a generic degrade, not a truncation (stop_reason suppressed).
+        assert stats.truncated == 0
+        assert stats.degraded >= 1
+
+    def test_api_truncated_first_response_does_take_max_tokens_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Control: on api, the same truncated first response DOES route to the
+        # bigger-budget retry (stop_reason is trusted). Proves the gating is
+        # provider-specific, not a blanket disable.
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        recovered = json.dumps(
+            [{"name": "Alpha", "entity_type": "reference",
+              "access": "internal", "tags": [], "observations": "ok"}]
+        )
+        client = _sequenced_client(
+            [_TRUNCATED_PAYLOAD, recovered],
+            stop_reasons=["max_tokens", "end_turn"],
+        )
+        raw = _make_raw("Entity-dense source text worth classifying.")
+        stats = Tier2ParseStats()
+        tier2_classify(
+            raw, [], self._TYPES, [], ["internal"], client,
+            config={"llm": {"provider": "api"}}, stats=stats,
+        )
+        retry_budget_calls = [
+            c
+            for c in client.messages.create.call_args_list
+            if c.kwargs.get("max_tokens") == _TIER2_CLASSIFY_RETRY_MAX_TOKENS
+        ]
+        assert len(retry_budget_calls) == 1
