@@ -10,6 +10,7 @@ Tier 4: Human escalation
 from __future__ import annotations
 
 import hashlib
+import importlib.resources
 import json
 import logging
 import os
@@ -60,6 +61,7 @@ from athenaeum.prompt_safety import (
     UNTRUSTED_DATA_CLAUSE,
     contains_tag,
     data_only_clause,
+    defang_tag,
     fence_untrusted,
 )
 from athenaeum.provider import (
@@ -80,9 +82,7 @@ DEFAULT_WRITE_MODEL = "claude-sonnet-4-6"
 
 
 def _get_classify_model(config: dict[str, Any] | None = None) -> str:
-    return resolve_model(
-        "classify", "ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CLASSIFY_MODEL, config
-    )
+    return resolve_model("classify", "ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CLASSIFY_MODEL, config)
 
 
 def _get_write_model(config: dict[str, Any] | None = None) -> str:
@@ -101,9 +101,7 @@ def _record_usage(
     untagged calls fall back to the blended rate.
     """
     if usage is not None and hasattr(response, "usage"):
-        input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(
-            response
-        )
+        input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
         usage.add(input_toks, output_toks, cache_creation, cache_read, model=model)
         if cache_creation or cache_read:
             log.debug(
@@ -113,15 +111,88 @@ def _record_usage(
             )
 
 
+# Cap on operator-tunable schema fragments read from the live wiki at runtime
+# (issue #563). Both shipped defaults are well under 2KB; the cap degrades a
+# too-long or accidentally-appended fragment (truncate, do not drop) so it
+# cannot silently inflate every classify/create call.
+_SCHEMA_FRAGMENT_MAX_CHARS = 8192
+
+# The operator-tunable schema fragments that tiers.py interpolates into prompt
+# *instruction position* (adjacent to the fenced <user_document> block). These
+# are the subset of init._SCHEMA_FILES whose live-vs-default divergence the
+# attribution child (#567) surfaces via :func:`schema_fragment_state`.
+_ATTRIBUTED_SCHEMA_FRAGMENTS = ("observation-filter.md", "_entity-template.md")
+
+
 def _load_schema_text(wiki_root: Path, filename: str) -> str:
-    """Load a bundled schema file's content, returning '' if not found."""
+    """Load an operator-tunable schema fragment from the live wiki.
+
+    This is the designed operator tuning knob (issue #17): the package ships
+    defaults under ``athenaeum.schema`` that ``init`` copies write-once into
+    ``wiki/_schema/``, and this reads the (possibly edited) copy back at runtime.
+    Returns ``''`` if the fragment is absent or unreadable.
+
+    Hardened per issue #563, because the two callers interpolate the result into
+    prompt *instruction position* next to the fenced ``<user_document>`` block:
+
+    - **Bounded** to :data:`_SCHEMA_FRAGMENT_MAX_CHARS` — a too-long fragment is
+      truncated (with a warning naming the file and its size), never dropped.
+    - **Defanged** — literal ``<user_document>`` / ``</user_document>`` markers
+      are neutralized so an edited fragment cannot forge the trust boundary of
+      the adjacent untrusted block.
+
+    A fragment with no fence markers that is under the cap (both shipped
+    defaults) renders byte-identically to before.
+    """
     path = wiki_root / "_schema" / filename
-    if path.exists():
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if len(text) > _SCHEMA_FRAGMENT_MAX_CHARS:
+        log.warning(
+            "schema fragment %s is %d chars; truncating to %d (issue #563)",
+            filename,
+            len(text),
+            _SCHEMA_FRAGMENT_MAX_CHARS,
+        )
+        text = text[:_SCHEMA_FRAGMENT_MAX_CHARS]
+    return defang_tag(text, "user_document")
+
+
+def schema_fragment_state(wiki_root: Path) -> dict[str, tuple[str, bool]]:
+    """Report the live vs. shipped-default state of each attributed schema fragment.
+
+    Returns ``{filename: (sha256_hex, is_default)}`` for each fragment in
+    :data:`_ATTRIBUTED_SCHEMA_FRAGMENTS`, where ``sha256_hex`` is the sha256 of
+    the *live* fragment bytes (the empty-string hash when the fragment is absent)
+    and ``is_default`` is True when those bytes are byte-identical to the bundled
+    default. An absent fragment reports a stable hash and ``is_default=False`` —
+    it diverges from the non-empty shipped default.
+
+    This is the input to the attribution child (#567): it is deliberately
+    importable and callable without a wiki write or an API client — the bundled
+    defaults are read via ``importlib.resources.files('athenaeum.schema')``, the
+    same source ``init`` copies out from.
+    """
+    schema_pkg = importlib.resources.files("athenaeum.schema")
+    state: dict[str, tuple[str, bool]] = {}
+    for fname in _ATTRIBUTED_SCHEMA_FRAGMENTS:
+        live_path = wiki_root / "_schema" / fname
         try:
-            return path.read_text(encoding="utf-8")
+            live_bytes = live_path.read_bytes()
         except OSError:
-            pass
-    return ""
+            live_bytes = b""
+        try:
+            default_bytes = (schema_pkg / fname).read_bytes()
+        except (OSError, FileNotFoundError):
+            default_bytes = b""
+        live_sha = hashlib.sha256(live_bytes).hexdigest()
+        default_sha = hashlib.sha256(default_bytes).hexdigest()
+        state[fname] = (live_sha, live_path.exists() and live_sha == default_sha)
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +340,7 @@ def tier2_request_params(
     if wiki_root:
         obs_text = _load_schema_text(wiki_root, "observation-filter.md")
         if obs_text:
-            obs_filter = "\n## Observation filter (what to capture)\n" f"{obs_text}\n"
+            obs_filter = f"\n## Observation filter (what to capture)\n{obs_text}\n"
 
     user_msg = CLASSIFY_USER_TEMPLATE.format(
         content=fence_untrusted(raw.content, tag="user_document", max_chars=4000),
@@ -570,8 +641,7 @@ def parse_tier2_entities(
     def _record_drop(reason: str) -> None:
         if _truncated:
             log.warning(
-                "%s ref=%s reason=%s stop_reason=max_tokens "
-                "dropped_all_entities: %s",
+                "%s ref=%s reason=%s stop_reason=max_tokens dropped_all_entities: %s",
                 TIER2_TRUNCATED_MARKER,
                 ref,
                 reason,
@@ -923,8 +993,7 @@ _MERGE_PATCH_MAX_TOKENS = 2048
 # and resolved through the seam like the merge budgets. Value unchanged.
 _TIER3_CREATE_MAX_TOKENS = 2048
 
-MERGE_TEMPLATE = (
-    """## Existing page content
+MERGE_TEMPLATE = """## Existing page content
 {existing_body}
 
 ## New observation (source: {source_ref})
@@ -940,12 +1009,9 @@ If the observation adds nothing new, return {{"ops": []}}.
 If you detect a principled contradiction that needs human review, do NOT
 return JSON — start your response with exactly `ESCALATE:` followed by a
 description of the conflict.
-"""
-    + data_only_clause("user_document", "existing_page")
-)
+""" + data_only_clause("user_document", "existing_page")
 
-MERGE_TEMPLATE_FULL = (
-    """## Existing page content
+MERGE_TEMPLATE_FULL = """## Existing page content
 {existing_body}
 
 ## New observation (source: {source_ref})
@@ -956,9 +1022,7 @@ Return the updated body content (no frontmatter). Merge the new observation
 into the existing page. If you detect a principled contradiction that needs
 human review, start your response with exactly `ESCALATE:` followed by a
 description of the conflict, then provide the merged body below a `---` separator.
-"""
-    + data_only_clause("user_document", "existing_page")
-)
+""" + data_only_clause("user_document", "existing_page")
 
 
 def tier3_create_params(
@@ -976,9 +1040,7 @@ def tier3_create_params(
     if wiki_root:
         tmpl_text = _load_schema_text(wiki_root, "_entity-template.md")
         if tmpl_text:
-            tmpl_section = (
-                "\n## Entity template (follow this structure)\n" f"{tmpl_text}\n"
-            )
+            tmpl_section = f"\n## Entity template (follow this structure)\n{tmpl_text}\n"
 
     user_msg = CREATE_TEMPLATE.format(
         name=action.name,
@@ -986,9 +1048,7 @@ def tier3_create_params(
         tags=", ".join(action.tags),
         access=action.access,
         source_ref=source_ref,
-        observations=fence_untrusted(
-            action.observations, tag="user_document", max_chars=3000
-        ),
+        observations=fence_untrusted(action.observations, tag="user_document", max_chars=3000),
         entity_template_section=tmpl_section,
     )
     return {
@@ -1104,9 +1164,7 @@ def tier3_merge_params(
             defang=False,
         ),
         source_ref=source_ref,
-        observations=fence_untrusted(
-            action.observations, tag="user_document", max_chars=3000
-        ),
+        observations=fence_untrusted(action.observations, tag="user_document", max_chars=3000),
     )
     return {
         "model": _get_write_model(config),
@@ -1140,9 +1198,7 @@ def tier3_merge_full_params(
             existing_body, tag=_EXISTING_PAGE_TAG, max_chars=_MAX_EXISTING_BODY_CHARS
         ),
         source_ref=source_ref,
-        observations=fence_untrusted(
-            action.observations, tag="user_document", max_chars=3000
-        ),
+        observations=fence_untrusted(action.observations, tag="user_document", max_chars=3000),
     )
     return {
         "model": _get_write_model(config),
@@ -1408,9 +1464,7 @@ def parse_merge_ops_response(
     # zero parse-fails or name exactly what is left, then fall back to full-echo
     # (never a silent no-op — a "no changes needed" prose reply must still be
     # completed by the full-echo path, not dropped).
-    redacted_prefix, _findings = redact_outbound_text(
-        stripped[:MERGE_RESP_PREFIX_CHARS]
-    )
+    redacted_prefix, _findings = redact_outbound_text(stripped[:MERGE_RESP_PREFIX_CHARS])
     log.warning(
         "%s page=%s source=%s cause=%s — patch-mode response unparseable "
         "(no valid ops list); retrying via full-page echo (~10x output cost) "
@@ -1470,9 +1524,7 @@ def tier3_merge(
     if not needs_fallback:
         return body, escalation
 
-    return tier3_merge_full(
-        action, existing_body, source_ref, client, usage=usage, config=config
-    )
+    return tier3_merge_full(action, existing_body, source_ref, client, usage=usage, config=config)
 
 
 def tier3_merge_full(
@@ -1627,9 +1679,7 @@ def tier3_write(
             existing_path = index.get_by_uid(action.existing_uid)
 
             if not existing_path or not existing_path.exists():
-                log.warning(
-                    "Could not find existing page for uid %s", action.existing_uid
-                )
+                log.warning("Could not find existing page for uid %s", action.existing_uid)
                 continue
 
             text = existing_path.read_text(encoding="utf-8")
@@ -1667,9 +1717,7 @@ def tier3_write(
 # ---------------------------------------------------------------------------
 
 
-def _question_from_description(
-    description: str, entity_name: str, conflict_type: str
-) -> str:
+def _question_from_description(description: str, entity_name: str, conflict_type: str) -> str:
     """Derive a one-line question for the checkbox row.
 
     Uses the first non-empty line of the description, trimmed to a single
@@ -1755,9 +1803,7 @@ def _pair_key_from_description(description: str) -> tuple[str, ...] | None:
         # with a stable separator so passage order does NOT change the key
         # — sort to make (P1,P2) and (P2,P1) collapse.
         norm = sorted(p.strip() for p in passages[:2])
-        h = hashlib.sha1((norm[0] + "\n---\n" + norm[1]).encode("utf-8")).hexdigest()[
-            :16
-        ]
+        h = hashlib.sha1((norm[0] + "\n---\n" + norm[1]).encode("utf-8")).hexdigest()[:16]
         return ("__passage_hash__", h)
     return None
 
@@ -1929,9 +1975,7 @@ def tier4_escalate(
         if isinstance(key, tuple) and key and key[0] != "__passage_hash__":
             mk = _member_key_str(key)
         norms2 = key_side_norms.get(key)
-        pt: str | None = (
-            _pair_text_from_passages(norms2[0], norms2[1]) if norms2 else None
-        )
+        pt: str | None = _pair_text_from_passages(norms2[0], norms2[1]) if norms2 else None
         record_resolution(
             knowledge_root,
             fingerprint=fp,
@@ -1979,9 +2023,12 @@ def tier4_escalate(
     # tuple, or sha1(passages) fallback). Default ON; escape hatch via the
     # ATHENAEUM_TIER4_DEDUP env var so a downstream user can force the
     # legacy always-append behavior.
-    dedup_enabled = os.environ.get(
-        "ATHENAEUM_TIER4_DEDUP", "true"
-    ).strip().lower() not in ("false", "0", "no", "off")
+    dedup_enabled = os.environ.get("ATHENAEUM_TIER4_DEDUP", "true").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+        "off",
+    )
 
     # Build the open-pair index from the file's currently-open ([ ]) blocks.
     # Archived/[x] blocks are deliberately excluded — a previously-answered
@@ -2048,9 +2095,7 @@ def tier4_escalate(
         # adjudicated (human or auto). Computed from the two passages +
         # conflict_type — page-independent, so a settled pair never re-fires
         # regardless of which page surfaced it.
-        item_fingerprint = fingerprint_from_description(
-            item.description, item.conflict_type
-        )
+        item_fingerprint = fingerprint_from_description(item.description, item.conflict_type)
 
         # Issue #211: per-item member_key and pair_text for fuzzy matching.
         # member_key is derived from _pair_key_from_description — only use it
@@ -2174,8 +2219,7 @@ def tier4_escalate(
                         recommended_winner="a",
                         action=resolved_action,  # type: ignore[arg-type]
                         rationale=(
-                            "auto-applied prior human-ratified verdict "
-                            f"{source_verdict_id}"
+                            f"auto-applied prior human-ratified verdict {source_verdict_id}"
                         ),
                         confidence=1.0,
                     )
@@ -2256,9 +2300,7 @@ def tier4_escalate(
         # Issue #198: embed the claim-pair fingerprint so the resolution
         # path (human ingest / auto-apply) can recover it and persist the
         # adjudication to the cache.
-        fingerprint_line = (
-            f"**Fingerprint**: {item_fingerprint}\n" if item_fingerprint else ""
-        )
+        fingerprint_line = f"**Fingerprint**: {item_fingerprint}\n" if item_fingerprint else ""
         block = (
             f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'
             f"- [ ] {question}\n\n"
@@ -2296,9 +2338,7 @@ def tier4_escalate(
             should_apply, gate_threshold = _should_auto_apply(best)
             if not should_apply:
                 continue
-            updated = apply_auto_resolution(
-                sections[slot], best, model=resolver_model_id
-            )
+            updated = apply_auto_resolution(sections[slot], best, model=resolver_model_id)
             if updated != sections[slot]:
                 log.info(
                     "Auto-resolved batched escalation key=%s action=%s "
@@ -2336,9 +2376,7 @@ def tier4_escalate(
                 best = best_proposal.get(key_for_block) if key_for_block else None
                 should_apply, gate_threshold = _should_auto_apply(best)
                 if should_apply:
-                    rewritten = apply_auto_resolution(
-                        updated_block, best, model=resolver_model_id
-                    )
+                    rewritten = apply_auto_resolution(updated_block, best, model=resolver_model_id)
                     if rewritten != updated_block:
                         log.info(
                             "Auto-resolved cross-batch escalation key=%s action=%s "
@@ -2348,9 +2386,7 @@ def tier4_escalate(
                             best.confidence,
                             gate_threshold,
                         )
-                        _maybe_enact(
-                            best, best_members.get(key_for_block), key_for_block
-                        )
+                        _maybe_enact(best, best_members.get(key_for_block), key_for_block)
                         _record_auto(best, key_for_block)
                     updated_block = rewritten
             # Replace verbatim — raw_block came from parse, so it lives
@@ -2411,9 +2447,7 @@ def tier4_escalate(
 _PROPOSAL_MARKER = "**Proposed resolution**:"
 _AUTO_RESOLVED_MARKER_TEXT = "**Auto-resolved**: true"
 # ``**Member paths**: a, b`` — explicit source paths carried on a block.
-_MEMBER_PATHS_LINE_RE = re.compile(
-    r"^\s*\*\*Member paths\*\*:\s*(?P<payload>.+)$", re.MULTILINE
-)
+_MEMBER_PATHS_LINE_RE = re.compile(r"^\s*\*\*Member paths\*\*:\s*(?P<payload>.+)$", re.MULTILINE)
 
 
 def _block_has_proposal(raw_block: str) -> bool:
@@ -2547,11 +2581,7 @@ def reresolve_open_questions(
 
     questions = parse_pending_questions(pending_path)
     # Fast exit: nothing proposal-less and open → no work, no discovery cost.
-    targets = [
-        pq
-        for pq in questions
-        if not pq.answered and not _block_has_proposal(pq.raw_block)
-    ]
+    targets = [pq for pq in questions if not pq.answered and not _block_has_proposal(pq.raw_block)]
     if not targets:
         # Issue #398: still emit start/done so a watchdog sees the phase ran
         # even when there was nothing to re-resolve.
@@ -2609,9 +2639,7 @@ def reresolve_open_questions(
     # zone — a hung ``claude -p`` resolver call previously produced zero
     # log output. Emit a heartbeat per pending question re-resolved.
     heartbeat_interval = resolve_heartbeat_interval(resolved_config)
-    heartbeat = PhaseHeartbeat(
-        "reresolve", total=len(targets), interval_s=heartbeat_interval
-    )
+    heartbeat = PhaseHeartbeat("reresolve", total=len(targets), interval_s=heartbeat_interval)
     heartbeat.start()
 
     for pq in targets:
@@ -2667,8 +2695,7 @@ def reresolve_open_questions(
             drops.add(pq.raw_block)
             dropped += 1
             log.info(
-                "reresolve: cleared entity=%s as not_a_conflict; "
-                "dropping pending question",
+                "reresolve: cleared entity=%s as not_a_conflict; dropping pending question",
                 pq.entity,
             )
             continue
@@ -2685,7 +2712,7 @@ def reresolve_open_questions(
             applied = apply_auto_resolution(block, proposal, model=resolver_model_id)
             if applied != block:
                 log.info(
-                    "reresolve: auto-resolved entity=%s action=%s " "(confidence=%.2f)",
+                    "reresolve: auto-resolved entity=%s action=%s (confidence=%.2f)",
                     pq.entity,
                     action,
                     confidence,
@@ -2769,12 +2796,7 @@ def _append_dropped_to_archive(pending_path: Path, blocks: list[str]) -> None:
     if existing.strip():
         if existing.startswith("# Answered Questions"):
             _, _, rest = existing.partition("\n")
-            combined = (
-                "# Answered Questions\n"
-                + new_section
-                + "\n\n---\n\n"
-                + rest.lstrip("\n")
-            )
+            combined = "# Answered Questions\n" + new_section + "\n\n---\n\n" + rest.lstrip("\n")
         else:
             combined = new_section + "\n\n---\n\n" + existing.lstrip("\n")
     else:
