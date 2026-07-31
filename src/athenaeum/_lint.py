@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 
 def _strip_self_reference(

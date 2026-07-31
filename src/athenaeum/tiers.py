@@ -58,7 +58,7 @@ from athenaeum.outbound_pii import redact_outbound_text
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.search import embed_texts
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 # Model defaults — override via env var or the yaml `models:` section
 # (env > yaml > default; issue #232).
