@@ -175,29 +175,6 @@ def validate_source_value(value: Any) -> Any:
     return value
 
 
-def _is_per_value_list(value: Any) -> bool:
-    """Return True if ``value`` is the per-value list-of-records shape.
-
-    Per-value shape (issue #102, design lock §2.1):
-
-        [{"value": <any>, "source": <str|dict>}, ...]
-
-    A non-list, or a list that doesn't look like records of that shape,
-    is legacy. Empty list counts as per-value (vacuously valid — and
-    distinguishes intent from an absent value).
-    """
-    if not isinstance(value, list):
-        return False
-    if not value:
-        return True
-    for entry in value:
-        if not isinstance(entry, dict):
-            return False
-        if "value" not in entry or "source" not in entry:
-            return False
-    return True
-
-
 def parse_per_value_field_sources(value: Any) -> list[dict[str, Any]]:
     """Parse a per-value ``field_sources.<list_field>`` entry.
 
