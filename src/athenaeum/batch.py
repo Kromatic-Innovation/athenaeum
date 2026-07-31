@@ -85,7 +85,7 @@ from athenaeum.tiers import (
     tier4_escalate,
 )
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 # Poll cadence for ``processing_status``. 30s keeps the nightly run
 # responsive to the common fast-completion case without hammering the API;

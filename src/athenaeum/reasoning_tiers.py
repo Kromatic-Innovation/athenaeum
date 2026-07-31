@@ -87,7 +87,7 @@ from athenaeum.pending_merges import PendingMerge
 from athenaeum.pii import is_pii_flagged
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Model selection (issue #423) — resolves via the existing provider-aware

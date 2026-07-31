@@ -23,7 +23,7 @@ from pathlib import Path
 from athenaeum.ephemeral import classify_ephemeral_page
 from athenaeum.models import parse_frontmatter
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 # Compiled merged auto-memory pages are named ``auto-<topic-slug>.md`` (mirrors
 # :data:`athenaeum.merge.AUTO_WIKI_PREFIX`). Re-declared here so the prune

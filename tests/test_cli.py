@@ -609,6 +609,38 @@ class TestIngestAnswers:
         assert rc == 0
         assert "Ingested 0" in capsys.readouterr().out
 
+    def test_provider_misconfig_fails_loud_not_offline_fallback(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Issue #540 (M14): a provider misconfiguration (a typo'd backend name)
+        # must NOT be swallowed into the offline fallback + exit 0. It must
+        # print the error and exit nonzero — the silent-backend-fallback the
+        # provider module forbids in writing.
+        (tmp_path / "wiki").mkdir()
+        (tmp_path / "raw").mkdir()
+        monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "bogus-backend")
+        rc = main(["ingest-answers", "--path", str(tmp_path)])
+        assert rc == 1
+        assert "bogus-backend" in capsys.readouterr().err
+
+    def test_reresolve_provider_misconfig_fails_loud(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Issue #540 (M14): the same fail-loud guarantee on the sibling
+        # `reresolve-questions` write path.
+        (tmp_path / "wiki").mkdir()
+        (tmp_path / "raw").mkdir()
+        monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "bogus-backend")
+        rc = main(["reresolve-questions", "--path", str(tmp_path)])
+        assert rc == 1
+        assert "bogus-backend" in capsys.readouterr().err
+
     def test_ingests_answered_block(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

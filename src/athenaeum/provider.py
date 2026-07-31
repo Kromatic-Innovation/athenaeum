@@ -56,7 +56,7 @@ from typing import Any
 
 from athenaeum._retry import TransientAPIError
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 #: Recognized provider ids. ``api`` is the default and wraps the Anthropic SDK
 #: unchanged; ``claude-cli`` drives the ambient Claude Code subscription login.

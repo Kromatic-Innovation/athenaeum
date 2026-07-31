@@ -40,7 +40,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-log = logging.getLogger("athenaeum")
+log = logging.getLogger(__name__)
 
 # Cache file lives under the knowledge root's ``raw/`` tree, beside the
 # answers intake. It is append-only JSONL.
