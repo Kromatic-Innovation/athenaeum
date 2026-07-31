@@ -1743,9 +1743,13 @@ def _rebuild_recall_index(
     cache_dir.mkdir(parents=True, exist_ok=True)
     try:
         if backend == "vector":
-            count = build_vector_index(wiki_root, cache_dir, extra_roots=extra_roots)
+            count = build_vector_index(
+                wiki_root, cache_dir, extra_roots=extra_roots, config=cfg
+            )
         else:
-            count = build_fts5_index(wiki_root, cache_dir, extra_roots=extra_roots)
+            count = build_fts5_index(
+                wiki_root, cache_dir, extra_roots=extra_roots, config=cfg
+            )
         print(f"  recall index rebuilt ({backend}): {count} page(s).")
     except Exception as exc:
         print(
@@ -2000,6 +2004,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         extra_roots=extra_roots,
         caller_audience=caller_audience,
         screening=screening,
+        config=cfg,
     )
     try:
         server.run()
@@ -2453,6 +2458,7 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
                     embedding_model=embedding_model,
                     as_of=as_of,
                     full_rehash_max_age_days=full_rehash_max_age_days,
+                    config=cfg,
                 )
             except ImportError as exc:
                 print(f"Vector backend unavailable: {exc}", file=sys.stderr)
@@ -2476,6 +2482,7 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
                 exclude_globs=exclude_globs,
                 as_of=as_of,
                 full_rehash_max_age_days=full_rehash_max_age_days,
+                config=cfg,
             )
             print(
                 f"FTS5 index rebuilt{as_of_note} ({mode}): {count} pages "
@@ -2670,6 +2677,7 @@ def _cmd_recall(args: argparse.Namespace) -> int:
         parse_frontmatter,
     )
     from athenaeum.search import get_backend
+    from athenaeum.storage import is_recallable, storage_policy_configured
 
     knowledge_root = args.path.expanduser().resolve()
     wiki_root = knowledge_root / "wiki"
@@ -2685,6 +2693,9 @@ def _cmd_recall(args: argparse.Namespace) -> int:
 
     # Issue #312: resolve the read-scope pin (CLI > env > yaml). None = owner.
     caller_audience = resolve_audience(cfg, getattr(args, "audience", None))
+    # Issue #532: enforce the storage-adapter ``recallable`` policy at render
+    # only when a non-default storage policy is configured (strict no-op else).
+    enforce_recallable = storage_policy_configured(cfg)
 
     try:
         backend = get_backend(backend_name)
@@ -2705,7 +2716,11 @@ def _cmd_recall(args: argparse.Namespace) -> int:
         query_cache.mkdir(parents=True, exist_ok=True)
         try:
             backend.build_index(
-                wiki_root, query_cache, extra_roots=extra_roots, as_of=as_of
+                wiki_root,
+                query_cache,
+                extra_roots=extra_roots,
+                as_of=as_of,
+                config=cfg,
             )
         except ImportError as exc:
             print(f"As-of index build failed: {exc}", file=sys.stderr)
@@ -2748,6 +2763,15 @@ def _cmd_recall(args: argparse.Namespace) -> int:
         # window relative to ``as_of`` (default today), so the CLI output stays
         # consistent with the requested view regardless of backend build state.
         if readable and is_inactive_memory(fm, as_of):
+            continue
+        # Issue #532 (H4): honor the storage-adapter ``recallable`` corpus
+        # policy, matching the MCP ``recall`` tool. Only enforced when the
+        # config defines a non-default storage policy — a strict no-op
+        # otherwise. Fail-closed: an unreadable hit cannot have its class
+        # verified, so it is withheld.
+        if enforce_recallable and (
+            not readable or not is_recallable(str(fm.get("type") or ""), cfg)
+        ):
             continue
         print(f"{score:.2f}\t{filename}\t{preview}")
 
