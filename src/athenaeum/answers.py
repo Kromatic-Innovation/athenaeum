@@ -68,6 +68,7 @@ from athenaeum.fingerprint import (
     normalize_side,
     record_resolution,
 )
+from athenaeum.sidecar_blocks import GENERIC_FENCE_OPEN_RE, split_blocks
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +112,14 @@ def _unescape_entity(raw: str) -> str:
             i += 1
     return "".join(out)
 
+
+# Any level-2 heading starts a new pending-question block. Unlike pending
+# merges (which only breaks on its canonical ``Merge:`` header and absorbs other
+# ``## `` lines as Draft body), a pending-question block with a MALFORMED header
+# is preserved verbatim as its own block so a human can fix it — so the block
+# boundary here is any ``## `` line, while only a real ``Entity:`` header
+# (:data:`_HEADER_RE`) recovers a boundary swallowed by an unclosed fence.
+_ANY_H2_RE = re.compile(r"^## ")
 
 # Checkbox grammar — ``- [ ]`` or ``- [x]`` (case-insensitive on ``x``).
 _CHECKBOX_RE = re.compile(r"^- \[(?P<state>[ xX])\]\s*(?P<question>.*)$")
@@ -178,30 +187,31 @@ def _make_id(header_line: str, question_text: str) -> str:
 def _split_blocks(text: str) -> list[str]:
     """Split ``_pending_questions.md`` text into per-question blocks.
 
-    Blocks are separated by ``## `` headers or ``---`` dividers; the file
-    leader (``# Pending Questions``, blank lines, or a stray preamble)
-    is discarded. Each returned block starts with its ``## `` header.
+    Only a canonical question header (``## [DATE] Entity: "..." (from ...)`` —
+    the :data:`_HEADER_RE` shape) starts a new block. A block's tail is the
+    human's free-form answer, which may legitimately contain a fenced code block
+    that itself holds bare ``---`` dividers or ``## `` headings. While inside
+    that fence those lines are body content, never block delimiters — the file
+    leader (``# Pending Questions``, blank lines, stray preamble) is still
+    discarded, and each returned block starts with its ``## `` header.
+
+    Historically this split naively on ``startswith("## ")`` and bare ``---``
+    with NO fence tracking, so a ``---`` or ``## `` inside a human's fenced
+    answer split the block and silently dropped the tail — taking the answer
+    with it (the #394 failure class, fixed in ``pending_merges`` only; audit M11
+    / #527). It now delegates to the shared
+    :func:`athenaeum.sidecar_blocks.split_blocks` — the single fence-aware
+    splitter — parameterized with the Entity header and a generic backtick
+    fence-opener (a human answer may fence with any language, not just
+    ```markdown), so the two sidecar splitters cannot diverge again.
     """
-    blocks: list[str] = []
-    current: list[str] = []
-
-    for line in text.splitlines():
-        stripped = line.strip()
-        if line.startswith("## "):
-            if current:
-                blocks.append("\n".join(current).rstrip())
-            current = [line]
-        elif stripped == "---":
-            if current:
-                blocks.append("\n".join(current).rstrip())
-                current = []
-        else:
-            if current:
-                current.append(line)
-    if current:
-        blocks.append("\n".join(current).rstrip())
-
-    return [b for b in blocks if b.startswith("## ")]
+    return split_blocks(
+        text,
+        block_header_re=_ANY_H2_RE,
+        fence_open_re=GENERIC_FENCE_OPEN_RE,
+        recovery_header_re=_HEADER_RE,
+        context="pending_questions",
+    )
 
 
 def _synthesize_checkbox_block(lines: list[str]) -> list[str] | None:
