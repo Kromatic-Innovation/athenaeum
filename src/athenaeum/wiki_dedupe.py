@@ -63,20 +63,15 @@ Out of scope (deliberate — see issue #290):
 - Real contradiction detection beyond the existing cohesion threshold.
 - Retroactively re-clustering already ``archived``/``superseded_by`` pages.
 
-SCC membership (L4, one of 8 mutually-recursive modules — librarian,
-merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
-as one ~12,000-line module split for readability, not independence).
-``wiki_dedupe.py`` imports ``athenaeum.merge`` and
-``athenaeum.pending_merges`` at module TOP level — normal downward
-dependencies; neither imports this module back, so this module has NO
-cycle edge of its own in the SCC (``librarian.py`` calls into this module,
-but only via ITS OWN deferred import — see ``librarian.py``'s module
-docstring — because librarian, not wiki_dedupe, sits on a cycle). The one
-function-local ``from athenaeum.pending_merges import _make_id,
-parse_pending_merges`` inside ``propose_wiki_page_merges`` (~line 431) is
+Layering (L4 domain/pipeline). ``wiki_dedupe.py`` imports ``athenaeum.merge``
+and ``athenaeum.pending_merges`` at module TOP level — normal downward
+dependencies; neither imports this module back. After issue #545 dissolved
+the librarian-centered named-8 coupling, ``wiki_dedupe.py`` is NOT part of any
+import SCC. ``librarian.py`` calls into this module only via its own deferred
+import (a one-way edge). The one function-local ``from athenaeum.pending_merges
+import _make_id, parse_pending_merges`` inside ``propose_wiki_page_merges`` is
 NOT a cycle-breaker (``pending_merges`` is already imported at top level
-above); it is a plain in-function convenience import with no
-import-ordering significance.
+above); it is a plain in-function convenience import.
 """
 
 from __future__ import annotations

@@ -45,18 +45,14 @@ to upgrade a source from the honest ``inferred`` default to ``user-stated`` /
 invariant still holds: a footnote never cites the raw ``auto-memory/...``
 filename.
 
-SCC membership (L4, one of 8 mutually-recursive modules — librarian,
-merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
-as one ~12,000-line module split for readability, not independence).
-``retire.py`` imports ``athenaeum.merge`` (``MergedWikiEntry``,
-``render_merged_entry``, ``resolve_member_path``) at module TOP level — a
-normal downward dependency, not a cycle edge on this side. This module has
-NO deferred imports of its own; it is the non-deferred half of the
-librarian<->merge/retire relationship — ``librarian.py`` function-locally
-imports this module's ``run_retire_pass`` (``_run_retire_pass``, ~line
-1516) precisely BECAUSE both ``retire.py`` and ``librarian.py`` already
-import ``merge.py`` at top level, so it is librarian's import of THIS
-module (not the other way round) that has to be the deferred one.
+Layering (L4 domain/pipeline). ``retire.py`` imports ``athenaeum.merge``
+(``MergedWikiEntry``, ``render_merged_entry``, ``resolve_member_path``) at
+module TOP level — a normal downward dependency. This module has NO deferred
+imports of its own and, after issue #545 dissolved the librarian-centered
+named-8 coupling, ``retire.py`` is NOT part of any import SCC: it imports no
+module that imports it back. ``librarian.py`` still function-locally imports
+this module's ``run_retire_pass`` (``_run_retire_pass``), but that is a
+one-way edge kept deferred for best-effort isolation, not cycle-breaking.
 """
 
 from __future__ import annotations
