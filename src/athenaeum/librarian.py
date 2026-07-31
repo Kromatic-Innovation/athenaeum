@@ -102,6 +102,7 @@ from athenaeum.models import (
 from athenaeum.provider import (
     ProviderConfigError,
     build_llm_client,
+    capabilities_for,
     preflight_provider,
     resolve_provider,
 )
@@ -2005,11 +2006,13 @@ def run(
     if batch_mode is None:
         batch_mode = librarian_batch_mode(config)
 
-    # Issue #330: batch mode is API-only — the Messages Batch API is an
-    # Anthropic-endpoint feature with no ``claude`` CLI equivalent. Reject the
-    # combination LOUDLY at startup rather than silently falling back to the
-    # api backend or silently dropping the batch request.
-    if batch_mode and provider == "claude-cli":
+    # Issue #330/#573: batch mode is API-only — the Messages Batch API is an
+    # Anthropic-endpoint feature with no ``claude`` CLI equivalent. This is now
+    # a DECLARED capability (``supports_batches``) rather than an inline
+    # provider-id test: reject the combination LOUDLY at startup rather than
+    # silently falling back to the api backend or silently dropping the batch
+    # request.
+    if batch_mode and not capabilities_for(provider).supports_batches:
         log.error(
             "batch mode (ATHENAEUM_BATCH_MODE / librarian.batch_mode / "
             "--batch-mode) is incompatible with the claude-cli provider: the "
