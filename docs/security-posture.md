@@ -54,6 +54,37 @@ one write a secondary agent legitimately makes without adding any read
 protection. As with the read scope, this is a single-owner filter, **not** a
 multi-user ACL system.
 
+### 2.2 Outbound LLM path — prompt hygiene and PII posture (#543)
+
+Athenaeum sends prompts to a model on two backends: the Anthropic SDK (`api`)
+and a local `claude -p` subprocess (`claude-cli`). Audit findings **L4/L5/L6**
+covered what leaves the process on that path and what comes back.
+
+- **L4 — prompt never in the process table.** The `claude-cli` backend passes
+  the user prompt on **stdin**, not as a `-p <prompt>` argv element, so the
+  user's own notes are not visible to a local `ps` for the (up to 300s) life of
+  the call. The argv-list form (no `shell=True`; the audit confirmed zero
+  `shell=True` / `os.system` across the tree) is retained.
+- **L5 — response logging is redacted.** The one response-logging site that
+  embedded raw model output in an error (`provider._parse_envelope`) now runs it
+  through `redact_outbound_text` first, matching the sibling site in `tiers.py`.
+
+- **L6 — outbound PII redaction on egress: intended posture is NO chokepoint,
+  by design (option S).** `outbound_pii.redact_outbound_text` exists and is
+  wired to *log-line* redaction (L5 above, and `tiers.py`), but **no call site
+  redacts prompt CONTENT on the way to a model, and that is intentional.**
+  Athenaeum is a single-user *personal memory* tool whose entire job is to
+  remember personal things and reason over them with a model; a blanket egress
+  redactor on `build_llm_client` would corrupt the very content the tool exists
+  to process. So the deliberate posture is: **the outbound path is not a PII
+  boundary.** The genuinely hard half — egress *refusal* (an agent declining to
+  reveal PII even when asked), and any conditional/consented redaction that is
+  narrower than "redact everything" — is a policy decision that stays parked on
+  **#428** (see `outbound_pii.py` module docstring, lines 8-10), which owns the
+  enforcement design if the posture ever changes. This section is the "write it
+  down" half of L6: the redaction module is called by nothing on the egress path
+  **on purpose**, not by oversight.
+
 ## 3. Dependency-upgrade policy
 
 This repo follows the Kromatic maintenance-posture playbook, with one critical adaptation: **the package's own upper-bound caps in `pyproject.toml` define what Dependabot can propose at all.** Auto-merge eligibility is layered on top of those caps.
