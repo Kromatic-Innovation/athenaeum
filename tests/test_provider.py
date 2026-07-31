@@ -22,11 +22,13 @@ from athenaeum.provider import (
     LLMResponse,
     LLMTextBlock,
     LLMUsage,
+    ProviderCapabilities,
     ProviderConfigError,
     _CliResponse,
     _CliTextBlock,
     _CliUsage,
     build_llm_client,
+    capabilities_for,
     resolve_provider,
 )
 from athenaeum.tiers import _record_usage
@@ -547,3 +549,48 @@ class TestLLMBackendContract:
         )
         assert isinstance(resp, LLMResponse)
         assert extract_json_object(resp.content[0].text) == {"ok": 1}
+
+
+# ---------------------------------------------------------------------------
+# ProviderCapabilities — each backend DECLARES what it can honor (#573)
+# ---------------------------------------------------------------------------
+
+
+class TestProviderCapabilities:
+    def test_cli_declares_the_dropped_capabilities(self):
+        caps = capabilities_for("claude-cli")
+        # The CLI backend drops max_tokens, cannot report stop_reason, strips
+        # cache_control, drops sampling params, and has no Batch API.
+        assert caps.honors_max_tokens is False
+        assert caps.reports_stop_reason is False
+        assert caps.honors_cache_control is False
+        assert caps.honors_sampling_params is False
+        assert caps.supports_batches is False
+
+    def test_api_honors_the_full_surface(self):
+        caps = capabilities_for("api")
+        # The api backend wraps the SDK verbatim: every param passes through.
+        assert caps.honors_max_tokens is True
+        assert caps.reports_stop_reason is True
+        assert caps.honors_cache_control is True
+        assert caps.honors_sampling_params is True
+        assert caps.supports_batches is True
+
+    def test_unknown_provider_falls_back_to_api_caps(self):
+        # A caller reaching here with a bad id has passed resolve_provider's
+        # validation; the api caps are the conservative (most-honoring) default.
+        assert capabilities_for("something-else") == capabilities_for("api")
+
+    def test_capabilities_are_frozen(self):
+        caps = capabilities_for("claude-cli")
+        with pytest.raises((AttributeError, TypeError)):
+            caps.honors_max_tokens = True  # type: ignore[misc]
+
+    def test_supports_batches_is_the_folded_batch_guard(self):
+        # The batch-mode startup guard now reads this flag (issue #573):
+        # claude-cli cannot batch; api can.
+        assert capabilities_for("claude-cli").supports_batches is False
+        assert capabilities_for("api").supports_batches is True
+
+    def test_is_a_provider_capabilities_instance(self):
+        assert isinstance(capabilities_for("api"), ProviderCapabilities)

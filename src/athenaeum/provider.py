@@ -238,6 +238,105 @@ class LLMBackend(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Provider capabilities (issue #573 / epic #515)
+#
+# The load-bearing piece of the epic: each backend DECLARES what it can honor
+# instead of silently no-op'ing a param it drops. The audit found the exact
+# bug this prevents (M15, issue #574): the CLI backend drops ``max_tokens``
+# with no CLI equivalent (``provider.py`` ``_create``), so the #476 truncation
+# retry — whose only change is raising ``max_tokens`` — re-sends a byte-
+# identical request; and it cannot populate ``stop_reason``, so the
+# truncation-detection branches never fire. Two defects, one root cause: a
+# dropped capability with no declaration.
+#
+# This folds in the two ad-hoc precedents that already encoded a capability
+# informally:
+#   1. the batch-mode startup guard (``librarian.run_librarian``) — now
+#      ``supports_batches`` (the guard reads this flag instead of testing the
+#      provider id inline);
+#   2. the documented-but-unenforced ``cache_control`` stripping on the CLI
+#      path (``_text_from_system`` / ``_text_from_messages``) — now declared
+#      as ``honors_cache_control=False``.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    """What a backend can honor. Frozen — a backend's capabilities are fixed.
+
+    Callers branch or warn on a ``False`` flag instead of silently sending a
+    request the backend will drop (issue #573). The four flags here are
+    TRANSPORT-level (a property of the backend), resolved by
+    :func:`capabilities_for`.
+
+    ``honors_sampling_params`` is the one MODEL-level flag: ``temperature`` /
+    ``top_p`` / ``top_k`` return HTTP 400 on Opus 4.7+, Opus 5, Sonnet 5, and
+    Fable 5, and are accepted on Haiku 4.5 / Sonnet 4.6 — a property of the
+    *model*, not the transport. The model-level prefix set that records this
+    lands with the pricing table in :mod:`athenaeum.models` (issue #577 / epic
+    #516's B1), which is *"the single update site for model pricing"*; this
+    module reads that set rather than re-declaring it (epic #515: the sampling-
+    capability set *"should land once, not twice"*). The value here is the
+    transport-level default (the CLI drops sampling params like ``max_tokens``;
+    the ``api`` transport passes them through and the model 400s or does not);
+    per-model refinement is wired in :func:`capabilities_for` once #577's set
+    exists. The flag DESCRIBES reality — it is not a step toward sending the
+    parameter (issues #573/#577 both put that out of scope).
+    """
+
+    honors_max_tokens: bool
+    reports_stop_reason: bool
+    honors_cache_control: bool
+    honors_sampling_params: bool
+    supports_batches: bool
+
+
+#: The ``api`` backend wraps the real Anthropic SDK: every param passes through
+#: unchanged (issue #330), so it honors ``max_tokens``, reports ``stop_reason``,
+#: preserves ``cache_control`` breakpoints, and supports the Messages Batch API.
+#: ``honors_sampling_params`` is the transport-level default (the SDK forwards
+#: the params); whether a given MODEL 400s is #577's model-level set.
+_API_CAPABILITIES = ProviderCapabilities(
+    honors_max_tokens=True,
+    reports_stop_reason=True,
+    honors_cache_control=True,
+    honors_sampling_params=True,
+    supports_batches=True,
+)
+
+#: The ``claude-cli`` subscription backend drives ``claude -p``: it has no
+#: ``max_tokens`` equivalent (dropped in ``_create``), its ``--output-format
+#: json`` envelope does not populate ``stop_reason``, it strips ``cache_control``
+#: (``_text_from_*`` keep only prompt text), it drops sampling params the same
+#: way, and it has no Batch API (the startup guard, now this flag).
+_CLI_CAPABILITIES = ProviderCapabilities(
+    honors_max_tokens=False,
+    reports_stop_reason=False,
+    honors_cache_control=False,
+    honors_sampling_params=False,
+    supports_batches=False,
+)
+
+
+def capabilities_for(provider: str) -> ProviderCapabilities:
+    """Return the :class:`ProviderCapabilities` for backend *provider* (#573).
+
+    Keyed by backend id (``"api"`` | ``"claude-cli"``). An unrecognized id maps
+    to the ``api`` capabilities — the conservative choice, since ``api`` honors
+    the most (a caller that reaches here with a bad id has already passed
+    :func:`resolve_provider`'s validation, so this is only a fallback).
+
+    The MODEL-level refinement of ``honors_sampling_params`` (Opus 4.7+/5 etc.
+    return HTTP 400) is deferred to :mod:`athenaeum.models`' sampling-capability
+    prefix set (issue #577); when that set lands, this function grows a ``model``
+    argument that reads it, rather than re-declaring the prefixes here.
+    """
+    if provider == "claude-cli":
+        return _CLI_CAPABILITIES
+    return _API_CAPABILITIES
+
+
+# ---------------------------------------------------------------------------
 # claude-cli adapter — response shapes mirroring the anthropic SDK surface
 # the four call sites consume (``.content[0].text`` + ``.usage`` counters).
 # ---------------------------------------------------------------------------
@@ -275,7 +374,10 @@ def _text_from_system(system: Any) -> str:
     """Flatten a ``system`` param (str OR list of text blocks) to plain text.
 
     Strips ``cache_control`` (and every other block key) by design — the CLI
-    path has no caching breakpoints, so only the prompt TEXT survives.
+    path has no caching breakpoints, so only the prompt TEXT survives. This is
+    the behavior ``capabilities_for("claude-cli").honors_cache_control is
+    False`` now DECLARES (issue #573, folding the documented-but-unenforced
+    stripping into the capability set).
     """
     if system is None:
         return ""
