@@ -5,6 +5,26 @@ Reads ``athenaeum.yaml`` from the knowledge directory root to control
 sidecar behavior: auto-recall toggle, search backend selection, etc.
 
 Missing config or missing keys fall back to sensible defaults.
+
+Malformed-env-value policy (issue #519/#528)
+--------------------------------------------
+Every numeric env override (``ATHENAEUM_*``) is read through
+:func:`_env_number`, which enforces ONE policy for a value that fails to
+parse: **log a WARNING naming the variable, then fall back** to yaml/default.
+This replaces four incompatible hand-rolled behaviours that used to depend on
+which knob you mistyped — silent fall-through, silent return-default, a silent
+hard-zero, and a hard crash — so the same typo now produces the same,
+predictable, *visible* outcome everywhere.
+
+The one deliberate exception is a small, enumerated set of **fail-loud** knobs
+that raise :class:`ValueError` on a bad value BY DESIGN, because silently
+falling back would hide an operator error with a safety cost:
+``ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD`` (and its per-action siblings, in
+:mod:`athenaeum.resolutions`) and ``ATHENAEUM_SCREEN_MEDICAL``. These are the
+documented exceptions to the WARN-and-fall-back rule, not accidental
+divergence. Separately, out-of-*range* validation (e.g. a ``[0.0, 1.0]``
+bound, or a ``> 0`` guardrail) is a per-knob concern layered on top of the
+shared parse and is unaffected by this policy.
 """
 
 from __future__ import annotations
@@ -623,12 +643,10 @@ def _resolve_sample_rate(
     def _clamp(value: float) -> float:
         return max(0.0, min(1.0, value))
 
-    env = os.environ.get(env_var)
-    if env is not None:
-        try:
-            return _clamp(float(env))
-        except (TypeError, ValueError):
-            pass
+    # Issue #528: malformed env now WARNs + falls back (was silent fall-through).
+    value = _env_number(env_var, float)
+    if value is not None:
+        return _clamp(value)
     if isinstance(config, dict):
         cfg = config.get("librarian")
         if isinstance(cfg, dict):
@@ -733,12 +751,10 @@ def resolve_min_merge_mean_similarity(config: dict[str, Any] | None) -> float:
     default.
     """
     default = 0.6
-    env = os.environ.get("ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY")
-    if env is not None:
-        try:
-            return float(env)
-        except (TypeError, ValueError):
-            pass
+    # Issue #528: malformed env now WARNs + falls back (was silent fall-through).
+    value = _env_number("ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY", float)
+    if value is not None:
+        return value
     if isinstance(config, dict):
         cfg = config.get("librarian")
         if isinstance(cfg, dict):
@@ -945,12 +961,9 @@ def resolve_lock_timeout(config: dict[str, Any] | None) -> float:
     No seed in ``_DEFAULTS`` (#231) so the code default stays reachable. ``bool``
     and non-numeric / negative values fall through to 0.0.
     """
-    env = os.environ.get("ATHENAEUM_LOCK_TIMEOUT")
-    if env is not None:
-        try:
-            value = float(env)
-        except ValueError:
-            value = 0.0
+    # Issue #528: malformed env now WARNs + falls back (was a silent hard-zero).
+    value = _env_number("ATHENAEUM_LOCK_TIMEOUT", float)
+    if value is not None:
         return value if value > 0 else 0.0
     if isinstance(config, dict):
         cfg = config.get("librarian")
@@ -988,12 +1001,10 @@ def resolve_heartbeat_interval(config: dict[str, Any] | None) -> float:
     fail-fast collapse).
     """
     default = 60.0
-    env = os.environ.get("ATHENAEUM_HEARTBEAT_INTERVAL")
-    if env is not None:
-        try:
-            value = float(env)
-        except ValueError:
-            return default
+    # Issue #528: malformed env now WARNs + falls back to yaml/default (was a
+    # silent return-default that skipped yaml).
+    value = _env_number("ATHENAEUM_HEARTBEAT_INTERVAL", float)
+    if value is not None:
         return value if value > 0 else 0.0
     if isinstance(config, dict):
         cfg = config.get("librarian")
@@ -1028,12 +1039,9 @@ def resolve_lock_break_stale_after(config: dict[str, Any] | None) -> float | Non
     disables auto-break entirely (returns ``None``).
     """
     default = 21600.0
-    env = os.environ.get("ATHENAEUM_LOCK_BREAK_STALE_AFTER")
-    if env is not None:
-        try:
-            value = float(env)
-        except ValueError:
-            return default
+    # Issue #528: malformed env now WARNs + falls back (was silent return-default).
+    value = _env_number("ATHENAEUM_LOCK_BREAK_STALE_AFTER", float)
+    if value is not None:
         return value if value > 0 else None
     if isinstance(config, dict):
         cfg = config.get("librarian")
@@ -1069,12 +1077,9 @@ def resolve_lock_warn_stale_after(config: dict[str, Any] | None) -> float | None
     disables the warning entirely (returns ``None``).
     """
     default = 7200.0
-    env = os.environ.get("ATHENAEUM_LOCK_WARN_STALE_AFTER")
-    if env is not None:
-        try:
-            value = float(env)
-        except ValueError:
-            return default
+    # Issue #528: malformed env now WARNs + falls back (was silent return-default).
+    value = _env_number("ATHENAEUM_LOCK_WARN_STALE_AFTER", float)
+    if value is not None:
         return value if value > 0 else None
     if isinstance(config, dict):
         cfg = config.get("librarian")
