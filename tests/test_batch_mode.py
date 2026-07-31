@@ -168,7 +168,13 @@ class _FakeBatches:
 
 
 class _FakeClient:
-    """Fake Anthropic client exposing sync ``messages.create`` AND batches."""
+    """Fake Anthropic client exposing sync ``messages.create`` AND batches.
+
+    Issue #554 (L11): left ad-hoc rather than repointed at
+    ``tests.conftest.FakeLLMClient`` — it also models the
+    ``client.messages.batches`` API surface (create/retrieve/results/cancel
+    for batch mode), which the shared canned-response double doesn't cover.
+    """
 
     def __init__(
         self,
