@@ -220,6 +220,52 @@ class TestIngestEngineTier0:
         # No stamp written on failure → next run retries.
         assert not (cache / "ingest-manifest.json").exists()
 
+    def test_truncated_exit_zero_run_does_not_stamp(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        # Issue #530 (H2): a max_files-truncated run still exits 0, but only
+        # part of the intake was compiled. The OLD code stamped the pre-compile
+        # snapshot of ALL discovered files, so the next ingest took the false
+        # no-op fast path and the beyond-window remainder was silently never
+        # compiled. The stamp must be withheld until the backlog is fully
+        # drained — and the very next ingest must then drain it.
+        from athenaeum.librarian import ingest
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aaaaaaaa")
+        _write_tier0_raw(root, "p-0002", "Bob", "20240410T130000Z", "bbbbbbbb")
+        cache = tmp_path / "cache"
+
+        first = ingest(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            incremental=True,
+            cache_dir=cache,
+            max_files=1,  # truncate: one file compiled, one left beyond the window
+        )
+        assert first.exit_code == 0
+        # Exactly one file was consumed; one remains uncompiled in the intake.
+        remaining = list((root / "raw" / "sessions").glob("2024*.md"))
+        assert len(remaining) == 1
+        # H2: the truncated exit-0 run must NOT stamp — otherwise the next
+        # ingest false-no-ops and the remaining note is lost forever.
+        assert not (cache / "ingest-manifest.json").exists()
+
+        # The next ingest must actually pick up the remainder (no false no-op),
+        # compile it, and only THEN stamp the now fully-drained intake.
+        second = ingest(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            incremental=True,
+            cache_dir=cache,
+        )
+        assert second.noop is False
+        assert second.exit_code == 0
+        assert not list((root / "raw" / "sessions").glob("2024*.md"))
+        assert (cache / "ingest-manifest.json").is_file()
+
     def test_session_scopes_new_change_detection(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
