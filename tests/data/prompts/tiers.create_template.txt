@@ -9,9 +9,7 @@ Tags: {tags}
 Access: {access}
 
 ## Raw observation (source: {source_ref})
-<user_document>
 {observations}
-</user_document>
 {entity_template_section}
 ## Instructions
 Write the body content (no frontmatter) for this entity's wiki page.
