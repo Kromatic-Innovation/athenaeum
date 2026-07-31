@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 from athenaeum.killswitch import is_disabled
@@ -27,6 +25,7 @@ from athenaeum.models import (
 )
 from athenaeum.provenance import resolve_remember_extras, resolve_remember_sources
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
+from athenaeum.storage import write_raw_intake
 
 log = logging.getLogger(__name__)
 
@@ -505,16 +504,6 @@ def remember_write(
         ):
             return "Error: writes to wiki/ are not allowed."
 
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    short_id = uuid.uuid4().hex[:8]
-    filename = f"{timestamp}-{short_id}.md"
-    filepath = target_dir / filename
-
-    if filepath.exists():
-        return f"Error: file already exists at {filepath}. This should not happen."
-
     # Intake screening (issue #320): classify sensitive content and resolve the
     # read-time `access:` label (#312) to stamp BEFORE the single append-only
     # write below. The screener only inspects `content`; the body bytes are
@@ -529,7 +518,7 @@ def remember_write(
     final_content = _inject_provenance_frontmatter(
         content, wiki_source, field_sources_map, extras, screened_access=screened_access
     )
-    filepath.write_text(final_content, encoding="utf-8")
+    filepath = write_raw_intake(target_dir, final_content)
     return f"Saved to {filepath}"
 
 

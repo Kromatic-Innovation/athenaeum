@@ -41,6 +41,7 @@ import anthropic
 from athenaeum import detection_state, spend
 from athenaeum._lint import _strip_self_reference
 from athenaeum._retry import TransientAPIError
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.clusters import (
     cluster_auto_memory_files,
     prune_cluster_rotations,
@@ -457,7 +458,7 @@ def rebuild_index(wiki_root: Path) -> None:
             lines.append(f"- {label}[{name}]({filename})")
         lines.append("")
 
-    (wiki_root / "_index.md").write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(wiki_root / "_index.md", "\n".join(lines))
     log.info(
         "Rebuilt _index.md with %d entities", sum(len(v) for v in by_type.values())
     )
@@ -760,9 +761,9 @@ def tier0_passthrough(
     if dry_run:
         return entity
 
-    out_path.write_text(
+    atomic_write_text(
+        out_path,
         render_frontmatter(meta) + "\n" + body,
-        encoding="utf-8",
     )
     index.register(entity)
     return entity
@@ -870,9 +871,9 @@ def tier0_handle_upsert(
     if dry_run:
         return entity, True
 
-    existing_path.write_text(
+    atomic_write_text(
+        existing_path,
         render_frontmatter(merged_meta) + "\n" + existing_body,
-        encoding="utf-8",
     )
     return entity, True
 
@@ -1080,7 +1081,7 @@ def process_one(
         # re-parsing ``rendered``.
         rendered_meta, _ = parse_frontmatter(rendered)
         validate_wiki_meta(rendered_meta)
-        page_path.write_text(rendered, encoding="utf-8")
+        atomic_write_text(page_path, rendered)
         index.register(entity)
         result.created.append(entity)
         log.info("  Created: %s → %s", entity.name, entity.filename)
@@ -1759,7 +1760,7 @@ def _write_deferred_manifest(
             *[f"- {ref}" for ref in failed_refs],
             "",
         ]
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
     return path
 
 
@@ -3332,9 +3333,7 @@ def _write_ingest_manifest(
     payload: dict[str, Any] = {"version": version, "hashes": hashes}
     if stats is not None:
         payload["stats"] = {k: [v[0], v[1]] for k, v in stats.items()}
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_text(path, json.dumps(payload))
 
 
 # ---------------------------------------------------------------------------
@@ -3418,9 +3417,7 @@ def _write_auto_memory_manifest(path: Path, hashes: dict[str, str]) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {"version": 1, "hashes": hashes}
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_text(path, json.dumps(payload))
 
 
 def _auto_memory_changed_paths(
@@ -3494,9 +3491,7 @@ def _write_full_compile_stamp(path: Path, at: datetime, head: str | None) -> Non
         "at": at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "head": head,
     }
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_text(path, json.dumps(payload))
 
 
 def ingest(

@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from athenaeum._retry import TransientAPIError, with_retry
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import resolve_model as _resolve_model_knob
 from athenaeum.contradictions import ContradictionResult
 from athenaeum.json_utils import extract_json_object
@@ -2083,7 +2084,7 @@ def _mark_member_frontmatter(path: Path, key: str, value: Any) -> bool:
     meta[key] = value
     rendered = render_frontmatter(meta) + body
     try:
-        path.write_text(rendered, encoding="utf-8")
+        atomic_write_text(path, rendered)
     except OSError as exc:
         log.warning(
             "resolutions: cannot mark %s=%r on %s — write failed (%s)",

@@ -44,6 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import AutoMemoryFile
 
 log = logging.getLogger(__name__)
@@ -542,7 +543,7 @@ def write_cluster_report(
         timestamped = output_path.with_name(
             f"{output_path.stem}-{ts}{output_path.suffix}"
         )
-        timestamped.write_text(text, encoding="utf-8")
+        atomic_write_text(timestamped, text)
 
     _atomic_replace(output_path, text)
     return output_path, timestamped
