@@ -228,7 +228,7 @@ def _cosine_matrix(vectors: list[list[float]]):
     similarity (never group), matching ``_cosine``'s zero-vector contract.
     """
     try:
-        import numpy as np  # noqa: PLC0415
+        import numpy as np
     except ImportError:
         return None
     arr = np.asarray(vectors, dtype=float)

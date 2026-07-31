@@ -528,7 +528,7 @@ def record_merge_provenance(
         )
         _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
         return True
-    except Exception as exc:  # noqa: BLE001 — ledger write must never break a merge
+    except Exception as exc:
         log.debug(
             "merge provenance ledger write skipped (%s): %s", type(exc).__name__, exc
         )

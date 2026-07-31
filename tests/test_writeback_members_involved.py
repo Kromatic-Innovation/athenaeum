@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 from athenaeum.answers import (
     _extract_members_involved_refs,
     ingest_answers,
-)  # noqa: PLC2701
+)
 
 _OFFENDING = "current primary venture"
 

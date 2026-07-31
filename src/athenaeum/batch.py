@@ -146,7 +146,7 @@ def execute_batch(
             lambda: client.messages.batches.create(requests=payload),
             description=f"batch submit ({description})",
         )
-    except Exception as exc:  # noqa: BLE001 — any submit failure is batch-fatal
+    except Exception as exc:
         raise BatchExecutionError(
             f"batch submit failed ({description}): {exc}"
         ) from exc
@@ -163,7 +163,7 @@ def execute_batch(
         if waited >= timeout:
             try:
                 client.messages.batches.cancel(batch.id)
-            except Exception:  # noqa: BLE001 — cancel is best-effort
+            except Exception:
                 log.warning("could not cancel timed-out batch %s", batch.id)
             raise BatchExecutionError(
                 f"batch {batch.id} did not end within {timeout:.0f}s "
@@ -176,7 +176,7 @@ def execute_batch(
                 lambda: client.messages.batches.retrieve(batch.id),
                 description=f"batch poll ({description})",
             )
-        except Exception as exc:  # noqa: BLE001 — any poll failure is batch-fatal
+        except Exception as exc:
             raise BatchExecutionError(
                 f"batch poll failed ({description}): {exc}"
             ) from exc
@@ -218,7 +218,7 @@ def execute_batch(
                     rtype,
                     description,
                 )
-    except Exception as exc:  # noqa: BLE001 — any results failure is batch-fatal
+    except Exception as exc:
         raise BatchExecutionError(
             f"batch results failed ({description}): {exc}"
         ) from exc

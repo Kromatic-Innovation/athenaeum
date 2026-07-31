@@ -24,7 +24,7 @@ from athenaeum.answers import (
     PendingQuestion,
     _writeback_source,
     ingest_answers,
-)  # noqa: PLC2701
+)
 from athenaeum.resolutions import propose_freetext_source_edits
 
 # ---------------------------------------------------------------------------

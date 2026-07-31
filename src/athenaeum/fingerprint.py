@@ -604,7 +604,7 @@ def find_resolved_record(
     # Resolve embedder default lazily to avoid import at module load time.
     if embedder is None:
         try:
-            from athenaeum.search import embed_texts  # noqa: PLC0415
+            from athenaeum.search import embed_texts
 
             embedder = embed_texts
         except ImportError:
@@ -624,7 +624,7 @@ def find_resolved_record(
     if vecs is None or len(vecs) < 2:
         return None
 
-    from athenaeum.cross_scope import _cosine  # noqa: PLC0415
+    from athenaeum.cross_scope import _cosine
 
     new_vec = vecs[0]
     stored_recs_with_pt = [

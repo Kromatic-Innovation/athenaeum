@@ -800,7 +800,7 @@ def _purge_vector_ids(
     ids = [f"{slug}.md" for slug in slugs]
     try:
         return VectorBackend(embedding_model=embedding_model).purge_ids(ids, cache_dir)
-    except Exception:  # noqa: BLE001 — purge must never break the merge
+    except Exception:
         log.debug("pending_merges: vector purge skipped for ids=%s", ids)
         return 0
 
