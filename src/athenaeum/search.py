@@ -1933,7 +1933,7 @@ def query_vector_index(
     exclude: set[str] | None = None,
 ) -> list[tuple[str, str, float]]:
     """Query the chromadb vector index. Callable from shell hooks."""
-    return VectorBackend().query(query, Path(cache_dir), n=n, exclude=exclude)
+    return get_backend("vector").query(query, Path(cache_dir), n=n, exclude=exclude)
 
 
 # ---------------------------------------------------------------------------
