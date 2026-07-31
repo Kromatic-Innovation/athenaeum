@@ -40,6 +40,7 @@ from athenaeum.models import (
     render_frontmatter,
 )
 from athenaeum.prompt_safety import defang_tag
+from athenaeum.provider import resolve_max_tokens
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 if TYPE_CHECKING:
@@ -51,6 +52,11 @@ log = logging.getLogger(__name__)
 # shape is legible from the opening; we do not need the whole body.
 _CLASSIFY_BODY_CHARS = 800
 
+
+# Claim-kind classify output budget (issue #575): a single one-word label plus
+# a short reason — a tiny response. Formerly a bare ``64`` literal; named and
+# resolved through the seam. Value unchanged.
+_CLAIM_KIND_MAX_TOKENS = 64
 
 CLAIM_KIND_SYSTEM = """You classify a single memory snippet by its EPISTEMIC KIND.
 
@@ -137,7 +143,12 @@ def classify_claim_kind(
         response = with_retry(
             lambda: client.messages.create(
                 model=model,
-                max_tokens=64,
+                max_tokens=resolve_max_tokens(
+                    "claim_kind",
+                    "ATHENAEUM_CLAIM_KIND_MAX_TOKENS",
+                    _CLAIM_KIND_MAX_TOKENS,
+                    config,
+                ),
                 system=CLAIM_KIND_SYSTEM,
                 messages=[{"role": "user", "content": user_msg}],
             ),

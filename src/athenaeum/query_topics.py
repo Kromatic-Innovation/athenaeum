@@ -37,6 +37,11 @@ log = logging.getLogger(__name__)
 # (which pulls ``tiers``), so it is resident before this module runs.
 DEFAULT_TOPIC_MODEL = DEFAULT_CLASSIFY_MODEL
 
+# Topic-extraction output budget (issue #575): a short JSON array of topic
+# strings on the recall hot path. Formerly a bare ``256`` literal; named and
+# resolved through the seam. Value unchanged.
+_TOPIC_MAX_TOKENS = 256
+
 _SYSTEM_PROMPT = (
     "You extract substantive search topics from a user's message for a "
     "librarian to use against a wiki. Return ONLY a JSON array of short "
@@ -90,7 +95,11 @@ def extract_topics(
     # the backend actually used — never a hardcoded ``api`` that would misreport
     # a subscription call as metered dollars.
     try:
-        from athenaeum.provider import build_llm_client, resolve_provider
+        from athenaeum.provider import (
+            build_llm_client,
+            resolve_max_tokens,
+            resolve_provider,
+        )
 
         provider = resolve_provider(config)
         client = build_llm_client(config, timeout=timeout, max_retries=0)
@@ -110,7 +119,9 @@ def extract_topics(
     try:
         response = client.messages.create(
             model=_get_topic_model(config),
-            max_tokens=256,
+            max_tokens=resolve_max_tokens(
+                "topic", "ATHENAEUM_TOPIC_MAX_TOKENS", _TOPIC_MAX_TOKENS, config
+            ),
             system=_SYSTEM_PROMPT,
             messages=[
                 {"role": "user", "content": _USER_TEMPLATE.format(prompt=prompt)}

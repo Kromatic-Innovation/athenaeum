@@ -66,6 +66,7 @@ from athenaeum.provider import (
     ProviderCapabilities,
     capabilities_for,
     reported_stop_reason,
+    resolve_max_tokens,
     resolve_provider,
 )
 from athenaeum.search import embed_texts
@@ -280,7 +281,9 @@ def tier2_request_params(
     )
     return {
         "model": _get_classify_model(config),
-        "max_tokens": _TIER2_CLASSIFY_MAX_TOKENS,
+        "max_tokens": resolve_max_tokens(
+            "classify", "ATHENAEUM_CLASSIFY_MAX_TOKENS", _TIER2_CLASSIFY_MAX_TOKENS, config
+        ),
         "system": CLASSIFY_SYSTEM,
         "messages": [{"role": "user", "content": user_msg}],
     }
@@ -718,7 +721,12 @@ def tier2_reclassify_larger_budget(
         wiki_root=wiki_root,
         config=config,
     )
-    params["max_tokens"] = _TIER2_CLASSIFY_RETRY_MAX_TOKENS
+    params["max_tokens"] = resolve_max_tokens(
+        "classify_retry",
+        "ATHENAEUM_CLASSIFY_RETRY_MAX_TOKENS",
+        _TIER2_CLASSIFY_RETRY_MAX_TOKENS,
+        config,
+    )
     response = with_retry(
         lambda: client.messages.create(**params),
         description=f"tier2_classify-truncation-retry {raw.ref}",
@@ -900,6 +908,11 @@ _MERGE_MAX_TOKENS = 8192
 # half-applied.
 _MERGE_PATCH_MAX_TOKENS = 2048
 
+# Tier-3 CREATE output budget (issue #575): a fresh entity page from one
+# observation. Formerly a bare ``2048`` literal in tier3_create_params; named
+# and resolved through the seam like the merge budgets. Value unchanged.
+_TIER3_CREATE_MAX_TOKENS = 2048
+
 MERGE_TEMPLATE = (
     """## Existing page content
 {existing_body}
@@ -970,7 +983,12 @@ def tier3_create_params(
     )
     return {
         "model": _get_write_model(config),
-        "max_tokens": 2048,
+        "max_tokens": resolve_max_tokens(
+            "merge_create",
+            "ATHENAEUM_MERGE_CREATE_MAX_TOKENS",
+            _TIER3_CREATE_MAX_TOKENS,
+            config,
+        ),
         "system": CREATE_SYSTEM,
         "messages": [{"role": "user", "content": user_msg}],
     }
@@ -1082,7 +1100,12 @@ def tier3_merge_params(
     )
     return {
         "model": _get_write_model(config),
-        "max_tokens": _MERGE_PATCH_MAX_TOKENS,
+        "max_tokens": resolve_max_tokens(
+            "merge_patch",
+            "ATHENAEUM_MERGE_PATCH_MAX_TOKENS",
+            _MERGE_PATCH_MAX_TOKENS,
+            config,
+        ),
         "system": MERGE_SYSTEM,
         "messages": [{"role": "user", "content": user_msg}],
     }
@@ -1113,7 +1136,9 @@ def tier3_merge_full_params(
     )
     return {
         "model": _get_write_model(config),
-        "max_tokens": _MERGE_MAX_TOKENS,
+        "max_tokens": resolve_max_tokens(
+            "merge_full", "ATHENAEUM_MERGE_FULL_MAX_TOKENS", _MERGE_MAX_TOKENS, config
+        ),
         "system": MERGE_SYSTEM_FULL,
         "messages": [{"role": "user", "content": user_msg}],
     }
