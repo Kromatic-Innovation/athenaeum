@@ -806,3 +806,162 @@ class TestCLIServe:
 
         code = main(["serve", "--path", str(tmp_path / "nonexistent")])
         assert code == 1
+
+
+# ---------------------------------------------------------------------------
+# M22 (issue #554): every registered MCP tool WRAPPER is invoked via tool.fn().
+# Before this, only 2 of the 11 registered tool bodies were ever exercised; the
+# 9 untested wrappers included every write path (remember, resolve_question,
+# resolve_merge, review_audit_item). Argument marshalling and error-to-string
+# conversion were unverified on the live production surface.
+# ---------------------------------------------------------------------------
+
+
+class TestAllMcpToolWrappers:
+    """Invoke all 11 registered MCP tool wrappers through ``tool.fn()``."""
+
+    # One valid-args invocation per registered tool. Read tools take no args;
+    # the write tools are called with a nonexistent id so a single call
+    # exercises BOTH the wrapper's argument marshalling and its error-to-string
+    # path without a seeded queue. ``remember`` is the one write tool with a
+    # trivial success, so it gets real content.
+    _INVOKE = {
+        "recall": lambda fn: fn("anything at all"),
+        "remember": lambda fn: fn("a note worth remembering", source="test-session"),
+        "list_pending_questions": lambda fn: fn(),
+        "resolve_question": lambda fn: fn("no-such-id", "an answer body"),
+        "list_pending_merges": lambda fn: fn(),
+        "list_pending_decisions": lambda fn: fn(),
+        "list_axiom_audit": lambda fn: fn(),
+        "scan_retraction_cascade": lambda fn: fn(),
+        "calibration_summary": lambda fn: fn(),
+        "review_audit_item": lambda fn: fn("no-such-id", "confirm"),
+        "resolve_merge": lambda fn: fn("no-such-id", "reject"),
+    }
+    _EXPECTED_TYPE = {
+        "recall": str,
+        "remember": str,
+        "list_pending_questions": list,
+        "list_pending_merges": list,
+        "list_pending_decisions": list,
+        "list_axiom_audit": list,
+        "resolve_question": dict,
+        "resolve_merge": dict,
+        "review_audit_item": dict,
+        "scan_retraction_cascade": dict,
+        "calibration_summary": dict,
+    }
+
+    def _server(self, tmp_path: Path, *, cache_dir: Path | None = None):
+        pytest.importorskip("fastmcp")
+        from athenaeum.mcp_server import create_server
+
+        raw = tmp_path / "raw"
+        wiki = tmp_path / "wiki"
+        raw.mkdir(exist_ok=True)
+        wiki.mkdir(exist_ok=True)
+        return create_server(raw_root=raw, wiki_root=wiki, cache_dir=cache_dir)
+
+    def _registered_names(self, server) -> list[str]:
+        import asyncio
+
+        async def _run() -> list[str]:
+            return [t.name for t in await server.list_tools()]
+
+        return asyncio.run(_run())
+
+    def _call(self, server, name: str, caller):
+        import asyncio
+
+        async def _run():
+            tool = await server.get_tool(name)
+            return caller(tool.fn)
+
+        return asyncio.run(_run())
+
+    def test_invocation_map_covers_every_registered_tool(self, tmp_path: Path) -> None:
+        # The set of registered tools must exactly equal the invocation map —
+        # so a newly-registered tool forces a new invocation entry (and thus
+        # wrapper coverage) instead of silently going untested.
+        server = self._server(tmp_path)
+        registered = set(self._registered_names(server))
+        assert registered == set(self._INVOKE), (
+            "MCP tool set drifted from the invocation map (issue #554 M22): "
+            f"registered-only={registered - set(self._INVOKE)}, "
+            f"map-only={set(self._INVOKE) - registered}"
+        )
+        assert len(registered) == 11
+
+    @pytest.mark.parametrize("name", sorted(_INVOKE))
+    def test_wrapper_marshals_args_and_returns_declared_type(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        # Invoking every wrapper with valid args must not raise, and the return
+        # value must marshal to the wrapper's declared type — the write tools'
+        # error-to-string path (a nonexistent id) returns a value, never raises.
+        server = self._server(tmp_path)
+        result = self._call(server, name, self._INVOKE[name])
+        assert isinstance(result, self._EXPECTED_TYPE[name]), (
+            f"{name} returned {type(result).__name__}, "
+            f"expected {self._EXPECTED_TYPE[name].__name__}"
+        )
+
+    # --- the four WRITE wrappers: marshalling + error-to-string --------------
+
+    def test_remember_marshalling_and_error_to_string(self, tmp_path: Path) -> None:
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        server = self._server(tmp_path, cache_dir=cache)
+        # Argument marshalling: a valid call returns the "Saved to" confirmation.
+        ok = self._call(server, "remember", lambda fn: fn("hi there", source="s"))
+        assert isinstance(ok, str)
+        assert ok.startswith("Saved to")
+        # Error-to-string: with capture disabled (kill switch), the wrapper
+        # returns a message string rather than raising or writing.
+        from athenaeum import killswitch
+
+        killswitch.disable(cache_dir=cache)
+        blocked = self._call(server, "remember", lambda fn: fn("nope", source="s"))
+        assert isinstance(blocked, str)
+        assert not blocked.startswith("Saved to")
+
+    def test_resolve_question_marshalling_and_error_to_string(
+        self, tmp_path: Path
+    ) -> None:
+        server = self._server(tmp_path)
+        res = self._call(
+            server, "resolve_question", lambda fn: fn("no-such-id", "ans")
+        )
+        # Marshalling: structured keys present.
+        assert isinstance(res, dict)
+        assert set(res) >= {"ok", "error_code", "message"}
+        # Error-to-string: the unknown id is reported, not raised.
+        assert res["ok"] is False
+        assert res["error_code"]
+        assert res["message"]
+
+    def test_resolve_merge_marshalling_and_error_to_string(
+        self, tmp_path: Path
+    ) -> None:
+        server = self._server(tmp_path)
+        res = self._call(server, "resolve_merge", lambda fn: fn("no-such-id", "reject"))
+        assert isinstance(res, dict)
+        assert res["ok"] is False
+        assert res.get("error_code")
+        # Marshalling: an invalid decision is validated and reported, not raised.
+        bad = self._call(server, "resolve_merge", lambda fn: fn("x", "bogus-decision"))
+        assert bad["ok"] is False
+        assert bad["error_code"] == "invalid_decision"
+
+    def test_review_audit_item_marshalling_and_error_to_string(
+        self, tmp_path: Path
+    ) -> None:
+        server = self._server(tmp_path)
+        res = self._call(
+            server, "review_audit_item", lambda fn: fn("no-such-id", "confirm")
+        )
+        assert isinstance(res, dict)
+        # Error-to-string: the ValueError for an unknown id becomes a structured
+        # error dict, not a raised exception.
+        assert res.get("ok") is False
+        assert res.get("error")
