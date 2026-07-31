@@ -45,7 +45,8 @@ Every default figure on this page is verified against the code under
 | Cluster-cohesion floor | — | — | `librarian.min_cluster_cohesion` | `0.0` | Cohesion floor that suppresses low-cohesion cross-scope over-clusters (#281). A cluster is withheld only when its `cluster_centroid_score` is strictly below this value **AND** it spans `>= min_cluster_cohesion_scopes` distinct origin scopes. Default `0.0` = OFF (the cutoff is corpus-specific); `0.47` is recommended for the reference corpus. Suppressed clusters leave their raw members in place (not retired). |
 | Cohesion-floor scope count | — | — | `librarian.min_cluster_cohesion_scopes` | `4` | Minimum distinct `origin_scope` count a low-cohesion cluster must span before the `min_cluster_cohesion` floor suppresses it (#281). Legitimate pages span 1-3 scopes and over-clusters span 8-17, so `4` is the clean margin — a low-cohesion single-/few-scope cluster is never false-suppressed. Inert while `min_cluster_cohesion` is `0.0`. |
 | Merge-proposal source cap | — | `ATHENAEUM_MAX_MERGE_SOURCES` | `librarian.max_merge_sources` | `25` | Source-count cap on resolver merge proposals (#400). A `propose_merge` folding more than N sources is a degenerate over-cluster (the incident: 1,600+ sources at ~0.33 confidence, re-proposed every run), not a pairwise/small-group refinement — it is dropped before it reaches `wiki/_pending_merges.md` (neither proposed nor escalated as a pending question). Default `25` (active, anchored to the cross-scope cluster-size cap); set `0` to disable. The cohesion floor above already withholds low-cohesion over-clusters upstream — this catches the *high*-cohesion degenerates it doesn't. |
-| Merge-proposal confidence floor | — | `ATHENAEUM_MIN_MERGE_CONFIDENCE` | `librarian.min_merge_confidence` | `0.0` | Optional confidence floor on resolver merge proposals (#400): a proposal below this confidence is dropped before `wiki/_pending_merges.md`. Default `0.0` = OFF (the review bar is corpus-specific), opt-in via yaml. Complements `max_merge_sources` — the cap catches over-clusters by shape, this keeps low-confidence small merges out of the queue. |
+| Merge-proposal confidence floor | — | `ATHENAEUM_MIN_MERGE_CONFIDENCE` | `librarian.min_merge_confidence` | `0.0` | Optional confidence floor on resolver merge proposals (#400): a proposal below this confidence is dropped before `wiki/_pending_merges.md`. Default `0.0` = OFF (the review bar is corpus-specific), opt-in via yaml. Complements `max_merge_sources` — the cap catches over-clusters by shape, this keeps low-confidence small merges out of the queue. A parsed env value is authoritative — `0` disables the floor even when yaml sets one (#524); a malformed value logs a WARNING and falls back (#528). |
+| Merge-proposal cohesion floor | — | `ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY` | `librarian.min_merge_mean_similarity` | `0.6` | Mean-pairwise-cosine floor on resolver merge proposals (#421): a proposal whose cluster mean pairwise cosine is strictly below this is suppressed before `wiki/_pending_merges.md`. Unlike the corpus-specific confidence floor above, this cohesion gate is **active by default**. `0` (or negative) disables it. A malformed env value logs a WARNING and falls back (#528). |
 | Page warn size | — | `ATHENAEUM_PAGE_WARN_BYTES` | `librarian.page_warn_bytes` | `8192` | Soft byte threshold above which a wiki entity page is reported as a **warn**-level oversized page in `athenaeum status` (#310). Warn-only: nothing is blocked or modified. A long page usually means poorly-factored knowledge that should be split into linked sub-entities. `bool` / non-int / `<= 0` values fall through to the default. |
 | Page flag size | — | `ATHENAEUM_PAGE_FLAG_BYTES` | `librarian.page_flag_bytes` | `16384` | Byte threshold above which a page is **flagged** for splitting — surfaced in `status` and logged as a non-fatal `WARNING` during `athenaeum run` (#310). Still warn-only (never blocks; the tier-3 merge body cap is separate and unchanged). A flagged page appears only in the flag bucket, not also in warn. Keep comfortably below the merge body cap. |
 | Backlog-drain warn threshold (days) | — | — | `librarian.drain_warn_days` | `3` | Backlog-drain ETA threshold in **days** (#470). At the end of any run that leaves raw intake undrained (and in `athenaeum status`), the advisor projects time-to-drain from **observed** throughput (the #378 spend ledger; falls back to this run's own rate) and emits a machine-greppable `backlog-drain-advisor:` `WARNING` — naming the copy-pastable `athenaeum drain` remedy — only when the projection **exceeds** this many days; below it the run stays silent. `bool` / non-int / `<= 0` values fall through to the default. |
@@ -56,6 +57,9 @@ Every default figure on this page is verified against the code under
 | Embedding cache root | — | `ATHENAEUM_CACHE_DIR` | — | `~/.cache/athenaeum` | Cache root used by the librarian's cluster pass (chromadb lives at `<dir>/wiki-vectors/`). The `recall` / `rebuild-index` commands do **not** read this var — they take `--cache-dir` (same default). |
 | Post-run git push | `--push` | — | `librarian.push_after_run` | off | Push the knowledge repo to its remote after a successful run that produced at least one commit (#284). Closes the move-then-retire recovery gap on multi-machine setups: without it, scheduled nightly runs commit locally but origin silently drifts. Uses the operator's ambient git auth (credential helper / SSH); athenaeum handles no tokens or secrets. `--dry-run` never pushes; a run with no new commits never pushes; a push failure is a non-fatal warning (`athenaeum-push-failed:`) and the next run retries. Remote/branch come from `librarian.push_remote` (default `origin`) and `librarian.push_branch` (default: current branch's upstream). |
 | Run-lock wait | `--wait` | `ATHENAEUM_LOCK_TIMEOUT` | `librarian.lock_timeout` | `0` | Default seconds a mutating command blocks for the single-machine run lock before failing (#309). `0` = fail-fast (name the holder, exit non-zero). The `--wait` flag overrides per-invocation. See the run-lock note below. |
+| Run-lock auto-break age | — | `ATHENAEUM_LOCK_BREAK_STALE_AFTER` | `librarian.lock_break_stale_after` | `21600` (6h) | Seconds of holder-heartbeat age after which a contended acquire auto-breaks a wedged-but-alive holder's lock, without a human passing `--force` (#397). Comfortably above any healthy run; lower it once the librarian reliably refreshes the heartbeat. |
+| Run-lock stale warning age | — | `ATHENAEUM_LOCK_WARN_STALE_AFTER` | `librarian.lock_warn_stale_after` | `7200` (2h) | Seconds of holder-heartbeat age after which a contended acquire logs a prominent "likely wedged" warning naming the holder (#397) — typically lower than the auto-break age, so an operator gets an early heads-up before auto-break fires. |
+| Progress-heartbeat interval | — | `ATHENAEUM_HEARTBEAT_INTERVAL` | `librarian.heartbeat_interval` | `60` | Seconds between `librarian-heartbeat` progress ticks emitted by the dark-zone phases (T3 merge, C4 detection, #290 wiki-dedup, #188 re-resolve) so a stall is visible in the log and to a watchdog (#398). `<= 0` emits every tick. |
 | Delta-scoped compile | — | — | `librarian.delta.enabled` | `true` | Enable delta-scoped incremental compile on the deterministic (`client=None`) path — `session-end` / `ingest` tier0 (#370). When on, re-cluster and re-merge only the clusters a change actually touches instead of the whole auto-memory corpus; byte-equivalent to the whole-corpus path. Set `false` to always compile whole-corpus. The nightly LLM `run` always stays whole-corpus regardless of this flag. `bool` yaml values are honored; anything else falls through to the `true` default. |
 | Delta affected-cluster cap | — | — | `librarian.delta.max_affected_clusters` | `8` | If a change would touch more than this many clusters, fall back to a full whole-corpus compile rather than churning most of the corpus through the delta path (#370). `bool` / non-positive / non-int values fall through to the default. |
 | Delta affected-member cap | — | — | `librarian.delta.max_affected_members` | `200` | If the affected-cluster member pool exceeds this many files, fall back to a full compile (#370). Bounds worst-case re-cluster cost so a pathological closure never does more work than a full run. `bool` / non-positive / non-int values fall through to the default. |
@@ -177,8 +181,12 @@ accepts the pre-#232 `resolve.model` key for backward compatibility.
 | Writer | `ATHENAEUM_WRITE_MODEL` | `models.write` | `claude-sonnet-4-6` | Tier-3 wiki writer. |
 | Topic extractor | `ATHENAEUM_TOPIC_MODEL` | `models.topic` | `claude-haiku-4-5-20251001` | `athenaeum query-topics` recall query rewriting. |
 | Resolver | `ATHENAEUM_RESOLVE_MODEL` | `models.resolve` (_also_ `resolve.model`¹) | `claude-opus-4-7` | Contradiction resolver (proposes a winner once the detector flags a conflict). |
+| Reasoning tier 1 | `ATHENAEUM_REASONING_T1_MODEL` | `models.reasoning_t1` | `claude-haiku-4-5-20251001` | First-pass model for the reasoning-tier chain.² |
+| Reasoning tier 2 | `ATHENAEUM_REASONING_T2_MODEL` | `models.reasoning_t2` | `claude-opus-4-1-20250805` | Escalation model for the reasoning-tier chain.² |
 
 > ¹ The legacy `resolve.model` key is checked as a fallback when neither the `ATHENAEUM_RESOLVE_MODEL` env var nor `models.resolve` is set. Prefer `models.resolve` for consistency with the other model knobs.
+>
+> ² The reasoning-tier knobs are read by `athenaeum.reasoning_tiers`. That subsystem currently has no production caller (`DEFAULT_TIER_CHAIN` is empty), so setting these has no runtime effect today — they are documented here for completeness because `src/` reads them. If the subsystem is removed, these two rows go with it.
 
 ## LLM provider selection (#330)
 
@@ -357,6 +365,22 @@ the `scope_a` / `scope_b` resolver actions are documented in
 `docs/conflict-resolution.md` §12 and `docs/provenance-shape.md` §9. The recall
 `serve --scope` caller-context filter is deferred design (#314).
 
+## Intake screening (#320)
+
+Optional content screening applied to raw intake before it is compiled. The
+medical classifier ships **off**; when enabled it routes/withholds medical
+intake per the configured action and access.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Medical screening | `ATHENAEUM_SCREEN_MEDICAL` | `screening.medical.action` | `off` | Action for medical intake: `off` (default, no screening) or an enabled action per `docs/screening.md`. **Fails loudly** — a mis-set value raises `ScreeningConfigError` rather than serving with a silently inert classifier. This is one of the two deliberate exceptions to the WARN-and-fall-back malformed-env policy (#528). |
+
+## Authority manifest (#426)
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Authority manifest path | `ATHENAEUM_AUTHORITY_MANIFEST` | `librarian.authority_manifest_path` | `<knowledge_root>/authority-manifest.yaml` | Path to the authority manifest mapping authoritative LIVE sources. Relative yaml values resolve against the knowledge root; a missing file is treated as "no manifest configured". Full reference: [`docs/authority-manifest.md`](authority-manifest.md). |
+
 ## Recall and search
 
 | Knob | CLI flag | Env var | YAML key | Default | What it does |
@@ -375,6 +399,12 @@ the `scope_a` / `scope_b` resolver actions are documented in
 `_DEFAULTS` seed but no code reads them yet — the vector backend hardcodes
 chromadb and the `wiki` collection name. Setting either key has no effect
 today.
+
+**Ambient telemetry variable.** `CLAUDE_SESSION_ID` is read by
+`athenaeum.query_topics` and stamped onto recall telemetry so recall activity
+is session-keyed. It is an **ambient / host-provided** variable (Claude Code
+sets it), not an operator knob — you do not set it yourself; it is documented
+here only so a reader knows recall telemetry carries a session id.
 
 ## Kill switch (`athenaeum disable` / `enable`, #379)
 
