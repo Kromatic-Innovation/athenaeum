@@ -225,7 +225,7 @@ class _RecordingMessages:
     def __init__(self, parent: RecordingClient) -> None:
         self._parent = parent
 
-    def create(self, **params: Any) -> Any:  # noqa: ANN401 — SDK signature
+    def create(self, **params: Any) -> Any:
         response = self._parent._inner.messages.create(**params)
         if self._parent._record and self._parent._pending_case is not None:
             try:
@@ -280,7 +280,7 @@ def replay_client(layer: str, case_id: str) -> Any:
     """
     rec = load_recorded(layer, case_id)
 
-    def _create(**params: Any) -> Any:  # noqa: ANN401
+    def _create(**params: Any) -> Any:
         seen = prompt_hash(
             str(params.get("model", "")),
             params.get("system"),
@@ -446,6 +446,6 @@ def live_ready() -> tuple[bool, str]:
     """
     try:
         build_live_client()
-    except (RuntimeError, Exception) as exc:  # noqa: BLE001 — skip on any construction failure
+    except (RuntimeError, Exception) as exc:
         return False, str(exc)
     return True, ""

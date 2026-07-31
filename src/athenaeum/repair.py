@@ -369,7 +369,7 @@ def migrate_legacy_source_slugs(
             parsed = parse_source(typed)
             if parsed is None:
                 raise ValueError("parse_source returned None")
-        except Exception as exc:  # noqa: BLE001 — defensive guard
+        except Exception as exc:
             report.skipped_validation_fail += 1
             report.errors.append((path, f"invalid_source: {str(exc)[:120]}"))
             continue
