@@ -209,8 +209,20 @@ pruned page is recoverable from history.
 
 ## MCP memory server
 
-Athenaeum ships an MCP server exposing `remember` and `recall` tools so AI
-agents can write to raw intake and search the compiled wiki:
+Athenaeum ships an MCP server exposing **11 tools** so AI agents can write to
+raw intake, search the compiled wiki, and triage the human-decision queue. The
+core pair is `remember` (append-only write to raw intake) and `recall` (keyword
+search over the compiled wiki); the rest surface the pending-decision queues
+(`list_pending_questions`, `list_pending_merges`, `list_pending_decisions`,
+`resolve_question`, `resolve_merge`), the axiom-governance audit
+(`list_axiom_audit`), the retraction-cascade scan (`scan_retraction_cascade`),
+and tier calibration (`calibration_summary`, `review_audit_item`).
+
+When the operator pins a restricted read scope (`athenaeum serve --audience …`,
+issue #312), audience scoping applies across **every** tool, not just `recall`
+(issue #538): the page-content-bearing list tools fail closed by the same
+predicate `recall` uses, and the three decision-queue mutators (`resolve_*`,
+`review_audit_item`) become owner-only. See `docs/security-posture.md` §2.1.
 
 ```bash
 pip install 'athenaeum[mcp]'

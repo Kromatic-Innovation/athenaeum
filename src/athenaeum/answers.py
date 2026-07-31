@@ -1082,12 +1082,25 @@ def ingest_answers(
 # ---------------------------------------------------------------------------
 
 
-def list_unanswered(pending_path: Path) -> list[dict]:
+def list_unanswered(
+    pending_path: Path,
+    *,
+    caller_audience: set[str] | None = None,
+    knowledge_root: Path | None = None,
+) -> list[dict]:
     """Return unanswered pending questions as dicts suitable for MCP output.
 
     Each dict has: ``id``, ``entity``, ``source``, ``question``,
     ``conflict_type``, ``description``, ``created_at``.
+
+    Issue #538: a restricted ``caller_audience`` (non-owner) sees only questions
+    whose originating ``source`` memory it is authorized to read — the same
+    fail-closed predicate ``recall`` applies. Owner (``None``, the default)
+    sees everything, preserving existing behavior. ``knowledge_root`` is the
+    base a relative source path is resolved against.
     """
+    from athenaeum.models import is_page_authorized_at
+
     return [
         {
             "id": pq.id,
@@ -1100,6 +1113,7 @@ def list_unanswered(pending_path: Path) -> list[dict]:
         }
         for pq in parse_pending_questions(pending_path)
         if not pq.answered
+        and is_page_authorized_at(pq.source, caller_audience, base=knowledge_root)
     ]
 
 
