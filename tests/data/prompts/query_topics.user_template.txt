@@ -1,0 +1,10 @@
+# GOLDEN SNAPSHOT — ASSERTION, NOT SOURCE.
+# Editing this file changes what the test EXPECTS, not what the model receives.
+# To change this prompt, edit `athenaeum.query_topics._USER_TEMPLATE`, then run: python -m athenaeum.prompt_registry --write
+# ===8<=== prompt bytes below this line are asserted verbatim ===8<===
+User message:
+---
+{prompt}
+---
+
+Respond with JSON only, no prose. Example: ["Return Path", "lean startup"]
