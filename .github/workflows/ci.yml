@@ -57,6 +57,34 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short --cov=athenaeum --cov-report=term-missing --cov-fail-under=75
 
+  # hestia#550 — NON-BLOCKING type check. The package ships `py.typed` (a PEP
+  # 561 assertion of type correctness to downstream consumers) but nothing had
+  # ever run a checker. This job exists to size the backlog and keep it
+  # visible; it is deliberately NOT wired into `needs: [test]` / `CI Required`,
+  # and the mypy step is `continue-on-error: true`, so a type error can neither
+  # gate merge nor promote `main`. Making mypy a required check is itself
+  # blocked on clearing the backlog (operator decision 2026-07-30). Runs on a
+  # single Python version — sizing does not need the full matrix.
+  types:
+    name: Types (mypy, non-blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (with type extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,vector,types]"
+
+      - name: Type check with mypy (non-blocking — sizes the backlog)
+        continue-on-error: true
+        run: mypy
+
   # hestia#557 — a single, always-present aggregate status that is intended to
   # be the ONE required check on develop/main. It runs on every event
   # (`if: always()`) so it reports a concrete conclusion instead of vanishing

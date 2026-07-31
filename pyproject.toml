@@ -61,6 +61,14 @@ dev = [
     "build>=1.0",
     "hatchling",
 ]
+types = [
+    # NON-BLOCKING type-check tooling (hestia#550). Exact-pinned like
+    # ruff so the sized backlog count is deterministic run-to-run. mypy is
+    # NOT a required check — see the ci.yml `types` job (continue-on-error)
+    # and [tool.mypy]. Enabling it as blocking is gated on clearing the
+    # backlog (operator decision 2026-07-30).
+    "mypy==2.3.0",
+]
 bench = [
     # Optional: pytest-benchmark is only needed to run tests/benchmarks/
     # (p95 search-latency harness, issue #69). The main `dev` extra does
@@ -114,6 +122,24 @@ line-length = 100
 # here changes *what* is linted, not *whether* lint gates: `ruff check`
 # remains a required check exact-pinned to ruff==0.16.0.
 select = ["E", "F", "I", "W", "RUF100"]
+
+[tool.mypy]
+# NON-BLOCKING type check (hestia#550). The package ships `py.typed`
+# (a PEP 561 assertion of type correctness to downstream consumers), yet
+# nothing here had ever run a type checker. This config exists first to
+# *size* the backlog, not to gate: the CI step that runs it is
+# `continue-on-error: true` and is NOT in the `CI Required` aggregate.
+# `warn_unused_ignores` immediately flags which of the `# type: ignore`
+# markers in src/ are dead. Enabling mypy as a *required* check is itself
+# blocked on clearing the backlog (operator decision, 2026-07-30) — do not
+# make it blocking here.
+python_version = "3.11"
+files = ["src/athenaeum"]
+warn_unused_ignores = true
+# Third-party deps ship without stubs (anthropic, chromadb, fastmcp, …);
+# silence import-not-found so the sizing measures athenaeum's own
+# annotations, not missing upstream stubs.
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
