@@ -48,7 +48,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
@@ -318,22 +318,6 @@ def fingerprint_from_description(
     if len(passages) < 2:
         return None
     return claim_pair_fingerprint(passages[0], passages[1], conflict_type)
-
-
-def fingerprints_from_descriptions(
-    descriptions: Iterable[tuple[str, str | None]],
-) -> list[str]:
-    """Batch helper: fingerprints for ``(description, conflict_type)`` pairs.
-
-    Skips entries that yield no fingerprint. Used by tests and callers that
-    want every recoverable fingerprint for a set of blocks.
-    """
-    out: list[str] = []
-    for desc, ctype in descriptions:
-        fp = fingerprint_from_description(desc, ctype)
-        if fp:
-            out.append(fp)
-    return out
 
 
 # ---------------------------------------------------------------------------

@@ -307,16 +307,6 @@ def group_recurring_claims(
     return groups
 
 
-def find_recurring_claims(
-    wiki_root: Path,
-    threshold: float,
-    embedding_provider: EmbeddingProvider,
-) -> list[Group]:
-    """Extract claim occurrences from ``wiki_root`` then group recurrences."""
-    occurrences = extract_claim_occurrences(wiki_root)
-    return group_recurring_claims(occurrences, threshold, embedding_provider)
-
-
 # ---------------------------------------------------------------------------
 # Report rendering
 # ---------------------------------------------------------------------------
