@@ -25,6 +25,7 @@ import json
 import sys
 from pathlib import Path
 
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.authority import (
     AuthorityManifestError,
     convert_page_to_pointer_stub,
@@ -140,7 +141,7 @@ def _cmd_authority_convert(args: argparse.Namespace) -> int:
         sys.stdout.write(new_text)
         return 0
 
-    page_path.write_text(new_text, encoding="utf-8")
+    atomic_write_text(page_path, new_text)
     print(f"converted {page_path} -> pointer stub ({source.slug})")
     return 0
 

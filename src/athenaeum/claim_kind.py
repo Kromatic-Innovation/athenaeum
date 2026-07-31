@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from athenaeum._retry import with_retry
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import resolve_model
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
@@ -205,7 +206,7 @@ def stamp_claim_kind(
     meta["claim_kind"] = kind
     rendered = render_frontmatter(meta) + body
     try:
-        path.write_text(rendered, encoding="utf-8")
+        atomic_write_text(path, rendered)
     except OSError as exc:
         log.warning("claim_kind: cannot write %s (%s); leaving unclassified", path, exc)
         return ""
