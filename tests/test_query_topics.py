@@ -8,16 +8,17 @@ contract.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from athenaeum import query_topics
+from tests.conftest import FakeLLMClient, make_llm_response, make_llm_usage
 
-
-def _mock_response(text: str) -> Any:
-    return SimpleNamespace(content=[SimpleNamespace(text=text)])
+# Issue #554 (L11): _mock_response kept as a thin alias of the shared
+# make_llm_response helper — every call site below still reads
+# `_mock_response(text)`.
+_mock_response = make_llm_response
 
 
 def test_returns_empty_when_api_key_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -36,28 +37,19 @@ def test_extracts_topics_from_instruction_heavy_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    captured: dict[str, Any] = {}
 
-    class _FakeMessages:
-        def create(self, **kwargs: Any) -> Any:
-            captured.update(kwargs)
-            return _mock_response('["Return Path", "consulting engagement"]')
-
-    class _FakeClient:
-        def __init__(self, **kwargs: Any) -> None:
-            captured["__client_kwargs__"] = kwargs
-            self.messages = _FakeMessages()
+    fake = FakeLLMClient(text='["Return Path", "consulting engagement"]')
 
     import anthropic
-    monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
+    monkeypatch.setattr(anthropic, "Anthropic", fake)
 
     topics = query_topics.extract_topics(
         "Without calling any tools, quote the block about Return Path verbatim."
     )
     assert topics == ["Return Path", "consulting engagement"]
-    assert captured["model"] == query_topics.DEFAULT_TOPIC_MODEL
-    assert captured["__client_kwargs__"]["api_key"] == "sk-test"
-    assert captured["__client_kwargs__"]["max_retries"] == 0
+    assert fake.calls[0]["model"] == query_topics.DEFAULT_TOPIC_MODEL
+    assert fake.client_kwargs["api_key"] == "sk-test"
+    assert fake.client_kwargs["max_retries"] == 0
 
 
 def test_returns_empty_when_api_raises(
@@ -66,15 +58,10 @@ def test_returns_empty_when_api_raises(
     import logging
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
-    class _FakeClient:
-        def __init__(self, **_: Any) -> None:
-            self.messages = self
-
-        def create(self, **_: Any) -> Any:
-            raise RuntimeError("network fell over")
+    fake = FakeLLMClient(raises=RuntimeError("network fell over"))
 
     import anthropic
-    monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
+    monkeypatch.setattr(anthropic, "Anthropic", fake)
 
     with caplog.at_level(logging.WARNING, logger="athenaeum.query_topics"):
         assert query_topics.extract_topics("Tell me about Return Path") == []
@@ -99,26 +86,15 @@ def test_ledger_failure_logs_debug_not_fully_silent(
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
-    resp = SimpleNamespace(
-        content=[SimpleNamespace(text='["Return Path"]')],
-        usage=SimpleNamespace(
-            input_tokens=10,
-            output_tokens=5,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        ),
+    resp = make_llm_response(
+        '["Return Path"]',
+        usage=make_llm_usage(input_tokens=10, output_tokens=5),
     )
-
-    class _FakeClient:
-        def __init__(self, **_: Any) -> None:
-            self.messages = self
-
-        def create(self, **_: Any) -> Any:
-            return resp
+    fake = FakeLLMClient(response=resp)
 
     import anthropic
 
-    monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
+    monkeypatch.setattr(anthropic, "Anthropic", fake)
 
     import athenaeum.spend as spend_mod
 
@@ -139,15 +115,10 @@ def test_ledger_failure_logs_debug_not_fully_silent(
 def test_returns_empty_on_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
-    class _FakeClient:
-        def __init__(self, **_: Any) -> None:
-            self.messages = self
-
-        def create(self, **_: Any) -> Any:
-            return _mock_response("sorry, I can't help with that")
+    fake = FakeLLMClient(text="sorry, I can't help with that")
 
     import anthropic
-    monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
+    monkeypatch.setattr(anthropic, "Anthropic", fake)
 
     assert query_topics.extract_topics("Tell me about Return Path") == []
 
@@ -155,15 +126,10 @@ def test_returns_empty_on_malformed_json(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_filters_non_string_items(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
-    class _FakeClient:
-        def __init__(self, **_: Any) -> None:
-            self.messages = self
-
-        def create(self, **_: Any) -> Any:
-            return _mock_response('["Return Path", 42, null, "", "  ", "Kalshi"]')
+    fake = FakeLLMClient(text='["Return Path", 42, null, "", "  ", "Kalshi"]')
 
     import anthropic
-    monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
+    monkeypatch.setattr(anthropic, "Anthropic", fake)
 
     assert query_topics.extract_topics("anything goes") == ["Return Path", "Kalshi"]
 
@@ -171,17 +137,13 @@ def test_filters_non_string_items(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_caps_at_eight_topics(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
-    class _FakeClient:
-        def __init__(self, **_: Any) -> None:
-            self.messages = self
+    import json as _json
 
-        def create(self, **_: Any) -> Any:
-            many = [f"topic{i}" for i in range(20)]
-            import json as _json
-            return _mock_response(_json.dumps(many))
+    many = [f"topic{i}" for i in range(20)]
+    fake = FakeLLMClient(text=_json.dumps(many))
 
     import anthropic
-    monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
+    monkeypatch.setattr(anthropic, "Anthropic", fake)
 
     topics = query_topics.extract_topics("some prompt with topics")
     assert len(topics) == 8
@@ -191,21 +153,14 @@ def test_caps_at_eight_topics(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_respects_topic_model_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("ATHENAEUM_TOPIC_MODEL", "claude-haiku-3-5")
-    captured: dict[str, Any] = {}
 
-    class _FakeClient:
-        def __init__(self, **_: Any) -> None:
-            self.messages = self
-
-        def create(self, **kwargs: Any) -> Any:
-            captured.update(kwargs)
-            return _mock_response("[]")
+    fake = FakeLLMClient(text="[]")
 
     import anthropic
-    monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
+    monkeypatch.setattr(anthropic, "Anthropic", fake)
 
     query_topics.extract_topics("some prompt")
-    assert captured["model"] == "claude-haiku-3-5"
+    assert fake.calls[0]["model"] == "claude-haiku-3-5"
 
 
 # ---------------------------------------------------------------------------
@@ -231,23 +186,14 @@ def test_claude_cli_provider_makes_zero_sdk_calls(
             sdk_constructed["count"] += 1
             raise AssertionError("anthropic.Anthropic must not be constructed")
 
-    captured: dict[str, Any] = {}
-
-    class _FakeCliClient:
-        def __init__(self, **kwargs: Any) -> None:
-            captured["__cli_kwargs__"] = kwargs
-            self.messages = self
-
-        def create(self, **kwargs: Any) -> Any:
-            captured.update(kwargs)
-            return _mock_response('["Return Path", "Kalshi"]')
+    fake_cli = FakeLLMClient(text='["Return Path", "Kalshi"]')
 
     import anthropic
 
     from athenaeum import provider
 
     monkeypatch.setattr(anthropic, "Anthropic", _ForbiddenSDK)
-    monkeypatch.setattr(provider, "ClaudeCliClient", _FakeCliClient)
+    monkeypatch.setattr(provider, "ClaudeCliClient", fake_cli)
 
     topics = query_topics.extract_topics(
         "quote the block about Return Path verbatim",
@@ -257,7 +203,7 @@ def test_claude_cli_provider_makes_zero_sdk_calls(
     assert topics == ["Return Path", "Kalshi"]
     assert sdk_constructed["count"] == 0
     # timeout still flows to the subscription client (per-turn hook budget).
-    assert captured["__cli_kwargs__"]["timeout"] == 3.0
+    assert fake_cli.client_kwargs["timeout"] == 3.0
 
 
 def test_api_backend_preserves_timeout_and_no_retries(
@@ -267,23 +213,16 @@ def test_api_backend_preserves_timeout_and_no_retries(
     max_retries=0 — a per-turn hook must never gain retries (issue #380)."""
     monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    captured: dict[str, Any] = {}
 
-    class _FakeClient:
-        def __init__(self, **kwargs: Any) -> None:
-            captured["__client_kwargs__"] = kwargs
-            self.messages = self
-
-        def create(self, **_: Any) -> Any:
-            return _mock_response("[]")
+    fake = FakeLLMClient(text="[]")
 
     import anthropic
 
-    monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
+    monkeypatch.setattr(anthropic, "Anthropic", fake)
 
     query_topics.extract_topics("Tell me about Return Path", timeout=3.0)
 
-    kwargs = captured["__client_kwargs__"]
+    kwargs = fake.client_kwargs
     assert kwargs["api_key"] == "sk-test"
     assert kwargs["max_retries"] == 0
     assert kwargs["timeout"] == 3.0

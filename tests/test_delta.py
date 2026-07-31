@@ -203,6 +203,10 @@ def test_query_neighbors_ranks_near_dups(tmp_path: Path) -> None:
 
 
 class _FakeClient:
+    # Issue #554 (L11): left ad-hoc rather than repointed at
+    # tests.conftest.FakeLLMClient — this is a null placeholder (the D5 tests
+    # below only check that a "live client" is truthy/non-None; `.messages`
+    # is never called), so there is no `messages.create` shape to share.
     pass
 
 
