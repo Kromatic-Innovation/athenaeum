@@ -11,30 +11,28 @@ reasoning-tier screen at the merge-proposal seam
 function's docstring and :mod:`athenaeum.reasoning_tiers` for the
 gated/default-OFF wiring detail.
 
-SCC membership (L4, one of 8 mutually-recursive modules — librarian,
-merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
-as one ~12,000-line module split for readability, not independence).
-``merge.py`` is imported at TOP level by ``librarian.py``, ``retire.py``,
-and ``wiki_dedupe.py`` (a normal downward dependency from their side, not a
-cycle edge on this side). This module owns ONE deferred (function-local)
-import that breaks a real cycle:
+SCC membership (L4 domain/pipeline). ``merge.py`` is imported at TOP level by
+``librarian.py``, ``retire.py``, and ``wiki_dedupe.py`` (normal downward
+dependencies from their side). Issue #545 hoisted ``discover_auto_memory_files``
+to the :mod:`athenaeum.intake` leaf, so this module now imports it from
+``intake`` at TOP level and the former deferred ``from athenaeum.librarian
+import discover_auto_memory_files`` back-edge (the librarian<->merge cycle) is
+GONE.
 
-- ``merge_clusters_to_wiki`` (~line 1529): local ``from athenaeum.librarian
-  import discover_auto_memory_files``. Breaks the librarian<->merge cycle —
-  ``librarian.py`` already imports THIS module at top level, so the
-  reverse edge must defer here or the package fails to import.
+(A local import in ``merge_clusters_to_wiki`` — ``from athenaeum.clusters
+import DEFAULT_CACHE_DIR`` — is unrelated to any cycle: :mod:`athenaeum.clusters`
+is an L3 service module that does not import this module back; deferred for
+cost/ordering, not cycle-breaking.)
 
-(A second local import at ~line 2292, ``from athenaeum.clusters import
-DEFAULT_CACHE_DIR``, is unrelated to the SCC — :mod:`athenaeum.clusters` is
-an L3 service module and does not import this module back; that one is
-deferred for cost/ordering reasons, not cycle-breaking.)
-
-Separately, ``pending_merges.py`` owns the OTHER half of a real cycle with
-this module: ``pending_merges.revalidate_pending_merges`` function-locally
-imports ``_merge_proposal_suppression_reason`` FROM this module (its own
-docstring explains why: this module imports ``write_pending_merge`` FROM
-``pending_merges`` at top level, so the reverse edge must stay deferred on
-the ``pending_merges`` side).
+``merge.py`` remains in a PRE-EXISTING residual SCC that #545 did NOT target
+(out of its named scope): ``{merge, pending_merges, calibration,
+reasoning_tiers}``. ``pending_merges.py`` owns one half —
+``pending_merges.revalidate_pending_merges`` function-locally imports
+``_merge_proposal_suppression_reason`` FROM this module because this module
+imports ``write_pending_merge`` FROM ``pending_merges`` at top level — and
+``reasoning_tiers``/``calibration`` join via their top-level ``tiers`` +
+``pending_merges`` imports. This residual is pinned as a baseline by
+``tests/test_import_graph_acyclic.py``; a follow-up issue tracks dissolving it.
 
 Scope for this module (kept narrow on purpose — see issue #197):
 
@@ -118,6 +116,7 @@ from athenaeum.fingerprint import (
     record_resolution,
     resolve_not_a_conflict_ttl_days,
 )
+from athenaeum.intake import discover_auto_memory_files
 from athenaeum.merge_type_gate import build_cite_proposal, cross_class_precheck
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
@@ -1553,10 +1552,6 @@ def merge_clusters_to_wiki(
     extra_roots = resolve_extra_intake_roots(knowledge_root, config=resolved_config)
 
     if auto_memory_files is None:
-        # Lazy import to avoid a circular dep on librarian when this
-        # module is imported standalone from a test.
-        from athenaeum.librarian import discover_auto_memory_files
-
         auto_memory_files = discover_auto_memory_files(
             knowledge_root,
             config=resolved_config,

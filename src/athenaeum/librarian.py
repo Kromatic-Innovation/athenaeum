@@ -25,47 +25,53 @@ Environment:
   ATHENAEUM_BATCH_MODE       Opt into Batch API mode for tier-2/3 calls (default: off)
 
 Layering and the SCC (read this before touching any of librarian / merge /
-tiers / pending_merges / batch / status / retire / wiki_dedupe): these 8
-modules are L4 domain/pipeline and form ONE mutually-recursive cycle,
-~12,000 lines behaving as a single module split across 8 files for
-readability, not for independence. ``librarian.py`` is the hub: it imports
-:mod:`athenaeum.merge` at TOP level (the C1-C4 cluster/merge pass is a
-normal dependency, not a cycle edge on this side), and it owns FOUR of the
-package's deferred (function-local) imports, each breaking one cycle edge
-that a top-level import on this side would deadlock:
+tiers / pending_merges / batch / status / retire / wiki_dedupe): these
+modules are L4 domain/pipeline. Historically they formed ONE ~12,000-line
+mutually-recursive cycle held together by function-local (deferred) imports
+BACK into ``librarian`` for three shared raw-intake primitives. Issue #545
+HOISTED those three primitives — ``discover_raw_files``,
+``discover_auto_memory_files``, ``tier0_passthrough`` — DOWN to the
+:mod:`athenaeum.intake` leaf module (``vecmath`` from #542 is the precedent),
+so the modules that need them import from ``intake`` at TOP level and the
+librarian-centered back-edges are gone. ``batch``, ``status``, ``retire``, and
+``wiki_dedupe`` are now fully free of the librarian cycle.
 
-- ``_run_retire_pass`` (~line 1516): local ``from athenaeum.retire import
-  run_retire_pass``. Breaks librarian<->merge/retire: ``retire.py`` imports
-  ``merge`` at top level, and ``merge`` is already imported by librarian at
-  top level, so this side must be the deferred one.
-- ``_run_reresolve_pass`` (~line 1548): local ``from athenaeum.tiers import
-  reresolve_open_questions``. Breaks librarian<->tiers: ``tiers.py``
-  function-locally imports ``discover_auto_memory_files`` BACK from
-  librarian (tiers.py ~line 2633) — neither side can be top-level without
-  deadlocking package import, so both sides defer.
-- inside the run loop (~line 2275): local ``from athenaeum.wiki_dedupe
-  import propose_wiki_page_merges``. wiki_dedupe.py imports ``merge`` and
-  ``pending_merges`` at top level but never imports librarian back, so this
-  edge is one-way — deferred here purely so a wiki-dedupe failure can be
-  caught and logged as non-fatal without complicating module load order.
-- inside the run loop (~line 2559, batch mode branch): local ``from
-  athenaeum.batch import process_batch_run``. Breaks librarian<->batch:
-  ``batch.py`` function-locally imports ``tier0_passthrough`` BACK from
-  librarian (batch.py ~line 320) — same both-sides-defer shape as tiers.
-- inside the run loop (~line 3108): local ``from athenaeum.status import
-  scan_page_sizes``. Breaks librarian<->status: ``status.py`` imports
-  ``discover_raw_files`` FROM librarian at TOP level, so this side must
-  defer to avoid the deadlock.
-- inside the run loop (~line 3144): local ``from athenaeum.pending_merges
-  import revalidate_pending_merges``. ``pending_merges.py`` does not import
-  librarian at all (its own cycle edge is with ``merge``, not this module);
-  deferred here to keep the revalidation advisor's own try/except-isolated,
-  best-effort framing self-contained rather than for cycle-breaking reasons.
+``librarian.py`` is still the run-loop hub: it imports :mod:`athenaeum.merge`
+at TOP level (the C1-C4 cluster/merge pass, a normal downward dependency) and
+re-exports the three hoisted primitives from ``intake`` for backward
+compatibility. It still owns these deferred (function-local) imports, which
+are NOT librarian<->sibling cycle back-edges and stay deferred:
 
-Deleting any of the above deferred imports and hoisting it to module level
-makes the package FAIL TO IMPORT (circular import). This is documented
-structure, not an oversight — do not "clean it up" without untangling the
-whole SCC, which is out of scope for a docstring pass.
+- ``_run_retire_pass``: local ``from athenaeum.retire import
+  run_retire_pass``. ``retire.py`` never imports librarian back; deferred so
+  a retire failure stays best-effort/isolated.
+- ``_run_reresolve_pass``: local ``from athenaeum.tiers import
+  reresolve_open_questions``. ``tiers.py`` no longer imports librarian back
+  (its ``discover_auto_memory_files`` now comes from ``intake`` at top level);
+  deferred to keep the reresolve pass isolated.
+- run loop: local ``from athenaeum.wiki_dedupe import
+  propose_wiki_page_merges`` and ``from athenaeum.batch import
+  process_batch_run`` — neither module imports librarian back; deferred for
+  best-effort/optional-branch isolation, not cycle-breaking.
+- run loop: local ``from athenaeum.status import scan_page_sizes``.
+  ``status.py`` no longer imports librarian (it gets ``discover_raw_files``
+  from ``intake`` now); this is a one-way edge kept deferred for best-effort
+  page-size guardrail isolation.
+- run loop: local ``from athenaeum.pending_merges import
+  revalidate_pending_merges`` — ``pending_merges`` does not import librarian;
+  deferred for best-effort framing.
+- run loop: local ``from athenaeum import drain`` (backlog-drain advisor).
+  ``drain`` DOES import librarian back (function-locally); this
+  librarian<->drain deferred cycle is PRE-EXISTING, out of #545's named
+  scope, and left as-is (see the import-graph regression test's documented
+  residual-SCC baseline).
+
+Three residual SCCs remain after #545 and are pinned as a baseline by
+``tests/test_import_graph_acyclic.py`` (they were always there; #545 dissolved
+only the librarian-centered named-8 coupling): ``{librarian, drain, status}``,
+``{merge, pending_merges, calibration, reasoning_tiers}``, and ``{tiers,
+contradictions, resolutions, answers}``. Do not GROW them; a follow-up issue
+tracks dissolving them.
 """
 
 from __future__ import annotations
@@ -74,7 +80,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -87,7 +92,6 @@ from typing import Any, Callable
 import anthropic
 
 from athenaeum import detection_state, spend
-from athenaeum._lint import _strip_self_reference
 from athenaeum._retry import TransientAPIError
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.clusters import (
@@ -106,11 +110,9 @@ from athenaeum.config import (
     resolve_delta_enabled,
     resolve_delta_max_affected_clusters,
     resolve_delta_max_affected_members,
-    resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
     resolve_full_compile_every_days,
     resolve_live_delta_enabled,
-    resolve_operational_markers,
     resolve_pull_before_run,
     resolve_push_after_run,
     resolve_push_branch,
@@ -119,7 +121,14 @@ from athenaeum.config import (
 )
 from athenaeum.config import resolve_cache_dir as _resolve_cache_dir_config
 from athenaeum.delta import compute_affected_clusters, splice_cluster_report
-from athenaeum.ephemeral import classify_ephemeral
+from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE re-exported for back-compat
+    _AUTO_MEMORY_SKIP_NAMES,
+    AUTO_MEMORY_FILE_RE,
+    RAW_FILE_RE,
+    discover_auto_memory_files,
+    discover_raw_files,
+    tier0_passthrough,
+)
 from athenaeum.merge import (
     RunDeadlineExceeded,
     derive_topic_slug,
@@ -134,22 +143,10 @@ from athenaeum.models import (
     RawFile,
     TokenUsage,
     WikiEntity,
-    coerce_source_type,
     load_schema_list,
     parse_access,
-    parse_asserter,
-    parse_claim_kind,
-    parse_deprecated,
     parse_frontmatter,
-    parse_model,
-    parse_on_behalf_of,
-    parse_refines,
-    parse_superseded_by,
-    parse_supersedes,
     render_frontmatter,
-    safe_source_ref,
-    slugify,
-    validity_bound_str,
 )
 from athenaeum.provider import (
     ProviderConfigError,
@@ -244,240 +241,14 @@ FALLBACK_TAGS = [
     "blocked",
 ]
 
-# Raw file naming: {timestamp}-{uuid8}.md
-RAW_FILE_RE = re.compile(r"^(\d{8}T\d{6}Z?)-([0-9a-f]{8})\.md$", re.IGNORECASE)
-
-# Auto-memory file naming: <prefix>_<slug>.md where prefix is one of
-# feedback|project|reference|user|Recall. Slug is underscore-separated
-# lowercase, but the regex only constrains the prefix — typo bodies
-# (e.g. project_foo_bar.md) must still match so C2 clustering
-# can dedupe them downstream. The ``Recall`` prefix is capitalized in
-# production (see raw/auto-memory/.../Recall_architecture.md); lowercase
-# ``recall_`` is also accepted defensively.
-AUTO_MEMORY_FILE_RE = re.compile(
-    r"^(feedback|project|reference|user|Recall|recall)_(.+)\.md$"
-)
-
-# Filenames to skip in auto-memory scope scan. ``MEMORY.md`` is the
-# per-scope curated index generated by build-per-scope-memory-index.py
-# (mirrors search.py's _INTAKE_SKIP_NAMES contract). Non-.md files are
-# already filtered by the glob, but ``_migration-log.jsonl`` lives at
-# raw/auto-memory/ root — excluded by the directory-only iteration below.
-_AUTO_MEMORY_SKIP_NAMES: frozenset[str] = frozenset({"MEMORY.md"})
-
-
-def discover_auto_memory_files(
-    knowledge_root: Path | None = None,
-    config: dict[str, object] | None = None,
-) -> list[AutoMemoryFile]:
-    """Find all auto-memory intake files under ``raw/auto-memory/<scope>/``.
-
-    Uses :func:`resolve_extra_intake_roots` to pick up the auto-memory
-    root from config (``recall.extra_intake_roots``) — does NOT hard-code
-    the path. This keeps the config surface single-sourced with the
-    recall index builder.
-
-    Returns a list of :class:`AutoMemoryFile` records sorted by
-    ``(scope, filename)``. ``MEMORY.md`` files and non-directory entries
-    at the auto-memory root (e.g. ``_migration-log.jsonl``) are excluded.
-    The ``_unscoped/`` directory is included as a scope alongside named
-    scopes — its files are first-class memories, not metadata.
-    """
-    if knowledge_root is None:
-        knowledge_root = Path.home() / "knowledge"
-
-    # resolve_extra_intake_roots returns absolute paths for every
-    # configured intake root; in the default config the only entry is
-    # raw/auto-memory but callers can configure more, so we iterate all.
-    roots = resolve_extra_intake_roots(knowledge_root, config=config)
-    if not roots:
-        return []
-
-    # Issue #278: resolve the ephemeral/operational classifier inputs once.
-    # An ephemeral-scope OR ``ephemeral: true``-flagged intake is dropped
-    # HERE -- the cleanest choke point -- so it is never clustered or
-    # materialized into a durable ``wiki/auto-*.md`` page. Drops are logged
-    # with their reason; the raw file stays on disk (the move-then-retire
-    # pass only touches members that landed in a wiki entry), so a dropped
-    # file is simply re-evaluated (and re-dropped) idempotently next run.
-    resolved_config = config if config is not None else load_config(knowledge_root)
-    ephemeral_scopes = resolve_ephemeral_scopes(resolved_config)
-    operational_markers = resolve_operational_markers(resolved_config)
-    dropped_ephemeral = 0
-
-    files: list[AutoMemoryFile] = []
-    for root in roots:
-        if not root.is_dir():
-            continue
-        # Directory-only iteration at the root level. This is how we
-        # skip _migration-log.jsonl and any other non-scope sibling
-        # files without relying on the .md glob alone.
-        for scope_dir in sorted(root.iterdir()):
-            if not scope_dir.is_dir():
-                continue
-            scope = scope_dir.name
-            for fpath in sorted(scope_dir.glob("*.md")):
-                if fpath.name in _AUTO_MEMORY_SKIP_NAMES:
-                    continue
-                m = AUTO_MEMORY_FILE_RE.match(fpath.name)
-                if not m:
-                    # Defensive: anything not matching the auto-memory
-                    # convention is skipped here. Entity-schema files
-                    # (<timestamp>-<uuid8>.md) naturally fall through
-                    # because they lack the prefix.
-                    continue
-                memory_type = m.group(1).lower()
-                try:
-                    text = fpath.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
-                    continue
-                meta, _body = parse_frontmatter(text)
-                # Issue #278: drop ephemeral/operational intake before it can
-                # be clustered + merged into a permanent wiki entity.
-                drop_reason = classify_ephemeral(
-                    scope,
-                    meta,
-                    _body,
-                    ephemeral_scopes=ephemeral_scopes,
-                    operational_markers=operational_markers,
-                )
-                if drop_reason is not None:
-                    dropped_ephemeral += 1
-                    log.info(
-                        "auto-memory: dropping ephemeral intake %s - %s",
-                        fpath,
-                        drop_reason,
-                    )
-                    continue
-                name = str(meta.get("name", "")) if meta else ""
-                description = str(meta.get("description", "")) if meta else ""
-                origin_session_id = meta.get("originSessionId") if meta else None
-                if origin_session_id is not None:
-                    origin_session_id = str(origin_session_id)
-                origin_turn_raw = meta.get("originTurn") if meta else None
-                origin_turn: int | None
-                try:
-                    origin_turn = (
-                        int(origin_turn_raw) if origin_turn_raw is not None else None
-                    )
-                except (TypeError, ValueError):
-                    origin_turn = None
-                sources_raw = meta.get("sources") if meta else None
-                if isinstance(sources_raw, list):
-                    sources = [str(s) for s in sources_raw]
-                else:
-                    sources = []
-                # Issue #260 (slice A of #259): origin-traced provenance.
-                # Missing source_type defaults to ``inferred``; source_ref is
-                # the ultimate reference and is never this file's own name.
-                source_type = coerce_source_type(
-                    meta.get("source_type") if meta else None
-                )
-                # Guard the explicit path: a frontmatter source_ref that is a
-                # raw filename (or any ``.md``) is rejected to "" rather than
-                # cited as the ultimate source (#260 invariant).
-                source_ref = safe_source_ref(
-                    meta.get("source_ref") if meta else None, ""
-                )
-                # Lane 1 / #167: declared refines/supersedes relationships.
-                # Malformed entries raise — surfacing the bad file rather
-                # than silently dropping the declaration.
-                try:
-                    refines = parse_refines(meta if meta else None)
-                    supersedes = parse_supersedes(meta if meta else None)
-                except ValueError as exc:
-                    log.warning(
-                        "auto-memory %s: invalid refines/supersedes (%s); "
-                        "treating as empty",
-                        fpath,
-                        exc,
-                    )
-                    refines = []
-                    supersedes = []
-                # Issue #173 / #181: drop refines/supersedes self-references.
-                refines, supersedes = _strip_self_reference(
-                    name, refines, supersedes, fpath
-                )
-                # Issue #191: non-destructive inactive markers.
-                meta_for_markers = meta if meta else None
-                files.append(
-                    AutoMemoryFile(
-                        path=fpath,
-                        origin_scope=scope,
-                        memory_type=memory_type,
-                        name=name,
-                        description=description,
-                        origin_session_id=origin_session_id,
-                        origin_turn=origin_turn,
-                        sources=sources,
-                        refines=refines,
-                        supersedes=supersedes,
-                        superseded_by=parse_superseded_by(meta_for_markers),
-                        deprecated=parse_deprecated(meta_for_markers),
-                        source_type=source_type,
-                        source_ref=source_ref,
-                        # Issue #326: channel-split provenance annotations.
-                        model=parse_model(meta_for_markers),
-                        on_behalf_of=parse_on_behalf_of(meta_for_markers),
-                        asserter=parse_asserter(meta_for_markers),
-                        # Issue #327: epistemic claim kind (fail-open when
-                        # absent/unrecognized → "" unclassified).
-                        claim_kind=parse_claim_kind(meta_for_markers),
-                        # Issue #308: claim-level temporal validity bounds.
-                        valid_from=validity_bound_str(meta_for_markers, "valid_from"),
-                        valid_until=validity_bound_str(meta_for_markers, "valid_until"),
-                    )
-                )
-    if dropped_ephemeral:
-        log.info(
-            "auto-memory: dropped %d ephemeral/operational intake file(s) "
-            "before clustering (issue #278)",
-            dropped_ephemeral,
-        )
-    return files
-
-
-def discover_raw_files(raw_root: Path) -> list[RawFile]:
-    """Find all raw intake files, sorted by timestamp."""
-    files: list[RawFile] = []
-    if not raw_root.exists():
-        return files
-
-    for source_dir in sorted(raw_root.iterdir()):
-        if not source_dir.is_dir():
-            continue
-        source = source_dir.name
-        # Issue #414: answer fragments under raw/answers/ are resolution
-        # OUTPUT, not new intake. Re-discovering them feeds already-settled
-        # rulings back through tier1-2 classification and tier4 contradiction
-        # escalation, so the same ruling re-surfaces as fresh pending
-        # questions on every subsequent run. Skip them at the source level,
-        # before any tier classification can re-escalate them.
-        if source == "answers":
-            continue
-        for fpath in sorted(source_dir.glob("*.md")):
-            if fpath.name == ".gitkeep":
-                continue
-            m = RAW_FILE_RE.match(fpath.name)
-            if m:
-                files.append(
-                    RawFile(
-                        path=fpath,
-                        source=source,
-                        timestamp=m.group(1),
-                        uuid8=m.group(2),
-                    )
-                )
-            else:
-                files.append(
-                    RawFile(
-                        path=fpath,
-                        source=source,
-                        timestamp="",
-                        uuid8="",
-                    )
-                )
-    return files
+# Raw-intake discovery + tier-0 passthrough primitives (RAW_FILE_RE,
+# AUTO_MEMORY_FILE_RE, _AUTO_MEMORY_SKIP_NAMES, discover_raw_files,
+# discover_auto_memory_files, tier0_passthrough) moved DOWN to the
+# :mod:`athenaeum.intake` leaf module in issue #545 to dissolve the
+# librarian-centered import SCC. They are re-imported at the top of this
+# module (``from athenaeum.intake import ...``) so this module's own call
+# sites, the public ``athenaeum.discover_raw_files`` re-export, and existing
+# ``from athenaeum.librarian import ...`` call sites all keep working.
 
 
 def rebuild_index(wiki_root: Path) -> None:
@@ -740,93 +511,6 @@ def git_pull(
         f" {branch}" if branch else "",
     )
     return True
-
-
-def tier0_passthrough(
-    raw: RawFile,
-    index: EntityIndex,
-    wiki_root: Path,
-    valid_types: list[str],
-    dry_run: bool = False,
-) -> WikiEntity | None:
-    """Promote a pre-structured raw-intake file to wiki/ verbatim.
-
-    Some upstream producers (e.g. ``generate_warm_wiki.py``, contact-sync
-    scripts) emit raw-intake markdown that is *already* in valid wiki
-    schema — has ``uid``, ``type``, ``name``, plus rich custom-namespace
-    frontmatter (``relationship:``, ``exclude:``, ``apollo_*``,
-    ``current_title``, ``linkedin_url``, etc.). Sending such files through
-    Tier 2/3 is wasteful (one Haiku + one Sonnet call per file) AND lossy:
-    the LLM-driven path rebuilds frontmatter from a fixed allowlist and
-    drops any field outside it.
-
-    This passthrough writes the raw frontmatter + body to ``wiki/``
-    byte-for-byte, only stamping ``created`` (if missing) and ``updated``
-    to today. No classification runs; the index is updated so later raw
-    files in the same pipeline can match against it.
-
-    Returns the new :class:`WikiEntity` on success, or ``None`` if the
-    raw is unstructured / ineligible (caller should fall through to
-    Tier 1/2/3). Eligibility gate: frontmatter parses, ``uid``/``type``/
-    ``name`` are non-empty, ``type`` is in the schema's allowlist, and the
-    uid is not already present in the index (idempotent re-runs).
-    """
-    meta, body = parse_frontmatter(raw.content)
-    if not meta:
-        return None
-    uid = str(meta.get("uid", "") or "").strip()
-    etype = str(meta.get("type", "") or "").strip()
-    name = str(meta.get("name", "") or "").strip()
-    if not uid or not etype or not name:
-        return None
-    if etype not in valid_types:
-        return None
-    if index.get_by_uid(uid) is not None:
-        return None
-
-    today = date.today().isoformat()
-    if not meta.get("created"):
-        meta["created"] = today
-    meta["updated"] = today
-
-    filename = f"{uid}-{slugify(name)}.md"
-    out_path = wiki_root / filename
-    if out_path.exists():
-        # Filename collision with a different uid would be a real bug,
-        # but a same-uid existing file is already covered by the index
-        # check above. Defer to Tier 1/2/3 rather than overwrite blindly.
-        return None
-
-    aliases_raw = meta.get("aliases") or []
-    tags_raw = meta.get("tags") or []
-    entity = WikiEntity(
-        uid=uid,
-        type=etype,
-        name=name,
-        aliases=[str(a) for a in aliases_raw if a],
-        access=str(meta.get("access", "internal")),
-        tags=[str(t) for t in tags_raw if t],
-        created=str(meta.get("created", today)),
-        updated=str(meta.get("updated", today)),
-        body=body,
-    )
-
-    # Validate frontmatter against the Pydantic schema before write. This
-    # is the schema gate for the byte-for-byte passthrough — malformed
-    # custom-namespace fields are still accepted (extra="allow"), but the
-    # uid/type/name contract is enforced. Raises pydantic.ValidationError
-    # on failure; caller treats that as a real bug, not a fall-through.
-    validate_wiki_meta(meta)
-
-    if dry_run:
-        return entity
-
-    atomic_write_text(
-        out_path,
-        render_frontmatter(meta) + "\n" + body,
-    )
-    index.register(entity)
-    return entity
 
 
 def tier0_handle_upsert(
