@@ -39,6 +39,7 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
+from athenaeum.prompt_safety import defang_tag
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 if TYPE_CHECKING:
@@ -93,10 +94,10 @@ def _snippet(text: str) -> str:
     _, body = parse_frontmatter(text)
     body = (body or text).strip()
     # Defang any literal memory tags so an untrusted body cannot forge the
-    # <memory> boundary in the prompt (mirrors contradictions._member_snippet).
-    import re
-
-    body = re.sub(r"</?\s*memory\s*>", "(memory)", body, flags=re.IGNORECASE)
+    # <memory> boundary in the prompt. #564: shared prompt_safety.defang_tag
+    # helper (byte-identical to the former hand-rolled re.sub, which this and
+    # contradictions._member_snippet each open-coded) — one defang for both.
+    body = defang_tag(body, "memory")
     return body[:_CLASSIFY_BODY_CHARS].strip()
 
 
