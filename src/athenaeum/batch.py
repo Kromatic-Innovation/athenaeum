@@ -55,20 +55,14 @@ Known divergences from the synchronous loop (deliberate, documented):
 Polling interval and timeout are module constants — deliberately not a
 config surface; the nightly window is latency-tolerant.
 
-SCC membership (L4, one of 8 mutually-recursive modules — librarian,
-merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
-as one ~12,000-line module split for readability, not independence).
-``batch.py`` does not import ``librarian`` at module top level (only
-``athenaeum.config`` and ``athenaeum.tiers``, neither of which imports this
-module back). It owns the deferred (function-local) side of the
-librarian<->batch cycle:
-
-- ``process_batch_run`` (~line 320): local ``from athenaeum.librarian
-  import tier0_passthrough``. ``librarian.py`` itself function-locally
-  imports ``process_batch_run`` FROM this module inside its run loop's
-  batch-mode branch (~line 2559) — neither side can be hoisted to module
-  level without the package failing to import, so both sides of this edge
-  stay deferred.
+SCC membership (L4 domain/pipeline). Issue #545 hoisted ``tier0_passthrough``
+to the :mod:`athenaeum.intake` leaf, so ``batch.py`` now imports it from
+``intake`` at TOP level and the former deferred ``from athenaeum.librarian
+import tier0_passthrough`` back-edge (the librarian<->batch cycle) is GONE.
+``batch.py`` is now FREE of the librarian import cycle: it imports no SCC
+member that imports it back. ``librarian.py`` still function-locally imports
+``process_batch_run`` FROM this module in its batch-mode branch, but that is
+now a one-way edge (no cycle).
 """
 
 from __future__ import annotations
@@ -84,6 +78,7 @@ import anthropic
 from athenaeum import spend
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.intake import tier0_passthrough
 from athenaeum.models import (
     EntityAction,
     EntityIndex,
@@ -345,7 +340,6 @@ def process_batch_run(
     Anthropic-endpoint-only; tokens for ``claude-cli``).
     """
     from athenaeum.config import load_config, resolve_owner
-    from athenaeum.librarian import tier0_passthrough
 
     owner = resolve_owner(config)
     result = BatchRunResult()

@@ -12,17 +12,21 @@ stale page, actually running a drain) belongs in the module that owns that
 mutation (``retire.py``, ``athenaeum.drain``), not here — this module may
 only advise, never act.
 
-SCC membership (L4, one of 8 mutually-recursive modules — librarian,
-merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
-as one ~12,000-line module split for readability, not independence).
-``status.py`` imports ``athenaeum.librarian.discover_raw_files`` and
-``athenaeum.tiers.schema_fragment_state`` at TOP level — normal downward
-dependencies. It is the OTHER half of the librarian<->status cycle:
-``librarian.py`` itself function-locally imports this module's
-``scan_page_sizes`` inside its run loop's page-size guardrail (~line 3108)
-specifically because this module already imports librarian at top level,
-so that side must defer or the package fails to import. ``status.py``
-itself has no deferred imports of its own.
+SCC membership (L4 domain/pipeline). Issue #545 hoisted ``discover_raw_files``
+to the :mod:`athenaeum.intake` leaf, so ``status.py`` now imports it from
+``intake`` (not ``librarian``) at TOP level, and its top-level
+``athenaeum.tiers.schema_fragment_state`` import is a normal downward
+dependency. ``status.py`` no longer imports ``librarian`` at all, so the former
+librarian<->status cycle is GONE: ``librarian.py``'s function-local
+``scan_page_sizes`` import is now a one-way edge.
+
+``status.py`` still participates in a PRE-EXISTING residual SCC that #545 did
+NOT target (out of its named scope): ``{librarian, drain, status}``.
+``status.py`` function-locally imports ``athenaeum.drain`` (backlog-drain
+advisor), ``drain`` function-locally imports ``librarian``, and ``librarian``
+function-locally imports ``status`` (``scan_page_sizes``). This residual is
+pinned as a baseline by ``tests/test_import_graph_acyclic.py``; a follow-up
+issue tracks dissolving it.
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ from athenaeum.config import (
     resolve_page_flag_bytes,
     resolve_page_warn_bytes,
 )
-from athenaeum.librarian import discover_raw_files
+from athenaeum.intake import discover_raw_files
 from athenaeum.models import parse_frontmatter
 from athenaeum.tiers import schema_fragment_state
 

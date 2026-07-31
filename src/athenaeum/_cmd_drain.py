@@ -38,7 +38,7 @@ def _positive_float(value: str) -> float:
 
 def add_drain_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Register ``athenaeum drain`` and its flags on *subparsers* (issue #470)."""
-    from athenaeum.cli import _add_lock_args, _positive_int
+    from athenaeum._cli_shared import _add_lock_args, _positive_int
 
     parser = subparsers.add_parser(
         "drain",
@@ -102,7 +102,7 @@ def add_drain_subparser(subparsers: argparse._SubParsersAction) -> None:
 def cmd_drain(args: argparse.Namespace) -> int:
     """Handle ``athenaeum drain`` (issue #470). Returns a process exit code."""
     from athenaeum import drain, spend
-    from athenaeum.cli import _acquire_or_exit
+    from athenaeum._cli_shared import _acquire_or_exit
     from athenaeum.config import load_config
     from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, discover_raw_files
 
