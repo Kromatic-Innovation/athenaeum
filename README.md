@@ -19,16 +19,17 @@ turn.
 > [mem0](https://github.com/mem0ai/mem0) or
 > [Letta](https://github.com/letta-ai/letta) may be a better fit.
 
-## Why Athenaeum
+## What is this?
 
-Four design choices separate a production memory system from a single-user
-markdown file. Each one fixes something that quietly breaks when a team scales
-past one agent:
-
-1. **[Sources as first-class objects](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md#1-sources-are-first-class-objects-trust-but-verify)** — every claim carries provenance, the way Wikipedia does. An unfootnoted fact is an assertion.
-2. **[The librarian — a tiered compilation pipeline](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md#2-the-librarian--a-tiered-compilation-pipeline)** — agents can only _append_ to raw intake. A separate compiler is the only writer to the wiki. Safety from structure, not trust.
-3. **[Passive recall](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md#3-passive-recall--recall-on-every-turn-automatically)** — a hybrid FTS5+vector search fires on every turn and injects breadcrumbs into context. The agent doesn't have to remember to look.
-4. **[An editable observation filter](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md#4-the-notetaker--a-configurable-editable-observation-filter)** — what the agent saves is governed by a prompt you can read, edit, and audit. Not a black box.
+A context window forgets everything the moment a session ends, and even
+within a session it can't tell a durable fact ("Acme is a client") from a
+passing remark. Athenaeum is a memory layer that sits outside any one agent
+session: agents **write** observations to an append-only intake log, a
+separate compiler (**the librarian**) turns that raw stream into a
+structured, deduplicated **wiki** of entities, and a **sidecar** injects the
+relevant slice of that wiki back into context automatically on every turn.
+The result is memory that survives across sessions, across agents, and
+across a team — not just across turns of one conversation.
 
 Full rationale, comparison with alternatives (Claude memory, Anthropic's
 memory tool, RAG, Karpathy's gist, mem0/Letta/Zep/Cognee), and the lessons
@@ -36,6 +37,226 @@ from running it on our own operations live in
 [**docs/why-athenaeum.md**](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md). For the companion blog
 post: [What We Learned Running Our Own Operations on Agentic
 Memory](https://kromatic.com/blog/agentic-memory-in-production/).
+
+## Key features and why they're built this way
+
+### The librarian compiles raw intake into a wiki — it doesn't store verbatim
+
+**What:** Agents can only *append* to `raw/`. A separate process, the
+librarian, is the only writer to `wiki/`, and it runs the observation through
+a tiered pipeline — programmatic normalization, a fast classifier that routes
+the observation to a known or new entity, and a capable model that merges it
+into the entity page and resolves simple contradictions.
+
+**Why:** If every agent could edit the wiki directly, three facts about the
+same person surfaced across three sessions would become three drifting
+person pages, and a bad write from one agent would be indistinguishable from
+a good one. Routing everything through one compiler makes safety a property
+of *structure*, not of trusting every agent to be a careful writer — the
+librarian snapshots the wiki to git before every run, so a bad merge is a
+`git revert` away.
+
+### Contradiction detection escalates to a human decision queue
+
+**What:** When the pipeline can't confidently resolve a conflict between an
+incoming observation and the existing wiki, it doesn't guess — it appends a
+block to `wiki/_pending_questions.md` for a human to answer. The
+`list_pending_decisions` MCP tool (and `athenaeum decisions` on the CLI)
+surfaces this queue, unified with pending merge proposals, as one
+"decisions needed" list.
+
+**Why:** An automated memory system that silently picks a side on every
+ambiguous conflict will eventually silently pick the *wrong* side, and
+nobody will know to check. Some conflicts are cheap to auto-resolve; the
+ones that aren't need a human in the loop, and that only works if there's a
+durable, listable surface for them rather than a conflict resolved by
+whichever write happened last.
+
+### Source precedence is a 9-tier taxonomy, not last-write-wins
+
+**What:** Every claim carries a source, and when two claims conflict, the
+resolver picks a winner using a fixed 9-tier precedence order (from
+`docs/why-athenaeum.md` and `resolutions.py`): direct user statement, curated
+public profile, third-party authoritative API, consensus public source,
+agent-observed-from-artifact, LLM-generated, pipeline script, model prior,
+and unsourced last.
+
+**Why:** "Whichever fact was written most recently wins" is how memory
+systems quietly go wrong — a stale scraped fact can overwrite something the
+user said directly. A precedence order means a low-authority source can
+never silently clobber a high-authority one; genuine ties still fall through
+to a human question rather than a coin flip.
+
+### Recall is scoped by audience, fail-closed
+
+**What:** `athenaeum serve --audience <role>` pins a restricted read scope
+for the life of that server process. Every page-content-bearing tool —
+`recall` and every list tool — applies the same predicate: a restricted
+caller sees only pages it's explicitly authorized for. Untagged pages fail
+**closed** for a restricted audience (the owner, with no audience pinned,
+still sees everything).
+
+**Why:** A secondary or scheduled agent (an email-drafting routine, say)
+often needs *some* of the wiki but must never reach PII or client-confidential
+pages. Defaulting to "visible unless labeled private" means a missed label
+leaks; defaulting to "hidden unless labeled visible for this audience" means
+a missed label is merely annoying, not a leak.
+
+### Spend ceilings and a run lock bound the background compiler
+
+**What:** `athenaeum run` enforces a per-run API-call budget
+(`ATHENAEUM_MAX_API_CALLS`, default 800) and takes a shared run lock
+(`RunLock`, issue #309) so `run`, `ingest`, `reindex`, and `session-end` are
+single-flight against each other on the same knowledge root.
+
+**Why:** The librarian is an LLM-driven background process with no human
+watching each call — without a hard ceiling, a bad day (a big backlog, a
+runaway retry loop) turns into an unbounded bill. And because the librarian
+mutates the wiki with git commits, two overlapping runs writing at once is a
+correctness bug, not just a cost one — the lock guarantees a single writer.
+
+### A provider abstraction lets the pipeline run on the API or a Claude Code subscription
+
+**What:** All LLM calls go through one factory (`athenaeum.provider`) with two
+backends: `api` (the Anthropic SDK, metered) and `claude-cli` (drives the
+operator's own `claude` binary against their Code subscription, no API key).
+The `api` backend wraps `anthropic.Anthropic` with parameters passed through
+unchanged, so behavior is byte-for-byte identical to the pre-abstraction
+code; the `claude-cli` backend mirrors the same call surface so callers need
+no branching logic.
+
+**Why:** Not every operator wants to meter a separate API key for a nightly
+batch job when they already pay for a Claude Code subscription — but the
+tiers, prompts, and call sites shouldn't need two implementations to support
+both. One seam, two transports, identical prompts either way.
+
+### Storage adapters are an extension point (not yet used in-tree)
+
+**What:** `storage.py` resolves each wiki entity class to a **storage
+surface** — a backing store plus a corpus policy — through a small registry
+(`register_adapter` / `storage.adapters` in config). Two adapters ship
+built-in: the default `wiki-markdown-embedded` surface, and an `excluded`
+surface (all-false corpus policy) that PII/archival content is routed
+through so it's excluded from embed/recall/merge by construction.
+
+**Why (honestly scoped):** This is presented as an extension point, not a
+finished feature: only one corpus-policy bit (`is_merge_eligible`) currently
+has a real call site in `src/` (`wiki_dedupe.py`); the `is_embedded` and
+`is_recallable` bits exist on `StorageAdapter` but nothing in `src/` reads
+them yet, and there's no third-party adapter registered in-tree today. The
+seam exists so a future storage surface (e.g. a database-backed wiki) is a
+config change, not a core rewrite — but as of this writing it has one real
+built-in consumer (the PII-exclusion surface), not a general policy engine.
+
+> **Note on reasoning tiers.** `reasoning_tiers.py` implements a tiered
+> reasoning pipeline (`DEFAULT_TIER_CHAIN` is the empty tuple by default), but
+> it is not part of any default run path. It is reachable through exactly one
+> production call site — `merge.py`'s `t1_screen_rejects_merge_proposal` —
+> which is itself gated behind `resolve_reasoning_tier_auditing_enabled`, an
+> explicit opt-in that defaults to **off**. Until an operator turns that
+> setting on, production merge behavior is unaffected. We're listing this for
+> accuracy, not billing it as a current feature.
+
+## The MCP surface
+
+Athenaeum ships an MCP server (`athenaeum serve`) exposing **11 tools** so AI
+agents can write to raw intake, search the compiled wiki, and triage the
+human-decision queue — 7 read-only, 4 that mutate human-decision state.
+
+| Tool | R/W | What it does |
+|---|---|---|
+| `recall` | READ | Searches the compiled wiki for pages relevant to a query (keyword/FTS5/vector depending on configured backend). |
+| `list_pending_questions` | READ | Lists unanswered contradiction-detector questions from `wiki/_pending_questions.md`. |
+| `list_pending_merges` | READ | Lists unresolved resolver-proposed page merges from `wiki/_pending_merges.md`. |
+| `list_pending_decisions` | READ | Unified queue — pending questions **and** merge proposals in one call, oldest first. |
+| `list_axiom_audit` | READ | Per-slug history of `memory_class: axiom` promotions/demotions, so axiom status is auditable without a write tool. |
+| `scan_retraction_cascade` | READ | Flags completed merges that relied on a since-retracted source; never auto-unmerges. |
+| `calibration_summary` | READ | Per-tier sampled/reviewed/overturned counts for the tiered-reasoning calibration loop (reports "not enabled" when the opt-in above is off). |
+| `remember` | WRITE | Appends a piece of knowledge to raw intake (append-only; compiled into the wiki on the next run). |
+| `resolve_question` | WRITE | Flips a pending question to answered and records the answer body. |
+| `resolve_merge` | WRITE | Approves or rejects a pending merge proposal; approval folds/creates the merged wiki page. |
+| `review_audit_item` | WRITE | Records a human's confirm/overturn verdict on a sampled tier-audit item (calibration signal only, never re-executes a merge). |
+
+The three decision-queue mutators (`resolve_question`, `resolve_merge`,
+`review_audit_item`) plus every page-content-bearing read tool are subject to
+audience scoping: a restricted (`--audience`) server process fails those
+mutators closed entirely, since adjudicating the operator's decision queue is
+owner-only. See [`docs/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/security-posture.md).
+
+```bash
+pip install 'athenaeum[mcp]'
+athenaeum serve --path ~/knowledge
+
+# Smoke test the round-trip without a live session
+athenaeum test-mcp
+```
+
+**Claude Code integration.** Add to your MCP config and it auto-starts with
+every session:
+
+```bash
+claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
+```
+
+**Custom raw/wiki locations.** The raw and wiki roots default to
+`<path>/raw` and `<path>/wiki`. To point them at independent locations —
+for example a read-only mounted wiki, or an existing config that predates
+this command — set `KNOWLEDGE_RAW_PATH` and/or `KNOWLEDGE_WIKI_PATH`; each
+overrides its root individually while `--path` remains where `athenaeum.yaml`
+and extra intake roots resolve:
+
+```bash
+KNOWLEDGE_RAW_PATH=/data/knowledge/raw \
+KNOWLEDGE_WIKI_PATH=/data/knowledge/wiki \
+  athenaeum serve --path ~/knowledge
+```
+
+**Scoped read access (secondary agents).** By default `athenaeum serve`
+exposes the **whole wiki** to `recall` — the owner sees everything. If you
+wire a secondary/scheduled agent (e.g. an email-drafting routine) to this
+server, pin it to a restricted audience so it can reach operational pages but
+never your PII / client-confidential / financial ones:
+
+```bash
+# This server process may only recall pages an "ops" audience is allowed to read.
+athenaeum serve --path ~/knowledge --audience ops
+```
+
+The audience is pinned by the operator at serve time and cannot be widened by
+the caller. Pages carry `access:` (`open`/`internal`/`confidential`/`personal`)
+and/or an `audience:` role list; untagged pages fail **closed** for a restricted
+audience (owner still sees them). This is a single-owner read filter, not a
+multi-user ACL. See
+[`docs/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/security-posture.md)
+and [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md)
+for the frontmatter model and the fail-closed enforcement.
+
+**Write-time PII screening (opt-in, off by default).** Complementing the
+read-time audience filter above, an intake screener can classify each
+`remember()` payload *before* it is stored and auto-label matched **medical**
+content `access: personal` so a restricted `recall` never surfaces it (it
+labels, never drops). It is **off by default** — a deliberate choice, not a
+gap: unscreened intake already defaults to the non-world-readable
+`access: internal`, so nothing is world-readable unless a page is explicitly
+labeled `open`. Turn it on in `athenaeum.yaml`:
+
+```yaml
+screening:
+  medical:
+    action: label_restrict   # default: off
+```
+
+Example round-trip:
+
+> **User:** Tristan's partner is Amanda; they met at Stanford GSB.
+>
+> *(Claude calls `remember(content="Tristan's partner is Amanda; they met at Stanford GSB.", source="claude-session")`)*
+>
+> A raw observation lands in `raw/claude-session/20260417T…-…md`. On the
+> next `athenaeum run`, the pipeline compiles it into Tristan's wiki
+> entity (under "Key Contacts") and Amanda's own entity if she doesn't
+> exist yet. Later sessions can ask _"who is Amanda?"_ and `recall`
+> returns the compiled page.
 
 ## Installation
 
@@ -207,98 +428,6 @@ never swept in. Like move-then-retire, recovery is **git-only** — the
 command refuses to run outside a git repo and never hard-`unlink`s, so a
 pruned page is recoverable from history.
 
-## MCP memory server
-
-Athenaeum ships an MCP server exposing **11 tools** so AI agents can write to
-raw intake, search the compiled wiki, and triage the human-decision queue. The
-core pair is `remember` (append-only write to raw intake) and `recall` (keyword
-search over the compiled wiki); the rest surface the pending-decision queues
-(`list_pending_questions`, `list_pending_merges`, `list_pending_decisions`,
-`resolve_question`, `resolve_merge`), the axiom-governance audit
-(`list_axiom_audit`), the retraction-cascade scan (`scan_retraction_cascade`),
-and tier calibration (`calibration_summary`, `review_audit_item`).
-
-When the operator pins a restricted read scope (`athenaeum serve --audience …`,
-issue #312), audience scoping applies across **every** tool, not just `recall`
-(issue #538): the page-content-bearing list tools fail closed by the same
-predicate `recall` uses, and the three decision-queue mutators (`resolve_*`,
-`review_audit_item`) become owner-only. See `docs/security-posture.md` §2.1.
-
-```bash
-pip install 'athenaeum[mcp]'
-athenaeum serve --path ~/knowledge
-
-# Smoke test the round-trip without a live session
-athenaeum test-mcp
-```
-
-**Claude Code integration.** Add to your MCP config and it auto-starts with
-every session:
-
-```bash
-claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
-```
-
-**Custom raw/wiki locations.** The raw and wiki roots default to
-`<path>/raw` and `<path>/wiki`. To point them at independent locations —
-for example a read-only mounted wiki, or an existing config that predates
-this command — set `KNOWLEDGE_RAW_PATH` and/or `KNOWLEDGE_WIKI_PATH`; each
-overrides its root individually while `--path` remains where `athenaeum.yaml`
-and extra intake roots resolve:
-
-```bash
-KNOWLEDGE_RAW_PATH=/data/knowledge/raw \
-KNOWLEDGE_WIKI_PATH=/data/knowledge/wiki \
-  athenaeum serve --path ~/knowledge
-```
-
-**Scoped read access (secondary agents).** By default `athenaeum serve`
-exposes the **whole wiki** to `recall` — the owner sees everything. If you
-wire a secondary/scheduled agent (e.g. an email-drafting routine) to this
-server, pin it to a restricted audience so it can reach operational pages but
-never your PII / client-confidential / financial ones:
-
-```bash
-# This server process may only recall pages an "ops" audience is allowed to read.
-athenaeum serve --path ~/knowledge --audience ops
-```
-
-The audience is pinned by the operator at serve time and cannot be widened by
-the caller. Pages carry `access:` (`open`/`internal`/`confidential`/`personal`)
-and/or an `audience:` role list; untagged pages fail **closed** for a restricted
-audience (owner still sees them). This is a single-owner read filter, not a
-multi-user ACL. See
-[`docs/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/security-posture.md)
-and [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md)
-for the frontmatter model and the fail-closed enforcement.
-
-**Write-time PII screening (opt-in, off by default).** Complementing the
-read-time audience filter above, an intake screener can classify each
-`remember()` payload *before* it is stored and auto-label matched **medical**
-content `access: personal` so a restricted `recall` never surfaces it (it
-labels, never drops). It is **off by default** — a deliberate choice, not a
-gap: unscreened intake already defaults to the non-world-readable
-`access: internal`, so nothing is world-readable unless a page is explicitly
-labeled `open`. Turn it on in `athenaeum.yaml`:
-
-```yaml
-screening:
-  medical:
-    action: label_restrict   # default: off
-```
-
-Example round-trip:
-
-> **User:** Tristan's partner is Amanda; they met at Stanford GSB.
->
-> *(Claude calls `remember(content="Tristan's partner is Amanda; they met at Stanford GSB.", source="claude-session")`)*
->
-> A raw observation lands in `raw/claude-session/20260417T…-…md`. On the
-> next `athenaeum run`, the pipeline compiles it into Tristan's wiki
-> entity (under "Key Contacts") and Amanda's own entity if she doesn't
-> exist yet. Later sessions can ask _"who is Amanda?"_ and `recall`
-> returns the compiled page.
-
 ## Answering pending questions
 
 When Tier 3 can't resolve an ambiguity or a principled contradiction, the
@@ -331,10 +460,10 @@ The 2026-04 raw file is correct; the prior wiki entry is stale.
 **Description**: Prior wiki says Series A; the 2026-04 raw file implies Series B.
 ```
 
-### Option 2 — Use the MCP tool
+### Option 2 — Use the MCP tools
 
 For containerized agents that can't touch the filesystem, `athenaeum serve`
-exposes two tools:
+exposes the full 11-tool surface documented above, including:
 
 - `list_pending_questions()` returns unanswered blocks as JSON — each item
   carries a stable `id` derived from the header + question text.
@@ -683,6 +812,12 @@ release line:
 - **Tier 4 (human escalation) is a file, not a workflow.** Conflicts land in
   `wiki/_pending_questions.md`; you read it and decide. No PR-opening, no
   Slack integration, no UI — on purpose, for now.
+- **Reasoning tiers exist but aren't wired into any default run path.** See
+  the note under "Key features" above — the tiered-reasoning pipeline is
+  reachable only through one opt-in, default-off audit hook.
+- **Storage adapters are an extension point with one real in-tree
+  consumer.** See "Key features" above — `is_embedded`/`is_recallable` have
+  no callers in `src/` yet; only `is_merge_eligible` is wired.
 
 ## Development
 
@@ -716,6 +851,21 @@ git checkout "$(git describe --tags --abbrev=0)"
 ```
 
 See [CONTRIBUTING.md](https://github.com/Kromatic-Innovation/athenaeum/blob/main/CONTRIBUTING.md) for the full promotion flow.
+
+## Where to go next
+
+This README covers the shape of the system and how to run it. For depth on a
+specific piece:
+
+- [`docs/why-athenaeum.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/why-athenaeum.md) — full design rationale, comparison with mem0/Letta/Zep/Cognee/RAG/Claude memory, and production lessons.
+- [`docs/recall-architecture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/recall-architecture.md) — the hybrid FTS5 + vector recall path and its invariants.
+- [`docs/contradiction-detection.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/contradiction-detection.md) — contradiction pipeline, cross-scope modes, cost model.
+- [`docs/conflict-resolution.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/conflict-resolution.md) and [`docs/auto-resolve.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/auto-resolve.md) — the resolver's action taxonomy and auto-apply lane.
+- [`docs/authority-manifest.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/authority-manifest.md) and [`docs/source-handles.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/source-handles.md) — source precedence and provenance handles.
+- [`docs/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/security-posture.md) — audience scoping, fail-closed enforcement, PII screening.
+- [`docs/storage-adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/storage-adapter-contract.md) — the storage extension point.
+- [`docs/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/adapter-contract.md) — writing a custom intake adapter.
+- [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md) — every env var, yaml key, and CLI flag, with defaults and precedence.
 
 ## Getting help
 
