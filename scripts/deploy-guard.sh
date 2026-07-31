@@ -46,12 +46,23 @@
 #      -> loud abort + recovery hint, never a force-reset.
 #   3. Resolve origin/<ref> (default main). Transient fetch/resolve failure ->
 #      leave the checkout as-is (never block dispatch on a network blip).
-#   4. In-sync (dist/.build-sha stamp == origin/<ref>) -> exit 0, mutating
-#      NOTHING (idempotent — a re-run on a synced+built checkout is a no-op).
-#   5. Drift -> fast-forward (--ff-only) to origin/<ref>, refresh the venv
-#      (`pip install -e ".[mcp,vector]"`), then restamp dist/.build-sha; exit 0.
-#   6. Fast-forward, venv-refresh, or stamp FAILURE -> abort LOUDLY (stderr +
-#      non-zero exit) with a recovery hint. NEVER force-reset.
+#   4. Decide against HEAD -- the RUNNING code -- NOT the dist/.build-sha stamp.
+#      The stamp is a derived output with two writers (this guard and
+#      deploy-sync.sh); trusting it as the drift oracle is how a rewind went
+#      silently unsynced (athenaeum#614). In-sync == HEAD == origin/<ref> AND
+#      the stamp already records it -> exit 0, mutating NOTHING (idempotent).
+#   5. Drift (HEAD != origin/<ref>, in EITHER direction -- including a REWIND /
+#      rollback to an ANCESTOR, which --ff-only treats as a successful no-op)
+#      -> reconcile the checkout to origin/<ref> with `git reset --hard` (the
+#      deploy checkout owns no local work, and the dirty-tree refusal in step 2
+#      still guards against clobbering local edits), refresh the venv
+#      (`pip install -e ".[mcp,vector]"`), then restamp dist/.build-sha.
+#   6. POST-CONDITION: re-read HEAD and require it to equal origin/<ref> NOW.
+#      The success line reports the OBSERVED HEAD, never the intended target.
+#      A reconcile/venv/stamp FAILURE -- or a HEAD that did not actually move to
+#      the ref -- aborts LOUDLY (stderr + non-zero exit) with a recovery hint,
+#      rather than a false "synced". A DIRTY deploy worktree is still never
+#      force-reset (step 2 refuses it first).
 #
 # --check: print a decision and mutate nothing
 #   (pre-activation | in-sync | drift | error  ->  exit 0 | 0 | 10 | 20).
@@ -62,8 +73,11 @@
 #   ATHENAEUM_DEPLOY_REF      ref to track (default: main; shared with deploy-sync.sh)
 #   ATHENAEUM_GUARD_REF_SHA   inject resolved origin/<ref> sha (skip fetch+rev-parse)
 #   ATHENAEUM_GUARD_FETCH=0   skip `git fetch`
-#   ATHENAEUM_GUARD_FF_CMD    fast-forward command
-#                             (default: git -C <dir> merge --ff-only origin/<ref>)
+#   ATHENAEUM_GUARD_RECONCILE_CMD  reconcile command run on drift
+#                             (default: git -C <dir> reset --hard origin/<ref> --
+#                             moves HEAD forward OR backward, unlike --ff-only).
+#                             ATHENAEUM_GUARD_FF_CMD is accepted as a DEPRECATED
+#                             alias for back-compat with older callers/tests.
 #   ATHENAEUM_GUARD_INSTALL_CMD  venv-refresh command run on drift
 #                             (default: python3 -m venv .venv && .venv/bin/pip
 #                              install -q -e ".[<extras>]")
@@ -121,6 +135,10 @@ _dg_build_sha() {
   fi
 }
 
+# The deploy checkout's ACTUAL current HEAD sha -- the running code, and this
+# guard's drift oracle (athenaeum#614). Empty when HEAD is unreadable.
+_dg_head() { git -C "$1" rev-parse HEAD 2>/dev/null; }
+
 # True when the deploy worktree has no uncommitted changes.
 _dg_worktree_clean() { [ -z "$(git -C "$1" status --porcelain 2>/dev/null)" ]; }
 
@@ -129,6 +147,16 @@ _dg_worktree_clean() { [ -z "$(git -C "$1" status --porcelain 2>/dev/null)" ]; }
 # is idempotent, and the extras pull the MCP server + vector-search deps.
 _dg_default_install_cmd() {
   printf 'python3 -m venv .venv && .venv/bin/pip install -q -e ".[%s]"' "$(_dg_extras)"
+}
+
+# The default drift reconcile: hard-reset the deploy checkout to origin/<ref>.
+# Unlike `merge --ff-only`, this moves HEAD in EITHER direction, so a REWIND /
+# rollback to an ancestor is actually applied instead of a silent no-op that
+# leaves the deploy stale while the guard reports success (athenaeum#614). Safe
+# because the deploy checkout owns no local work and the dirty-tree refusal in
+# _dg_sync runs first.
+_dg_default_reconcile_cmd() {
+  printf 'git -C "%s" reset --hard "origin/%s"' "$1" "$2"
 }
 
 # The default stamp step: write the running commit into <dir>/dist/.build-sha
@@ -156,7 +184,7 @@ _dg_alert() {
 
 # --- modes -----------------------------------------------------------------
 _dg_check() {
-  local dir ref refsha marker
+  local dir ref refsha head marker
   dir="$(_dg_deploy_dir)"
   ref="$(_dg_ref)"
   if ! _dg_is_checkout "$dir"; then
@@ -167,18 +195,22 @@ _dg_check() {
     echo "error could not resolve origin/${ref} in ${dir}"
     return 20
   fi
+  head="$(_dg_head "$dir")"
   marker="$(_dg_build_sha "$dir")"
-  if [ -n "$marker" ] && [ "$marker" = "$refsha" ]; then
+  # In-sync requires BOTH the running code (HEAD) and the built marker to be at
+  # the ref. Keying only on the stamp let a rewound HEAD report a false in-sync
+  # while a stale stamp still matched the ref (athenaeum#614).
+  if [ -n "$head" ] && [ "$head" = "$refsha" ] && [ "$marker" = "$refsha" ]; then
     echo "in-sync ${refsha}"
     return 0
   fi
-  echo "drift ref=${refsha} stamp=${marker:-<none>}"
+  echo "drift ref=${refsha} head=${head:-<none>} stamp=${marker:-<none>}"
   return 10
 }
 
 # Default mode: perform the sync. Returns 0 (proceed) or 1 (abort loud).
 _dg_sync() {
-  local dir ref refsha marker ff install stamp
+  local dir ref refsha head_before marker reconcile install stamp head_after
   dir="$(_dg_deploy_dir)"
   ref="$(_dg_ref)"
 
@@ -189,9 +221,11 @@ _dg_sync() {
 
   # A main-pinned deploy worktree must never be hand-edited. Refuse to dispatch
   # on a dirty tree -- on EITHER the in-sync or the drift path -- rather than
-  # risk a fast-forward clobbering local edits or running against unknown state.
+  # risk the reconcile clobbering local edits or running against unknown state.
+  # This is the guard that keeps the `reset --hard` below from ever discarding
+  # local work: a clean deploy checkout owns none.
   if ! _dg_worktree_clean "$dir"; then
-    _dg_alert "deploy worktree ${dir} is dirty -- refusing to touch it (someone edited the deploy checkout?). Recovery: inspect it (git -C ${dir} status), discard stray edits once you understand them, then re-run. The guard never force-resets."
+    _dg_alert "deploy worktree ${dir} is dirty -- refusing to touch it (someone edited the deploy checkout?). Recovery: inspect it (git -C ${dir} status), discard stray edits once you understand them, then re-run. The guard never force-resets a dirty tree."
     return 1
   fi
 
@@ -200,23 +234,46 @@ _dg_sync() {
     return 0
   fi
 
+  head_before="$(_dg_head "$dir")"
   marker="$(_dg_build_sha "$dir")"
-  if [ -n "$marker" ] && [ "$marker" = "$refsha" ]; then
+
+  # Decide against HEAD (the running code), NOT the stamp. In-sync only when the
+  # checkout is AT the ref AND the build marker already records it.
+  if [ -n "$head_before" ] && [ "$head_before" = "$refsha" ] && [ "$marker" = "$refsha" ]; then
     echo "deploy-guard: in-sync ${refsha} (${dir} @ origin/${ref})" >&2
     return 0
   fi
 
-  echo "deploy-guard: drift (ref=${refsha} stamp=${marker:-<none>}) -- fast-forwarding ${dir}" >&2
+  # Drift. If HEAD is not at the ref -- in EITHER direction, including a REWIND
+  # to an ancestor that --ff-only would treat as a successful no-op -- reconcile
+  # the checkout to the ref. `reset --hard` moves HEAD forward OR backward; the
+  # deploy checkout owns no local work and is clean (checked above).
+  if [ "$head_before" != "$refsha" ]; then
+    echo "deploy-guard: drift (HEAD=${head_before:-<none>} ref=${refsha}) -- reconciling ${dir} to origin/${ref}" >&2
+    reconcile="${ATHENAEUM_GUARD_RECONCILE_CMD:-${ATHENAEUM_GUARD_FF_CMD:-$(_dg_default_reconcile_cmd "$dir" "$ref")}}"
+    if ! ( cd "$dir" && eval "$reconcile" ) >/dev/null 2>&1; then
+      _dg_alert "reconcile to origin/${ref} failed for ${dir} (cmd: ${reconcile}). Recovery: bring the deploy checkout to origin/${ref} by hand (git -C ${dir} fetch --force origin ${ref} && git -C ${dir} reset --hard origin/${ref}) once you understand why the reset failed."
+      return 1
+    fi
+  else
+    # HEAD is already at the ref but the build marker is stale/absent: the code
+    # is correct, the venv/stamp may not be. Rebuild them; do not touch git.
+    echo "deploy-guard: HEAD already at ${refsha} but unstamped/stale (stamp=${marker:-<none>}) -- refreshing venv + stamp" >&2
+  fi
 
-  ff="${ATHENAEUM_GUARD_FF_CMD:-git -C \"$dir\" merge --ff-only \"origin/$ref\"}"
-  if ! ( cd "$dir" && eval "$ff" ) >/dev/null 2>&1; then
-    _dg_alert "fast-forward to origin/${ref} failed -- the deploy worktree has diverged from ${ref}. Recovery: inspect the divergence (git -C ${dir} log --oneline origin/${ref}..HEAD) and bring it back to origin/${ref} by hand once you understand it. The guard never force-resets."
+  # POST-CONDITION: re-read the ACTUAL HEAD and require it to be the ref now.
+  # This turns a reconcile that did NOT move the checkout (the athenaeum#614
+  # rewind no-op) from a silent false "synced" into a loud abort, and it is why
+  # the success line below can only ever print an OBSERVED, verified HEAD.
+  head_after="$(_dg_head "$dir")"
+  if [ "$head_after" != "$refsha" ]; then
+    _dg_alert "post-condition FAILED: ${dir} HEAD is ${head_after:-<unreadable>} but expected ${refsha} after reconcile to origin/${ref} -- refusing to report a sync that did not move the checkout. Recovery: git -C ${dir} fetch --force origin ${ref} && git -C ${dir} reset --hard origin/${ref}."
     return 1
   fi
 
   install="${ATHENAEUM_GUARD_INSTALL_CMD:-$(_dg_default_install_cmd)}"
   if ! ( cd "$dir" && eval "$install" ); then
-    _dg_alert "venv refresh failed after fast-forward to origin/${ref} (cmd: ${install}). Recovery: rebuild the venv by hand (cd ${dir} && ${install}) and confirm the deploy extras resolve."
+    _dg_alert "venv refresh failed after reconcile to origin/${ref} (cmd: ${install}). Recovery: rebuild the venv by hand (cd ${dir} && ${install}) and confirm the deploy extras resolve."
     return 1
   fi
 
@@ -226,7 +283,8 @@ _dg_sync() {
     return 1
   fi
 
-  echo "deploy-guard: synced ${dir} to origin/${ref} (${refsha}) and refreshed .venv" >&2
+  # Report the OBSERVED post-sync HEAD, never the intended target.
+  echo "deploy-guard: synced ${dir} to origin/${ref} (observed HEAD ${head_after}) and refreshed .venv" >&2
   return 0
 }
 
