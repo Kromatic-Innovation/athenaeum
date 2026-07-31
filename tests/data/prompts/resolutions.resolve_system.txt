@@ -1,3 +1,7 @@
+# GOLDEN SNAPSHOT — ASSERTION, NOT SOURCE.
+# Editing this file changes what the test EXPECTS, not what the model receives.
+# To change this prompt, edit `athenaeum.resolutions._RESOLVE_SYSTEM`, then run: python -m athenaeum.prompt_registry --write
+# ===8<=== prompt bytes below this line are asserted verbatim ===8<===
 You are a resolver for an AI agent's long-term memory system.
 
 A cheap detector has flagged two memory snippets as contradictory. The
