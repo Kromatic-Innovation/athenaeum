@@ -34,7 +34,6 @@ Out of scope (deliberate):
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -50,6 +49,7 @@ from athenaeum.models import (
     parse_frontmatter,
     validity_bound_str,
 )
+from athenaeum.prompt_safety import defang_tag
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 if TYPE_CHECKING:
@@ -167,8 +167,10 @@ def _member_snippet(am: AutoMemoryFile) -> str:
         body = f"{am.name}\n{am.description}".strip()
     # Issue #324 hardening: the untrusted body must not forge the <memory>
     # boundary and smuggle a trusted `scope:`/system line into the prompt.
-    # Defang any literal memory tags before the body is embedded.
-    body = re.sub(r"</?\s*memory\s*>", "(memory)", body, flags=re.IGNORECASE)
+    # Defang any literal memory tags before the body is embedded. #564: this is
+    # the shared prompt_safety.defang_tag helper (byte-identical to the former
+    # hand-rolled `</?\s*memory\s*>` re.sub) — one defang, one source of truth.
+    body = defang_tag(body, "memory")
     snippet = body[:PER_MEMBER_BODY_CHARS]
     return snippet.strip()
 

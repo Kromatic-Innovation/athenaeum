@@ -85,6 +85,7 @@ from athenaeum.config import resolve_model
 from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge
 from athenaeum.pii import is_pii_flagged
+from athenaeum.prompt_safety import data_only_clause, fence_untrusted
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 log = logging.getLogger(__name__)
@@ -873,9 +874,20 @@ class ReasoningTierT2Decision:
                 )
 
 
-T2_SYSTEM_PROMPT = """You are a careful, deep-reasoning reviewer for a memory-merge proposal
+# The FULL source bodies T2 sees are untrusted content (audit M21): T1 gets
+# some protection from repr-quoting (reasoning_tiers.py `f"  {k}: {v!r}"`), but
+# T2's full bodies had no delimiter, no defang, and — critically — no data-only
+# clause, while T2's output space includes `approve`, which finalizes a merge.
+# The clause names the <source_body> fence that `_render_full_source` wraps each
+# body in, so an injected body cannot forge the boundary or issue instructions.
+T2_SYSTEM_PROMPT = (
+    """You are a careful, deep-reasoning reviewer for a memory-merge proposal
 queue. You see proposals that a cheaper pre-screener already passed up as
 NOT confidently rejectable. You are shown FULL source bodies (not excerpts).
+
+"""
+    + data_only_clause("source_body")
+    + """
 
 You may return exactly one of:
 - "approve": the merge is correct and safe to finalize automatically. Only
@@ -894,15 +906,27 @@ Respond with ONLY a JSON object of the shape:
  "reason": "<one or two sentences>",
  "amended_sources": ["path", ...] | null,
  "drafted_body": "<merged body text>" | null}"""
+)
+
+# Generous cap on the fenced full body (audit M21). T2's privilege is FULL
+# bodies, so this is set far above any realistic memory file — it only bounds a
+# pathologically large body from blowing up the request, and defangs the
+# <source_body> fence so the body cannot forge its own boundary. T2 does not
+# copy anchors to real files (its output is a verdict / human-reviewed draft),
+# so — unlike tiers.py's merge path — defang here is safe (defang default=True).
+_T2_FULL_BODY_MAX_CHARS = 100_000
 
 
 def _render_full_source(view: BoundedSourceView, full_body: str) -> str:
     fm_lines = "\n".join(f"  {k}: {v!r}" for k, v in sorted(view.frontmatter.items()))
+    fenced_body = fence_untrusted(
+        full_body, tag="source_body", max_chars=_T2_FULL_BODY_MAX_CHARS
+    )
     return (
         f"- path: {view.path}\n"
         f"  title: {view.title}\n"
         f"  frontmatter:\n{fm_lines or '  (none)'}\n"
-        f"  body (FULL):\n{full_body}"
+        f"  body (FULL):\n{fenced_body}"
     )
 
 
