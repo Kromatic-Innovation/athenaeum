@@ -245,19 +245,57 @@ class TestRunLockAutoBreakStaleHeartbeat:
             lock1.release()
 
     def test_auto_break_does_not_fire_for_fresh_heartbeat(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path
     ) -> None:
+        # Issue #526 (H10): NON-VACUOUS. The old version monkeypatched
+        # ``heartbeat_age_seconds`` to 0.1 — a value production could never
+        # produce, because ``heartbeat()`` was never called in production. It
+        # asserted the guard works under an input the system cannot generate.
+        # Here the decision is driven off a REAL, freshly-refreshed heartbeat
+        # line: the holder's ACQUIRE age is pushed past ``break_stale_after``,
+        # but a real ``heartbeat()`` call keeps its PROGRESS age near zero, so
+        # auto-break must NOT fire. No monkeypatch of the age function; and the
+        # holder PID is genuinely this (alive) process, so ``holder_alive`` is
+        # really True — the break's other precondition is satisfied for real.
+        threshold = 0.3
         lock1 = RunLock(tmp_path)
         lock1.acquire()
         try:
-            monkeypatch.setattr(
-                runlock, "heartbeat_age_seconds", lambda _lockfile: 0.1
-            )
-            monkeypatch.setattr(runlock, "_pid_alive", lambda _pid: True)
-
-            lock2 = RunLock(tmp_path, break_stale_after=1.0)
+            time.sleep(threshold + 0.2)  # acquire age now exceeds the threshold
+            lock1.heartbeat()  # ...but progress (heartbeat) is fresh
+            lock2 = RunLock(tmp_path, break_stale_after=threshold)
             with pytest.raises(LockHeld):
                 lock2.acquire()
+        finally:
+            lock1.release()
+
+    def test_stale_real_heartbeat_past_acquire_age_is_auto_broken(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The counterpart that proves the test above is not vacuous: with the
+        # SAME real timing but NO heartbeat refresh, the holder's real heartbeat
+        # age (falling back to acquire time) does exceed ``break_stale_after``,
+        # so auto-break fires — driven entirely by real timestamps, no
+        # monkeypatch of ``heartbeat_age_seconds``. Together the two tests show
+        # the guard flips on the real heartbeat value, not a synthetic one.
+        threshold = 0.3
+        lock1 = RunLock(tmp_path)
+        lock1.acquire()
+        try:
+            time.sleep(threshold + 0.2)  # acquire age exceeds threshold; no refresh
+            lock2 = RunLock(tmp_path, break_stale_after=threshold)
+            with caplog.at_level("WARNING", logger="athenaeum.runlock"):
+                lock2.acquire()  # real heartbeat is stale → auto-break fires
+            try:
+                assert any(
+                    "auto-breaking wedged lock" in rec.message
+                    for rec in caplog.records
+                )
+                holder_meta = read_holder(tmp_path / runlock.LOCKFILE_NAME)
+                assert holder_meta is not None
+                assert holder_meta["pid"] == str(os.getpid())
+            finally:
+                lock2.release()
         finally:
             lock1.release()
 
@@ -318,6 +356,165 @@ class TestRunLockAutoBreakStaleHeartbeat:
             )
         finally:
             lock1.release()
+
+
+class TestWaiterStaleFdReopen:
+    """Finding M6 (issue #526): the wait loop must never acquire an orphan inode.
+
+    A descriptor opened before contention refers to an orphan inode once a break
+    (--force / auto-break) unlinks and re-creates the lockfile. Re-flocking that
+    orphan "succeeds" while the real lock path is a different inode, so two
+    processes each believe they hold the lock on two different inodes.
+    """
+
+    def test_holds_current_inode_true_for_live_fd(self, tmp_path: Path) -> None:
+        lock = RunLock(tmp_path)
+        fd = lock._open_fd()
+        try:
+            assert lock._holds_current_inode(fd)
+        finally:
+            os.close(fd)
+
+    def test_holds_current_inode_false_after_break(self, tmp_path: Path) -> None:
+        lockfile = tmp_path / runlock.LOCKFILE_NAME
+        lock = RunLock(tmp_path)
+        fd = lock._open_fd()  # descriptor on inode X
+        try:
+            assert lock._holds_current_inode(fd)
+            # Simulate a break: unlink + re-create → a new inode now at the path.
+            lock._break_lock()
+            fd2 = lock._open_fd()
+            os.close(fd2)
+            assert os.stat(lockfile).st_ino != os.fstat(fd).st_ino
+            # The pre-break fd is now an orphan — the guard must reject it.
+            assert not lock._holds_current_inode(fd)
+        finally:
+            os.close(fd)
+
+    def test_holds_current_inode_false_when_path_unlinked(
+        self, tmp_path: Path
+    ) -> None:
+        lock = RunLock(tmp_path)
+        fd = lock._open_fd()
+        try:
+            lock._break_lock()  # unlink, leave nothing at the path
+            assert not lock._holds_current_inode(fd)
+        finally:
+            os.close(fd)
+
+    def test_wait_loop_reopens_fd_and_ignores_orphan_inode(
+        self, tmp_path: Path
+    ) -> None:
+        # End-to-end: a waiter blocked in acquire()'s poll loop, whose lockfile
+        # is rotated (unlink + fresh inode) by a concurrent break while it
+        # waits, must acquire the CURRENT inode — never the orphan its
+        # pre-contention fd pointed at. Under the pre-fix code the waiter
+        # re-flocked its stale fd and finished on the orphan, so its held fd's
+        # inode would differ from the file now at the lock path.
+        lockfile = tmp_path / runlock.LOCKFILE_NAME
+        holder = RunLock(tmp_path)
+        holder.acquire()
+        orphan_ino = os.stat(lockfile).st_ino
+
+        acquired: dict[str, int] = {}
+        errors: list[BaseException] = []
+
+        def waiter() -> None:
+            lk = RunLock(tmp_path, wait=5.0)
+            try:
+                lk.acquire()
+                acquired["fd_ino"] = os.fstat(lk._fd).st_ino  # type: ignore[arg-type]
+                acquired["path_ino"] = os.stat(lockfile).st_ino
+                lk.release()
+            except BaseException as exc:  # pragma: no cover - surfaced via assert
+                errors.append(exc)
+
+        t = threading.Thread(target=waiter)
+        t.start()
+        time.sleep(0.4)  # let the waiter enter its poll loop on the orphan-to-be inode
+
+        # A concurrent actor rotates the lockfile: unlink (orphaning the inode
+        # the holder still flocks) then create a fresh inode at the path.
+        os.unlink(lockfile)
+        fresh = os.open(lockfile, os.O_RDWR | os.O_CREAT, 0o644)
+        os.close(fresh)
+        fresh_ino = os.stat(lockfile).st_ino
+        assert fresh_ino != orphan_ino
+        holder.release()  # drop the flock on the now-orphan inode
+
+        t.join(timeout=10)
+        assert not t.is_alive()
+        assert not errors, errors
+        # The waiter holds the CURRENT inode, not the orphan.
+        assert acquired["fd_ino"] == acquired["path_ino"] == fresh_ino
+        assert acquired["fd_ino"] != orphan_ino
+
+
+class TestRunHeartbeatWiring:
+    """H10 (issue #526): librarian.run refreshes the lock heartbeat per phase."""
+
+    def _seed_root(self, tmp_path: Path) -> Path:
+        import subprocess
+
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        (root / "athenaeum.yaml").write_text(
+            "recall:\n  extra_intake_roots: []\n", encoding="utf-8"
+        )
+        subprocess.run(["git", "init", "-q", "-b", "test-branch"], cwd=root, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=root, check=True)
+        return root
+
+    def test_run_invokes_heartbeat_callback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Before this fix RunLock.heartbeat had no production caller at all, so
+        # heartbeat_age_seconds reported ACQUIRE age forever. run() must now call
+        # the threaded heartbeat at least once as it advances through its phases.
+        from athenaeum.librarian import run
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path / "cache"))
+        root = self._seed_root(tmp_path)
+
+        calls = {"n": 0}
+
+        def hb() -> None:
+            calls["n"] += 1
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            dry_run=False,
+            max_runtime=0,
+            retire=False,
+            heartbeat=hb,
+        )
+        assert rc == 0
+        assert calls["n"] >= 1
+
+    def test_run_without_heartbeat_callback_is_safe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The heartbeat seam is optional: a caller that passes no heartbeat (or
+        # the --dry-run path, which holds no lock) must run without raising.
+        from athenaeum.librarian import run
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path / "cache"))
+        root = self._seed_root(tmp_path)
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            dry_run=False,
+            max_runtime=0,
+            retire=False,
+        )
+        assert rc == 0
 
 
 class TestRunLockLoudStaleWarning:

@@ -2043,6 +2043,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             pull_before_run=getattr(args, "pull_before_run", None),
             install_signal_handlers=True,
             full_compile=getattr(args, "full_compile", False),
+            # Issue #526 (H10): thread the run lock's heartbeat into the
+            # librarian so its per-phase/per-file loop refreshes the lockfile's
+            # heartbeat — making heartbeat_age_seconds report progress age, not
+            # acquire age, so a healthy long run is never auto-broken.
+            heartbeat=lock.heartbeat,
         )
     finally:
         lock.release()
