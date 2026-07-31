@@ -85,6 +85,11 @@ from typing import Any, Literal
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter, render_frontmatter, slugify
 from athenaeum.provenance import record_merge_provenance
+from athenaeum.sidecar_blocks import (
+    MARKDOWN_FENCE_OPEN_RE,
+    scan_fence_state,
+    split_blocks,
+)
 
 log = logging.getLogger(__name__)
 
@@ -105,12 +110,6 @@ _HEADER_RE = re.compile(
 )
 _CHECKBOX_RE = re.compile(r"^- \[(?P<state>[ xX])\]\s*(?P<question>.*)$")
 
-# ```markdown fence-opener / bare-fence-closer, shared by _split_blocks and
-# _parse_block (#292) so the two block-boundary state machines can't diverge
-# on what counts as "inside a fenced Draft body".
-_FENCE_OPEN_RE = re.compile(r"^(?P<fence>`{3,})markdown$")
-_FENCE_CLOSE_RE = re.compile(r"^(?P<fence>`{3,})$")
-
 
 def _scan_fence_state(line: str, fence_len: int) -> int:
     """Return the updated open-fence backtick-length after ``line``.
@@ -128,15 +127,12 @@ def _scan_fence_state(line: str, fence_len: int) -> int:
     inside the three-backtick outer fence) without prematurely closing
     the outer fence — see the module docstring's nested-fence
     convention.
+
+    Delegates to the shared :func:`athenaeum.sidecar_blocks.scan_fence_state`
+    (#527) with the pending-merges ```markdown fence-opener so the fence state
+    machine has exactly one implementation across both sidecars.
     """
-    stripped = line.strip()
-    if fence_len:
-        close_match = _FENCE_CLOSE_RE.match(stripped)
-        if close_match and len(close_match.group("fence")) == fence_len:
-            return 0
-        return fence_len
-    open_match = _FENCE_OPEN_RE.match(stripped)
-    return len(open_match.group("fence")) if open_match else 0
+    return scan_fence_state(line, fence_len, fence_open_re=MARKDOWN_FENCE_OPEN_RE)
 
 
 @dataclass
@@ -278,64 +274,19 @@ def _split_blocks(text: str) -> list[str]:
     orphan ``## From`` fragments left behind by an already-archived merge
     drain out of the sidecar on the next rewrite rather than accreting
     forever.
+
+    Delegates to the shared
+    :func:`athenaeum.sidecar_blocks.split_blocks` (#527) with the canonical
+    merge header and the ```markdown fence-opener, so the pending-merges and
+    pending-questions splitters share one implementation and cannot diverge
+    again.
     """
-    blocks: list[str] = []
-    current: list[str] = []
-    fence_len = 0
-    for line in text.splitlines():
-        stripped = line.strip()
-        new_fence_len = _scan_fence_state(line, fence_len)
-        if fence_len:
-            if new_fence_len == 0:
-                fence_len = 0
-                if current:
-                    current.append(line)
-                continue
-            if _HEADER_RE.match(line):
-                # A canonical block header (``## [DATE] Merge: "name"``)
-                # appearing while a fence is still "open" means a prior
-                # block's ```markdown fence was left unclosed (malformed
-                # input) — real headers never legitimately appear inside
-                # fenced draft content. Recover the boundary here instead
-                # of silently swallowing every subsequent block into the
-                # malformed one.
-                log.warning(
-                    "pending_merges: unclosed ```markdown fence before "
-                    "block header %r; recovering block boundary",
-                    line[:80],
-                )
-                fence_len = 0
-                if current:
-                    blocks.append("\n".join(current).rstrip())
-                current = [line]
-                continue
-            if current:
-                current.append(line)
-            continue
-        if new_fence_len:
-            fence_len = new_fence_len
-            if current:
-                current.append(line)
-            continue
-        if _HEADER_RE.match(line):
-            if current:
-                blocks.append("\n".join(current).rstrip())
-            current = [line]
-        elif stripped == "---":
-            if current:
-                blocks.append("\n".join(current).rstrip())
-                current = []
-        else:
-            if current:
-                current.append(line)
-    if fence_len:
-        log.warning(
-            "pending_merges: reached end of file with an unclosed "
-            "```markdown fence in the last block; flushing anyway"
-        )
-    if current:
-        blocks.append("\n".join(current).rstrip())
-    return [b for b in blocks if b.startswith("## ")]
+    return split_blocks(
+        text,
+        block_header_re=_HEADER_RE,
+        fence_open_re=MARKDOWN_FENCE_OPEN_RE,
+        context="pending_merges",
+    )
 
 
 def _parse_block(block_text: str) -> PendingMerge | None:
