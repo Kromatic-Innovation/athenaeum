@@ -211,21 +211,26 @@ def singleton_pair_root(tmp_path: Path) -> Path:
 
 
 class TestCosineHelpers:
+    """Issue #542: cosine moved to athenaeum.vecmath; see tests/test_vecmath.py
+    for the full behavior suite. These stay here as a thin regression check
+    that athenaeum.clusters still resolves similarity via the shared helper.
+    """
+
     def test_cosine_identity_is_one(self) -> None:
-        from athenaeum.clusters import _cosine
+        from athenaeum.vecmath import cosine
 
         v = [0.3, -0.2, 0.5, 1.1]
-        assert _cosine(v, v) == pytest.approx(1.0)
+        assert cosine(v, v) == pytest.approx(1.0)
 
     def test_cosine_zero_vector(self) -> None:
-        from athenaeum.clusters import _cosine
+        from athenaeum.vecmath import cosine
 
-        assert _cosine([0.0, 0.0], [1.0, 1.0]) == 0.0
+        assert cosine([0.0, 0.0], [1.0, 1.0]) == 0.0
 
     def test_cosine_length_mismatch(self) -> None:
-        from athenaeum.clusters import _cosine
+        from athenaeum.vecmath import cosine
 
-        assert _cosine([1.0, 0.0], [1.0, 0.0, 0.0]) == 0.0
+        assert cosine([1.0, 0.0], [1.0, 0.0, 0.0]) == 0.0
 
 
 class TestSingleLinkage:

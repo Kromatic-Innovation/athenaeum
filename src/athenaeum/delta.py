@@ -65,11 +65,11 @@ from typing import Any
 
 from athenaeum.clusters import (
     Cluster,
-    _cosine,
     _fallback_embeddings,
     _indexed_id_for,
 )
 from athenaeum.models import AutoMemoryFile
+from athenaeum.vecmath import cosine
 
 log = logging.getLogger(__name__)
 
@@ -305,7 +305,7 @@ def compute_affected_clusters(
             vj = vec_by_relpath.get(other)
             if vj is None:
                 continue
-            if _cosine(vi, vj) >= threshold:
+            if cosine(vi, vj) >= threshold:
                 other_cid = path_to_cid.get(other)
                 if other_cid is not None:
                     _add_cluster(other_cid)
