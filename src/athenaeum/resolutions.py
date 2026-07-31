@@ -65,6 +65,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.config import _env_number
 from athenaeum.config import resolve_model as _resolve_model_knob
 from athenaeum.contradictions import ContradictionResult
 from athenaeum.json_utils import extract_json_object
@@ -691,10 +692,15 @@ def resolve_auto_apply(config: dict[str, Any] | None = None) -> bool:
 def resolve_auto_apply_threshold(config: dict[str, Any] | None = None) -> float:
     """Resolve the auto-apply confidence threshold from env > config > default.
 
-    Must land in ``[0.0, 1.0]``. An out-of-range env or yaml value raises
-    :class:`ValueError` so operators get a loud signal — silently clamping
-    a typo (e.g. ``9.0`` meant as ``0.9``) would auto-apply nothing for the
-    rest of the run with no obvious cause.
+    Must land in ``[0.0, 1.0]``. A malformed OR out-of-range env or yaml value
+    raises :class:`ValueError` so operators get a loud signal — silently
+    clamping or falling back on a typo (e.g. ``9.0`` meant as ``0.9``) would
+    auto-apply nothing for the rest of the run with no obvious cause.
+
+    This is a DELIBERATE, enumerated exception to the shared WARN-and-fall-back
+    malformed-value policy (issue #528; see :mod:`athenaeum.config` module
+    docstring): this knob gates auto-application of contradiction resolutions,
+    so a fail-loud contract is the safe default.
     """
     env = os.environ.get("ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD")
     if env is not None:
@@ -818,14 +824,11 @@ def resolve_max_per_run(config: dict[str, Any] | None = None) -> int:
     bump the cap on a single run without editing config. Negative or
     non-numeric values fall back to :data:`DEFAULT_RESOLVE_MAX_PER_RUN`.
     """
-    env = os.environ.get("ATHENAEUM_RESOLVE_MAX_PER_RUN")
-    if env is not None:
-        try:
-            value = int(env)
-            if value >= 0:
-                return value
-        except (TypeError, ValueError):
-            pass
+    # Issue #528: malformed env now WARNs + falls back (was silent fall-through);
+    # the `>= 0` guard is a per-knob range check kept on top of the shared parse.
+    value = _env_number("ATHENAEUM_RESOLVE_MAX_PER_RUN", int)
+    if value is not None and value >= 0:
+        return value
     if config is not None:
         cfg = config.get("contradiction") if isinstance(config, dict) else None
         if isinstance(cfg, dict):
@@ -852,16 +855,14 @@ def resolve_full_body_token_cap(config: dict[str, Any] | None = None) -> int:
         "full_body_token_cap must be a positive integer; "
         "set a large value to disable truncation"
     )
-    env = os.environ.get("ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP")
-    if env is not None:
-        try:
-            value = int(env)
-        except (TypeError, ValueError):
-            value = None
-        if value is not None:
-            if value <= 0:
-                raise ValueError(msg)
-            return value
+    # Issue #528: a malformed env now WARNs + falls back (was silent). The
+    # `<= 0` case still raises — that is an out-of-RANGE rejection (a deliberate
+    # per-knob range check), not a malformed-parse fall-back.
+    value = _env_number("ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP", int)
+    if value is not None:
+        if value <= 0:
+            raise ValueError(msg)
+        return value
     if isinstance(config, dict):
         resolve_cfg = config.get("resolve")
         if isinstance(resolve_cfg, dict):
