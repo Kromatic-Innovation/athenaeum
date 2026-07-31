@@ -9,9 +9,12 @@ Companion to `docs/conflict-resolution.md` — that doc locks how
 disagreements are RESOLVED; this one locks how attribution is REPRESENTED
 on disk and at the MCP boundary.
 
-This is a design document. No code changes ship with it. The
-implementation issues remain open and reference this doc as their target
-contract.
+This document is the SHIPPED lock: #96, #97, and #102 have all landed
+against the shape decided here (`src/athenaeum/provenance.py` —
+`parse_per_value_field_sources`, `validate_field_sources`,
+`resolve_remember_sources`). It remains the target contract for any future
+change to this surface; this doc and the code are meant to be read
+together, not the doc as future-tense design ahead of the code.
 
 ---
 
@@ -34,14 +37,18 @@ contract.
   carried forward. Pruned when the underlying field is gone. Locked in
   `docs/conflict-resolution.md` §7.
 
-### Not yet decided (this doc decides them)
+### Also already shipped (settled by this doc)
 
-- **Per-VALUE attribution for list fields** (#102). Today
-  `field_sources.emails` is one source for the whole list. If a contact
-  has `emails: [a@x.com, b@y.com]` where `a@x` came from Apollo and `b@y`
-  came from a LinkedIn export, the second source is lost.
-- **MCP `remember(sources=...)` shape** (#96). Three on-the-wire shapes
-  collide today and the type-based disambiguation has a pathological case.
+- **Per-VALUE attribution for list fields** (#102). Previously
+  `field_sources.emails` was one source for the whole list, so a contact
+  with `emails: [a@x.com, b@y.com]` where `a@x` came from Apollo and `b@y`
+  came from a LinkedIn export lost the second source. Now shipped as the
+  co-indexed `list[{value, source}]` shape (§2), parsed and validated by
+  `provenance.parse_per_value_field_sources` / `provenance.validate_field_sources`.
+- **MCP `remember(sources=...)` shape** (#96). The three on-the-wire shapes
+  that used to collide (with a pathological disambiguation case) are
+  replaced by the explicit wrapper keys (§4), shipped in
+  `provenance.resolve_remember_sources`.
 - ~~**Legacy slug → typed migration** (#97).~~ Resolved 2026-05-09:
   `athenaeum repair --legacy-source-slugs --apply` migrated 15,403 wikis
   from `<bare-slug>` to `script:<slug>`. The `_LEGACY_SCALAR_RE` branch
@@ -150,9 +157,9 @@ Migration path:
   as wikis are organically updated. The legacy reader branch stays
   forever — the cost is one isinstance check per parse.
 
-### 2.4 Validator changes (informational; implementation is #102)
+### 2.4 Validator changes (shipped — #102)
 
-`provenance.validate_field_sources` will need to accept either:
+`provenance.validate_field_sources` accepts either:
 
 - a `str | dict` value (legacy), validated by `parse_source`, OR
 - a `list[dict]` value where each entry is `{"value": <any>, "source":
@@ -233,14 +240,13 @@ Rules:
 
 - `sources is None` → no provenance attached (today's behavior).
 - `sources is str` → wiki-level `source` scalar (today's behavior).
-- `sources is dict` → MUST contain exactly one of `_source` or
-  `_field_sources` at the top level. Anything else is a `ValueError`.
-- The two wrappers may NOT both appear in one call. If a caller wants a
-  wiki-level default AND per-field overrides, they pass `_field_sources`
-  with the desired per-field map; `WikiBase.source` is set separately
-  via the wiki's existing source field, not via `remember(sources=...)`.
-  (Parsimony — the MCP surface is for new wiki creation, not retroactive
-  field attribution.)
+- `sources is dict` → accepts ANY combination of the allowed wrapper/extra
+  keys: `_source`, `_field_sources`, and the channel-split extras
+  (`_source_type`, `_source_ref`, `_model`, `_on_behalf_of`, `_asserter`,
+  issue #326). `_source` and `_field_sources` MAY co-occur in the same
+  call — a caller wanting a wiki-level default AND per-field overrides
+  passes both. A dict with none of the allowed keys, or with any unknown
+  key, is a `ValueError`.
 
 The pathological `{"type", "ref"}` case now writes:
 
@@ -847,10 +853,11 @@ in a tool-result block; the scalar becomes
 when the transcript carries none).
 
 Lock discipline: any change to this taxonomy MUST update
-`docs/conflict-resolution.md` (which cross-links to this section), the
-`_RESOLVE_SYSTEM` prompt + its `tests/data/resolve_system.txt` snapshot,
-AND the corresponding test in `tests/test_conflict_resolution.py` in the
-same change.
+`docs/conflict-resolution.md` (which cross-links to this section),
+`docs/contradiction-detection.md` (which publishes its own copy of this
+taxonomy in its §3), the `_RESOLVE_SYSTEM` prompt + its
+`tests/data/resolve_system.txt` snapshot, AND the corresponding test in
+`tests/test_conflict_resolution.py` in the same change.
 
 ### 10.1a Source backfill — `repair --backfill-sources` (issue #328)
 
