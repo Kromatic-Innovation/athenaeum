@@ -1,10 +1,24 @@
 # Authority manifest + pointer-stub converter (issue #426)
 
-> **Status:** standalone, unit-testable slice. Reasoning-tier consultation
-> (rejecting/converting live-source duplicates automatically) belongs to the
-> consumers — #423's T1 duplicate bin and #432's T2 rejection — which carry
-> `blocked_by` edges on this issue. Running the converter against the live
-> corpus is operator task #437. Neither is in scope here.
+> **Status:** standalone, unit-testable slice, shipped and complete (this
+> issue's own scope — the manifest schema, `athenaeum.authority`'s
+> lookup/detector/converter, and the `authority lint`/`authority convert` CLI —
+> is fully implemented; see the sections below). Reasoning-tier consultation of
+> the manifest (rejecting/converting live-source duplicates automatically)
+> belongs to the consumers — #423's T1 duplicate bin and #432's T2 rejection,
+> both implemented in `src/athenaeum/reasoning_tiers.py` (~1,375 lines). As of
+> issue #518, those tiers have one gated production caller:
+> `athenaeum.merge.t1_screen_rejects_merge_proposal`
+> (`src/athenaeum/merge.py:1209`, invoked at `src/athenaeum/merge.py:1765`),
+> which screens merge proposals through T1 — including this manifest, loaded
+> once per merge run via `load_authority_manifest_for_pipeline` and threaded
+> into T1 as its `authority_manifest` argument (`src/athenaeum/merge.py:1496-1497`,
+> passed at `src/athenaeum/merge.py:1774`). That wiring is opt-in and
+> **defaults OFF** (`resolve_reasoning_tier_auditing_enabled`,
+> `src/athenaeum/config.py:706`), so production merge behavior is unchanged
+> until an operator sets `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED`. Running
+> the converter against the live corpus remains operator task #437. Neither is
+> in scope here.
 
 ## Why
 
