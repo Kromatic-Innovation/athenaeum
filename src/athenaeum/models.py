@@ -718,6 +718,13 @@ def parse_observed_at(meta: dict[str, object] | None) -> date | None:
     Fail-open, same posture as :func:`parse_valid_from` /
     :func:`parse_valid_until`: a missing, empty, or unparseable value
     returns ``None`` rather than raising.
+
+    Intentional, retained helper (issue #539 settling of §4.4). It has no
+    in-repo caller today but is the documented parser for the ``observed_at``
+    staleness axis — see ``docs/memory-taxonomy.md`` §5, which names it — and
+    is the read-side companion to ``parse_valid_from`` / ``parse_valid_until``.
+    Kept as an intentional internal helper (not on the stable ``__all__``
+    surface); not dead.
     """
     if not meta:
         return None

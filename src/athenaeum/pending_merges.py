@@ -723,6 +723,15 @@ def resolve_alias_slug(wiki_root: Path, slug: str) -> str:
     filename stem) on a hit, else returns ``slug`` unchanged (not an alias,
     or already canonical). First match wins on a (should-not-happen)
     multi-hit; unreadable/malformed files are skipped.
+
+    Intentional, retained helper (issue #539 settling of §4.4). It is the
+    READ-side of #425 (resolving a ``[[old-slug]]`` link to its canonical page
+    via ``aliases:``), the complement to — NOT superseded by — the WRITE-side
+    :func:`_apply_fold_into_existing` (which folds a page away and records the
+    alias). It has no in-repo caller today because the recall/link-rewrite
+    consumer that would resolve stale wikilinks on read is not yet wired; the
+    resolver itself is correct and tested, so it is kept rather than deleted.
+    An intentional internal helper (not on the stable ``__all__`` surface).
     """
     target = slugify(slug)
     if not target:
