@@ -1,0 +1,164 @@
+# requirements-ci.lock — CI-only dependency lock (athenaeum#556)
+#
+# WHAT THIS IS: a constraints lock pinning the FULL transitive dependency tree
+# resolved from `pip install -e ".[dev,vector]"`, so a green CI run at a given
+# SHA is reproducible at that SHA tomorrow. Direct deps in pyproject.toml are
+# range-pinned with deliberate upper bounds; their TRANSITIVE closure was
+# entirely unpinned before this file, so CI drifted silently as new transitive
+# releases shipped.
+#
+# WHAT THIS IS NOT: it does NOT change the published package's dependency
+# ranges. pyproject.toml stays the single source of truth for what a CONSUMER
+# installs (the deliberate upper bounds are unchanged). This lock only pins what
+# CI installs, and is applied as a CONSTRAINTS file, not a requirements file:
+#
+#     pip install -e ".[dev,vector]" -c requirements-ci.lock
+#
+# pip still resolves the dependency graph from pyproject per Python version
+# (3.11 / 3.12 / 3.13), then pins each package it installs to the version below.
+# A constraint for a package not needed on a given interpreter (e.g. a backport
+# behind a python_version marker) is simply ignored, so one lock serves the
+# whole matrix.
+#
+# REGENERATE (from a clean venv on the lowest supported Python, 3.11):
+#     python -m venv .venv && .venv/bin/pip install -e ".[dev,vector]"
+#     .venv/bin/pip freeze --exclude-editable | sort -f > requirements-ci.lock
+#     # then restore this header
+#
+# Dependabot proposes bumps against pyproject.toml's ranges (see
+# .github/workflows/dependabot-auto-merge.yml and docs/security-posture.md
+# §3.1); regenerate this lock when a dependency bump lands so CI tracks it.
+aiofile==3.11.1
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anthropic==0.120.2
+anyio==4.14.2
+attrs==26.1.0
+Authlib==1.7.2
+backports.tarfile==1.2.0
+bcrypt==5.0.0
+beartype==0.22.9
+build==1.5.0
+cachetools==7.1.6
+caio==0.9.25
+certifi==2026.7.22
+cffi==2.1.0
+charset-normalizer==3.4.9
+chromadb==1.5.9
+click==8.4.2
+coverage==7.15.2
+cryptography==50.0.0
+cyclopts==4.22.3
+distro==1.9.0
+dnspython==2.8.0
+docstring_parser==0.18.0
+durationpy==0.10
+email-validator==2.3.0
+exceptiongroup==1.3.1
+fastmcp-slim==3.4.5
+fastmcp==3.4.5
+filelock==3.32.2
+flatbuffers==25.12.19
+frozenlist==1.8.0
+fsspec==2026.7.0
+googleapis-common-protos==1.75.0
+griffelib==2.1.0
+grpcio==1.83.0
+h11==0.16.0
+hatchling==1.31.0
+hf-xet==1.5.2
+httpcore==1.0.9
+httptools==0.8.0
+httpx-sse==0.4.3
+httpx==0.28.1
+huggingface_hub==1.26.0
+idna==3.18
+importlib_metadata==9.0.0
+importlib_resources==7.1.0
+iniconfig==2.3.0
+jaraco.classes==3.4.0
+jaraco.context==6.1.2
+jaraco.functools==4.6.0
+jeepney==0.9.0
+jiter==0.16.0
+joserfc==1.7.4
+jsonref==1.1.0
+jsonschema-path==0.5.0
+jsonschema-specifications==2025.9.1
+jsonschema==4.26.0
+keyring==25.7.0
+kubernetes==36.0.3
+markdown-it-py==4.2.0
+mcp==1.29.0
+mdurl==0.1.2
+mmh3==5.2.1
+more-itertools==11.1.0
+multidict==6.7.1
+numpy==2.4.6
+oauthlib==3.3.1
+onnxruntime==1.28.0
+openapi-pydantic==0.5.1
+opentelemetry-api==1.44.0
+opentelemetry-exporter-otlp-proto-common==1.44.0
+opentelemetry-exporter-otlp-proto-grpc==1.44.0
+opentelemetry-proto==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-semantic-conventions==0.65b0
+orjson==3.11.9
+overrides==7.7.0
+packaging==26.2
+pathable==0.6.0
+pathspec==1.1.1
+platformdirs==4.11.0
+pluggy==1.6.0
+propcache==0.5.2
+protobuf==7.35.1
+py-key-value-aio==0.4.5
+pybase64==1.4.3
+pycparser==3.0
+pydantic-settings==2.14.2
+pydantic==2.13.4
+pydantic_core==2.46.4
+Pygments==2.20.0
+PyJWT==2.13.0
+pyperclip==1.11.0
+PyPika==0.51.1
+pyproject_hooks==1.2.0
+pytest-cov==7.1.0
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
+python-multipart==0.0.32
+PyYAML==6.0.3
+referencing==0.37.0
+requests-oauthlib==2.0.0
+requests==2.34.2
+rich-rst==2.1.0
+rich==15.0.0
+rpds-py==2026.6.3
+ruff==0.16.0
+SecretStorage==3.5.0
+shellingham==1.5.4
+six==1.17.0
+sniffio==1.3.1
+sse-starlette==3.4.6
+starlette==1.3.1
+tenacity==9.1.4
+tokenizers==0.23.1
+tqdm==4.70.0
+trove-classifiers==2026.6.1.19
+typer==0.27.0
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+uncalled-for==0.3.2
+urllib3==2.7.0
+uvicorn==0.52.0
+uvloop==0.22.1
+watchfiles==1.2.0
+websocket-client==1.9.0
+websockets==17.0.1
+yarl==1.24.5
+zipp==4.1.0
