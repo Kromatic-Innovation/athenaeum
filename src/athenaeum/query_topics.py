@@ -25,10 +25,17 @@ import os
 import re
 
 from athenaeum.config import resolve_model
+from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 log = logging.getLogger("athenaeum")
 
-DEFAULT_TOPIC_MODEL = "claude-haiku-4-5-20251001"
+# Single-sourced from ``tiers.DEFAULT_CLASSIFY_MODEL`` (issue #571, M19) rather
+# than a fourth copy of the literal — a haiku-class bump now touches one file.
+# The topic env knob (``ATHENAEUM_TOPIC_MODEL``, in ``_get_topic_model``) is
+# unchanged; only the DEFAULT collapses. Importing ``tiers`` adds no load cost
+# on the recall-hook path: ``athenaeum/__init__`` already imports ``librarian``
+# (which pulls ``tiers``), so it is resident before this module runs.
+DEFAULT_TOPIC_MODEL = DEFAULT_CLASSIFY_MODEL
 
 _SYSTEM_PROMPT = (
     "You extract substantive search topics from a user's message for a "

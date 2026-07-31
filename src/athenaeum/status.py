@@ -171,6 +171,7 @@ def status(knowledge_root: Path) -> StatusInfo:
             backlog=raw_pending,
             ledger_records=_spend.read_ledger(_spend.resolve_ledger_path(config)),
             warn_days=resolve_drain_warn_days(config),
+            config=config,
         )
         if advisory is not None:
             drain_advisory = advisory.summary

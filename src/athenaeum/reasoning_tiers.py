@@ -85,6 +85,7 @@ from athenaeum.config import resolve_model
 from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge
 from athenaeum.pii import is_pii_flagged
+from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 log = logging.getLogger("athenaeum")
 
@@ -97,7 +98,10 @@ log = logging.getLogger("athenaeum")
 
 #: T1 is the cheap reject-and-route tier — haiku-class by default. Overridable
 #: via ``ATHENAEUM_REASONING_T1_MODEL`` env or ``models.reasoning_t1`` yaml.
-DEFAULT_T1_MODEL = "claude-haiku-4-5-20251001"
+#: The DEFAULT is single-sourced from ``tiers.DEFAULT_CLASSIFY_MODEL`` (issue
+#: #571, M19) so a haiku-class bump touches one file, not four; the T1 env knob
+#: above is unchanged.
+DEFAULT_T1_MODEL = DEFAULT_CLASSIFY_MODEL
 
 
 def get_t1_model(config: dict[str, Any] | None = None) -> str:

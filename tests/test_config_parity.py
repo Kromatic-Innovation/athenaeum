@@ -28,6 +28,7 @@ import pytest
 
 import athenaeum.contradictions as contradictions_mod
 import athenaeum.query_topics as query_topics_mod
+import athenaeum.reasoning_tiers as reasoning_tiers_mod
 import athenaeum.resolutions as resolutions_mod
 import athenaeum.tiers as tiers_mod
 from athenaeum.cli import main
@@ -248,6 +249,26 @@ class TestMaxFilesCLI:
 # ---------------------------------------------------------------------------
 # Model knobs: env > yaml models.<knob> > code default
 # ---------------------------------------------------------------------------
+
+
+class TestModelDefaultConsolidation:
+    """Issue #571 (M19): the four haiku-class stage defaults are single-sourced.
+
+    ``tiers.DEFAULT_CLASSIFY_MODEL`` is the one literal; the classifier, the
+    contradiction detector (which shares the ``classify`` knob), the recall
+    topic extractor, and the reasoning-T1 tier all take their DEFAULT from it.
+    Asserting they AGREE means a future model bump that re-hardcodes one file to
+    a stale value fails loudly here — the exact "4 files, miss one, split the
+    detector and classifier onto different defaults, silently" regression M19
+    removes.
+    """
+
+    def test_classify_detector_topic_t1_defaults_agree(self) -> None:
+        canonical = tiers_mod.DEFAULT_CLASSIFY_MODEL
+        assert contradictions_mod.DEFAULT_CONTRADICTION_MODEL == canonical
+        assert query_topics_mod.DEFAULT_TOPIC_MODEL == canonical
+        assert reasoning_tiers_mod.DEFAULT_T1_MODEL == canonical
+
 
 _MODEL_CASES: list[tuple[Callable[..., str], str, str, str]] = [
     (
