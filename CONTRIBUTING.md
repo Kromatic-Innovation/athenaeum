@@ -5,14 +5,16 @@ Thank you for your interest in contributing to Athenaeum!
 ## Development setup
 
 1. Fork and clone the repository
-2. Install in development mode: `pip install -e ".[dev]"`
+2. Install in development mode: `pip install -e ".[dev,vector]"`
 3. Run the test suite: `pytest tests/ -v`
 4. Run the linter: `ruff check src/ tests/`
 
-Some tests exercise optional extras and skip automatically when the extra is
-not installed: vector-search and clustering tests need `chromadb` (install
-with `pip install -e ".[dev,vector]"` to run them), and MCP server tests need
-`fastmcp` (already included in `[dev]`).
+The `[dev,vector]` install matches what CI installs
+(`.github/workflows/ci.yml`), so a fresh clone following these steps runs the
+same test set CI runs — nothing is silently skipped. The `vector` extra pulls
+in `chromadb`, which the vector-search and clustering tests need. If you don't
+intend to touch search or clustering, `[dev]` alone works and those tests skip
+automatically; MCP server tests need `fastmcp` (already included in `[dev]`).
 
 ## Pull requests
 

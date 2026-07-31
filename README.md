@@ -824,7 +824,7 @@ release line:
 ```bash
 git clone https://github.com/Kromatic-Innovation/athenaeum.git
 cd athenaeum
-pip install -e ".[dev]"
+pip install -e ".[dev,vector]"   # matches CI; [dev] alone works if you won't touch search/clustering
 
 pytest tests/ -v
 ruff check src/ tests/
