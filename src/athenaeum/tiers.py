@@ -62,6 +62,12 @@ from athenaeum.prompt_safety import (
     data_only_clause,
     fence_untrusted,
 )
+from athenaeum.provider import (
+    ProviderCapabilities,
+    capabilities_for,
+    reported_stop_reason,
+    resolve_provider,
+)
 from athenaeum.search import embed_texts
 
 log = logging.getLogger(__name__)
@@ -280,6 +286,17 @@ def tier2_request_params(
     }
 
 
+def _capabilities(config: dict[str, Any] | None) -> ProviderCapabilities:
+    """The active backend's declared capabilities (issues #573/#574).
+
+    Resolved from the run config the same way :func:`build_llm_client` resolves
+    the backend, so the tier call sites gate on what the SERVING backend can
+    honor (``max_tokens``, ``stop_reason``) instead of assuming the ``api``
+    surface. Cheap — :func:`resolve_provider` is an env/dict lookup.
+    """
+    return capabilities_for(resolve_provider(config))
+
+
 def tier2_classify(
     raw: RawFile,
     matched_names: list[str],
@@ -341,7 +358,11 @@ def tier2_classify(
 
     owner = resolve_owner(config)
     first_text = response.content[0].text
-    first_stop_reason = getattr(response, "stop_reason", None)
+    # #574: a backend that cannot reliably report stop_reason (claude-cli)
+    # yields None here, so a dropped-all response is classed as a generic
+    # degrade rather than a truncation — which avoids the futile bigger-budget
+    # retry the CLI backend cannot honor (it drops max_tokens).
+    first_stop_reason = reported_stop_reason(response, _capabilities(config))
     if stats is None:
         stats = Tier2ParseStats()
     # Capture baselines so the first-response outcome is detected as a delta,
@@ -428,7 +449,7 @@ def tier2_classify(
             valid_access,
             owner=owner,
             stats=retry_stats,
-            stop_reason=getattr(retry_response, "stop_reason", None),
+            stop_reason=reported_stop_reason(retry_response, _capabilities(config)),
         )
         if not retry_stats.degraded and not retry_stats.truncated:
             # Recovered — clear the degrade recorded on the first attempt so
@@ -669,6 +690,25 @@ def tier2_reclassify_larger_budget(
     path gets a real bigger-budget retry too, not just the sync path (the
     exact gap #472 left).
     """
+    caps = _capabilities(config)
+    if not caps.honors_max_tokens:
+        # #574 (M15): the ONLY thing this retry changes is raising max_tokens,
+        # which this backend drops (claude-cli has no CLI equivalent) — so the
+        # retry would re-send a BYTE-IDENTICAL request that cannot change the
+        # outcome. Short-circuit with a warning instead of burning the call.
+        # Returning a still-truncated stat signals NO recovery, so the caller
+        # keeps the original truncation recorded and preserves the file for the
+        # next run (identical to a retry that itself truncated).
+        log.warning(
+            "tier2-classify-truncation-retry-skipped ref=%s: backend "
+            "(provider=%s) does not honor max_tokens, so a larger-budget retry "
+            "would re-send an identical request; leaving the truncation "
+            "recorded for the next run",
+            raw.ref,
+            resolve_provider(config),
+        )
+        return [], Tier2ParseStats(truncated=1)
+
     params = tier2_request_params(
         raw,
         matched_names,
@@ -693,7 +733,7 @@ def tier2_reclassify_larger_budget(
         valid_access,
         owner=owner,
         stats=retry_stats,
-        stop_reason=getattr(response, "stop_reason", None),
+        stop_reason=reported_stop_reason(response, caps),
     )
     return entities, retry_stats
 
@@ -1379,7 +1419,10 @@ def tier3_merge(
         action,
         source_ref,
         existing_body,
-        stop_reason=getattr(response, "stop_reason", None),
+        # #574: None on a backend that cannot report stop_reason (claude-cli),
+        # so the "truncated -> fall back to full echo" branch never fires on a
+        # spurious value — the fallback would itself be a no-op there.
+        stop_reason=reported_stop_reason(response, _capabilities(config)),
     )
     if not needs_fallback:
         return body, escalation
@@ -1416,7 +1459,10 @@ def tier3_merge_full(
         response.content[0].text,
         action,
         source_ref,
-        stop_reason=getattr(response, "stop_reason", None),
+        # #574: None on a backend that cannot report stop_reason (claude-cli),
+        # so the truncation-refusal escalation does not fire on a spurious
+        # value; a genuinely short body still degrades through the normal path.
+        stop_reason=reported_stop_reason(response, _capabilities(config)),
     )
 
 
