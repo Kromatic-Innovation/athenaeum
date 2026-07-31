@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from athenaeum.atomic_io import atomic_write_text
+
 log = logging.getLogger("athenaeum")
 
 # The per-scope index file name (mirrors the ``MEMORY.md`` skip-name every
@@ -197,7 +199,7 @@ def apply_prune_index(knowledge_root: Path, report: DanglingReport) -> DanglingR
                 "knowledge_root — not pruned"
             )
             continue
-        scope.index_path.write_text(scope.new_text, encoding="utf-8")
+        atomic_write_text(scope.index_path, scope.new_text)
         rel_paths.append(rel)
 
     if not rel_paths:

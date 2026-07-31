@@ -50,10 +50,13 @@ companion ``docs/storage-adapter-contract.md``.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import resolve_storage_adapters, resolve_storage_mapping
 
 
@@ -343,3 +346,37 @@ def surface_root_for_class(
     the default, the configured excluded root for an excluded class).
     """
     return resolve_adapter_for_class(entity_class, config).resolve_root(knowledge_root)
+
+
+_RAW_INTAKE_FILENAME_RETRIES = 5
+
+
+def write_raw_intake(target_dir: Path, content: str) -> Path:
+    """Persist one raw-intake file atomically under *target_dir* (issue #534, M13).
+
+    Mints a UTC-timestamp + short-id ``.md`` filename, creates the directory,
+    and writes via :func:`athenaeum.atomic_io.atomic_write_text` so an
+    interrupted ``remember()`` never leaves a truncated intake file for the next
+    compile to parse. Retries the (astronomically unlikely) filename collision.
+    Returns the written path. This keeps the L5 MCP presentation layer out of
+    the L0 filesystem: it validates + injects frontmatter, then delegates the
+    write here.
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    filepath: Path | None = None
+    for _ in range(_RAW_INTAKE_FILENAME_RETRIES):
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        short_id = uuid.uuid4().hex[:8]
+        candidate = target_dir / f"{timestamp}-{short_id}.md"
+        if not candidate.exists():
+            filepath = candidate
+            break
+    else:
+        raise FileExistsError(
+            f"could not mint a unique raw-intake filename under {target_dir} "
+            f"after {_RAW_INTAKE_FILENAME_RETRIES} attempts"
+        )
+
+    atomic_write_text(filepath, content)
+    return filepath

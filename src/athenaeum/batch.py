@@ -55,6 +55,7 @@ import anthropic
 
 from athenaeum import spend
 from athenaeum._retry import TransientAPIError, with_retry
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import (
     EntityAction,
     EntityIndex,
@@ -781,14 +782,14 @@ def process_batch_run(
             # All calls for this file succeeded — apply writes (updates
             # first, then creates, matching the synchronous order).
             for path, content in pending_updates:
-                path.write_text(content, encoding="utf-8")
+                atomic_write_text(path, content)
             for entity in new_entities:
                 rendered = entity.render()
                 # Same schema gate as process_one: re-parse the rendered
                 # frontmatter so the validator sees the on-disk bytes.
                 rendered_meta, _ = parse_frontmatter(rendered)
                 validate_wiki_meta(rendered_meta)
-                (wiki_root / entity.filename).write_text(rendered, encoding="utf-8")
+                atomic_write_text(wiki_root / entity.filename, rendered)
                 index.register(entity)
                 log.info("  Created: %s → %s", entity.name, entity.filename)
 

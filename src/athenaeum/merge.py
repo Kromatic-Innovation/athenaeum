@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 from athenaeum import detection_state, spend
 from athenaeum._lint import _strip_self_reference
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.clusters import resolve_cluster_output_path, resolve_cluster_threshold
 from athenaeum.config import (
     load_config,
@@ -1916,7 +1917,7 @@ def merge_clusters_to_wiki(
             text = render_merged_entry(entry)
             first_write_render[entry.filename] = text
             page_path = wiki_root / entry.filename
-            page_path.write_text(text, encoding="utf-8")
+            atomic_write_text(page_path, text)
             log.info(
                 "merge: wrote %s (cluster %s, %d source(s), contradictions=%s) "
                 "[pre-C4 first write, #462]",
@@ -2142,7 +2143,7 @@ def merge_clusters_to_wiki(
         if not dry_run:
             new_text = render_merged_entry(entry)
             if new_text != first_write_render.get(entry.filename):
-                (wiki_root / entry.filename).write_text(new_text, encoding="utf-8")
+                atomic_write_text(wiki_root / entry.filename, new_text)
                 first_write_render[entry.filename] = new_text
                 log.info(
                     "merge: re-wrote %s after C4 (cluster %s, contradictions=%s) "
