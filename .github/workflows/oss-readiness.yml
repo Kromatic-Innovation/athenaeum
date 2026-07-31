@@ -22,6 +22,13 @@ on:
   pull_request:
     branches: [develop]
 
+# Cancel a superseded run when a newer commit lands on the same ref (M23,
+# hestia#548), keyed on workflow + ref — mirrors ci.yml so a PR push run and
+# the post-merge develop run stay independent while stacked pushes cancel.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
