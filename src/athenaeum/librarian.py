@@ -1836,6 +1836,7 @@ def run(
     full_compile: bool = False,
     now: datetime | None = None,
     heartbeat: Callable[[], None] | None = None,
+    out_run_stats: dict[str, Any] | None = None,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error.
 
@@ -2111,6 +2112,26 @@ def run(
         if heartbeat is not None:
             heartbeat()
 
+    # Issue #530 (H2): surface truncation/deferral to callers (e.g. ingest())
+    # so a max_files-truncated OR budget/deadline-deferred run — which still
+    # exits 0 — is not mistaken for a fully-drained one. ``ingest`` gates its
+    # stamp on these: a run that left files uncompiled must never stamp them as
+    # seen, or the next ingest takes the false no-op fast path and those notes
+    # are silently never compiled and never recallable. Defaults are seeded here
+    # (before the merge-only / cluster-only early returns, which cannot truncate)
+    # and overwritten with the true figures by ``_export_run_stats`` once the
+    # entity phase has run.
+    if out_run_stats is not None:
+        out_run_stats.setdefault("beyond_window", 0)
+        out_run_stats.setdefault("deferred_refs", [])
+        out_run_stats.setdefault("failed_files", [])
+
+    def _export_run_stats() -> None:
+        if out_run_stats is not None:
+            out_run_stats["beyond_window"] = beyond_window
+            out_run_stats["deferred_refs"] = list(deferred_refs)
+            out_run_stats["failed_files"] = list(failed_files)
+
     # Issue #464: per-phase run summary accumulator. `run()` appends one
     # ``(phase_name, elapsed_seconds, fields)`` tuple per phase it actually
     # ran (a phase never reached — e.g. after an early deadline trip — is
@@ -2278,6 +2299,7 @@ def run(
     total_truncated = 0  # issue #476: files that dropped all entities on truncation
     failed_files: list[str] = []
     deferred_refs: list[str] = []
+    beyond_window = 0  # issue #530 (H2): files discovery found but max_files excluded
     processed_count = 0
     deadline_tripped = False  # issue #396: set when the entity loop hits the deadline
     raw_files: list[Any] = []
@@ -3092,6 +3114,11 @@ def run(
     # a distinct, resumable non-zero signal rather than a silent success. Takes
     # precedence over the failed-files / strict-budget codes below: a deadline
     # trip is the more actionable signal.
+    # Issue #530 (H2): export the final truncation/deferral figures before ANY
+    # of the entity-phase exit paths so a caller (ingest) can tell a fully
+    # drained run from a partial one regardless of exit code.
+    _export_run_stats()
+
     if deadline_tripped:
         log.warning(
             "librarian: run stopped at the wall-clock deadline — exiting 124 "
@@ -3610,25 +3637,52 @@ def ingest(
             break
     run_kwargs.pop("changed_paths", None)
 
+    # Issue #530 (H2): capture whether the compile left any raw file
+    # uncompiled — files beyond the max_files window, or budget/deadline
+    # deferrals — so the stamp below is not written for a partial run.
+    run_stats: dict[str, Any] = {}
     exit_code = run(
         raw_root=raw_root,
         wiki_root=wiki_root,
         knowledge_root=knowledge_root,
         dry_run=dry_run,
         changed_paths=auto_changed,
+        out_run_stats=run_stats,
         **run_kwargs,
     )
 
     after_all = _raw_hash_snapshot(raw_root, knowledge_root)
     compiled = len(set(before_all) - set(after_all))
 
-    # Stamp the pre-compile snapshot on a clean, non-dry run: everything we
-    # just processed is now "seen". Consumed (deleted) files stay recorded —
-    # harmless, and it keeps a re-run with no new intake a fast no-op. Files
-    # that appeared mid-run are absent here, so they correctly surface as
-    # ``added`` next run. A failed compile leaves the stamp untouched (retry).
-    if exit_code == 0 and not dry_run:
+    # Stamp the pre-compile snapshot ONLY on a clean, COMPLETE, non-dry run:
+    # everything we just processed is now "seen". Consumed (deleted) files stay
+    # recorded — harmless, and it keeps a re-run with no new intake a fast
+    # no-op. Files that appeared mid-run are absent here, so they correctly
+    # surface as ``added`` next run.
+    #
+    # Issue #530 (H2): a ``max_files``-truncated run still exits 0, but the
+    # pre-compile snapshot (``before_all``) includes the ``beyond_window``
+    # remainder that was NEVER compiled. Stamping it would make the next ingest
+    # take the no-op fast path and silently drop those notes forever. So gate
+    # the stamp on a fully-drained run: no beyond-window remainder AND no
+    # in-window deferrals. A failed compile (nonzero) already leaves the stamp
+    # untouched; this extends the same "leave it for retry" guarantee to the
+    # degraded exit-0 case the authors guarded the adjacent path against but
+    # missed here.
+    beyond_window = int(run_stats.get("beyond_window", 0) or 0)
+    run_deferred = run_stats.get("deferred_refs") or []
+    fully_drained = beyond_window == 0 and not run_deferred
+    if exit_code == 0 and not dry_run and fully_drained:
         _write_ingest_manifest(manifest_path, before_all, stats=before_all_stats)
+    elif exit_code == 0 and not dry_run and not fully_drained:
+        log.info(
+            "ingest: run left %d file(s) uncompiled (beyond_window=%d, "
+            "deferred=%d) — leaving the stamp manifest untouched so the next "
+            "ingest retries the backlog instead of a false no-op (issue #530)",
+            beyond_window + len(run_deferred),
+            beyond_window,
+            len(run_deferred),
+        )
 
     return IngestResult(
         mode=mode,

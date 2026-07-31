@@ -606,6 +606,17 @@ def _write_manifest(
 class FTS5Backend:
     """SQLite FTS5 full-text search with BM25 ranking and porter stemming."""
 
+    # Issue #530 (M7): on-disk schema version, stamped into the SQLite DB via
+    # ``PRAGMA user_version`` at build time and checked before every incremental
+    # build. Bump this whenever the ``wiki`` table shape changes (column set,
+    # order, or tokenizer). A DB whose stamp does not match — including a legacy
+    # DB that predates the stamp (``user_version`` defaults to 0) — is force-
+    # rebuilt instead of reused, so a stale-shaped table can never survive an
+    # incremental build and turn every audience-filtered query into a silent
+    # ``OperationalError`` → empty recall. Version 2 == the ``audience``-aware
+    # shape (#312); anything older (0/1) triggers a one-time full rebuild.
+    _SCHEMA_VERSION = 2
+
     # SQL fragments shared by the full and incremental build paths.
     _CREATE_SQL = (
         "CREATE VIRTUAL TABLE IF NOT EXISTS wiki USING fts5"
@@ -613,6 +624,33 @@ class FTS5Backend:
         'tokenize="porter unicode61")'
     )
     _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?)"
+
+    @staticmethod
+    def _db_schema_version(db_path: Path) -> int:
+        """Read the DB's ``PRAGMA user_version`` (issue #530 M7).
+
+        Returns 0 for a missing/unreadable DB or one that was never stamped —
+        both of which must NOT be reused for an incremental build.
+        """
+        try:
+            conn = sqlite3.connect(str(db_path))
+        except sqlite3.Error:
+            return 0
+        try:
+            row = conn.execute("PRAGMA user_version").fetchone()
+            return int(row[0]) if row else 0
+        except sqlite3.Error:
+            return 0
+        finally:
+            conn.close()
+
+    def _stamp_schema_version(self, conn: sqlite3.Connection) -> None:
+        """Stamp the current schema version into the DB (issue #530 M7).
+
+        ``PRAGMA user_version`` does not accept bound parameters, so the value
+        is interpolated — safe because it is our own integer class constant.
+        """
+        conn.execute(f"PRAGMA user_version = {int(self._SCHEMA_VERSION)}")
 
     @staticmethod
     def _row_for(
@@ -663,8 +701,40 @@ class FTS5Backend:
         )
         # Incremental only when we have BOTH a prior manifest and a live DB;
         # otherwise seed with a clean full rebuild.
+        #
+        # Issue #530 (M7): additionally require the on-disk DB to carry the
+        # CURRENT schema version. A DB built by an older athenaeum (e.g. a
+        # pre-``audience`` shape, or any DB predating the PRAGMA stamp, which
+        # reads back 0) must NOT be reused: ``CREATE VIRTUAL TABLE IF NOT
+        # EXISTS`` is a no-op against the old shape, so the positional INSERT
+        # mismatches and every audience-filtered query hits a missing column,
+        # raises ``OperationalError``, and is silently turned into empty recall.
+        # A schema mismatch forces a full rebuild (the DB is unlinked and
+        # recreated below), which self-heals a legacy index on the next build.
+        db_schema_ok = (
+            db_path.is_file()
+            and self._db_schema_version(db_path) == self._SCHEMA_VERSION
+        )
+        if (
+            incremental
+            and as_of is None
+            and stored is not None
+            and db_path.is_file()
+            and not db_schema_ok
+        ):
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "search: FTS5 index at %s has schema version %d, expected %d — "
+                "forcing a full rebuild instead of an incremental one so a "
+                "stale-shaped table cannot silently break audience-filtered "
+                "recall (issue #530)",
+                db_path,
+                self._db_schema_version(db_path),
+                self._SCHEMA_VERSION,
+            )
         do_incremental = (
-            incremental and as_of is None and stored is not None and db_path.is_file()
+            incremental and as_of is None and stored is not None and db_schema_ok
         )
 
         # Issue #373: self-healing full-re-hash backstop. On the incremental
@@ -704,6 +774,7 @@ class FTS5Backend:
             conn = sqlite3.connect(str(db_path))
             try:
                 conn.execute(self._CREATE_SQL)
+                self._stamp_schema_version(conn)  # issue #530 (M7)
                 rows = [
                     self._row_for(name, path, text, meta)
                     for name, path, _h, text, meta, _s in current
@@ -727,6 +798,7 @@ class FTS5Backend:
         conn = sqlite3.connect(str(db_path))
         try:
             conn.execute(self._CREATE_SQL)  # defensive: table may predate a wipe
+            self._stamp_schema_version(conn)  # issue #530 (M7): keep the stamp current
             to_delete = removed + changed
             if to_delete:
                 conn.executemany(
