@@ -19,6 +19,16 @@ Fail-open throughout: no client, an API error, malformed JSON, or an
 out-of-vocabulary label all yield ``""`` (unclassified) — an unclassified
 claim behaves exactly as it did before #327. Tests stub the client; no live
 network in CI.
+
+Layering note: despite living alongside the L0 primitives, this module is NOT
+a leaf — it calls the live LLM client and imports L2 config
+(:mod:`athenaeum.config`) plus service-level helpers (:mod:`athenaeum.provider`,
+:mod:`athenaeum.tiers`, :mod:`athenaeum.prompt_safety`) for model resolution and
+prompt hygiene, on top of the L0/L1 primitives (:mod:`athenaeum._retry`,
+:mod:`athenaeum.atomic_io`, :mod:`athenaeum.json_utils`, :mod:`athenaeum.models`).
+Factoring rule: this module owns ONLY the claim-kind classify+stamp
+round-trip; it must not grow resolver/merge policy that consumes
+``claim_kind`` (that lives in :mod:`athenaeum.resolutions`).
 """
 
 from __future__ import annotations

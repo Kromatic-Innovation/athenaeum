@@ -20,6 +20,16 @@ Repair runs **before** schema validation by design: these passes work on
 raw text via regex/line-walks because the corruption shapes prevent
 ``yaml.safe_load`` from producing a document at all; pydantic validators
 are downstream consumers of already-parseable frontmatter.
+
+Layering: L4 domain/pipeline module. Sits below schema validation
+(:mod:`athenaeum.schemas`) in the read path and may import L3 services
+(``atomic_io``, ``models``, ``provenance``, ``transcript_verify``) freely.
+Some of those imports are deferred (function-local) to keep this module's
+own top-level import surface light and avoid cycles with the SCC those
+helpers belong to — that pattern is deliberate, not an oversight to clean up.
+Factoring rule: only frontmatter-repair scans/fixes belong here; schema
+*validation* (deciding whether an already-parseable value is acceptable)
+belongs in :mod:`athenaeum.schemas`, not here.
 """
 
 from __future__ import annotations

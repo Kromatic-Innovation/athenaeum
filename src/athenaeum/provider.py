@@ -42,6 +42,29 @@ Known constraints (implemented here / at the call sites, documented in
   retried in-run: it propagates and is caught downstream as a give-up (the
   affected file is deferred), and the single-machine run-lock + resume make the
   next run pick it up safely.
+
+**Contract:** one factory (:func:`build_llm_client`) hides which backend is
+serving a call site behind the shared ``messages.create(**params) ->
+LLMResponse`` surface (see the :class:`LLMBackend` Protocol family below), and
+one capability table (:func:`capabilities_for` / :class:`ProviderCapabilities`)
+DECLARES what each backend can honor (``max_tokens``, ``stop_reason``,
+``cache_control``, sampling params, batching) instead of a backend silently
+dropping a param it cannot serve. A call site branches on the declared
+capability, never on the provider id string.
+
+**Factoring rule:** this module owns the LLM TRANSPORT seam — client
+construction, backend capability declarations, and param/response translation
+between the four call sites' expectations and each concrete backend
+(``api`` wraps the Anthropic SDK unchanged; ``claude-cli`` drives the
+``claude`` subscription CLI). It does NOT own prompt content, response
+parsing/coercion (each call site's own job), or spend accounting
+(:mod:`athenaeum.spend` reads the token counts this module's responses carry,
+but this module never writes the ledger itself).
+
+**Layering:** L3 service. Module scope imports :mod:`athenaeum._retry` and
+:mod:`athenaeum.outbound_pii` (sibling L3) — never L4. ``anthropic`` (the
+``api`` backend's SDK) is imported lazily inside :func:`build_llm_client` so a
+``claude-cli``-only deployment need not have it installed.
 """
 
 from __future__ import annotations

@@ -50,6 +50,13 @@ The ledger is append-only and crash-safe: each record is a single
 trailing line. It records ONLY counts, model ids, run type, provider,
 session id and timestamp — never prompt/response content, environment
 values, or credentials.
+
+**Layering:** L3 service. Module scope imports only :mod:`athenaeum.config`
+(L2); ``athenaeum.models.TokenUsage`` is a ``TYPE_CHECKING``-only import
+(the type is never constructed here — callers pass their own accumulator in)
+so this module carries no runtime dependency on :mod:`athenaeum.models`.
+Consumed by the L4 pipeline (:mod:`athenaeum.librarian`, :mod:`athenaeum.drain`)
+at the end of a run — never imports either back.
 """
 
 from __future__ import annotations

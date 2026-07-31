@@ -36,6 +36,14 @@ a stray or legacy escalation writer that didn't route through
 from the first line of the description so the block becomes answerable, and
 the repair is persisted on the next file rewrite. Only blocks with neither
 a checkbox nor a description — i.e. no recoverable question — are skipped.
+
+Layering: L4 domain/pipeline module, part of the merge/contradiction SCC
+(:mod:`athenaeum.merge`, :mod:`athenaeum.resolutions`, :mod:`athenaeum.tiers`).
+May import L3 services freely (``atomic_io``, ``fingerprint``, etc.). Calls
+into :mod:`athenaeum.resolutions` (e.g. for freetext-edit proposals) are
+DEFERRED (function-local) imports to break the SCC's import cycle — this is
+intentional cross-module wiring, not something to "fix" by hoisting to the
+top of the file.
 """
 
 from __future__ import annotations

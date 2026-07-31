@@ -35,6 +35,16 @@ FLAGGED via :attr:`InferenceBlock.malformed` / :attr:`InferenceBlock.errors`
 rather than silently dropped or silently accepted — the block is still
 returned (visible) unless it isn't even recognizable as an ``## Inference``
 header, since a linter needs to see broken blocks to report them.
+
+**Factoring rule:** this module owns PARSING and TEXT-LEVEL RETRACTION of
+``## Inference`` blocks only — pure string transforms with no I/O, no
+frontmatter validation (``memory_class: fact`` gating lives in
+:mod:`athenaeum.schemas`), and no basis re-evaluation or cascading (a
+retracted block's ``basis`` links are not chased or re-checked here).
+
+**Layering:** L3 service. Module scope imports only stdlib (``hashlib``,
+``re``, ``dataclasses``) — no athenaeum imports at all, so this module can be
+imported by anything at any layer with zero risk of a cycle.
 """
 
 from __future__ import annotations

@@ -29,6 +29,12 @@ present in ``field_sources``. ``field_sources`` is a dict
 Conflict resolution behavior (which source wins on update) is NOT defined
 here — that is Lane G / #91. This module only parses, validates, and
 round-trips.
+
+Layering: L1 (data model). No athenaeum-internal imports — only stdlib +
+pydantic, making this a leaf even though it sits at L1. Factoring rule: this
+module owns ONLY the ``source`` / ``field_sources`` shape (parse, validate,
+round-trip); it must never decide which of two conflicting sources wins —
+that policy is Lane G's, layered on top, not here.
 """
 from __future__ import annotations
 

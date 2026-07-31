@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Knowledge librarian — tiered compilation pipeline.
+"""Knowledge librarian — the nightly run loop, L4 domain/pipeline.
 
-Processes raw intake files from a knowledge directory's raw/ folder into wiki
-entity pages using a four-tier approach:
+Contract: owns the top-level ``athenaeum run`` orchestration — discovering
+raw intake, driving it through the four programmatic/LLM tiers below, and
+calling out to the other seven SCC siblings for the passes that happen
+around that loop (clustering/merge, wiki-page dedup, retire, reresolve,
+batch mode, status/page-size checks, pending-merge revalidation). It is the
+run loop's HUB, not a general dumping ground: helper logic that belongs to
+one of those passes belongs in ITS module, not here.
 
   Tier 1: Programmatic entity matching (no LLM)
   Tier 2: Classification via fast LLM
@@ -18,6 +23,49 @@ Environment:
   ATHENAEUM_WRITE_MODEL      Override the Tier 3 model (default: claude-sonnet-4-6)
   ATHENAEUM_MAX_FILES        Override the per-run intake batch size (default: 50)
   ATHENAEUM_BATCH_MODE       Opt into Batch API mode for tier-2/3 calls (default: off)
+
+Layering and the SCC (read this before touching any of librarian / merge /
+tiers / pending_merges / batch / status / retire / wiki_dedupe): these 8
+modules are L4 domain/pipeline and form ONE mutually-recursive cycle,
+~12,000 lines behaving as a single module split across 8 files for
+readability, not for independence. ``librarian.py`` is the hub: it imports
+:mod:`athenaeum.merge` at TOP level (the C1-C4 cluster/merge pass is a
+normal dependency, not a cycle edge on this side), and it owns FOUR of the
+package's deferred (function-local) imports, each breaking one cycle edge
+that a top-level import on this side would deadlock:
+
+- ``_run_retire_pass`` (~line 1516): local ``from athenaeum.retire import
+  run_retire_pass``. Breaks librarian<->merge/retire: ``retire.py`` imports
+  ``merge`` at top level, and ``merge`` is already imported by librarian at
+  top level, so this side must be the deferred one.
+- ``_run_reresolve_pass`` (~line 1548): local ``from athenaeum.tiers import
+  reresolve_open_questions``. Breaks librarian<->tiers: ``tiers.py``
+  function-locally imports ``discover_auto_memory_files`` BACK from
+  librarian (tiers.py ~line 2633) — neither side can be top-level without
+  deadlocking package import, so both sides defer.
+- inside the run loop (~line 2275): local ``from athenaeum.wiki_dedupe
+  import propose_wiki_page_merges``. wiki_dedupe.py imports ``merge`` and
+  ``pending_merges`` at top level but never imports librarian back, so this
+  edge is one-way — deferred here purely so a wiki-dedupe failure can be
+  caught and logged as non-fatal without complicating module load order.
+- inside the run loop (~line 2559, batch mode branch): local ``from
+  athenaeum.batch import process_batch_run``. Breaks librarian<->batch:
+  ``batch.py`` function-locally imports ``tier0_passthrough`` BACK from
+  librarian (batch.py ~line 320) — same both-sides-defer shape as tiers.
+- inside the run loop (~line 3108): local ``from athenaeum.status import
+  scan_page_sizes``. Breaks librarian<->status: ``status.py`` imports
+  ``discover_raw_files`` FROM librarian at TOP level, so this side must
+  defer to avoid the deadlock.
+- inside the run loop (~line 3144): local ``from athenaeum.pending_merges
+  import revalidate_pending_merges``. ``pending_merges.py`` does not import
+  librarian at all (its own cycle edge is with ``merge``, not this module);
+  deferred here to keep the revalidation advisor's own try/except-isolated,
+  best-effort framing self-contained rather than for cycle-breaking reasons.
+
+Deleting any of the above deferred imports and hoisting it to module level
+makes the package FAIL TO IMPORT (circular import). This is documented
+structure, not an oversight — do not "clean it up" without untangling the
+whole SCC, which is out of scope for a docstring pass.
 """
 
 from __future__ import annotations

@@ -71,6 +71,15 @@ PII off-corpus (issue #427):
   the page body, which is out of scope for a frontmatter-only validator —
   see :func:`athenaeum.pii.lint_inline_contact_fields` for the body-aware
   batch-lint counterpart).
+
+Layering: L1 (data model — pydantic validation boundary alongside
+:mod:`athenaeum.models`). Imports :mod:`athenaeum.provenance` (L1, sibling)
+and :mod:`athenaeum.pii` (a higher-layer service module) for one validator's
+exemption check — a deliberate, narrow upward reach for a single flag lookup,
+not a general license to import service-layer policy here. Factoring rule:
+this module owns ONLY frontmatter SHAPE validation (required fields, type
+coercion, the flagged-vs-tolerated axes above); it must never decide merge/
+resolution/conflict outcomes — that is out of scope per the notes above.
 """
 from __future__ import annotations
 

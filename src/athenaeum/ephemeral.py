@@ -28,6 +28,13 @@ Precision order (most authoritative first):
 
 Every classifier returns a human-readable REASON string when the intake is
 ephemeral, else ``None`` -- so callers can log *why* something was dropped.
+
+Layering: L0 primitive (leaf). May import only stdlib (``fnmatch``,
+``typing``). Factoring rule: this module owns ONLY the ephemeral/operational
+classification predicate over an already-parsed (meta, body) pair — it does
+no file I/O and does not itself read ``athenaeum.yaml``; config values
+(``ephemeral_scopes`` / ``operational_markers``) are resolved by the caller
+via :mod:`athenaeum.config` and passed in.
 """
 
 from __future__ import annotations

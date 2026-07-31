@@ -24,6 +24,21 @@ The store lives at ``<cache_dir>/detection_incomplete.json`` and is best-effort:
 a missing or corrupt file reads as "no markers" (fail-open — a marker store must
 never break the run it guards), and writes go through
 :func:`athenaeum.atomic_io.atomic_write_text`.
+
+**Factoring rule:** this module owns the ``cluster_id -> member paths`` marker
+STORE only (load/save/mark/clear + the query :func:`incomplete_member_paths`
+callers fold into ``changed_paths``). It does NOT decide when a detection
+attempt is incomplete (:mod:`athenaeum.contradictions` sets
+``ContradictionResult.incomplete``) and does NOT run the delta closure itself
+(:mod:`athenaeum.delta` does) — this is purely the sidecar the two ends read
+and write.
+
+**Layering:** L3 service. Module scope imports :mod:`athenaeum.config` and
+:mod:`athenaeum.atomic_io` (both L2). Consumed by the L4
+:mod:`athenaeum.librarian` cluster pass (write side, via
+:func:`mark_incomplete` / :func:`clear_incomplete`) and read at the start of
+the next cluster pass (via :func:`incomplete_member_paths`) — never imports
+``librarian`` back.
 """
 
 from __future__ import annotations

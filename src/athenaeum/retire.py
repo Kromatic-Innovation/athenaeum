@@ -1,6 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Move-then-retire lifecycle for raw auto-memory (issue #261, slice B of #259).
 
+L4 domain/pipeline.
+
+Contract: decides, per merged cluster, whether its raw intake can be safely
+deleted (moved into the wiki entry + ``git rm``'d) or must be held pending
+a human contradiction call — and performs that git-backed retire safely.
+Factoring rule: this module owns RETIREMENT DECISIONS AND THE GIT RM/COMMIT
+MECHANICS only; it does not decide what goes IN the wiki entry (that is
+``merge.py``'s synthesis) and does not detect contradictions itself (that
+is the C4 detector, upstream of this pass) — it only consumes those two
+upstream results to pick move-vs-hold.
+
 ``raw/auto-memory/`` is an *expiring intake queue*, not a permanent source.
 Per nightly run, once the C3 merge has compiled each cluster into a canonical
 ``wiki/auto-<topic>.md`` entry and the C4 detector has run, this pass decides
@@ -33,6 +44,19 @@ to upgrade a source from the honest ``inferred`` default to ``user-stated`` /
 ``external`` when the session transcript confirms it. The ultimate-source
 invariant still holds: a footnote never cites the raw ``auto-memory/...``
 filename.
+
+SCC membership (L4, one of 8 mutually-recursive modules — librarian,
+merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
+as one ~12,000-line module split for readability, not independence).
+``retire.py`` imports ``athenaeum.merge`` (``MergedWikiEntry``,
+``render_merged_entry``, ``resolve_member_path``) at module TOP level — a
+normal downward dependency, not a cycle edge on this side. This module has
+NO deferred imports of its own; it is the non-deferred half of the
+librarian<->merge/retire relationship — ``librarian.py`` function-locally
+imports this module's ``run_retire_pass`` (``_run_retire_pass``, ~line
+1516) precisely BECAUSE both ``retire.py`` and ``librarian.py`` already
+import ``merge.py`` at top level, so it is librarian's import of THIS
+module (not the other way round) that has to be the deferred one.
 """
 
 from __future__ import annotations

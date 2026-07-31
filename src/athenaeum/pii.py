@@ -1,14 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """PII off-corpus — contacts surface, entity-page lint, observation log (#427).
 
-Corpus hygiene + ambient-egress reduction, NOT encryption (see the issue's
-threat model: recall injects pages into arbitrary agent prompts, so the
-retrieval-layer exclusion is the cheapest egress reduction — at-rest
-encryption is ~pointless when the librarian itself needs the keys). This
-module is the **code-only slice**: migrating live entity pages to
-durable-IDs-only is operator task #437 (out of scope); wiring "retracting an
-observation flags a dependent merge" is the retraction cascade, #435 (out of
-scope, blocked on #425's merge-provenance model).
+**Contract:** keep PII OUT of the recall-visible corpus (or, if it must live
+inline, keep it flagged so every corpus consumer excludes it) — this module
+never encrypts or redacts content in place. Corpus hygiene + ambient-egress
+reduction, NOT encryption (see the issue's threat model: recall injects pages
+into arbitrary agent prompts, so the retrieval-layer exclusion is the
+cheapest egress reduction — at-rest encryption is ~pointless when the
+librarian itself needs the keys). This module is the **code-only slice**:
+migrating live entity pages to durable-IDs-only is operator task #437 (out of
+scope); wiring "retracting an observation flags a dependent merge" is the
+retraction cascade, #435 (out of scope, blocked on #425's merge-provenance
+model).
+
+**Relationship to :mod:`athenaeum.outbound_pii`** (read that module's
+docstring for its half): this module screens content that STAYS in the
+corpus (entity pages, the observation ledger); ``outbound_pii`` screens text
+about to LEAVE the system (an email draft, a Buffer post). Different
+surfaces, different lifecycles — kept as separate modules on purpose, though
+``outbound_pii`` imports this module's compiled detection regexes so there is
+one definition of "what an email/phone looks like" shared by both.
+
+**Layering:** L3 service. Imports only :mod:`athenaeum.storage` (L2) at
+module scope. Consumed by :mod:`athenaeum.search` (the ``is_pii_flagged``
+corpus-exclusion predicate) and by the merge-candidate discovery in
+:mod:`athenaeum.wiki_dedupe` — never the reverse.
 
 Four pieces, in the order the issue settles them:
 

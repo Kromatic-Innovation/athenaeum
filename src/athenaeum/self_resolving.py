@@ -13,6 +13,21 @@ This module is the deterministic backstop: it scans raw text for these
 patterns BEFORE any LLM stage sees it and prepends an explicit,
 code-inserted warning, so the untrusted-data boundary does not depend on
 the model choosing to notice the claim itself.
+
+**Contract:** :func:`flag_self_resolving_claims` takes raw text and returns it
+unchanged, or with a deterministic warning prepended in front of each
+self-resolving-claim match — a pure, regex-only text transform, never an LLM
+call, never a mutation of anything but the returned string.
+
+**Factoring rule:** this module owns DETECTION + WARNING-PREFIXING of a
+narrow, enumerated set of self-resolving-document shapes. It does not decide
+what the LLM does with a flagged claim (the tier prompts' own judgment-level
+instructions handle that) and is explicitly NOT idempotent under repeated
+calls on already-flagged text — callers must invoke it exactly once per raw
+read, before the text reaches any LLM stage.
+
+**Layering:** L3 service. Module scope imports only stdlib (``re``) — no
+athenaeum imports at all, so any layer can depend on it with zero cycle risk.
 """
 
 from __future__ import annotations

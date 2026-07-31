@@ -15,6 +15,30 @@ the hook.
 If the API is unavailable, the function returns an empty list and the
 caller is expected to fall back to its existing extractor. No exception
 escapes — every failure mode collapses to the empty-list fallback.
+
+**Contract:** :func:`extract_topics` takes a raw user prompt and returns a
+short list of substantive search-topic strings, or ``[]`` on ANY failure
+(missing key, missing SDK, network/timeout, malformed response) — never
+raises. ``[]`` is a fallback SIGNAL, not an error the caller must handle
+specially.
+
+**Factoring rule:** this module owns the one LLM call that rewrites a hook
+prompt into search topics — it does not itself search anything
+(:mod:`athenaeum.search` does, driven by the returned topics) and does not
+retry or cache (the caller's built-in regex extractor is the retry/fallback
+path, not this module).
+
+**Layering:** L3 service on the RECALL HOT PATH (the per-turn
+``UserPromptSubmit`` hook, budgeted at ``timeout`` seconds — default 3s).
+Module scope imports only :mod:`athenaeum.config`; the L4
+:mod:`athenaeum.tiers` import is for a single model-id constant
+(:data:`DEFAULT_CLASSIFY_MODEL`), not a capability — see the comment at
+:data:`DEFAULT_TOPIC_MODEL` for why that import adds no load cost on this
+path. :mod:`athenaeum.provider`, :mod:`athenaeum.spend`, and
+:mod:`athenaeum.llm_schemas` are all deferred INSIDE :func:`extract_topics` so
+their heavier dependencies (``anthropic``, ``pydantic``) never load before a
+prompt actually needs the LLM path — this module's own invariant, stated at
+each call site, is "stay import-light."
 """
 
 from __future__ import annotations

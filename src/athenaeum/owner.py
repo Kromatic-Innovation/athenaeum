@@ -11,6 +11,12 @@ Owner identity is supplied entirely by config (see
 :func:`athenaeum.config.resolve_owner`); when no owner is configured every
 function here is inert (returns ``None``) so the shipped package carries no
 personal identity.
+
+Layering: L0 primitive (leaf). May import only stdlib (``typing``). Factoring
+rule: this module owns ONLY the owner-namespace routing predicate over an
+already-resolved ``owner`` dict — it never itself reads ``athenaeum.yaml`` or
+calls :func:`athenaeum.config.resolve_owner`; callers resolve config and pass
+the dict in, keeping this leaf free of the config layer's dependencies.
 """
 
 from __future__ import annotations
