@@ -49,7 +49,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athenaeum import spend
+from athenaeum import detection_state, spend
 from athenaeum._lint import _strip_self_reference
 from athenaeum.clusters import resolve_cluster_output_path, resolve_cluster_threshold
 from athenaeum.config import (
@@ -1936,6 +1936,10 @@ def merge_clusters_to_wiki(
         "merge-detect", total=len(entries), interval_s=heartbeat_interval
     )
     detect_heartbeat.start()
+    # Issue #569 (H6): resolved once for the per-cluster detection-incomplete
+    # marker writes/clears below (same cache-dir resolution the cluster pass
+    # reads with, so writes here and reads in _run_cluster_pass agree).
+    _incomplete_cache_dir = detection_state.resolve_cache_dir()
     for entry in entries:
         detect_heartbeat.tick(entry.cluster_id)
         if use_ancestor:
@@ -1954,6 +1958,11 @@ def merge_clusters_to_wiki(
         # Set when the confirmation pass cleared a detected cluster — the
         # entry must NOT be flagged even though the detector fired.
         suppressed = False
+        # Issue #569 (H6): set when the detector OR resolver gave up after its
+        # transient-error retries for this cluster. Drives the per-cluster
+        # detection-incomplete marker below so a cluster that hit one transient
+        # error is force-re-queued into the next run's delta set.
+        entry_incomplete = False
         for chunk in chunks:
             # Issue #396: wall-clock deadline check at the C4 detector/resolver
             # chunk boundary — the EXACT site the #396 incident wedged in
@@ -2043,6 +2052,11 @@ def merge_clusters_to_wiki(
             result = detect_contradictions(
                 filtered, client, config=resolved_config, usage=usage
             )
+            # Issue #569 (H6): capture the detector's transient give-up BEFORE
+            # any downgrade reassigns `result`, so a cluster whose detection was
+            # cut short by an overload window is re-queued next run.
+            if result.incomplete:
+                entry_incomplete = True
             # Issue #324: post-detection guard — an otherwise-overlapping
             # cluster can still have the detector flag a SPECIFIC disjoint
             # pair. Downgrade to not-detected BEFORE the escalation/pending-
@@ -2058,6 +2072,10 @@ def merge_clusters_to_wiki(
             _record_pair_keys(chunk)
             if result.detected and aggregate is None:
                 proposal = _maybe_propose(result, filtered)
+                # Issue #569 (H6): a resolver that gave up after its retries
+                # leaves the contradiction un-resolved — re-queue the cluster.
+                if getattr(proposal, "incomplete", False):
+                    entry_incomplete = True
                 # When the confirmation pass suppresses the cluster, the
                 # detector over-fired: leave `aggregate` unset so the
                 # wiki entry frontmatter is NOT tagged
@@ -2095,6 +2113,24 @@ def merge_clusters_to_wiki(
                 aggregate = result if chunks else ContradictionResult(detected=False)
         entry.contradiction = aggregate
         entry.contradictions_detected = bool(aggregate.detected)
+        # Issue #569 (H6): record or clear the per-cluster detection-incomplete
+        # marker. Only when detection was actually ATTEMPTED (a live client) and
+        # this is not a dry run — otherwise we neither examined the cluster nor
+        # should churn the marker. A cluster whose detector/resolver gave up
+        # after retries is marked so the next run's delta set re-examines it
+        # regardless of file changes; a cluster examined to completion has any
+        # stale marker cleared.
+        if client is not None and not dry_run:
+            if entry_incomplete:
+                detection_state.mark_incomplete(
+                    _incomplete_cache_dir,
+                    entry.cluster_id,
+                    [str(am.path) for am in entry.resolved_members],
+                )
+            else:
+                detection_state.clear_incomplete(
+                    _incomplete_cache_dir, entry.cluster_id
+                )
         # Issue #462: re-write this page IMMEDIATELY if C4 changed its rendered
         # bytes (contradiction flag added, or a stale flag cleared) relative to
         # the pre-C4 first write. Doing it per-entry inside the loop — rather

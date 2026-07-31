@@ -1415,6 +1415,116 @@ class TestSpendCeilingC4Guard:
         assert fake_client.messages.create.call_count >= 1
 
 
+class TestDetectionIncompleteMarker:
+    """Issue #569 (H6): a cluster whose detector gave up after transient-error
+    retries is marked detection-incomplete so the next run's delta set
+    re-examines it; a cluster examined to completion has any marker cleared."""
+
+    def test_incomplete_detection_writes_marker(
+        self,
+        contradiction_merge_root: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from athenaeum import detection_state
+        from athenaeum.contradictions import ContradictionResult
+        from athenaeum.models import TokenUsage
+
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+
+        # The detector "gave up" — a fail-open verdict flagged incomplete.
+        monkeypatch.setattr(
+            "athenaeum.merge.detect_contradictions",
+            lambda *_a, **_k: ContradictionResult(
+                detected=False, rationale="llm-unavailable", incomplete=True
+            ),
+        )
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=MagicMock(),
+            usage=TokenUsage(),
+        )
+
+        marked = detection_state.load(cache_dir)
+        assert marked, "the incomplete cluster must be recorded"
+        # Every marked cluster carries its member paths (for delta re-queue).
+        assert all(isinstance(v, list) and v for v in marked.values())
+
+    def test_completed_detection_clears_marker(
+        self,
+        contradiction_merge_root: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from athenaeum import detection_state
+        from athenaeum.contradictions import ContradictionResult
+        from athenaeum.models import TokenUsage
+
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+
+        # Run 1: detector gives up → marker written.
+        monkeypatch.setattr(
+            "athenaeum.merge.detect_contradictions",
+            lambda *_a, **_k: ContradictionResult(
+                detected=False, rationale="llm-unavailable", incomplete=True
+            ),
+        )
+        merge_clusters_to_wiki(
+            contradiction_merge_root, client=MagicMock(), usage=TokenUsage()
+        )
+        assert detection_state.load(cache_dir), "run 1 should mark the cluster"
+
+        # Run 2: detector completes cleanly (not detected) → marker cleared.
+        monkeypatch.setattr(
+            "athenaeum.merge.detect_contradictions",
+            lambda *_a, **_k: ContradictionResult(
+                detected=False, rationale="no-conflict"
+            ),
+        )
+        merge_clusters_to_wiki(
+            contradiction_merge_root, client=MagicMock(), usage=TokenUsage()
+        )
+        assert detection_state.load(cache_dir) == {}, "run 2 should clear the marker"
+
+    def test_dry_run_never_marks(
+        self,
+        contradiction_merge_root: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from athenaeum import detection_state
+        from athenaeum.contradictions import ContradictionResult
+        from athenaeum.models import TokenUsage
+
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setattr(
+            "athenaeum.merge.detect_contradictions",
+            lambda *_a, **_k: ContradictionResult(
+                detected=False, rationale="llm-unavailable", incomplete=True
+            ),
+        )
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=MagicMock(),
+            usage=TokenUsage(),
+            dry_run=True,
+        )
+        assert detection_state.load(cache_dir) == {}
+
+
 class TestEscalationDedupe:
     """Issue #146: dedup escalations by the flagged source-file SET, not
     by cluster slug, across the whole run."""
