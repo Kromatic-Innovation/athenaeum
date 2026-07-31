@@ -95,6 +95,20 @@ def prompt_manifest() -> dict[str, str]:
     }
 
 
+def prompt_manifest_hash(length: int = 8) -> str:
+    """A single short aggregate digest over the whole prompt manifest.
+
+    Hashes the canonical ``name=sha256`` lines (name-sorted, so it is stable
+    across dict ordering) into one short hex token. Its purpose (issue #567) is
+    to let a librarian run record *which prompt bytes it used* in ONE
+    run-summary key instead of sixteen; it changes iff any registered prompt's
+    bytes change.
+    """
+    manifest = prompt_manifest()
+    canonical = "\n".join(f"{name}={manifest[name]}" for name in sorted(manifest))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:length]
+
+
 # --------------------------------------------------------------------------- #
 # Golden-snapshot rendering (shared by the test and the --write regenerator).
 # --------------------------------------------------------------------------- #
