@@ -29,6 +29,7 @@ from athenaeum.provider import (
     _CliUsage,
     build_llm_client,
     capabilities_for,
+    reported_stop_reason,
     resolve_provider,
 )
 from athenaeum.tiers import _record_usage
@@ -594,3 +595,28 @@ class TestProviderCapabilities:
 
     def test_is_a_provider_capabilities_instance(self):
         assert isinstance(capabilities_for("api"), ProviderCapabilities)
+
+
+# ---------------------------------------------------------------------------
+# reported_stop_reason — trust stop_reason only when the backend reports it (#574)
+# ---------------------------------------------------------------------------
+
+
+class TestReportedStopReason:
+    def test_none_when_backend_cannot_report(self):
+        # Even a stop_reason that LOOKS meaningful is suppressed for claude-cli:
+        # the CLI envelope's stop_reason is not a faithful mirror (it can carry
+        # a spurious value), so trusting it routes truncation the wrong way.
+        resp = SimpleNamespace(stop_reason="max_tokens")
+        assert reported_stop_reason(resp, capabilities_for("claude-cli")) is None
+
+    def test_passthrough_when_backend_reports(self):
+        resp = SimpleNamespace(stop_reason="max_tokens")
+        assert reported_stop_reason(resp, capabilities_for("api")) == "max_tokens"
+
+    def test_non_str_stop_reason_coerces_to_none(self):
+        resp = SimpleNamespace(stop_reason=object())
+        assert reported_stop_reason(resp, capabilities_for("api")) is None
+
+    def test_missing_stop_reason_is_none(self):
+        assert reported_stop_reason(SimpleNamespace(), capabilities_for("api")) is None

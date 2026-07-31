@@ -318,6 +318,33 @@ _CLI_CAPABILITIES = ProviderCapabilities(
 )
 
 
+def reported_stop_reason(
+    response: Any, capabilities: ProviderCapabilities
+) -> str | None:
+    """Return *response*'s ``stop_reason``, or ``None`` if the backend cannot
+    reliably report it (issue #574).
+
+    A backend with ``reports_stop_reason=False`` (``claude-cli``) does not
+    reliably populate a message-level ``stop_reason``: the ``--output-format
+    json`` envelope carries a top-level ``stop_reason`` field, but empirically
+    (CLI 2.1.197) it can hold a spurious value (e.g. ``"stop_sequence"`` on an
+    error envelope) and is not a faithful mirror of the model's terminal
+    reason. Trusting it routes truncation detection down the wrong path.
+
+    Returning ``None`` for such a backend makes every downstream branch that
+    tests ``stop_reason == "max_tokens"`` fall through to its safe
+    UNKNOWN-stop-reason path (a drop is classed as a generic degrade, not a
+    truncation; the tier-3 truncation-refusal/fallback branches do not fire) —
+    exactly the behavior the existing code already implements for a ``None``
+    stop_reason. A backend that CAN report it (``api``) passes through
+    unchanged.
+    """
+    if not capabilities.reports_stop_reason:
+        return None
+    value = getattr(response, "stop_reason", None)
+    return value if isinstance(value, str) else None
+
+
 def capabilities_for(provider: str) -> ProviderCapabilities:
     """Return the :class:`ProviderCapabilities` for backend *provider* (#573).
 
