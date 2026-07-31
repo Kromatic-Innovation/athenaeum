@@ -187,6 +187,55 @@ class TestEstimateDrainCostUsd:
         assert cost == pytest.approx(0.075)
 
 
+class TestEstimateModelResolution:
+    """Issue #571 (M18): the drain estimate prices at the resolved ``models.write``
+    model, not a hardcoded literal — env > yaml > ``DEFAULT_WRITE_MODEL``."""
+
+    def test_default_is_the_write_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_WRITE_MODEL", raising=False)
+        assert drain._resolve_estimate_model(None) == drain.DEFAULT_WRITE_MODEL
+
+    def test_env_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_WRITE_MODEL", "claude-opus-4-8")
+        assert drain._resolve_estimate_model(None) == "claude-opus-4-8"
+        assert (
+            drain._resolve_estimate_model({"models": {"write": "claude-haiku-4"}})
+            == "claude-opus-4-8"  # env beats yaml
+        )
+
+    def test_yaml_models_write_used_when_env_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_WRITE_MODEL", raising=False)
+        assert (
+            drain._resolve_estimate_model({"models": {"write": "claude-opus-4-8"}})
+            == "claude-opus-4-8"
+        )
+
+    def test_cost_follows_write_model_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The audit's exact failure: override models.write to Opus and the
+        # estimate must price at Opus rates (5/25), not a stale Sonnet default
+        # (3/15). Same tokens, batch off — Opus estimate must exceed Sonnet.
+        monkeypatch.delenv("ATHENAEUM_WRITE_MODEL", raising=False)
+        kw = dict(
+            backlog=100,
+            avg_input_per_file=20_000,
+            avg_output_per_file=1_500,
+            batch=False,
+        )
+        opus = drain.estimate_drain_cost_usd(
+            config={"models": {"write": "claude-opus-4-8"}}, **kw
+        )
+        sonnet = drain.estimate_drain_cost_usd(
+            config={"models": {"write": "claude-sonnet-4"}}, **kw
+        )
+        assert opus > sonnet
+
+
 class TestRoundUpBudget:
     @pytest.mark.parametrize(
         "value,expected",
