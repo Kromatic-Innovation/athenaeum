@@ -1559,6 +1559,13 @@ def _parse_response(text: str) -> "ResolutionProposal | MergeProposal":
         log.warning("resolutions: resolver returned no JSON object: %s", text[:200])
         return _fallback("resolver-returned-no-json")
 
+    # Observe-only schema validation (#570, M17 phase 1): log the delta from the
+    # accepted resolver-output shape without changing the action/winner/clamp
+    # handling below. Lazy import keeps pydantic off the import graph until use.
+    from athenaeum.llm_schemas import observe_resolutions
+
+    observe_resolutions(payload, call_site="resolutions._parse_response")
+
     action = str(payload.get("action", "")).strip()
     if action not in _VALID_ACTIONS:
         log.warning("resolutions: resolver returned invalid action: %r", action)
