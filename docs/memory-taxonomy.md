@@ -58,7 +58,7 @@ them.
   lint/report pass calls to surface these pages as "untyped" rather than
   letting them disappear silently.
 
-## 3. Merge-vs-cite semantics (documented here; enforcement is #433)
+## 3. Merge-vs-cite semantics (documented here; enforcement shipped in #433)
 
 The reason `memory_class` exists as a distinct axis is that different
 classes should be reconciled DIFFERENTLY when new, possibly-overlapping
@@ -83,11 +83,15 @@ memory arrives:
 This is a **should-merge-here / must-cite-there** rule pair, not a single
 merge algorithm — enforcing it (routing a resolver decision through the
 right one of the two paths depending on whether the pair being reconciled
-shares a `memory_class`) is explicitly **out of scope for this issue** and
-is tracked as #433. Nothing in the merge/recall/embed code paths changes as
-part of #424.
+shares a `memory_class`) was explicitly out of scope for THIS issue (#424)
+and shipped separately as #433: `src/athenaeum/merge_type_gate.py`
+(`cross_class_precheck` rejects cross-class merge proposals at proposal
+time; `build_cite_proposal` builds the non-destructive cite path in their
+place), consumed by `athenaeum.merge` and `athenaeum.wiki_dedupe`. Nothing
+in the merge/recall/embed code paths changed as part of #424 itself — the
+routing logic landed in the follow-up #433 change.
 
-## 4. Inference blocks — schema + parser (retraction machinery is #433)
+## 4. Inference blocks — schema + parser (retraction machinery shipped in #433)
 
 A `memory_class: fact` page may derive some of its claims from OTHER fact
 pages rather than from direct observation. Such a derived claim is written
@@ -106,11 +110,18 @@ The derived claim goes here, in prose.
 
 Each block parses to an addressable unit (`athenaeum.inference_blocks.InferenceBlock`)
 with a stable content-derived `id`, exposing its `basis` list and
-`confidence` value — "addressable" so a future retraction pass (#433) can
-name a specific inference block and re-evaluate or invalidate it when one of
-its `basis` facts is retracted. **That re-evaluation/invalidation logic does
-not exist yet** — this issue ships only the schema + parser
-(`athenaeum.inference_blocks.parse_inference_blocks`).
+`confidence` value — "addressable" so a retraction pass can name a specific
+inference block and remove it when one of its `basis` facts is retracted.
+This issue (#424) ships only the schema + parser
+(`athenaeum.inference_blocks.parse_inference_blocks`); the retraction
+primitive shipped in the follow-up #433:
+`athenaeum.inference_blocks.retract_inference_block` removes a targeted
+`## Inference` block by `id` as a pure text transform (byte-identical
+elsewhere, no basis re-evaluation, no cascading). Cross-record cascading —
+notifying dependent merges when a retraction removes a fact a merge relied
+on — is separately shipped in issue #435's `src/athenaeum/retraction_cascade.py`,
+which emits a human-review item (never an auto-unmerge) naming the
+dependent merge, the retracted observation, and the retraction reason.
 
 A block missing `**Basis**:`, missing/unparseable `**Confidence**:`, or
 whose `**Basis**:` line has no recoverable wikilink is **flagged**
@@ -142,9 +153,12 @@ consumer issue (most naturally #433), not this data-model issue.
 
 ## 6. Explicitly out of scope for #424
 
-- Any change to `recall`, `merge`, or `embed` behavior.
-- Enforcing merge-vs-cite semantics (§3) — #433.
-- Inference-block retraction machinery (§4) — #433.
+- Any change to `recall`, `merge`, or `embed` behavior as PART OF #424 itself.
+- Enforcing merge-vs-cite semantics (§3) — out of scope for #424, shipped
+  separately in #433 (`src/athenaeum/merge_type_gate.py`).
+- Inference-block retraction machinery (§4) — out of scope for #424, shipped
+  separately in #433 (`athenaeum.inference_blocks.retract_inference_block`)
+  and #435 (`src/athenaeum/retraction_cascade.py`).
 - Axiom governance (elevated review/approval for the `axiom` class) — shipped
   separately in #434 (`src/athenaeum/axiom_governance.py`; see that module's
   docstring for the promotion/demotion ledger + assignment-audit design).

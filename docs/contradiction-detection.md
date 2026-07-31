@@ -125,10 +125,15 @@ This catches:
 - Cross-tree-branch contradictions where two scopes are siblings (no
   ancestor relationship), e.g. `-Users-tristankromer-Code-foo` and
   `-Users-tristankromer-Code-bar`.
-- Wiki-vs-wiki gaps that emerge AFTER raw originals are merged-and-deleted.
-  Two compiled `wiki/auto-*.md` pages can still contradict each other; the
-  raw pass would never see them again, but the similarity sweep picks up
-  the embedded text directly from chromadb.
+
+**Known limitation (issue #262):** wiki-vs-wiki pairs are NOT compared.
+`cross_scope_similarity_pairs`'s `require_raw_side` defaults `True` and is
+passed `True` at its only call site (`merge.py`), so any candidate pair
+where BOTH sides are wiki entries is dropped — this removes the
+O(corpus²) wiki-vs-wiki adjudication term. Two compiled `wiki/auto-*.md`
+pages that drift apart AFTER their raw originals are merged-and-deleted
+will NOT be caught by this sweep; re-detection targets new raw intake
+only.
 
 Cost: roughly **2× Haiku calls in the worst case** — one for the per-scope
 pass and one per candidate pair. The threshold is the cost lever.
@@ -151,7 +156,7 @@ multi-project structure under one user.
 |------|------|
 | Lowest cost; accept gap | `off` |
 | Catch general-rule-vs-project-override | `ancestor` (default) |
-| Catch cross-tree-branch + wiki-vs-wiki | `similarity` |
+| Catch cross-tree-branch (siblings); wiki-vs-wiki NOT covered (#262) | `similarity` |
 | Maximal coverage | `both` |
 
 ---
@@ -167,17 +172,27 @@ When the detector flags a contradiction, the Opus resolver
 2. linkedin:<...> / twitter:<...> — user-curated public profile.
 3. api:apollo / api:<vendor>    — third-party authoritative source.
 4. wikipedia:<page>             — consensus public source.
-5. claude:tier3-...             — LLM-generated. Subordinate to any human/external source.
-6. script:<slug>                — pipeline-generated, no upstream evidence.
-7. unsourced / empty            — always loses to any sourced claim.
+5. agent-observed:<model>:<session-ref> — an AI derived it from an in-session
+   artifact it READ (file contents, tool output), verifiable against the
+   transcript. Ranks below external/consensus sources (not a curated
+   authority) but above claude:tier3/inferred (grounded in a real artifact,
+   not an unsupported leap).
+6. claude:tier3-...             — LLM-generated. Subordinate to any human/external source.
+7. script:<slug>                — pipeline-generated, no upstream evidence.
+8. model-prior:<model-id>       — asserted from training-data knowledge with
+   no session evidence. Unverifiable and silently stale past the model
+   cutoff, so ranks below script: (a pipeline slug at least names a
+   repeatable in-tree process).
+9. unsourced / empty            — always loses to any sourced claim.
 ```
 
 **Tie-break.** When two claims sit at the same precedence tier, prefer the
 *newer* source date.
 
-The resolver receives ONLY each member's `source:` value, the relevant
-`field_sources.<key>` slice when present, and the conflicting passages —
-NOT the full body. Token economy is enforced at prompt assembly.
+The resolver receives each member's `source:` value, the relevant
+`field_sources.<key>` slice when present, and the conflicting passages.
+The full body is also included when it fits under the configured token
+budget. Token economy is enforced at prompt assembly.
 
 ### Worked example — "Tristan is German"
 
@@ -225,9 +240,9 @@ returns:
 {
   "recommended_winner": "b",
   "action": "keep_b",
-  "rationale": "User-direct statement (precedence 1) overrides Claude-generated tier3 classification (precedence 5).",
+  "rationale": "User-direct statement (precedence 1) overrides Claude-generated tier3 classification (precedence 6).",
   "confidence": 0.95,
-  "source_precedence_used": ["a:claude:tier3-classify-2026-04-08 > b:user:session-2026-04-10-rosie-intake (b wins, tier 1 > tier 5)"]
+  "source_precedence_used": ["a:claude:tier3-classify-2026-04-08 > b:user:session-2026-04-10-rosie-intake (b wins, tier 1 > tier 6)"]
 }
 ```
 
@@ -243,8 +258,8 @@ Passage 2: Tristan holds American and British citizenship; not German.
 Members involved: -Users-.../auto-tristan-nationality-2026-04-10.md, -Users-.../auto-tristan-citizenship-2026-04-10.md
 **Proposed resolution**: keep_b
 **Confidence**: 0.95
-**Rationale**: User-direct statement (precedence 1) overrides Claude-generated tier3 classification (precedence 5).
-**Source precedence**: a:claude:tier3-classify-2026-04-08 > b:user:session-2026-04-10-rosie-intake (b wins, tier 1 > tier 5)
+**Rationale**: User-direct statement (precedence 1) overrides Claude-generated tier3 classification (precedence 6).
+**Source precedence**: a:claude:tier3-classify-2026-04-08 > b:user:session-2026-04-10-rosie-intake (b wins, tier 1 > tier 6)
 ```
 
 The user remains the final authority. The four `**Proposed resolution**`
@@ -396,8 +411,9 @@ authoritative current numbers.
   order of magnitude).**
 
 - **Resolver (Opus).** `claude-opus-4-7` is roughly **$15/MTok input,
-  $75/MTok output**. The resolver prompt is small by design (sources +
-  conflicting passages, NOT bodies) — a few hundred tokens in, a few
+  $75/MTok output**. The resolver prompt is small by design (sources,
+  conflicting passages, and each member's full body when it fits under
+  the configured token budget) — a few hundred tokens in, a few
   hundred out. Cost: **~$0.05–$0.10 per call.**
 
 ### Per-ingest upper bound
