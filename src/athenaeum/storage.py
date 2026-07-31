@@ -314,6 +314,23 @@ def resolve_adapter_for_class(
 # ---------------------------------------------------------------------------
 
 
+def storage_policy_configured(config: dict[str, Any] | None) -> bool:
+    """Whether this config defines any non-default storage policy (issue #532).
+
+    ``True`` only when ``storage.mapping`` or ``storage.adapters`` is present and
+    non-empty — i.e. when some entity class could resolve to a surface other than
+    the all-true default ``wiki-markdown-embedded``. When ``False``, every class
+    is guaranteed full corpus participation, so the ``embedded`` / ``recallable``
+    enforcement gates (index-build scan, recall render) can short-circuit to
+    their pre-#532 behavior as a strict no-op. Consulted at the recall render
+    layer so a base with no ``storage:`` config pays nothing and behaves exactly
+    as before — including for edge cases like an unreadable (stale-index) hit.
+    """
+    if not config:
+        return False
+    return bool(resolve_storage_mapping(config) or resolve_storage_adapters(config))
+
+
 def corpus_policy_for_class(
     entity_class: str | None,
     config: dict[str, Any] | None,

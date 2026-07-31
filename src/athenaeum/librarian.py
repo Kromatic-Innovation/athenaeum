@@ -3872,6 +3872,7 @@ def reindex(
             exclude_globs=exclude_globs,
             embedding_model=resolve_embedding_model(config),
             full_rehash_max_age_days=full_rehash_max_age_days,
+            config=config,
         )
     else:
         pages = build_fts5_index(
@@ -3882,6 +3883,7 @@ def reindex(
             include_globs=include_globs,
             exclude_globs=exclude_globs,
             full_rehash_max_age_days=full_rehash_max_age_days,
+            config=config,
         )
     return backend_name, pages
 

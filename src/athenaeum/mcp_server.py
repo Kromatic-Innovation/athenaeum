@@ -47,7 +47,7 @@ from athenaeum.models import (
 )
 from athenaeum.provenance import resolve_remember_extras, resolve_remember_sources
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
-from athenaeum.storage import write_raw_intake
+from athenaeum.storage import is_recallable, storage_policy_configured, write_raw_intake
 
 log = logging.getLogger(__name__)
 
@@ -150,6 +150,7 @@ def recall_search(
     cache_dir: Path | None = None,
     extra_roots: list[Path] | None = None,
     caller_audience: set[str] | None = None,
+    config: dict[str, object] | None = None,
 ) -> str:
     """Search the knowledge wiki for pages relevant to *query*.
 
@@ -171,6 +172,13 @@ def recall_search(
             set restricts results to pages the caller is authorized for; the
             predicate is applied inside the backend query (Layer B) AND
             re-checked against fresh on-disk frontmatter at render (Layer C).
+        config: Resolved ``athenaeum.yaml`` config (issue #532). Used to honor
+            the storage-adapter ``recallable`` corpus policy: a hit whose entity
+            class routes to a surface with ``recallable: false`` is dropped at
+            the render layer (Layer C), the same fresh-frontmatter re-check the
+            audience predicate uses. ``None`` (default) skips the check —
+            today's behavior — and is a no-op for the default configuration
+            (every class maps to the all-true wiki surface).
 
     Returns a formatted string of matching wiki pages with relevance scores
     and content snippets.
@@ -191,6 +199,7 @@ def recall_search(
         cache_dir,
         extra_roots or [],
         caller_audience,
+        config,
     )
 
 
@@ -321,6 +330,7 @@ def _recall_via_backend(
     cache_dir: Path | None,
     extra_roots: list[Path],
     caller_audience: set[str] | None = None,
+    config: dict[str, object] | None = None,
 ) -> str:
     """Delegate recall to a registered search backend, then format results."""
     from athenaeum.search import DegradedIndexError, get_backend
@@ -355,6 +365,11 @@ def _recall_via_backend(
 
     tokens = tokenize_keyword_query(query)
 
+    # Issue #532: only enforce the ``recallable`` policy when the config
+    # actually defines a non-default storage policy — a strict no-op (including
+    # for unreadable/stale hits) for any base with no ``storage:`` config.
+    enforce_recallable = storage_policy_configured(config)
+
     # Render each hit, applying Layer C (issue #312): re-check the FRESH
     # on-disk frontmatter for a restricted caller so a stale index (a page
     # whose audience changed since the last rebuild) cannot leak a forbidden
@@ -386,6 +401,22 @@ def _recall_via_backend(
         # cannot verify, so withhold. Owner (caller_audience=None) is unaffected.
         if caller_audience is not None:
             if not readable or not is_page_authorized(fm, caller_audience):
+                continue
+
+        # Issue #532 (H4): honor the storage-adapter ``recallable`` corpus
+        # policy at the same render layer. A hit whose entity class routes to a
+        # surface with ``recallable: false`` is dropped even if it slipped into
+        # the index — the ``recallable`` capability the storage contract
+        # promises, enforced fail-closed against fresh on-disk frontmatter (a
+        # class flipped to non-recallable since the last rebuild cannot leak).
+        # NO-OP by default: with no ``storage:`` config ``enforce_recallable``
+        # is False and this is skipped entirely. If we couldn't read the file we
+        # cannot verify the class, so (fail-closed) withhold the hit.
+        if enforce_recallable:
+            if not readable:
+                continue
+            page_type = str(fm.get("type") or "")
+            if not is_recallable(page_type, config):
                 continue
 
         if isinstance(tags, list):
@@ -640,6 +671,7 @@ def create_server(
     extra_roots: list[Path] | None = None,
     caller_audience: set[str] | None = None,
     screening: dict | None = None,
+    config: dict | None = None,
 ) -> "FastMCP":  # noqa: F821 — lazy import
     """Create and return a configured FastMCP server instance.
 
@@ -677,6 +709,11 @@ def create_server(
             a read-time ``access:`` level before the append-only write. Pinned
             HERE (not a ``remember()`` tool argument) so a caller cannot
             disable its own screening.
+        config: Resolved ``athenaeum.yaml`` config (issue #532), threaded to
+            ``recall`` so the storage-adapter ``recallable`` corpus policy is
+            honored at query time — a class routed to a ``recallable: false``
+            surface is never returned by ``recall``. ``None`` (default) is a
+            no-op for the default configuration (every class all-true).
 
     Requires ``fastmcp`` to be installed (``pip install athenaeum[mcp]``).
     """
@@ -732,6 +769,7 @@ def create_server(
             cache_dir=cache_dir,
             extra_roots=extra_roots,
             caller_audience=caller_audience,
+            config=config,
         )
 
     @mcp.tool()
