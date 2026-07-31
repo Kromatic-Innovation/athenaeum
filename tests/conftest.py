@@ -4,8 +4,124 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Callable
 
 import pytest
+
+# Issue #554 (L11) — re-export RecordingClient so the record/replay eval
+# double is importable from a single, discoverable location alongside the
+# canned-response unit double below (``from tests.conftest import
+# RecordingClient``). RecordingClient wraps a REAL anthropic client and
+# persists live responses to fixtures for tests/evals/harness.py's
+# record/replay flow; it is NOT a canned-response fake, so it is a distinct
+# tool from FakeLLMClient (which never touches the network). Imported here,
+# rather than reimplemented, so there is exactly one implementation.
+from tests.evals.harness import RecordingClient  # noqa: F401
+
+
+def make_llm_response(text: str, usage: Any = None) -> SimpleNamespace:
+    """Build an anthropic-shaped ``messages.create`` response.
+
+    Mirrors the ``_mock_response``/``_msg`` helpers duplicated across the
+    ad-hoc ``_FakeClient`` doubles: ``resp.content[0].text`` plus an
+    optional ``resp.usage`` with the four token counters athenaeum's spend
+    ledger reads.
+    """
+    return SimpleNamespace(content=[SimpleNamespace(text=text)], usage=usage)
+
+
+def make_llm_usage(
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+) -> SimpleNamespace:
+    """Build the four-counter usage object athenaeum's spend ledger reads."""
+    return SimpleNamespace(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+    )
+
+
+class FakeLLMClient:
+    """Canonical anthropic-shaped test double (issue #554, L11).
+
+    One shared implementation of the ``client.messages.create(**params)``
+    slice the athenaeum call sites use, so the ~13 ad-hoc ``_FakeClient``
+    copies stop drifting from the SDK shape independently. Construct with a
+    response (text or a full response object) OR a callable, and it records
+    the kwargs each call received for assertions.
+
+    Construction modes (pick one):
+      * ``FakeLLMClient(text="...")`` — every ``create`` call returns a
+        canned-text response (``.content[0].text``).
+      * ``FakeLLMClient(response=some_namespace)`` — every ``create`` call
+        returns the given pre-built response object verbatim (use
+        :func:`make_llm_response` to build one with ``usage`` attached).
+      * ``FakeLLMClient(responder=callable)`` — ``create`` calls
+        ``responder(**kwargs)``; return a response object, or a bare
+        string (auto-wrapped via :func:`make_llm_response`).
+      * ``FakeLLMClient(raises=SomeException("..."))`` — every ``create``
+        call raises the given exception instance instead of returning.
+
+    All modes record: ``self.calls`` (list of kwargs dicts passed to each
+    ``create`` invocation, in order) and ``self.client_kwargs`` (the kwargs
+    the fake was constructed with, e.g. ``api_key``/``max_retries``/
+    ``timeout``, for tests asserting client-construction args like
+    ``captured["__client_kwargs__"]["api_key"]`` in the pre-#554 doubles).
+    """
+
+    def __init__(
+        self,
+        *,
+        text: str | None = None,
+        response: Any = None,
+        responder: Callable[..., Any] | None = None,
+        raises: BaseException | None = None,
+        **client_kwargs: Any,
+    ) -> None:
+        self._text = text
+        self._response = response
+        self._responder = responder
+        self._raises = raises
+        self.client_kwargs = client_kwargs
+        self.calls: list[dict[str, Any]] = []
+        self.messages = self
+
+    # Matches ``anthropic.Anthropic(**kwargs)`` being monkeypatched directly
+    # onto an INSTANCE — call sites do
+    # ``monkeypatch.setattr(anthropic, "Anthropic", fake_instance)`` and then
+    # the code under test constructs via ``anthropic.Anthropic(**kwargs)``.
+    # Recording ``client_kwargs`` on ``self`` (rather than returning a fresh
+    # instance) means the ONE instance the test holds a reference to
+    # accumulates both the construction kwargs and every ``create`` call, so
+    # `fake.client_kwargs` / `fake.calls` are visible from the test without
+    # threading a second handle through the monkeypatch.
+    def __call__(self, **client_kwargs: Any) -> "FakeLLMClient":
+        self.client_kwargs = client_kwargs
+        return self
+
+    def create(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        if self._raises is not None:
+            raise self._raises
+        if self._responder is not None:
+            result = self._responder(**kwargs)
+            if isinstance(result, str):
+                return make_llm_response(result)
+            return result
+        if self._response is not None:
+            return self._response
+        return make_llm_response(self._text or "")
+
+
+@pytest.fixture
+def fake_llm_client() -> Callable[..., FakeLLMClient]:
+    """Factory fixture returning :class:`FakeLLMClient` for repointing tests."""
+    return FakeLLMClient
 
 
 @pytest.fixture(autouse=True)

@@ -28,6 +28,7 @@ from athenaeum.config import (
     resolve_spend_max_usd_per_run,
 )
 from athenaeum.models import TokenUsage
+from tests.conftest import FakeLLMClient, make_llm_response, make_llm_usage
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -594,31 +595,21 @@ class TestQueryTopicsLedger:
     def test_records_metered_spend(
         self, ledger: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from types import SimpleNamespace
-
         from athenaeum import query_topics
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
-        class _FakeMessages:
-            def create(self, **kwargs: Any) -> Any:
-                return SimpleNamespace(
-                    content=[SimpleNamespace(text='["Return Path"]')],
-                    usage=SimpleNamespace(
-                        input_tokens=120,
-                        output_tokens=15,
-                        cache_creation_input_tokens=0,
-                        cache_read_input_tokens=0,
-                    ),
-                )
-
-        class _FakeClient:
-            def __init__(self, **kwargs: Any) -> None:
-                self.messages = _FakeMessages()
+        # Issue #554 (L11): repointed at the shared FakeLLMClient double.
+        fake = FakeLLMClient(
+            response=make_llm_response(
+                '["Return Path"]',
+                usage=make_llm_usage(input_tokens=120, output_tokens=15),
+            )
+        )
 
         import anthropic
 
-        monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
+        monkeypatch.setattr(anthropic, "Anthropic", fake)
 
         topics = query_topics.extract_topics("Tell me about Return Path please")
         assert topics == ["Return Path"]

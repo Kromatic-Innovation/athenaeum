@@ -439,6 +439,10 @@ class TestModelPlumbing:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         captured: dict[str, Any] = {}
 
+        # Issue #554 (L11): left ad-hoc rather than repointed at
+        # tests.conftest.FakeLLMClient — this file's fakes are built around
+        # MagicMock-based clients asserting on `call_args` elsewhere in the
+        # module, a different pattern than the shared canned-response double.
         class _FakeClient:
             def __init__(self, **_: Any) -> None:
                 self.messages = self
