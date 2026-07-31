@@ -506,11 +506,13 @@ for the 1Password bootstrap pattern.
 
 ## Configuration
 
-Settings are resolved in the order **CLI flag > env var > `<knowledge_root>/athenaeum.yaml` > built-in default**, so a one-off shell export beats the yaml without requiring an edit. The canonical reference for every knob — librarian budgets, model selection, contradiction/resolver tuning, recall/search, and hook environment — is [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md). As one example, the contradiction-resolver knobs live under a top-level `resolve:` block:
+Settings are resolved in the order **CLI flag > env var > `<knowledge_root>/athenaeum.yaml` > built-in default**, so a one-off shell export beats the yaml without requiring an edit. The canonical reference for every knob — librarian budgets, model selection, contradiction/resolver tuning, recall/search, and hook environment — is [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md). As one example, the resolver model lives under the top-level `models:` block, and the rest of the resolver's behavior knobs live under `resolve:`:
 
 ```yaml
+models:
+  resolve: claude-opus-4-7        # ATHENAEUM_RESOLVE_MODEL
+
 resolve:
-  model: claude-opus-4-7          # ATHENAEUM_RESOLVE_MODEL
   auto_apply: true                # ATHENAEUM_RESOLVE_AUTO_APPLY (default: true)
   auto_apply_threshold: 0.90      # ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD, [0.0, 1.0]
   full_body_token_cap: 1500       # ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP, per-side body cap (~4 chars/token)
