@@ -40,13 +40,22 @@ you want a *storage* adapter.
 ## The three corpus capabilities
 
 A surface's `corpus_policy` declares participation in three **orthogonal**
-capabilities:
+capabilities. Each is **enforced** — a class routed to a surface that opts out
+of a capability is dropped from it, even for a page that physically sits inside
+`wiki/` (issue #532). The enforcement point per capability:
 
-| Capability | Meaning |
-|---|---|
-| `embedded` | pages are indexed into the FTS5 / vector store |
-| `recallable` | pages are eligible to be returned by `recall` |
-| `merge_eligible` | pages may be proposed for wiki-dedup consolidation |
+| Capability | Meaning | Enforced at |
+|---|---|---|
+| `embedded` | pages are indexed into the FTS5 / vector store | index **build** — a non-`embedded` class is dropped by the scan (`search._scan_indexed_records`), the same way a `pii:`-flagged page is (#427). No persisted index for the keyword backend, so it is inert there. |
+| `recallable` | pages are eligible to be returned by `recall` | recall **render** — a non-`recallable` class is dropped against fresh on-disk frontmatter (`mcp_server._recall_via_backend`, and the `athenaeum recall` CLI), the same fail-closed re-check the audience predicate uses (#312 Layer C). Applies to every backend. |
+| `merge_eligible` | pages may be proposed for wiki-dedup consolidation | candidate discovery — a non-`merge_eligible` class is dropped from merge candidates (`wiki_dedupe.discover_wiki_dedupe_candidates`). |
+
+All three are **defense-in-depth on top of the by-construction path exclusion**
+(a restricted surface lives outside `wiki/`, so its pages are never scanned):
+they additionally cover the case where a page of a restricted class happens to
+sit inside `wiki/`. All three are a **strict no-op for the default,
+unconfigured knowledge base** — every class maps to the all-true
+`wiki-markdown-embedded` surface, so nothing is ever dropped.
 
 ## Built-in adapters
 
@@ -151,8 +160,27 @@ consumer needs:
 | `is_embedded / is_recallable / is_merge_eligible(cls, config)` | the individual policy bits |
 | `is_excluded(cls, config)` | `True` when the class joins no corpus capability |
 
-The wiki-dedup merge pass already consults `is_merge_eligible` (see
-`wiki_dedupe.discover_wiki_dedupe_candidates`): a class routed to a
-non-merge-eligible surface is dropped from merge candidates even if a page of
-that class happens to sit in `wiki/` — fail-closed defense-in-depth on top of
-the by-construction path exclusion.
+Every corpus consumer honors the matching policy bit (issue #532):
+
+- The embedder drops a non-`embedded` class at index build
+  (`search._scan_indexed_records`).
+- `recall` drops a non-`recallable` class at render
+  (`mcp_server._recall_via_backend`, and the `athenaeum recall` CLI).
+- The wiki-dedup merge pass drops a non-`merge_eligible` class from candidates
+  (`wiki_dedupe.discover_wiki_dedupe_candidates`).
+
+Each is fail-closed defense-in-depth on top of the by-construction path
+exclusion, and each is a no-op for the default all-true wiki surface.
+
+## Extension point: supported (with a contract test)
+
+The in-process extension point — `register_adapter`, `resolve_adapter_for_class`,
+`available_adapters`, and the `StorageAdapter` / `CorpusPolicy` dataclasses — is
+**intentional, supported public API of this internal seam** (issue #532, M34).
+It is importable from `athenaeum.storage`; like the rest of this module it is
+not yet on the stable `__all__` surface (signatures may change between minor
+releases until the seam is promoted), but it is exercised end to end by a
+contract test — `tests/test_storage_enforcement.py::TestAdapterExtensionPointContract`
+drives a code-registered custom adapter through resolve → index → recall — so it
+is a live, guarded seam rather than untested rot. A downstream consumer (e.g.
+#426's deferred skill-file-sync surface) can rely on it.
