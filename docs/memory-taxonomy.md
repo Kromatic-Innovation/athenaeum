@@ -3,7 +3,9 @@
 > **Status:** data model + validation only. This document locks the shape;
 > enforcement of the merge-vs-cite semantics described in §3 is
 > [#433](https://github.com/Kromatic-Innovation/athenaeum/issues/433) and has
-> not shipped yet. Governance over the `axiom` class
+> **shipped** — see `src/athenaeum/merge_type_gate.py` (module docstring:
+> "This module is that enforcement"), consumed by the merge/proposal engine
+> (`athenaeum.merge`, `athenaeum.wiki_dedupe`). Governance over the `axiom` class
 > ([#434](https://github.com/Kromatic-Innovation/athenaeum/issues/434):
 > explicit human-approved promotion/demotion ledger + assignment audit) has
 > shipped — see `src/athenaeum/axiom_governance.py`. Tier

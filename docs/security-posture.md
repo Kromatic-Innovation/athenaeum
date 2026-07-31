@@ -11,11 +11,12 @@ Athenaeum is an **open-source Python library** (Apache 2.0) published to PyPI. I
 - Built with `hatchling` from `pyproject.toml`.
 - Released via `.github/workflows/release.yml` on git-tag push (`v*`).
 - Tested across Python 3.11 / 3.12 / 3.13 in CI.
-- Critical deps have **explicit upper-bound caps** documented in pyproject.toml comments:
-  - `anthropic>=0.30.0,<1.0` — "pre-1.0 and ships breaking changes freely"
+- Critical deps have **explicit upper-bound caps** documented in pyproject.toml comments (`pyproject.toml:39-48`):
+  - `anthropic>=0.39.0,<1.0` — "pre-1.0 and ships breaking changes freely"
   - `pydantic>=2.0,<3.0`
   - `chromadb>=0.5.0,<2.0` — "has shipped sqlite schema migrations in minor bumps"
-  - `fastmcp>=2.0.0,<3.0` — pre-1.0
+  - `fastmcp>=2.0.0,<4.0` — post-1.0 but still iterating on its MCP protocol surface
+  - **Verify these against `pyproject.toml` quarterly** (see §3.3) — this table is a snapshot, not the source of truth; `pyproject.toml` is.
 - Third-party GitHub Actions are **pinned to SHAs** in both CI and release workflows for supply-chain hygiene.
 
 The threat model is "**library consumer drift**" — a dep that ships a subtle behavior change can affect every athenaeum user's deployment without them noticing. Patches are usually safe; minors on the explicitly-flagged deps need a human eye.
@@ -28,7 +29,8 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 | Direct network access | Via consumers' use | When wrapping the Anthropic API, requests go from the consumer's process. |
 | Local file/SQLite operations | Yes (chromadb optional extra) | SQLite schema migrations have happened in chromadb minors — hence the hold list. |
 | Build-time secret handling | At release time only | Trusted-publishing identity uses GitHub OIDC; no long-lived PyPI token. |
-| Read-scoping of recall (#312) | Yes (opt-in) | `athenaeum serve --audience <role,…>` (also `ATHENAEUM_AUDIENCE` / `serve.audience`) pins a server process to a restricted read scope so a secondary agent/routine recalls only `access: open` pages and pages whose `audience:` list grants one of its roles; untagged / `confidential` / `personal` pages fail closed (withheld). The audience is pinned by the operator at serve time, not chosen by the `recall` caller, so a restricted agent can't widen its own scope. Enforced inside each backend query (ranking/top-k) and re-checked against fresh on-disk frontmatter at render. Unset = owner = full access. This is NOT a full multi-user auth/ACL system — it is a single-owner read filter for the owner's own secondary agents. Intake-side secret/PII screening for `remember()` is tracked separately. |
+| Read-scoping of recall (#312) | Yes (opt-in) | `athenaeum serve --audience <role,…>` (also `ATHENAEUM_AUDIENCE` / `serve.audience`) pins a server process to a restricted read scope so a secondary agent/routine recalls only `access: open` pages and pages whose `audience:` list grants one of its roles; untagged / `confidential` / `personal` pages fail closed (withheld). The audience is pinned by the operator at serve time, not chosen by the `recall` caller, so a restricted agent can't widen its own scope. Enforced inside each backend query (ranking/top-k) and re-checked against fresh on-disk frontmatter at render. Unset = owner = full access. This is NOT a full multi-user auth/ACL system — it is a single-owner read filter for the owner's own secondary agents. |
+| Intake-side secret/PII screening (#320) | **Shipped** | `remember()`'s write path calls `athenaeum.screening.screen_intake` (`src/athenaeum/mcp_server.py:553`, screener defined at `src/athenaeum/screening.py:212`) to classify sensitive content and resolve the read-time `access:` label BEFORE the single append-only write. Opt-in via a `screening` config resolved by `athenaeum.config.resolve_screening`; `None` (default) preserves prior unscreened behavior. |
 
 ### 2.1 MCP tool audience scoping (#312 → #538)
 
@@ -107,7 +109,7 @@ A "major bump" here is sometimes Dependabot proposing to raise the upper-bound c
 - **Anthropic 1.0** when it ships → schedule a focused PR. Audit breaking changes. Bump the cap and run the full test matrix.
 - **Pydantic 3.0** → same.
 - **Chromadb 2.0** → review SQLite migration path; consumers' existing databases must keep working.
-- **Fastmcp 3.0** → audit MCP protocol changes.
+- **Fastmcp 3.0** is **not** a future trigger — the current cap is `fastmcp>=2.0.0,<4.0` (`pyproject.toml:45,54`), so a `3.x` release resolves inside the existing range and is eligible for the ordinary minor-bump path in §3.1 (still hold-listed there, so it requires a human eye, but it does not need a cap-bump PR). **Fastmcp 4.0** is the actual future cap-bump trigger — audit MCP protocol changes when it ships.
 
 For all of these, the worktree-internal version cap shift is the actual change; the dependency bump is a consequence.
 
@@ -117,9 +119,10 @@ Quarterly (next: 2026-08-06):
 
 1. Confirm `anthropic` is still < 1.0 (or update strategy if 1.0 ships).
 2. Confirm `chromadb` minor releases haven't introduced an SQLite migration that would break consumers downgrading.
-3. Run `pip-audit` against the resolved lockfile in CI logs.
+3. **Known gap:** no `pip-audit` (or equivalent dependency-vulnerability scan) runs anywhere in CI today — verified against `.github/workflows/*` (no `pip-audit` reference in any workflow). There is also no committed resolved lockfile for it to scan against; this repo ships a `pyproject.toml` range, not a pinned lockfile. Both the scan step and the lockfile are out of scope for this document and owned by a separate lane — this line exists so the gap is visible at each quarterly review rather than silently assumed covered.
 4. Confirm action SHA pins are still up-to-date with their semver tags.
 5. Re-evaluate hold list. If any pre-1.0 dep has stabilized (e.g. Anthropic 1.0), remove from hold list.
+6. Re-verify the dependency-cap table in §1 against `pyproject.toml` — copy the live ranges verbatim; do not let this doc drift from the source of truth.
 
 ## 4. What CI already enforces
 
