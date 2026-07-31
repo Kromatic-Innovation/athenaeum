@@ -15,6 +15,7 @@ from athenaeum.config import (
 )
 from athenaeum.librarian import discover_raw_files
 from athenaeum.models import parse_frontmatter
+from athenaeum.tiers import schema_fragment_state
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,12 @@ class StatusInfo(TypedDict):
     # ``librarian.drain_warn_days``. Surfaces the same signal the end-of-run
     # WARNING emits, so status/MCP surfaces show it BETWEEN runs.
     drain_advisory: str | None
+    # Issue #567: live-vs-default state of each operator-tunable schema fragment,
+    # as ``{filename: (sha256_hex, is_default)}`` from
+    # :func:`athenaeum.tiers.schema_fragment_state`. Surfaces which fragment
+    # bytes are in play between runs, the same attribution the run-summary line
+    # records; a fragment matching its bundled default has ``is_default=True``.
+    schema_fragments: dict[str, tuple[str, bool]]
 
 
 def scan_page_sizes(
@@ -182,6 +189,11 @@ def status(knowledge_root: Path) -> StatusInfo:
             exc,
         )
 
+    # Issue #567: schema-fragment divergence — which operator-tunable fragments
+    # differ from the bundled default. Observational (read-only); mirrors the
+    # attribution the librarian run-summary line records.
+    schema_fragments = schema_fragment_state(wiki_root)
+
     return {
         "raw_pending": raw_pending,
         "entity_count": entity_count,
@@ -192,6 +204,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "pages_warn": pages_warn,
         "pages_flag": pages_flag,
         "drain_advisory": drain_advisory,
+        "schema_fragments": schema_fragments,
     }
 
 
@@ -224,6 +237,17 @@ def format_status(info: StatusInfo) -> str:
         lines.append(f"  [flag] {name} ({size} bytes)")
     for name, size in pages_warn:
         lines.append(f"  [warn] {name} ({size} bytes)")
+
+    # Issue #567: one divergence line per operator-tunable schema fragment —
+    # ``default`` when it matches the bundled copy, ``edited (sha8 …)`` when the
+    # live bytes differ. ``.get`` keeps pre-#567 status dicts formatting cleanly.
+    schema_fragments = info.get("schema_fragments") or {}
+    if schema_fragments:
+        lines.append("Schema fragments:")
+        for name in sorted(schema_fragments):
+            sha_hex, is_default = schema_fragments[name]
+            detail = "default" if is_default else f"edited (sha8 {sha_hex[:8]})"
+            lines.append(f"  {name}: {detail}")
 
     if info["last_commit_date"]:
         lines.append(f"Last commit:          {info['last_commit_date']}")

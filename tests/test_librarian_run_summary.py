@@ -349,8 +349,12 @@ class TestDeadlineExitSummary:
         assert len(lines) == 1, "exactly one summary line must be emitted on a 124 exit"
         line = lines[0]
         assert "wiki-dedup secs=" in line
-        assert "entity" not in line
-        assert "auto-memory" not in line
+        # Assert on the phase SEGMENT, not a bare "entity" substring: issue #567
+        # adds a `schema_fragments=…,_entity-template:…` attribution token to the
+        # head, so "entity" now legitimately appears there. The intent here is
+        # that the entity PHASE never ran — i.e. no `entity secs=` segment.
+        assert "entity secs=" not in line
+        assert "auto-memory secs=" not in line
 
     def test_entity_loop_deadline_trip_summary_has_entity_not_automemory(
         self,

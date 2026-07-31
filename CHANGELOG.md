@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Prompt + schema-fragment byte attribution on the run summary and `status` (#567).**
+  A classify/create regression could not be attributed to *which* bytes a run
+  used — the operator's (possibly edited) schema fragments vs. the shipped
+  prompts. Two forensic surfaces now close that gap, adding no new phase, log,
+  or exit-code behavior. (1) The one-line `librarian-run-summary` gains, on its
+  head segment right after `total_secs`, a `schema_fragments=` key
+  (`<name>:default` when the live fragment matches the bundled default,
+  `<name>:<sha8>` when it diverges — one entry per operator-tunable fragment)
+  and a single aggregate `prompt_manifest=<sha8>` key over the whole prompt
+  set. (2) `athenaeum status` gains one divergence line per schema fragment
+  (`default` vs `edited (sha8 …)`). Source of truth is unchanged —
+  `tiers.schema_fragment_state` (#563) for the fragment bytes and the new
+  `prompt_registry.prompt_manifest_hash` aggregating `prompt_manifest` (#561);
+  no hashing is re-implemented. **No auto-update and no upgrade-time notice**
+  were added: the write-once copy semantics stay, and the run-summary hash
+  provides forensics regardless (per #517's settled operator decision).
+
 - **`models.resolve` — the resolver model joins the `models:` block (#513).**
   #232 introduced the `models:` yaml section and the shared
   `config.resolve_model()` precedence helper, but routed only three of the four

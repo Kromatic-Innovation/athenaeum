@@ -111,6 +111,7 @@ from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
     Tier2ParseStats,
+    schema_fragment_state,
     tier1_programmatic_match,
     tier2_classify,
     tier3_write,
@@ -1785,7 +1786,32 @@ def _write_deferred_manifest(
 RUN_SUMMARY_PREFIX = "librarian-run-summary"
 
 
-def _render_run_summary(profile: "list[tuple[str, float, dict]]") -> str:
+def _render_schema_fragment_attribution(
+    state: "dict[str, tuple[str, bool]]",
+) -> str:
+    """Render ``schema_fragment_state`` as one comma-joined ``name:token`` value.
+
+    ``token`` is ``default`` when the live fragment is byte-identical to the
+    bundled default, else the first 8 hex chars of its sha256 — so an operator's
+    edited copy is attributable to a specific byte-state from the run log alone
+    (issue #567). ``name`` drops the redundant ``.md`` suffix; every attributed
+    fragment name is otherwise free of the space/``=``/``,``/``:`` separators the
+    run-summary line uses, so it stays unambiguously greppable.
+    """
+    pairs = []
+    for fname, (sha_hex, is_default) in state.items():
+        label = fname[:-3] if fname.endswith(".md") else fname
+        token = "default" if is_default else sha_hex[:8]
+        pairs.append(f"{label}:{token}")
+    return ",".join(pairs)
+
+
+def _render_run_summary(
+    profile: "list[tuple[str, float, dict]]",
+    *,
+    schema_fragments: "dict[str, tuple[str, bool]] | None" = None,
+    prompt_manifest_hash: "str | None" = None,
+) -> str:
     """Render the accumulated per-phase *profile* into ONE greppable line.
 
     ``profile`` is an ordered list of ``(phase_name, elapsed_seconds,
@@ -1797,7 +1823,9 @@ def _render_run_summary(profile: "list[tuple[str, float, dict]]") -> str:
 
     Format::
 
-        librarian-run-summary total_secs=12.3 | wiki-dedup secs=0.1 | \
+        librarian-run-summary total_secs=12.3 \
+            schema_fragments=observation-filter:default,_entity-template:a1b2c3d4 \
+            prompt_manifest=9f8e7d6c | wiki-dedup secs=0.1 | \
             entity secs=4.2 calls=6 created=2 updated=1 escalated=0 files=3 | \
             auto-memory secs=7.8 detector_haiku=4 resolver_opus=1 \
             sweep_pairs=0 clusters_merged=2 escalations=0 | retire secs=0.1 | \
@@ -1805,9 +1833,23 @@ def _render_run_summary(profile: "list[tuple[str, float, dict]]") -> str:
 
     ``total_secs`` sums the per-phase elapsed times (NOT independently timed)
     so it is always internally consistent with the phase breakdown.
+
+    Attribution (issue #567) rides the head segment, right after ``total_secs``:
+    ``schema_fragments=`` attributes the operator-tunable fragment bytes and
+    ``prompt_manifest=`` the shipped-prompt bytes this run used. Both are
+    omitted when their argument is ``None`` (the pure formatting default), so
+    the pre-#567 head and the direct unit-test callers are byte-unchanged. No
+    phase logic, ordering, or exit code is affected.
     """
     total_secs = sum(secs for _phase, secs, _fields in profile)
-    parts = [f"{RUN_SUMMARY_PREFIX} total_secs={total_secs:.3f}"]
+    head = f"{RUN_SUMMARY_PREFIX} total_secs={total_secs:.3f}"
+    if schema_fragments is not None:
+        head += (
+            f" schema_fragments={_render_schema_fragment_attribution(schema_fragments)}"
+        )
+    if prompt_manifest_hash is not None:
+        head += f" prompt_manifest={prompt_manifest_hash}"
+    parts = [head]
     for phase, secs, fields in profile:
         tokens = " ".join(f"{k}={v}" for k, v in fields.items())
         segment = f"{phase} secs={secs:.3f}"
@@ -2158,7 +2200,32 @@ def run(
         if _summary_emitted["done"]:
             return
         _summary_emitted["done"] = True
-        log.info("%s", _render_run_summary(run_profile))
+        # Issue #567: attribute the operator-fragment + shipped-prompt bytes this
+        # run used, on the same greppable line. Computing them touches the wiki
+        # (fragment reads) and the prompt registry — neither may ever change an
+        # exit code, so any failure degrades to omitting the key, never raises.
+        try:
+            frag_state: "dict[str, tuple[str, bool]] | None" = schema_fragment_state(
+                wiki_root
+            )
+        except Exception as exc:  # pragma: no cover - defensive; helper is hardened
+            log.debug("run-summary: schema_fragment_state skipped: %s", exc)
+            frag_state = None
+        try:
+            from athenaeum.prompt_registry import prompt_manifest_hash
+
+            manifest_hash: "str | None" = prompt_manifest_hash()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("run-summary: prompt_manifest_hash skipped: %s", exc)
+            manifest_hash = None
+        log.info(
+            "%s",
+            _render_run_summary(
+                run_profile,
+                schema_fragments=frag_state,
+                prompt_manifest_hash=manifest_hash,
+            ),
+        )
 
     def _stop_on_deadline(phase: str) -> int:
         """Commit partial progress and return 124 when the deadline trips in a
