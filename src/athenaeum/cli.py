@@ -9,7 +9,7 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athenaeum.config import resolve_cache_dir
+from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
 from athenaeum.logconf import configure_logging
 
 if TYPE_CHECKING:
@@ -135,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     init_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Target directory (default: ~/knowledge)",
     )
     init_parser.add_argument(
@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     status_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     status_parser.add_argument(
@@ -242,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     spend_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory for config resolution (default: ~/knowledge).",
     )
     spend_parser.add_argument(
@@ -264,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     serve_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge). The raw/wiki roots "
         "default to <path>/raw and <path>/wiki; the KNOWLEDGE_RAW_PATH / "
         "KNOWLEDGE_WIKI_PATH environment variables override them individually "
@@ -458,7 +458,7 @@ def main(argv: list[str] | None = None) -> int:
     people_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     people_parser.add_argument(
@@ -566,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest_answers_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     _add_lock_args(ingest_answers_parser)
@@ -582,7 +582,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest_merges_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     _add_lock_args(ingest_merges_parser)
@@ -598,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
     reresolve_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     _add_lock_args(reresolve_parser)
@@ -625,7 +625,7 @@ def main(argv: list[str] | None = None) -> int:
     recall_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     recall_parser.add_argument(
@@ -721,7 +721,7 @@ def main(argv: list[str] | None = None) -> int:
     dedupe_wiki_pages.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     dedupe_wiki_pages.add_argument(
@@ -756,7 +756,7 @@ def main(argv: list[str] | None = None) -> int:
     claims_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     claims_parser.add_argument(
@@ -791,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
     prune_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     prune_parser.add_argument(
@@ -829,7 +829,7 @@ def main(argv: list[str] | None = None) -> int:
     prune_index_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     _add_lock_args(prune_index_parser)
@@ -974,7 +974,7 @@ def main(argv: list[str] | None = None) -> int:
     rebuild_parser.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     rebuild_parser.add_argument(
@@ -1039,7 +1039,7 @@ def main(argv: list[str] | None = None) -> int:
         "--knowledge-root",
         dest="path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge).",
     )
     compile_parser.add_argument(
@@ -1079,7 +1079,7 @@ def main(argv: list[str] | None = None) -> int:
         "--knowledge-root",
         dest="path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge).",
     )
     registry_parser.add_argument(
@@ -1111,7 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
         "--knowledge-root",
         dest="path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge). "
         "--knowledge-root is an alias, matching `run`.",
     )
@@ -1175,7 +1175,7 @@ def main(argv: list[str] | None = None) -> int:
         "--knowledge-root",
         dest="path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge). "
         "--knowledge-root is an alias, matching `run`/`ingest`.",
     )
@@ -3079,7 +3079,7 @@ def _cmd_repair_backfill_sources(args: argparse.Namespace) -> int:
     from athenaeum.config import load_config, resolve_owner_asserter
     from athenaeum.repair import backfill_sources
 
-    knowledge_root = (args.knowledge_root or Path("~/knowledge")).expanduser().resolve()
+    knowledge_root = (args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
     auto_memory_root = knowledge_root / "raw" / "auto-memory"
     if not auto_memory_root.is_dir():
         print(f"Auto-memory root not found: {auto_memory_root}", file=sys.stderr)
