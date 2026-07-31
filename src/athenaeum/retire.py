@@ -42,6 +42,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import load_config, resolve_extra_intake_roots
 from athenaeum.memory_index import INDEX_FILENAME, rewrite_index
 from athenaeum.merge import (
@@ -550,7 +551,7 @@ def run_retire_pass(
     for entry, _members in retiring:
         _enrich_entry(entry, projects_root)
         page = wiki_root / entry.filename
-        page.write_text(render_merged_entry(entry), encoding="utf-8")
+        atomic_write_text(page, render_merged_entry(entry))
         wiki_rel.append(str(page.resolve().relative_to(kr)))
 
     # Issue #388: rewrite each retired member's sibling ``MEMORY.md`` in the
@@ -559,7 +560,7 @@ def run_retire_pass(
     # pointers to members retired THIS run are dropped.
     index_rel: list[str] = []
     for index_path, (new_text, dropped) in _plan_index_sweep(retiring).items():
-        index_path.write_text(new_text, encoding="utf-8")
+        atomic_write_text(index_path, new_text)
         index_rel.append(str(index_path.resolve().relative_to(kr)))
         report.index_pruned.extend(f"{index_path.parent.name}/{t}" for t in dropped)
         log.info(

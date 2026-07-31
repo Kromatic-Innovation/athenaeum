@@ -1512,7 +1512,7 @@ def tier3_write(
 
     # All LLM calls succeeded — apply updates atomically
     for path, content in pending_updates:
-        path.write_text(content, encoding="utf-8")
+        atomic_write_text(path, content)
 
     return new_entities, updated_uids, escalations
 

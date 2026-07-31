@@ -38,6 +38,7 @@ from typing import Any, Iterable
 
 import yaml
 
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter, render_frontmatter
 
 # Honorifics + suffixes to drop before name matching.
@@ -716,7 +717,7 @@ def _perform_merge(
     if dry_run:
         return f"WOULD_MERGE:{absorbed_uid}->{canonical_uid}"
 
-    canonical_path.write_text(new_text, encoding="utf-8")
+    atomic_write_text(canonical_path, new_text)
     absorbed_path.unlink()
     return f"MERGED:{absorbed_uid}->{canonical_uid}"
 
@@ -770,7 +771,7 @@ def rewrite_references(
         new_text = text.replace(absorbed_uid, canonical_uid)
         if new_text != text:
             if not dry_run:
-                path.write_text(new_text, encoding="utf-8")
+                atomic_write_text(path, new_text)
             n += 1
     return n
 

@@ -617,7 +617,7 @@ def _add_refines_declaration(source_path: Path, other_name: str) -> bool:
     existing.append(other_name)
     meta["refines"] = existing
     new_text = render_frontmatter(meta) + body
-    source_path.write_text(new_text, encoding="utf-8")
+    atomic_write_text(source_path, new_text)
     return True
 
 
@@ -843,7 +843,7 @@ def _apply_fold_into_existing(
     }
 
     # Step 1 — write the merged draft body to the canonical target.
-    target_path.write_text(pm.draft_merged_body, encoding="utf-8")
+    atomic_write_text(target_path, pm.draft_merged_body)
 
     # Step 2 — folded-away source slugs, excluding the canonical page
     # reappearing among its own sources.
@@ -1085,7 +1085,7 @@ def resolve_merge(
                     ),
                     "resolved_block": None,
                 }
-            target_path.write_text(target_pm.draft_merged_body, encoding="utf-8")
+            atomic_write_text(target_path, target_pm.draft_merged_body)
 
         record_merge_provenance(
             root,

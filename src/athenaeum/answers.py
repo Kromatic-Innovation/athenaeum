@@ -737,12 +737,12 @@ def _writeback_source(
                     for path, new_body in proposed.items():
                         meta = path_to_meta.get(path, {})
                         if meta:
-                            path.write_text(
+                            atomic_write_text(
+                                path,
                                 render_frontmatter(meta) + "\n" + new_body,
-                                encoding="utf-8",
                             )
                         else:
-                            path.write_text(new_body, encoding="utf-8")
+                            atomic_write_text(path, new_body)
                         edited += 1
                     if edited:
                         log.info(
@@ -770,11 +770,11 @@ def _writeback_source(
             if new_body == body:
                 continue
             if meta:
-                path.write_text(
-                    render_frontmatter(meta) + "\n" + new_body, encoding="utf-8"
+                atomic_write_text(
+                    path, render_frontmatter(meta) + "\n" + new_body
                 )
             else:
-                path.write_text(new_body, encoding="utf-8")
+                atomic_write_text(path, new_body)
             edited += 1
         return edited
     except Exception:  # noqa: BLE001 -- write-back must not block provenance
@@ -897,7 +897,7 @@ def ingest_answers(
         while candidate.exists():
             candidate = answers_dir / f"{filename_ts}-{slug}-{counter}.md"
             counter += 1
-        candidate.write_text(_render_answer_raw_file(pq, iso_ts), encoding="utf-8")
+        atomic_write_text(candidate, _render_answer_raw_file(pq, iso_ts))
 
         # Issue #197/#210: apply the ratified verdict to the source memory
         # file(s). The provenance doc above is the audit trail and is ALWAYS
