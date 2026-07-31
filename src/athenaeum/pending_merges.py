@@ -505,6 +505,8 @@ def list_pending_merges(
     *,
     config: dict | None = None,
     full_body: bool = False,
+    caller_audience: set[str] | None = None,
+    knowledge_root: Path | None = None,
 ) -> list[dict]:
     """Return unresolved merges as MCP-friendly dicts.
 
@@ -535,11 +537,19 @@ def list_pending_merges(
     always-present booleans/lengths), so normal-sized merges are unaffected.
     """
     from athenaeum.config import resolve_merge_body_preview_chars
+    from athenaeum.models import all_sources_authorized
 
     preview_chars = resolve_merge_body_preview_chars(config)
     out = []
     for pm in parse_pending_merges(merges_path):
         if pm.resolved:
+            continue
+        # Issue #538: a restricted caller sees a merge only if authorized for
+        # EVERY source page — the same fail-closed predicate ``recall`` applies,
+        # so ``draft_merged_body`` never leaks content ``recall`` would withhold.
+        if not all_sources_authorized(
+            pm.sources, caller_audience, base=knowledge_root
+        ):
             continue
         full = pm.draft_merged_body
         if full_body:

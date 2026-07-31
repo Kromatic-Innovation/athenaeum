@@ -1,9 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """MCP memory server — read/write gate for an Athenaeum knowledge base.
 
-Tools:
-  remember  — append-only write to raw/
-  recall    — keyword search over wiki/
+Registers 11 tools (issue #538 — the count was previously under-reported as 2):
+
+  Reads:  recall, list_pending_questions, list_pending_merges,
+          list_pending_decisions, list_axiom_audit, scan_retraction_cascade,
+          calibration_summary
+  Writes: remember, resolve_question, resolve_merge, review_audit_item
+
+Audience scoping (issue #312, #538). ``caller_audience`` is pinned ONCE at
+``create_server`` time (never a per-tool argument, so a restricted agent cannot
+widen its own scope) and governs the whole process:
+
+  - ``recall`` and every page-content-bearing LIST tool
+    (``list_pending_questions`` / ``list_pending_merges`` /
+    ``list_pending_decisions``) apply the SAME fail-closed read predicate — a
+    restricted caller sees only pending items whose source pages they are
+    authorized to read, so no tool returns page content ``recall`` would
+    withhold.
+  - The three human-decision-queue mutators (``resolve_question`` /
+    ``resolve_merge`` / ``review_audit_item``) fail closed for any restricted
+    (non-owner) caller — adjudicating the operator's contradiction/merge queue
+    is an owner-only action.
+  - ``remember`` is intentionally NOT audience-scoped: intake is write-only and
+    compiles through the normal read-time screening path (issue #320). See
+    ``docs/security-posture.md``.
 
 Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 """
@@ -48,6 +69,30 @@ def _kill_switch_result() -> dict:
         # legacy aliases (see resolve_question / resolve_merge):
         "block": None,
         "error": _KILL_SWITCH_MSG,
+    }
+
+
+# Audience write-guard (issue #538): the three human-decision-queue mutators
+# (resolve_question / resolve_merge / review_audit_item) adjudicate the
+# operator's contradiction/merge queue and are OWNER-ONLY. A restricted
+# (non-None caller_audience) process is refused fail-closed. ``remember`` is
+# deliberately NOT guarded here — intake is write-only and screened downstream.
+_FORBIDDEN_MSG = (
+    "athenaeum: this decision-queue action is owner-only and is not available "
+    "to a restricted caller_audience (issue #538)."
+)
+
+
+def _forbidden_result() -> dict:
+    """Structured fail-closed refusal for the ``resolve_*`` tools (dict shape)."""
+    return {
+        "ok": False,
+        "error_code": "forbidden",
+        "message": _FORBIDDEN_MSG,
+        "resolved_block": None,
+        # legacy aliases (see resolve_question / resolve_merge):
+        "block": None,
+        "error": _FORBIDDEN_MSG,
     }
 
 # Default wiki-level source stamped onto remember() writes when the caller
@@ -605,13 +650,25 @@ def create_server(
         extra_roots: Additional intake roots that were indexed alongside
             the wiki. Passed through to :func:`recall_search` so raw
             intake hits resolve to their on-disk path.
-        caller_audience: Read-scope pin for this server process (issue #312).
-            ``None`` (the default) is the owner: the ``recall`` tool returns
-            every page, preserving single-user behavior. A non-None role set
-            restricts every ``recall`` call to authorized pages only. This is
-            pinned HERE by the operator's ``athenaeum serve`` invocation — it
-            is deliberately NOT a ``recall()`` tool argument, so a restricted
-            agent cannot widen its own scope by passing a different audience.
+        caller_audience: Read-scope pin for this server process (issue #312,
+            extended to every tool in #538). ``None`` (the default) is the
+            owner: every tool behaves as it always has, preserving single-user
+            behavior. A non-None role set is a RESTRICTED caller and governs the
+            whole process, not just ``recall``:
+
+            - Reads: ``recall`` AND the page-content-bearing list tools
+              (``list_pending_questions`` / ``list_pending_merges`` /
+              ``list_pending_decisions``) apply the same fail-closed predicate,
+              so a restricted caller cannot route around ``recall`` by asking a
+              different tool for the same bytes.
+            - Writes: the three human-decision-queue mutators
+              (``resolve_question`` / ``resolve_merge`` / ``review_audit_item``)
+              fail closed — adjudicating the operator's queue is owner-only.
+              ``remember`` stays open (intake is screened downstream, #320).
+
+            Pinned HERE by the operator's ``athenaeum serve`` invocation — it is
+            deliberately NOT a per-tool argument, so a restricted agent cannot
+            widen its own scope by passing a different audience.
         screening: Resolved intake-screening config (issue #320) from
             :func:`athenaeum.config.resolve_screening`. ``None`` (default) =
             no screening — every ``remember`` write is unclassified, preserving
@@ -742,7 +799,11 @@ def create_server(
         from athenaeum.answers import list_unanswered
 
         pending_path = wiki_root / "_pending_questions.md"
-        return list_unanswered(pending_path)
+        return list_unanswered(
+            pending_path,
+            caller_audience=caller_audience,
+            knowledge_root=wiki_root.parent,
+        )
 
     @mcp.tool()
     def resolve_question(id: str, answer: str) -> dict:
@@ -775,6 +836,9 @@ def create_server(
             (= ``message`` on failure). New callers should prefer
             ``error_code`` + ``message`` + ``resolved_block``.
         """
+        # Issue #538: adjudicating the human-decision queue is owner-only.
+        if caller_audience is not None:
+            return _forbidden_result()
         if is_disabled("capture", cache_dir=cache_dir):
             return _kill_switch_result()
 
@@ -836,7 +900,13 @@ def create_server(
 
         merges_path = wiki_root / "_pending_merges.md"
         config = load_config(wiki_root.parent)
-        return _list_pending_merges(merges_path, config=config, full_body=full_body)
+        return _list_pending_merges(
+            merges_path,
+            config=config,
+            full_body=full_body,
+            caller_audience=caller_audience,
+            knowledge_root=wiki_root.parent,
+        )
 
     @mcp.tool()
     def list_pending_decisions() -> list[dict]:
@@ -870,7 +940,11 @@ def create_server(
 
         config = load_config(wiki_root.parent)
         max_sources_per_merge = resolve_decisions_max_sources_per_merge(config)
-        return _list_decisions(wiki_root, max_sources_per_merge=max_sources_per_merge)
+        return _list_decisions(
+            wiki_root,
+            max_sources_per_merge=max_sources_per_merge,
+            caller_audience=caller_audience,
+        )
 
     @mcp.tool()
     def list_axiom_audit() -> list[dict]:
@@ -957,6 +1031,10 @@ def create_server(
         Returns the review record (including ``overturned``). Errors if the id
         is unknown or already reviewed.
         """
+        # Issue #538: adjudicating the human-decision queue is owner-only.
+        if caller_audience is not None:
+            return {"ok": False, "error_code": "forbidden", "error": _FORBIDDEN_MSG}
+
         from athenaeum.calibration import record_audit_review
 
         try:
@@ -1001,6 +1079,9 @@ def create_server(
             New callers should prefer ``error_code`` + ``message`` +
             ``resolved_block``.
         """
+        # Issue #538: adjudicating the human-decision queue is owner-only.
+        if caller_audience is not None:
+            return _forbidden_result()
         if is_disabled("capture", cache_dir=cache_dir):
             return _kill_switch_result()
 
