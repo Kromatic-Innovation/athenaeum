@@ -38,7 +38,7 @@ from typing import Any
 
 import anthropic
 
-from athenaeum import spend
+from athenaeum import detection_state, spend
 from athenaeum._lint import _strip_self_reference
 from athenaeum._retry import TransientAPIError
 from athenaeum.clusters import (
@@ -1187,6 +1187,26 @@ def _run_cluster_pass(
         os.environ.get("ATHENAEUM_CACHE_DIR") or (Path.home() / ".cache" / "athenaeum")
     )
     output_path = resolve_cluster_output_path(knowledge_root, config=resolved_config)
+
+    # Issue #569 (H6): fold any cluster carrying a detection-incomplete marker
+    # (its detector/resolver gave up after retries on a PRIOR run) into this
+    # run's delta set, REGARDLESS of whether its member files changed. Live-delta
+    # only re-examines clusters whose files changed, so without this a cluster
+    # that hit one transient error would not be looked at again until the
+    # periodic full compile (default 7 days). Unioning the marked members into
+    # ``changed_paths`` lets the existing delta closure re-cluster + re-detect
+    # them; merge clears each marker once the cluster is examined to completion.
+    # Only meaningful on the delta path (``changed_paths is not None``); a
+    # whole-corpus compile re-examines every cluster anyway.
+    if changed_paths is not None:
+        incomplete_members = detection_state.incomplete_member_paths(cache_dir)
+        if incomplete_members:
+            changed_paths = changed_paths | incomplete_members
+            log.info(
+                "delta: %d member file(s) across detection-incomplete cluster(s) "
+                "forced into the delta set for re-detection (issue #569)",
+                len(incomplete_members),
+            )
 
     # Issue #370 PR2: delta-scoped cluster pass. Only reachable when a caller
     # threads ``changed_paths`` (ingest / session_end); the nightly ``run``

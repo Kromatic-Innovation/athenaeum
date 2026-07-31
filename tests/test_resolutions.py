@@ -346,6 +346,39 @@ class TestPassThrough:
         assert proposal.action == "retain_both_with_context"
         assert proposal.confidence == 0.0
         assert proposal.rationale == "resolver-unavailable"
+        # No-client is not a transient give-up — must NOT flag incomplete.
+        assert proposal.incomplete is False
+
+    def test_transient_giveup_flags_incomplete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Issue #569 (H6): the resolver giving up after transient-error retries
+        # returns the resolver-unavailable fallback flagged ``incomplete`` so
+        # merge re-queues the cluster for re-resolution next run.
+        from athenaeum._retry import TransientAPIError
+
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "x")
+        b = _write_am(scope, "b.md", "y")
+        client = MagicMock()
+
+        def _giveup(_call, **_kw):
+            raise TransientAPIError(5, RuntimeError("529 ×5"))
+
+        monkeypatch.setattr("athenaeum.resolutions.with_retry", _giveup)
+        proposal = propose_resolution(_detected([a, b]), [a, b], client)
+        assert proposal.rationale == "resolver-unavailable"
+        assert proposal.incomplete is True
+
+    def test_nontransient_failure_not_incomplete(self, tmp_path: Path) -> None:
+        scope = tmp_path / "scope"
+        a = _write_am(scope, "a.md", "x")
+        b = _write_am(scope, "b.md", "y")
+        client = MagicMock()
+        client.messages.create.side_effect = RuntimeError("api down")
+        proposal = propose_resolution(_detected([a, b]), [a, b], client)
+        assert proposal.rationale == "resolver-unavailable"
+        assert proposal.incomplete is False
 
 
 # ---------------------------------------------------------------------------

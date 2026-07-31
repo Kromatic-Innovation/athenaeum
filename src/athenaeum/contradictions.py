@@ -38,6 +38,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.config import resolve_model
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
@@ -83,6 +84,13 @@ class ContradictionResult:
     members_involved: list[str] = field(default_factory=list)
     conflicting_passages: list[str] = field(default_factory=list)
     rationale: str = ""
+    # Issue #569 (H6): True when this verdict is a fail-open degrade caused by
+    # the detector call giving up AFTER its transient-error retries (a 429/529/
+    # connection blip that outlived `with_retry`), NOT a genuine "no
+    # contradiction". merge.py marks such clusters detection-incomplete so the
+    # next run's delta set re-examines them regardless of file changes. Defaults
+    # False, so a normal not-detected / detected verdict never re-queues.
+    incomplete: bool = False
 
 
 _DETECT_SYSTEM = """You are an auditor for an AI agent's long-term memory system.
@@ -377,15 +385,32 @@ def detect_contradictions(
 
     detect_model = _get_model(config)
     try:
-        response = client.messages.create(
-            model=detect_model,
-            max_tokens=1024,
-            system=_DETECT_SYSTEM,
-            messages=[{"role": "user", "content": user_msg}],
+        # Issue #569 (H6): wrap in with_retry so a transient 429/529/connection
+        # blip is retried with backoff instead of immediately degrading to a
+        # durable detected=False (which live-delta would not revisit for days).
+        response = with_retry(
+            lambda: client.messages.create(
+                model=detect_model,
+                max_tokens=1024,
+                system=_DETECT_SYSTEM,
+                messages=[{"role": "user", "content": user_msg}],
+            ),
+            description="contradiction_detect",
         )
-    except (
-        Exception
-    ) as exc:  # noqa: BLE001 -- fall back to no-detection on any API error
+    except TransientAPIError as exc:
+        # Retries exhausted on a transient error — fail open, but flag the
+        # verdict INCOMPLETE so the cluster is force-re-queued next run (#569).
+        log.warning(
+            "contradictions: detector gave up after transient-error retries "
+            "(%s); returning detected=False, marked detection-incomplete",
+            exc,
+        )
+        return ContradictionResult(
+            detected=False, rationale="llm-unavailable", incomplete=True
+        )
+    except Exception as exc:  # noqa: BLE001 -- non-transient: fail open, no re-queue
+        # A non-transient failure (e.g. a 400 on malformed input) will not be
+        # cured by re-running, so degrade WITHOUT the incomplete flag.
         log.warning(
             "contradictions: detector call failed (%s); returning detected=False",
             exc,
