@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.config import resolve_cache_dir
 from athenaeum.models import AutoMemoryFile
 
 log = logging.getLogger(__name__)
@@ -52,7 +53,9 @@ log = logging.getLogger(__name__)
 # Default cache dir mirrors search.py's expectations — callers usually
 # pass this in explicitly (librarian.run() resolves it against the
 # knowledge root), but we expose a default for shell/library callers.
-DEFAULT_CACHE_DIR = Path.home() / ".cache" / "athenaeum"
+# Issue #521: resolved through the shared config resolver (arg > env > default)
+# so ~/.cache/athenaeum is constructed in exactly one place.
+DEFAULT_CACHE_DIR = resolve_cache_dir()
 
 # Default threshold — empirically tuned against the near-duplicate
 # clustering fixture (see test_librarian_clusters.py). MiniLM

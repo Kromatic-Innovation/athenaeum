@@ -9,6 +9,7 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from athenaeum.config import resolve_cache_dir
 from athenaeum.logconf import configure_logging
 
 if TYPE_CHECKING:
@@ -247,8 +248,9 @@ def main(argv: list[str] | None = None) -> int:
     spend_parser.add_argument(
         "--cache-dir",
         type=Path,
-        default=Path("~/.cache/athenaeum"),
-        help="Cache dir holding spend.jsonl (default: ~/.cache/athenaeum).",
+        default=None,
+        help="Cache dir holding spend.jsonl (default: ATHENAEUM_CACHE_DIR env, "
+        "else ~/.cache/athenaeum).",
     )
     spend_parser.add_argument(
         "--ledger",
@@ -278,6 +280,16 @@ def main(argv: list[str] | None = None) -> int:
         "(plus 'access: open' pages); untagged/confidential/personal pages "
         "are withheld. Unset = owner = full access. Overrides "
         "ATHENAEUM_AUDIENCE and serve.audience in athenaeum.yaml.",
+    )
+    serve_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory holding the compiled index (default: "
+        "ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). Issue #521: serve "
+        "previously hardcoded ~/.cache/athenaeum and ignored ATHENAEUM_CACHE_DIR, "
+        "so recall could serve a stale/empty index when the compiler wrote "
+        "elsewhere.",
     )
 
     # run command — execute the librarian pipeline
@@ -1684,11 +1696,7 @@ def _rebuild_recall_index(
 
     wiki_root = knowledge_root / "wiki"
     backend = getattr(args, "backend", None) or cfg.get("search_backend", "fts5")
-    cache_dir = (
-        (getattr(args, "cache_dir", None) or Path("~/.cache/athenaeum"))
-        .expanduser()
-        .resolve()
-    )
+    cache_dir = resolve_cache_dir(getattr(args, "cache_dir", None)).resolve()
     extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
     cache_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -1819,7 +1827,7 @@ def _cmd_spend(args: argparse.Namespace) -> int:
         ledger_path = args.ledger.expanduser().resolve()
     else:
         ledger_path = spend.resolve_ledger_path(
-            config, cache_dir=args.cache_dir.expanduser().resolve()
+            config, cache_dir=resolve_cache_dir(args.cache_dir).resolve()
         )
 
     try:
@@ -1900,7 +1908,10 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     cfg = load_config(target)
     backend = cfg.get("search_backend", "fts5")
-    cache_dir = Path("~/.cache/athenaeum").expanduser()
+    # Issue #521 (H9): route serve's cache dir through the shared resolver so
+    # ATHENAEUM_CACHE_DIR (and --cache-dir) are honoured — previously hardcoded,
+    # so recall served a stale/empty index when the compiler wrote elsewhere.
+    cache_dir = resolve_cache_dir(getattr(args, "cache_dir", None))
     extra_roots = resolve_extra_intake_roots(target, cfg)
 
     # Issue #312: resolve the serve-time read-scope pin (CLI > env > yaml).
@@ -2353,7 +2364,7 @@ def _cmd_rebuild_index(args: argparse.Namespace) -> int:
 
     knowledge_root = args.path.expanduser().resolve()
     wiki_root = knowledge_root / "wiki"
-    cache_dir = (args.cache_dir or Path("~/.cache/athenaeum")).expanduser().resolve()
+    cache_dir = resolve_cache_dir(args.cache_dir).resolve()
 
     if not wiki_root.exists():
         print(f"Wiki directory not found: {wiki_root}", file=sys.stderr)
@@ -2627,7 +2638,7 @@ def _cmd_recall(args: argparse.Namespace) -> int:
 
     cfg = load_config(knowledge_root)
     backend_name = args.backend or cfg.get("search_backend", "fts5")
-    cache_dir = (args.cache_dir or Path("~/.cache/athenaeum")).expanduser().resolve()
+    cache_dir = resolve_cache_dir(args.cache_dir).resolve()
     extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
 
     # Issue #312: resolve the read-scope pin (CLI > env > yaml). None = owner.

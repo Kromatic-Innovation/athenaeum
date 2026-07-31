@@ -66,6 +66,7 @@ from athenaeum.config import (
     resolve_push_remote,
     resolve_retire,
 )
+from athenaeum.config import resolve_cache_dir as _resolve_cache_dir_config
 from athenaeum.delta import compute_affected_clusters, splice_cluster_report
 from athenaeum.ephemeral import classify_ephemeral
 from athenaeum.merge import (
@@ -1186,9 +1187,7 @@ def _run_cluster_pass(
         )
         return None
 
-    cache_dir = Path(
-        os.environ.get("ATHENAEUM_CACHE_DIR") or (Path.home() / ".cache" / "athenaeum")
-    )
+    cache_dir = _resolve_cache_dir_config()
     output_path = resolve_cluster_output_path(knowledge_root, config=resolved_config)
 
     # Issue #569 (H6): fold any cluster carrying a detection-incomplete marker
@@ -3271,12 +3270,12 @@ class IngestResult:
 
 
 def _resolve_cache_dir(cache_dir: Path | None) -> Path:
-    """Resolve the athenaeum cache dir (arg > env > ``~/.cache/athenaeum``)."""
-    if cache_dir is not None:
-        return Path(cache_dir).expanduser()
-    return Path(
-        os.environ.get("ATHENAEUM_CACHE_DIR") or (Path.home() / ".cache" / "athenaeum")
-    ).expanduser()
+    """Resolve the athenaeum cache dir (arg > env > ``~/.cache/athenaeum``).
+
+    Thin wrapper over :func:`athenaeum.config.resolve_cache_dir` (issue #521):
+    the canonical resolver lives in ``config`` so every site agrees.
+    """
+    return _resolve_cache_dir_config(cache_dir)
 
 
 def _raw_hash_snapshot(
