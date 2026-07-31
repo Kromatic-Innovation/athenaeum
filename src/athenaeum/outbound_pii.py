@@ -1,15 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 """Outbound-draft PII lint (emails/phones) — interim mitigation split from #428.
 
-The cheap, mechanical half of #428's "no PII in outbound drafts" idea: before
-an agent-authored outbound surface (email draft, Buffer post, public issue)
-ships, scan the destined text for PII — emails and phone numbers, the two
-classes #428 names — and either **flag** each finding (location + class) or
-**redact** it. The genuinely hard half of #428 — egress *refusal*, an agent
-declining to reveal PII even when directly asked — stays parked on #428 and is
-deliberately NOT attempted here; this module is a pure, offline, deterministic
-text lint with no policy judgment, no network, no live-store access, and no LLM
-call.
+**Contract:** given text about to leave the system (email draft, Buffer post,
+public issue), return every email/phone-shaped finding (location + class), or
+a redacted copy — a pure, offline, deterministic text lint. It never decides
+whether to actually block/send the outbound surface; that policy call is the
+caller's.
+
+**Factoring rule:** the cheap, mechanical half of #428's "no PII in outbound
+drafts" idea. This module owns DETECTION + optional REDACTION of the two named
+classes (email, phone) in already-composed text. It does NOT own egress
+*refusal* — an agent declining to reveal PII even when directly asked — which
+stays parked on #428 and is deliberately NOT attempted here: no policy
+judgment, no network, no live-store access, no LLM call.
+
+**Layering:** L3 service. Imports nothing but :mod:`athenaeum.pii` (a sibling
+L3 module) at module scope — reuses its compiled ``_EMAIL_RE`` / ``_PHONE_RE``
+patterns (and its digit-count floor) rather than a second, driftable copy, so
+the detection patterns change in exactly one place. Consumed by
+:mod:`athenaeum.provider` (redacting a CLI error envelope before it reaches a
+log line) and the ``athenaeum outbound-lint`` CLI.
 
 Relationship to :mod:`athenaeum.pii` (the #427 corpus-hygiene slice): that
 module lints *entity pages that stay in the corpus* for inline contact data.

@@ -46,6 +46,15 @@ Like :class:`athenaeum.search.SearchBackend` and
 importable but not part of the stable ``__all__`` surface, and its signatures
 may change between minor releases until the extension point is promoted with a
 companion ``docs/storage-adapter-contract.md``.
+
+Layering: L1 (data model — storage-surface resolution for wiki entity
+classes). Imports :mod:`athenaeum.atomic_io` (L0) for the actual write and
+:mod:`athenaeum.config` (L2) to resolve adapters/mapping — the one place in
+this module's assigned L0/L1 set that legitimately reaches up to L2, because
+"which surface a class maps to" is explicitly a config-owned decision (see
+above). Factoring rule: this module owns ONLY surface resolution + the
+generic write-through-the-resolved-surface path; it must never itself decide
+corpus policy for a specific entity beyond what ``storage.mapping`` says.
 """
 
 from __future__ import annotations

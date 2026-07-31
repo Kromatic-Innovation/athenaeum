@@ -13,6 +13,11 @@ periodic, machine-detectable progress line while a phase iterates over its
 units of work (clusters, wiki-dedupe candidates, pending questions, ...).
 Every emitted line carries the stable ``librarian-heartbeat`` prefix so a
 watchdog can ``grep`` the log for liveness without parsing prose.
+
+Layering: L0 primitive (leaf). May import only stdlib (``logging``, ``time``).
+Factoring rule: this module owns ONLY the periodic-log-line mechanism — it has
+no opinion on what a "unit of work" is or how a phase decides to iterate;
+callers own that. Never raises, so a logging hiccup never breaks a run.
 """
 
 from __future__ import annotations

@@ -36,6 +36,20 @@ The shell hooks in ``examples/claude-code/`` reimplement :func:`is_disabled`
 with ``aspect="recall"`` in a few lines of ``bash``; keep the two in sync — the
 file format is deliberately trivial (presence ⇒ ``all`` unless the JSON/text
 says ``compile``) so a plain ``grep`` and this reader agree.
+
+**Contract:** one state file plus one env override that EVERY entry point
+(CLI, MCP tools, shell hooks) checks before doing background work —
+:func:`is_disabled` / :func:`current_state` are the single read path;
+:func:`disable` / :func:`enable` are the single write path.
+
+**Factoring rule:** this module owns the on/off STATE and its resolution
+precedence (env > file > enabled); it does not itself gate any specific
+capability — each call site (compile pass, recall hook, MCP tool) calls
+:func:`is_disabled` with its own ``aspect`` and decides what to skip.
+
+**Layering:** L3 service. Module scope imports only :mod:`athenaeum.atomic_io`
+and :mod:`athenaeum.config` (L2). Consumed by the L4 CLI/librarian entry
+points and by the recall hooks — never imports either.
 """
 
 from __future__ import annotations

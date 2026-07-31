@@ -1,11 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Auto-memory merge pass (issue #197, C3).
+"""Auto-memory merge pass (issue #197, C3) — L4 domain/pipeline.
 
 Consumes the JSONL cluster report produced by C2
 (:mod:`athenaeum.clusters`) and emits ONE canonical wiki entry per
 cluster at ``wiki/auto-<topic-slug>.md``. Every member's content is
 concatenated into a synthesized body; every member's ``sources[]`` is
-unioned into a single deduped cited list.
+unioned into a single deduped cited list. It also owns the T1
+reasoning-tier screen at the merge-proposal seam
+(:func:`t1_screen_rejects_merge_proposal`, issue #518) — see that
+function's docstring and :mod:`athenaeum.reasoning_tiers` for the
+gated/default-OFF wiring detail.
+
+SCC membership (L4, one of 8 mutually-recursive modules — librarian,
+merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
+as one ~12,000-line module split for readability, not independence).
+``merge.py`` is imported at TOP level by ``librarian.py``, ``retire.py``,
+and ``wiki_dedupe.py`` (a normal downward dependency from their side, not a
+cycle edge on this side). This module owns ONE deferred (function-local)
+import that breaks a real cycle:
+
+- ``merge_clusters_to_wiki`` (~line 1529): local ``from athenaeum.librarian
+  import discover_auto_memory_files``. Breaks the librarian<->merge cycle —
+  ``librarian.py`` already imports THIS module at top level, so the
+  reverse edge must defer here or the package fails to import.
+
+(A second local import at ~line 2292, ``from athenaeum.clusters import
+DEFAULT_CACHE_DIR``, is unrelated to the SCC — :mod:`athenaeum.clusters` is
+an L3 service module and does not import this module back; that one is
+deferred for cost/ordering reasons, not cycle-breaking.)
+
+Separately, ``pending_merges.py`` owns the OTHER half of a real cycle with
+this module: ``pending_merges.revalidate_pending_merges`` function-locally
+imports ``_merge_proposal_suppression_reason`` FROM this module (its own
+docstring explains why: this module imports ``write_pending_merge`` FROM
+``pending_merges`` at top level, so the reverse edge must stay deferred on
+the ``pending_merges`` side).
 
 Scope for this module (kept narrow on purpose — see issue #197):
 

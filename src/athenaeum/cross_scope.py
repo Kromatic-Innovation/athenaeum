@@ -71,6 +71,16 @@ Modes:
 - ``similarity`` — per-scope clusters + similarity sweep.
 - ``both`` — ancestor pooling first, similarity sweep second over the
   remaining unpaired entries.
+
+**Layering:** L3 service. Module scope imports only :mod:`athenaeum._lint`
+and :mod:`athenaeum.models` (L1/L2) — never L4. The
+``from athenaeum.search import VectorBackend`` import inside
+:func:`cross_scope_similarity_pairs` (below) is function-local for IMPORT
+COST, NOT a cycle-breaker: :mod:`athenaeum.search` does not import this
+module. Deferring it means a caller in ``off``/``ancestor`` mode (no
+similarity sweep) never pays ``search``'s optional ``chromadb`` import cost,
+and a test can inject its own ``embedding_provider`` without importing
+chromadb either.
 """
 
 from __future__ import annotations
@@ -445,6 +455,11 @@ def cross_scope_similarity_pairs(
         return []
 
     # Fetch embeddings from the shared collection (no new client/collection).
+    # Deferred for IMPORT COST, not a cycle: athenaeum.search does not import
+    # this module. VectorBackend pulls in chromadb (an optional [vector]
+    # extra) on first real use — deferring means an `off`/`ancestor`-mode run
+    # (no similarity sweep) and a test-injected embedding_provider never pay
+    # that cost.
     if embedding_provider is None:
         try:
             from athenaeum.search import VectorBackend

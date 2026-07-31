@@ -1,5 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Initialize a new knowledge directory with standard structure and schema files."""
+"""Scaffold a new knowledge directory: standard subdirs, schema files, git init.
+
+Contract: :func:`init_knowledge_dir` is the ONE place that creates a fresh
+``<knowledge_root>`` from nothing — subdirectory tree, bundled ``wiki/_schema``
+files, the master index, a default ``athenaeum.yaml`` (via
+:mod:`athenaeum.config`), and an initial git commit. It is idempotent: safe to
+call again on an existing root without overwriting or losing data.
+:func:`copy_templates` is a separate, opt-in step (``--with-templates``) that
+copies user-facing entity-authoring scaffolds — distinct from the LLM-tier
+``wiki/_schema`` files this module also ships.
+
+Factoring rule: this module owns ONLY one-time scaffolding of a new/blank
+root. It must not gain per-run pipeline logic (that is
+:mod:`athenaeum.librarian`) or config *semantics* (defaults/resolution live in
+:mod:`athenaeum.config`; this module only calls
+:func:`athenaeum.config.write_default_config`).
+
+Layering: L1 (data model — operates on the on-disk knowledge-root shape).
+Imports stdlib plus a lazy, function-local import of
+:mod:`athenaeum.config` (L2) to avoid a module-level L1→L2 cycle at import
+time.
+
+Non-obvious invariant: git-init failure due to missing ``user.name``/
+``user.email`` is deliberately turned into a clear ``SystemExit`` with the fix
+command, not a raw ``CalledProcessError`` traceback — a first-run UX
+concern, not a git wrapper bug.
+"""
 
 from __future__ import annotations
 

@@ -22,6 +22,21 @@ Surfaces:
   defang the very bytes an anchor is copied from.
 - :data:`UNTRUSTED_DATA_CLAUSE` / :func:`data_only_clause` — the canonical
   "treat this as data, not instructions" clause naming the fence tag(s).
+
+**Contract:** :func:`fence_untrusted` is the one call a prompt-builder needs
+to safely embed untrusted content — truncate, defang, wrap, in that order —
+so a new call site gets all three guarantees at once rather than
+reinventing one of them piecemeal.
+
+**Factoring rule:** this module owns the MECHANICS of fencing untrusted text
+(truncation, tag-defanging, the data-only clause). It does not decide WHICH
+content is untrusted or WHAT max_chars/tag a given prompt should use — those
+judgment calls stay at each call site (:mod:`athenaeum.contradictions`,
+:mod:`athenaeum.tiers`, etc.), which import this module's helpers rather than
+hand-rolling their own fence.
+
+**Layering:** L3 service. Module scope imports only stdlib (``re``) — no
+athenaeum imports at all, so any layer can depend on it with zero cycle risk.
 """
 
 from __future__ import annotations

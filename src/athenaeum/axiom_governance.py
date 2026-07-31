@@ -64,6 +64,14 @@ accepts an optional ``scope`` on a promotion record (the scope the human
 approved AT THAT TIME), but enforcement of scope (deciding when a consumer
 should or should not treat a page as axiomatic in context) is explicitly
 OUT OF SCOPE here, per the issue.
+
+Layering: L4 domain/pipeline module. Owns the append-only
+``_axiom_governance.jsonl`` ledger and its read/write helpers; may import L3
+services (``models``, via a deferred/function-local import to avoid a
+top-level cycle) freely. Factoring rule: this module is the ONLY place that
+records or reads promotion/demotion state — it does not itself set
+``memory_class: axiom`` on a page (an ordinary frontmatter edit elsewhere)
+and does not enforce ``scope`` at read time (a consumer's job, per above).
 """
 from __future__ import annotations
 

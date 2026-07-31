@@ -58,6 +58,25 @@ every mismatch line automatically. The WARNING marker is greppable:
 
 Aggregating those by ``contract=`` yields the per-contract mismatch count that
 is #608's input.
+
+**Contract:** :func:`observe` (and its per-contract ``observe_<name>``
+wrappers) validates an already-parsed LLM response payload against a Pydantic
+model and logs a WARNING on mismatch — it NEVER raises, NEVER mutates the
+payload, and NEVER changes what the caller does with the response. Read the
+load-bearing constraint above again: this is a logging side-channel, not a
+gate.
+
+**Factoring rule:** this module owns the response SHAPE models and the
+observe-and-log entry point only. It does not own parsing/coercion (each call
+site's existing hand-rolled logic runs first, unchanged) and does not own the
+reject-vs-degrade decision (deferred to #608).
+
+**Layering:** L3 service. Module scope imports only ``pydantic`` — no
+athenaeum imports at all, including :mod:`athenaeum.models` (the two
+vocabulary tuples are stated LOCALLY rather than imported, kept in sync by a
+test rather than a dependency) — so this module stays off the recall hot
+path's (:mod:`athenaeum.query_topics`) import graph until a call site
+explicitly, lazily imports an ``observe_*`` wrapper.
 """
 
 from __future__ import annotations

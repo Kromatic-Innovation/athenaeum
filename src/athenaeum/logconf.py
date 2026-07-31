@@ -15,6 +15,12 @@ MCP server). The correlation id lives in a :class:`contextvars.ContextVar` so it
 follows the run without threading a parameter through every call site; a
 :class:`logging.Filter` injects it onto every record so ``%(run_id)s`` in the
 format always resolves.
+
+Layering: L0 primitive (leaf). May import only stdlib (``contextvars``,
+``logging``, ``uuid``). Factoring rule: this module owns ONLY logging
+format/wiring and the run-id contextvar; it must never itself decide WHEN a
+run starts (that is :func:`athenaeum.librarian.run` calling
+:func:`new_run_id`) or read any athenaeum config.
 """
 
 from __future__ import annotations

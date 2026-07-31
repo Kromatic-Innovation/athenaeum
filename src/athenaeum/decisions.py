@@ -27,6 +27,15 @@ systems). So every merge carries, per source page:
 and a plainly-phrased ``summary`` question ("Merge these N pages into one? —
 …") built from them, so a human can decide approve/reject without opening the
 raw wiki files.
+
+Layering: L4 domain/pipeline module. Aggregates OTHER L4 modules
+(:mod:`athenaeum.answers`, :mod:`athenaeum.calibration`,
+:mod:`athenaeum.pending_merges`, :mod:`athenaeum.retraction_cascade`) into one
+unified view and may import L3 services (``models``) freely. Factoring rule:
+this module only READS and re-shapes the three underlying queues into a
+common item shape — it owns no queue's storage format or mutation path;
+resolving/writing back to a given queue stays the owning module's job (e.g.
+``answers.py`` for questions, ``merge.py``/``resolutions.py`` for merges).
 """
 
 from __future__ import annotations

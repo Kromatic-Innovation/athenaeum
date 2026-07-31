@@ -22,6 +22,29 @@ the same test, so it cannot rot. Regenerate goldens + docs after any intentional
 prompt-text change::
 
     python -m athenaeum.prompt_registry --write
+
+**Contract:** :data:`PROMPTS` maps a stable registry name to the LIVE prompt
+constant (re-imported from its home module, never copied) so a golden test
+can pin exact bytes and ``docs/prompts.md`` can render an always-current
+inventory. This module never edits or generates prompt text.
+
+**Factoring rule:** this module owns the INDEX (name -> module/constant/
+knob/max_tokens) plus the golden-snapshot and docs rendering that read from
+it. The prompt TEXT itself stays owned by its home module, next to the parser
+that consumes it — moving prompt text into this module would break the
+load-bearing adjacency between a prompt and its parser (e.g.
+``MERGE_SYSTEM``'s anchored-ops JSON shape and ``parse_merge_ops_response``).
+
+**Layering:** L3 service, but an unusual one — it ``importlib.import_module``s
+EVERY L4 module that owns a registered prompt (:mod:`athenaeum.tiers`,
+:mod:`athenaeum.contradictions`, :mod:`athenaeum.resolutions`,
+:mod:`athenaeum.claim_kind`, :mod:`athenaeum.query_topics`,
+:mod:`athenaeum.reasoning_tiers`) at IMPORT TIME (module-scope
+:data:`PROMPTS` dict comprehension) to resolve the live constants. This is the
+one deliberate exception to "L3 does not import L4" in this file's
+assignment: the registry's whole point is indexing prompts that live in L4
+modules, so nothing here is imported BACK by those modules — the dependency
+runs one way only (registry -> prompt owner), never creating a cycle.
 """
 
 from __future__ import annotations

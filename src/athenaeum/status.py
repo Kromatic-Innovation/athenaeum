@@ -1,5 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Athenaeum status — inspect current state of a knowledge base."""
+"""Athenaeum status — read-only snapshot of a knowledge base, L4 domain/pipeline.
+
+Contract: computes a point-in-time :class:`StatusInfo` snapshot (raw-intake
+backlog, entity counts, pending-question count, oversized-page scan, drain
+ETA advisory, schema-fragment attribution) by READING the knowledge
+directory and git log — it never mutates anything. Factoring rule: any
+check here must stay side-effect-free and cheap enough to run between
+librarian runs (it backs both the ``athenaeum status`` CLI command and the
+MCP status surface); a check that needs to WRITE (e.g. actually retiring a
+stale page, actually running a drain) belongs in the module that owns that
+mutation (``retire.py``, ``athenaeum.drain``), not here — this module may
+only advise, never act.
+
+SCC membership (L4, one of 8 mutually-recursive modules — librarian,
+merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
+as one ~12,000-line module split for readability, not independence).
+``status.py`` imports ``athenaeum.librarian.discover_raw_files`` and
+``athenaeum.tiers.schema_fragment_state`` at TOP level — normal downward
+dependencies. It is the OTHER half of the librarian<->status cycle:
+``librarian.py`` itself function-locally imports this module's
+``scan_page_sizes`` inside its run loop's page-size guardrail (~line 3108)
+specifically because this module already imports librarian at top level,
+so that side must defer or the package fails to import. ``status.py``
+itself has no deferred imports of its own.
+"""
 
 from __future__ import annotations
 

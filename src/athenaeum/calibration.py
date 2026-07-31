@@ -32,6 +32,14 @@ Persistence mirrors the other librarian ledgers (JSONL, ``O_APPEND`` +
 fsync, tolerant reader). One ledger, ``<wiki_root>/_calibration.jsonl``,
 carries two record kinds: ``audit`` (a sampled decision) and ``review`` (a
 human's confirm/overturn of an audit item).
+
+**Layering:** L3 service. Module scope imports only stdlib — ``config``
+(:func:`athenaeum.config.resolve_audit_sample_rate_t1_rejects` etc.) and
+``reasoning_tiers`` (:data:`T1_TIER_NAME` / :data:`T2_TIER_NAME`) are both
+deferred inside their one call site so this ledger stays importable without
+either. Consumed by the L4 tier pipeline (:mod:`athenaeum.reasoning_tiers`)
+right after a T1 reject / T2 approve is finalized — never imports it back at
+module scope.
 """
 
 from __future__ import annotations

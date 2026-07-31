@@ -40,6 +40,24 @@ Because unmatched intake already defaults to ``internal`` (never
 world-readable), a medical false-negative is not world-readable by default;
 the screener escalates genuinely regulated content from ``internal`` to
 ``personal``.
+
+**Contract:** :func:`screen_intake` takes raw intake text plus the resolved
+``screening:`` config and returns the ``access:`` level to stamp (or ``None``
+for "stamp nothing") — a pure classification, no I/O, no mutation of the
+content itself. :func:`is_medical` is the underlying boolean predicate.
+
+**Factoring rule:** this module owns intake-side CLASSIFICATION only — it
+never writes the stamped label to disk (the ``remember()`` write path does
+that) and never decides the config schema (:mod:`athenaeum.config` owns
+``resolve_screening``, the sibling function this module's ``screening`` dict
+comes from).
+
+**Layering:** L3 service. Module scope imports only stdlib (``re``) — no
+athenaeum imports at all. This is deliberate: :mod:`athenaeum.config` (L2)
+imports THIS module (``athenaeum.screening``) via a deferred, function-local
+import inside :func:`athenaeum.config.resolve_screening` — a module-scope
+import the other direction would be an L2-importing-L3 cycle. Reached from
+the ``remember()`` write path (L4) through that same config seam.
 """
 
 from __future__ import annotations

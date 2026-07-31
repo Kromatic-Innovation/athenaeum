@@ -57,11 +57,25 @@ record-shape builder) — only the ``tier`` tag and the set of legal
 Out of scope here (see the issue body for the re-scope rationale):
 
 - The calibration sampler that watches T1/T2 accuracy over time (#438).
-- Wiring this pipeline into the live ``merge.py`` / ``wiki_dedupe.py`` call
-  sites that currently write straight to ``_pending_merges.md`` — a
-  T1(+T2)-reject-or-pass-up/approve-in-safe-class pipeline with no live
-  call-site wiring is a real, useful configuration; the issue scopes this
-  change to the pipeline + tier building blocks, not the call-site rewrite.
+- Wiring T2, or wiring ANY tier into ``wiki_dedupe.py``'s call sites — those
+  still write straight to ``_pending_merges.md`` unscreened.
+
+Production status (current, do not let this go stale again — #525
+corrected a prior overclaim in the docs, this restates it against the
+code): :data:`DEFAULT_TIER_CHAIN` is genuinely the empty tuple — nothing
+calls :func:`run_reasoning_pipeline` with tiers configured by default.
+BUT this module IS reached in production, through exactly ONE caller:
+``merge.py``'s ``t1_screen_rejects_merge_proposal`` (#518) builds an
+explicit ``tier_chain=(functools.partial(run_t1_tier, ...),)`` and calls
+:func:`run_reasoning_pipeline` with it directly — bypassing the empty
+default. That single call site is gated behind
+``resolve_reasoning_tier_auditing_enabled`` (:mod:`athenaeum.config`),
+which defaults OFF, so an unconfigured install still sees every proposal
+pass straight to the human queue exactly as if this module did not exist.
+Do not describe this module as having "no production caller" (stale as of
+#518) and do not describe it as generally "in use" (only that one gated,
+opt-in, T1-only path is wired — T2 and the wiki_dedupe call sites remain
+unwired).
 """
 
 from __future__ import annotations

@@ -21,6 +21,13 @@ acknowledgement was chosen over routing through the #401 decisions-queue):
 
 Mirrors ``athenaeum merges provenance`` in shape (a thin CLI dispatcher over
 :mod:`athenaeum.axiom_governance`, no logic of its own).
+
+Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
+its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — this
+is where a NEW subcommand goes, not inline in ``cli.py``'s ``main()``. This
+module may import library modules (L4/L3) but ``cli.py`` only imports the
+``add_*_subparser`` entry point, kept lazy/local to keep top-level import cost
+down.
 """
 
 from __future__ import annotations

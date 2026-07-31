@@ -1,10 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tiered processing pipeline for the knowledge librarian.
+"""Tiered entity-compilation pipeline (T0-T4) — L4 domain/pipeline.
 
-Tier 1: Programmatic entity matching (no LLM)
-Tier 2: Classification via fast LLM (default: Haiku)
-Tier 3: Content writing via capable LLM (default: Sonnet)
-Tier 4: Human escalation
+Contract: implements the actual per-file tier logic that ``librarian.py``'s
+run loop drives — entity matching, LLM classification, LLM content
+writing, and human escalation — plus the re-resolve pass for proposal-less
+pending questions. Factoring rule: this module owns the TIER MECHANICS
+(what each tier does to one file/question); ``librarian.py`` owns the RUN
+LOOP (discovery, ordering, budget, batch-mode dispatch, summary emission).
+If you're adding a new per-file classification/writing rule, it belongs
+here; if you're changing how/when files are discovered or the run is
+paced, that belongs in ``librarian.py``.
+
+  Tier 1: Programmatic entity matching (no LLM)
+  Tier 2: Classification via fast LLM (default: Haiku)
+  Tier 3: Content writing via capable LLM (default: Sonnet)
+  Tier 4: Human escalation
+
+NOT to be confused with :mod:`athenaeum.reasoning_tiers` — that module is a
+DIFFERENT, later pipeline (merge-proposal screening, T1/T2 reasoning
+tiers) with its own unrelated tier numbering scheme.
+
+SCC membership (L4, one of 8 mutually-recursive modules — librarian,
+merge, tiers, pending_merges, batch, status, retire, wiki_dedupe —
+behaving as one ~12,000-line module split for readability, not
+independence). ``tiers.py`` does not import ``librarian`` at module top
+level. It owns the deferred (function-local) side of the librarian<->tiers
+cycle:
+
+- ``reresolve_open_questions`` (~line 2633): local ``from athenaeum.librarian
+  import discover_auto_memory_files``. ``librarian.py`` itself
+  function-locally imports ``reresolve_open_questions`` FROM this module
+  (librarian.py's ``_run_reresolve_pass``, ~line 1548) — neither side can be
+  hoisted to module level without the package failing to import, so both
+  sides of this edge stay deferred.
+
+Also imported at module top level by ``status.py`` (``schema_fragment_state``)
+and ``batch.py``, but neither of those two imports this module back — this
+module's only SCC-cycle edge is with ``librarian``.
 """
 
 from __future__ import annotations
