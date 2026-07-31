@@ -99,8 +99,9 @@ sidecars, double-spend the API-call budget, or race the move-then-retire git
 ops. The lockfile records the holder's PID, an ISO-8601 timestamp, and the
 hostname for diagnostics.
 
-- **Locked commands:** `run`, `ingest-answers`, `ingest-merges`,
-  `reresolve-questions`, `rebuild-index`, `auto-memory prune --apply`,
+- **Locked commands:** `run`, `ingest`, `ingest-answers`, `ingest-merges`,
+  `reresolve-questions`, `rebuild-index`, `session-end`, `drain`,
+  `auto-memory prune --apply`, `auto-memory prune-index`,
   `repair --apply`, `dedupe persons --apply`, and `dedupe wiki-pages`
   (non-`--dry-run`).
 - **Never locked:** `status`, `recall`, `serve`, and every `--dry-run`
@@ -184,7 +185,7 @@ accepts the pre-#232 `resolve.model` key for backward compatibility.
 | Reasoning tier 1 | `ATHENAEUM_REASONING_T1_MODEL` | `models.reasoning_t1` | `claude-haiku-4-5-20251001` | First-pass model for the reasoning-tier chain.² |
 | Reasoning tier 2 | `ATHENAEUM_REASONING_T2_MODEL` | `models.reasoning_t2` | `claude-opus-4-1-20250805` | Escalation model for the reasoning-tier chain.² |
 
-> ¹ The legacy `resolve.model` key is checked as a fallback when neither the `ATHENAEUM_RESOLVE_MODEL` env var nor `models.resolve` is set. Prefer `models.resolve` for consistency with the other model knobs.
+> ¹ `resolve.model` is still read post-#512/#513 (`athenaeum.resolutions._get_model`), not yet removed. Precedence, highest first: `ATHENAEUM_RESOLVE_MODEL` env var, then `models.resolve` yaml, then `resolve.model` yaml (legacy), then the code default — so if both `models.resolve` and `resolve.model` are set, **`models.resolve` wins**. There is no scheduled removal; it is kept indefinitely so existing `athenaeum.yaml` files keep working unchanged. Prefer `models.resolve` for new configs, for consistency with the other model knobs.
 >
 > ² The reasoning-tier knobs are read by `athenaeum.reasoning_tiers`. That subsystem currently has no production caller (`DEFAULT_TIER_CHAIN` is empty), so setting these has no runtime effect today — they are documented here for completeness because `src/` reads them. If the subsystem is removed, these two rows go with it.
 
@@ -193,8 +194,8 @@ accepts the pre-#232 `resolve.model` key for backward compatibility.
 Athenaeum's librarian pipeline talks to Claude through a single **provider
 seam** (`athenaeum.provider.build_llm_client`). Two backends ship:
 
-| Knob | Env var | YAML key | Default | Used by |
-|---|---|---|---|---|
+| Knob | CLI flag | Env var | YAML key | Default | Used by |
+|---|---|---|---|---|---|
 | LLM provider | — | `ATHENAEUM_LLM_PROVIDER` | `llm.provider` | `api` | Selects the LLM backend for the librarian compile path (tiers, contradiction detector, resolver). `api` = the Anthropic SDK; `claude-cli` = the operator's ambient Claude Code subscription login. An unrecognized value is a hard error (no silent fallback). |
 | CLI binary | — | `ATHENAEUM_CLAUDE_CLI_BIN` | — | `claude` | Override the `claude` executable used by the `claude-cli` backend (editable installs / non-PATH locations). |
 | CLI timeout | — | `ATHENAEUM_CLAUDE_CLI_TIMEOUT` | — | `300` (s) | Per-call subprocess timeout for the `claude-cli` backend. A timeout is treated as a **transient** error — not retried in-run; the affected file is deferred to the next run. |
