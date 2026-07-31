@@ -1975,11 +1975,3 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
         return [list(map(float, vec)) for vec in result]
     except Exception:
         return None
-
-
-def embed_text(text: str) -> list[float] | None:
-    """Convenience wrapper: embed a single string.  Returns None on failure."""
-    result = embed_texts([text])
-    if result is None:
-        return None
-    return result[0]

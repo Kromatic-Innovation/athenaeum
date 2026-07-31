@@ -19,11 +19,28 @@ from pathlib import Path
 import pytest
 
 from athenaeum.recurring_claims import (
+    EmbeddingProvider,
+    Group,
     extract_claim_occurrences,
-    find_recurring_claims,
     group_recurring_claims,
     render_report,
 )
+
+
+def _find_recurring_claims(
+    wiki_root: Path,
+    threshold: float,
+    embedding_provider: EmbeddingProvider,
+) -> list[Group]:
+    """Drive the SHIPPED recurring-claim path — the exact two-call composition
+    ``cli.py``'s ``claims --find`` uses (``extract_claim_occurrences`` then
+    ``group_recurring_claims``). Replaces the former ``recurring_claims.
+    find_recurring_claims`` src façade (issue #536, M35), which had 11 test
+    refs and 0 src callers, so these tests now exercise the real dispatch path
+    rather than a test-only wrapper.
+    """
+    occurrences = extract_claim_occurrences(wiki_root)
+    return group_recurring_claims(occurrences, threshold, embedding_provider)
 
 # ---------------------------------------------------------------------------
 # Fake offline embedding provider
@@ -198,7 +215,7 @@ def test_extract_claim_occurrences_reads_footnote_and_sentence(wiki_root: Path):
 
 
 def test_restatements_group_as_one_recurring_claim(wiki_root: Path):
-    groups = find_recurring_claims(
+    groups = _find_recurring_claims(
         wiki_root, threshold=0.85, embedding_provider=_fake_embed
     )
     # Exactly one recurring claim: the venture restatement.
@@ -216,7 +233,7 @@ def test_restatements_group_as_one_recurring_claim(wiki_root: Path):
 
 
 def test_distinct_claims_are_not_grouped(wiki_root: Path):
-    groups = find_recurring_claims(
+    groups = _find_recurring_claims(
         wiki_root, threshold=0.85, embedding_provider=_fake_embed
     )
     grouped_texts = {o.claim_text for g in groups for o in g.occurrences}
@@ -227,10 +244,10 @@ def test_distinct_claims_are_not_grouped(wiki_root: Path):
 
 
 def test_group_key_is_stable(wiki_root: Path):
-    g1 = find_recurring_claims(
+    g1 = _find_recurring_claims(
         wiki_root, threshold=0.85, embedding_provider=_fake_embed
     )
-    g2 = find_recurring_claims(
+    g2 = _find_recurring_claims(
         wiki_root, threshold=0.85, embedding_provider=_fake_embed
     )
     assert [g.key for g in g1] == [g.key for g in g2]
@@ -255,7 +272,7 @@ def test_same_entity_repeats_do_not_group(tmp_path: Path):
         "---\n"
         "Body.\n",
     )
-    groups = find_recurring_claims(root, threshold=0.85, embedding_provider=_fake_embed)
+    groups = _find_recurring_claims(root, threshold=0.85, embedding_provider=_fake_embed)
     assert groups == []
 
 
@@ -265,7 +282,7 @@ def test_memory_index_file_is_excluded(wiki_root: Path):
     assert all(o.entity_id != "MEMORY" for o in occ)
     # Its TOC line duplicates a venture claim verbatim; if MEMORY.md were
     # scanned the venture group would gain a 4th (bogus) occurrence.
-    groups = find_recurring_claims(
+    groups = _find_recurring_claims(
         wiki_root, threshold=0.85, embedding_provider=_fake_embed
     )
     assert len(groups) == 1
@@ -313,7 +330,7 @@ def test_complete_linkage_does_not_chain_distinct_claims(tmp_path: Path):
             "Body.\n",
         )
 
-    groups = find_recurring_claims(root, threshold=0.85, embedding_provider=_embed)
+    groups = _find_recurring_claims(root, threshold=0.85, embedding_provider=_embed)
     # No group may contain BOTH the A and C claims.
     for g in groups:
         member_texts = {o.claim_text for o in g.occurrences}
@@ -371,7 +388,7 @@ def test_no_wiki_files_are_mutated(wiki_root: Path):
         for p in wiki_root.iterdir()
         if p.is_file()
     }
-    find_recurring_claims(wiki_root, threshold=0.85, embedding_provider=_fake_embed)
+    _find_recurring_claims(wiki_root, threshold=0.85, embedding_provider=_fake_embed)
     after = {
         p.name: (p.stat().st_mtime_ns, p.read_bytes())
         for p in wiki_root.iterdir()
@@ -390,7 +407,7 @@ def test_no_wiki_files_are_mutated(wiki_root: Path):
 def test_render_report_is_valid_yaml_with_group(wiki_root: Path):
     import yaml
 
-    groups = find_recurring_claims(
+    groups = _find_recurring_claims(
         wiki_root, threshold=0.85, embedding_provider=_fake_embed
     )
     occ = extract_claim_occurrences(wiki_root)
@@ -412,7 +429,7 @@ def test_render_report_is_valid_yaml_with_group(wiki_root: Path):
 
 
 def test_no_embeddings_returns_empty(wiki_root: Path):
-    groups = find_recurring_claims(
+    groups = _find_recurring_claims(
         wiki_root, threshold=0.85, embedding_provider=lambda texts: None
     )
     assert groups == []
