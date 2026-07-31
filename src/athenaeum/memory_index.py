@@ -22,6 +22,18 @@ gap:
 Both paths only ever *drop* a sibling pointer whose target ``.md`` is gone;
 non-pointer lines and pointers into other trees (``../wiki/x.md``, URLs) are
 preserved verbatim. Rewrites are git-tracked and therefore recoverable.
+
+**Factoring rule:** this module owns parsing/rewriting the ``MEMORY.md``
+pointer-list TEXT and the git commit for the backfill sweep. It does NOT
+decide WHEN a member is retired (:mod:`athenaeum.retire` owns that decision
+and calls in here inline) and does NOT touch any file other than a scope's
+``MEMORY.md`` — a retired member's own deletion is the caller's job.
+
+**Layering:** L3 service. Module scope imports only :mod:`athenaeum.atomic_io`
+(L2) plus stdlib (``subprocess`` for the backfill's git commit). Never
+imports L4. Consumed inline by :mod:`athenaeum.retire` (L4, same commit as a
+retirement) and by the standalone ``athenaeum auto-memory prune-index`` CLI
+backfill.
 """
 
 from __future__ import annotations

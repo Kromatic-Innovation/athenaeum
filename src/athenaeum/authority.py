@@ -49,6 +49,14 @@ A malformed manifest (missing ``version``, wrong version, non-list
 ``sources``, a source missing a required field, a duplicate ``slug``, or
 unparseable YAML) raises :class:`AuthorityManifestError` with a message
 naming the specific defect — never a bare stack trace.
+
+Layering: L1 (data model — reads/writes wiki frontmatter via
+:mod:`athenaeum.models`, the L1 hub). No config-layer or LLM imports.
+Factoring rule: this module owns ONLY the manifest schema + loader, the
+duplicate-detector lookup, and the pointer-stub converter; it deliberately
+does NOT wire into any reasoning-tier consumption path or run against the
+live corpus — those are separate, later concerns (see the module docstring's
+opening paragraph) layered on top by their own call sites.
 """
 
 from __future__ import annotations

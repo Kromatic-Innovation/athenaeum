@@ -27,6 +27,15 @@ Out of scope (deliberate — later lanes):
 The embedder MUST be the shared chromadb collection. This module does
 not import sentence_transformers, openai, cohere, or any other
 embedding provider.
+
+**Layering:** L3 service. Module scope imports :mod:`athenaeum.atomic_io`,
+:mod:`athenaeum.config`, and :mod:`athenaeum.models` (L1/L2) — never L4. The
+``from athenaeum.search import VectorBackend`` import inside
+:func:`_resolve_embeddings` (below) is function-local for IMPORT COST, NOT a
+cycle-breaker: :mod:`athenaeum.search` does not import this module. Deferring
+it means a caller who supplies its own ``embeddings`` map (skipping chromadb
+entirely, per :func:`cluster_auto_memory_files`'s ``embeddings`` argument)
+never pays ``search``'s optional ``chromadb`` import cost.
 """
 
 from __future__ import annotations
@@ -211,6 +220,11 @@ def _resolve_embeddings(
     hit_ids: set[str] = set()
     if id_to_file:
         try:
+            # Deferred for IMPORT COST, not a cycle: athenaeum.search does not
+            # import this module. VectorBackend pulls in chromadb (an optional
+            # [vector] extra) on first real use — deferring means a caller that
+            # supplies its own `embeddings` map to cluster_auto_memory_files
+            # never pays that cost.
             from athenaeum.search import VectorBackend
 
             backend = VectorBackend()

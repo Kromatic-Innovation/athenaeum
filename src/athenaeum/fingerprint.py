@@ -27,6 +27,16 @@ Two pieces:
 The module deliberately has NO heavy imports so both the escalation path
 (:mod:`athenaeum.tiers`) and the resolution path (:mod:`athenaeum.answers`,
 auto-apply in :mod:`athenaeum.tiers`) can import it without a cycle.
+
+**Layering:** L3 service. Module scope imports only stdlib. The two
+``from athenaeum.search import ...`` / ``from athenaeum.cross_scope import
+_cosine`` imports inside :func:`find_resolved_record` (below) are function-
+local for IMPORT COST, NOT to break a cycle: neither :mod:`athenaeum.search`
+nor :mod:`athenaeum.cross_scope` imports this module at module scope, so no
+cycle exists either way. They are deferred so a caller who never reaches the
+embedding-similarity strategy (fingerprint / member-key matches resolve
+first) never pays ``search``'s optional ``chromadb`` import cost just to use
+this module's cheap hashing/JSONL helpers.
 """
 
 from __future__ import annotations
@@ -601,7 +611,12 @@ def find_resolved_record(
     if not pair_text:
         return None
 
-    # Resolve embedder default lazily to avoid import at module load time.
+    # Deferred for IMPORT COST, not a cycle: athenaeum.search does not import
+    # this module, so there is nothing to break either way. embed_texts pulls
+    # in chromadb (an optional [vector] extra) on first real use — deferring
+    # here means a caller that never reaches this embedding-similarity
+    # strategy (an exact fingerprint or member-key match resolved above) never
+    # pays that cost merely by importing athenaeum.fingerprint.
     if embedder is None:
         try:
             from athenaeum.search import embed_texts
@@ -624,6 +639,8 @@ def find_resolved_record(
     if vecs is None or len(vecs) < 2:
         return None
 
+    # Deferred for IMPORT COST (this is the one call site that needs cosine
+    # similarity), not a cycle — cross_scope does not import this module.
     from athenaeum.cross_scope import _cosine
 
     new_vec = vecs[0]

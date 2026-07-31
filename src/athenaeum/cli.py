@@ -1,5 +1,47 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Athenaeum CLI entry point."""
+"""Athenaeum CLI entry point — L5 presentation layer.
+
+Honest contract note: a single clean one-sentence contract for this module
+is NOT achievable today, and this docstring will not pretend otherwise. The
+module is supposed to be "argparse wiring only, no business logic" (L5:
+parse argv, call into L1-L4 modules, format the result, return an exit
+code) — and roughly half of it already lives up to that: nine sibling
+``_cmd_*.py`` modules (``_cmd_questions``, ``_cmd_merges``, ``_cmd_decisions``,
+``_cmd_authority``, ``_cmd_axiom``, ``_cmd_calibration``, ``_cmd_outbound``,
+``_cmd_drain``, ``_cmd_storage``) each own one subcommand's argparse setup
+via an ``add_*_subparser(subparsers)`` function and are wired into
+``main()`` with a lazy import + a single call. The other half is not: the
+remaining ~25 subcommands (``run``, ``status``, ``recall``, ``serve``,
+``repair*``, ``spend``, ``people``, ...) have their subparsers built INLINE
+inside ``main()`` (~1,200 lines of it) and are dispatched through a flat
+``if args.command == "...": return _cmd_x(args)`` / ``elif ...`` chain of
+~32 branches with no ``set_defaults(func=...)`` — so this file currently
+mixes two incompatible patterns for the same job, and the module docstring
+must not describe the flat-chain half as if it were the intended design.
+
+FACTORING RULE (the fix, not yet applied — no refactor happens here):
+**every new subcommand goes in its own ``_cmd_<name>.py`` module with an
+``add_<name>_subparser(subparsers)`` function, wired into ``main()`` via a
+lazy import + one call — never as another inline block or another
+``elif`` branch in ``main()``.** The nine ``_cmd_*`` modules are the
+pattern to copy; the inline blocks and the ``elif`` chain are legacy shape
+to be migrated opportunistically, not a template to extend.
+
+Layering: L5 (presentation, top of the stack). May import anything below
+it (L0-L4) plus the ``_cmd_*.py`` sibling modules; nothing below may import
+this module. Owns process-level concerns only: argv parsing, exit codes,
+run-lock acquisition/release around commands that mutate the knowledge
+base (see ``_acquire_or_exit``), and stdout/stderr formatting. Must NOT
+contain merge/tier/resolution business logic itself — that belongs in the
+L3/L4 module the command delegates to.
+
+Non-obvious invariant: subcommand modules are imported LAZILY (inside
+``main()``, not at module top), including for the nine ``_cmd_*``
+subparser registrations — this keeps `import athenaeum.cli` cheap (no
+transitive pull of the whole L1-L4 graph, e.g. ``anthropic``/embedding
+backends) for callers that only need argv-parsing helpers like
+``_iso_date``.
+"""
 
 import argparse
 import os

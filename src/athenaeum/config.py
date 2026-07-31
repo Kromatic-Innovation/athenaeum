@@ -1,10 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Athenaeum configuration loader.
+"""Athenaeum configuration resolution layer — L2.
 
-Reads ``athenaeum.yaml`` from the knowledge directory root to control
-sidecar behavior: auto-recall toggle, search backend selection, etc.
+Contract: this module is THE resolution layer for every operator-facing
+knob in athenaeum (~50 ``resolve_*`` functions and counting) — not just
+"sidecar behavior" as an early version of this docstring undersold it.
+Every knob, without exception, resolves through the SAME precedence rule:
+**env var > ``athenaeum.yaml`` > code default.** ``load_config`` reads
+``athenaeum.yaml`` from the knowledge directory root; each ``resolve_*``
+function then layers the env override and the default on top of whatever
+``load_config`` returned (or on ``None``, for callers that skip disk
+entirely). Missing config, missing keys, and a missing file all fall back
+to sensible defaults rather than raising — the small set of deliberate
+fail-loud exceptions is documented below.
 
-Missing config or missing keys fall back to sensible defaults.
+FACTORING RULE (durable — enforce on every new knob): **a new knob is not
+done until it is added here as a ``resolve_*`` function AND documented in
+``docs/configuration.md``.** This module is the only place precedence is
+implemented; do not hand-roll env/yaml lookups in another module, and do
+not let a knob land without its docs entry — the resolver function and the
+docs page are two halves of one change.
+
+Layering (L2): sits above L1 (models/schemas/provenance/registry/
+authority/storage) and L0 primitives, and below L3 (search/pii/
+fingerprint/...) and everything above. May import L0/L1 freely. It must
+NOT import L3+ at module level — screening is L3 and screening does not
+depend on config at import time — but ``resolve_screening`` (~line 1414)
+does a FUNCTION-LOCAL ``from athenaeum.screening import (...)`` purely to
+reuse validation constants/exception types (``_ACCESS_RANK``,
+``VALID_MEDICAL_ACTIONS``, ``ScreeningConfigError``) so this module doesn't
+duplicate them. That import is a deliberate, one-way "reach up" confined
+to a single function body — it is not a real import cycle (screening never
+imports config back) and must stay deferred so `import athenaeum.config`
+itself never pulls in L3.
 
 Malformed-env-value policy (issue #519/#528)
 --------------------------------------------

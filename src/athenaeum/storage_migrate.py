@@ -45,6 +45,13 @@ Detection reuses :mod:`athenaeum.pii` verbatim (``find_inline_emails`` /
 ``find_inline_phones`` / ``DURABLE_IDENTIFIER_FIELDS``) — the #455 outbound-lint
 scanner's single source of truth for the patterns — rather than defining a
 second detector.
+
+Layering: L4 domain/pipeline module. May import L3 services (``models``,
+``pii``, ``storage``) freely. Factoring rule: this module is a PURE
+transform — it reads a page and returns the two would-be file texts; it never
+writes to disk. Applying a plan (dry-run vs. ``--apply``) is the L5 CLI's job
+(:mod:`athenaeum._cmd_storage`), mirroring the read/transform/write split
+``authority.py``/``_cmd_authority.py`` already use.
 """
 
 from __future__ import annotations

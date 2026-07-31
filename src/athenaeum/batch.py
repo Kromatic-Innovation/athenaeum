@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Batch API execution for the librarian's tier-2/tier-3 phases (issue #236).
+"""Batch API execution for the librarian's tier-2/tier-3 phases (issue #236) — L4 domain/pipeline.
+
+Contract: an alternate, opt-in EXECUTION STRATEGY for the same tier-2/
+tier-3 work ``librarian.py``'s synchronous loop performs — same tier
+semantics (see :func:`athenaeum.librarian.process_one`), different
+transport (phased Anthropic Messages Batch API fan-out instead of one
+call per file). Factoring rule: this module owns the BATCH TRANSPORT ONLY
+— phase assembly, submission, polling, and result application. It must
+NOT diverge on tier semantics (what counts as a match, what a
+classification means, how a merge is written) from the synchronous path;
+any such divergence belongs in ``tiers.py``/``librarian.py`` and must be
+mirrored here, not invented here. The "known divergences" list below is
+the complete, deliberate set — anything not listed there is a bug, not a
+feature.
 
 Opt-in via ``--batch-mode`` / ``ATHENAEUM_BATCH_MODE`` /
 ``librarian.batch_mode`` (resolved by
@@ -41,6 +54,21 @@ Known divergences from the synchronous loop (deliberate, documented):
 
 Polling interval and timeout are module constants — deliberately not a
 config surface; the nightly window is latency-tolerant.
+
+SCC membership (L4, one of 8 mutually-recursive modules — librarian,
+merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
+as one ~12,000-line module split for readability, not independence).
+``batch.py`` does not import ``librarian`` at module top level (only
+``athenaeum.config`` and ``athenaeum.tiers``, neither of which imports this
+module back). It owns the deferred (function-local) side of the
+librarian<->batch cycle:
+
+- ``process_batch_run`` (~line 320): local ``from athenaeum.librarian
+  import tier0_passthrough``. ``librarian.py`` itself function-locally
+  imports ``process_batch_run`` FROM this module inside its run loop's
+  batch-mode branch (~line 2559) — neither side can be hoisted to module
+  level without the package failing to import, so both sides of this edge
+  stay deferred.
 """
 
 from __future__ import annotations

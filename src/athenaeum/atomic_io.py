@@ -13,6 +13,12 @@ target. ``os.replace`` is atomic on POSIX and Windows: readers and the parsers
 see either the complete old file or the complete new one, never a torn write.
 The run lock (:mod:`athenaeum.runlock`) already serializes librarian processes;
 this is defense-in-depth against a crash mid-append.
+
+Layering: L0 primitive (leaf). May import only stdlib. Every store-path write
+anywhere in the codebase must route through :func:`atomic_write_text` rather
+than a plain ``Path.write_text`` — that is the invariant this module exists to
+carry, not a stylistic preference. Nothing belongs here beyond the atomic
+write itself; higher layers (L1+) may import this module, never the reverse.
 """
 
 from __future__ import annotations

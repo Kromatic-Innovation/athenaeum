@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Wiki-page dedup pass (issue #290).
+"""Wiki-page dedup pass (issue #290) — L4 domain/pipeline.
+
+Contract: clusters already-COMPILED wiki pages (not raw intake) against
+each other and appends a merge proposal to ``wiki/_pending_merges.md``
+when two-or-more concept/reference/principle pages look like duplicates.
+Factoring rule: this module owns the WIKI-VS-WIKI clustering pass only —
+it deliberately does NOT reimplement clustering (reuses
+``clusters.cluster_auto_memory_files``), draft synthesis (reuses
+``merge.synthesize_body`` / ``merge.derive_topic_slug``), or the
+sidecar-write/idempotency logic (reuses
+``pending_merges.write_pending_merge``); it is glue over those three, not
+a fourth implementation of any of them.
 
 The C1-C4 auto-memory pipeline (:mod:`athenaeum.clusters`,
 :mod:`athenaeum.merge`) only ever clusters ``raw/auto-memory/*.md`` intake
@@ -51,6 +62,21 @@ Out of scope (deliberate — see issue #290):
 - LLM-based draft synthesis / rich merge rationale.
 - Real contradiction detection beyond the existing cohesion threshold.
 - Retroactively re-clustering already ``archived``/``superseded_by`` pages.
+
+SCC membership (L4, one of 8 mutually-recursive modules — librarian,
+merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
+as one ~12,000-line module split for readability, not independence).
+``wiki_dedupe.py`` imports ``athenaeum.merge`` and
+``athenaeum.pending_merges`` at module TOP level — normal downward
+dependencies; neither imports this module back, so this module has NO
+cycle edge of its own in the SCC (``librarian.py`` calls into this module,
+but only via ITS OWN deferred import — see ``librarian.py``'s module
+docstring — because librarian, not wiki_dedupe, sits on a cycle). The one
+function-local ``from athenaeum.pending_merges import _make_id,
+parse_pending_merges`` inside ``propose_wiki_page_merges`` (~line 431) is
+NOT a cycle-breaker (``pending_merges`` is already imported at top level
+above); it is a plain in-function convenience import with no
+import-ordering significance.
 """
 
 from __future__ import annotations

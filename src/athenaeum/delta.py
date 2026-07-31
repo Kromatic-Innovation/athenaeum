@@ -43,6 +43,15 @@ run re-content-addresses every row. This is harmless: recall reads ALL
 first nightly whole-corpus ``run`` (no ``changed_paths``) rewrites the entire
 report with content-addressed ids and heals the naming. Delta never deletes the
 stale-named orphan (F5 parity — full runs leak orphans identically).
+
+**Layering:** L3 service. Module scope imports :mod:`athenaeum.clusters` and
+:mod:`athenaeum.models` (sibling L3 / L1) — never L4. The
+``from athenaeum.search import VectorBackend`` import inside
+:func:`_resolve_all_embeddings` (below) is function-local for IMPORT COST,
+NOT a cycle-breaker: :mod:`athenaeum.search` does not import this module (nor
+:mod:`athenaeum.clusters`). Deferring it keeps ``athenaeum.delta`` importable
+without pulling in ``search``'s optional ``chromadb`` extra until a real
+embedding fetch is needed.
 """
 
 from __future__ import annotations
@@ -125,6 +134,9 @@ def _resolve_all_embeddings(
     hit_relpaths: set[str] = set()
     if id_to_file:
         try:
+            # Deferred for IMPORT COST, not a cycle: athenaeum.search does not
+            # import this module. VectorBackend pulls in chromadb (an optional
+            # [vector] extra) on first real use.
             from athenaeum.search import VectorBackend
 
             raw_hits = VectorBackend().fetch_embeddings(id_to_file.keys(), cache_dir)

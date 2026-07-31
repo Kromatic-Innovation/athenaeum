@@ -29,6 +29,15 @@ Out of scope (deliberate):
   this module only writes TO it via :func:`athenaeum.tiers.tier4_escalate`.
 - Re-scoring cluster centroids (C2/C3's territory).
 - Multi-cluster or cross-cluster reasoning -- one call per cluster.
+
+**Layering:** L3 service. Imports L0-L2 (:mod:`athenaeum._retry`,
+:mod:`athenaeum.config`, :mod:`athenaeum.json_utils`, :mod:`athenaeum.models`,
+:mod:`athenaeum.prompt_safety`) plus a sibling L3 module
+(:mod:`athenaeum.provider`) normally. The one narrow exception:
+``from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL`` reaches UP into the L4
+pipeline module, but only for a model-id string constant (single-sourcing the
+default so this detector's knob never drifts from tier2's) — no L4 behavior
+or capability is imported. Consumed by :mod:`athenaeum.merge` (L4).
 """
 
 from __future__ import annotations

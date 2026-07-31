@@ -25,6 +25,12 @@ Per-claim provenance preservation (issue #90):
 
 Idempotence: ``merge_duplicate_persons(..., apply=True)`` is a no-op on
 already-merged pairs (absorbed file missing → ``already_merged`` count).
+
+Layering: L4 domain/pipeline module. May import L3 services (``atomic_io``,
+``models``) freely. Factoring rule: only the HIGH-confidence
+apollo_id/linkedin_url/exact-name person-dedupe path lives here; MEDIUM-tier
+fuzzy matching (human-triage CSV workflow) is deliberately NOT ported —
+that stays a cwc-side script, per the module's own note above.
 """
 
 from __future__ import annotations

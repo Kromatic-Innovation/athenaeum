@@ -1,5 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Data models, YAML frontmatter parsing, and entity index for Athenaeum."""
+"""Shared data-model hub: frontmatter parsing, claim metadata, and wiki entity shapes.
+
+Contract: this is the single source of truth for what a memory/claim/wiki-page
+*looks like* on disk and in memory — frontmatter parse/render
+(:func:`parse_frontmatter` / :func:`render_frontmatter`), claim-level metadata
+parsers (source type, claim kind, validity window, audience/access, refines/
+supersedes, asserter identity), and the core dataclasses (:class:`RawFile`,
+:class:`AutoMemoryFile`, :class:`WikiEntity`, :class:`EntityIndex`,
+:class:`TokenUsage`, :class:`ProcessingResult`, etc.).
+
+Factoring rule: this module holds DATA SHAPES and pure parse/coerce functions
+over them — no I/O beyond trivial frontmatter (de)serialization, no network
+calls, no merge/resolution/clustering *policy*. It is the L1 hub every layer
+above L1 imports (config, services, pipeline, presentation); nothing here may
+import from those higher layers, so a change here can ripple outward but never
+loop back. Fail-open is the house style throughout: a malformed or
+out-of-vocabulary field value degrades to a safe default (logged at debug/
+warning) rather than raising, because a bad frontmatter value must never crash
+the nightly compile.
+
+Non-obvious invariant: many parsers here look similar (``parse_x(meta) ->
+default-on-anything-wrong``) by design — this is the shared boundary where
+every other module's trust in frontmatter shape is established or fails open.
+Do not duplicate a parser elsewhere; add a new field's accessor here instead.
+"""
 
 from __future__ import annotations
 

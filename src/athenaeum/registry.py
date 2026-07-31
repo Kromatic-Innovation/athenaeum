@@ -19,6 +19,14 @@ tested with synthetic fixtures. Populating real client handles is a separate,
 operator-only, private-store operation (issue #454); the builder must emit a
 well-formed registry even when zero handles are populated, so #454 is never a
 precondition for it working.
+
+Layering: L1 (data model — reads the wiki tree via :mod:`athenaeum.models`,
+the L1 hub, for :func:`~athenaeum.models.parse_frontmatter`). No config, no
+LLM client. Factoring rule: this module owns ONLY the deterministic
+frontmatter → registry compile (extract known handle keys, sort, serialize);
+it must never invent new handle keys' semantics or validate the handle
+VALUES beyond non-empty-string cleanup — a source handle's meaning belongs to
+the adapter that consumes it.
 """
 
 from __future__ import annotations

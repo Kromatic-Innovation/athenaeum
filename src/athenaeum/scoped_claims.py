@@ -50,6 +50,14 @@ DELIBERATELY DEFERRED to the ADR (design-only, not built here):
   exception should override an always-valid claim is left to the #329 ADR.
 - **Recall caller-context filter** (``serve --scope org:...``) and the broader
   team/multi-tenant scope-IDENTITY system are out of scope (#314).
+
+Layering: L0/L1-boundary primitive. Imports only :mod:`athenaeum.models` (the
+L1 hub, for the #308 ``valid_from``/``valid_until`` parsers) plus stdlib — no
+config, no LLM client. Factoring rule: this module owns ONLY the poset
+math (meet/leq/three-way verdict) and the frontmatter → coordinate parse; it
+has no opinion on what a caller DOES with a DISJOINT/OVERRIDE/OVERLAP verdict
+(escalate, auto-resolve, etc.) — that policy lives with the contradiction
+detector / resolver that calls in.
 """
 
 from __future__ import annotations
