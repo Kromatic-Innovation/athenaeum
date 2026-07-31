@@ -17,12 +17,16 @@ what ``revalidate_pending_merges`` can prove from the stored block alone
 (see that function's own docstring for the narrow, deliberately-incomplete
 gate set it re-checks).
 
-SCC membership (L4, one of 8 mutually-recursive modules — librarian,
-merge, tiers, pending_merges, batch, status, retire, wiki_dedupe — behaving
-as one ~12,000-line module split for readability, not independence). This
-module is imported at top level by ``merge.py`` (``write_pending_merge``),
-``wiki_dedupe.py``, and ``librarian.py`` (all normal downward dependencies
-from their side). It owns the deferred (function-local) side of the
+SCC membership (L4 domain/pipeline). This module is imported at top level by
+``merge.py`` (``write_pending_merge``), ``wiki_dedupe.py``, and ``librarian.py``
+(all normal downward dependencies from their side). The librarian-centered
+named-8 coupling was dissolved in issue #545, but this module's OWN cycle with
+``merge`` was NOT part of that scope (it hinges on
+``_merge_proposal_suppression_reason``, not one of #545's three hoisted
+primitives) and remains as a PRE-EXISTING residual SCC ``{merge,
+pending_merges, calibration, reasoning_tiers}``, pinned as a baseline by
+``tests/test_import_graph_acyclic.py`` with a follow-up issue tracking its
+dissolution. It owns the deferred (function-local) side of the
 merge<->pending_merges cycle:
 
 - ``revalidate_pending_merges`` (~line 1316): local ``from athenaeum.merge

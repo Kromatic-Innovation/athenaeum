@@ -20,23 +20,23 @@ NOT to be confused with :mod:`athenaeum.reasoning_tiers` — that module is a
 DIFFERENT, later pipeline (merge-proposal screening, T1/T2 reasoning
 tiers) with its own unrelated tier numbering scheme.
 
-SCC membership (L4, one of 8 mutually-recursive modules — librarian,
-merge, tiers, pending_merges, batch, status, retire, wiki_dedupe —
-behaving as one ~12,000-line module split for readability, not
-independence). ``tiers.py`` does not import ``librarian`` at module top
-level. It owns the deferred (function-local) side of the librarian<->tiers
-cycle:
+SCC membership (L4 domain/pipeline). ``tiers.py`` does not import
+``librarian`` at all. Issue #545 hoisted ``discover_auto_memory_files`` to the
+:mod:`athenaeum.intake` leaf, so ``reresolve_open_questions`` now imports it
+from ``intake`` at TOP level and the former deferred ``from
+athenaeum.librarian import discover_auto_memory_files`` back-edge (the
+librarian<->tiers cycle) is GONE. ``librarian.py`` still function-locally
+imports ``reresolve_open_questions`` FROM this module, but that is now a
+one-way edge (no cycle).
 
-- ``reresolve_open_questions`` (~line 2633): local ``from athenaeum.librarian
-  import discover_auto_memory_files``. ``librarian.py`` itself
-  function-locally imports ``reresolve_open_questions`` FROM this module
-  (librarian.py's ``_run_reresolve_pass``, ~line 1548) — neither side can be
-  hoisted to module level without the package failing to import, so both
-  sides of this edge stay deferred.
-
-Also imported at module top level by ``status.py`` (``schema_fragment_state``)
-and ``batch.py``, but neither of those two imports this module back — this
-module's only SCC-cycle edge is with ``librarian``.
+Imported at module top level by ``status.py`` (``schema_fragment_state``) and
+``batch.py``, neither of which imports this module back. This module DOES
+remain in a PRE-EXISTING residual SCC that #545 did NOT target (out of its
+named scope): ``{tiers, contradictions, resolutions, answers}`` —
+``contradictions`` imports ``tiers.DEFAULT_CLASSIFY_MODEL`` at top level while
+``reresolve_open_questions`` function-locally imports ``contradictions`` /
+``resolutions`` / ``answers`` back. This residual is pinned as a baseline by
+``tests/test_import_graph_acyclic.py``; a follow-up issue tracks dissolving it.
 """
 
 from __future__ import annotations
@@ -69,6 +69,7 @@ from athenaeum.fingerprint import (
     record_resolution,
     resolve_resolved_similarity_threshold,
 )
+from athenaeum.intake import discover_auto_memory_files
 from athenaeum.json_utils import (
     extract_json_object,
     loads_lenient,
@@ -2662,7 +2663,6 @@ def reresolve_open_questions(
 
     from athenaeum.answers import parse_pending_questions
     from athenaeum.contradictions import ContradictionResult
-    from athenaeum.librarian import discover_auto_memory_files
     from athenaeum.resolutions import (
         ENACTING_ACTIONS,
         SUPPRESS_ACTION,
