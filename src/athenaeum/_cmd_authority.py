@@ -32,11 +32,15 @@ from athenaeum.authority import (
     find_duplicates_in_wiki,
     load_authority_manifest,
 )
-from athenaeum.config import load_config, resolve_authority_manifest_path
+from athenaeum.config import (
+    DEFAULT_KNOWLEDGE_ROOT,
+    load_config,
+    resolve_authority_manifest_path,
+)
 
 
 def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
-    return (getattr(args, "path", None) or Path("~/knowledge")).expanduser().resolve()
+    return (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
 
 
 def _load_manifest_or_exit(knowledge_root: Path):
@@ -164,7 +168,7 @@ def add_authority_subparser(subparsers: argparse._SubParsersAction) -> None:
     lint_p.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge)",
     )
     lint_p.add_argument(
@@ -182,7 +186,7 @@ def add_authority_subparser(subparsers: argparse._SubParsersAction) -> None:
     convert_p.add_argument(
         "--path",
         type=Path,
-        default=Path("~/knowledge"),
+        default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge directory (default: ~/knowledge), used to resolve "
         "the authority manifest.",
     )
