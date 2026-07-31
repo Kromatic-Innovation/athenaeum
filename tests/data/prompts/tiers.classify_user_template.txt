@@ -1,0 +1,37 @@
+# GOLDEN SNAPSHOT — ASSERTION, NOT SOURCE.
+# Editing this file changes what the test EXPECTS, not what the model receives.
+# To change this prompt, edit `athenaeum.tiers.CLASSIFY_USER_TEMPLATE`, then run: python -m athenaeum.prompt_registry --write
+# ===8<=== prompt bytes below this line are asserted verbatim ===8<===
+## Raw observation
+<user_document>
+{content}
+</user_document>
+
+## Already matched entities (skip these)
+{matched_names}
+
+## Valid entity types
+{valid_types}
+
+## Valid tags
+{valid_tags}
+
+## Valid access levels
+{valid_access}
+{observation_filter_section}
+## Instructions
+Extract entities from the raw observation. Return a JSON array of objects:
+```json
+[
+  {{
+    "name": "Entity Name",
+    "entity_type": "person",
+    "tags": ["active"],
+    "access": "internal",
+    "observations": "Key facts about this entity extracted from the raw text"
+  }}
+]
+```
+
+If no entities worth creating, return `[]`.
+Return ONLY the JSON array, no other text.
