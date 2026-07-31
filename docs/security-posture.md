@@ -30,6 +30,30 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 | Build-time secret handling | At release time only | Trusted-publishing identity uses GitHub OIDC; no long-lived PyPI token. |
 | Read-scoping of recall (#312) | Yes (opt-in) | `athenaeum serve --audience <role,…>` (also `ATHENAEUM_AUDIENCE` / `serve.audience`) pins a server process to a restricted read scope so a secondary agent/routine recalls only `access: open` pages and pages whose `audience:` list grants one of its roles; untagged / `confidential` / `personal` pages fail closed (withheld). The audience is pinned by the operator at serve time, not chosen by the `recall` caller, so a restricted agent can't widen its own scope. Enforced inside each backend query (ranking/top-k) and re-checked against fresh on-disk frontmatter at render. Unset = owner = full access. This is NOT a full multi-user auth/ACL system — it is a single-owner read filter for the owner's own secondary agents. Intake-side secret/PII screening for `remember()` is tracked separately. |
 
+### 2.1 MCP tool audience scoping (#312 → #538)
+
+`caller_audience` (§2, row "Read-scoping of recall") is pinned **once** by the
+operator at `athenaeum serve` time and governs the **whole** MCP process, not
+just `recall`. Issue #538 closed the gap where `recall` was the only one of the
+11 registered tools that applied it — a restricted caller could read the same
+bytes from a different tool, or mutate the operator's decision queue unchecked.
+The decided model (this is the "write it down" outcome #538 asked for):
+
+| Tool group | Tools | Restricted (`caller_audience != None`) behavior |
+|---|---|---|
+| Scoped reads | `recall`, `list_pending_questions`, `list_pending_merges`, `list_pending_decisions` | Fail-closed by the SAME predicate `recall` uses (`is_page_authorized`): an item is withheld unless the caller is authorized for **every** source page behind it. A restricted caller can never obtain page content `recall` would refuse. |
+| Owner-only writes | `resolve_question`, `resolve_merge`, `review_audit_item` | **Fail closed** — adjudicating the operator's contradiction/merge/calibration queue is an owner action. `list_pending_decisions` likewise withholds the `retraction`/`audit` calibration items (no readable source-page path to authorize against). |
+| Intentionally open | `remember` | **Not** audience-scoped. Intake is write-only and compiles through the read-time screening path (#320); a restricted secondary agent contributing raw memories is the intended use. It cannot read anything back it isn't authorized for. |
+| Metadata reads | `list_axiom_audit`, `scan_retraction_cascade`, `calibration_summary` | Not page-content bearing (governance history, provenance flags, tier counts). Left unscoped; revisit if any starts echoing page bodies. |
+
+Rationale for the write split: the three decision-queue mutators change
+**human-decision** state the owner uses to adjudicate the knowledge base, so a
+non-owner caller has no business writing them. `remember` is different in kind —
+it is append-only intake behind the screening pin, so scoping it would block the
+one write a secondary agent legitimately makes without adding any read
+protection. As with the read scope, this is a single-owner filter, **not** a
+multi-user ACL system.
+
 ## 3. Dependency-upgrade policy
 
 This repo follows the Kromatic maintenance-posture playbook, with one critical adaptation: **the package's own upper-bound caps in `pyproject.toml` define what Dependabot can propose at all.** Auto-merge eligibility is layered on top of those caps.

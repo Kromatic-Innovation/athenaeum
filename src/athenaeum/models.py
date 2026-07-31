@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import ItemsView, Iterator
+    from collections.abc import ItemsView, Iterable, Iterator
 
 import yaml
 
@@ -911,6 +911,69 @@ def is_page_authorized(
     if public:
         return True
     return bool(caller_audience & roles)
+
+
+def is_page_authorized_at(
+    source: str | Path,
+    caller_audience: set[str] | None,
+    *,
+    base: str | Path | None = None,
+) -> bool:
+    """Fail-closed authorize a caller against a page identified by PATH (#538).
+
+    The path-resolving counterpart to :func:`is_page_authorized`, used by the
+    MCP pending-decision list tools (``list_pending_merges`` /
+    ``list_pending_decisions`` / ``list_pending_questions``) to apply the exact
+    same read predicate ``recall`` applies — so no tool returns page content a
+    restricted caller could not get from ``recall``.
+
+    ``caller_audience=None`` is the owner: authorized for everything, and the
+    file is never even read. A non-None (restricted) caller is authorized iff
+    the page at ``source`` is readable AND :func:`is_page_authorized` passes on
+    its frontmatter. Fail-closed on every failure mode a restricted caller must
+    not be able to route around: a missing/unreadable/mis-encoded file, or one
+    with no parseable frontmatter, is WITHHELD (returns ``False``) — an attacker
+    cannot widen scope by pointing at a path we cannot authorize.
+
+    ``base`` (optional) is joined to a relative ``source`` before reading; an
+    absolute ``source`` is used as-is (matching ``decisions.source_info``).
+    """
+    if caller_audience is None:
+        return True
+    path = Path(source).expanduser()
+    if base is not None and not path.is_absolute():
+        path = Path(base).expanduser() / path
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False  # fail closed — unreadable page is never authorized
+    meta, _ = parse_frontmatter(text)
+    return is_page_authorized(meta if isinstance(meta, dict) else None, caller_audience)
+
+
+def all_sources_authorized(
+    sources: "Iterable[str | Path]",
+    caller_audience: set[str] | None,
+    *,
+    base: str | Path | None = None,
+) -> bool:
+    """True iff a restricted caller may read EVERY page in ``sources`` (#538).
+
+    The fail-closed predicate the MCP pending-decision list tools apply to
+    withhold any pending item whose underlying source pages a restricted caller
+    could not read via ``recall``. Owner (``caller_audience=None``) is always
+    authorized. For a restricted caller an EMPTY ``sources`` returns ``False``
+    — there is nothing to authorize against, so the item is withheld rather
+    than shown on a vacuous ``all([])``.
+    """
+    if caller_audience is None:
+        return True
+    sources = list(sources)
+    if not sources:
+        return False
+    return all(
+        is_page_authorized_at(s, caller_audience, base=base) for s in sources
+    )
 
 
 def audience_index_string(meta: dict[str, object] | None) -> str:

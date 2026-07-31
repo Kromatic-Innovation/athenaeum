@@ -334,6 +334,7 @@ def list_pending_decisions(
     *,
     with_proposal: bool = False,
     max_sources_per_merge: int = _DECISIONS_MAX_SOURCES_DEFAULT,
+    caller_audience: set[str] | None = None,
 ) -> list[dict]:
     """Unified list of pending questions + merges, oldest first.
 
@@ -348,22 +349,41 @@ def list_pending_decisions(
     config-resolved default (env > yaml > 20). Callers that already loaded
     config (the CLI, the MCP tool) should resolve it there and pass it
     through; this default keeps direct callers working unchanged.
+
+    Issue #538 (audience scoping): a restricted ``caller_audience`` (non-owner)
+    sees only the decisions whose underlying pages it is authorized to read —
+    the same fail-closed predicate ``recall`` applies. A question is withheld
+    unless its ``source`` memory authorizes; a merge unless EVERY source page
+    authorizes (checked over the FULL source set, before the #431 render cap);
+    and ``retraction`` / ``audit`` calibration items — which reference pages by
+    slug/proposal-id rather than a readable source path — are withheld
+    wholesale from a restricted caller (adjudicating them is owner-only, mirror-
+    ing the write-side guard on ``review_audit_item``). Owner (``None``, the
+    default) sees everything, preserving existing behavior.
     """
+    from athenaeum.models import all_sources_authorized, is_page_authorized_at
+
+    knowledge_root = wiki_root.parent
     questions = [
         pq
         for pq in parse_pending_questions(wiki_root / "_pending_questions.md")
         if not pq.answered
+        and is_page_authorized_at(pq.source, caller_audience, base=knowledge_root)
     ]
     decisions = [question_to_decision(pq, with_proposal=with_proposal) for pq in questions]
     decisions += [
         merge_to_decision(pm, max_sources=max_sources_per_merge)
         for pm in parse_pending_merges(wiki_root / "_pending_merges.md")
         if not pm.resolved
+        and all_sources_authorized(pm.sources, caller_audience, base=knowledge_root)
     ]
-    decisions += [
-        retraction_to_decision(rec) for rec in read_retraction_reviews(wiki_root)
-    ]
-    decisions += [audit_to_decision(rec) for rec in list_pending_audit(wiki_root)]
+    if caller_audience is None:
+        # Retraction/audit calibration items are owner-only for a restricted
+        # caller (no readable source-page path to authorize against, #538).
+        decisions += [
+            retraction_to_decision(rec) for rec in read_retraction_reviews(wiki_root)
+        ]
+        decisions += [audit_to_decision(rec) for rec in list_pending_audit(wiki_root)]
     decisions.sort(key=lambda d: d["created_at"] or "")
     return decisions
 
