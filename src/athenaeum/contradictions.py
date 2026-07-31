@@ -50,6 +50,7 @@ from athenaeum.models import (
     parse_frontmatter,
     validity_bound_str,
 )
+from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 if TYPE_CHECKING:
     import anthropic
@@ -58,7 +59,11 @@ log = logging.getLogger(__name__)
 
 # Model override uses the SAME env var as tier2_classify. Keeping a single
 # knob avoids a C4-only dial that sessions would have to learn separately.
-DEFAULT_CONTRADICTION_MODEL = "claude-haiku-4-5-20251001"
+# The default is single-sourced from tiers.DEFAULT_CLASSIFY_MODEL (issue #571,
+# M19): the detector shares the classify knob, so a divergent literal here only
+# ever surfaced as an inconsistent default on a model bump. This collapses the
+# DEFAULT; the env knob (ATHENAEUM_CLASSIFY_MODEL, below) is unchanged.
+DEFAULT_CONTRADICTION_MODEL = DEFAULT_CLASSIFY_MODEL
 
 # Per-member body trim. 800 chars comfortably captures the "claim" section
 # of a typical auto-memory file (they are opinion/guidance one-liners with

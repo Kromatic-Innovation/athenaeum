@@ -145,6 +145,7 @@ def cmd_drain(args: argparse.Namespace) -> int:
         backlog=backlog,
         avg_input_per_file=avg_input,
         avg_output_per_file=avg_output,
+        config=config,
         batch=True,
     )
 

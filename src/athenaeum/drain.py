@@ -37,7 +37,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from athenaeum import spend
+from athenaeum.config import resolve_model
 from athenaeum.models import _rates_for_model
+from athenaeum.tiers import DEFAULT_WRITE_MODEL
 
 log = logging.getLogger("athenaeum")
 
@@ -45,11 +47,20 @@ log = logging.getLogger("athenaeum")
 #: WARNING (mirrors ``RUN_SUMMARY_PREFIX`` in :mod:`athenaeum.librarian`).
 DRAIN_ADVISOR_PREFIX = "backlog-drain-advisor"
 
-#: Representative batch-tier model used to PRICE the up-front drain cost estimate
-#: and the advisor's suggested budget. The entity tiers span haiku/sonnet/opus;
-#: sonnet is the tier-2/tier-3 workhorse, so it is the honest single-model proxy
-#: for a coarse estimate. Priced via :func:`athenaeum.models._rates_for_model`.
-DRAIN_ESTIMATE_MODEL = "claude-sonnet-4"
+
+def _resolve_estimate_model(config: dict[str, Any] | None = None) -> str:
+    """Model id used to PRICE the drain cost estimate and suggested budget.
+
+    Issue #571 (M18): resolved from the ``models.write`` knob (env
+    ``ATHENAEUM_WRITE_MODEL`` > yaml ``models.write`` > code default
+    :data:`athenaeum.tiers.DEFAULT_WRITE_MODEL`), NOT a hardcoded literal. The
+    drain writes entities at the write model, so the estimate must price at
+    whatever ``models.write`` actually resolves to — override it to Opus and the
+    estimate follows, instead of silently understating cost (and the 1.25x
+    budget margin) at a stale Sonnet rate. Priced via
+    :func:`athenaeum.models._rates_for_model`.
+    """
+    return resolve_model("write", "ATHENAEUM_WRITE_MODEL", DEFAULT_WRITE_MODEL, config)
 
 #: Coarse per-file token fallbacks used ONLY when the ledger carries no usable
 #: throughput history (no prior librarian run recorded ``files_processed``).
@@ -162,15 +173,23 @@ def estimate_drain_cost_usd(
     backlog: int,
     avg_input_per_file: float,
     avg_output_per_file: float,
-    model: str = DRAIN_ESTIMATE_MODEL,
+    model: str | None = None,
+    config: dict[str, Any] | None = None,
     batch: bool = True,
 ) -> float:
     """Coarse USD to drain *backlog* files at *model* list prices.
+
+    *model* defaults to the resolved ``models.write`` id
+    (:func:`_resolve_estimate_model`, issue #571/M18) when not given explicitly,
+    so the estimate tracks the model the drain actually writes with; pass
+    *config* to route the yaml ``models.write`` knob.
 
     ``backlog × avg-tokens-per-file × per-MTok rate``, with the #236 batch
     discount applied when *batch* is set. Priced via the single per-model rate
     table in :mod:`athenaeum.models` (never a second hardcoded price site).
     """
+    if model is None:
+        model = _resolve_estimate_model(config)
     input_rate, output_rate = _rates_for_model(model)  # USD per million tokens
     per_file = (
         avg_input_per_file * input_rate + avg_output_per_file * output_rate
@@ -220,7 +239,8 @@ def build_advisory(
     ledger_records: list[dict[str, Any]],
     warn_days: int,
     this_run_files: int = 0,
-    model: str = DRAIN_ESTIMATE_MODEL,
+    model: str | None = None,
+    config: dict[str, Any] | None = None,
 ) -> DrainAdvisory | None:
     """Build a :class:`DrainAdvisory` when the backlog ETA exceeds *warn_days*.
 
@@ -254,6 +274,7 @@ def build_advisory(
         avg_input_per_file=avg_input,
         avg_output_per_file=avg_output,
         model=model,
+        config=config,
         batch=True,
     )
     suggested = _round_up_budget(cost * _SUGGESTED_BUDGET_MARGIN)
