@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.config import resolve_cache_dir
 
 SCOPE_ALL = "all"
 SCOPE_COMPILE = "compile"
@@ -82,14 +83,7 @@ def state_path(cache_dir: Path | None = None) -> Path:
     file always lands where the rest of athenaeum keeps its cache — and where
     the shell hooks look for it.
     """
-    if cache_dir is not None:
-        base = Path(cache_dir).expanduser()
-    else:
-        base = Path(
-            os.environ.get("ATHENAEUM_CACHE_DIR")
-            or (Path.home() / ".cache" / "athenaeum")
-        ).expanduser()
-    return base / "disabled"
+    return resolve_cache_dir(cache_dir) / "disabled"
 
 
 def _env_scope() -> str | None:

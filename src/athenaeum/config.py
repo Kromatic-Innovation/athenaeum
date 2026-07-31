@@ -19,6 +19,33 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# Issue #519/#521 (H9 + L3): the single canonical default cache-dir location
+# and the single resolver honouring the ``ATHENAEUM_CACHE_DIR`` override.
+#
+# Before this, ``~/.cache/athenaeum`` was constructed by hand at ~13 sites
+# across 8 modules — some consulting the env var first, most not — so "honours
+# ``ATHENAEUM_CACHE_DIR``" was a per-site property new code got wrong by
+# default (H9: ``serve`` wrote/read the wrong index). Every site now routes
+# through :data:`DEFAULT_CACHE_DIR` / :func:`resolve_cache_dir`; a guard test
+# asserts the literal is constructed nowhere else.
+DEFAULT_CACHE_DIR: Path = Path("~/.cache/athenaeum")
+
+
+def resolve_cache_dir(cache_dir: Path | None = None) -> Path:
+    """Resolve the athenaeum cache dir: ``arg > ATHENAEUM_CACHE_DIR env > default``.
+
+    Returns an ``expanduser()``-ed path (``~`` expanded); callers that need a
+    fully-resolved absolute path call ``.resolve()`` on the result. This is the
+    one place ``~/.cache/athenaeum`` is defaulted and the env override applied.
+    """
+    if cache_dir is not None:
+        return Path(cache_dir).expanduser()
+    env = os.environ.get("ATHENAEUM_CACHE_DIR")
+    if env:
+        return Path(env).expanduser()
+    return DEFAULT_CACHE_DIR.expanduser()
+
+
 _DEFAULTS: dict[str, Any] = {
     "auto_recall": True,
     "search_backend": "fts5",
