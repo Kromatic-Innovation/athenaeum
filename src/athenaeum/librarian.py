@@ -3057,6 +3057,7 @@ def run(
                 ledger_records=spend.read_ledger(spend.resolve_ledger_path(config)),
                 warn_days=resolve_drain_warn_days(config),
                 this_run_files=files_processed_count,
+                config=config,
             )
             if _advisory is not None:
                 log.warning("%s", _advisory.line)
