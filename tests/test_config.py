@@ -11,8 +11,10 @@ from athenaeum.config import (
     load_config,
     resolve_audience,
     resolve_extra_intake_roots,
+    resolve_max_merge_sources,
     resolve_min_cluster_cohesion,
     resolve_min_cluster_cohesion_scopes,
+    resolve_min_merge_confidence,
     resolve_owner,
     resolve_page_flag_bytes,
     resolve_page_warn_bytes,
@@ -755,3 +757,82 @@ class TestWriteDefaultConfig:
         (tmp_path / "athenaeum.yaml").write_text("custom: true\n")
         write_default_config(tmp_path)
         assert "custom: true" in (tmp_path / "athenaeum.yaml").read_text()
+
+
+class TestMinMergeConfidenceEnvAuthoritative:
+    """Issue #524 (M1): a parsed env value is authoritative over yaml.
+
+    ``ATHENAEUM_MIN_MERGE_CONFIDENCE=0`` disables the floor even when yaml sets
+    a non-zero one — previously the ``> 0.0`` guard dropped the env override and
+    silently fell through to yaml, so an emergency override did nothing.
+    """
+
+    def test_env_zero_overrides_nonzero_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_MIN_MERGE_CONFIDENCE", "0")
+        cfg = {"librarian": {"min_merge_confidence": 0.7}}
+        assert resolve_min_merge_confidence(cfg) == 0.0
+
+    def test_env_positive_wins_over_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_MIN_MERGE_CONFIDENCE", "0.9")
+        cfg = {"librarian": {"min_merge_confidence": 0.7}}
+        assert resolve_min_merge_confidence(cfg) == 0.9
+
+    def test_env_negative_clamps_to_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_MIN_MERGE_CONFIDENCE", "-3")
+        cfg = {"librarian": {"min_merge_confidence": 0.7}}
+        assert resolve_min_merge_confidence(cfg) == 0.0
+
+    def test_unset_env_falls_through_to_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_MIN_MERGE_CONFIDENCE", raising=False)
+        cfg = {"librarian": {"min_merge_confidence": 0.7}}
+        assert resolve_min_merge_confidence(cfg) == 0.7
+
+
+class TestMalformedNumericEnvWarns:
+    """Issue #524 (M2): a malformed numeric env value logs a WARNING naming the
+    variable and falls back to yaml/default — instead of silently swallowing
+    the typo. Exercises the shared :func:`_env_number` policy across several
+    numeric knobs (float, int, disable-semantics, and byte-guardrail)."""
+
+    def test_malformed_min_merge_confidence_warns_and_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_MIN_MERGE_CONFIDENCE", "0.85x")
+        cfg = {"librarian": {"min_merge_confidence": 0.7}}
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            assert resolve_min_merge_confidence(cfg) == 0.7
+        assert any(
+            "ATHENAEUM_MIN_MERGE_CONFIDENCE" in r.message and "malformed" in r.message
+            for r in caplog.records
+        ), caplog.text
+
+    def test_malformed_max_merge_sources_warns_and_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_MAX_MERGE_SOURCES", "notanint")
+        cfg = {"librarian": {"max_merge_sources": 9}}
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            assert resolve_max_merge_sources(cfg) == 9
+        assert any(
+            "ATHENAEUM_MAX_MERGE_SOURCES" in r.message for r in caplog.records
+        ), caplog.text
+
+    def test_malformed_byte_guardrail_warns_and_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The byte guardrail keeps its deliberate `> 0` rejection but now warns
+        # on a malformed value like every other numeric knob.
+        monkeypatch.setenv("ATHENAEUM_PAGE_WARN_BYTES", "notint")
+        with caplog.at_level(logging.WARNING, logger="athenaeum.config"):
+            assert resolve_page_warn_bytes({"librarian": {"page_warn_bytes": 4096}}) == 4096
+        assert any(
+            "ATHENAEUM_PAGE_WARN_BYTES" in r.message for r in caplog.records
+        ), caplog.text
