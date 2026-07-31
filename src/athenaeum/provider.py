@@ -51,8 +51,9 @@ import logging
 import os
 import shutil
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from athenaeum._retry import TransientAPIError
 from athenaeum.outbound_pii import redact_outbound_text
@@ -129,6 +130,111 @@ def preflight_provider(provider: str) -> str | None:
                 "no silent fallback to the api backend."
             )
     return None
+
+
+# ---------------------------------------------------------------------------
+# The LLM backend contract (issue #572 / epic #515)
+#
+# The seam is not greenfield: ``build_llm_client`` already hides the backend
+# from the four ``messages.create`` call sites, and ``ClaudeCliClient`` already
+# proves a non-SDK backend can serve the same surface. What was missing is a
+# *declared* interface — so adding a backend is a rewrite rather than a
+# registration. These ``Protocol`` classes name exactly the slice of the
+# anthropic SDK surface the call sites consume:
+#
+# * ``messages.create(**params)`` — the one method every backend must serve;
+# * the response the callers read — ``.content[0].text`` and ``.stop_reason``;
+# * the four normalized ``.usage`` counters
+#   :func:`athenaeum.models.cache_usage_counts` reads (issue #230).
+#
+# The concrete backends must ACTUALLY satisfy this contract — the ``# type:
+# ignore[dict-item]`` leaky-registry pattern the audit flagged at
+# ``search.py:1654-1657`` (concrete classes that do not satisfy their declared
+# Protocol) must not be repeated here. The ``TYPE_CHECKING`` assertion below
+# is what enforces that for :class:`ClaudeCliClient`: it type-checks the
+# adapter against :class:`LLMBackend` with no ``# type: ignore`` escape.
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class LLMUsage(Protocol):
+    """The four token counters :func:`~athenaeum.models.cache_usage_counts`
+    reads off ``response.usage`` (issue #230)."""
+
+    input_tokens: int
+    output_tokens: int
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
+
+
+@runtime_checkable
+class LLMTextBlock(Protocol):
+    """One content block. Callers read ``response.content[0].text``."""
+
+    text: str
+
+
+@runtime_checkable
+class LLMResponse(Protocol):
+    """The response surface the four ``messages.create`` call sites consume.
+
+    Declared as read-only ``@property`` members on purpose: a Protocol's plain
+    data attributes are matched INVARIANTLY, which would reject a backend whose
+    concrete field type merely *satisfies* the declared type (e.g.
+    ``ClaudeCliClient``'s ``content: list[_CliTextBlock]`` against a
+    ``Sequence[LLMTextBlock]`` field). Read-only properties are covariant, so a
+    concrete backend satisfies the contract by exposing compatible attributes —
+    which is exactly the "must ACTUALLY satisfy" guarantee issue #572 requires.
+
+    ``content`` is a sequence of text blocks (callers read ``content[0].text``);
+    ``stop_reason`` is the terminal reason (``"max_tokens"``, ``"end_turn"``,
+    ...) or ``None`` when a backend cannot report it; ``usage`` carries the four
+    normalized token counters.
+    """
+
+    @property
+    def content(self) -> Sequence[LLMTextBlock]: ...
+
+    @property
+    def stop_reason(self) -> str | None: ...
+
+    @property
+    def usage(self) -> LLMUsage: ...
+
+
+@runtime_checkable
+class LLMMessages(Protocol):
+    """The ``client.messages`` facade — a single ``create(**params)`` method.
+
+    Every athenaeum call site invokes ``client.messages.create(**params)`` and
+    reads an :class:`LLMResponse` off the result; the parameter dict itself
+    stays backend-neutral (a backend that cannot honor a param drops or
+    normalizes it — see the ``ProviderCapabilities`` child, issue #573).
+    """
+
+    def create(self, **params: Any) -> LLMResponse: ...
+
+
+@runtime_checkable
+class LLMBackend(Protocol):
+    """The declared LLM backend contract (issue #572 / epic #515).
+
+    A backend is anything exposing a ``messages`` facade whose ``create``
+    returns an :class:`LLMResponse`. Both shipping backends satisfy it: the
+    ``api`` backend *is* a real :class:`anthropic.Anthropic`, and
+    :class:`ClaudeCliClient` is the first EXPLICIT implementor — it mirrors the
+    same surface over the ``claude`` subscription CLI. Declaring the contract
+    turns "add a backend" from a rewrite into a registration; a future backend
+    registers by satisfying this Protocol, not by being wired into every call
+    site.
+
+    ``messages`` is a read-only ``@property`` for the same covariance reason as
+    :class:`LLMResponse` — so a backend whose ``messages`` is a concrete facade
+    (``_CliMessages``) still satisfies the contract.
+    """
+
+    @property
+    def messages(self) -> LLMMessages: ...
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +524,17 @@ class ClaudeCliClient:
         )
 
 
+if TYPE_CHECKING:
+    # Issue #572: ``ClaudeCliClient`` must ACTUALLY satisfy the declared
+    # backend contract — no ``# type: ignore`` escape (the leaky-registry
+    # anti-pattern the audit flagged at ``search.py:1654-1657``). If the
+    # adapter ever drifts from :class:`LLMBackend` (a renamed ``messages``
+    # facade, a ``create`` that stops returning an :class:`LLMResponse`), the
+    # type checker flags it right here. Never executed — this is a
+    # type-checker assertion only.
+    _cli_backend_contract: LLMBackend = ClaudeCliClient()
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
@@ -431,6 +548,15 @@ def build_llm_client(
     timeout: float | None = None,
 ) -> Any | None:
     """Construct the LLM client for the resolved provider (issue #330).
+
+    The returned client satisfies the :class:`LLMBackend` contract (issue #572):
+    ``claude-cli`` returns a :class:`ClaudeCliClient` (the first explicit
+    implementor, type-checked against the Protocol above), and ``api`` returns a
+    real :class:`anthropic.Anthropic`, which serves the same
+    ``messages.create`` / ``.content`` / ``.usage`` surface. The annotation
+    stays ``Any`` rather than ``LLMBackend`` so the external SDK client is not
+    forced through a fragile structural-subtype proof of the ``**params``
+    surface; the contract is declared and enforced for our own backend.
 
     Returns ``None`` when nothing is configured for the ``api`` backend (no
     ``ANTHROPIC_API_KEY``) so every deterministic offline fallback keeps
