@@ -72,6 +72,18 @@ class TestClassifyClaimKind:
         client.messages.create.side_effect = RuntimeError("boom")
         assert classify_claim_kind("something", client) == ""
 
+    def test_transient_giveup_fails_open(self, monkeypatch) -> None:
+        # Issue #569 (H6): classify_claim_kind is now wrapped in with_retry; a
+        # transient give-up still fails open to "" (unclassified) — the retry
+        # only buys resilience, it does not change the fail-open contract.
+        from athenaeum._retry import TransientAPIError
+
+        def _giveup(_call, **_kw):
+            raise TransientAPIError(5, RuntimeError("429 x5"))
+
+        monkeypatch.setattr("athenaeum.claim_kind.with_retry", _giveup)
+        assert classify_claim_kind("something", MagicMock()) == ""
+
     def test_empty_body_no_call(self) -> None:
         client = _client('{"claim_kind": "opinion"}')
         assert classify_claim_kind("", client) == ""

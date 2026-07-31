@@ -27,6 +27,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from athenaeum._retry import with_retry
 from athenaeum.config import resolve_model
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
@@ -129,13 +130,18 @@ def classify_claim_kind(
     model = _get_classify_model(config)
     user_msg = f"Classify this memory snippet.\n\n<memory>\n{snippet}\n</memory>"
     try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=64,
-            system=CLAIM_KIND_SYSTEM,
-            messages=[{"role": "user", "content": user_msg}],
+        # Issue #569 (H6): retry transient 429/529/connection blips with backoff
+        # rather than failing straight to unclassified on the first one.
+        response = with_retry(
+            lambda: client.messages.create(
+                model=model,
+                max_tokens=64,
+                system=CLAIM_KIND_SYSTEM,
+                messages=[{"role": "user", "content": user_msg}],
+            ),
+            description="claim_kind_classify",
         )
-    except Exception as exc:  # noqa: BLE001 -- fail open on any API error
+    except Exception as exc:  # noqa: BLE001 -- transient give-up or hard failure: fail open
         log.warning("claim_kind: classify call failed (%s); unclassified", exc)
         return ""
 
