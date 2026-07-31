@@ -34,7 +34,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import anthropic
 
@@ -1835,6 +1835,7 @@ def run(
     changed_paths: set[Path] | None = None,
     full_compile: bool = False,
     now: datetime | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error.
 
@@ -2098,6 +2099,18 @@ def run(
     def _deadline_exceeded() -> bool:
         return run_deadline is not None and time.monotonic() >= run_deadline
 
+    def _heartbeat() -> None:
+        # Issue #526 (H10): refresh the run lock's heartbeat at phase/file
+        # boundaries so ``heartbeat_age_seconds`` reflects PROGRESS, not merely
+        # the acquire time. Before this call existed, ``RunLock.heartbeat`` had
+        # no production caller, so a healthy run longer than
+        # ``break_stale_after`` (6h default) would have a "stale" heartbeat and
+        # a second invocation would auto-break a still-working process's lock.
+        # ``heartbeat`` is ``None`` for callers that hold no lock (e.g. the
+        # --dry-run path, which acquires no lock), so this is a safe no-op then.
+        if heartbeat is not None:
+            heartbeat()
+
     # Issue #464: per-phase run summary accumulator. `run()` appends one
     # ``(phase_name, elapsed_seconds, fields)`` tuple per phase it actually
     # ran (a phase never reached — e.g. after an early deadline trip — is
@@ -2168,6 +2181,7 @@ def run(
     # deadline raised inside it would be lost — the between-phase check here is
     # how the deadline "covers" wiki-dedup: if it ran long, the run stops now
     # rather than starting the (heavier) merge + entity phases past the cap.
+    _heartbeat()  # issue #526: progress past the #290 wiki-dedup phase
     if _deadline_exceeded():
         return _stop_on_deadline("post-compile (after #290 wiki-dedup)")
 
@@ -2461,6 +2475,10 @@ def run(
                     deferred_refs = outcome.deferred_refs
                 else:
                     for i, raw in enumerate(raw_files):
+                        # Issue #526 (H10): heartbeat at every per-file boundary
+                        # so a long healthy entity phase keeps the lock's
+                        # heartbeat fresh and is never mistaken for wedged.
+                        _heartbeat()
                         if not dry_run and usage.api_calls >= max_api_calls:
                             log.warning(
                                 "API call budget exhausted (%d/%d) — stopping early",
@@ -2856,6 +2874,7 @@ def run(
             # Issue #396: deadline check at the post-compile phase boundary,
             # before the retire + reresolve passes (both can commit / make
             # LLM calls).
+            _heartbeat()  # issue #526: progress into the retire/reresolve phase
             if _deadline_exceeded():
                 return _stop_on_deadline("post-compile (before retire/reresolve)")
 
