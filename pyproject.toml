@@ -108,7 +108,12 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
+# RUF100 flags `# noqa` directives that suppress a rule which is not enabled
+# (or which no longer fires), so a dead suppression can't silently accumulate
+# and read as an audited-and-accepted site (hestia#549). Widening `select`
+# here changes *what* is linted, not *whether* lint gates: `ruff check`
+# remains a required check exact-pinned to ruff==0.16.0.
+select = ["E", "F", "I", "W", "RUF100"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -450,7 +450,7 @@ def cross_scope_similarity_pairs(
             from athenaeum.search import VectorBackend
 
             embedding_provider = VectorBackend()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("cross_scope similarity: VectorBackend unavailable: %s", exc)
             return []
 
@@ -459,7 +459,7 @@ def cross_scope_similarity_pairs(
             id_to_entry.keys(),
             cache_dir,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("cross_scope similarity: fetch_embeddings failed: %s", exc)
         return []
 

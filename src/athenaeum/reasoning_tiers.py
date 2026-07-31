@@ -384,7 +384,7 @@ def record_reasoning_tier_decision(
         )
         _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
         return True
-    except Exception as exc:  # noqa: BLE001 — ledger write must never break the pipeline
+    except Exception as exc:
         log.debug(
             "reasoning tier decision log write skipped (%s): %s",
             type(exc).__name__,
@@ -1097,7 +1097,7 @@ def record_reasoning_tier_t2_decision(
         )
         _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
         return True
-    except Exception as exc:  # noqa: BLE001 — ledger write must never break the pipeline
+    except Exception as exc:
         log.debug(
             "T2 reasoning tier decision log write skipped (%s): %s",
             type(exc).__name__,

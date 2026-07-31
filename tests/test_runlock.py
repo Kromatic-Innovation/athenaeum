@@ -738,7 +738,7 @@ class TestAtomicSidecarAppends:
 
         # Simulate a crash after the temp file is written but before the
         # rename lands — os.replace raises.
-        def _boom(src: str, dst: str) -> None:  # noqa: ARG001
+        def _boom(src: str, dst: str) -> None:
             raise RuntimeError("simulated crash before rename")
 
         monkeypatch.setattr(os, "replace", _boom)
@@ -827,7 +827,7 @@ class TestRunLockSerializesWriters:
                     atomic_write_text(
                         sidecar, current.rstrip("\n") + f"\n\n---\n\n{marker}\n"
                     )
-            except BaseException as exc:  # noqa: BLE001 - surface to main thread
+            except BaseException as exc:
                 errors.append(exc)
 
         t1 = threading.Thread(target=_append_under_lock, args=("block-ONE",))

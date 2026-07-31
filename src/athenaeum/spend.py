@@ -291,7 +291,7 @@ def record_spend(
         )
         _append_line(target, json.dumps(record, separators=(",", ":")) + "\n")
         return True
-    except Exception as exc:  # noqa: BLE001 — ledger must never break a run
+    except Exception as exc:
         # Issue #568 (H1): a failed ledger write was invisible at debug level,
         # yet ``drain.run_drain``'s MANDATORY cumulative dollar ceiling is
         # computed by re-reading this ledger — a silent failure makes it read

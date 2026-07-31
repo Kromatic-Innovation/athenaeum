@@ -1127,7 +1127,7 @@ def _write_cluster_report_and_prune(
                     len(pruned),
                     retention,
                 )
-        except Exception as exc:  # noqa: BLE001 — prune must not abort the run
+        except Exception as exc:
             log.warning("cluster rotation prune failed (non-fatal): %s", exc)
 
 
@@ -1544,7 +1544,7 @@ def _run_reresolve_pass(
         return reresolve_open_questions(
             pending_path, client=client, config=config, usage=usage
         )
-    except Exception as exc:  # noqa: BLE001 — heal pass must not fail the run
+    except Exception as exc:
         log.warning("reresolve pass failed (%s); leaving questions untouched", exc)
         return 0
 
@@ -2771,7 +2771,7 @@ def run(
                     run_changed_paths = _auto_memory_changed_paths(
                         auto_memory_files, knowledge_root, auto_memory_manifest_path
                     )
-                except Exception as exc:  # noqa: BLE001 — stamp read must not break the run
+                except Exception as exc:
                     log.warning(
                         "auto-memory delta baseline read failed (non-fatal, "
                         "falling back to whole-corpus): %s",
@@ -2790,7 +2790,7 @@ def run(
                             ).replace(tzinfo=timezone.utc)
                             age_days = (run_now - stamp_at).total_seconds() / 86400.0
                             full_compile_due = age_days >= full_compile_every_days
-                    except Exception as exc:  # noqa: BLE001 — must not break the run
+                    except Exception as exc:
                         log.warning(
                             "full-compile stamp read failed (non-fatal, forcing "
                             "whole-corpus reconciliation this run): %s",
@@ -2886,7 +2886,7 @@ def run(
                     _write_auto_memory_manifest(
                         auto_memory_manifest_path, current_snapshot
                     )
-                except Exception as exc:  # noqa: BLE001 — stamp write must not break the run
+                except Exception as exc:
                     log.warning(
                         "auto-memory delta baseline write failed (non-fatal): %s", exc
                     )
@@ -2897,7 +2897,7 @@ def run(
                             run_now,
                             _capture_head(knowledge_root),
                         )
-                    except Exception as exc:  # noqa: BLE001 — must not break the run
+                    except Exception as exc:
                         log.warning(
                             "full-compile stamp write failed (non-fatal): %s", exc
                         )
@@ -3051,7 +3051,7 @@ def run(
                     )
                 ),
             )
-    except Exception as exc:  # noqa: BLE001 — guardrail must never break a run
+    except Exception as exc:
         log.warning("page-size guardrail check failed (non-fatal): %s", exc)
 
     # Issue #481: pending-merge revalidation advisor. #480 stopped NEW
@@ -3077,7 +3077,7 @@ def run(
                     "archive them",
                     len(_reval.retired),
                 )
-        except Exception as exc:  # noqa: BLE001 — advisor must never break a run
+        except Exception as exc:
             log.warning("pending-merge revalidation advisor failed (non-fatal): %s", exc)
 
     # Issue #464: normal finalize path — every return below this point
@@ -3111,7 +3111,7 @@ def run(
             )
             if _advisory is not None:
                 log.warning("%s", _advisory.line)
-        except Exception as exc:  # noqa: BLE001 — advisor must never break a run
+        except Exception as exc:
             log.debug(
                 "backlog-drain advisor skipped (%s): %s", type(exc).__name__, exc
             )
