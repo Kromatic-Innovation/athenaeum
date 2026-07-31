@@ -296,6 +296,24 @@ class RunLock:
             return False
         return True
 
+    def _holds_current_inode(self, fd: int) -> bool:
+        """True if *fd* refers to the inode currently at the lock path (issue #526).
+
+        After a break (``--force`` or auto-break) unlinks and re-creates the
+        lockfile, a descriptor opened *before* the break refers to an orphan
+        inode: ``flock`` on it still succeeds (nothing holds the orphan), but
+        any metadata written lands in a file no longer at the lock path, so two
+        processes each believe they "hold the lock" on two different inodes
+        (finding M6). Comparing ``fstat``/``stat`` ``st_ino`` catches that — the
+        descriptor is only valid if it names the file currently at the path.
+        Any ``OSError`` (e.g. the lockfile was unlinked mid-check) means the
+        descriptor is not the current inode.
+        """
+        try:
+            return os.fstat(fd).st_ino == os.stat(self.lockfile).st_ino
+        except OSError:
+            return False
+
     # -- public API --------------------------------------------------------
 
     def acquire(self) -> RunLock:
@@ -354,9 +372,24 @@ class RunLock:
             deadline = time.monotonic() + self.wait
             while time.monotonic() < deadline:
                 time.sleep(_POLL_INTERVAL)
+                # Issue #526 (M6): the fd above was opened BEFORE contention
+                # began. If the holder's lock is broken while we wait (--force
+                # or an auto-break from another waiter), the lockfile is
+                # unlinked and re-created, and THIS fd is left pointing at an
+                # orphan inode. Re-flocking that orphan "succeeds" while the
+                # real lock path is now a different inode → two holders. So
+                # re-open the fd on every poll to flock the inode currently at
+                # the path, and verify the inode after acquiring.
+                os.close(fd)
+                fd = self._open_fd()
                 if self._try_flock(fd):
-                    self._finish_acquire(fd)
-                    return self
+                    if self._holds_current_inode(fd):
+                        self._finish_acquire(fd)
+                        return self
+                    # We locked an inode that is no longer the file at the lock
+                    # path (a concurrent break rotated it). Drop the flock; the
+                    # next poll re-opens the current inode.
+                    fcntl.flock(fd, fcntl.LOCK_UN)
 
         # Still contended. Determine the holder's heartbeat age once and reuse
         # it for both the auto-break and the loud-warning checks below
