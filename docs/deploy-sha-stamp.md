@@ -17,32 +17,70 @@ and voltaire.
 - **Not committed:** `dist/` is gitignored. The stamp is a local build/deploy
   artifact, regenerated on every sync — never a tracked file.
 
-## Why a single checkout (not a `-deploy` worktree)
+## Primary path: the main-pinned deploy worktree (`scripts/deploy-guard.sh`)
 
-hestia and voltaire each run from a dedicated `main`-pinned `<repo>-deploy`
-worktree kept in sync by their `scripts/deploy-guard.sh`, which stamps
-`dist/.build-sha` after each rebuild. athenaeum's MCP server instead runs
-directly from a single source checkout with no separate deploy path (see the
-2026-07-21 audit, hestia#691) — so it uses the **lighter-weight equivalent**:
-`scripts/deploy-sync.sh` fast-forwards that one checkout to its deploy ref and
-stamps the running commit. If athenaeum ever adopts a dedicated deploy worktree,
-the same `scripts/write_build_sha.py` stamp writer drops into a guard flow
-unchanged (exactly the writer↔guard relationship voltaire already has).
+athenaeum#510 gave athenaeum the same fleet-standard deploy shape hestia and
+voltaire already have: a dedicated, `main`-pinned deploy worktree, kept in sync
+by `scripts/deploy-guard.sh` and stamped after every rebuild.
 
-## How it is written
+- **Location:** `$LOCAL_DEPLOYS_DIR/athenaeum` when `$LOCAL_DEPLOYS_DIR` is
+  set (the cwc#1422 local-deploys migration), else `~/Code/athenaeum-deploy`
+  on a machine that hasn't migrated yet. In the migrated (current) layout this
+  is **`~/local-deploys/athenaeum`**. Resolution lives in the shared
+  `scripts/lib/local-deploys.sh:local_deploy_dir` helper, matching every other
+  repo's guard.
+- **What runs there:** the worktree's `.venv` runs the athenaeum MCP stdio
+  server (`~/local-deploys/athenaeum/.venv/bin/athenaeum serve`, spawned fresh
+  per Claude Code session per `~/.claude.json`) and the nightly librarian. The
+  venv installs athenaeum **editable** (`pip install -e ".[mcp,vector]"`), so a
+  fast-forward of the worktree updates the running code without a reinstall;
+  the venv refresh only needs to run when dependencies/entry points change.
+- **Sync flow (`scripts/deploy-guard.sh`, default mode):** resolve the deploy
+  dir → refuse to touch a dirty worktree (loud abort, never a force-reset) →
+  resolve `origin/main` (configurable via `ATHENAEUM_DEPLOY_REF`) → if the
+  worktree's `dist/.build-sha` stamp already matches, no-op → on drift,
+  fast-forward (`--ff-only`) the worktree, refresh the `.venv`, then re-stamp
+  `dist/.build-sha` via `scripts/write_build_sha.py`. Any failure at any step
+  (dirty tree, non-fast-forward divergence, venv refresh, or stamp write)
+  aborts loudly with a recovery hint rather than force-resetting anything.
+- **`scripts/deploy-guard.sh --check`** reports `pre-activation` / `in-sync` /
+  `drift` / `error` and mutates nothing (exit `0` / `0` / `10` / `20`).
+- **Why this file exists at all:** `hestia redeploy`'s guard discovery
+  (hestia#802) looks for `<deploy>/scripts/deploy-guard.sh` (then
+  `<deploy>/deploy-guard.sh`) and did not know about athenaeum's
+  `scripts/deploy-sync.sh` — before `deploy-guard.sh` landed,
+  `hestia redeploy --repos Kromatic-Innovation/athenaeum` reported
+  `no-guard-script` and the deploy worktree only advanced on a manual pull
+  (found 2 commits behind `origin/main` during the 2026-07-29 cwc redeploy
+  audit, athenaeum#510). `deploy-guard.sh` is now the fleet-standard entrypoint
+  `hestia redeploy` runs on the redeploy cadence, so a push to `main` becomes
+  the deploy with no hand-rebuild required.
+
+## The lighter-weight equivalent: `scripts/deploy-sync.sh`
+
+`scripts/deploy-sync.sh` remains the operator-facing manual sync for a single
+checkout (fast-forward to the deploy ref + stamp), and is what an operator
+without the deploy worktree set up locally can run directly against their own
+checkout:
 
 - `scripts/write_build_sha.py` — writes `dist/.build-sha` from
   `git rev-parse HEAD`. Refuses to write anything that is not a 40-hex SHA.
   Root override for tests: `ATHENAEUM_BUILD_SHA_ROOT`.
-- `scripts/deploy-sync.sh` — the deploy-sync entrypoint: fast-forwards the
-  checkout to its deploy ref (`ATHENAEUM_DEPLOY_REF`, default `main`) and then
-  runs the stamp writer. `scripts/deploy-sync.sh --check` reports
-  `in-sync` / `drift` without mutating anything (exit `0` / `10`).
+- `scripts/deploy-sync.sh` — fast-forwards a checkout to its deploy ref
+  (`ATHENAEUM_DEPLOY_REF`, default `main`) and then runs the stamp writer.
+  `scripts/deploy-sync.sh --check` reports `in-sync` / `drift` without
+  mutating anything (exit `0` / `10`).
 
   ```bash
   scripts/deploy-sync.sh          # sync to the deploy ref, rewrite the stamp
   scripts/deploy-sync.sh --check  # report drift only, mutate nothing
   ```
+
+Both scripts fast-forward + reinstall/refresh + stamp the same way and share
+the same `write_build_sha.py` stamp writer, so they are interchangeable in
+what they produce; `deploy-guard.sh` is what the automated `hestia redeploy`
+cadence runs against the worktree above, `deploy-sync.sh` is the manual
+single-checkout path.
 
 ## Scope
 
