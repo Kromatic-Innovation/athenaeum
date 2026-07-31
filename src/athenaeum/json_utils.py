@@ -19,6 +19,13 @@ multi-object scan yields ``None`` rather than a guess (see the function
 docstring for the precise contract).
 Retry-on-parse-failure is deliberately out of scope for #219.
 
+Settling note (issue #539): :func:`scan_json_objects`, :func:`loads_lenient`,
+and :func:`repair_json_control_chars` are LIVE, not test-only — the audit's
+"no src callers" reading (§4.4, at ``4324f04``) is stale. The reasoning-tier
+LLM-output parser consumes them (:mod:`athenaeum.tiers` calls
+``scan_json_objects`` and ``loads_lenient``, and ``loads_lenient`` calls
+``repair_json_control_chars``). Intentional public utilities of this L0 seam.
+
 Layering: L0 primitive (leaf). May import only stdlib (``json``, ``re``,
 ``logging``). This module owns lenient extraction/repair of JSON *text*
 produced by an LLM — it must never grow athenaeum-specific parsing (e.g.
