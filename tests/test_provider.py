@@ -17,7 +17,15 @@ from athenaeum.json_utils import extract_json_object
 from athenaeum.models import TokenUsage, cache_usage_counts
 from athenaeum.provider import (
     ClaudeCliClient,
+    LLMBackend,
+    LLMMessages,
+    LLMResponse,
+    LLMTextBlock,
+    LLMUsage,
     ProviderConfigError,
+    _CliResponse,
+    _CliTextBlock,
+    _CliUsage,
     build_llm_client,
     resolve_provider,
 )
@@ -485,3 +493,57 @@ class TestSubscriptionCost:
         usage = TokenUsage()
         usage.add(1000, 500, model="claude-sonnet-4-6")
         assert usage.estimated_cost_usd > 0.0
+
+
+# ---------------------------------------------------------------------------
+# LLMBackend contract — the declared seam (#572 / epic #515)
+# ---------------------------------------------------------------------------
+
+
+class TestLLMBackendContract:
+    """The backend contract is DECLARED (a Protocol), and the shipping
+    ``claude-cli`` backend ACTUALLY satisfies it — not a `# type: ignore`
+    duck-type (the anti-pattern #572 calls out from search.py:1654)."""
+
+    def test_claude_cli_client_is_an_llm_backend(self):
+        # runtime_checkable: ClaudeCliClient exposes the ``messages`` facade.
+        client = ClaudeCliClient()
+        assert isinstance(client, LLMBackend)
+        assert isinstance(client.messages, LLMMessages)
+
+    def test_build_llm_client_claude_cli_satisfies_contract(self, monkeypatch):
+        monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")
+        client = build_llm_client(None)
+        assert isinstance(client, LLMBackend)
+
+    def test_cli_response_shapes_satisfy_the_declared_protocols(self):
+        resp = _CliResponse(
+            content=[_CliTextBlock(text='{"ok": 1}')],
+            usage=_CliUsage(
+                input_tokens=10,
+                output_tokens=5,
+                cache_creation_input_tokens=32,
+                cache_read_input_tokens=0,
+            ),
+            stop_reason="end_turn",
+        )
+        assert isinstance(resp, LLMResponse)
+        assert isinstance(resp.content[0], LLMTextBlock)
+        assert isinstance(resp.usage, LLMUsage)
+        # The surface the four call sites read is reachable through the contract.
+        assert resp.content[0].text == '{"ok": 1}'
+        assert resp.stop_reason == "end_turn"
+        assert cache_usage_counts(resp) == (10, 5, 32, 0)
+
+    def test_create_returns_an_llm_response(self, monkeypatch):
+        # A real ``create`` call (subprocess stubbed) returns an LLMResponse.
+        _stub_run(monkeypatch, stdout=_envelope(result='{"ok": 1}'))
+        client = ClaudeCliClient()
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=256,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert isinstance(resp, LLMResponse)
+        assert extract_json_object(resp.content[0].text) == {"ok": 1}
