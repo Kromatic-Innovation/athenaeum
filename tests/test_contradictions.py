@@ -396,3 +396,55 @@ class TestUsageThreading:
         assert usage.input_tokens == 0
         assert usage.cache_read_input_tokens == 0
         assert usage.api_calls == 0
+
+
+class TestDetectionIncomplete:
+    """Issue #569 (H6): a detector give-up AFTER transient-error retries flags
+    the verdict ``incomplete`` (so merge re-queues the cluster); a non-transient
+    failure or a clean verdict does not."""
+
+    def test_transient_giveup_flags_incomplete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum._retry import TransientAPIError
+
+        scope = tmp_path / "scope"
+        m1 = _write_am(scope, "a.md", "A")
+        m2 = _write_am(scope, "b.md", "B")
+        client = MagicMock()
+
+        def _giveup(_call, **_kw):
+            raise TransientAPIError(5, RuntimeError("429 ×5"))
+
+        monkeypatch.setattr("athenaeum.contradictions.with_retry", _giveup)
+        result = detect_contradictions([m1, m2], client)
+        assert result.detected is False
+        assert result.rationale == "llm-unavailable"
+        assert result.incomplete is True
+
+    def test_nontransient_failure_not_incomplete(self, tmp_path: Path) -> None:
+        # A RuntimeError is non-transient: with_retry re-raises immediately (no
+        # backoff sleep), and the degrade must NOT flag incomplete — re-running
+        # will not cure it.
+        scope = tmp_path / "scope"
+        m1 = _write_am(scope, "a.md", "A")
+        m2 = _write_am(scope, "b.md", "B")
+        client = MagicMock()
+        client.messages.create.side_effect = RuntimeError("api down")
+        result = detect_contradictions([m1, m2], client)
+        assert result.detected is False
+        assert result.rationale == "llm-unavailable"
+        assert result.incomplete is False
+
+    def test_clean_verdict_not_incomplete(self, tmp_path: Path) -> None:
+        scope = tmp_path / "scope"
+        m1 = _write_am(scope, "a.md", "A")
+        m2 = _write_am(scope, "b.md", "B")
+        client = _fake_client(
+            '{"detected": false, "conflict_type": null, '
+            '"members_involved": [], "conflicting_passages": [], '
+            '"rationale": "no conflict"}'
+        )
+        result = detect_contradictions([m1, m2], client)
+        assert result.detected is False
+        assert result.incomplete is False

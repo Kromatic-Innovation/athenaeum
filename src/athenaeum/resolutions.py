@@ -63,6 +63,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.config import resolve_model as _resolve_model_knob
 from athenaeum.contradictions import ContradictionResult
 from athenaeum.json_utils import extract_json_object
@@ -319,6 +320,11 @@ class ResolutionProposal:
     # backward-compatible (existing positional constructions are
     # unaffected).
     disambiguation_options: list[str] = field(default_factory=list)
+    # Issue #569 (H6): True when this fallback proposal is the result of the
+    # resolver call giving up AFTER its transient-error retries, NOT a genuine
+    # deterministic fallback. merge.py marks such clusters detection-incomplete
+    # so the next run's delta set re-examines them regardless of file changes.
+    incomplete: bool = False
 
 
 @dataclass
@@ -1511,14 +1517,20 @@ def _declared_winner(
     return None
 
 
-def _fallback(rationale: str) -> ResolutionProposal:
-    """Build the deterministic-fallback proposal for offline / error paths."""
+def _fallback(rationale: str, *, incomplete: bool = False) -> ResolutionProposal:
+    """Build the deterministic-fallback proposal for offline / error paths.
+
+    ``incomplete=True`` (issue #569) marks a fallback caused by the resolver
+    giving up after its transient-error retries, so merge.py can force the
+    cluster back into the next run's delta set.
+    """
     return ResolutionProposal(
         recommended_winner="neither",
         action="retain_both_with_context",
         rationale=rationale,
         confidence=0.0,
         source_precedence_used=[],
+        incomplete=incomplete,
     )
 
 
@@ -1705,33 +1717,45 @@ def propose_resolution(
     text = ""
     for attempt in range(max_attempts):
         try:
-            response = client.messages.create(
-                model=resolve_model,
-                max_tokens=1024,
-                # Prompt-caching breakpoint (issue #230): the resolver system
-                # prompt is the largest stable prefix in the codebase (3,387
-                # tokens per the Anthropic count-tokens endpoint with the Opus
-                # tokenizer; a live Sonnet run's cache counters reported 2,437)
-                # and the resolver is called repeatedly within a run.
-                # Note: 3,387 tokens is BELOW the Opus-tier 4,096-token minimum
-                # cacheable prefix, so on the default Opus resolver this
-                # breakpoint no-ops and the run summary's cache counters
-                # correctly read 0; caching engages on Sonnet-tier overrides
-                # (2,048-token minimum).
-                # Below a model's minimum cacheable prefix the marker is a
-                # silent no-op (no error, no extra cost), so this engages
-                # automatically when ATHENAEUM_RESOLVE_MODEL / resolve.model
-                # points at a model whose minimum is <= the prompt size.
-                system=[
-                    {
-                        "type": "text",
-                        "text": _RESOLVE_SYSTEM,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                messages=messages,
+            # Issue #569 (H6): retry transient 429/529/connection blips with
+            # backoff rather than degrading straight to the resolver-unavailable
+            # fallback (which live-delta would not revisit for days).
+            #
+            # Prompt-caching breakpoint (issue #230): the resolver system prompt
+            # is the largest stable prefix in the codebase (3,387 tokens per the
+            # Anthropic count-tokens endpoint with the Opus tokenizer; a live
+            # Sonnet run's cache counters reported 2,437) and the resolver is
+            # called repeatedly within a run. 3,387 tokens is BELOW the Opus-tier
+            # 4,096-token minimum cacheable prefix, so on the default Opus
+            # resolver this breakpoint no-ops and the run summary's cache
+            # counters correctly read 0; caching engages on Sonnet-tier overrides
+            # (2,048-token minimum). Below a model's minimum cacheable prefix the
+            # marker is a silent no-op (no error, no extra cost).
+            response = with_retry(
+                lambda: client.messages.create(
+                    model=resolve_model,
+                    max_tokens=1024,
+                    system=[
+                        {
+                            "type": "text",
+                            "text": _RESOLVE_SYSTEM,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    messages=messages,
+                ),
+                description="resolver_propose",
             )
-        except Exception as exc:  # noqa: BLE001 -- fall back on any API error
+        except TransientAPIError as exc:
+            # Retries exhausted on a transient error — fail open, but flag the
+            # fallback INCOMPLETE so the cluster is force-re-queued next run.
+            log.warning(
+                "resolutions: resolver gave up after transient-error retries "
+                "(%s); returning fallback, marked detection-incomplete",
+                exc,
+            )
+            return _fallback("resolver-unavailable", incomplete=True)
+        except Exception as exc:  # noqa: BLE001 -- non-transient: fall back, no re-queue
             log.warning(
                 "resolutions: resolver call failed (%s); returning fallback",
                 exc,
@@ -2566,13 +2590,19 @@ def propose_freetext_source_edits(
 
     freetext_model = _get_model(config)
     try:
-        response = client.messages.create(
-            model=freetext_model,
-            max_tokens=4096,
-            system=_FREETEXT_EDIT_SYSTEM,
-            messages=[{"role": "user", "content": user_msg}],
+        # Issue #569 (H6): retry transient blips before falling back to plain
+        # annotation. No detection-incomplete marker here — this path is not a
+        # per-cluster contradiction verdict, it degrades to annotation in place.
+        response = with_retry(
+            lambda: client.messages.create(
+                model=freetext_model,
+                max_tokens=4096,
+                system=_FREETEXT_EDIT_SYSTEM,
+                messages=[{"role": "user", "content": user_msg}],
+            ),
+            description="resolver_freetext_edit",
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 -- transient give-up or hard failure: annotate
         log.warning(
             "resolutions: propose_freetext_source_edits — API call failed; "
             "falling back to annotation"
