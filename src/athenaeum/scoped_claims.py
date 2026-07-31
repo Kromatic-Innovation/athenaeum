@@ -337,6 +337,12 @@ def scope_leq(a: ScopeCoordinate, b: ScopeCoordinate, tree: ScopeTree) -> bool:
     completeness/tests; the OVERRIDE verdict uses :func:`tree_leq` (org+locale
     only) so time-interval nesting does not silently drive an override — see the
     module docstring's deferred-design note.
+
+    Intentional, retained helper (issue #539 settling of §4.4): it is the
+    full-poset counterpart to the deliberately-narrower :func:`tree_leq` the
+    shipped comparison path uses, kept so the complete order stays expressed and
+    tested alongside the design decision to narrow it. Not dead; an intentional
+    internal symbol (not on the stable ``__all__`` surface).
     """
     return (
         tree.org.leq(a.org, b.org)
