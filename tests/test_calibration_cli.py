@@ -8,6 +8,8 @@ import json
 from contextlib import redirect_stdout
 from pathlib import Path
 
+import pytest
+
 from athenaeum.calibration import sample_tier_decision
 from athenaeum.cli import main as cli_main
 
@@ -17,6 +19,12 @@ def _run(argv: list[str]) -> tuple[int, str]:
     with redirect_stdout(buf):
         rc = cli_main(argv)
     return rc, buf.getvalue()
+
+
+@pytest.fixture
+def _tiers_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enable the reasoning-tier surface (issue #518 — default OFF)."""
+    monkeypatch.setenv("ATHENAEUM_REASONING_TIER_AUDITING_ENABLED", "1")
 
 
 def _seed_audit(knowledge_root: Path, *, tier: str, verdict: str, pid: str) -> str:
@@ -39,7 +47,18 @@ def _seed_audit(knowledge_root: Path, *, tier: str, verdict: str, pid: str) -> s
     return rec["id"]
 
 
-def test_summary_empty(tmp_path: Path) -> None:
+def test_summary_gated_off_by_default(tmp_path: Path) -> None:
+    """Issue #518: with the tiers disabled (the default), the summary reports
+    an explicit not-enabled state — not a 0/0/0 all-clear that lies."""
+    (tmp_path / "wiki").mkdir()
+    rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["enabled"] is False
+    assert "not enabled" in payload["error"]
+
+
+def test_summary_empty(tmp_path: Path, _tiers_enabled: None) -> None:
     (tmp_path / "wiki").mkdir()
     rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
     assert rc == 0
@@ -49,14 +68,14 @@ def test_summary_empty(tmp_path: Path) -> None:
     }
 
 
-def test_summary_after_sampling(tmp_path: Path) -> None:
+def test_summary_after_sampling(tmp_path: Path, _tiers_enabled: None) -> None:
     _seed_audit(tmp_path, tier="T2", verdict="approve", pid="p1")
     rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
     assert rc == 0
     assert json.loads(out)["T2"]["sampled"] == 1
 
 
-def test_review_overturn_flow(tmp_path: Path) -> None:
+def test_review_overturn_flow(tmp_path: Path, _tiers_enabled: None) -> None:
     audit_id = _seed_audit(tmp_path, tier="T2", verdict="approve", pid="p2")
     rc, out = _run(
         [
@@ -78,7 +97,7 @@ def test_review_overturn_flow(tmp_path: Path) -> None:
     assert json.loads(out)["T2"] == {"sampled": 1, "reviewed": 1, "overturned": 1}
 
 
-def test_review_unknown_id_exits_nonzero(tmp_path: Path) -> None:
+def test_review_unknown_id_exits_nonzero(tmp_path: Path, _tiers_enabled: None) -> None:
     (tmp_path / "wiki").mkdir()
     rc, _ = _run(
         [
@@ -95,7 +114,7 @@ def test_review_unknown_id_exits_nonzero(tmp_path: Path) -> None:
     assert rc == 1
 
 
-def test_summary_text_output(tmp_path: Path) -> None:
+def test_summary_text_output(tmp_path: Path, _tiers_enabled: None) -> None:
     _seed_audit(tmp_path, tier="T1", verdict="reject", pid="p3")
     rc, out = _run(["calibration", "summary", "--path", str(tmp_path)])
     assert rc == 0
