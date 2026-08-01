@@ -140,7 +140,7 @@ def _resolve_all_embeddings(
             from athenaeum.search import VectorBackend
 
             raw_hits = VectorBackend().fetch_embeddings(id_to_file.keys(), cache_dir)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — degrade to fallback on any error
             log.debug("delta: fetch_embeddings failed: %s", exc)
             raw_hits = {}
         for idx_id, vec in raw_hits.items():

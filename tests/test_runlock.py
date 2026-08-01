@@ -426,7 +426,7 @@ class TestWaiterStaleFdReopen:
                 acquired["fd_ino"] = os.fstat(lk._fd).st_ino  # type: ignore[arg-type]
                 acquired["path_ino"] = os.stat(lockfile).st_ino
                 lk.release()
-            except BaseException as exc:  # pragma: no cover - surfaced via assert
+            except BaseException as exc:  # noqa: BLE001 — pragma: no cover - surface to main thread
                 errors.append(exc)
 
         t = threading.Thread(target=waiter)
@@ -827,7 +827,7 @@ class TestRunLockSerializesWriters:
                     atomic_write_text(
                         sidecar, current.rstrip("\n") + f"\n\n---\n\n{marker}\n"
                     )
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - surface to main thread
                 errors.append(exc)
 
         t1 = threading.Thread(target=_append_under_lock, args=("block-ONE",))

@@ -137,7 +137,16 @@ line-length = 100
 # and read as an audited-and-accepted site (hestia#549). Widening `select`
 # here changes *what* is linted, not *whether* lint gates: `ruff check`
 # remains a required check exact-pinned to ruff==0.16.0.
-select = ["E", "F", "I", "W", "RUF100"]
+#
+# BLE001 (hestia#592): flags `except Exception`/bare-except. Every `src/`
+# site was given an honest per-site judgement — narrowed to a specific
+# exception type where a failure mode is expected, or kept broad with a
+# live, rationale-bearing `# noqa: BLE001` at a deliberate last-resort
+# boundary (best-effort cleanup, ledger/advisor writes that must never
+# break a run, an offline-fallback construction, a chromadb boundary whose
+# exception types move across releases). RUF100 (above) now keeps every
+# one of those suppressions honest.
+select = ["E", "F", "I", "W", "RUF100", "BLE001"]
 
 [tool.mypy]
 # NON-BLOCKING type check (hestia#550). The package ships `py.typed`

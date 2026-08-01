@@ -453,6 +453,6 @@ def live_ready() -> tuple[bool, str]:
     """
     try:
         build_live_client()
-    except (RuntimeError, Exception) as exc:
+    except (RuntimeError, Exception) as exc:  # noqa: BLE001 — skip on any construction failure
         return False, str(exc)
     return True, ""
