@@ -24,6 +24,24 @@ from athenaeum._cli_shared import _iso_date
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
 
 
+def _numeric_frontmatter_value(value: object) -> int | float | str:
+    """Narrow an open-schema frontmatter value to something ``float``/``int`` accept.
+
+    :func:`athenaeum.models.parse_frontmatter` intentionally returns
+    ``dict[str, object]`` (YAML frontmatter is open-schema — see that
+    function's docstring), so a numeric-looking field like ``warm_score`` is
+    typed ``object`` at the point of use here. Callers already wrap the
+    ``float()``/``int()`` call in ``except (TypeError, ValueError)`` to
+    tolerate a malformed or missing value at runtime; this just gives mypy a
+    type ``float``/``int`` actually accept, falling back to ``str(value)`` for
+    anything else so the existing except-clause is what catches a genuinely
+    unparseable value (e.g. a non-numeric string), not a new failure mode here.
+    """
+    if isinstance(value, (int, float, str)):
+        return value
+    return str(value)
+
+
 def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
     """Register ``recall``, ``people``, ``query-topics``, ``stopwords``, ``test-mcp``."""
 
@@ -405,15 +423,19 @@ def cmd_people(args: argparse.Namespace) -> int:
                 continue
 
         try:
-            warm_score = float(meta.get("warm_score") or 0)
+            warm_score = float(_numeric_frontmatter_value(meta.get("warm_score") or 0))
         except (TypeError, ValueError):
             warm_score = 0.0
         try:
-            meeting_count = int(meta.get("meeting_count_24mo") or 0)
+            meeting_count = int(
+                _numeric_frontmatter_value(meta.get("meeting_count_24mo") or 0)
+            )
         except (TypeError, ValueError):
             meeting_count = 0
         try:
-            sent_count = int(meta.get("sent_count_24mo") or 0)
+            sent_count = int(
+                _numeric_frontmatter_value(meta.get("sent_count_24mo") or 0)
+            )
         except (TypeError, ValueError):
             sent_count = 0
 

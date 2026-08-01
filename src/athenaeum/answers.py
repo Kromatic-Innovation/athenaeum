@@ -60,6 +60,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import anthropic
 
+    from athenaeum.models import TokenUsage
+
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.fingerprint import (
     _member_key_str,
@@ -621,9 +623,9 @@ def _writeback_source(
     pq: PendingQuestion,
     roots: list[Path],
     *,
-    client: "object | None" = None,
+    client: "anthropic.Anthropic | None" = None,
     config: "dict | None" = None,
-    usage: "object | None" = None,
+    usage: "TokenUsage | None" = None,
 ) -> int:
     """Apply ``pq``'s ratified answer to its source memory file(s).
 
