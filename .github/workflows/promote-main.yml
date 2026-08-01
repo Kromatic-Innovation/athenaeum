@@ -7,15 +7,29 @@ name: Promote Main
 # develop-main`). It is versioned in code-workspace-config at
 # `templates/promote-main.yml` and synced into each platform repo by
 # `scripts/sync_promote_workflows.py` (mirror of `derive_repo_configs.py`).
-# A CI drift-check (`.github/workflows/promote-workflow-drift.yml`) fails the
-# build if a repo's committed copy diverges from this canonical content.
+# A CI drift-check (`code-workspace-config/.github/workflows/promote-workflow-drift.yml`)
+# fails the build if a repo's committed copy diverges from this canonical content.
 #
 # To change the promotion contract, edit THIS template and re-run the sync
 # script — never hand-edit a repo's `.github/workflows/promote-main.yml`.
 # cwc#1468. End home: cron-fleet (rides cwc#1107).
 #
-# Contract — the `{source_branch, target_branch, reason}` winner (rejecting the
-# old `{sha, reason}` + hardcoded-`ci.yml` shape):
+# Contract — `{source_branch, target_branch, reason}` plus an OPTIONAL `sha`
+# (cwc#1866 / hestia#1021). The base contract is the `{source_branch,
+# target_branch, reason}` winner (rejecting the old REQUIRED-`{sha, reason}` +
+# hardcoded-`ci.yml` shape). The optional `sha` re-introduces SHA pinning as an
+# ADD-ON, never a replacement:
+#
+#   - Absent (the default, and every un-migrated caller): behavior is exactly as
+#     before — the source SHA is re-resolved from the `source_branch` tip at
+#     runtime.
+#   - Present: promote that EXACT commit. `hestia promote` reads develop's tip at
+#     gate time and passes it here, so a commit landing on develop mid-flight
+#     cannot divert the promotion to a newer, still-building SHA (hestia#1021).
+#     The workflow asserts the pinned SHA is reachable from `source_branch` and
+#     that `main` fast-forwards to it, gates `CI Required` on that exact SHA, and
+#     fast-forwards `main` to it WITHOUT re-resolving the branch. The hestia half
+#     is a safe no-op until this template accepts `sha`.
 #
 # Platform repos are `develop-main`: `main` is the deliberate deploy ref (the
 # launchd registry deploy checkout is main-pinned; deploy-guard.sh
@@ -49,6 +63,14 @@ on:
       reason:
         description: Promotion reason for audit trail
         required: true
+      sha:
+        description: >-
+          Optional exact commit SHA to promote. When set, this exact commit is
+          promoted instead of re-resolving the source-branch tip (hestia#1021).
+          Must be reachable from source_branch. When empty (the default),
+          behavior is unchanged — the source-branch tip is promoted.
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -66,6 +88,7 @@ jobs:
       SOURCE_BRANCH: ${{ github.event.inputs.source_branch }}
       TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
       PROMOTION_REASON: ${{ github.event.inputs.reason }}
+      PROMOTE_SHA: ${{ github.event.inputs.sha }}
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -107,6 +130,22 @@ jobs:
           SOURCE_SHA="$(git rev-parse "origin/${SOURCE_BRANCH}")"
           TARGET_SHA="$(git rev-parse "origin/${TARGET_BRANCH}")"
 
+          # Optional pinned `sha` (cwc#1866 / hestia#1021): when supplied, promote
+          # that EXACT commit instead of the branch tip resolved just above, so a
+          # commit landing on ${SOURCE_BRANCH} mid-flight cannot divert the
+          # promotion to a newer, still-building SHA. The pinned commit must be
+          # reachable from ${SOURCE_BRANCH} (its tip, or an ancestor of it — the
+          # gated commit hestia read). When absent, this block is skipped and the
+          # source SHA stays the branch tip: behavior is unchanged.
+          if [ -n "${PROMOTE_SHA:-}" ]; then
+            if ! git merge-base --is-ancestor "$PROMOTE_SHA" "$SOURCE_SHA"; then
+              echo "::error::Pinned sha ${PROMOTE_SHA} is not reachable from origin/${SOURCE_BRANCH} (tip ${SOURCE_SHA}). Promote only a commit that is on ${SOURCE_BRANCH}."
+              exit 1
+            fi
+            echo "Promoting pinned sha ${PROMOTE_SHA} (origin/${SOURCE_BRANCH} tip is ${SOURCE_SHA})."
+            SOURCE_SHA="$PROMOTE_SHA"
+          fi
+
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_ENV"
           echo "target_sha=$TARGET_SHA" >> "$GITHUB_ENV"
 
@@ -127,19 +166,28 @@ jobs:
           set -euo pipefail
 
           # `to_main` gate is `ci_green`; the enforcing context is the `CI
-          # Required` aggregate check. Fail closed if it is not a completed
-          # success on the exact SHA being promoted.
-          required=("CI Required")
+          # Required` aggregate check. Fail closed unless it is an UNAMBIGUOUS
+          # success on the exact SHA being promoted: there must be at least one
+          # `CI Required` check-run AND every one must have concluded 'success'.
+          #
+          # cron-fleet#138 / cwc#1903: the prior `head -n 1` logic picked a
+          # single conclusion nondeterministically, so two same-named check-runs
+          # that DISAGREE (a stale success + a failed rerun) could resolve to
+          # 'success' and promote a failed tree. The single-source-of-truth jq
+          # filter below encodes "≥1 match and all success"; it is exercised
+          # verbatim (extracted, not reimplemented) by
+          # scripts/test_sync_promote_workflows.py against recorded check-run
+          # payloads. `length > 0` is required because jq's `all(empty; …)` is
+          # vacuously true — an empty match must fail closed, not pass.
+          CI_REQUIRED_JQ='[.check_runs[] | select(.name == "CI Required") | .conclusion] as $c | if ($c | length) > 0 and (all($c[]; . == "success")) then "success" else "blocked" end'
 
-          for ctx in "${required[@]}"; do
-            conclusion=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${source_sha}/check-runs" \
-              --jq ".check_runs[] | select(.name == \"${ctx}\") | .conclusion" | head -n 1)
-            if [ "$conclusion" != "success" ]; then
-              echo "::error::Required check '${ctx}' is not passing on ${source_sha} (conclusion='${conclusion:-<missing>}'). Wait for develop CI or investigate failures."
-              exit 1
-            fi
-            echo "ok: ${ctx} = success"
-          done
+          verdict=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${source_sha}/check-runs" \
+            --jq "$CI_REQUIRED_JQ")
+          if [ "$verdict" != "success" ]; then
+            echo "::error::Required check 'CI Required' is not an unambiguous success on ${source_sha} (verdict='${verdict}'). Every 'CI Required' check-run must have concluded success. Wait for develop CI or investigate failures."
+            exit 1
+          fi
+          echo "ok: CI Required = success"
 
       - name: Set promoted SHA output
         id: set_promoted_sha
