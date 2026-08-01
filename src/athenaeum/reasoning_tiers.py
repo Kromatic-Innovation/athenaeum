@@ -743,7 +743,7 @@ T2_TIER_NAME = "T2"
 #: T2 is the opus-class deep-reasoning tier. Overridable via
 #: ``ATHENAEUM_REASONING_T2_MODEL`` env or ``models.reasoning_t2`` yaml —
 #: same env/yaml/default precedence as :func:`get_t1_model` (issue #232).
-DEFAULT_T2_MODEL = "claude-opus-4-1-20250805"
+DEFAULT_T2_MODEL = "claude-opus-4-8"  # Opus 4.8 (was 4.1, retiring; #633)
 
 
 def get_t2_model(config: dict[str, Any] | None = None) -> str:
