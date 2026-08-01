@@ -31,6 +31,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from athenaeum.answers import PendingQuestion, parse_pending_questions
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
@@ -189,7 +190,15 @@ def add_questions_subparser(subparsers: argparse._SubParsersAction) -> None:
     q_parser.set_defaults(func=cmd_questions)
     q_sub = q_parser.add_subparsers(dest="questions_target")
 
-    common = {
+    # Explicit annotation: without it mypy infers dict[str, tuple[str, dict[str,
+    # object]]] (the nested kwargs dicts mix `type: Path`, `default: ...`,
+    # `action: str`, `help: str` values, so the value type widens to `object`),
+    # which then fails every `**common[...][1]` call below with "Argument
+    # after ** must be a mapping, not object" (issue #595). argparse's own
+    # ``add_argument(**kwargs)`` is typed to accept ``**Any`` anyway, so
+    # ``dict[str, Any]`` here is the concrete-enough type — it just needs to
+    # not be ``object``.
+    common: dict[str, tuple[str, dict[str, Any]]] = {
         "path": (
             "--path",
             {
