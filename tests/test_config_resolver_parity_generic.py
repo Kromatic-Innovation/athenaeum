@@ -333,7 +333,7 @@ class TestGenericResolverParity:
         for candidate_cfg in candidates:
             try:
                 result = _invoke(fn, candidate_cfg, tmp_path)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — any raise proves the key was read; see comment
                 # A resolver that raises on our synthetic sentinel (e.g.
                 # resolve_screening validating `action`) is still PROVING it
                 # read the key -- just via a loud rejection rather than a
@@ -403,7 +403,7 @@ class TestGenericResolverParity:
                 monkeypatch.setenv(env_var, env_value)
                 try:
                     result = _invoke(fn, None, tmp_path)
-                except Exception:
+                except Exception:  # noqa: BLE001 — any raise proves the env var was read; see comment
                     # A malformed/rejected sentinel causing a validation
                     # error also proves the env var was READ (see rationale
                     # in test_yaml_key_is_actually_read) -- just via a loud

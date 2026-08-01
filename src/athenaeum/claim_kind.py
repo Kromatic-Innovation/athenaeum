@@ -170,7 +170,7 @@ def classify_claim_kind(
             ),
             description="claim_kind_classify",
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- transient give-up or hard failure: fail open
         log.warning("claim_kind: classify call failed (%s); unclassified", exc)
         return ""
 

@@ -566,7 +566,7 @@ def _rebuild_recall_index(
                 wiki_root, cache_dir, extra_roots=extra_roots, config=cfg
             )
         print(f"  recall index rebuilt ({backend}): {count} page(s).")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - rebuild failure must not fail prune
         print(
             f"  WARN recall index rebuild failed ({type(exc).__name__}): {exc}",
             file=sys.stderr,

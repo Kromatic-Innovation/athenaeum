@@ -127,7 +127,7 @@ def extract_topics(
 
         provider = resolve_provider(config)
         client = build_llm_client(config, timeout=timeout, max_retries=0)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — never raise out of the recall hook
         # Missing SDK, a bad ``llm.provider`` value, etc. — collapse to the
         # regex-extractor fallback, same guarantee the whole module makes.
         log.warning(
@@ -158,7 +158,7 @@ def extract_topics(
                 {"role": "user", "content": _USER_TEMPLATE.format(prompt=prompt)}
             ],
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — ledger must never break recall
         # WARNING (not debug): silent fall-through to the regex extractor
         # hides a degraded state — topics lose proper-noun rescue even
         # though the feature looks "working". The class name in the log
