@@ -56,7 +56,7 @@ class TestServeHonoursCacheDir:
         return knowledge
 
     def _run_serve(self, monkeypatch, knowledge: Path, cache_dir_arg):
-        import athenaeum.cli as cli
+        import athenaeum._cmd_serve as cmd_serve_mod
         import athenaeum.mcp_server as mcp
 
         captured: dict[str, object] = {}
@@ -80,7 +80,7 @@ class TestServeHonoursCacheDir:
             cache_dir=cache_dir_arg,
             verbose=False,
         )
-        rc = cli._cmd_serve(args)
+        rc = cmd_serve_mod.cmd_serve(args)
         assert rc == 0
         return captured
 
@@ -100,6 +100,7 @@ class TestServeHonoursCacheDir:
 
     def test_serve_subparser_declares_cache_dir_flag(self) -> None:
         # The serve subparser must accept --cache-dir (previously it did not).
+        import athenaeum._cmd_serve as cmd_serve_mod
         import athenaeum.cli as cli
 
         rc_holder: dict[str, object] = {}
@@ -108,16 +109,18 @@ class TestServeHonoursCacheDir:
             rc_holder["cache_dir"] = args.cache_dir
             return 0
 
-        # main() dispatches serve -> _cmd_serve; stub the handler so we only
-        # exercise argument parsing, not the server.
-        orig = cli._cmd_serve
-        cli._cmd_serve = _fake_serve  # type: ignore[assignment]
+        # main() rebuilds the parser (and re-binds set_defaults(func=...))
+        # on every call, resolving add_serve_subparser's `cmd_serve` name from
+        # this module's globals at call time — so patching the module-level
+        # name here is visible to the next cli.main() dispatch.
+        orig = cmd_serve_mod.cmd_serve
+        cmd_serve_mod.cmd_serve = _fake_serve  # type: ignore[assignment]
         try:
             rc = cli.main(
                 ["serve", "--path", "/tmp/kb", "--cache-dir", "/tmp/custom"]
             )
         finally:
-            cli._cmd_serve = orig  # type: ignore[assignment]
+            cmd_serve_mod.cmd_serve = orig  # type: ignore[assignment]
         assert rc == 0
         assert rc_holder["cache_dir"] == Path("/tmp/custom")
 

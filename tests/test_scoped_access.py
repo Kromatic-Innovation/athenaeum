@@ -579,7 +579,7 @@ class TestCliRecallAudience:
         audience: str | None,
         capsys: pytest.CaptureFixture[str],
     ) -> str:
-        from athenaeum.cli import _cmd_recall
+        from athenaeum._cmd_query import cmd_recall as _cmd_recall
 
         args = argparse.Namespace(
             query=query,
