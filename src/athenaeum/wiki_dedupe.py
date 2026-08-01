@@ -90,11 +90,14 @@ from athenaeum.clusters import (
 )
 from athenaeum.config import load_config, resolve_heartbeat_interval
 from athenaeum.merge import (
-    _merge_proposal_suppression_reason,
     derive_topic_slug,
     synthesize_body,
 )
-from athenaeum.merge_type_gate import build_cite_proposal, cross_class_precheck
+from athenaeum.merge_type_gate import (
+    _merge_proposal_suppression_reason,
+    build_cite_proposal,
+    cross_class_precheck,
+)
 from athenaeum.models import AutoMemoryFile, parse_frontmatter, validity_bound_str
 from athenaeum.pending_merges import write_pending_merge
 from athenaeum.pii import is_pii_flagged

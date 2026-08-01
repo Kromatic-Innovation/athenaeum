@@ -20,21 +20,18 @@ gate set it re-checks).
 SCC membership (L4 domain/pipeline). This module is imported at top level by
 ``merge.py`` (``write_pending_merge``), ``wiki_dedupe.py``, and ``librarian.py``
 (all normal downward dependencies from their side). The librarian-centered
-named-8 coupling was dissolved in issue #545, but this module's OWN cycle with
-``merge`` was NOT part of that scope (it hinges on
-``_merge_proposal_suppression_reason``, not one of #545's three hoisted
-primitives) and remains as a PRE-EXISTING residual SCC ``{merge,
-pending_merges, calibration, reasoning_tiers}``, pinned as a baseline by
-``tests/test_import_graph_acyclic.py`` with a follow-up issue tracking its
-dissolution. It owns the deferred (function-local) side of the
-merge<->pending_merges cycle:
+named-8 coupling was dissolved in issue #545; this module's OWN cycle with
+``merge`` (it hinged on ``_merge_proposal_suppression_reason``, not one of
+#545's three hoisted primitives) survived as a PRE-EXISTING residual SCC
+``{merge, pending_merges, calibration, reasoning_tiers}`` and was dissolved in
+issue #640:
 
-- ``revalidate_pending_merges`` (~line 1316): local ``from athenaeum.merge
-  import _merge_proposal_suppression_reason`` — the code comment at the
-  call site states the reason directly: "merge.py imports
-  write_pending_merge from this module, so a module-level import of the
-  gate would be circular." Since ``merge.py`` already imports THIS module
-  at top level, this side must stay deferred.
+- ``revalidate_pending_merges`` formerly took a deferred ``from athenaeum.merge
+  import _merge_proposal_suppression_reason`` because ``merge.py`` imports
+  ``write_pending_merge`` FROM this module at top level, so a module-level import
+  of ``merge`` would have been circular. Issue #640 hoisted that guardrail DOWN
+  to the :mod:`athenaeum.merge_type_gate` leaf, so this module now imports it at
+  top level like any other downward dependency and the cycle is gone.
 
 Block format (mirrors ``_pending_questions.md``):
 
@@ -87,6 +84,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.merge_type_gate import _merge_proposal_suppression_reason
 from athenaeum.models import parse_frontmatter, render_frontmatter, slugify
 from athenaeum.provenance import record_merge_provenance
 from athenaeum.sidecar_blocks import (
@@ -1353,10 +1351,6 @@ def revalidate_pending_merges(
     Dry-run by default (reports what WOULD be retired, writes nothing); pass
     ``apply=True`` to write. ``now`` is injectable for deterministic tests.
     """
-    # Lazy import: merge.py imports write_pending_merge from this module, so a
-    # module-level import of the gate would be circular.
-    from athenaeum.merge import _merge_proposal_suppression_reason
-
     result = RevalidationResult(retired=[], kept=0, applied=False)
     if not merges_path.exists():
         return result
