@@ -760,7 +760,9 @@ def process_one(
         return result
 
     # --- Tier 1: Programmatic matching ---
-    matched = tier1_programmatic_match(raw, index)
+    # Issue #662: pass config so junk-name matches (here/get/main/reach/lane a
+    # and operator-tuned stopwords) are filtered before they cost a tier-3 call.
+    matched = tier1_programmatic_match(raw, index, config=config)
     matched_names = [name for name, _, _ in matched]
 
     for name, uid_or_name, fpath in matched:
