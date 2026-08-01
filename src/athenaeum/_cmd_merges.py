@@ -245,6 +245,7 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
             "The merges half of `athenaeum decisions`."
         ),
     )
+    m_parser.set_defaults(func=cmd_merges)
     m_sub = m_parser.add_subparsers(dest="merges_target")
 
     def _add_common(parser: argparse.ArgumentParser) -> None:

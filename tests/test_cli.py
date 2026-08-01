@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pytest
 
-from athenaeum.cli import main
+from athenaeum.cli import build_parser, main
 
 
 @pytest.fixture
@@ -308,7 +309,7 @@ class TestWarnIfBackendCacheMissing:
     def test_keyword_backend_no_op(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from athenaeum.cli import _warn_if_backend_cache_missing
+        from athenaeum._cmd_serve import _warn_if_backend_cache_missing
 
         _warn_if_backend_cache_missing("keyword", tmp_path)
         captured = capsys.readouterr()
@@ -320,7 +321,7 @@ class TestWarnIfBackendCacheMissing:
     def test_fts5_missing_cache_warns(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from athenaeum.cli import _warn_if_backend_cache_missing
+        from athenaeum._cmd_serve import _warn_if_backend_cache_missing
 
         _warn_if_backend_cache_missing("fts5", tmp_path)
         err = capsys.readouterr().err
@@ -330,7 +331,7 @@ class TestWarnIfBackendCacheMissing:
     def test_fts5_present_cache_silent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from athenaeum.cli import _warn_if_backend_cache_missing
+        from athenaeum._cmd_serve import _warn_if_backend_cache_missing
 
         (tmp_path / "wiki-index.db").write_bytes(b"")
         _warn_if_backend_cache_missing("fts5", tmp_path)
@@ -339,7 +340,7 @@ class TestWarnIfBackendCacheMissing:
     def test_vector_missing_cache_warns(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from athenaeum.cli import _warn_if_backend_cache_missing
+        from athenaeum._cmd_serve import _warn_if_backend_cache_missing
 
         _warn_if_backend_cache_missing("vector", tmp_path)
         err = capsys.readouterr().err
@@ -349,7 +350,7 @@ class TestWarnIfBackendCacheMissing:
     def test_vector_present_cache_silent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from athenaeum.cli import _warn_if_backend_cache_missing
+        from athenaeum._cmd_serve import _warn_if_backend_cache_missing
 
         (tmp_path / "wiki-vectors").mkdir()
         _warn_if_backend_cache_missing("vector", tmp_path)
@@ -358,7 +359,7 @@ class TestWarnIfBackendCacheMissing:
     def test_unknown_backend_warns(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from athenaeum.cli import _warn_if_backend_cache_missing
+        from athenaeum._cmd_serve import _warn_if_backend_cache_missing
 
         _warn_if_backend_cache_missing("sphinx", tmp_path)
         err = capsys.readouterr().err
@@ -1303,3 +1304,87 @@ class TestAsOfView:
         # mid + always are live on 2026-04-01; closed has expired. An as-of
         # build is always full (issue #348 reconciliation).
         assert "FTS5 index rebuilt as of 2026-04-01 (full): 2 pages" in out
+
+
+class TestEverySubparserHasFuncDefault:
+    """Guard the #553 dispatch invariant: every subcommand binds a ``func``.
+
+    ``main()`` dispatches with a single ``return args.func(args)`` and no
+    per-command branching. A subparser registered without a
+    ``set_defaults(func=...)`` (directly, or inherited from an ancestor
+    parser at parse time) would leave ``args.func`` unbound and the command
+    would fall through / raise at dispatch — the exact "someone forgot to add
+    the branch" failure this replaces. This walks the assembled parser tree
+    and asserts every terminal command path resolves a callable ``func``.
+    """
+
+    @staticmethod
+    def _subparsers_action(
+        parser: argparse.ArgumentParser,
+    ) -> argparse._SubParsersAction | None:
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                return action
+        return None
+
+    def _terminal_paths(
+        self,
+        parser: argparse.ArgumentParser,
+        prefix: list[str],
+        inherited_func: bool,
+    ):
+        """Yield ``(path, has_resolvable_func)`` for every leaf command path.
+
+        ``has_resolvable_func`` is ``True`` when the leaf subparser — or any
+        ancestor on its path — binds a ``func`` default, mirroring argparse's
+        parse-time default inheritance (a nested command like ``dedupe
+        persons`` inherits ``func`` from its ``dedupe`` parent).
+        """
+        action = self._subparsers_action(parser)
+        has_func = inherited_func or (parser.get_default("func") is not None)
+        if action is None:
+            yield prefix, has_func
+            return
+        for name, subparser in action.choices.items():
+            yield from self._terminal_paths(subparser, [*prefix, name], has_func)
+
+    def test_every_registered_subparser_has_func_default(self) -> None:
+        parser = build_parser()
+        top = self._subparsers_action(parser)
+        assert top is not None, "top-level parser registered no subcommands"
+
+        missing = [
+            " ".join(path)
+            for path, has_func in self._terminal_paths(
+                parser, prefix=[], inherited_func=False
+            )
+            if not has_func
+        ]
+        assert not missing, (
+            "these subcommand paths dispatch via `args.func` but bind no "
+            f"`func` default (add set_defaults(func=...)): {missing}"
+        )
+
+    def test_guard_detects_a_stripped_binding(self) -> None:
+        """The guard must actually fail when a real binding is removed."""
+        parser = build_parser()
+        top = self._subparsers_action(parser)
+        assert top is not None
+        # Strip the func from a top-level leaf command and confirm the walk
+        # now flags at least one unresolved path — proves the assertion above
+        # is not vacuously green.
+        victim = next(
+            sp
+            for sp in top.choices.values()
+            if self._subparsers_action(sp) is None
+            and sp.get_default("func") is not None
+        )
+        victim.set_defaults(func=None)
+        missing = [
+            path
+            for path, has_func in self._terminal_paths(
+                parser, prefix=[], inherited_func=False
+            )
+            if not has_func
+        ]
+        assert missing, "guard failed to detect a stripped func binding"

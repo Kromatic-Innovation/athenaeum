@@ -235,6 +235,7 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
             "AND merges, each tagged by type. Three modes: list, next, count."
         ),
     )
+    d_parser.set_defaults(func=cmd_decisions)
     d_sub = d_parser.add_subparsers(dest="decisions_target")
 
     def _add_common(parser: argparse.ArgumentParser, *, with_proposal: bool) -> None:
