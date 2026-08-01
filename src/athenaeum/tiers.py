@@ -30,13 +30,16 @@ imports ``reresolve_open_questions`` FROM this module, but that is now a
 one-way edge (no cycle).
 
 Imported at module top level by ``status.py`` (``schema_fragment_state``) and
-``batch.py``, neither of which imports this module back. This module DOES
-remain in a PRE-EXISTING residual SCC that #545 did NOT target (out of its
+``batch.py``, neither of which imports this module back. This module was
+formerly in a PRE-EXISTING residual SCC that #545 did NOT target (out of its
 named scope): ``{tiers, contradictions, resolutions, answers}`` —
-``contradictions`` imports ``tiers.DEFAULT_CLASSIFY_MODEL`` at top level while
+``contradictions`` imported ``tiers.DEFAULT_CLASSIFY_MODEL`` at top level while
 ``reresolve_open_questions`` function-locally imports ``contradictions`` /
-``resolutions`` / ``answers`` back. This residual is pinned as a baseline by
-``tests/test_import_graph_acyclic.py``; a follow-up issue tracks dissolving it.
+``resolutions`` / ``answers`` back. Issue #640 dissolved that cycle by hoisting
+``DEFAULT_CLASSIFY_MODEL`` DOWN to the :mod:`athenaeum.config` leaf, so
+``contradictions`` no longer reaches up into this hub; the deferred
+``tiers`` -> ``resolutions``/``answers``/``contradictions`` edges remain as a
+one-directional (acyclic) top layer.
 """
 
 from __future__ import annotations
@@ -57,7 +60,11 @@ import anthropic
 
 from athenaeum._retry import with_retry
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import resolve_heartbeat_interval, resolve_model
+from athenaeum.config import (
+    DEFAULT_CLASSIFY_MODEL,
+    resolve_heartbeat_interval,
+    resolve_model,
+)
 from athenaeum.fingerprint import (
     _member_key_str,
     _pair_text_from_passages,
@@ -112,8 +119,10 @@ from athenaeum.search import embed_texts
 log = logging.getLogger(__name__)
 
 # Model defaults — override via env var or the yaml `models:` section
-# (env > yaml > default; issue #232).
-DEFAULT_CLASSIFY_MODEL = "claude-haiku-4-5-20251001"
+# (env > yaml > default; issue #232). ``DEFAULT_CLASSIFY_MODEL`` moved DOWN to
+# :mod:`athenaeum.config` (issue #640) to break the ``contradictions`` -> ``tiers``
+# top-level back-edge; it is imported from there above and stays reachable as
+# ``athenaeum.tiers.DEFAULT_CLASSIFY_MODEL`` for backwards compatibility.
 DEFAULT_WRITE_MODEL = "claude-sonnet-4-6"
 
 

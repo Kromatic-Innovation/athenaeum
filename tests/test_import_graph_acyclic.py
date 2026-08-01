@@ -21,18 +21,12 @@ NAMED, in-scope goal was to dissolve the librarian-centered named-8 coupling
 ``status``, ``retire``, ``wiki_dedupe``, ``cli``, and ``_cmd_drain`` are now
 free of their former cycles.
 
-The THREE residual SCCs below are PRE-EXISTING, were explicitly OUT of #545's
-named scope (the issue says "do NOT hunt for a sixth [pair]"), and are pinned
-here as a DELIBERATELY-SMALLER allowed baseline — the acceptance criteria's
-sanctioned escape hatch ("an explicitly-documented, deliberately-smaller
-allowed set"). The guard FAILS if:
-
-  * any SCC appears that is not a subset of an allowed baseline entry, OR
-  * any allowed SCC GROWS (gains a member).
-
-So the graph can only shrink from here, never regrow past this baseline. A
-follow-up issue (filed by the orchestrator, not here) tracks dissolving the
-residuals; when one is dissolved, tighten the corresponding entry below.
+The three residual SCCs that #545 left in place ({answers, contradictions,
+resolutions, tiers}, {calibration, merge, pending_merges, reasoning_tiers}, and
+{drain, librarian, status}) were dissolved in issue #640, so the full-graph SCC
+is now EMPTY. The allowed baseline (:data:`ALLOWED_SCCS`) is therefore ``[]``:
+the guard FAILS if ANY multi-node SCC appears at all. The graph is fully acyclic
+and must stay that way — any new cycle is a regression.
 """
 
 from __future__ import annotations
@@ -42,23 +36,19 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "athenaeum"
 
-# The pinned, deliberately-smaller allowed baseline of residual SCCs (issue
-# #545). Each frozenset is the MAXIMUM allowed membership for a residual cycle;
-# the actual measured SCC must be a subset of exactly one of these (or a
-# singleton, which Tarjan reports but we ignore as "not a cycle"). See the
-# module docstring for why these three are out of #545's scope.
-ALLOWED_SCCS: list[frozenset[str]] = [
-    # tiers<->contradictions (top-level DEFAULT_CLASSIFY_MODEL import) plus
-    # tiers' deferred reresolve imports of resolutions/answers.
-    frozenset({"tiers", "contradictions", "resolutions", "answers"}),
-    # merge<->pending_merges (the _merge_proposal_suppression_reason back-edge,
-    # NOT one of #545's 3 hoisted primitives) plus reasoning_tiers/calibration
-    # joining via their top-level tiers + pending_merges imports.
-    frozenset({"merge", "pending_merges", "reasoning_tiers", "calibration"}),
-    # librarian<->drain deferred cycle, with status joining via its own
-    # deferred drain-advisor import.
-    frozenset({"librarian", "drain", "status"}),
-]
+# The allowed baseline of residual import SCCs. Issue #640 dissolved the last
+# three residuals that #545 left in place, so the full-graph SCC is now EMPTY
+# and this baseline is ``[]``: ANY multi-node SCC is now a regression. The three
+# hoists that got here (each "move the shared primitive DOWN to a leaf, then drop
+# the back-edge", the pattern #545 established with intake.py/vecmath.py):
+#   * {tiers, contradictions, resolutions, answers} — DEFAULT_CLASSIFY_MODEL
+#     moved tiers -> config, dropping the contradictions -> tiers back-edge.
+#   * {merge, pending_merges, calibration, reasoning_tiers} —
+#     _merge_proposal_suppression_reason moved merge -> merge_type_gate,
+#     dropping the pending_merges -> merge back-edge.
+#   * {librarian, drain, status} — build_advisory (the ETA advisor) moved
+#     drain -> drain_advisor, dropping the librarian/status -> drain back-edges.
+ALLOWED_SCCS: list[frozenset[str]] = []
 
 
 def _athenaeum_targets(node: ast.AST, self_mod: str) -> set[str]:
@@ -165,11 +155,12 @@ def _multi_node_sccs(graph: dict[str, set[str]]) -> list[frozenset[str]]:
 def test_no_import_scc_outside_allowed_baseline() -> None:
     """Every cyclic SCC must fit within the pinned, documented baseline.
 
-    Pre-#545 this FAILS: the full graph had a 14-node SCC spanning the named-8
-    hub modules plus answers/calibration/contradictions/drain/reasoning_tiers/
-    resolutions — no baseline entry contains it. Post-#545 it PASSES: the only
-    remaining cyclic SCCs are the three residuals, each a subset of an
-    ALLOWED_SCCS entry.
+    The baseline is ``[]`` since issue #640 (which dissolved the three residual
+    SCCs #545 left behind), so this now asserts the full import graph is entirely
+    acyclic: ANY multi-node SCC is a violation. Pre-#545 the full graph had a
+    14-node SCC spanning the named-8 hub modules plus answers/calibration/
+    contradictions/drain/reasoning_tiers/resolutions; #545 shrank it to three
+    residuals and #640 removed those.
     """
     graph = build_import_graph()
     sccs = _multi_node_sccs(graph)

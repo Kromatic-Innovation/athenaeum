@@ -20,13 +20,16 @@ dependency. ``status.py`` no longer imports ``librarian`` at all, so the former
 librarian<->status cycle is GONE: ``librarian.py``'s function-local
 ``scan_page_sizes`` import is now a one-way edge.
 
-``status.py`` still participates in a PRE-EXISTING residual SCC that #545 did
-NOT target (out of its named scope): ``{librarian, drain, status}``.
-``status.py`` function-locally imports ``athenaeum.drain`` (backlog-drain
-advisor), ``drain`` function-locally imports ``librarian``, and ``librarian``
-function-locally imports ``status`` (``scan_page_sizes``). This residual is
-pinned as a baseline by ``tests/test_import_graph_acyclic.py``; a follow-up
-issue tracks dissolving it.
+``status.py`` formerly participated in a PRE-EXISTING residual SCC that #545 did
+NOT target (out of its named scope): ``{librarian, drain, status}``, because it
+function-locally imported ``athenaeum.drain`` (backlog-drain advisor) while
+``drain`` function-locally imports ``librarian`` and ``librarian`` function-
+locally imports ``status`` (``scan_page_sizes``). Issue #640 dissolved that
+cycle by hoisting ``build_advisory`` DOWN to the :mod:`athenaeum.drain_advisor`
+leaf: ``status.py`` now function-locally imports it from ``drain_advisor`` (a
+low leaf that imports none of these three), so it no longer reaches up into the
+``drain`` orchestrator. The full-graph SCC is now empty and
+``tests/test_import_graph_acyclic.py`` pins the baseline at ``[]``.
 """
 
 from __future__ import annotations
@@ -206,11 +209,11 @@ def status(knowledge_root: Path) -> StatusInfo:
     # Best-effort — a ledger/estimator hiccup must never break status.
     drain_advisory: str | None = None
     try:
-        from athenaeum import drain as _drain
         from athenaeum import spend as _spend
         from athenaeum.config import resolve_drain_warn_days
+        from athenaeum.drain_advisor import build_advisory
 
-        advisory = _drain.build_advisory(
+        advisory = build_advisory(
             backlog=raw_pending,
             ledger_records=_spend.read_ledger(_spend.resolve_ledger_path(config)),
             warn_days=resolve_drain_warn_days(config),

@@ -102,7 +102,7 @@ def add_drain_subparser(subparsers: argparse._SubParsersAction) -> None:
 
 def cmd_drain(args: argparse.Namespace) -> int:
     """Handle ``athenaeum drain`` (issue #470). Returns a process exit code."""
-    from athenaeum import drain, spend
+    from athenaeum import drain, drain_advisor, spend
     from athenaeum._cli_shared import _acquire_or_exit
     from athenaeum.config import load_config
     from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, discover_raw_files
@@ -141,15 +141,15 @@ def cmd_drain(args: argparse.Namespace) -> int:
         return 0
 
     records = spend.read_ledger(spend.resolve_ledger_path(config))
-    tokens = drain.observed_tokens_per_file(records)
+    tokens = drain_advisor.observed_tokens_per_file(records)
     if tokens is None:
-        avg_input = drain.DEFAULT_AVG_INPUT_TOKENS_PER_FILE
-        avg_output = drain.DEFAULT_AVG_OUTPUT_TOKENS_PER_FILE
+        avg_input = drain_advisor.DEFAULT_AVG_INPUT_TOKENS_PER_FILE
+        avg_output = drain_advisor.DEFAULT_AVG_OUTPUT_TOKENS_PER_FILE
         rate_note = "no ledger history — coarse token defaults"
     else:
         avg_input, avg_output = tokens
         rate_note = "observed ledger tokens/file"
-    estimate = drain.estimate_drain_cost_usd(
+    estimate = drain_advisor.estimate_drain_cost_usd(
         backlog=backlog,
         avg_input_per_file=avg_input,
         avg_output_per_file=avg_output,
