@@ -566,7 +566,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             install_signal_handlers=not args.dry_run,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
         print(
             json.dumps(
                 {
@@ -654,7 +654,7 @@ def cmd_session_end(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             install_signal_handlers=not args.dry_run,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
         print(
             json.dumps(
                 {

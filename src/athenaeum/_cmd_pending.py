@@ -128,7 +128,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
         # exiting 0 — the exact silent-backend-fallback provider.py forbids.
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except Exception:
+    except Exception:  # noqa: BLE001 — a genuine construction error (e.g. no
         # API key for the api backend) is the intended offline fallback: leave
         # the client None and let the caller degrade. Only ProviderConfigError
         # (a misconfig) is fatal, handled above.
@@ -141,7 +141,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
         count = ingest_answers(
             pending_path, raw_root, client=anthropic_client, config=cfg
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
         print(
             f"Fatal error ingesting answers ({type(exc).__name__}): {exc}",
             file=sys.stderr,
@@ -180,7 +180,7 @@ def cmd_ingest_merges(args: argparse.Namespace) -> int:
         return lock
     try:
         count = ingest_resolved_merges(merges_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
         print(
             f"Fatal error ingesting merges ({type(exc).__name__}): {exc}",
             file=sys.stderr,
@@ -228,7 +228,7 @@ def cmd_reresolve_questions(args: argparse.Namespace) -> int:
         # exiting 0 — the exact silent-backend-fallback provider.py forbids.
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except Exception:
+    except Exception:  # noqa: BLE001 — a genuine construction error (e.g. no
         # API key for the api backend) is the intended offline fallback: leave
         # the client None and let the caller degrade. Only ProviderConfigError
         # (a misconfig) is fatal, handled above.
@@ -241,7 +241,7 @@ def cmd_reresolve_questions(args: argparse.Namespace) -> int:
         count = reresolve_open_questions(
             pending_path, client=anthropic_client, config=cfg
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
         print(
             f"Fatal error re-resolving questions ({type(exc).__name__}): {exc}",
             file=sys.stderr,

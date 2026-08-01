@@ -871,7 +871,7 @@ def _write_cluster_report_and_prune(
                     len(pruned),
                     retention,
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — rotation prune is non-fatal
             log.warning("cluster rotation prune failed (non-fatal): %s", exc)
 
 
@@ -1286,7 +1286,7 @@ def _run_reresolve_pass(
         return reresolve_open_questions(
             pending_path, client=client, config=config, usage=usage
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — heal pass must not fail the run
         log.warning("reresolve pass failed (%s); leaving questions untouched", exc)
         return 0
 
@@ -1705,14 +1705,14 @@ class RunContext:
             frag_state: "dict[str, tuple[str, bool]] | None" = schema_fragment_state(
                 self.wiki_root
             )
-        except Exception as exc:  # pragma: no cover - defensive; helper is hardened
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive; helper is hardened
             log.debug("run-summary: schema_fragment_state skipped: %s", exc)
             frag_state = None
         try:
             from athenaeum.prompt_registry import prompt_manifest_hash
 
             manifest_hash: "str | None" = prompt_manifest_hash()
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: prompt_manifest_hash skipped: %s", exc)
             manifest_hash = None
         log.info(
@@ -2578,7 +2578,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             run_changed_paths = _auto_memory_changed_paths(
                 auto_memory_files, ctx.knowledge_root, auto_memory_manifest_path
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — stamp read must not break the run
             log.warning(
                 "auto-memory delta baseline read failed (non-fatal, "
                 "falling back to whole-corpus): %s",
@@ -2597,7 +2597,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                     ).replace(tzinfo=timezone.utc)
                     age_days = (run_now - stamp_at).total_seconds() / 86400.0
                     full_compile_due = age_days >= full_compile_every_days
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — must not break the run
                 log.warning(
                     "full-compile stamp read failed (non-fatal, forcing "
                     "whole-corpus reconciliation this run): %s",
@@ -2692,7 +2692,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             _write_auto_memory_manifest(
                 auto_memory_manifest_path, current_snapshot
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — stamp write must not break the run
             log.warning(
                 "auto-memory delta baseline write failed (non-fatal): %s", exc
             )
@@ -2703,7 +2703,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                     run_now,
                     _capture_head(ctx.knowledge_root),
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — must not break the run
                 log.warning(
                     "full-compile stamp write failed (non-fatal): %s", exc
                 )
@@ -2860,7 +2860,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
                     )
                 ),
             )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — guardrail must never break a run
         log.warning("page-size guardrail check failed (non-fatal): %s", exc)
 
     # Issue #481: pending-merge revalidation advisor. #480 stopped NEW
@@ -2886,7 +2886,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
                     "archive them",
                     len(_reval.retired),
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — advisor must never break a run
             log.warning("pending-merge revalidation advisor failed (non-fatal): %s", exc)
 
     # Issue #464: normal finalize path — every return below this point
@@ -2920,7 +2920,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
             )
             if _advisory is not None:
                 log.warning("%s", _advisory.line)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — advisor must never break a run
             log.debug(
                 "backlog-drain advisor skipped (%s): %s", type(exc).__name__, exc
             )

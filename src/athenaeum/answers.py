@@ -859,7 +859,7 @@ def ingest_answers(
         for extra in resolve_extra_intake_roots(knowledge_root, cfg):
             if extra not in source_roots:
                 source_roots.append(extra)
-    except Exception:
+    except Exception:  # noqa: BLE001 -- config is best-effort; defaults suffice
         pass
 
     # #248: meter the LLM calls this run makes (the free-text proposer is the
