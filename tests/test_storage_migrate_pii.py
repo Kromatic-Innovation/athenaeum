@@ -21,8 +21,11 @@ from athenaeum.search import query_fts5_index
 from athenaeum.storage import surface_root_for_class
 from athenaeum.storage_migrate import (
     INLINE_REDACTION_MARKER,
+    apply_name_email_rename,
+    bulk_rename_name_email_pages,
     iter_entity_pages,
     iter_glob_pages,
+    plan_name_email_rename,
     plan_pii_migration,
 )
 
@@ -957,3 +960,397 @@ class TestMigratePiiSearchIndex:
         err = capsys.readouterr().err
         assert "still carries the pre-migration page text" in err
         assert "athenaeum reindex" in err
+
+
+# ---------------------------------------------------------------------------
+# Name-is-an-email rename migration (issue #505 — the #502 carve-out's slice)
+# ---------------------------------------------------------------------------
+#
+# APPROACH 1 (operator decision): derive a display name from the local-part
+# with a confidence gate, rename the page, move the address to the excluded
+# contact record, and rewrite inbound [[wikilink]] edges. Ambiguous
+# local-parts are DEFERRED (left unrenamed), never guessed at.
+
+
+def _write_name_email_page(
+    wiki_root: Path,
+    filename: str,
+    *,
+    uid: str,
+    email: str,
+    name_field: str = "name",
+    body: str = "Contact-only record from the Streak import.",
+    extra_frontmatter: str = "",
+) -> Path:
+    wiki_root.mkdir(parents=True, exist_ok=True)
+    path = wiki_root / filename
+    path.write_text(
+        "---\n"
+        f"uid: {uid}\n"
+        f"{name_field}: {email}\n"
+        "type: person\n"
+        f"{extra_frontmatter}"
+        "---\n"
+        f"{body}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestPlanNameEmailRename:
+    def test_confident_local_part_derives_display_name(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="z1", email="jane.doe@acme.example"
+        )
+
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+
+        assert plan.confident is True
+        assert plan.email == "jane.doe@acme.example"
+        assert plan.display_name == "Jane Doe"
+        assert plan.new_slug == "jane-doe"
+        assert plan.new_filename == "jane-doe.md"
+        assert plan.new_page_path == page.with_name("jane-doe.md")
+
+    def test_ambiguous_role_address_is_deferred(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_name_email_page(
+            root / "wiki", "info-at-acme.md", uid="z2", email="info@acme.example"
+        )
+
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+
+        assert plan.confident is False
+        assert plan.email == "info@acme.example"
+        assert plan.new_page_path is None
+        assert plan.deferred_reason  # a human-readable reason is populated
+
+    def test_ambiguous_initial_blob_is_deferred(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_name_email_page(
+            root / "wiki", "jdoe-at-acme.md", uid="z3", email="jdoe@acme.example"
+        )
+
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+
+        assert plan.confident is False
+
+    def test_ambiguous_plus_tag_is_deferred(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_name_email_page(
+            root / "wiki",
+            "tagged.md",
+            uid="z4",
+            email="first.last+tag@acme.example",
+        )
+
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+
+        assert plan.confident is False
+
+    def test_ambiguous_numeric_local_part_is_deferred(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_name_email_page(
+            root / "wiki", "numeric.md", uid="z5", email="12345@acme.example"
+        )
+
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+
+        assert plan.confident is False
+
+    def test_preferred_name_is_email_handled_same_as_name(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_name_email_page(
+            root / "wiki",
+            "pref.md",
+            uid="z6",
+            email="mary.jane@acme.example",
+            name_field="preferred_name",
+            extra_frontmatter="name: Legacy Record\n",
+        )
+
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+
+        assert plan.confident is True
+        assert plan.display_name == "Mary Jane"
+        meta, _ = parse_frontmatter(plan.rewritten_page_text or "")
+        assert meta["preferred_name"] == "Mary Jane"
+        # The other name field is untouched.
+        assert meta["name"] == "Legacy Record"
+
+    def test_non_name_email_page_is_unplanned(self, tmp_path: Path) -> None:
+        root = _seed_knowledge_root(tmp_path)
+        page = root / "wiki" / "jane.md"
+
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+
+        assert plan.email == ""
+        assert plan.confident is False
+
+    def test_excluded_record_carries_the_address(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="z7", email="jane.doe@acme.example"
+        )
+
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+        meta, _ = parse_frontmatter(plan.excluded_page_text or "")
+
+        assert meta["pii"] is True
+        assert meta["emails"] == ["jane.doe@acme.example"]
+        assert plan.excluded_page_path == surface_root_for_class(
+            "pii", EXCLUDED_CONFIG, root
+        ) / "jane-doe.md"
+
+    def test_renamed_page_carries_old_slug_and_local_part_as_aliases(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="z8", email="jane.doe@acme.example"
+        )
+
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+        meta, _ = parse_frontmatter(plan.rewritten_page_text or "")
+
+        # The old slug (filename stem, slugified) and the raw local-part are
+        # both recorded so a `[[jane.doe-at-acme]]` wikilink (slugified to
+        # match) or an `[[jane.doe]]` alias lookup keep resolving post-rename.
+        assert "jane-doe-at-acme" in meta["aliases"]
+        assert "jane.doe" in meta["aliases"]
+
+
+class TestApplyNameEmailRename:
+    def test_confident_rename_writes_new_file_and_removes_old(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "knowledge"
+        page = _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="z9", email="jane.doe@acme.example"
+        )
+
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+        apply_name_email_rename(plan, root / "wiki")
+
+        assert not page.exists()
+        new_path = root / "wiki" / "jane-doe.md"
+        assert new_path.is_file()
+        meta, _ = parse_frontmatter(new_path.read_text(encoding="utf-8"))
+        assert meta["name"] == "Jane Doe"
+        assert "jane.doe@acme.example" not in new_path.read_text(encoding="utf-8")
+
+        excluded = surface_root_for_class("pii", EXCLUDED_CONFIG, root) / "jane-doe.md"
+        assert excluded.is_file()
+        assert "jane.doe@acme.example" in excluded.read_text(encoding="utf-8")
+
+    def test_inbound_wikilink_from_another_page_is_rewritten_no_dangling_ref(
+        self, tmp_path: Path
+    ) -> None:
+        # AC: an inbound [[related:]] edge from another page must be rewritten
+        # to the new slug — no dangling reference remains.
+        root = tmp_path / "knowledge"
+        page = _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="z10", email="jane.doe@acme.example"
+        )
+        referrer = root / "wiki" / "referrer.md"
+        referrer.write_text(
+            "---\nuid: r1\nname: Referrer\ntype: person\n---\n"
+            "See [[jane.doe-at-acme]] for details.\n",
+            encoding="utf-8",
+        )
+
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+        links_rewritten = apply_name_email_rename(plan, root / "wiki")
+
+        assert links_rewritten == 1
+        referrer_text = referrer.read_text(encoding="utf-8")
+        assert "[[jane-doe]]" in referrer_text
+        # No dangling reference to the old slug remains anywhere.
+        assert "[[jane.doe-at-acme]]" not in referrer_text
+        assert not (root / "wiki" / "jane.doe-at-acme.md").exists()
+
+    def test_apply_raises_on_deferred_plan(self, tmp_path: Path) -> None:
+        import pytest
+
+        root = tmp_path / "knowledge"
+        page = _write_name_email_page(
+            root / "wiki", "info-at-acme.md", uid="z11", email="info@acme.example"
+        )
+        plan = plan_name_email_rename(page, EXCLUDED_CONFIG, root)
+
+        with pytest.raises(ValueError):
+            apply_name_email_rename(plan, root / "wiki")
+
+
+class TestBulkRenameNameEmailPages:
+    def test_dry_run_reports_renamed_and_residual_writes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "knowledge"
+        _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="b1", email="jane.doe@acme.example"
+        )
+        _write_name_email_page(
+            root / "wiki", "info-at-acme.md", uid="b2", email="info@acme.example"
+        )
+        before = (root / "wiki" / "jane.doe-at-acme.md").read_text(encoding="utf-8")
+
+        report = bulk_rename_name_email_pages(
+            root / "wiki", EXCLUDED_CONFIG, root, apply=False
+        )
+
+        assert report.renamed == 1
+        assert report.residual == 1
+        assert (root / "wiki" / "jane.doe-at-acme.md").read_text(encoding="utf-8") == before
+        assert not (root / "wiki" / "jane-doe.md").exists()
+
+    def test_apply_renames_confident_pages_and_leaves_residual_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "knowledge"
+        _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="b3", email="jane.doe@acme.example"
+        )
+        info_page = _write_name_email_page(
+            root / "wiki", "info-at-acme.md", uid="b4", email="info@acme.example"
+        )
+        before_info = info_page.read_text(encoding="utf-8")
+
+        report = bulk_rename_name_email_pages(
+            root / "wiki", EXCLUDED_CONFIG, root, apply=True
+        )
+
+        assert report.renamed == 1
+        assert report.residual == 1
+        assert (root / "wiki" / "jane-doe.md").is_file()
+        assert not (root / "wiki" / "jane.doe-at-acme.md").exists()
+        # The ambiguous page is left exactly as-is.
+        assert info_page.read_text(encoding="utf-8") == before_info
+
+    def test_idempotent_rerun_skips_already_renamed_pages(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="b5", email="jane.doe@acme.example"
+        )
+
+        first = bulk_rename_name_email_pages(root / "wiki", EXCLUDED_CONFIG, root, apply=True)
+        second = bulk_rename_name_email_pages(root / "wiki", EXCLUDED_CONFIG, root, apply=True)
+
+        assert first.renamed == 1
+        assert second.renamed == 0  # already renamed; name: no longer email-shaped
+        assert second.residual == 0
+
+
+class TestMigratePiiCliRenameNameEmail:
+    def test_cli_all_apply_rename_name_email_migrates_confident_and_defers_residual(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = tmp_path / "knowledge"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="c1", email="jane.doe@acme.example"
+        )
+        _write_name_email_page(
+            root / "wiki", "info-at-acme.md", uid="c2", email="info@acme.example"
+        )
+        referrer = root / "wiki" / "referrer.md"
+        referrer.parent.mkdir(parents=True, exist_ok=True)
+        referrer.write_text(
+            "---\nuid: r1\nname: Referrer\ntype: person\n---\n"
+            "See [[jane.doe-at-acme]].\n",
+            encoding="utf-8",
+        )
+
+        rc = main(
+            [
+                "storage", "migrate-pii", "--path", str(root),
+                "--all", "--apply", "--rename-name-email",
+            ]
+        )
+
+        assert rc == 0
+        assert (root / "wiki" / "jane-doe.md").is_file()
+        assert not (root / "wiki" / "jane.doe-at-acme.md").exists()
+        assert "[[jane-doe]]" in referrer.read_text(encoding="utf-8")
+        assert "[[jane.doe-at-acme]]" not in referrer.read_text(encoding="utf-8")
+        # The ambiguous page is untouched.
+        assert (root / "wiki" / "info-at-acme.md").is_file()
+        out = capsys.readouterr().out
+        assert "renamed 1 name-is-an-email page" in out
+        assert "1 page(s) have an ambiguous local-part" in out
+
+    def test_cli_without_rename_flag_still_reports_note_for_both_populations(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = tmp_path / "knowledge"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="c3", email="jane.doe@acme.example"
+        )
+
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--all"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "page(s) are named after an email" in out
+        # Without --rename-name-email nothing is written.
+        assert (root / "wiki" / "jane.doe-at-acme.md").is_file()
+
+
+class TestLintPiiCleanAfterRename:
+    """AC: after migration + reindex, lint-pii no longer reports migrated
+    pages, except the deliberately-deferred ambiguous residual."""
+
+    def test_lint_pii_clean_except_deferred_residual(self, tmp_path: Path, capsys) -> None:
+        from athenaeum.pii import name_field_holds_pii, scan_corpus_pii
+
+        root = tmp_path / "knowledge"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="d1", email="jane.doe@acme.example"
+        )
+        _write_name_email_page(
+            root / "wiki", "info-at-acme.md", uid="d2", email="info@acme.example"
+        )
+
+        rc = main(
+            [
+                "storage", "migrate-pii", "--path", str(root),
+                "--all", "--apply", "--rename-name-email",
+            ]
+        )
+        assert rc == 0
+
+        # The confident page no longer trips name_field_holds_pii (renamed to
+        # a human-readable name) nor the corpus-wide lint (the raw address no
+        # longer appears anywhere under wiki/).
+        renamed_text = (root / "wiki" / "jane-doe.md").read_text(encoding="utf-8")
+        renamed_meta, _ = parse_frontmatter(renamed_text)
+        assert name_field_holds_pii(renamed_meta) is False
+
+        findings = scan_corpus_pii(root / "wiki")
+        finding_paths = {f.path.name for f in findings}
+        # The deferred ambiguous page is still surfaced (deliberately) —
+        # its address is still on the page as its name.
+        assert "info-at-acme.md" in finding_paths
+        # The renamed page's own findings must not include the migrated
+        # address (it was moved off-corpus, not merely relocated on-page).
+        assert "jane-doe.md" not in finding_paths
+
+        # The deferred page still trips name_field_holds_pii — the residual
+        # AC's "reported as a residual count" surfaces through the bulk
+        # driver's report, not a silent disappearance.
+        deferred_meta, _ = parse_frontmatter(
+            (root / "wiki" / "info-at-acme.md").read_text(encoding="utf-8")
+        )
+        assert name_field_holds_pii(deferred_meta) is True
