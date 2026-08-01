@@ -113,7 +113,7 @@ from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge
 from athenaeum.pii import is_pii_flagged
 from athenaeum.prompt_safety import data_only_clause, fence_untrusted
-from athenaeum.provider import resolve_max_tokens
+from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 log = logging.getLogger(__name__)
@@ -537,6 +537,11 @@ def build_t1_request_params(
         "max_tokens": resolve_max_tokens(
             "reasoning_t1", "ATHENAEUM_REASONING_T1_MAX_TOKENS", _T1_MAX_TOKENS, config
         ),
+        # Issue #578: T1 is a cheap Haiku pre-screen (reject or pass_up) —
+        # same posture as tier2_classify. Disabled explicitly.
+        "thinking": resolve_thinking(
+            "reasoning_t1", "ATHENAEUM_REASONING_T1_THINKING", "disabled", config
+        ),
         "system": T1_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_msg}],
     }
@@ -704,7 +709,10 @@ def run_t1_tier(
             input_toks, output_toks, cache_creation, cache_read, model=params["model"]
         )
 
-    verdict, reason = _parse_t1_response(response.content[0].text)
+    # Issue #578: response_text skips any leading thinking block (T1 runs
+    # disabled today; the helper is text-block-equivalent for a text-only
+    # response and keeps the site robust if the posture changes).
+    verdict, reason = _parse_t1_response(response_text(response))
     reason_code = (
         REJECT_REASON_DIFFERENT_ENTITIES if verdict == "reject" else None
     )
@@ -1008,6 +1016,17 @@ def build_t2_request_params(
         "max_tokens": resolve_max_tokens(
             "reasoning_t2", "ATHENAEUM_REASONING_T2_MAX_TOKENS", _T2_MAX_TOKENS, config
         ),
+        # Issue #578: T2 already defaults to Opus 4.8 (deep reasoning over
+        # full source bodies — approve/amend/draft/escalate) and adaptive
+        # thinking benefits it now, not just after a future model bump.
+        # Enabled explicitly. NOTE: this stage's max_tokens (4096) was not in
+        # issue #578's named re-baseline table (only the resolver and
+        # merge-patch stages were flagged there) — left unchanged here; a
+        # future re-baseline for this stage is deferred, same as the spend-
+        # ceiling re-baseline called out in issue #578's out-of-scope list.
+        "thinking": resolve_thinking(
+            "reasoning_t2", "ATHENAEUM_REASONING_T2_THINKING", "adaptive", config
+        ),
         "system": T2_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_msg}],
     }
@@ -1224,8 +1243,10 @@ def run_t2_tier(
             input_toks, output_toks, cache_creation, cache_read, model=params["model"]
         )
 
+    # Issue #578: T2 enables adaptive thinking — response_text skips any
+    # leading thinking block and returns the verdict JSON answer.
     verdict, reason, amended_sources, drafted_body = _parse_t2_response(
-        response.content[0].text
+        response_text(response)
     )
     return _t2_decision_from_model_verdict(
         proposal_id=proposal.proposal_id,

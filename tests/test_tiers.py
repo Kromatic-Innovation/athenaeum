@@ -2404,10 +2404,13 @@ class TestPerStageMaxTokensThroughSeam:
         assert params["max_tokens"] == 3210
 
     def test_merge_stage_defaults_unchanged(self) -> None:
-        # Value preservation guard for the tier-3 merge budgets: the historical
-        # literals stay the defaults, resolved through the seam.
-        assert _MERGE_MAX_TOKENS == 8192
-        assert _MERGE_PATCH_MAX_TOKENS == 2048
-        assert _TIER3_CREATE_MAX_TOKENS == 2048
+        # Value preservation guard for the tier-3 merge budgets: the classify
+        # budgets are untouched by #578 (Haiku, disabled thinking); the
+        # write-knob budgets (create/merge_patch/merge_full) were RAISED by
+        # issue #578's re-baseline ahead of the Sonnet-5 bump (#580) — see
+        # TestThinkingReBaseline below for the never-shrinks assertion.
+        assert _MERGE_MAX_TOKENS == 12288
+        assert _MERGE_PATCH_MAX_TOKENS == 6144
+        assert _TIER3_CREATE_MAX_TOKENS == 6144
         assert _TIER2_CLASSIFY_MAX_TOKENS == 4096
         assert _TIER2_CLASSIFY_RETRY_MAX_TOKENS == 8192

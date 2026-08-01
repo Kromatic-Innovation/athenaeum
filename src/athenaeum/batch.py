@@ -90,6 +90,7 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
+from athenaeum.provider import response_text
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
@@ -461,7 +462,11 @@ def process_batch_run(
                 st.failed = True
                 continue
             try:
-                text = msg.content[0].text
+                # Issue #578: response_text skips any leading thinking block
+                # (tier-2 classify runs disabled today; the helper is
+                # text-block-equivalent for a text-only response and keeps the
+                # batch site robust if the posture changes).
+                text = response_text(msg)
             except Exception:
                 log.exception("Failed to process %s", st.raw.ref)
                 st.failed = True
@@ -742,7 +747,9 @@ def process_batch_run(
                 if msg is None:
                     raise _BatchItemError(cid)
                 new_entities.append(
-                    tier3_entity_from_text(action, msg.content[0].text, config=config)
+                    # Issue #578: tier-3 create enables adaptive thinking —
+                    # response_text skips any leading thinking block.
+                    tier3_entity_from_text(action, response_text(msg), config=config)
                 )
 
             for cid, action, page_path, meta, existing_body in st.merge_ids:
@@ -753,7 +760,9 @@ def process_batch_run(
                 # a live full-echo fallback runs only when the patch response is
                 # unparseable, truncated, or fails to apply.
                 updated_body, esc, needs_fallback = parse_merge_ops_response(
-                    msg.content[0].text,
+                    # Issue #578: patch merge enables adaptive thinking —
+                    # response_text skips any leading thinking block.
+                    response_text(msg),
                     action,
                     st.raw.ref,
                     existing_body,
