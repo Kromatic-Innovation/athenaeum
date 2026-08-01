@@ -1955,7 +1955,7 @@ def _get_ef() -> Any | None:
         return _EF
     _EF_LOADED = True
     try:
-        from chromadb.utils import embedding_functions  # type: ignore[import]
+        from chromadb.utils import embedding_functions
 
         _EF = embedding_functions.DefaultEmbeddingFunction()
     except Exception:  # noqa: BLE001 — ImportError, any chromadb init error: degrade to None

@@ -30,13 +30,14 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import ItemsView, Iterable, Iterator
+    from collections.abc import ItemsView, Iterator, Mapping
 
 import yaml
 
@@ -541,7 +542,7 @@ def parse_supersedes(meta: dict[str, object] | None) -> list[dict[str, str]]:
     return out
 
 
-def parse_superseded_by(meta: dict[str, object] | None) -> str:
+def parse_superseded_by(meta: Mapping[str, object] | None) -> str:
     """Return the frontmatter ``superseded_by`` pointer (winner name slug), or "".
 
     Set by the resolver's keep_a/keep_b enactment on the LOSING member to
@@ -557,7 +558,7 @@ def parse_superseded_by(meta: dict[str, object] | None) -> str:
     return str(raw).strip()
 
 
-def parse_deprecated(meta: dict[str, object] | None) -> bool:
+def parse_deprecated(meta: Mapping[str, object] | None) -> bool:
     """Return the truthy ``deprecated`` frontmatter flag (deprecate_both, #191).
 
     Accepts a real bool, or a string variant (``true``/``1``/``yes``,
@@ -631,7 +632,7 @@ def _coerce_iso_date(value: object) -> date | None:
     return None
 
 
-def parse_valid_from(meta: dict[str, object] | None) -> date | None:
+def parse_valid_from(meta: Mapping[str, object] | None) -> date | None:
     """Return the frontmatter ``valid_from`` as a date, or ``None`` (open lower bound).
 
     Fail-open: missing / unparseable => ``None`` (valid since always). Parsed for
@@ -645,7 +646,7 @@ def parse_valid_from(meta: dict[str, object] | None) -> date | None:
     return _coerce_iso_date(meta.get("valid_from"))
 
 
-def parse_valid_until(meta: dict[str, object] | None) -> date | None:
+def parse_valid_until(meta: Mapping[str, object] | None) -> date | None:
     """Return the frontmatter ``valid_until`` as a date, or ``None`` (open upper bound).
 
     Fail-open: missing / unparseable => ``None`` (open interval, still valid).
@@ -766,7 +767,7 @@ def is_inactive_memory(
 
 
 def validity_windows_disjoint(
-    meta_a: dict[str, object] | None, meta_b: dict[str, object] | None
+    meta_a: Mapping[str, object] | None, meta_b: Mapping[str, object] | None
 ) -> bool:
     """True when two claims' validity windows cannot overlap in time (issue #324).
 
@@ -1850,10 +1851,17 @@ class EntityIndex:
             if not meta:
                 continue
 
-            uid = meta.get("uid", "")
-            name = meta.get("name", "")
-            if not name:
+            uid_raw = meta.get("uid", "")
+            name_raw = meta.get("name", "")
+            if not name_raw:
                 continue
+            # meta is dict[str, object] (arbitrary YAML-scalar values), but
+            # uid/name are coerced to str at the frontmatter boundary (see
+            # parse_frontmatter's identity-field coercion) — narrow here.
+            assert isinstance(uid_raw, str)
+            assert isinstance(name_raw, str)
+            uid = uid_raw
+            name = name_raw
 
             key = name.lower()
             self._by_name[key] = (uid or name, fpath)
@@ -1862,8 +1870,15 @@ class EntityIndex:
                 self._by_uid[uid] = fpath
                 self._entity_format_paths.add(fpath)
 
-            for alias in meta.get("aliases", []):
+            aliases_raw = meta.get("aliases", [])
+            # Iterable (not list) preserves the pre-existing runtime
+            # behavior of tolerating any iterable (e.g. a bare string would
+            # iterate per-character); .lower() below assumes str elements,
+            # same assumption the original code made.
+            assert isinstance(aliases_raw, Iterable)
+            for alias in aliases_raw:
                 if alias:
+                    assert isinstance(alias, str)
                     self._by_name[alias.lower()] = (uid or name, fpath)
 
     def lookup(self, name: str) -> tuple[str, Path] | None:

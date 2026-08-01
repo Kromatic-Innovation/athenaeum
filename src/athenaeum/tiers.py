@@ -2378,7 +2378,7 @@ def tier4_escalate(
                     )
                     # fall through (do NOT continue) to normal escalation.
                 else:
-                    proposal = ResolutionProposal(
+                    verdict_proposal = ResolutionProposal(
                         recommended_winner="a",
                         action=resolved_action,  # type: ignore[arg-type]
                         rationale=(
@@ -2386,10 +2386,11 @@ def tier4_escalate(
                         ),
                         confidence=1.0,
                     )
+                    proposal: ResolutionProposal | None = verdict_proposal
                     # members are in THIS new conflict's a/b order
                     # (members[0]=side a); resolved_action is already
                     # oriented to that order.
-                    enacted = enact_resolution(proposal, members)
+                    enacted = enact_resolution(verdict_proposal, members)
                     if enacted is None:
                         # #203: enact_resolution returns None on a failed file
                         # op (OSError on unlink/write) or a no-op — the source
@@ -2474,7 +2475,7 @@ def tier4_escalate(
         proposal = getattr(item, "proposal", None)
         if auto_apply_enabled:
             should_apply, gate_threshold = _should_auto_apply(proposal)
-            if should_apply:
+            if should_apply and proposal is not None:
                 block = apply_auto_resolution(block, proposal, model=resolver_model_id)
                 log.info(
                     "Auto-resolved escalation for entity=%s action=%s "
@@ -2497,9 +2498,9 @@ def tier4_escalate(
     # its _AUTO_RESOLVED_MARKER check, so already-applied blocks are no-ops.
     if auto_apply_enabled:
         for key, slot in batch_index.items():
-            best = best_proposal.get(key)
+            best: ResolutionProposal | None = best_proposal.get(key)
             should_apply, gate_threshold = _should_auto_apply(best)
-            if not should_apply:
+            if not should_apply or best is None:
                 continue
             updated = apply_auto_resolution(sections[slot], best, model=resolver_model_id)
             if updated != sections[slot]:
@@ -2536,9 +2537,9 @@ def tier4_escalate(
             # rewrite it as [x]. Cross-batch case.
             if auto_apply_enabled:
                 key_for_block = block_to_key.get(original_block)
-                best = best_proposal.get(key_for_block) if key_for_block else None
+                best = best_proposal.get(key_for_block) if key_for_block is not None else None
                 should_apply, gate_threshold = _should_auto_apply(best)
-                if should_apply:
+                if should_apply and best is not None:
                     rewritten = apply_auto_resolution(updated_block, best, model=resolver_model_id)
                     if rewritten != updated_block:
                         log.info(
@@ -2549,7 +2550,8 @@ def tier4_escalate(
                             best.confidence,
                             gate_threshold,
                         )
-                        _maybe_enact(best, best_members.get(key_for_block), key_for_block)
+                        if key_for_block is not None:
+                            _maybe_enact(best, best_members.get(key_for_block), key_for_block)
                         _record_auto(best, key_for_block)
                     updated_block = rewritten
             # Replace verbatim — raw_block came from parse, so it lives

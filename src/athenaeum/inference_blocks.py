@@ -252,6 +252,7 @@ def retract_inference_block(text: str, block_id: str) -> str:
     for i, line in enumerate(lines):
         if line.rstrip("\r\n").startswith("## "):
             if current is not None:
+                assert current_start is not None  # set together with `current`
                 parsed = _parse_one_block("".join(current))
                 spans.append((current_start, i, parsed))
                 current = None
@@ -264,6 +265,7 @@ def retract_inference_block(text: str, block_id: str) -> str:
             current.append(line)
 
     if current is not None:
+        assert current_start is not None  # set together with `current`
         parsed = _parse_one_block("".join(current))
         spans.append((current_start, len(lines), parsed))
 

@@ -71,7 +71,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 import anthropic
 
@@ -109,6 +109,9 @@ from athenaeum.tiers import (
     tier3_merge_params,
     tier4_escalate,
 )
+
+if TYPE_CHECKING:
+    from anthropic.types.messages.batch_create_params import Request
 
 log = logging.getLogger(__name__)
 
@@ -168,7 +171,9 @@ def execute_batch(
     payload = [{"custom_id": r.custom_id, "params": r.params} for r in requests]
     try:
         batch = with_retry(
-            lambda: client.messages.batches.create(requests=payload),
+            lambda: client.messages.batches.create(
+                requests=cast("list[Request]", payload)
+            ),
             description=f"batch submit ({description})",
         )
     except Exception as exc:
@@ -223,8 +228,8 @@ def execute_batch(
         )
         for entry in entries:
             result = entry.result
-            rtype = getattr(result, "type", "errored")
-            if rtype == "succeeded":
+            rtype = result.type
+            if result.type == "succeeded":
                 message = result.message
                 if usage is not None:
                     inp, out, cache_w, cache_r = cache_usage_counts(message)

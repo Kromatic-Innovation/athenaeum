@@ -61,16 +61,16 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short --cov=athenaeum --cov-report=term-missing --cov-fail-under=75
 
-  # hestia#550 — NON-BLOCKING type check. The package ships `py.typed` (a PEP
-  # 561 assertion of type correctness to downstream consumers) but nothing had
-  # ever run a checker. This job exists to size the backlog and keep it
-  # visible; it is deliberately NOT wired into `needs: [test]` / `CI Required`,
-  # and the mypy step is `continue-on-error: true`, so a type error can neither
-  # gate merge nor promote `main`. Making mypy a required check is itself
-  # blocked on clearing the backlog (operator decision 2026-07-30). Runs on a
-  # single Python version — sizing does not need the full matrix.
+  # hestia#596 — BLOCKING type check. The package ships `py.typed` (a PEP 561
+  # assertion of type correctness to downstream consumers); mypy now enforces
+  # that assertion. The backlog that hestia#550 sized (and the two systemic
+  # slices #594/#595 plus #596 cleared) is empty, so this job is wired into
+  # `CI Required` (`needs: [test, types]` below) and the mypy step is no longer
+  # `continue-on-error` — a type regression now gates merge and `main`
+  # promotion. Runs on a single Python version — mypy is Python-version-agnostic
+  # here (`python_version = "3.11"` is pinned in `[tool.mypy]`).
   types:
-    name: Types (mypy, non-blocking)
+    name: Types (mypy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -87,8 +87,7 @@ jobs:
           # (mypy + stubs) resolve unpinned since the lock tracks [dev,vector].
           pip install -e ".[dev,vector,types]" -c requirements-ci.lock
 
-      - name: Type check with mypy (non-blocking — sizes the backlog)
-        continue-on-error: true
+      - name: Type check with mypy
         run: mypy
 
   # hestia#557 — a single, always-present aggregate status that is intended to
@@ -110,25 +109,28 @@ jobs:
   # here explicitly — not restore a blanket `skipped)` branch.
   ci-required:
     name: CI Required
-    needs: [test]
+    needs: [test, types]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate CI result
         env:
           TEST_RESULT: ${{ needs.test.result }}
+          TYPES_RESULT: ${{ needs.types.result }}
         run: |
-          echo "test=$TEST_RESULT"
-          # `success` → the test matrix ran and every leg passed.
-          # anything else (skipped/failure/cancelled) → fail the gate; no job
-          # is permitted to skip today (see the hestia#548 note above).
-          case "$TEST_RESULT" in
-            success)
-              echo "CI Required: green (test=$TEST_RESULT)"
-              exit 0
-              ;;
-            *)
-              echo "::error::test job result '$TEST_RESULT' is not green — failing the aggregate gate."
-              exit 1
-              ;;
-          esac
+          echo "test=$TEST_RESULT types=$TYPES_RESULT"
+          # `success` → the job ran and passed. Anything else
+          # (skipped/failure/cancelled) → fail the gate. Neither `test` nor
+          # `types` may legitimately skip today (see the hestia#548 note above);
+          # `types` (mypy) became blocking in hestia#596, so a type regression
+          # now fails this aggregate exactly as a test failure does.
+          if [ "$TEST_RESULT" != "success" ]; then
+            echo "::error::test job result '$TEST_RESULT' is not green — failing the aggregate gate."
+            exit 1
+          fi
+          if [ "$TYPES_RESULT" != "success" ]; then
+            echo "::error::types (mypy) job result '$TYPES_RESULT' is not green — failing the aggregate gate."
+            exit 1
+          fi
+          echo "CI Required: green (test=$TEST_RESULT types=$TYPES_RESULT)"
+          exit 0
