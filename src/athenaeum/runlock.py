@@ -414,7 +414,9 @@ class RunLock:
         # Still contended. Determine the holder's heartbeat age once and reuse
         # it for both the auto-break and the loud-warning checks below
         # (issue #397 — recovery for an ALIVE-but-wedged holder).
-        age = heartbeat_age_seconds(self.lockfile)
+        # Named distinctly from the `age` string above (`_age_str` return) —
+        # this is the numeric seconds value, not a human-friendly string.
+        heartbeat_age = heartbeat_age_seconds(self.lockfile)
         holder = read_holder(self.lockfile)
         holder_pid: int | None = None
         if holder and holder.get("pid"):
@@ -430,8 +432,8 @@ class RunLock:
         # unconditional, and does not loop.
         if (
             self.break_stale_after is not None
-            and age is not None
-            and age > self.break_stale_after
+            and heartbeat_age is not None
+            and heartbeat_age > self.break_stale_after
             and holder_alive
         ):
             log.warning(
@@ -439,7 +441,7 @@ class RunLock:
                 "stale %.0fs (> threshold %.0fs); holder alive but making no "
                 "progress",
                 holder_pid,
-                age,
+                heartbeat_age,
                 self.break_stale_after,
             )
             os.close(fd)
@@ -456,15 +458,15 @@ class RunLock:
         # warn that the holder looks wedged so an operator can --force it.
         if (
             self.warn_stale_after is not None
-            and age is not None
-            and age > self.warn_stale_after
+            and heartbeat_age is not None
+            and heartbeat_age > self.warn_stale_after
             and holder_alive
         ):
             log.warning(
                 "runlock: holder alive but lock age %.0fs (PID %s) — likely "
                 "wedged; break with --force or lower "
                 "librarian.lock_break_stale_after",
-                age,
+                heartbeat_age,
                 holder_pid,
             )
 

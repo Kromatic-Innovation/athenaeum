@@ -61,7 +61,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
@@ -88,6 +88,7 @@ from athenaeum.scoped_claims import ScopeTree, ScopeVerdict, scope_comparison
 
 if TYPE_CHECKING:
     import anthropic
+    from anthropic.types import MessageParam, TextBlockParam, ThinkingConfigParam
 
 log = logging.getLogger(__name__)
 
@@ -284,37 +285,37 @@ _VALID_ACTIONS: frozenset[str] = frozenset(
 
 # The suppress verdict — exported so :mod:`athenaeum.merge` can branch on
 # it without re-typing the literal.
-SUPPRESS_ACTION = "not_a_conflict"
+SUPPRESS_ACTION: Final = "not_a_conflict"
 # Merge-proposal verdict (Lane 3 / issue #169) — exported so :mod:`merge`
 # can branch on it cleanly.
-PROPOSE_MERGE_ACTION = "propose_merge"
+PROPOSE_MERGE_ACTION: Final = "propose_merge"
 # Correct verdicts (#166 follow-up) — exported so :mod:`merge` and tests
 # can branch on / reference them without re-typing the literals. A correct
 # verdict mutates a wiki body (removes the wrong member's claim), so it
 # flows through the same escalation + auto-apply path as keep_a/keep_b.
-CORRECT_A_ACTION = "correct_a"
-CORRECT_B_ACTION = "correct_b"
+CORRECT_A_ACTION: Final = "correct_a"
+CORRECT_B_ACTION: Final = "correct_b"
 # Forget verdicts (#166 follow-up) — single-side clean delete, no history.
-FORGET_A_ACTION = "forget_a"
-FORGET_B_ACTION = "forget_b"
+FORGET_A_ACTION: Final = "forget_a"
+FORGET_B_ACTION: Final = "forget_b"
 # Marking verdicts (#191) — non-destructive. keep_a/keep_b mark the LOSING
 # member superseded_by the winner (history preserved); deprecate_both marks
 # BOTH members deprecated/stale. Exported so :mod:`merge` and tests can
 # reference them without re-typing the literals.
-KEEP_A_ACTION = "keep_a"
-KEEP_B_ACTION = "keep_b"
-DEPRECATE_BOTH_ACTION = "deprecate_both"
+KEEP_A_ACTION: Final = "keep_a"
+KEEP_B_ACTION: Final = "keep_b"
+DEPRECATE_BOTH_ACTION: Final = "deprecate_both"
 # Scope-edit verdicts (#329) — non-destructive scope narrowing. Both members
 # stay active; the named side's validity interval is closed until the two
 # contexts no longer overlap. Exported so :mod:`merge`, :mod:`tiers`, and tests
 # can reference them without re-typing the literals.
-SCOPE_A_ACTION = "scope_a"
-SCOPE_B_ACTION = "scope_b"
+SCOPE_A_ACTION: Final = "scope_a"
+SCOPE_B_ACTION: Final = "scope_b"
 # Opinion-attribution verdict (#327) — non-destructive. BOTH opinion members
 # stay active with explicit attribution to their asserters; neither is
 # superseded/deleted by precedence. Exported so :mod:`merge`, :mod:`tiers`, and
 # tests can reference it without re-typing the literal.
-ATTRIBUTE_BOTH_ACTION = "attribute_both"
+ATTRIBUTE_BOTH_ACTION: Final = "attribute_both"
 
 
 @dataclass
@@ -1773,17 +1774,23 @@ def propose_resolution(
                     # mechanical transform — so it is enabled explicitly
                     # rather than relying on Opus 5's omit-means-adaptive
                     # default.
-                    thinking=resolve_thinking(
-                        "resolve", "ATHENAEUM_RESOLVE_THINKING", "adaptive", config
+                    thinking=cast(
+                        "ThinkingConfigParam",
+                        resolve_thinking(
+                            "resolve", "ATHENAEUM_RESOLVE_THINKING", "adaptive", config
+                        ),
                     ),
-                    system=[
-                        {
-                            "type": "text",
-                            "text": _RESOLVE_SYSTEM,
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ],
-                    messages=messages,
+                    system=cast(
+                        "list[TextBlockParam]",
+                        [
+                            {
+                                "type": "text",
+                                "text": _RESOLVE_SYSTEM,
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    ),
+                    messages=cast("list[MessageParam]", messages),
                 ),
                 description="resolver_propose",
             )
@@ -2692,11 +2699,19 @@ def propose_freetext_source_edits(
                 # as ``propose_resolution`` above — translating a human's
                 # free-text ruling into concrete source-file edits benefits
                 # from adaptive thinking, enabled explicitly.
-                thinking=resolve_thinking(
-                    "freetext_edit", "ATHENAEUM_FREETEXT_EDIT_THINKING", "adaptive", config
+                thinking=cast(
+                    "ThinkingConfigParam",
+                    resolve_thinking(
+                        "freetext_edit",
+                        "ATHENAEUM_FREETEXT_EDIT_THINKING",
+                        "adaptive",
+                        config,
+                    ),
                 ),
                 system=_FREETEXT_EDIT_SYSTEM,
-                messages=[{"role": "user", "content": user_msg}],
+                messages=cast(
+                    "list[MessageParam]", [{"role": "user", "content": user_msg}]
+                ),
             ),
             description="resolver_freetext_edit",
         )

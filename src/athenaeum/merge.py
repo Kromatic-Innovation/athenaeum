@@ -81,7 +81,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from athenaeum import detection_state, spend
 from athenaeum._lint import _strip_self_reference
@@ -976,7 +976,7 @@ def merge_cluster_row(
             origin_turn_raw = meta.get("originTurn") if meta else None
             try:
                 origin_turn = (
-                    int(origin_turn_raw) if origin_turn_raw is not None else None
+                    int(cast(Any, origin_turn_raw)) if origin_turn_raw is not None else None
                 )
             except (TypeError, ValueError):
                 origin_turn = None
@@ -1893,9 +1893,8 @@ def merge_clusters_to_wiki(
     def _record_pair_keys(members: list[AutoMemoryFile]) -> None:
         for i in range(len(members)):
             for j in range(i + 1, len(members)):
-                covered_pair_keys.add(
-                    tuple(sorted((str(members[i].path), str(members[j].path))))
-                )
+                path_a, path_b = sorted((str(members[i].path), str(members[j].path)))
+                covered_pair_keys.add((path_a, path_b))
 
     def _emit_escalation(
         entry: MergedWikiEntry,
@@ -2106,7 +2105,7 @@ def merge_clusters_to_wiki(
         # run (cheap, no Opus call) and is dropped identically.
         if proposal is not None and proposal.action == ATTRIBUTE_BOTH_ACTION:
             member_paths = _order_member_paths(result, members)
-            if member_paths:
+            if member_paths and isinstance(proposal, ResolutionProposal):
                 enact_resolution(proposal, member_paths)
             log.info(
                 "contradictions: opinion pair kept-both-with-attribution for "

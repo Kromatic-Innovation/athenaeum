@@ -162,7 +162,7 @@ def build_dangling_report(intake_roots: list[Path]) -> DanglingReport:
                 1 for line in text.splitlines() if index_line_target(line) is not None
             )
             new_text, dropped = rewrite_index(
-                text, lambda t, d=scope_dir: not (d / t).exists()
+                text, lambda t: not (scope_dir / t).exists()
             )
             if dropped:
                 report.scopes.append(

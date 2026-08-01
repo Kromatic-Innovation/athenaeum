@@ -218,10 +218,10 @@ def _resolve_embeddings(
             log.debug("VectorBackend.fetch_embeddings failed: %s", exc)
             raw_hits = {}
         for idx_id, vec in raw_hits.items():
-            am = id_to_file.get(idx_id)
-            if am is None:
+            hit_file = id_to_file.get(idx_id)
+            if hit_file is None:
                 continue
-            embeddings[str(am.path)] = vec
+            embeddings[str(hit_file.path)] = vec
             hit_ids.add(idx_id)
 
     # Fallback for any misses.

@@ -48,6 +48,7 @@ Two entry points, mirroring the issue's "callable API **and** a CLI":
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 # Single source of truth for the detection patterns: reuse #427's compiled
@@ -117,6 +118,11 @@ class Allowlist:
         phones: set[str] = set()
         if entries is None:
             return cls()
+        # entries is typed ``object`` so callers may pass any iterable of
+        # raw values (each is str()-coerced below); narrow just enough for
+        # mypy while preserving the original "whatever's iterable" runtime
+        # behavior (a non-iterable truthy value still raises TypeError).
+        assert isinstance(entries, Iterable)
         for raw in entries:
             token = str(raw).strip()
             if not token:

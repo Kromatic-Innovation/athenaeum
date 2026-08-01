@@ -144,11 +144,11 @@ def _resolve_all_embeddings(
             log.debug("delta: fetch_embeddings failed: %s", exc)
             raw_hits = {}
         for idx_id, vec in raw_hits.items():
-            am = id_to_file.get(idx_id)
-            if am is None:
+            hit_file = id_to_file.get(idx_id)
+            if hit_file is None:
                 continue
-            embeddings[str(am.path)] = vec
-            hit_relpaths.add(_relpath_for(am.path, extra_roots))
+            embeddings[str(hit_file.path)] = vec
+            hit_relpaths.add(_relpath_for(hit_file.path, extra_roots))
 
     missing = [am for am in files if str(am.path) not in embeddings]
     if missing:
@@ -273,9 +273,9 @@ def compute_affected_clusters(
     # Seed: each changed file's prior cluster (covers "member left cluster")
     # plus the changed/new file itself (covers "member joined / new cluster").
     for rp in changed_relpaths:
-        cid = path_to_cid.get(rp)
-        if cid is not None:
-            _add_cluster(cid)
+        prior_seed_cid = path_to_cid.get(rp)
+        if prior_seed_cid is not None:
+            _add_cluster(prior_seed_cid)
         _add_file(rp)
 
     def _over_caps() -> bool:

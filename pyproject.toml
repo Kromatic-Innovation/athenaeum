@@ -66,11 +66,10 @@ dev = [
     "hatchling",
 ]
 types = [
-    # NON-BLOCKING type-check tooling (hestia#550). Exact-pinned like
-    # ruff so the sized backlog count is deterministic run-to-run. mypy is
-    # NOT a required check — see the ci.yml `types` job (continue-on-error)
-    # and [tool.mypy]. Enabling it as blocking is gated on clearing the
-    # backlog (operator decision 2026-07-30).
+    # Type-check tooling (hestia#550, made blocking in hestia#596). Exact-
+    # pinned like ruff so results are deterministic run-to-run. mypy IS now a
+    # required check — see the ci.yml `types` job (wired into `CI Required`)
+    # and [tool.mypy]. The backlog #550 sized has been cleared.
     "mypy==2.3.0",
 ]
 bench = [
@@ -149,15 +148,14 @@ line-length = 100
 select = ["E", "F", "I", "W", "RUF100", "BLE001"]
 
 [tool.mypy]
-# NON-BLOCKING type check (hestia#550). The package ships `py.typed`
-# (a PEP 561 assertion of type correctness to downstream consumers), yet
-# nothing here had ever run a type checker. This config exists first to
-# *size* the backlog, not to gate: the CI step that runs it is
-# `continue-on-error: true` and is NOT in the `CI Required` aggregate.
-# `warn_unused_ignores` immediately flags which of the `# type: ignore`
-# markers in src/ are dead. Enabling mypy as a *required* check is itself
-# blocked on clearing the backlog (operator decision, 2026-07-30) — do not
-# make it blocking here.
+# BLOCKING type check (hestia#550 sized the backlog; hestia#596 cleared it and
+# made mypy required). The package ships `py.typed` (a PEP 561 assertion of type
+# correctness to downstream consumers), and mypy now enforces that assertion:
+# the CI `types` job is wired into the `CI Required` aggregate and is no longer
+# `continue-on-error`, so a type regression gates merge and `main` promotion.
+# `warn_unused_ignores` keeps dead `# type: ignore` markers from accumulating.
+# Strictness is intentionally still incremental here — tighten `[tool.mypy]`
+# (e.g. `disallow_untyped_defs`) in a follow-up, keeping the check green.
 python_version = "3.11"
 files = ["src/athenaeum"]
 warn_unused_ignores = true

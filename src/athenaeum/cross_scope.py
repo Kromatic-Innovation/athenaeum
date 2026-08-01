@@ -410,7 +410,8 @@ def cross_scope_similarity_pairs(
     """
     excluded: set[tuple[str, str]] = set()
     for a, b in excluded_pair_keys:
-        excluded.add(tuple(sorted((str(a), str(b)))))
+        sa, sb = sorted((str(a), str(b)))
+        excluded.add((sa, sb))
 
     # Build id → (path, scope) map for both raw + wiki.
     id_to_entry: dict[str, tuple[Path, str]] = {}
