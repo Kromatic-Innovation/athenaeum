@@ -1,0 +1,112 @@
+# Classify (Tier-2) golden set (issue #552)
+#
+# Synthetic scenario: "Meridian Advisory", the same fictional 12-person
+# consultancy the detector/resolver golden sets use. Every case is invented —
+# nothing here is drawn from a live knowledge tree.
+#
+# Each case is one raw-intake text fed to tiers.tier2_classify(). Unlike the
+# detector/resolver sets (which classify a RELATIONSHIP between two existing
+# snippets), this set classifies STRUCTURE extracted from ONE piece of raw
+# text: which entities are worth a wiki page, and their name/type/tags/access.
+#
+# ``outcome_class`` values (the classify-specific taxonomy):
+#   - extract_single   : exactly one substantive entity should be extracted
+#   - extract_multiple : more than one entity in the same raw text
+#   - skip_matched     : an entity already in the "already matched" list must
+#                        NOT be re-extracted
+#   - skip_placeholder : the raw text mentions a passing name that is NOT
+#                        substantive enough to warrant a page (no entity)
+#   - empty_procedural : purely procedural/log content -> expects []
+#
+# Scoring (see test_classify_eval.py): we assert on the SHAPE of the
+# extraction — count of entities, that expected names appear (case-
+# insensitive substring match), and that unwanted names/placeholder labels do
+# NOT appear — never on exact observations text.
+
+- id: single_person_entity
+  outcome_class: extract_single
+  content: |
+    Session note: spent an hour with Priya Shah today going over the Q3
+    roadmap for the Meridian retainer. Priya is the client lead on our side
+    and has been with the firm for four years. She flagged that the client
+    wants a mid-month check-in going forward instead of only end-of-month.
+  matched_names: []
+  valid_types: ["person", "project", "reference", "concept"]
+  valid_tags: ["active", "client", "internal"]
+  valid_access: ["internal", "open"]
+  expected:
+    min_entities: 1
+    max_entities: 2
+    must_include_name_substrings: ["Priya"]
+
+- id: multiple_entities_project_and_person
+  outcome_class: extract_multiple
+  content: |
+    Kicked off the Atlas Retooling engagement for Meridian Advisory this
+    week. The engagement is led by Amir Khan on our side, a senior
+    consultant who joined last spring. Atlas Retooling covers a full audit
+    of the client's internal tooling stack over the next two quarters.
+  matched_names: []
+  valid_types: ["person", "project", "reference", "concept"]
+  valid_tags: ["active", "client", "internal"]
+  valid_access: ["internal", "open"]
+  expected:
+    min_entities: 2
+    max_entities: 3
+    must_include_name_substrings: ["Amir", "Atlas"]
+
+- id: skip_already_matched_entity
+  outcome_class: skip_matched
+  content: |
+    Quick update: Priya Shah confirmed the Meridian retainer renewal for
+    another year. No new information otherwise — just a restatement of the
+    existing arrangement.
+  matched_names: ["priya shah"]
+  valid_types: ["person", "project", "reference", "concept"]
+  valid_tags: ["active", "client", "internal"]
+  valid_access: ["internal", "open"]
+  expected:
+    max_entities: 1
+    must_not_include_name_substrings: ["Priya Shah"]
+
+- id: passing_mention_not_substantive
+  outcome_class: skip_placeholder
+  content: |
+    Build log: deploy to staging succeeded at 14:02. Bob from IT support
+    rebooted the CI runner earlier in the day after a flaky agent came back
+    unhealthy. No further action needed.
+  matched_names: []
+  valid_types: ["person", "project", "reference", "concept"]
+  valid_tags: ["active", "client", "internal"]
+  valid_access: ["internal", "open"]
+  expected:
+    max_entities: 0
+
+- id: purely_procedural_no_entities
+  outcome_class: empty_procedural
+  content: |
+    CI run #4821: lint passed, 312 tests passed, 0 failed, 4 skipped.
+    Deploy pipeline triggered automatically post-merge. No manual steps
+    were required.
+  matched_names: []
+  valid_types: ["person", "project", "reference", "concept"]
+  valid_tags: ["active", "client", "internal"]
+  valid_access: ["internal", "open"]
+  expected:
+    max_entities: 0
+
+- id: reference_entity_office_policy
+  outcome_class: extract_single
+  content: |
+    New reference note: Meridian's expense policy was updated this week.
+    All expenses over 25 GBP now require a scanned receipt attached in
+    Airtable before reimbursement is processed. This replaces the old
+    verbal-approval-only process.
+  matched_names: []
+  valid_types: ["person", "project", "reference", "concept"]
+  valid_tags: ["active", "client", "internal"]
+  valid_access: ["internal", "open"]
+  expected:
+    min_entities: 1
+    max_entities: 2
+    must_include_name_substrings: ["expense"]

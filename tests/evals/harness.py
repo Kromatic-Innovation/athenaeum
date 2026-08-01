@@ -44,6 +44,11 @@ LAYER_DETECTOR = "detector"
 LAYER_RESOLVER = "resolver"
 LAYER_RECALL = "recall"
 LAYER_BACKFILL = "backfill"
+# Issue #552: the two additional layers covering tiers.py's CLASSIFY and
+# WRITE/MERGE stages (see docs/evals-inventory.md for the inventory this
+# fills in).
+LAYER_CLASSIFY = "classify"
+LAYER_MERGE = "merge"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EVAL_DATA_ROOT = REPO_ROOT / "tests" / "evals" / "data"
@@ -393,6 +398,8 @@ class EvalSession:
                         LAYER_RESOLVER,
                         LAYER_RECALL,
                         LAYER_BACKFILL,
+                        LAYER_CLASSIFY,
+                        LAYER_MERGE,
                     )
                 )
                 if total
