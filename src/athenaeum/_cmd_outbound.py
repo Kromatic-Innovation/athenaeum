@@ -71,6 +71,10 @@ def cmd_outbound(args: argparse.Namespace) -> int:
     if args.redact:
         # Strip mode: sanitized text is the product. Emit it on stdout; report
         # the count on stderr so a pipe consuming stdout gets clean text only.
+        # `redacted` is only None in flag-only mode (args.redact False), so it
+        # is always populated here — the assert documents that contract for
+        # mypy without changing behavior.
+        assert result.redacted is not None
         sys.stdout.write(result.redacted)
         print(
             f"redacted {len(result.findings)} PII finding(s)",

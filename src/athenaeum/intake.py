@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
+from typing import cast
 
 from athenaeum._lint import _strip_self_reference
 from athenaeum.atomic_io import atomic_write_text
@@ -179,8 +181,15 @@ def discover_auto_memory_files(
                 origin_turn_raw = meta.get("originTurn") if meta else None
                 origin_turn: int | None
                 try:
+                    # origin_turn_raw is an arbitrary YAML scalar (object);
+                    # int() rejects that statically even though at runtime
+                    # it accepts str/float/bool/etc. Any type mismatch not
+                    # covered by int()'s overloads still raises TypeError,
+                    # caught below exactly as before.
                     origin_turn = (
-                        int(origin_turn_raw) if origin_turn_raw is not None else None
+                        int(cast(str, origin_turn_raw))
+                        if origin_turn_raw is not None
+                        else None
                     )
                 except (TypeError, ValueError):
                     origin_turn = None
@@ -359,6 +368,14 @@ def tier0_passthrough(
 
     aliases_raw = meta.get("aliases") or []
     tags_raw = meta.get("tags") or []
+    # meta is dict[str, object] (arbitrary YAML scalars). aliases/tags are
+    # documented as list-shaped frontmatter fields, but the prior runtime
+    # behavior tolerated any iterable (e.g. a bare string would iterate
+    # per-character) and only raised TypeError for genuinely non-iterable
+    # truthy values. Narrow to Iterable (not list) to keep that behavior
+    # exactly; each element is coerced via str() below regardless.
+    assert isinstance(aliases_raw, Iterable)
+    assert isinstance(tags_raw, Iterable)
     entity = WikiEntity(
         uid=uid,
         type=etype,

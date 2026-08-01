@@ -418,7 +418,11 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         created_at=created_at,
         resolved=resolved,
         raw_block=block_text,
-        decision=decision if decision in ("approve", "reject") else "",
+        decision=(
+            "approve"
+            if decision == "approve"
+            else "reject" if decision == "reject" else ""
+        ),
         note=note,
         write_kind=write_kind,
         auto_applied=auto_applied,
@@ -865,9 +869,9 @@ def _apply_fold_into_existing(
     prior_meta, _ = parse_frontmatter(prior_target_text)
     if not isinstance(prior_meta, dict):
         prior_meta = {}
-    existing_alias_slugs = {
-        slugify(str(a)) for a in (prior_meta.get("aliases") or [])
-    }
+    prior_aliases = prior_meta.get("aliases")
+    prior_aliases_list = prior_aliases if isinstance(prior_aliases, list) else []
+    existing_alias_slugs = {slugify(str(a)) for a in prior_aliases_list}
 
     # Step 1 — write the merged draft body to the canonical target.
     atomic_write_text(target_path, pm.draft_merged_body)
@@ -890,7 +894,7 @@ def _apply_fold_into_existing(
     if not isinstance(target_meta, dict):
         target_meta = {}
     carried_meta = _add_aliases_to_frontmatter(
-        target_meta, list(prior_meta.get("aliases") or [])
+        target_meta, list(prior_aliases_list)
     )
     new_meta = _add_aliases_to_frontmatter(carried_meta, folded_slugs)
     if new_meta != target_meta:

@@ -74,8 +74,11 @@ def _resolve_estimate_model(config: dict[str, Any] | None = None) -> str:
 #: Coarse per-file token fallbacks used ONLY when the ledger carries no usable
 #: throughput history (no prior librarian run recorded ``files_processed``).
 #: Deliberately coarse: the estimate promises cost + "hours, not nights".
-DEFAULT_AVG_INPUT_TOKENS_PER_FILE = 20_000
-DEFAULT_AVG_OUTPUT_TOKENS_PER_FILE = 1_500
+#: Typed ``float`` (not ``int``) because these feed the same
+#: ``avg_input_per_file`` / ``avg_output_per_file`` slots as the observed,
+#: division-derived averages from :func:`observed_tokens_per_file`.
+DEFAULT_AVG_INPUT_TOKENS_PER_FILE: float = 20_000
+DEFAULT_AVG_OUTPUT_TOKENS_PER_FILE: float = 1_500
 
 #: Anthropic Messages Batch API discount (issue #236): batch-attributed tokens
 #: bill at half list price. Mirrors the ``0.5`` applied in

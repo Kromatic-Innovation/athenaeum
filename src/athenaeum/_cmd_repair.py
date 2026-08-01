@@ -164,7 +164,12 @@ def cmd_repair(args: argparse.Namespace) -> int:
         mode = "APPLY" if args.apply else "DRY RUN"
 
         for name, func in passes:
-            report: RepairReport = func(wiki_root, apply=args.apply)
+            # `RepairFn = Callable[[Path, bool], RepairReport]` types its second
+            # parameter positionally (plain `Callable[...]` aliases don't carry
+            # keyword-argument names for mypy to match), so call positionally
+            # here even though the underlying functions' `apply` param also
+            # accepts the keyword form.
+            report: RepairReport = func(wiki_root, args.apply)
             total_changed += report.files_changed
             total_errors += len(report.errors)
             print(f"=== repair {name} ({mode}) ===")

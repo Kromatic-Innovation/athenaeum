@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from athenaeum.config import resolve_cache_dir
 from athenaeum.killswitch import is_disabled
@@ -48,6 +49,13 @@ from athenaeum.models import (
 from athenaeum.provenance import resolve_remember_extras, resolve_remember_sources
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
 from athenaeum.storage import is_recallable, storage_policy_configured, write_raw_intake
+
+if TYPE_CHECKING:
+    # Issue #550: resolves the forward reference on ``create_server``'s return
+    # annotation for mypy WITHOUT importing fastmcp at runtime — the real
+    # import stays lazy (inside create_server) so athenaeum works without the
+    # optional ``mcp`` extra installed.
+    from fastmcp import FastMCP
 
 log = logging.getLogger(__name__)
 
@@ -383,14 +391,15 @@ def _recall_via_backend(
             extra_roots,
         )
         body = ""
-        tags: str | list = "\u2014"
+        display_name: object = name
+        tags: object = "\u2014"
         fm: dict[str, object] = {}
         readable = False
         if page_path is not None and page_path.is_file():
             try:
                 text = page_path.read_text(encoding="utf-8")
                 fm, body = parse_frontmatter(text)
-                name = fm.get("name", name)
+                display_name = fm.get("name", display_name)
                 tags = fm.get("tags", "\u2014")
                 readable = True
             except (OSError, UnicodeDecodeError):
@@ -430,7 +439,7 @@ def _recall_via_backend(
         meta_lines = _recall_metadata_lines(fm)
         meta_block = "".join(f"{line}\n" for line in meta_lines)
         blocks.append(
-            f"{name} (score: {score:.1f})\n"
+            f"{display_name} (score: {score:.1f})\n"
             f"**Path:** {display_prefix}\n"
             f"**Tags:** {tags}\n"
             f"{meta_block}\n"
@@ -672,7 +681,7 @@ def create_server(
     caller_audience: set[str] | None = None,
     screening: dict | None = None,
     config: dict | None = None,
-) -> "FastMCP":  # noqa: F821 — lazy import
+) -> FastMCP:
     """Create and return a configured FastMCP server instance.
 
     Args:
