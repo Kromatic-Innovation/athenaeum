@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from athenaeum._retry import with_retry
 from athenaeum.atomic_io import atomic_write_text
@@ -55,6 +55,7 @@ from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 if TYPE_CHECKING:
     import anthropic
+    from anthropic.types import MessageParam, ThinkingConfigParam
 
 log = logging.getLogger(__name__)
 
@@ -162,11 +163,16 @@ def classify_claim_kind(
                 # Issue #578: same ``classify``-model / Haiku posture as
                 # tier2_classify — a single-label classification does not
                 # benefit from thinking. Disabled explicitly.
-                thinking=resolve_thinking(
-                    "claim_kind", "ATHENAEUM_CLAIM_KIND_THINKING", "disabled", config
+                thinking=cast(
+                    "ThinkingConfigParam",
+                    resolve_thinking(
+                        "claim_kind", "ATHENAEUM_CLAIM_KIND_THINKING", "disabled", config
+                    ),
                 ),
                 system=CLAIM_KIND_SYSTEM,
-                messages=[{"role": "user", "content": user_msg}],
+                messages=cast(
+                    "list[MessageParam]", [{"role": "user", "content": user_msg}]
+                ),
             ),
             description="claim_kind_classify",
         )

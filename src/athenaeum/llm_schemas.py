@@ -82,6 +82,7 @@ explicitly, lazily imports an ``observe_*`` wrapper.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, RootModel, ValidationError
@@ -245,8 +246,13 @@ class Tier3MergeOpsResponse(RootModel[list[MergeOp]]):
 # ---------------------------------------------------------------------------
 
 
-def _fmt_error(err: dict[str, Any]) -> str:
-    """Render one pydantic error as ``field.path: message`` (empty loc → ``<root>``)."""
+def _fmt_error(err: Mapping[str, Any]) -> str:
+    """Render one pydantic error as ``field.path: message`` (empty loc → ``<root>``).
+
+    Takes a ``Mapping`` (not ``dict``) so pydantic's ``ErrorDetails`` TypedDict
+    — returned by ``ValidationError.errors()`` — is accepted directly; only
+    ``.get()`` is used here, which both support identically.
+    """
     loc = ".".join(str(p) for p in err.get("loc", ())) or "<root>"
     return f"{loc}: {err.get('msg', 'invalid')}"
 

@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 from athenaeum.config import (
     load_config,
@@ -161,7 +161,15 @@ def status(knowledge_root: Path) -> StatusInfo:
             if not meta or not meta.get("name"):
                 continue
             entity_count += 1
-            etype = meta.get("type", "unknown")
+            # meta is dict[str, object] (arbitrary YAML scalars); ``type``
+            # is one of the identity fields parse_frontmatter coerces to
+            # str when the YAML loader produced an int (e.g. a bare
+            # numeric type name), so it is str in practice. Cast rather
+            # than assert: the original code used the raw value as a dict
+            # key unconditionally (no crash for other hashable types), and
+            # a cast preserves that permissiveness while satisfying the
+            # dict[str, int] annotation.
+            etype = cast(str, meta.get("type", "unknown"))
             entities_by_type[etype] = entities_by_type.get(etype, 0) + 1
 
     # Last git commit

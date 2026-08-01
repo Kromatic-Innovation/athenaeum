@@ -266,9 +266,9 @@ def rebuild_index(wiki_root: Path) -> None:
         meta, _ = parse_frontmatter(text)
         if not meta or not meta.get("name"):
             continue
-        etype = meta.get("type", "unknown")
-        uid = meta.get("uid", "")
-        name = meta.get("name", fpath.stem)
+        etype = str(meta.get("type", "unknown"))
+        uid = str(meta.get("uid", ""))
+        name = str(meta.get("name", fpath.stem))
         by_type.setdefault(etype, []).append((name, uid, fpath.name))
 
     lines = [
@@ -588,13 +588,21 @@ def tier0_handle_upsert(
     for key, value in incoming.items():
         merged_meta[key] = value
 
+    existing_aliases = existing_meta.get("aliases")
+    existing_tags = existing_meta.get("tags")
     entity = WikiEntity(
         uid=uid,
         type=etype,
         name=name,
-        aliases=[str(a) for a in (existing_meta.get("aliases") or []) if a],
+        aliases=[
+            str(a)
+            for a in (existing_aliases if isinstance(existing_aliases, list) else [])
+            if a
+        ],
         access=str(existing_meta.get("access", "internal")),
-        tags=[str(t) for t in (existing_meta.get("tags") or []) if t],
+        tags=[
+            str(t) for t in (existing_tags if isinstance(existing_tags, list) else []) if t
+        ],
         created=str(existing_meta.get("created", date.today().isoformat())),
         updated=str(existing_meta.get("updated", date.today().isoformat())),
         body=existing_body,
@@ -605,8 +613,9 @@ def tier0_handle_upsert(
         # stable across re-seeds), do not bump ``updated``.
         return entity, False
 
-    merged_meta["updated"] = date.today().isoformat()
-    entity.updated = merged_meta["updated"]
+    updated_today = date.today().isoformat()
+    merged_meta["updated"] = updated_today
+    entity.updated = updated_today
 
     # Schema-gate the merged frontmatter before write — same guarantee tier0
     # passthrough gives. Source-handle keys ride through via extra="allow".
@@ -741,6 +750,7 @@ def process_one(
     # unparseable JSON (even after the repair pass + one retry) is counted and
     # surfaced in the run summary instead of vanishing into a warning log.
     t2_stats = Tier2ParseStats()
+    assert client is not None, "client required for non-dry-run"
     classified = tier2_classify(
         raw,
         matched_names,
@@ -2240,9 +2250,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
 
             if ctx.install_signal_handlers and not ctx.dry_run:
                 try:
-                    for _s in (signal.SIGTERM, signal.SIGINT):
+                    for _sig in (signal.SIGTERM, signal.SIGINT):
                         _prev_handlers.append(
-                            (_s, signal.signal(_s, _commit_partial_and_exit))
+                            (_sig, signal.signal(_sig, _commit_partial_and_exit))
                         )
                 except ValueError:
                     # Not the main thread (e.g. an in-process caller) —

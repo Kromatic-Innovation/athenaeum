@@ -103,13 +103,13 @@ def collect_handles(meta: dict[str, Any]) -> dict[str, Any]:
     """
     handles: dict[str, Any] = {}
     for key in LIST_HANDLE_KEYS:
-        cleaned = _clean_list(meta.get(key))
-        if cleaned:
-            handles[key] = cleaned
+        cleaned_list = _clean_list(meta.get(key))
+        if cleaned_list:
+            handles[key] = cleaned_list
     for key in SCALAR_HANDLE_KEYS:
-        cleaned = _clean_scalar(meta.get(key))
-        if cleaned:
-            handles[key] = cleaned
+        cleaned_scalar = _clean_scalar(meta.get(key))
+        if cleaned_scalar:
+            handles[key] = cleaned_scalar
     return handles
 
 

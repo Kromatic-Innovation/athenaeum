@@ -56,6 +56,7 @@ this module, never the reverse.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -119,7 +120,7 @@ class CrossClassRejection:
 CROSS_CLASS_REJECTED = "cross_class_incompatible"
 
 
-def cross_class_precheck(member_paths: list[str | Path]) -> CrossClassRejection | None:
+def cross_class_precheck(member_paths: Sequence[str | Path]) -> CrossClassRejection | None:
     """Return a rejection record when *member_paths* span >1 ``memory_class``.
 
     Issue #433, part 1. Reads each member's ``memory_class:`` frontmatter
@@ -204,7 +205,7 @@ class CiteProposal:
 
 
 def build_cite_proposal(
-    member_paths: list[str | Path],
+    member_paths: Sequence[str | Path],
     rejection: CrossClassRejection,
 ) -> CiteProposal:
     """Build the cite-proposal shape for a cross-class cluster (#433 part 2).

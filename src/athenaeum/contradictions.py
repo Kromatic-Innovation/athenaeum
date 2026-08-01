@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.config import resolve_model
@@ -64,6 +64,7 @@ from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 if TYPE_CHECKING:
     import anthropic
+    from anthropic.types import MessageParam, ThinkingConfigParam
 
 log = logging.getLogger(__name__)
 
@@ -429,14 +430,19 @@ def detect_contradictions(
                 # Issue #578: same ``classify``-model / Haiku posture as
                 # tier2_classify — a short structured verdict does not
                 # benefit from thinking. Disabled explicitly.
-                thinking=resolve_thinking(
-                    "contradiction_detect",
-                    "ATHENAEUM_CONTRADICTION_DETECT_THINKING",
-                    "disabled",
-                    config,
+                thinking=cast(
+                    "ThinkingConfigParam",
+                    resolve_thinking(
+                        "contradiction_detect",
+                        "ATHENAEUM_CONTRADICTION_DETECT_THINKING",
+                        "disabled",
+                        config,
+                    ),
                 ),
                 system=_DETECT_SYSTEM,
-                messages=[{"role": "user", "content": user_msg}],
+                messages=cast(
+                    "list[MessageParam]", [{"role": "user", "content": user_msg}]
+                ),
             ),
             description="contradiction_detect",
         )
