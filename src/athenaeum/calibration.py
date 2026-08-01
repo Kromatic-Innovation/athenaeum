@@ -173,6 +173,7 @@ def sample_tier_decision(
     reason: str,
     config: dict[str, Any] | None = None,
     ledger_path: Path | None = None,
+    applied: bool = False,
 ) -> dict[str, Any] | None:
     """Sample one finalized tier decision for human audit, if selected.
 
@@ -182,6 +183,17 @@ def sample_tier_decision(
     simply isn't selected by the deterministic sampler at the configured rate.
     Idempotent — re-sampling an already-recorded decision returns ``None``
     rather than duplicating it.
+
+    ``applied`` (issue #602): ``True`` iff the sampled decision was a T2
+    ``approve`` that was ALREADY auto-finalized (the merge is live in the
+    wiki by the time this is called — see
+    :func:`athenaeum.merge.t2_screen_merge_proposal`), as opposed to a T1
+    reject (never "applied" — a reject never writes anything) or a
+    hypothetical future watched verdict that only proposes. Carried through
+    unchanged onto a later :func:`record_audit_review` so an overturn of
+    this item can be recorded as an overturn of an ALREADY-APPLIED merge,
+    not merely of a proposal — see that function's ``overturned_applied``
+    field and :func:`calibration_summary`'s ``overturned_applied`` count.
     """
     from athenaeum.config import (
         resolve_audit_sample_rate_t1_rejects,
@@ -216,6 +228,7 @@ def sample_tier_decision(
         "proposal_id": proposal_id,
         "reason": reason,
         "sample_rate": rate,
+        "applied": applied,
     }
     target = (
         ledger_path if ledger_path is not None else default_calibration_ledger_path(wiki_root)
@@ -258,7 +271,20 @@ def record_audit_review(
     *overturned* when they differ, *confirmed* when they match. Recording is
     the whole effect: a confirm leaves the original decision untouched, and an
     overturn is a calibration signal only (no merge is executed or unwound
-    here). Returns the review record.
+    here — automated unwinding is explicitly OUT OF SCOPE, issue #602).
+    Returns the review record.
+
+    ``overturned_applied`` (issue #602): ``True`` iff this is an overturn
+    (``overturned`` is ``True``) of an audit item that was itself
+    ``applied`` (a T2 approve that had ALREADY auto-finalized a live wiki
+    write — see :func:`sample_tier_decision`'s ``applied`` param). This is
+    the distinct signal the issue calls for: overturning an APPLIED merge is
+    a materially bigger deal than overturning a mere proposal (nothing was
+    written for the latter), so it is recorded and surfaced separately
+    (:func:`calibration_summary`'s ``overturned_applied`` count) rather than
+    folded into the plain ``overturned`` count. Always ``False`` when
+    ``overturned`` is ``False``, and always ``False`` for a T1 item (a T1
+    reject is never ``applied`` — nothing is ever written on a reject).
 
     Raises ``ValueError`` if ``audit_id`` is unknown or already reviewed —
     each audit item is reviewed at most once.
@@ -278,6 +304,7 @@ def record_audit_review(
         raise ValueError(f"audit item already reviewed: {audit_id!r}")
 
     overturned = human_verdict != audit.get("verdict")
+    applied = bool(audit.get("applied"))
     record = {
         "v": CALIBRATION_LEDGER_VERSION,
         "kind": REVIEW_KIND,
@@ -287,6 +314,8 @@ def record_audit_review(
         "original_verdict": audit.get("verdict"),
         "human_verdict": human_verdict,
         "overturned": overturned,
+        "applied": applied,
+        "overturned_applied": overturned and applied,
         "note": note,
     }
     target = (
@@ -299,34 +328,58 @@ def record_audit_review(
 def calibration_summary(
     wiki_root: Path, *, ledger_path: Path | None = None
 ) -> dict[str, dict[str, int]]:
-    """Per-tier calibration counts: ``{tier: {sampled, reviewed, overturned}}``.
+    """Per-tier calibration counts:
+    ``{tier: {sampled, reviewed, overturned, applied, overturned_applied}}``.
 
     Always includes the two known tiers (``T1``, ``T2``) with zero counts when
     a tier has no audit history yet, plus any other tier that appears in the
     ledger — so the summary is a stable shape a human (or the ``calibration
     summary`` CLI / MCP tool) can read directly.
+
+    ``applied`` / ``overturned_applied`` (issue #602): ``applied`` counts
+    sampled items that were ALREADY auto-finalized (a live wiki write) at
+    sample time — always 0 for T1 (a reject never writes anything).
+    ``overturned_applied`` is the subset of ``overturned`` that were also
+    ``applied`` — the SINGLE most important number in this summary once T2
+    auto-finalize is enabled: it is a human catching a bad merge that is
+    ALREADY LIVE in the wiki (not merely a proposal nobody acted on yet).
+    Surfaced as its own top-level count (not folded into ``overturned``) so
+    it cannot be silently averaged away in a summary that also has ordinary
+    proposal overturns.
     """
     from athenaeum.reasoning_tiers import T1_TIER_NAME, T2_TIER_NAME
 
     records = read_calibration_ledger(wiki_root, ledger_path=ledger_path)
     summary: dict[str, dict[str, int]] = {
-        T1_TIER_NAME: {"sampled": 0, "reviewed": 0, "overturned": 0},
-        T2_TIER_NAME: {"sampled": 0, "reviewed": 0, "overturned": 0},
+        T1_TIER_NAME: _empty_tier_bucket(),
+        T2_TIER_NAME: _empty_tier_bucket(),
     }
     for r in records:
         tier = str(r.get("tier", ""))
         if not tier:
             continue
-        bucket = summary.setdefault(
-            tier, {"sampled": 0, "reviewed": 0, "overturned": 0}
-        )
+        bucket = summary.setdefault(tier, _empty_tier_bucket())
         if r.get("kind") == AUDIT_KIND:
             bucket["sampled"] += 1
+            if r.get("applied"):
+                bucket["applied"] += 1
         elif r.get("kind") == REVIEW_KIND:
             bucket["reviewed"] += 1
             if r.get("overturned"):
                 bucket["overturned"] += 1
+                if r.get("overturned_applied"):
+                    bucket["overturned_applied"] += 1
     return summary
+
+
+def _empty_tier_bucket() -> dict[str, int]:
+    return {
+        "sampled": 0,
+        "reviewed": 0,
+        "overturned": 0,
+        "applied": 0,
+        "overturned_applied": 0,
+    }
 
 
 __all__ = [
