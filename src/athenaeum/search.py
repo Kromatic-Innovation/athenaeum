@@ -1117,7 +1117,7 @@ class VectorBackend:
             from chromadb.api.client import SharedSystemClient
 
             SharedSystemClient.clear_system_cache()
-        except Exception:  # pragma: no cover - chromadb internals moved
+        except Exception:  # noqa: BLE001 — pragma: no cover - chromadb internals moved
             # If the internal moved, we simply don't get auto-reopen — the
             # pre-#489 behaviour — never a crash from the fix itself.
             pass
@@ -1150,7 +1150,7 @@ class VectorBackend:
             return embedding_functions.SentenceTransformerEmbeddingFunction(
                 model_name=self.embedding_model
             )
-        except Exception:  # pragma: no cover - optional-model fallback
+        except Exception:  # noqa: BLE001 — pragma: no cover - optional-model fallback
             import logging
 
             logging.getLogger(__name__).warning(
@@ -1305,7 +1305,7 @@ class VectorBackend:
                     _VECTOR_COLLECTION,
                     embedding_function=self._embedding_function(),
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — corrupt/missing collection: fall back to full rebuild
                 # Corrupt / missing collection despite a manifest — fall back
                 # to a clean full rebuild rather than accreting a bad delta.
                 # Issue #370: log it — a silent full rmtree+re-embed of a 21k
@@ -1401,7 +1401,7 @@ class VectorBackend:
         client = chromadb.PersistentClient(path=str(vector_dir))
         try:
             collection = client.get_collection(_VECTOR_COLLECTION)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — chromadb's exception class moves across releases; can't import it directly
             # chromadb raises an InvalidCollectionException (and occasionally
             # bare ValueError from the rust binding) when the collection is
             # absent or its metadata is corrupt. We can't import the exception
@@ -1493,12 +1493,12 @@ class VectorBackend:
             collection = client.get_collection(
                 _VECTOR_COLLECTION, embedding_function=None
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — missing/corrupt collection: degrade to no embeddings
             return {}
 
         try:
             result = collection.get(ids=id_list, include=["embeddings"])
-        except Exception:
+        except Exception:  # noqa: BLE001 — chromadb read failure: degrade to no embeddings
             return {}
 
         out: dict[str, list[float]] = {}
@@ -1559,7 +1559,7 @@ class VectorBackend:
                 _VECTOR_COLLECTION, embedding_function=None
             )
             collection.delete(ids=id_list)
-        except Exception:
+        except Exception:  # noqa: BLE001 — purge must never break the merge (see docstring)
             return 0
         return len(id_list)
 
@@ -1598,7 +1598,7 @@ class VectorBackend:
             collection = client.get_collection(
                 _VECTOR_COLLECTION, embedding_function=None
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — missing/corrupt collection: no neighbors
             return []
 
         count = collection.count()
@@ -1618,7 +1618,7 @@ class VectorBackend:
                 n_results=min(k, count),
                 where=where,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — chromadb query failure: no neighbors
             return []
 
         out: list[tuple[str, float]] = []
@@ -1958,7 +1958,7 @@ def _get_ef() -> Any | None:
         from chromadb.utils import embedding_functions  # type: ignore[import]
 
         _EF = embedding_functions.DefaultEmbeddingFunction()
-    except Exception:  # ImportError, any chromadb init error
+    except Exception:  # noqa: BLE001 — ImportError, any chromadb init error: degrade to None
         _EF = None
     return _EF
 
@@ -1979,5 +1979,5 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
         result = ef(texts)
         # chromadb EF returns a list-like of list-likes; normalise to list[list[float]]
         return [list(map(float, vec)) for vec in result]
-    except Exception:
+    except Exception:  # noqa: BLE001 — embedding call failure: degrade to None (caller falls back)
         return None

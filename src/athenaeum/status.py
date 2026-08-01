@@ -210,7 +210,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         )
         if advisory is not None:
             drain_advisory = advisory.summary
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — advisor must never break status
         log.debug(
             "status: backlog-drain advisor skipped (%s): %s",
             type(exc).__name__,
