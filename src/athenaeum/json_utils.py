@@ -292,3 +292,134 @@ def loads_lenient(text: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError:
         return json.loads(repair_json_control_chars(text))
+
+
+# ---------------------------------------------------------------------------
+# Balanced-array extraction (issue #607, M16)
+# ---------------------------------------------------------------------------
+#
+# The module above extracts JSON *objects*. Some LLM responses are a bare JSON
+# *array* — most notably the recall-hot-path topic extractor
+# (:mod:`athenaeum.query_topics`), which asks for a list of strings. The array
+# analogue below mirrors the object scanner's structure exactly (balanced
+# raw_decode scan, fenced-content-first then whole-text fallback, lenient
+# control-char repair) so callers route through ONE style, not two.
+
+
+def _scan_arrays(
+    text: str,
+    limit: int,
+) -> tuple[list[list[Any]], json.JSONDecodeError | None, bool]:
+    """Collect up to ``limit`` balanced top-level JSON arrays in ``text``.
+
+    The array analogue of :func:`_scan_objects`: anchors on each ``[`` and
+    attempts :meth:`json.JSONDecoder.raw_decode`, resuming *past* a matched
+    array's closing bracket so a nested array is not counted separately.
+    Returns the collected arrays, the last :class:`json.JSONDecodeError` seen
+    (for debug logging), and whether any attempt raised ``RecursionError``
+    (pathologically deep nesting, contained and treated as a failed parse).
+    """
+    found: list[list[Any]] = []
+    last_err: json.JSONDecodeError | None = None
+    hit_recursion = False
+    idx = text.find("[")
+    while idx != -1 and len(found) < limit:
+        try:
+            arr, end = _DECODER.raw_decode(text, idx)
+        except json.JSONDecodeError as err:
+            last_err = err
+            idx = text.find("[", idx + 1)
+            continue
+        except RecursionError:
+            hit_recursion = True
+            idx = text.find("[", idx + 1)
+            continue
+        if isinstance(arr, list):
+            found.append(arr)
+            idx = text.find("[", end)
+        else:
+            idx = text.find("[", idx + 1)
+    return found, last_err, hit_recursion
+
+
+def _scan_arrays_lenient(
+    text: str,
+    limit: int,
+) -> tuple[list[list[Any]], json.JSONDecodeError | None, bool]:
+    """:func:`_scan_arrays`, retried once through control-char repair.
+
+    Mirrors :func:`loads_lenient`'s two-pass shape: a strict scan first (so
+    well-formed text takes the identical fast path with no transformation),
+    then — only if the strict scan found nothing — a second scan over
+    :func:`repair_json_control_chars`\\ ed text, so a bare newline/tab inside a
+    string value does not sink an otherwise-balanced array. The whole text is
+    repaired once per pass, so ``raw_decode`` positions stay internally
+    consistent within each scan.
+    """
+    found, last_err, hit_recursion = _scan_arrays(text, limit)
+    if found:
+        return found, last_err, hit_recursion
+    repaired = repair_json_control_chars(text)
+    if repaired != text:
+        r_found, r_err, r_rec = _scan_arrays(repaired, limit)
+        if r_found:
+            return r_found, r_err, r_rec
+        return r_found, r_err or last_err, r_rec or hit_recursion
+    return found, last_err, hit_recursion
+
+
+def extract_json_array(text: str) -> list[Any] | None:
+    """Return the JSON array deliberately embedded in ``text``, or ``None``.
+
+    The array analogue of :func:`extract_json_object`, with the identical
+    fenced-content-first / whole-text fallback contract and control-char
+    repair. In priority order:
+
+    1. If ``text`` has fenced code blocks, extraction is tried from fenced
+       content first — the fence marks the deliberate answer. The FIRST fenced
+       block that yields a balanced array wins; unfenced brackets (e.g. an
+       example ``[1]`` in surrounding prose) are ignored. If fenced blocks are
+       present but none yields an array, the whole text is scanned (clause 2).
+    2. On a whole-text scan, if EXACTLY ONE balanced top-level array is found
+       it is returned. Trailing prose after the array is tolerated — the
+       balanced scan stops at the array's own closing ``]``. A nested array is
+       not counted separately.
+    3. If the whole-text scan finds MORE THAN ONE top-level array (e.g. the
+       real payload followed by a second example array), the response is
+       ambiguous and ``None`` is returned rather than guessing.
+
+    A legitimately-empty array ``[]`` is itself a balanced array and returns
+    ``[]`` (NOT ``None``), so a caller can distinguish an empty answer from a
+    parse miss. ``None`` means no parseable array exists — truncated/
+    unterminated output, non-array content, or the clause-3 ambiguity.
+    """
+    fenced_blocks = _FENCE_RE.findall(text)
+    if fenced_blocks:
+        for block in fenced_blocks:
+            found, _err, _rec = _scan_arrays_lenient(block, limit=1)
+            if found:
+                return found[0]
+        # Fenced blocks present but none held an array — fall through to the
+        # whole-text scan, exactly as :func:`extract_json_object` clause 2.
+
+    found, last_err, hit_recursion = _scan_arrays_lenient(text, limit=2)
+    if len(found) == 1:
+        return found[0]
+    if len(found) > 1:
+        log.debug(
+            "json_utils: multiple top-level JSON arrays in whole-text scan; "
+            "ambiguous, returning None"
+        )
+        return None
+    if last_err is not None:
+        log.debug(
+            "json_utils: no JSON array extracted; last decode error: %s (pos %d)",
+            last_err.msg,
+            last_err.pos,
+        )
+    elif hit_recursion:
+        log.debug(
+            "json_utils: no JSON array extracted; parse attempts exhausted "
+            "recursion depth"
+        )
+    return None

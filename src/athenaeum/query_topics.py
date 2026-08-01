@@ -43,10 +43,8 @@ each call site, is "stay import-light."
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 
 from athenaeum.config import resolve_model
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
@@ -217,13 +215,31 @@ def extract_topics(
     except (AttributeError, IndexError, TypeError):
         return []
 
-    match = re.search(r"\[.*\]", text, re.DOTALL)
-    if not match:
-        return []
+    # M16 (#607): route the topic array through the shared balanced scanner
+    # instead of a greedy ``re.search(r"\[.*\]", DOTALL)`` + bare
+    # ``json.loads``. The old regex spanned from the first ``[`` to the LAST
+    # ``]`` anywhere in the response, so any trailing prose, second array, or
+    # fenced example folded into one blob that failed to decode — silently,
+    # indistinguishably from an empty answer. ``extract_json_array`` stops at
+    # the payload's own closing bracket and (via loads_lenient) tolerates
+    # control chars inside strings. Imported here (not at module top) to keep
+    # this recall-hot-path module import-light, matching the deferred imports
+    # already used inside this function.
+    from athenaeum.json_utils import extract_json_array
 
-    try:
-        items = json.loads(match.group())
-    except json.JSONDecodeError:
+    items = extract_json_array(text)
+    if items is None:
+        # A genuine parse miss (unterminated array, ambiguous multi-array,
+        # non-array content, …). Surface it at WARNING so a systematically
+        # malformed topic-model regime is visible instead of degrading
+        # silently. A legitimately-empty ``[]`` answer returns ``[]`` from
+        # extract_json_array and never reaches this branch, so a normal
+        # no-topics response stays quiet at WARNING level.
+        log.warning(
+            "query_topics: no parseable topic array in model response; "
+            "degrading to no topics (response head: %r)",
+            text[:120],
+        )
         return []
 
     # Observe-only schema validation (#570, M17 phase 1): log the delta between
