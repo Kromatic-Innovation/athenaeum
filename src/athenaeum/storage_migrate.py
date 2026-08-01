@@ -382,6 +382,306 @@ def plan_pii_migration(
 
 
 # ---------------------------------------------------------------------------
+# Name-is-an-email rename migration (issue #505 — the #502 carve-out's slice)
+# ---------------------------------------------------------------------------
+#
+# #502 preserves ``name:``/``preferred_name:`` verbatim even when it is an
+# email address (:data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS`) — renaming
+# a page changes its slug and breaks inbound ``[[wikilink]]``/``aliases:``
+# resolution, so that population was EXCLUDED from the automatic path and left
+# for this dedicated slice. APPROACH 1 (operator decision, #505): derive a
+# display name from the local-part with a confidence gate
+# (:func:`~athenaeum.pii.derive_display_name_from_email`), rename the page to
+# that name (new slug/filename), move the address to the excluded contact
+# record (the same surface :func:`plan_pii_migration` writes to), and rewrite
+# every inbound edge that pointed at the OLD slug so nothing dangles.
+#
+# "Inbound edge" in this corpus is two things, both already-shipped machinery
+# in :mod:`athenaeum.pending_merges` (the ``fold-into-existing`` merge-write
+# path rewrites both when a page is folded into another under a new
+# canonical slug — the exact same slug-rename + edge-preservation shape this
+# migration needs, just triggered by a different reason):
+#
+# 1. ``[[old-slug]]`` wikilinks anywhere under ``wiki/`` — rewritten via
+#    :func:`athenaeum.pending_merges._rewrite_inbound_wikilinks`.
+# 2. Alias resolution — the OLD slug (and the raw email local-part, so a
+#    literal ``[[jane.doe]]`` or the historical ``[[jdoe]]``-shaped link some
+#    other page might carry) is recorded in the renamed page's own
+#    ``aliases:`` frontmatter via
+#    :func:`athenaeum.pending_merges._add_aliases_to_frontmatter`, so
+#    :func:`athenaeum.pending_merges.resolve_alias_slug` continues to resolve
+#    it after the rename.
+#
+# Reusing this machinery (rather than re-implementing slug-rewrite) keeps
+# there being exactly one definition of "how a wiki-tree rename propagates".
+
+
+@dataclass(frozen=True)
+class NameEmailRenamePlan:
+    """The would-be result of renaming one name-is-an-email entity page.
+
+    ``confident`` is False for the DEFERRED case (issue #505's REQUIRED
+    FALLBACK): an ambiguous local-part (role address, ``+tag``, initial-blob,
+    opaque/numeric) is never guessed at — the page is left exactly as-is and
+    this plan carries no rewrite, only the reason it was deferred.
+    """
+
+    page_path: Path
+    email: str
+    #: True when a confident display name was derived (approach 1 applies).
+    #: False => DEFER; every field below is meaningless/empty on a deferred
+    #: plan except :attr:`deferred_reason`.
+    confident: bool
+    #: The derived display name (e.g. ``"Jane Doe"``). ``""`` when deferred.
+    display_name: str = ""
+    #: New slug (``models.slugify(display_name)``). ``""`` when deferred.
+    new_slug: str = ""
+    #: New on-disk filename for the renamed page. ``""`` when deferred.
+    new_filename: str = ""
+    #: New path the page would be renamed to. ``None`` when deferred.
+    new_page_path: Path | None = None
+    #: Where the archival contact record would be written. ``None`` when
+    #: deferred (nothing is migrated for a deferred page).
+    excluded_page_path: Path | None = None
+    #: Rewritten page text (new ``name:``, email dropped, old slug/local-part
+    #: added to ``aliases:``). ``None`` when deferred.
+    rewritten_page_text: str | None = None
+    #: The archival contact-record text for the excluded surface. ``None``
+    #: when deferred.
+    excluded_page_text: str | None = None
+    #: Human-readable reason the page was deferred (e.g. "role address",
+    #: "numeric/opaque local-part"). ``""`` when confident.
+    deferred_reason: str = ""
+
+
+def _name_email_deferred_reason(email: str) -> str:
+    """Best-effort human-readable reason :func:`derive_display_name_from_email`
+    declined *email* — purely for operator-facing reporting, not re-derivation.
+    """
+    from athenaeum.pii import ROLE_LOCALPARTS
+
+    if "@" not in email:
+        return "malformed address"
+    local = email.split("@", 1)[0].strip()
+    if not local:
+        return "malformed address"
+    if "+" in local:
+        return "+tag address"
+    if local.lower() in ROLE_LOCALPARTS:
+        return "role/service address"
+    if any(ch.isdigit() for ch in local):
+        return "numeric or opaque local-part"
+    return "ambiguous local-part (initial-blob or too short to name confidently)"
+
+
+def plan_name_email_rename(
+    page_path: Path,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> NameEmailRenamePlan:
+    """Compute the rename migration for one name-is-an-email page — pure.
+
+    Reads *page_path*, and when its ``name:``/``preferred_name:`` is a
+    confidently-nameable email (per
+    :func:`~athenaeum.pii.derive_display_name_from_email`), returns a plan to:
+
+    - rename the page (``name:`` becomes the derived display name; the old
+      slug and the raw local-part are recorded in ``aliases:`` so old
+      wikilinks/alias-resolution keep working post-rename);
+    - move the address to an excluded contact record (mirrors
+      :func:`_render_excluded_record`'s shape);
+    - leave the origin page's OTHER frontmatter and body untouched.
+
+    When the name is NOT confidently nameable (role address, ``+tag``,
+    initial-blob, numeric/opaque local-part), returns a plan with
+    ``confident=False`` and writes nothing — the REQUIRED FALLBACK (issue
+    #505): never guess a name.
+
+    Only the FIRST of ``name:``/``preferred_name:`` that is email-shaped is
+    used as the rename source, matching :data:`~athenaeum.pii.NAME_FIELDS`
+    order — a page is renamed once, not twice.
+    """
+    from athenaeum.models import slugify
+    from athenaeum.pending_merges import _add_aliases_to_frontmatter
+    from athenaeum.pii import NAME_FIELDS, derive_display_name_from_email, find_inline_emails
+
+    text = page_path.read_text(encoding="utf-8")
+    meta, body = parse_frontmatter(text)
+    if not isinstance(meta, dict):
+        meta = {}
+
+    email: str | None = None
+    name_field: str | None = None
+    for field in NAME_FIELDS:
+        raw = meta.get(field)
+        if raw is None:
+            continue
+        candidate = str(raw)
+        hits = find_inline_emails(candidate)
+        if hits:
+            email = hits[0]
+            name_field = field
+            break
+
+    if email is None or name_field is None:
+        # Not a name-is-an-email page at all — nothing to plan.
+        return NameEmailRenamePlan(page_path=page_path, email="", confident=False)
+
+    display_name = derive_display_name_from_email(email)
+    if display_name is None:
+        return NameEmailRenamePlan(
+            page_path=page_path,
+            email=email,
+            confident=False,
+            deferred_reason=_name_email_deferred_reason(email),
+        )
+
+    new_slug = slugify(display_name)
+    new_filename = f"{new_slug}.md"
+    new_page_path = page_path.with_name(new_filename)
+
+    old_slug = slugify(page_path.stem)
+    local_part = email.split("@", 1)[0]
+
+    new_meta = dict(meta)
+    new_meta[name_field] = display_name
+    # Record the old slug + raw local-part as aliases so a `[[old-slug]]`
+    # wikilink or an `aliases:`-resolution lookup for the historical
+    # local-part keeps resolving post-rename (mirrors the fold-into-existing
+    # merge write path's alias bookkeeping via the same helper).
+    new_meta = _add_aliases_to_frontmatter(new_meta, [old_slug, local_part])
+
+    rewritten_page_text = render_frontmatter(new_meta) + "\n" + body
+
+    excluded_root = surface_root_for_class(PII_ENTITY_CLASS, config, knowledge_root)
+    excluded_page_path = excluded_root / new_filename
+    excluded_page_text = _render_excluded_record(
+        {"uid": meta.get("uid"), "name": display_name}, [email], []
+    )
+
+    return NameEmailRenamePlan(
+        page_path=page_path,
+        email=email,
+        confident=True,
+        display_name=display_name,
+        new_slug=new_slug,
+        new_filename=new_filename,
+        new_page_path=new_page_path,
+        excluded_page_path=excluded_page_path,
+        rewritten_page_text=rewritten_page_text,
+        excluded_page_text=excluded_page_text,
+    )
+
+
+@dataclass
+class NameEmailRenameReport:
+    """Result of applying (or dry-running) the bulk name-is-an-email rename.
+
+    ``residual`` is the REQUIRED count of pages deliberately deferred (issue
+    #505's fallback) — reported so the population never silently vanishes,
+    mirroring how :func:`plan_pii_migration`'s ``name_field_pii`` flag lets the
+    bulk PII driver surface this same population today.
+    """
+
+    scanned: int = 0
+    renamed: int = 0
+    residual: int = 0
+    links_rewritten: int = 0
+    renames: list[tuple[str, str]] = None  # type: ignore[assignment]
+    deferred: list[tuple[Path, str]] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.renames is None:
+            self.renames = []
+        if self.deferred is None:
+            self.deferred = []
+
+
+def apply_name_email_rename(
+    plan: NameEmailRenamePlan,
+    wiki_root: Path,
+) -> int:
+    """Write one CONFIDENT rename plan: excluded record, rename, rewrite edges.
+
+    Order mirrors :func:`_apply_plan`'s crash-safety discipline (archival copy
+    lands before anything origin-side changes):
+
+    1. Write the excluded contact record.
+    2. Write the rewritten page text to the NEW path (new slug/filename).
+    3. Remove the OLD path (the rename is a write-then-delete, not an
+       ``os.replace``, so a crash between steps 2 and 3 leaves BOTH the new
+       page and the stale old one on disk rather than losing content — the
+       stale old copy is simply a duplicate a re-run's rewrite would rewrite
+       again, or an operator can delete by hand; nothing is silently lost).
+    4. Rewrite every inbound ``[[old-slug]]`` wikilink under *wiki_root* to
+       the new slug (:func:`athenaeum.pending_merges._rewrite_inbound_wikilinks`
+       — reused, not reimplemented).
+
+    Returns the number of OTHER files whose inbound wikilinks were rewritten
+    (mirrors ``links_rewritten`` in the fold-into-existing merge write path).
+    Raises if *plan* is not confident — callers must check
+    :attr:`NameEmailRenamePlan.confident` first (the CLI/bulk driver never
+    calls this on a deferred plan).
+    """
+    from athenaeum.atomic_io import atomic_write_text
+    from athenaeum.models import slugify
+    from athenaeum.pending_merges import _rewrite_inbound_wikilinks
+
+    if not plan.confident or plan.new_page_path is None:
+        raise ValueError(f"cannot apply a deferred rename plan: {plan.page_path}")
+
+    assert plan.excluded_page_path is not None
+    plan.excluded_page_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(plan.excluded_page_path, plan.excluded_page_text or "")
+
+    atomic_write_text(plan.new_page_path, plan.rewritten_page_text or "")
+    if plan.new_page_path != plan.page_path and plan.page_path.is_file():
+        plan.page_path.unlink()
+
+    old_slug = slugify(plan.page_path.stem)
+    return _rewrite_inbound_wikilinks(
+        wiki_root, [old_slug], plan.new_slug, skip=plan.new_page_path
+    )
+
+
+def bulk_rename_name_email_pages(
+    wiki_root: Path,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+    *,
+    apply: bool = False,
+) -> NameEmailRenameReport:
+    """Drive :func:`plan_name_email_rename` over every entity page (issue #505).
+
+    Idempotent/resumable the same way :func:`plan_pii_migration`'s bulk driver
+    is: a renamed page's ``name:`` is no longer email-shaped, so
+    :func:`plan_name_email_rename` returns an unplanned (non-name-is-email)
+    result for it on a re-run — already-renamed pages are simply skipped, not
+    double-processed. A deferred page is likewise re-evaluated (and re-deferred)
+    on every run rather than remembered in a side ledger — the frontmatter
+    itself is the checkpoint.
+    """
+    report = NameEmailRenameReport()
+    for page_path in iter_entity_pages(wiki_root):
+        report.scanned += 1
+        try:
+            plan = plan_name_email_rename(page_path, config, knowledge_root)
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not plan.email:
+            continue  # not a name-is-an-email page at all
+        if not plan.confident:
+            report.residual += 1
+            report.deferred.append((page_path, plan.deferred_reason))
+            continue
+        report.renamed += 1
+        report.renames.append((page_path.stem, plan.new_slug))
+        if apply:
+            report.links_rewritten += apply_name_email_rename(plan, wiki_root)
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Bulk target-set resolution (issue #495)
 # ---------------------------------------------------------------------------
 #

@@ -12,7 +12,12 @@ Two sub-commands:
 - ``migrate-pii`` — move a live entity page's archival contact data
   (emails/phones) to the #427 excluded surface, dry-run by default (``--apply``
   writes). Single page (``--page``) or bulk over the whole entity set
-  (``--all`` / ``--glob``, issue #495).
+  (``--all`` / ``--glob``, issue #495). ``--rename-name-email`` (issue #505,
+  bulk-only) additionally migrates the ~80-page name-is-an-email population
+  #502 deliberately excluded: rename a confidently-nameable page (derived
+  display name from the local-part), move the address off-corpus, and rewrite
+  inbound wikilinks — an ambiguous local-part is left unrenamed and reported
+  as a residual count instead.
 - ``lint-pii`` — a corpus-wide PII gate: scan EVERY file under ``wiki/`` (not
   only entity pages — ``_``-prefixed queue/index/archive files and ``.bak``
   files included) for an inline email/phone and exit non-zero on any finding,
@@ -36,7 +41,9 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
 from athenaeum.pii import is_pii_class_excluded, scan_corpus_pii
 from athenaeum.storage_migrate import (
+    NameEmailRenameReport,
     PiiMigrationPlan,
+    bulk_rename_name_email_pages,
     iter_entity_pages,
     iter_glob_pages,
     plan_pii_migration,
@@ -134,6 +141,22 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
             "text — WITHOUT this, --apply leaves the pre-migration text live in "
             "the index and every migrated address stays reachable via recall. "
             "Ignored on a dry-run (nothing changed to reindex)."
+        ),
+    )
+    migrate_p.add_argument(
+        "--rename-name-email",
+        action="store_true",
+        help=(
+            "Also migrate the name-is-an-email population (issue #505): a page "
+            "whose name:/preferred_name: IS an email address (the #502 carve-"
+            "out) is renamed to a display name derived from the local-part "
+            "(e.g. jane.doe@acme.com -> 'Jane Doe'), the address is moved to "
+            "the excluded contact record, and inbound [[wikilink]]s are "
+            "rewritten to the new slug. An ambiguous local-part (role address, "
+            "+tag, initial-blob, numeric/opaque) is left unrenamed and counted "
+            "as a residual rather than guessed at. Only meaningful with --all "
+            "(the population is corpus-wide, not a single-page concern); "
+            "combines with the ordinary contact-data migration in the same run."
         ),
     )
 
@@ -386,18 +409,45 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
         f"{records} excluded contact record(s) to create; "
         f"{total_emails} email(s), {total_phones} phone(s)."
     )
-    if name_pii_excluded:
+    if name_pii_excluded and not getattr(args, "rename_name_email", False):
         # The name-is-an-email population (#502): EXCLUDED from this automatic
-        # path (renaming breaks slugs/edges) and handled in a separate slice.
-        # Surface it so it is visible, not silently dropped.
+        # path (renaming breaks slugs/edges) and handled in a separate slice
+        # (issue #505, --rename-name-email below). Surface it so it is
+        # visible, not silently dropped, when that slice was NOT requested.
         print(
             f"NOTE: {name_pii_excluded} page(s) are named after an email "
             "address (name:/preferred_name:) and were NOT migrated — renaming "
-            "is unsafe and is handled by the separate name-is-an-email slice."
+            "is unsafe by default; re-run with --rename-name-email to migrate "
+            "this population too (issue #505)."
         )
+
+    rename_report: NameEmailRenameReport | None = None
+    if getattr(args, "rename_name_email", False) and args.glob is None:
+        # #505: the name-is-an-email carve-out's own slice. Only meaningful
+        # over the whole entity-page set (--all), not a single named --glob
+        # target, since the population is corpus-wide by construction.
+        rename_report = bulk_rename_name_email_pages(
+            wiki_root, config, knowledge_root, apply=args.apply
+        )
+        rename_mode = "renamed" if args.apply else "[DRY RUN] would rename"
+        print(
+            f"{rename_mode} {rename_report.renamed} name-is-an-email page(s) "
+            f"of {rename_report.scanned} scanned "
+            f"({rename_report.links_rewritten} inbound link(s) rewritten)."
+        )
+        if rename_report.residual:
+            print(
+                f"NOTE: {rename_report.residual} page(s) have an ambiguous "
+                "local-part (role address, +tag, initial-blob, or numeric/"
+                "opaque) and were left unrenamed — manual naming required, "
+                "per issue #505's fallback (never guess)."
+            )
+        if not args.apply and rename_report.renamed:
+            print("re-run with --apply to write the renames.")
+
     if not args.apply and affected:
         print("re-run with --apply to write the changes.")
-    if args.apply and affected:
+    if args.apply and (affected or (rename_report and rename_report.renamed)):
         _post_apply_index_step(args, knowledge_root, config)
     return 0
 
