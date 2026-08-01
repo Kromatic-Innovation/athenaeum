@@ -245,20 +245,119 @@ def schema_fragment_state(wiki_root: Path) -> dict[str, tuple[str, bool]]:
 # ---------------------------------------------------------------------------
 
 
+# Issue #662: default set of low-signal entity names that must NOT produce a
+# tier-3 merge LLM call. ``tier1_programmatic_match`` matches any indexed page
+# name >= 3 chars; the wiki index accumulates junk pages named ``here`` /
+# ``get`` / ``main`` / ``reach`` / ``lane a`` (measured on the live host during
+# the #440 diagnosis, 2026-08-01). Every one of those becomes a match, and
+# every match becomes a tier-3 merge call against a 16-23KB page — ~half of the
+# ~15-18 calls/file were worthless. The cost is the LLM CALL, not the match, so
+# the filter is applied HERE (the single tier-1 chokepoint, before the tier-3
+# call site) rather than downstream. This default holds the measured junk plus
+# a conservative set of common English function words that are essentially never
+# a standalone entity name in a personal knowledge base; operators tune it per
+# corpus via ``librarian.junk_match_stopwords`` (extend) and
+# ``librarian.junk_match_allowlist`` (the escape hatch for a real entity whose
+# name collides with a default junk word — e.g. a company literally called
+# "Reach"). All comparisons are case-insensitive on the whole name.
+DEFAULT_JUNK_MATCH_STOPWORDS: frozenset[str] = frozenset(
+    {
+        # Measured junk pages (live host, 2026-08-01 — #440 diagnosis / #662).
+        "here",
+        "get",
+        "main",
+        "reach",
+        "lane a",
+        # Common English function / navigation words (>= 3 chars; shorter ones
+        # are already excluded by the 3-char floor) that surface as accidental
+        # page names and carry no entity signal.
+        "the",
+        "and",
+        "for",
+        "are",
+        "was",
+        "this",
+        "that",
+        "with",
+        "from",
+        "you",
+        "your",
+        "our",
+        "out",
+        "not",
+        "but",
+        "all",
+        "any",
+        "new",
+        "use",
+        "about",
+        "into",
+        "then",
+        "them",
+        "they",
+        "what",
+        "when",
+        "where",
+        "which",
+    }
+)
+
+
+def _config_str_list(config: dict[str, Any] | None, key: str) -> list[str]:
+    """Read ``librarian.<key>`` from config as a list of strings (issue #662).
+
+    Tolerant of every malformed shape (missing key, non-list, non-string
+    members) — a bad config value degrades to "no extra entries", never raises."""
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            val = cfg.get(key)
+            if isinstance(val, list):
+                return [x for x in val if isinstance(x, str)]
+    return []
+
+
+def resolve_junk_match_names(config: dict[str, Any] | None = None) -> set[str]:
+    """Resolve the effective junk-match name set (issue #662).
+
+    ``(DEFAULT_JUNK_MATCH_STOPWORDS ∪ librarian.junk_match_stopwords) −
+    librarian.junk_match_allowlist``, all lower-cased. The allowlist wins, so an
+    operator can un-filter a real entity whose name collides with a default junk
+    word without having to re-list the whole default set."""
+    effective = {s.lower() for s in DEFAULT_JUNK_MATCH_STOPWORDS}
+    effective |= {s.lower() for s in _config_str_list(config, "junk_match_stopwords")}
+    effective -= {s.lower() for s in _config_str_list(config, "junk_match_allowlist")}
+    return effective
+
+
 def tier1_programmatic_match(
     raw: RawFile,
     index: EntityIndex,
+    config: dict[str, Any] | None = None,
 ) -> list[tuple[str, str, Path]]:
     """Match entity names in raw content against the wiki index.
 
     Returns list of (name, uid_or_name, path) for entities found in index.
+
+    Issue #662: a match whose name is in the resolved junk set
+    (:func:`resolve_junk_match_names`) is dropped HERE, before it can become a
+    tier-3 merge LLM call — junk matches (``here`` / ``get`` / ``main`` /
+    ``reach`` / ``lane a`` and common function words) were ~half of the tier-3
+    calls per file. ``config`` threads the operator's tuning
+    (``librarian.junk_match_stopwords`` / ``junk_match_allowlist``); ``None``
+    still applies the conservative built-in defaults.
     """
     matched: list[tuple[str, str, Path]] = []
     content_lower = raw.content.lower()
+    junk_names = resolve_junk_match_names(config)
 
     for name_key, (uid_or_name, fpath) in index.items():
         # Only match names that are at least 3 chars to avoid false positives
         if len(name_key) < 3:
+            continue
+        # Issue #662: drop low-signal junk names before they cost a tier-3 call.
+        if name_key.strip().lower() in junk_names:
+            log.debug("  T1 junk match skipped (issue #662): %s", name_key)
             continue
         if name_key in content_lower:
             # Verify it's a word boundary match (not a substring)

@@ -378,7 +378,8 @@ def process_batch_run(
                 st.done = True
                 continue
 
-            st.matched = tier1_programmatic_match(raw, index)
+            # Issue #662: filter junk-name matches before they cost a tier-3 call.
+            st.matched = tier1_programmatic_match(raw, index, config=config)
             for name, _uid, fpath in st.matched:
                 if index.has_entity_format(fpath):
                     log.info("  T1 match (entity format): %s → %s", name, fpath.name)
