@@ -12,13 +12,26 @@ stored hash. On mismatch it raises
 "fixture stale — re-run evals with --record" message documented in the
 issue, so an operator sees the guidance directly in the failure.
 
-**Empty-fixture policy.** When a layer directory has zero recorded
-fixtures (the state at PR-merge time before any eval-workflow run has
-seeded them), the parametrized test collects zero items and passes
-trivially. Real coverage begins the first time ``evals.yml`` is
-dispatched with ``record=true``; from then on any edit to the module's
-prompt fails the corresponding replay tests until fixtures are
-re-recorded. See ``tests/evals/README.md`` for the record command.
+**Empty-fixture policy (issue #551).** Whether an empty layer directory
+is tolerated is decided by the committed seeded-layers manifest at
+``tests/fixtures/recorded/seeded-layers.yml``, not by the run:
+
+- **never seeded** — a layer *not* listed in the manifest collects zero
+  items and passes trivially. This is the state at PR-merge time before
+  any ``evals.yml`` run has seeded fixtures, and passing is correct.
+- **seeded, then lost** — a layer *listed* in the manifest whose directory
+  is empty or missing is a silent coverage hole (audit finding H13). It
+  fails the suite hard via
+  :func:`test_seeded_manifest_layers_are_populated`, naming the layer and
+  pointing at the record command, so a dropped fixture cannot pass
+  unnoticed.
+
+The manifest ships empty, so until #610 seeds the first layer the behavior
+is byte-identical to before: every layer is unlisted, every directory is
+empty, and all replay tests pass trivially — zero-key ``develop`` CI stays
+green. Once a layer is seeded, any edit to the module's prompt fails the
+corresponding replay tests until fixtures are re-recorded. See
+``tests/evals/README.md`` for the record command.
 """
 
 from __future__ import annotations
@@ -40,6 +53,7 @@ from athenaeum.resolutions import (
 )
 from tests.evals.harness import (
     EVAL_DATA_ROOT,
+    LAYER_BACKFILL,
     LAYER_DETECTOR,
     LAYER_RECALL,
     LAYER_RESOLVER,
@@ -74,6 +88,42 @@ _EMPTY_LAYER_REASON = (
     "no recorded fixtures — run evals.yml with record=true (or "
     "pytest -m eval --record locally) to seed"
 )
+
+# ---------------------------------------------------------------------------
+# Seeded-layers manifest (issue #551) — the durable "has this layer ever been
+# recorded" fact that an empty directory alone cannot express. A layer listed
+# here must keep a non-empty fixtures directory; an unlisted layer is free to
+# be empty (never-seeded). Ships empty, so behavior is unchanged until #610.
+# ---------------------------------------------------------------------------
+
+SEEDED_MANIFEST_PATH = RECORDED_ROOT / "seeded-layers.yml"
+
+
+def _seeded_layers() -> set[str]:
+    """Layer names recorded as ever-seeded in the committed manifest.
+
+    Missing file or ``seeded: {}`` both yield the empty set (never-seeded
+    everywhere), which is the shipped state.
+    """
+    if not SEEDED_MANIFEST_PATH.is_file():
+        return set()
+    data = yaml.safe_load(SEEDED_MANIFEST_PATH.read_text(encoding="utf-8")) or {}
+    seeded = data.get("seeded") or {}
+    return set(seeded)
+
+
+def _unpopulated_seeded_layers(
+    seeded: set[str],
+    present_ids: dict[str, list[str]],
+) -> list[str]:
+    """Seeded layers that have no fixtures on disk — the H13 coverage hole.
+
+    Pure function of (manifest membership, on-disk fixture ids) so the guard
+    logic is unit-testable without touching the real manifest or filesystem.
+    A layer counts as populated iff ``present_ids`` maps it to a non-empty
+    list; absent or empty means the seeded fixtures are gone.
+    """
+    return sorted(layer for layer in seeded if not present_ids.get(layer))
 
 
 def _load_golden(layer: str) -> dict[str, dict[str, Any]]:
@@ -316,3 +366,64 @@ def test_staleness_contract(tmp_path: Path) -> None:
         # Never leave the probe fixture in the working tree — it would show
         # up as an untracked stray in the record-mode artifact upload.
         (RECORDED_ROOT / layer / f"{case_id}.json").unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Seeded-layers guard (issue #551) — the H13 finding. Runs on every PR with
+# zero network. With the shipped empty manifest it passes trivially; it turns
+# a *seeded-then-lost* layer into a hard failure so a dropped fixture cannot
+# silently downgrade to "empty, passes trivially".
+# ---------------------------------------------------------------------------
+
+# Every layer that could hold recorded fixtures, so the guard can look up the
+# on-disk state of any name the manifest might list.
+_ALL_KNOWN_LAYERS = (LAYER_DETECTOR, LAYER_RESOLVER, LAYER_RECALL, LAYER_BACKFILL)
+
+
+def test_seeded_manifest_layers_are_populated() -> None:
+    """A layer listed in seeded-layers.yml must have fixtures on disk.
+
+    This is the H13 guard: an empty directory for a *never-seeded* layer is
+    fine (see the empty-fixture policy in the module docstring), but an empty
+    directory for a layer the manifest says was seeded means the fixtures were
+    lost — a silent coverage hole. Ships green because the manifest is empty.
+    """
+    seeded = _seeded_layers()
+    present_ids = {layer: _recorded_case_ids(layer) for layer in _ALL_KNOWN_LAYERS}
+    # Cover any manifest layer name that isn't one of the four known layers.
+    for layer in seeded:
+        present_ids.setdefault(layer, _recorded_case_ids(layer))
+
+    missing = _unpopulated_seeded_layers(seeded, present_ids)
+    assert not missing, (
+        "seeded-layers.yml lists layer(s) with no recorded fixtures on disk: "
+        f"{missing}. Their fixtures were lost (a silent coverage hole), or the "
+        "manifest entry is premature. Restore the fixtures, re-record with "
+        "evals.yml (record=true) — see tests/evals/README.md — or remove the "
+        f"stale manifest entry. Manifest: {SEEDED_MANIFEST_PATH}"
+    )
+
+
+def test_guard_fires_for_seeded_but_empty_layer() -> None:
+    """A manifest-listed layer whose directory is empty is reported missing."""
+    present = {"detector": [], "resolver": ["resolver-case-1"]}
+    # detector is seeded but empty -> flagged; resolver is seeded and populated.
+    assert _unpopulated_seeded_layers({"detector", "resolver"}, present) == [
+        "detector"
+    ]
+    # A seeded layer entirely absent from the on-disk lookup is also flagged.
+    assert _unpopulated_seeded_layers({"recall"}, {}) == ["recall"]
+
+
+def test_guard_passes_for_unlisted_empty_layer() -> None:
+    """An empty layer that is NOT in the manifest never fails the guard."""
+    present = {"detector": [], "resolver": []}
+    # Nothing seeded -> nothing required, even though every directory is empty.
+    assert _unpopulated_seeded_layers(set(), present) == []
+    # A seeded-and-populated layer is fine alongside unlisted empty layers.
+    assert _unpopulated_seeded_layers({"resolver"}, {"resolver": ["c1"]}) == []
+
+
+def test_shipped_manifest_is_empty() -> None:
+    """The manifest ships empty (#610 seeds it), so behavior is unchanged."""
+    assert _seeded_layers() == set()
