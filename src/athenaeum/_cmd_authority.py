@@ -165,6 +165,7 @@ def add_authority_subparser(subparsers: argparse._SubParsersAction) -> None:
         "live source (skill file, code path, config) into pointer stubs "
         "(issue #426).",
     )
+    a_parser.set_defaults(func=cmd_authority)
     a_sub = a_parser.add_subparsers(dest="authority_target")
 
     lint_p = a_sub.add_parser(

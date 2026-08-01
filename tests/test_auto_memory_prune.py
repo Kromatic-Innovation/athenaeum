@@ -306,11 +306,12 @@ class TestPruneCli:
         # asserts the CLI wiring git rm's only the kill-list and fires the
         # recall-index rebuild). The rebuild is stubbed so the test stays
         # hermetic (no chromadb / on-disk index build).
+        import athenaeum._cmd_curate as cmd_curate
         import athenaeum.cli as cli
 
         rebuild_calls: list[Path] = []
         monkeypatch.setattr(
-            cli,
+            cmd_curate,
             "_rebuild_recall_index",
             lambda knowledge_root, cfg, args: rebuild_calls.append(knowledge_root),
         )

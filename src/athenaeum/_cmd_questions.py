@@ -186,6 +186,7 @@ def add_questions_subparser(subparsers: argparse._SubParsersAction) -> None:
             "SessionStart hook and the resolve-questions skill."
         ),
     )
+    q_parser.set_defaults(func=cmd_questions)
     q_sub = q_parser.add_subparsers(dest="questions_target")
 
     common = {

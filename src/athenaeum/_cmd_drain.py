@@ -97,6 +97,7 @@ def add_drain_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Wiki directory (default: <knowledge-root>/wiki).",
     )
     _add_lock_args(parser)
+    parser.set_defaults(func=cmd_drain)
 
 
 def cmd_drain(args: argparse.Namespace) -> int:

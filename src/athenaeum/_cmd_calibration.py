@@ -122,6 +122,7 @@ def add_calibration_subparser(subparsers: argparse._SubParsersAction) -> None:
             "(issue #438)."
         ),
     )
+    c_parser.set_defaults(func=cmd_calibration)
     c_sub = c_parser.add_subparsers(dest="calibration_target")
 
     def _add_common(parser: argparse.ArgumentParser) -> None:

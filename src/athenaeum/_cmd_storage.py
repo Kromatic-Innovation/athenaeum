@@ -66,6 +66,7 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         "storage",
         help="Storage-surface operator tasks (migrate a page's PII off-corpus).",
     )
+    s_parser.set_defaults(func=cmd_storage)
     s_sub = s_parser.add_subparsers(dest="storage_target")
 
     migrate_p = s_sub.add_parser(
