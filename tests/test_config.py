@@ -612,7 +612,7 @@ class TestDefaultsDoNotShadowCodeDefaults:
 
         assert "resolve_model:" not in _DEFAULT_CONFIG_CONTENT
         assert "# resolve:" in _DEFAULT_CONFIG_CONTENT
-        assert "#   model: claude-opus-4-7" in _DEFAULT_CONFIG_CONTENT
+        assert "#   model: claude-opus-5" in _DEFAULT_CONFIG_CONTENT
 
 
 class TestNonDictSectionsDegradeGracefully:
