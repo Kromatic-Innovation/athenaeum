@@ -59,7 +59,7 @@ from athenaeum.models import (
     validity_bound_str,
 )
 from athenaeum.prompt_safety import defang_tag
-from athenaeum.provider import resolve_max_tokens
+from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 if TYPE_CHECKING:
@@ -426,6 +426,15 @@ def detect_contradictions(
                     _DETECT_MAX_TOKENS,
                     config,
                 ),
+                # Issue #578: same ``classify``-model / Haiku posture as
+                # tier2_classify — a short structured verdict does not
+                # benefit from thinking. Disabled explicitly.
+                thinking=resolve_thinking(
+                    "contradiction_detect",
+                    "ATHENAEUM_CONTRADICTION_DETECT_THINKING",
+                    "disabled",
+                    config,
+                ),
                 system=_DETECT_SYSTEM,
                 messages=[{"role": "user", "content": user_msg}],
             ),
@@ -466,7 +475,10 @@ def detect_contradictions(
     )
 
     try:
-        text = response.content[0].text
+        # Issue #578: response_text skips any leading thinking block (this
+        # stage runs disabled today; the helper is text-block-equivalent for a
+        # text-only response and keeps the site robust if the posture changes).
+        text = response_text(response)
     except (AttributeError, IndexError) as exc:
         log.warning(
             "contradictions: detector response malformed (%s)",
