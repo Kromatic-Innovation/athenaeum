@@ -1990,6 +1990,21 @@ class RunContext:
             # so a consumer can distinguish a permanent no-progress loop from a
             # one-off failure without parsing log text.
             self.out_run_stats["stuck_files"] = list(self.stuck_files)
+            # Issue #669: surface the entity-phase share yield (#440) as
+            # machine-detectable run state. cron-fleet#94 detects a capped run by
+            # DURATION (`LIBRARIAN_CAP_DEADLINE`), which the #440 yield made inert
+            # — the entity phase now yields at its share and the run ends well
+            # under the cap, so a #440-shaped stall goes undetected. Emitting the
+            # flag lets a consumer distinguish "entity yielded on purpose" from
+            # "API budget exhausted" WITHOUT parsing WARNING text or the deferred
+            # manifest header. The boolean alone can't judge whether the backlog
+            # is growing, so the files-claimed / files-deferred counts ride
+            # alongside it (this run's compiled count and the intake the yield
+            # deferred). This is purely additive observability — the yield
+            # BEHAVIOR from #440 is unchanged.
+            self.out_run_stats["entity_budget_tripped"] = self.entity_budget_tripped
+            self.out_run_stats["entity_files_claimed"] = self.processed_count
+            self.out_run_stats["entity_files_deferred"] = len(self.deferred_refs)
 
     def emit_run_summary(self) -> None:
         if self.summary_emitted:
@@ -2944,6 +2959,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # rendered when non-zero, so a clean run's summary line is
                     # unchanged, but a permanent no-progress loop shows "stuck=N".
                     **({"stuck": len(ctx.stuck_files)} if ctx.stuck_files else {}),
+                    # #669: the entity phase yielded its window share (#440).
+                    # Rendered only when it happened, so a clean run's summary
+                    # line is unchanged, but a consumer sees the yield alongside
+                    # the existing degraded/truncated/stuck flags.
+                    **(
+                        {"entity_budget_tripped": True}
+                        if ctx.entity_budget_tripped
+                        else {}
+                    ),
                 },
             )
         )

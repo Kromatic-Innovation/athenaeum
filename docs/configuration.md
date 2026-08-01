@@ -87,6 +87,30 @@ Every default figure on this page is verified against the code under
 > `full_rehash_max_age_days` (default ≤ 7 days), even if nothing else triggers a
 > re-hash in the meantime.
 
+> **Monitoring contract — entity-phase share yield (#669, paired with `entity_runtime_share` above).**
+> When the entity phase yields its window share (#440) it stops claiming new raw
+> files and defers the rest — a *deliberate, correct* stop, but one that ends the
+> run well **under** the duration-based cap heuristic (`LIBRARIAN_CAP_DEADLINE`,
+> cron-fleet#94), so a #440-shaped stall is no longer detectable by duration
+> alone. The yield is therefore emitted as **machine-detectable run state** so a
+> consumer can tell "entity yielded on purpose" from "API budget exhausted"
+> without parsing WARNING text or the `wiki/_deferred_work.md` header. The
+> `run()` `out_run_stats` dict (and the run-summary line) carry:
+> - `entity_budget_tripped` — `true` when the entity phase yielded on its share
+>   this run, `false`/absent otherwise. On the run-summary line the `entity`
+>   segment gains `entity_budget_tripped=true` only when it fired (a clean run's
+>   line is unchanged), alongside the existing `degraded` / `truncated` / `stuck`
+>   flags.
+> - `entity_files_claimed` — files the entity phase compiled this run.
+> - `entity_files_deferred` — in-window files the yield deferred to the next run.
+>   A boolean alone can detect the yield but not judge whether the backlog is
+>   growing; the claimed/deferred pair makes that judgeable (combine with the
+>   `beyond_window` count, also in `out_run_stats`, for the full backlog).
+>
+> This is purely additive observability — the yield **behavior** from #440 is
+> unchanged. The cross-repo consumer (cron-fleet gating on the new field) is a
+> separate `Kromatic-Innovation/cron-fleet` change, out of scope here.
+
 Path and mode flags on `athenaeum run` (CLI-only): `--raw-root` and
 `--wiki-root` (default under the knowledge root), `--knowledge-root` /
 `--path` (default `~/knowledge`), `--dry-run`, `--cluster-only`,
