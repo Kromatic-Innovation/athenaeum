@@ -335,6 +335,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The entity phase no longer starves the C4 contradiction detector of the
+  whole run window (#440).** `max_runtime` (#396) is a single deadline shared
+  by every phase, and the entity loop stopped only when that WHOLE budget was
+  gone — so once the entity phase became slow enough, everything downstream of
+  it (the auto-memory compile and the C4 contradiction detector, which #461
+  moved after it) got nothing. Measured on the live corpus: entity took 3690s
+  of a 3944s window (93.6%) on 3 files, and C4 received **0 seconds on 10+
+  consecutive nights**, so contradictions were not being detected slowly — they
+  were not being detected at all. The entity phase now gets a *share* of
+  `max_runtime` (`librarian.entity_runtime_share` /
+  `ATHENAEUM_ENTITY_RUNTIME_SHARE`, default `0.6`) for claiming new files;
+  when it is spent the phase defers the remaining intake to
+  `wiki/_deferred_work.md` (resumable, exactly like the #220 budget trip) and
+  the run **continues into C2-C4** instead of exiting `124`. Deliberately not
+  the `deadline_tripped` path — that flag skips the auto-memory block, which is
+  the starvation being fixed. The real wall-clock deadline still takes
+  precedence and still exits `124`. Checked at the per-file boundary, so a file
+  already in flight may overrun the share by its own duration; any value
+  outside `0 < share < 1` disables the reserve, and it is inert when
+  `max_runtime <= 0`.
+
 - **`storage migrate-pii`: detect PII in ANY frontmatter value, not only
   `emails:` / `phones:`, and invalidate the search index after `--apply`
   (#502).** After the live bulk sweep (#495) 690 pages still carried inline

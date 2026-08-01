@@ -217,6 +217,28 @@ DEFAULT_MAX_FILES = 50
 # resolved value <= 0 disables the deadline (explicit opt-out escape hatch).
 DEFAULT_MAX_RUNTIME = 3600  # 1 hour
 
+# Fraction of ``max_runtime`` the ENTITY phase may spend claiming new files
+# (issue #440). ``run_deadline`` is a single run-level budget shared by every
+# phase, and the entity loop only stops when that WHOLE budget is gone — so a
+# slow entity phase starves everything downstream of it. Measured on the live
+# corpus: entity consumed 3690s of a 3944s window (93.6%), and the C4
+# contradiction detector — which runs after it — got 0 seconds on every one of
+# 10+ consecutive nights. Reserving a tail makes the downstream phases'
+# budget structural instead of "whatever entity happens to leave": the entity
+# loop stops CLAIMING new files once ``share * max_runtime`` is spent, defers
+# the rest (resumable, exactly like the #220 budget trip), and lets the run
+# fall through to the auto-memory / C2-C4 block.
+#
+# NOTE the granularity: the check sits at the per-file boundary, so a file
+# already started may overrun the share by its own duration. This bounds when
+# the phase stops TAKING work, not when it stops working.
+#
+# Precedence: ``ATHENAEUM_ENTITY_RUNTIME_SHARE`` (env) >
+# ``librarian.entity_runtime_share`` (yaml) > this default. A resolved value
+# outside ``0 < share < 1`` disables the reserve entirely (entity may use the
+# whole window) — the explicit opt-out that restores pre-#440 behaviour.
+DEFAULT_ENTITY_RUNTIME_SHARE = 0.6
+
 # Manifest written next to _pending_questions.md when a budget-tripped run
 # defers intake (issue #220). Overwritten on every tripped run; removed by
 # the next clean run.
@@ -1387,6 +1409,45 @@ def librarian_max_runtime(config: dict[str, object] | None = None) -> int:
     return DEFAULT_MAX_RUNTIME
 
 
+def librarian_entity_runtime_share(config: dict[str, object] | None = None) -> float:
+    """Resolve the entity phase's share of ``max_runtime`` from env > config > default.
+
+    Issue #440. Mirrors :func:`librarian_max_runtime` (#396) in precedence, but
+    the value is a FRACTION of the run deadline rather than a duration, so the
+    reserve scales automatically when an operator retunes ``max_runtime``.
+
+    Only ``0 < share < 1`` reserves anything. Any other resolved value —
+    including a non-numeric string, a bool (``entity_runtime_share: yes``
+    parses as ``True``, an int subclass, and must not become a 100% share), or
+    an out-of-range number — disables the reserve and is returned as ``0.0``,
+    restoring the pre-#440 behaviour where the entity phase may consume the
+    entire window. That is a valid explicit choice, not an error.
+    """
+
+    def _coerce(value: object) -> float | None:
+        # bool is an int subclass — reject it before the numeric check.
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return None
+        try:
+            share = float(value)
+        except (TypeError, ValueError):
+            return None
+        return share if 0.0 < share < 1.0 else 0.0
+
+    env = os.environ.get("ATHENAEUM_ENTITY_RUNTIME_SHARE")
+    if env is not None:
+        resolved = _coerce(env)
+        if resolved is not None:
+            return resolved
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict) and "entity_runtime_share" in cfg:
+            resolved = _coerce(cfg.get("entity_runtime_share"))
+            if resolved is not None:
+                return resolved
+    return DEFAULT_ENTITY_RUNTIME_SHARE
+
+
 def librarian_batch_mode(config: dict[str, object] | None = None) -> bool:
     """Resolve the Batch API opt-in from env > config > default off.
 
@@ -1452,9 +1513,11 @@ def _write_deferred_manifest(
     run, but they are not "deferred by budget" so they get their own section.
 
     ``reason`` (issue #396) selects the header wording: ``"budget"`` (the
-    #220 API-call-budget trip) or ``"deadline"`` (the wall-clock deadline
-    trip). The rest of the manifest — the counts and the deferred-file list —
-    is identical either way; only the explanatory header differs.
+    #220 API-call-budget trip), ``"deadline"`` (the wall-clock deadline trip),
+    or ``"entity-share"`` (issue #440 — the entity phase yielded the rest of
+    the window to the downstream C4 detector). The rest of the manifest — the
+    counts and the deferred-file list — is identical either way; only the
+    explanatory header differs.
     """
     path = wiki_root / DEFERRED_MANIFEST_NAME
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1469,6 +1532,19 @@ def _write_deferred_manifest(
             "remain on disk and the next run picks them up automatically. This",
             "file is overwritten on every tripped run and removed by the next",
             "clean run.",
+        ]
+    elif reason == "entity-share":
+        header = [
+            "# Deferred work — librarian entity phase yielded to the C4 detector",
+            "",
+            "The last librarian run stopped its ENTITY phase early because that",
+            "phase had spent its share of the run window",
+            "(librarian.entity_runtime_share, issue #440). This is deliberate,",
+            "not a failure: the remainder of the window is reserved for the",
+            "auto-memory compile and the C4 contradiction detector downstream.",
+            "The raw files below were NOT processed this run; they remain on",
+            "disk and the next run picks them up automatically. This file is",
+            "overwritten on every tripped run and removed by the next clean run.",
         ]
     else:
         header = [
@@ -1661,6 +1737,13 @@ class RunContext:
     usage: TokenUsage = field(default_factory=TokenUsage)
     merge_client: Any = None
     run_deadline: float | None = None
+    # Issue #440: absolute monotonic instant after which the entity phase stops
+    # CLAIMING new files, reserving the remainder of ``run_deadline`` for the
+    # phases downstream of it (auto-memory C2/C3 and the C4 contradiction
+    # detector). ``None`` when the run deadline is disabled or the share is
+    # opted out of — in both cases the entity phase behaves exactly as it did
+    # before #440 and is bounded only by ``run_deadline``.
+    entity_deadline: float | None = None
 
     # --- per-phase profiling / summary state ------------------------------
     run_profile: list[tuple[str, float, dict]] = field(default_factory=list)
@@ -1678,6 +1761,13 @@ class RunContext:
     beyond_window: int = 0
     processed_count: int = 0
     deadline_tripped: bool = False
+    # Issue #440: the entity phase stopped on its OWN runtime share rather than
+    # on the run deadline. Deliberately distinct from ``deadline_tripped``:
+    # that flag skips the auto-memory block and exits 124, which is the exact
+    # starvation this reserve exists to prevent. An entity-budget stop is a
+    # #220-style deferral — remaining intake is resumable, the run continues
+    # into C2-C4, and it exits 0 unless a LATER phase trips the real deadline.
+    entity_budget_tripped: bool = False
     raw_files: list[Any] = field(default_factory=list)
 
     # --- auto-memory / retire handoff -------------------------------------
@@ -1688,6 +1778,13 @@ class RunContext:
 
     def deadline_exceeded(self) -> bool:
         return self.run_deadline is not None and time.monotonic() >= self.run_deadline
+
+    def entity_budget_exceeded(self) -> bool:
+        """True once the entity phase has spent its share of the run window (#440)."""
+        return (
+            self.entity_deadline is not None
+            and time.monotonic() >= self.entity_deadline
+        )
 
     def tick_heartbeat(self) -> None:
         # Issue #526 (H10): refresh the run lock's heartbeat at phase/file
@@ -1973,6 +2070,21 @@ def _arm_run_deadline(ctx: RunContext) -> None:
     # loops (see ``deadline=`` below) since that is where the incident wedged.
     ctx.run_deadline = (
         (time.monotonic() + ctx.max_runtime) if ctx.max_runtime > 0 else None
+    )
+
+    # Issue #440: carve the entity phase's share out of that same window, so the
+    # phases AFTER it (auto-memory C2/C3, the C4 contradiction detector) have a
+    # structural budget instead of whatever the entity loop happens to leave.
+    # Derived from the run deadline rather than from the entity phase's own
+    # start instant on purpose: an upstream phase that ran long (the #290
+    # wiki-dedup pass) eats into the ENTITY share, never into the reserve C4
+    # depends on. ``None`` whenever the run deadline is disabled or the share is
+    # opted out of.
+    _entity_share = librarian_entity_runtime_share(ctx.config)
+    ctx.entity_deadline = (
+        ctx.run_deadline - (1.0 - _entity_share) * ctx.max_runtime
+        if ctx.run_deadline is not None and _entity_share > 0.0
+        else None
     )
 
     # Issue #530 (H2): surface truncation/deferral to callers (e.g. ingest())
@@ -2354,6 +2466,27 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             ctx.deadline_tripped = True
                             break
 
+                        # Issue #440: the entity phase's OWN share of the run
+                        # window is spent. Stop claiming new files and defer the
+                        # rest, but do NOT set ``deadline_tripped`` -- the whole
+                        # point of the reserve is that the run keeps going into
+                        # the auto-memory / C4 block the entity phase has been
+                        # starving. Placed AFTER the run-deadline check so a run
+                        # that blew the real deadline still reports that (the
+                        # more severe condition), never this.
+                        if not ctx.dry_run and ctx.entity_budget_exceeded():
+                            log.warning(
+                                "librarian: entity phase runtime share exhausted "
+                                "after %d file(s) - deferring %d remaining file(s) "
+                                "and yielding the rest of the window to the "
+                                "auto-memory / C4 phases (resumable, issue #440)",
+                                i,
+                                len(ctx.raw_files) - i,
+                            )
+                            ctx.deferred_refs = [r.ref for r in ctx.raw_files[i:]]
+                            ctx.entity_budget_tripped = True
+                            break
+
                         # Issue #378: the spend ceiling is the actual
                         # mitigation — a monitor reports after the fact,
                         # this STOPS the burn. Tokens bound the subscription
@@ -2432,10 +2565,18 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # Issue #396: the entity loop defers remaining intake
                     # for either reason; label the manifest + summary with
                     # the actual trigger.
-                    degraded_reason = (
-                        "wall-clock deadline exceeded" if ctx.deadline_tripped
-                        else "budget exhausted"
-                    )
+                    if ctx.deadline_tripped:
+                        degraded_reason = "wall-clock deadline exceeded"
+                        manifest_reason = "deadline"
+                    elif ctx.entity_budget_tripped:
+                        # Issue #440: distinct from both siblings -- the run is
+                        # still healthy and still executing; only the entity
+                        # phase stopped, on purpose, to leave C4 a window.
+                        degraded_reason = "entity phase runtime share exhausted"
+                        manifest_reason = "entity-share"
+                    else:
+                        degraded_reason = "budget exhausted"
+                        manifest_reason = "budget"
                     manifest_path = _write_deferred_manifest(
                         ctx.wiki_root,
                         ctx.deferred_refs,
@@ -2443,7 +2584,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         budget=ctx.max_api_calls,
                         beyond_window=ctx.beyond_window,
                         failed_refs=ctx.failed_files,
-                        reason="deadline" if ctx.deadline_tripped else "budget",
+                        reason=manifest_reason,
                     )
                     log.warning(
                         "Done (DEGRADED — %s): %d created, %d updated, "
