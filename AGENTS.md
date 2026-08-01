@@ -19,10 +19,6 @@ Published to PyPI; tagged releases ship to real users.
 - PyPI publish workflow fires on tag push to `main`
   (`PYPI_RELEASE_ON_MAIN_TAG=true`)
 
-**Repo metadata** (promotion model, traffic tier, Sentry projects, autonomous-loop
-opt-in): see `~/Code/docs/project-registry.yaml` entry for
-`Kromatic-Innovation/athenaeum`. Do not duplicate that metadata here.
-
 ## Release process
 
 Athenaeum is on PyPI; release quality matters in a way that internal-only
