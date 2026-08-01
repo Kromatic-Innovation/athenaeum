@@ -244,6 +244,32 @@ DEFAULT_ENTITY_RUNTIME_SHARE = 0.6
 # the next clean run.
 DEFERRED_MANIFEST_NAME = "_deferred_work.md"
 
+# Issue #663: a persistent, cross-run ledger of raw files whose processing has
+# failed on the same content N consecutive runs. A single reliably-failing LLM
+# call (e.g. an entity page large enough to time out every night) otherwise
+# makes a raw file a PERMANENT no-progress loop: it is retried whole every
+# night, does ~17 units of successful merge work, throws all of it away on the
+# one timeout, and is retried identically forever — silently. This ledger
+# counts consecutive failures per file (keyed by ref + content hash, so a
+# re-edited file gets a fresh count) so a file that has failed ``>=`` the
+# threshold can be SKIPPED (it stops burning the entity-phase budget every
+# night) and SURFACED as machine-detectable run state instead of vanishing
+# into a per-run warning. Written under wiki_root beside the deferred manifest;
+# the ``_`` prefix + ``.json`` suffix keep it out of ``rebuild_index`` (which
+# only globs ``*.md`` and skips ``_``-prefixed names). Removed when empty.
+STUCK_MANIFEST_NAME = "_stuck_files.json"
+
+# Consecutive-failure count at which a raw file is treated as stuck (skipped +
+# surfaced) rather than retried again. Resolved via
+# :func:`librarian_stuck_file_threshold` (env > yaml > this default).
+DEFAULT_STUCK_FILE_THRESHOLD = 3
+
+# Stable, machine-greppable prefix for the WARNING emitted when a file is
+# surfaced as stuck (crossing the threshold, or skipped on a later run). A
+# log-scraper / watchdog can grep this without parsing prose — the #663
+# requirement that a permanently-stuck file be LOUD, not merely logged.
+STUCK_FILE_PREFIX = "librarian-stuck-file"
+
 # Fallback valid values if schema files are missing
 FALLBACK_TYPES = [
     "person",
@@ -1474,6 +1500,158 @@ def librarian_batch_mode(config: dict[str, object] | None = None) -> bool:
     return False
 
 
+def librarian_stuck_file_threshold(config: dict[str, object] | None = None) -> int:
+    """Resolve the consecutive-failure threshold before a raw file is stuck (#663).
+
+    Mirrors :func:`librarian_max_files` (#232): the
+    ``ATHENAEUM_STUCK_FILE_THRESHOLD`` env override wins over the yaml
+    ``librarian.stuck_file_threshold`` key so a cron deployment can tune it on
+    a single run. A file that has failed this many CONSECUTIVE runs on the same
+    content is treated as stuck — skipped (so it stops burning the entity-phase
+    budget every night) and surfaced as run state — rather than retried again.
+    Must be ``>= 1`` (a threshold below 1 would quarantine a file on its very
+    first transient failure, defeating the "N nights running" contract);
+    non-numeric, non-positive, or bool values fall back to
+    :data:`DEFAULT_STUCK_FILE_THRESHOLD`.
+    """
+    env = os.environ.get("ATHENAEUM_STUCK_FILE_THRESHOLD")
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 1:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict):
+            raw = cfg.get("stuck_file_threshold")
+            # bool is an int subclass — `stuck_file_threshold: yes` in yaml must
+            # not silently become a threshold of 1.
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_STUCK_FILE_THRESHOLD
+
+
+def _stuck_content_hash(raw: Any) -> str:
+    """Stable short hash of a raw file's content (#663 stuck-file ledger key).
+
+    Keying the ledger on (ref, content-hash) means a re-edited raw file — one
+    whose author fixed whatever made it time out — starts a FRESH consecutive
+    count instead of inheriting the old file's stuck verdict. Best-effort: any
+    read error hashes the empty string, which simply means the entry never
+    matches and the file is retried (fail-open, never fail-stuck)."""
+    try:
+        payload = raw.content
+    except Exception:  # noqa: BLE001 — a raw we cannot read is retried, not stuck
+        payload = ""
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_stuck_ledger(wiki_root: Path) -> dict[str, dict[str, Any]]:
+    """Load the persistent stuck-file ledger (#663). Missing/corrupt → empty.
+
+    A corrupt ledger must never wedge a run — a parse error is treated as "no
+    stuck files known", so at worst a genuinely-stuck file gets one more retry
+    while the ledger rebuilds, never a crash."""
+    path = wiki_root / STUCK_MANIFEST_NAME
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, dict):
+        return {}
+    # Keep only well-shaped entries; drop anything a future/older schema wrote.
+    return {
+        ref: entry
+        for ref, entry in files.items()
+        if isinstance(entry, dict) and isinstance(entry.get("failures"), int)
+    }
+
+
+def _write_stuck_ledger(wiki_root: Path, ledger: dict[str, dict[str, Any]]) -> None:
+    """Persist the stuck-file ledger (#663), or remove it when empty.
+
+    Written beside the deferred manifest under wiki_root so it rides the run's
+    git snapshot (it is durable cross-run state, exactly like the deferred
+    manifest). An empty ledger removes the file so a corpus that has recovered
+    leaves no stale stuck record behind."""
+    path = wiki_root / STUCK_MANIFEST_NAME
+    if not ledger:
+        if path.exists():
+            path.unlink()
+        return
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = {"updated": now, "files": ledger}
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _record_stuck_failure(
+    ledger: dict[str, dict[str, Any]],
+    raw: Any,
+    *,
+    error: str,
+    action: str | None,
+    threshold: int,
+) -> dict[str, Any] | None:
+    """Increment a raw file's consecutive-failure count in the ledger (#663).
+
+    Keyed by ``raw.ref`` + content hash: a content change (author re-edited the
+    file) resets the count. Returns the entry when this failure is the one that
+    CROSSES the threshold for the first time (so the caller surfaces it exactly
+    once), else ``None``. The ``escalated`` flag makes the crossing idempotent
+    across runs — a file that stays stuck is not re-surfaced as "newly stuck"
+    every night, only skipped."""
+    key = raw.ref
+    content_hash = _stuck_content_hash(raw)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry = ledger.get(key)
+    if not isinstance(entry, dict) or entry.get("hash") != content_hash:
+        # New file, or the content changed since the last failure — fresh count.
+        entry = {"hash": content_hash, "failures": 0, "first_failed": now, "escalated": False}
+    entry["failures"] = int(entry.get("failures", 0)) + 1
+    entry["last_failed"] = now
+    entry["last_error"] = error
+    if action:
+        entry["last_action"] = action
+    ledger[key] = entry
+    if entry["failures"] >= threshold and not entry.get("escalated"):
+        entry["escalated"] = True
+        return entry
+    return None
+
+
+def _surface_newly_stuck(ctx: "RunContext", raw: Any, entry: dict[str, Any]) -> None:
+    """Record + loudly log a raw file that just crossed the stuck threshold (#663).
+
+    Appends a machine-detectable record to ``ctx.stuck_files`` (exported to
+    ``out_run_stats["stuck_files"]``) and emits the greppable
+    :data:`STUCK_FILE_PREFIX` WARNING naming the file and its failing action, so
+    a permanent no-progress loop surfaces the night it becomes one instead of
+    only after someone notices the silent starvation."""
+    ctx.stuck_files.append(
+        {
+            "ref": raw.ref,
+            "failures": int(entry.get("failures", 0)),
+            "action": entry.get("last_action"),
+            "error": entry.get("last_error"),
+        }
+    )
+    log.warning(
+        "%s: %s has now failed %d consecutive run(s) on action %s (%s) — STUCK; "
+        "it will be skipped until its content changes or a human intervenes "
+        "(issue #663)",
+        STUCK_FILE_PREFIX,
+        raw.ref,
+        int(entry.get("failures", 0)),
+        entry.get("last_action") or "unknown",
+        entry.get("last_error") or "unknown",
+    )
+
+
 def _clear_stale_deferred_manifest(wiki_root: Path) -> None:
     """Remove a stale deferred-work manifest left by a budget-tripped run.
 
@@ -1769,6 +1947,13 @@ class RunContext:
     # into C2-C4, and it exits 0 unless a LATER phase trips the real deadline.
     entity_budget_tripped: bool = False
     raw_files: list[Any] = field(default_factory=list)
+    # Issue #663: raw files surfaced as STUCK this run — either they crossed the
+    # consecutive-failure threshold this run, or they were already over it and
+    # were skipped. Each entry is
+    # ``{"ref", "failures", "action", "error"}``. Exported to
+    # ``out_run_stats["stuck_files"]`` and counted in the entity run-profile so
+    # a permanently-failing file is machine-detectable, not merely logged.
+    stuck_files: list[dict[str, Any]] = field(default_factory=list)
 
     # --- auto-memory / retire handoff -------------------------------------
     merged_entries: list = field(default_factory=list)
@@ -1798,6 +1983,11 @@ class RunContext:
             self.out_run_stats["beyond_window"] = self.beyond_window
             self.out_run_stats["deferred_refs"] = list(self.deferred_refs)
             self.out_run_stats["failed_files"] = list(self.failed_files)
+            # Issue #663: stuck files (crossed the consecutive-failure threshold
+            # or skipped because they already had) as machine-detectable state,
+            # so a consumer can distinguish a permanent no-progress loop from a
+            # one-off failure without parsing log text.
+            self.out_run_stats["stuck_files"] = list(self.stuck_files)
 
     def emit_run_summary(self) -> None:
         if self.summary_emitted:
@@ -2428,11 +2618,50 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.failed_files = outcome.failed_refs
                     ctx.deferred_refs = outcome.deferred_refs
                 else:
+                    # Issue #663: the persistent stuck-file ledger for this
+                    # phase. A raw file that has failed the same content on
+                    # ``stuck_threshold`` consecutive runs is a permanent
+                    # no-progress loop — it is skipped below (so it stops
+                    # consuming the entity budget every night) and surfaced as
+                    # run state, rather than retried identically forever.
+                    stuck_ledger = _load_stuck_ledger(ctx.wiki_root)
+                    stuck_threshold = librarian_stuck_file_threshold(ctx.config)
                     for i, raw in enumerate(ctx.raw_files):
                         # Issue #526 (H10): heartbeat at every per-file boundary
                         # so a long healthy entity phase keeps the lock's
                         # heartbeat fresh and is never mistaken for wedged.
                         ctx.tick_heartbeat()
+                        # Issue #663: a file already over the stuck threshold (on
+                        # unchanged content) is a known permanent failure — skip
+                        # it so it never consumes an LLM call again, and surface
+                        # it LOUDLY. It stays on disk (a distinct category from
+                        # "deferred" and "failed") for a human to fix or remove; a
+                        # content edit resets its count via the hash-keyed ledger.
+                        _stuck = stuck_ledger.get(raw.ref)
+                        if (
+                            not ctx.dry_run
+                            and _stuck is not None
+                            and int(_stuck.get("failures", 0)) >= stuck_threshold
+                            and _stuck.get("hash") == _stuck_content_hash(raw)
+                        ):
+                            ctx.stuck_files.append(
+                                {
+                                    "ref": raw.ref,
+                                    "failures": int(_stuck.get("failures", 0)),
+                                    "action": _stuck.get("last_action"),
+                                    "error": _stuck.get("last_error"),
+                                }
+                            )
+                            log.warning(
+                                "%s: skipping %s — failed %d consecutive run(s) on "
+                                "action %s (%s); stuck, needs a human (issue #663)",
+                                STUCK_FILE_PREFIX,
+                                raw.ref,
+                                int(_stuck.get("failures", 0)),
+                                _stuck.get("last_action") or "unknown",
+                                _stuck.get("last_error") or "unknown",
+                            )
+                            continue
                         if not ctx.dry_run and ctx.usage.api_calls >= ctx.max_api_calls:
                             log.warning(
                                 "API call budget exhausted (%d/%d) — stopping early",
@@ -2534,10 +2763,42 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 type(exc.last_error).__name__,
                             )
                             ctx.failed_files.append(raw.ref)
+                            # Issue #663: a genuinely transient overload will NOT
+                            # recur on the same file N nights running, so counting
+                            # it toward "stuck" is safe — only a RELIABLY-failing
+                            # file (e.g. a page large enough to time out every
+                            # night; a timeout surfaces here as TransientAPIError,
+                            # see provider.py) crosses the threshold.
+                            if not ctx.dry_run:
+                                _crossed = _record_stuck_failure(
+                                    stuck_ledger,
+                                    raw,
+                                    error=f"TransientAPIError:{type(exc.last_error).__name__}",
+                                    action=getattr(exc, "athenaeum_failing_action", None),
+                                    threshold=stuck_threshold,
+                                )
+                                if _crossed is not None:
+                                    _surface_newly_stuck(ctx, raw, _crossed)
                             continue
-                        except Exception:
+                        except Exception as exc:
                             log.exception("Failed to process %s", raw.ref)
                             ctx.failed_files.append(raw.ref)
+                            # Issue #663: same stuck-file accounting for a
+                            # non-transient processing failure (malformed file, a
+                            # persistently-failing action). The failing action is
+                            # named via the annotation tier3_write set on the
+                            # exception; ``None`` when the failure happened outside
+                            # the tier-3 action loop.
+                            if not ctx.dry_run:
+                                _crossed = _record_stuck_failure(
+                                    stuck_ledger,
+                                    raw,
+                                    error=type(exc).__name__,
+                                    action=getattr(exc, "athenaeum_failing_action", None),
+                                    threshold=stuck_threshold,
+                                )
+                                if _crossed is not None:
+                                    _surface_newly_stuck(ctx, raw, _crossed)
                             continue
 
                         ctx.total_created += len(result.created)
@@ -2554,6 +2815,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             raw.path.unlink()
                             log.info("  Deleted: %s", raw.path)
                             ctx.processed_count += 1
+                            # Issue #663: this file made progress — drop any
+                            # failure history so a future failure starts a fresh
+                            # consecutive count rather than inheriting a stale one.
+                            stuck_ledger.pop(raw.ref, None)
+
+                    # Issue #663: persist the updated stuck-file ledger (or remove
+                    # it when empty). Durable cross-run state, committed with the
+                    # run's git snapshot exactly like the deferred manifest.
+                    if not ctx.dry_run:
+                        _write_stuck_ledger(ctx.wiki_root, stuck_ledger)
 
                 # Issue #220: a budget-tripped run must be visibly DEGRADED,
                 # not "Done". Exit code stays 0 (not a crash — the deferred
@@ -2667,6 +2938,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # separately from a parse ``degraded`` so the two are
                     # never conflated in the summary either.
                     **({"truncated": ctx.total_truncated} if ctx.total_truncated else {}),
+                    # #663: files skipped/surfaced as stuck this run. Only
+                    # rendered when non-zero, so a clean run's summary line is
+                    # unchanged, but a permanent no-progress loop shows "stuck=N".
+                    **({"stuck": len(ctx.stuck_files)} if ctx.stuck_files else {}),
                 },
             )
         )
