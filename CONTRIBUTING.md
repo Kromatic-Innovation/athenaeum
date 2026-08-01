@@ -23,6 +23,33 @@ automatically; MCP server tests need `fastmcp` (already included in `[dev]`).
 - Ensure all existing tests pass
 - Follow the existing code style (enforced by ruff)
 - Keep mechanical reformat commits separate from behavior changes — a reviewer (or release gate) should never have to dig a logic change out of a formatting diff
+- Sign off every commit under the DCO (see the next section)
+
+## Developer Certificate of Origin (DCO)
+
+Athenaeum requires every commit to be signed off under the [Developer
+Certificate of Origin](https://developercertificate.org/). This is the same
+requirement recorded in `AGENTS.md`; the two documents agree, and this section
+is the authoritative "how." Signing off certifies that you wrote the change (or
+otherwise have the right to submit it) and that it may be distributed under the
+project's Apache 2.0 License.
+
+Add the sign-off with the `-s` / `--signoff` flag when you commit:
+
+```bash
+git commit -s -m "your message"
+```
+
+That appends a trailer in exactly this form, using the real name and email in
+your Git config (`git config user.name` / `git config user.email`):
+
+```
+Signed-off-by: Jane Doe <jane@example.com>
+```
+
+Every commit in a pull request must carry this trailer. If you forget it on the
+most recent commit, `git commit --amend -s --no-edit` adds it; to sign off a
+whole range, use `git rebase --signoff <base>`.
 
 ## Branch flow and promotion
 
