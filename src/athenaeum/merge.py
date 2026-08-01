@@ -5,11 +5,17 @@ Consumes the JSONL cluster report produced by C2
 (:mod:`athenaeum.clusters`) and emits ONE canonical wiki entry per
 cluster at ``wiki/auto-<topic-slug>.md``. Every member's content is
 concatenated into a synthesized body; every member's ``sources[]`` is
-unioned into a single deduped cited list. It also owns the T1
-reasoning-tier screen at the merge-proposal seam
-(:func:`t1_screen_rejects_merge_proposal`, issue #518) — see that
-function's docstring and :mod:`athenaeum.reasoning_tiers` for the
-gated/default-OFF wiring detail.
+unioned into a single deduped cited list. It also owns the tiered
+reasoning-pass screen at the merge-proposal seam: T1
+(:func:`t1_screen_rejects_merge_proposal`, issue #518) drops a confident
+reject before the human queue, and T2 (:func:`t2_screen_merge_proposal`,
+issue #602) consults a T1 pass-up and AUTO-FINALIZES a safe-class
+``approve`` — bypassing ``_pending_merges.md`` entirely via
+:func:`athenaeum.pending_merges.resolve_merge`'s existing approve-time
+fold, marked ``auto_applied`` in provenance. See each function's own
+docstring and :mod:`athenaeum.reasoning_tiers` for the gated/default-OFF
+wiring detail (both tiers share ONE opt-in flag,
+``reasoning_tier_auditing_enabled``, default OFF).
 
 SCC membership (L4 domain/pipeline). ``merge.py`` is imported at TOP level by
 ``librarian.py``, ``retire.py``, and ``wiki_dedupe.py`` (normal downward
@@ -135,14 +141,16 @@ from athenaeum.models import (
     validity_bound_str,
     validity_windows_disjoint,
 )
-from athenaeum.pending_merges import _make_id, write_pending_merge
+from athenaeum.pending_merges import _make_id, resolve_merge, write_pending_merge
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.provider import resolve_provider
 from athenaeum.reasoning_tiers import (
     ReasoningProposal,
     load_authority_manifest_for_pipeline,
+    record_reasoning_tier_t2_decision,
     run_reasoning_pipeline,
     run_t1_tier,
+    run_t2_tier,
 )
 from athenaeum.resolutions import (
     ATTRIBUTE_BOTH_ACTION,
@@ -1321,6 +1329,176 @@ def t1_screen_rejects_merge_proposal(
     return False
 
 
+def t2_screen_merge_proposal(
+    *,
+    member_paths: list[str],
+    merge_target_name: str,
+    rationale: str,
+    draft_merged_body: str,
+    confidence: float,
+    write_kind: str,
+    cluster_id: str,
+    client: "anthropic.Anthropic | None",
+    usage: TokenUsage | None,
+    wiki_root: Path,
+    config: dict[str, Any] | None,
+    provider: str,
+    authority_manifest: Any,
+    enabled: bool,
+    dry_run: bool,
+) -> bool:
+    """Run the T2 reasoning tier over a T1 pass-up and auto-finalize a safe-class
+    approval (issue #602).
+
+    Returns ``True`` when the proposal has ALREADY been fully handled — either
+    auto-finalized (written to ``_pending_merges.md`` AND immediately resolved
+    as an auto-applied approve) or (defensively) dropped — so the caller must
+    NOT also call :func:`athenaeum.pending_merges.write_pending_merge`. Returns
+    ``False`` in every case where the proposal should still be written to the
+    human queue as usual: disabled, dry-run, no client, no members, a tripped
+    spend ceiling, an escalate/amend/draft verdict, or an ``approve`` that
+    fails the safe-class gate.
+
+    FAIL-SAFE DIRECTION (issue #602, absolute): every degradation path here
+    returns ``False`` — ceiling tripped, unparseable/unexpected model output,
+    tier disabled, or a safe-class violation all fall through to the SAME
+    unscreened ``write_pending_merge`` the caller already uses when T2 is
+    absent. There is no path from a T2 malfunction to an unreviewed write:
+    the ONLY way this function causes a wiki write is
+    ``run_t2_tier`` returning ``verdict == "approve"``, and
+    :func:`athenaeum.reasoning_tiers.run_t2_tier` /
+    ``_t2_decision_from_model_verdict`` already make that verdict structurally
+    unreachable whenever :func:`athenaeum.reasoning_tiers.safe_class_violation`
+    fires — this function does not re-implement that gate, it only trusts the
+    decision object's own ``verdict`` field, which cannot lie.
+
+    Auto-finalize (the ``approve`` branch) reuses the EXACT SAME write path a
+    human approval uses: :func:`athenaeum.pending_merges.write_pending_merge`
+    followed by :func:`athenaeum.pending_merges.resolve_merge` (``decision=
+    "approve"``, ``auto_applied=True``) — the fold/create ``write_kind``
+    mechanics (issue #421/#425) are untouched, no second write path is added.
+    ``auto_applied=True`` durably marks the resolved block and the provenance
+    ledger record so a human can always tell this write was never reviewed.
+
+    A sampled ``approve`` (per
+    :func:`athenaeum.config.resolve_audit_sample_rate_t2_approvals`, default
+    7.5%) is surfaced to the calibration ledger exactly like a T1 reject is —
+    via :func:`athenaeum.calibration.sample_tier_decision` — so an
+    auto-applied merge can be later reviewed and, if wrong, recorded as an
+    overturn of an APPLIED merge (see
+    :func:`athenaeum.calibration.record_audit_review`'s ``applied`` handling).
+    """
+    if not (enabled and client is not None and not dry_run and member_paths):
+        return False
+
+    # Same spend-ceiling participation as T1 (#568): T2 is an Opus call, so a
+    # tripped ceiling must degrade to the human queue, never to an unreviewed
+    # write. Checked BEFORE any T2 call is attempted.
+    if usage is not None:
+        ceiling = spend.ceiling_tripped(usage, provider=provider, config=config)
+        if ceiling is not None:
+            log.warning(
+                "resolutions: spend ceiling reached (%s) — skipping T2 reasoning "
+                "tier for cluster %s; writing proposal unscreened to the human "
+                "queue",
+                ceiling,
+                cluster_id,
+            )
+            return False
+
+    proposal = ReasoningProposal(
+        proposal_id=_make_id(member_paths, merge_target_name),
+        merge_target_name=merge_target_name,
+        sources=tuple(member_paths),
+    )
+    # Count the attempt against the run budget, mirroring T1's convention —
+    # run_t2_tier itself only adds token counts via usage.add, not api_calls.
+    if usage is not None:
+        usage.api_calls += 1
+
+    decision = run_t2_tier(
+        proposal,
+        client=client,
+        authority_manifest=authority_manifest,
+        config=config,
+        usage=usage,
+    )
+    record_reasoning_tier_t2_decision(wiki_root, decision)
+
+    if decision.verdict != "approve":
+        # escalate / amend / draft — including every safe-class-violation
+        # downgrade and every parse/verdict failure, all of which
+        # run_t2_tier already coerced to "escalate". Fall through to the
+        # human queue unchanged; the decision is already logged above.
+        log.info(
+            "resolutions: T2 reasoning tier verdict %r for cluster %s (%s); "
+            "writing proposal to the human queue",
+            decision.verdict,
+            cluster_id,
+            decision.reason,
+        )
+        return False
+
+    # decision.verdict == "approve" here, which run_t2_tier/
+    # _t2_decision_from_model_verdict only ever construct when
+    # safe_class_violation(...) was None — the safe-class gate has already
+    # been consulted and passed by the time we reach this branch.
+    merges_path = wiki_root / "_pending_merges.md"
+    write_pending_merge(
+        merges_path,
+        merge_target_name=merge_target_name,
+        sources=member_paths,
+        rationale=rationale,
+        draft_merged_body=draft_merged_body,
+        confidence=confidence,
+        write_kind=write_kind,
+    )
+    merge_id = _make_id(member_paths, merge_target_name)
+    result = resolve_merge(
+        merges_path,
+        merge_id,
+        "approve",
+        note=f"T2 auto-finalized (safe class): {decision.reason}",
+        wiki_root=wiki_root,
+        auto_applied=True,
+    )
+    if not result.get("ok"):
+        # Defense in depth: a resolve_merge failure (e.g. target_exists —
+        # a slug collision that snuck past the #421 precheck between
+        # classification and this call) must NOT be silently swallowed as
+        # a successful auto-apply. Fall through to the human queue: the
+        # block written above is already there, unresolved, exactly as an
+        # ordinary T1-pass-up-with-no-T2-approval proposal would be.
+        log.warning(
+            "resolutions: T2 auto-finalize failed for cluster %s (%s: %s); "
+            "leaving proposal unresolved in the human queue",
+            cluster_id,
+            result.get("error_code"),
+            result.get("message"),
+        )
+        return True  # already written to _pending_merges.md above; caller
+        # must not write it again (it would be rejected as a dup id anyway,
+        # since write_pending_merge is idempotent on id, but returning True
+        # keeps the caller's control flow simple and avoids double-logging).
+
+    log.info(
+        "resolutions: T2 reasoning tier AUTO-APPLIED merge proposal for "
+        "cluster %s (target=%s); bypassing the human queue",
+        cluster_id,
+        merge_target_name,
+    )
+    sample_tier_decision(
+        wiki_root,
+        tier=decision.tier,
+        verdict=decision.verdict,
+        proposal_id=decision.proposal_id,
+        reason=decision.reason,
+        config=config,
+        applied=True,
+    )
+    return True
+
+
 def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
     """Render ``[^name]: **Source:** ...`` footnotes for a source list (#260).
 
@@ -1808,6 +1986,37 @@ def merge_clusters_to_wiki(
             write_kind = _classify_merge_write_kind(
                 proposal.merge_target_name, wiki_root
             )
+            # Issue #602: T2 reasoning-tier screen — a second, more expensive
+            # tier consulted ONLY on a T1 pass-up (a T1 reject already
+            # returned above, so an already-rejected proposal never reaches
+            # this Opus call). Gated behind the SAME
+            # ``reasoning_tier_auditing_enabled`` flag as T1 — there is no
+            # separate opt-in for T2. A safe-class ``approve`` auto-applies
+            # the merge (bypassing the human queue) via the exact same
+            # write_pending_merge + resolve_merge mechanics used below,
+            # marked auto_applied in provenance. Every other outcome —
+            # disabled, dry-run, no client, ceiling tripped, escalate/amend/
+            # draft, or an approve that fails safe_class_violation — returns
+            # False and falls through to the unscreened write below
+            # unchanged, matching T1's own degrade-to-human-queue contract.
+            if t2_screen_merge_proposal(
+                member_paths=member_paths,
+                merge_target_name=proposal.merge_target_name,
+                rationale=proposal.rationale,
+                draft_merged_body=proposal.draft_merged_body,
+                confidence=proposal.confidence,
+                write_kind=write_kind,
+                cluster_id=entry.cluster_id,
+                client=client,
+                usage=usage,
+                wiki_root=wiki_root,
+                config=resolved_config,
+                provider=resolved_provider,
+                authority_manifest=reasoning_authority_manifest,
+                enabled=reasoning_tier_enabled,
+                dry_run=dry_run,
+            ):
+                return
             try:
                 write_pending_merge(
                     wiki_root / "_pending_merges.md",

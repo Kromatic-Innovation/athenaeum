@@ -57,25 +57,38 @@ record-shape builder) — only the ``tier`` tag and the set of legal
 Out of scope here (see the issue body for the re-scope rationale):
 
 - The calibration sampler that watches T1/T2 accuracy over time (#438).
-- Wiring T2, or wiring ANY tier into ``wiki_dedupe.py``'s call sites — those
-  still write straight to ``_pending_merges.md`` unscreened.
+- Wiring ANY tier into ``wiki_dedupe.py``'s call sites — those still write
+  straight to ``_pending_merges.md`` unscreened. (T2 IS wired into
+  ``merge.py``'s merge path as of #602 — see below.)
 
 Production status (current, do not let this go stale again — #525
 corrected a prior overclaim in the docs, this restates it against the
 code): :data:`DEFAULT_TIER_CHAIN` is genuinely the empty tuple — nothing
 calls :func:`run_reasoning_pipeline` with tiers configured by default.
-BUT this module IS reached in production, through exactly ONE caller:
-``merge.py``'s ``t1_screen_rejects_merge_proposal`` (#518) builds an
-explicit ``tier_chain=(functools.partial(run_t1_tier, ...),)`` and calls
-:func:`run_reasoning_pipeline` with it directly — bypassing the empty
-default. That single call site is gated behind
-``resolve_reasoning_tier_auditing_enabled`` (:mod:`athenaeum.config`),
+BUT this module IS reached in production, through exactly TWO callers in
+``merge.py``, both gated behind the SAME
+``resolve_reasoning_tier_auditing_enabled`` (:mod:`athenaeum.config`) flag,
 which defaults OFF, so an unconfigured install still sees every proposal
-pass straight to the human queue exactly as if this module did not exist.
+pass straight to the human queue exactly as if this module did not exist:
+
+- ``t1_screen_rejects_merge_proposal`` (#518) builds an explicit
+  ``tier_chain=(functools.partial(run_t1_tier, ...),)`` and calls
+  :func:`run_reasoning_pipeline` with it directly — bypassing the empty
+  default. A confident T1 reject drops the proposal before T2 is ever
+  consulted (no Opus spend on an already-rejected proposal).
+- ``t2_screen_merge_proposal`` (#602) calls :func:`run_t2_tier` directly
+  (NOT through :func:`run_reasoning_pipeline` — T2's decision type,
+  :class:`ReasoningTierT2Decision`, is a different shape than the
+  reject/pass_up-only :class:`ReasoningTierDecision` the pipeline skeleton
+  above is built around) on a T1 pass-up. A safe-class ``approve`` auto-
+  finalizes the merge via :func:`athenaeum.pending_merges.resolve_merge`
+  (``auto_applied=True``); every other verdict — including every
+  safe-class-violation downgrade — falls through to the human queue.
+
 Do not describe this module as having "no production caller" (stale as of
-#518) and do not describe it as generally "in use" (only that one gated,
-opt-in, T1-only path is wired — T2 and the wiki_dedupe call sites remain
-unwired).
+#518) and do not describe T2 as "unwired" (stale as of #602) — both tiers
+are wired, both opt-in behind the one flag, both defaulting to the
+identical unscreened behavior when it is off.
 """
 
 from __future__ import annotations

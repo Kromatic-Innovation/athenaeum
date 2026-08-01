@@ -439,6 +439,7 @@ def build_merge_provenance_record(
     canonical_slug: str,
     source_paths: list[str],
     ts: datetime | None = None,
+    auto_applied: bool = False,
 ) -> dict[str, Any]:
     """Build one merge-provenance record.
 
@@ -446,6 +447,17 @@ def build_merge_provenance_record(
     were folded/merged into). ``source_paths`` are the source memory/page
     paths the merge relied on, recorded verbatim (whatever path shape
     :class:`athenaeum.pending_merges.PendingMerge.sources` carried).
+
+    ``auto_applied`` (issue #602): ``True`` iff this merge was finalized by
+    the T2 reasoning tier's auto-finalize path
+    (:func:`athenaeum.pending_merges.resolve_merge` called with
+    ``auto_applied=True``) rather than by a human clicking approve. This is
+    the SINGLE durable marker distinguishing an unreviewed, machine-approved
+    write from a human-approved one — always present (default ``False``) so
+    every pre-#602 and human-approved record reads unambiguously as "a human
+    approved this" and every T2 auto-finalize reads unambiguously as "nobody
+    reviewed this write". See ``athenaeum merges provenance`` (:mod:`athenaeum
+    ._cmd_merges`) for the human-facing surface that renders this field.
     """
     stamp = (ts if ts is not None else datetime.now(tz=timezone.utc)).astimezone(
         timezone.utc
@@ -457,6 +469,7 @@ def build_merge_provenance_record(
         "write_kind": write_kind,
         "canonical_slug": canonical_slug,
         "source_paths": list(source_paths),
+        "auto_applied": auto_applied,
     }
 
 
@@ -486,6 +499,7 @@ def record_merge_provenance(
     source_paths: list[str],
     provenance_path: Path | None = None,
     ts: datetime | None = None,
+    auto_applied: bool = False,
 ) -> bool:
     """Append one provenance record for an executed merge. Best-effort.
 
@@ -495,6 +509,9 @@ def record_merge_provenance(
     already happened by the time this runs; failures are logged and
     swallowed, mirroring the spend ledger's crash-safety discipline.
     Returns ``True`` when a record was written.
+
+    ``auto_applied`` (issue #602): forwarded verbatim to
+    :func:`build_merge_provenance_record` — see that function's docstring.
     """
     try:
         record = build_merge_provenance_record(
@@ -503,6 +520,7 @@ def record_merge_provenance(
             canonical_slug=canonical_slug,
             source_paths=source_paths,
             ts=ts,
+            auto_applied=auto_applied,
         )
         target = (
             provenance_path

@@ -181,8 +181,14 @@ class TestReviewAndSummary:
         assert review["tier"] == "T2"
 
         summary = calibration_summary(wiki)
-        assert summary["T2"] == {"sampled": 1, "reviewed": 1, "overturned": 1}
-        assert summary["T1"] == {"sampled": 0, "reviewed": 0, "overturned": 0}
+        assert summary["T2"] == {
+            "sampled": 1, "reviewed": 1, "overturned": 1,
+            "applied": 0, "overturned_applied": 0,
+        }
+        assert summary["T1"] == {
+            "sampled": 0, "reviewed": 0, "overturned": 0,
+            "applied": 0, "overturned_applied": 0,
+        }
         # A reviewed item leaves the pending queue.
         assert list_pending_audit(wiki) == []
 
@@ -193,7 +199,10 @@ class TestReviewAndSummary:
         review = record_audit_review(wiki, audit_id=audit_id, human_verdict="reject")
         assert review["overturned"] is False
         summary = calibration_summary(wiki)
-        assert summary["T1"] == {"sampled": 1, "reviewed": 1, "overturned": 0}
+        assert summary["T1"] == {
+            "sampled": 1, "reviewed": 1, "overturned": 0,
+            "applied": 0, "overturned_applied": 0,
+        }
         # No merge sidecars were written — a review is a calibration signal only.
         assert not (wiki / "_pending_merges.md").exists()
 
@@ -208,9 +217,13 @@ class TestReviewAndSummary:
             record_audit_review(wiki, audit_id="nope", human_verdict="reject")
 
     def test_summary_empty_ledger_is_zeroed_both_tiers(self, tmp_path: Path) -> None:
+        empty_bucket = {
+            "sampled": 0, "reviewed": 0, "overturned": 0,
+            "applied": 0, "overturned_applied": 0,
+        }
         assert calibration_summary(tmp_path / "wiki") == {
-            "T1": {"sampled": 0, "reviewed": 0, "overturned": 0},
-            "T2": {"sampled": 0, "reviewed": 0, "overturned": 0},
+            "T1": empty_bucket,
+            "T2": empty_bucket,
         }
 
 
