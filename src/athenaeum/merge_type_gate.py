@@ -45,12 +45,18 @@ merge may reach a write path without first calling
 merge decision would silently reintroduce the pre-#433 gap.
 
 Layering: L0/L1-boundary primitive. Imports only :mod:`athenaeum.models` (the
-L1 hub, for :func:`~athenaeum.models.parse_frontmatter`) plus stdlib — no
-config, no LLM client, no merge-engine imports. Factoring rule: this module
-owns ONLY classification (same-class? cross-class?) and cite-vs-merge
-routing; it must never itself perform a merge, fold, or file write — that
-stays in :mod:`athenaeum.merge` / :mod:`athenaeum.wiki_dedupe`, which import
-this module, never the reverse.
+L1 hub, for :func:`~athenaeum.models.parse_frontmatter`) and the
+:mod:`athenaeum.config` leaf (for the ``librarian.*`` merge-guardrail knobs read
+by :func:`_merge_proposal_suppression_reason`) plus stdlib — no LLM client, no
+merge-engine imports. Factoring rule: this module owns ONLY merge GATING —
+classification (same-class? cross-class?), cite-vs-merge routing, and the #421
+proposal-suppression guardrail — each of which merely RETURNS a decision; it
+must never itself perform a merge, fold, or file write — that stays in
+:mod:`athenaeum.merge` / :mod:`athenaeum.wiki_dedupe`, which import this module,
+never the reverse. Issue #640 moved :func:`_merge_proposal_suppression_reason`
+DOWN here from :mod:`athenaeum.merge` to break the ``pending_merges`` -> ``merge``
+deferred back-edge that pinned the ``{merge, pending_merges, calibration,
+reasoning_tiers}`` residual import SCC.
 """
 
 from __future__ import annotations
@@ -61,6 +67,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from athenaeum.config import (
+    resolve_max_merge_sources,
+    resolve_min_merge_confidence,
+    resolve_min_merge_mean_similarity,
+)
 from athenaeum.models import parse_frontmatter
 
 log = logging.getLogger(__name__)
@@ -264,6 +275,67 @@ def build_cite_proposal(
     )
 
 
+def _merge_proposal_suppression_reason(
+    *,
+    n_sources: int,
+    confidence: float,
+    config: dict[str, Any] | None,
+    mean_similarity: float = 1.0,
+    min_pairwise: float = 1.0,
+    cluster_threshold: float = 0.0,
+) -> str | None:
+    """Return a human-readable reason to SUPPRESS a resolver merge proposal, or None.
+
+    Issue #400 introduced the size cap + opt-in confidence floor here. Issue #421
+    tightens the mechanical guardrails so the resolver stops emitting garbage the
+    reasoning/human tiers would only have to reject. Every gate is checked BEFORE
+    the proposal is written, so a suppressed cluster never reaches
+    ``wiki/_pending_merges.md`` and is not re-emitted on the next run:
+
+    * size cap — ``librarian.max_merge_sources`` (default **5**, active, #421):
+      a proposal folding more than N sources is not the pairwise/small-group
+      refinement a merge proposal is for.
+    * complete-linkage — ``min_pairwise < cluster_threshold`` (#421): single-
+      linkage only guarantees each member is transitively CONNECTED at the
+      threshold, so one weak ``cosine >= threshold`` bridge can chain dissimilar
+      members into a giant component (the 1,711-page incident). A genuine merge
+      is a complete-linkage clique — EVERY pair clears the threshold — so a
+      cluster whose minimum pairwise cosine falls below the clustering threshold
+      is a chain, not a merge, and is suppressed. ``cluster_threshold <= 0``
+      (the default when a caller does not supply it) disables this arm.
+    * mean-similarity floor — ``librarian.min_merge_mean_similarity`` (default
+      **0.6**, ACTIVE, #421): a proposal whose cluster mean pairwise cosine is
+      below the floor is too incohesive to be worth a human's review.
+    * confidence floor — ``librarian.min_merge_confidence`` (default 0.0, opt-in):
+      a proposal below the resolver-confidence floor is not confident enough.
+
+    The cross-scope cohesion floor (:func:`_is_low_cohesion_cross_scope`) is a
+    separate, upstream gate on DURABLE wiki pages and is unchanged.
+
+    Suppression is deterministic in the cluster's shape (source count + mean and
+    min pairwise similarity + confidence), so the same over-cluster is
+    suppressed on every run without any new sidecar state.
+    """
+    max_sources = resolve_max_merge_sources(config)
+    if max_sources > 0 and n_sources > max_sources:
+        return f"over-cluster: {n_sources} sources > max_merge_sources={max_sources}"
+    if cluster_threshold > 0.0 and min_pairwise < cluster_threshold:
+        return (
+            f"single-linkage chain: min pairwise {min_pairwise:.2f} < "
+            f"cluster_threshold {cluster_threshold:.2f} (not complete-linkage)"
+        )
+    min_mean = resolve_min_merge_mean_similarity(config)
+    if min_mean > 0.0 and mean_similarity < min_mean:
+        return (
+            f"low cohesion: mean pairwise {mean_similarity:.2f} < "
+            f"min_merge_mean_similarity={min_mean:.2f}"
+        )
+    min_conf = resolve_min_merge_confidence(config)
+    if min_conf > 0.0 and confidence < min_conf:
+        return f"low confidence: {confidence:.2f} < min_merge_confidence={min_conf:.2f}"
+    return None
+
+
 __all__ = [
     "CROSS_CLASS_REJECTED",
     "CrossClassRejection",
@@ -271,4 +343,5 @@ __all__ = [
     "read_memory_class",
     "cross_class_precheck",
     "build_cite_proposal",
+    "_merge_proposal_suppression_reason",
 ]

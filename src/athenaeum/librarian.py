@@ -60,18 +60,18 @@ are NOT librarian<->sibling cycle back-edges and stay deferred:
 - run loop: local ``from athenaeum.pending_merges import
   revalidate_pending_merges`` — ``pending_merges`` does not import librarian;
   deferred for best-effort framing.
-- run loop: local ``from athenaeum import drain`` (backlog-drain advisor).
-  ``drain`` DOES import librarian back (function-locally); this
-  librarian<->drain deferred cycle is PRE-EXISTING, out of #545's named
-  scope, and left as-is (see the import-graph regression test's documented
-  residual-SCC baseline).
+- run loop: local ``from athenaeum.drain_advisor import build_advisory``
+  (backlog-drain advisor). ``drain_advisor`` is a low leaf that does NOT import
+  librarian back, so this is a one-way edge. Issue #640 moved ``build_advisory``
+  there from the ``drain`` orchestrator precisely so this run-loop call no longer
+  reaches up into ``drain`` (``drain`` still imports ``librarian.run`` back,
+  function-locally — now a one-directional ``drain`` -> ``librarian`` edge).
 
-Three residual SCCs remain after #545 and are pinned as a baseline by
-``tests/test_import_graph_acyclic.py`` (they were always there; #545 dissolved
-only the librarian-centered named-8 coupling): ``{librarian, drain, status}``,
-``{merge, pending_merges, calibration, reasoning_tiers}``, and ``{tiers,
-contradictions, resolutions, answers}``. Do not GROW them; a follow-up issue
-tracks dissolving them.
+The three residual SCCs that #545 left in place were all dissolved in issue #640
+(``{librarian, drain, status}``, ``{merge, pending_merges, calibration,
+reasoning_tiers}`` and ``{tiers, contradictions, resolutions, answers}``); the
+full-graph SCC is now empty and ``tests/test_import_graph_acyclic.py`` pins the
+baseline at ``[]``. Do not reintroduce a cycle.
 """
 
 from __future__ import annotations
@@ -3059,10 +3059,10 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     # case the DEGRADED summary never surfaced. Best-effort: never breaks a run.
     if not ctx.dry_run and not ctx.cluster_only:
         try:
-            from athenaeum import drain as _drain
             from athenaeum.config import resolve_drain_warn_days
+            from athenaeum.drain_advisor import build_advisory
 
-            _advisory = _drain.build_advisory(
+            _advisory = build_advisory(
                 backlog=len(discover_raw_files(ctx.raw_root)),
                 ledger_records=spend.read_ledger(spend.resolve_ledger_path(ctx.config)),
                 warn_days=resolve_drain_warn_days(ctx.config),
