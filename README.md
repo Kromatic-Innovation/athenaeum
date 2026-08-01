@@ -492,7 +492,38 @@ Each merge item is rendered as an answerable question — the source pages are
 named by their frontmatter `name:` (not the uuid-slug) with a one-line gist
 each — because cosine topic-similarity alone is not "should-merge" and misleads
 without the pages' own words. The merges half is also available on its own via
-`athenaeum merges {list,next,count}` (the mirror of `athenaeum questions`).
+`athenaeum merges {list,next,count,revalidate,provenance}` (the mirror of
+`athenaeum questions`, plus two merge-only modes):
+
+```bash
+athenaeum merges list  [--limit N] [--json]        # all unresolved proposals
+athenaeum merges next  [--json]                     # the oldest unresolved proposal
+athenaeum merges count [--json]                     # "N unresolved (oldest: <iso-date>)"
+athenaeum merges revalidate [--apply] [--json]      # re-check the queue against the CURRENT gate
+athenaeum merges provenance [--canonical-slug S] [--merge-id ID] [--json]
+```
+
+**`revalidate` is the first move for "is the merge queue healthy?"** It
+re-runs the current suppression gate (size cap + confidence floor) against
+every unresolved proposal and reports each one's `n_sources` and the
+suppression reason for anything that would now be rejected. Proposals queued
+before the gate tightened (issue #400/#421) don't get re-checked on their
+own — this command is how you find them. It is **dry-run by default**; pass
+`--apply` to archive the stale ones to `wiki/_pending_merges_archive.md`
+(non-destructive — moved, never deleted). `provenance` is the read side for
+merges that already executed: which source pages a completed merge relied
+on, from `wiki/_merge_provenance.jsonl` (issue #425).
+
+**Never hand-parse `wiki/_pending_merges.md`.** It is a hand-rolled markdown
+sidecar with nested code fences and multi-line fields — grep/awk against it
+is fragile and has burned real investigation time. `parse_pending_merges()`
+(`src/athenaeum/pending_merges.py`) is the only sanctioned reader; the
+`athenaeum merges` subcommands above are the sanctioned CLI surface built on
+top of it. Also note: the MCP `list_pending_decisions` / `resolve_merge`
+view adds **derived fields that do not exist in the file**, most visibly
+`sources_omitted` (a rendered-vs-total source count computed in
+`decisions.py`) — don't assume a field you saw in that view is present in
+the markdown or in `athenaeum merges` JSON output.
 
 ### Step 2 — ingest the answers
 
