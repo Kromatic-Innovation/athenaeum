@@ -1753,15 +1753,12 @@ def propose_resolution(
             # is the largest stable prefix in the codebase (3,387 tokens per the
             # Anthropic count-tokens endpoint with the Opus tokenizer; a live
             # Sonnet run's cache counters reported 2,437) and the resolver is
-            # called repeatedly within a run. The minimum cacheable prefix is
-            # per-model (issue #580): Opus 5 = 512, Opus 4.8 = 1,024,
-            # Opus 4.7 = 2,048, Opus 4.6/4.5 = 4,096, Sonnet 5 / Sonnet 4.6 =
-            # 1,024, Haiku 4.5 = 4,096. The prefix clears the minimum on both the
-            # Opus 5 resolve default (3,387 > 512) and the Sonnet-tier overrides
-            # (2,437 > 1,024), so on the defaulted models this breakpoint is
-            # expected to engage rather than no-op. Below a model's minimum
-            # cacheable prefix the marker is a silent no-op (no error, no extra
-            # cost).
+            # called repeatedly within a run. Minimum cacheable prefix is
+            # per-model (issue #580): Opus 5 = 512, Opus 4.8 = 1,024, Opus 4.7 =
+            # 2,048, Opus 4.6/4.5 = 4,096, Sonnet 5 / Sonnet 4.6 = 1,024,
+            # Haiku 4.5 = 4,096. The 3,387/2,437-token prefix clears the minimum
+            # on the Opus 5 default and Sonnet-tier overrides, so the breakpoint
+            # engages there rather than no-opping (no counter value asserted).
             response = with_retry(
                 lambda: client.messages.create(
                     model=resolve_model,
