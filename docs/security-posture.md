@@ -136,7 +136,50 @@ Test suite is pytest with pytest-cov. Coverage was not measured in this session 
 
 The 3-Python-version test matrix is itself meaningful coverage — many dep regressions show up version-specifically.
 
-## 6. Pointers
+## 6. Branch protection posture (issue #557)
+
+Last reviewed: 2026-08-01 (owner ruling).
+
+Two branch-protection settings were evaluated for `develop` and `main` and **both were declined** by the repo owner on 2026-08-01, in a comment on issue #557. Recording the decision here so a future audit does not re-file it as a gap.
+
+### 6.1 The two declined settings
+
+- **`enforce_admins`** — declined. Stays `false` on `develop` and `main`.
+- **Required pull request review** (`required_pull_request_reviews`) — declined. No required review is configured on `develop` or `main`.
+
+Both are deliberate owner decisions, not oversights, made in an Occam issue-graph sweep and recorded directly on the issue (not inferred by an agent).
+
+### 6.2 Rationale
+
+- **Force-push and branch deletion are already blocked**, redundantly, by two independent organization-level rulesets (`local-clones-branch-baseline`, `dont-delete-branches`) that apply to `develop`, `main`, and `staging`. Direct writes to `main` are further restricted by a third org ruleset, and `main` carries a required-status-check rule. None of this is visible through the classic branch-protection API, so a finding based on that API alone overstates the risk.
+- **CI already runs on every path.** A direct push to `develop` triggers `ci.yml`. The gap identified was never test execution — it was the absence of a *required review* gate.
+- **Required review would break the overnight self-merge conveyor.** This repo's automated feature-build lane (hestia) self-merges its own PRs into `develop` once CI is green — that is how the majority of this repo ships. A required human review on `develop` would halt that conveyor.
+- **`enforce_admins` is declined alongside it for coherence.** With no required review, the only thing `enforce_admins` would gate is the maintainer's own CI check on a solo-maintained repo — it would add friction without adding a second reviewer, which is the change that would actually alter the security posture.
+
+### 6.3 Method note for future audits
+
+GitHub exposes branch protection through **two independent systems**. Reading `/repos/{owner}/{repo}/branches/{branch}/protection` alone is incomplete and will understate this repo's actual posture. A complete audit must also read `/repos/{owner}/{repo}/rules/branches/{branch}` (effective rules, including organization-level rulesets).
+
+Five organization-level rulesets apply to this repo (all `source=Organization`, all `enforcement=active`):
+
+| ruleset | refs | rules |
+|---|---|---|
+| `local-clones-branch-baseline` | develop, main, staging | `deletion`, `non_fast_forward` |
+| `dont-delete-branches` | main, staging, develop, default branch | `deletion`, `non_fast_forward` |
+| `local-clones-main-write-restriction` | main | `update` |
+| `local-clones-staging-write-restriction` | staging | `update` |
+| `main-ci-required` | main | `required_status_checks` |
+
+None of these five rulesets add a pull-request review requirement — so the "no required review" half of the original finding stands even after accounting for them. What they do change is the blast radius: force-push and deletion are not actually open on `develop`/`main`/`staging`, contrary to what a classic-API-only read would suggest.
+
+### 6.4 When to revisit
+
+This posture assumes a **single maintainer** and an **automated overnight merge conveyor**. Reconsider required review if either changes:
+
+- A second regular committer joins the repo (required review then adds a genuine second pair of eyes, not just ceremony).
+- The overnight self-merge automation is retired or no longer merges directly to `develop`.
+
+## 7. Pointers
 
 - Maintenance-posture origin: [plinkromatic#371](https://github.com/Kromatic-Innovation/plinkromatic/issues/371) and `plinkromatic/docs/security-posture.md`.
 - Auto-merge workflow: `.github/workflows/dependabot-auto-merge.yml`.
