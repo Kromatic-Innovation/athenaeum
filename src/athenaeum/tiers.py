@@ -1827,6 +1827,27 @@ def tier3_write(
     All LLM calls are made first; disk writes are deferred until all
     actions succeed, preventing partial writes on mid-processing failure.
 
+    Invariant (issue #663): this all-or-nothing boundary is DELIBERATE and is
+    preserved. A raw file's action set is re-derived from scratch on every run
+    by the non-deterministic LLM tiers (Tier 2 classification), and a failed
+    file is retried WHOLE (never unlinked on the failure path — see
+    ``_run_entity_tier_phase``). Applying a subset of a file's actions and then
+    retrying the whole file would therefore re-apply the already-applied subset
+    — a ``create`` whose page now exists re-enters as an ``update`` and
+    re-merges the same observations; an ``update`` re-merges into an
+    already-merged page. The boundary guarantees each raw file's derived actions
+    apply exactly-once-or-not-at-all, so no partial/corrupt wiki state is
+    reachable on a mid-file failure. The cost of this guarantee — a single
+    reliably-failing call discarding the file's other successful work forever —
+    is addressed NOT by weakening the boundary (which cannot be done safely
+    given the non-deterministic re-derivation) but by the stuck-file ledger in
+    ``librarian.py``, which bounds and surfaces a permanently-failing file
+    instead of retrying it silently every night.
+
+    On a mid-file failure the propagating exception is annotated with
+    ``athenaeum_failing_action`` (``"<kind>:<name>"``) so the caller can record
+    which action failed; the exception object and type are otherwise unchanged.
+
     Returns (new_entities, updated_uids, escalation_items).
     """
     new_entities: list[WikiEntity] = []
@@ -1835,47 +1856,64 @@ def tier3_write(
     escalations: list[EscalationItem] = []
 
     for action in actions:
-        if action.kind == "create":
-            new_entities.append(
-                tier3_create(
+        # Issue #663: name the failing action on the propagating exception so
+        # the entity loop's stuck-file ledger and the run summary can identify
+        # WHICH entity/kind failed (e.g. a large page that times out every
+        # night), instead of only knowing the raw ref. This does NOT change the
+        # all-or-nothing write boundary below: ``pending_updates`` is flushed
+        # only AFTER this loop completes cleanly, and ``new_entities`` is
+        # returned only on a clean exit, so a raise here discards both — every
+        # already-successful action in this file is intentionally NOT applied,
+        # preserving exactly-once-or-nothing per raw file. We annotate and
+        # re-raise the SAME exception object so its type (e.g.
+        # ``TransientAPIError``, which the caller routes distinctly) survives.
+        try:
+            if action.kind == "create":
+                new_entities.append(
+                    tier3_create(
+                        action,
+                        raw.ref,
+                        client,
+                        wiki_root=wiki_root,
+                        usage=usage,
+                        config=config,
+                    )
+                )
+
+            elif action.kind == "update" and action.existing_uid:
+                existing_path = index.get_by_uid(action.existing_uid)
+
+                if not existing_path or not existing_path.exists():
+                    log.warning(
+                        "Could not find existing page for uid %s", action.existing_uid
+                    )
+                    continue
+
+                text = existing_path.read_text(encoding="utf-8")
+                meta, existing_body = parse_frontmatter(text)
+
+                updated_body, esc = tier3_merge(
                     action,
+                    existing_body,
                     raw.ref,
                     client,
-                    wiki_root=wiki_root,
                     usage=usage,
                     config=config,
                 )
-            )
-
-        elif action.kind == "update" and action.existing_uid:
-            existing_path = index.get_by_uid(action.existing_uid)
-
-            if not existing_path or not existing_path.exists():
-                log.warning("Could not find existing page for uid %s", action.existing_uid)
-                continue
-
-            text = existing_path.read_text(encoding="utf-8")
-            meta, existing_body = parse_frontmatter(text)
-
-            updated_body, esc = tier3_merge(
-                action,
-                existing_body,
-                raw.ref,
-                client,
-                usage=usage,
-                config=config,
-            )
-            if esc:
-                escalations.append(esc)
-            if updated_body:
-                stamp_merge_provenance(meta, config=config)
-                pending_updates.append(
-                    (
-                        existing_path,
-                        render_frontmatter(meta) + "\n" + updated_body,
+                if esc:
+                    escalations.append(esc)
+                if updated_body:
+                    stamp_merge_provenance(meta, config=config)
+                    pending_updates.append(
+                        (
+                            existing_path,
+                            render_frontmatter(meta) + "\n" + updated_body,
+                        )
                     )
-                )
-                updated_uids.append(action.existing_uid)
+                    updated_uids.append(action.existing_uid)
+        except Exception as exc:
+            setattr(exc, "athenaeum_failing_action", f"{action.kind}:{action.name}")
+            raise
 
     # All LLM calls succeeded — apply updates atomically
     for path, content in pending_updates:

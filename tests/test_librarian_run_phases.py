@@ -136,11 +136,14 @@ class TestRunContext:
         ctx.beyond_window = 3
         ctx.deferred_refs = ["a.md", "b.md"]
         ctx.failed_files = ["c.md"]
+        ctx.stuck_files = [{"ref": "d.md", "failures": 3, "action": "update:X", "error": "E"}]
         ctx.export_run_stats()
         assert stats == {
             "beyond_window": 3,
             "deferred_refs": ["a.md", "b.md"],
             "failed_files": ["c.md"],
+            # Issue #663: stuck files exported as machine-detectable run state.
+            "stuck_files": [{"ref": "d.md", "failures": 3, "action": "update:X", "error": "E"}],
         }
 
     def test_mutation_through_context_is_visible_to_next_phase(
