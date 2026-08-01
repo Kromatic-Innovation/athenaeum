@@ -1898,6 +1898,10 @@ def _run_git_vcs_io(ctx: RunContext) -> None:
     BEFORE anything that could commit, so ``ctx.head_at_start`` reflects the
     post-pull state and the post-run push only pushes commits THIS run made.
     """
+    # ``_resolve_run_config`` runs before this phase and always resolves the
+    # opt-in to a concrete bool (#546: narrows the ``bool | None`` field to
+    # ``bool`` — a true post-resolution invariant, never fires for a valid run).
+    assert ctx.pull_before_run is not None
     # Issue #399: pull before capturing HEAD so (a) the run starts from
     # origin's latest and (b) head_at_start reflects the post-pull state, so
     # the existing post-run push (issue #284) only pushes commits THIS run
@@ -1925,6 +1929,11 @@ def _arm_run_deadline(ctx: RunContext) -> None:
     ``ctx.max_runtime``) and before any phase that spends budget or checks
     the deadline.
     """
+    # ``_resolve_run_config`` runs before this phase and always resolves
+    # ``max_runtime`` to a concrete int (#546: narrows ``int | None`` to
+    # ``int`` — a resolved ``<= 0`` still disables the deadline below, but the
+    # value is never None post-resolution, so this assert never fires).
+    assert ctx.max_runtime is not None
     # One run-level TokenUsage threaded through every phase (cluster, merge
     # incl. the C4 detector + resolver, #188 reresolve, entity tiers) so
     # ``max_api_calls`` is a genuine run-level ceiling. Earlier phases
@@ -2022,6 +2031,11 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
     Only called when ``ctx.merge_only`` is True; always returns (this phase
     IS the merge-only run and always ends the run with an int exit code).
     """
+    # Resolved to concrete values by ``_resolve_run_config`` before any phase
+    # runs (#546: narrows the ``... | None`` fields — never fires for a valid
+    # run).
+    assert ctx.max_api_calls is not None
+    assert ctx.push_after_run is not None
     _merge_only_stats: dict = {}
     _merge_only_start = time.monotonic()
     try:
@@ -2116,6 +2130,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
     ``raw_files``) that the finalize phase and (on a deadline trip) the
     caller's early-return both read.
     """
+    # Resolved to concrete values by ``_resolve_run_config`` before this phase
+    # runs (#546: narrows the ``int | None`` budget fields — never fires for a
+    # valid run).
+    assert ctx.max_files is not None
+    assert ctx.max_api_calls is not None
     _entity_phase_start = time.monotonic()  # issue #464
     _entity_phase_calls_before = ctx.usage.api_calls  # issue #464
     # Issue #490 (slice A): snapshot output tokens too, so the entity segment
@@ -2745,6 +2764,9 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     deadline trip, 1 for failed files, 1 for ``strict_budget``, else 0) is
     decided here, in the same precedence order as the original inline code.
     """
+    # Resolved to a concrete bool by ``_resolve_run_config`` before any phase
+    # runs (#546: narrows ``bool | None`` — never fires for a valid run).
+    assert ctx.push_after_run is not None
     # Issue #461: run-level spend summary + #378 ledger write, moved here from
     # the (now-earlier) entity phase so ``usage`` reflects BOTH phases — the
     # entity tiers AND the auto-memory C2-C4 detector/resolver spend that
@@ -3155,6 +3177,9 @@ def run(
         # cluster-only run must not preserve a stale deferred manifest.
         if not dry_run:
             _clear_stale_deferred_manifest(wiki_root)
+        # Resolved to a concrete bool by ``_resolve_run_config`` above (#546:
+        # narrows ``bool | None`` — never fires for a valid run).
+        assert ctx.push_after_run is not None
         _maybe_push_after_run(
             knowledge_root,
             config=ctx.config,
