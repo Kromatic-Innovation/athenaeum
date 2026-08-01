@@ -115,6 +115,18 @@ include = [
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "athenaeum/skills"
 
+# sdist: keep AGENTS.md OUT of the published source distribution (issue #612).
+# By hatchling's VCS default every git-tracked file — including AGENTS.md —
+# ships in the sdist, so a machine-local leak into this contributor-facing file
+# would be published to PyPI, not merely to GitHub. AGENTS.md is agent/contributor
+# guidance for working IN the repo; a PyPI source consumer does not need it.
+# Excluding it is defense-in-depth: even if local-workspace content is ever
+# re-injected here (the #612 / cwc#1841 failure mode), it cannot reach PyPI.
+# This is the sdist-inclusion decision AC #3 asks to record; reverse it by
+# deleting this exclude if AGENTS.md is later wanted in the sdist.
+[tool.hatch.build.targets.sdist]
+exclude = ["AGENTS.md"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
