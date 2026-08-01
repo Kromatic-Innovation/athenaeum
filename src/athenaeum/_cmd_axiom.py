@@ -121,6 +121,7 @@ def add_axiom_subparser(subparsers: argparse._SubParsersAction) -> None:
             "(issue #434)."
         ),
     )
+    a_parser.set_defaults(func=cmd_axiom)
     a_sub = a_parser.add_subparsers(dest="axiom_target")
 
     def _add_common(parser: argparse.ArgumentParser) -> None:

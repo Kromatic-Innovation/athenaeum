@@ -153,3 +153,4 @@ def add_outbound_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Emit machine-readable JSON findings instead of plain text "
         "(ignored in --redact mode).",
     )
+    parser.set_defaults(func=cmd_outbound)

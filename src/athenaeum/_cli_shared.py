@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared CLI/argparse helpers for ``cli.py`` and the ``_cmd_*`` subcommands.
 
-Contract: the small argparse-type functions, the run-lock flag group, the
-lock-acquire helper, and the lock-contention exit code that BOTH ``cli.py``'s
-inline subcommands AND the per-subcommand ``_cmd_*.py`` modules need. Extracted
+Contract: the small argparse-type functions (``_positive_int``, ``_iso_date``),
+the run-lock flag group, the lock-acquire helper, and the lock-contention exit
+code that BOTH ``cli.py`` AND the per-subcommand ``_cmd_*.py`` modules need. Extracted
 here (issue #545) so a ``_cmd_*`` module can reuse them WITHOUT importing
 ``cli.py`` — the ``cli`` <-> ``_cmd_drain`` back-edge that formed a 2-node import
 cycle. ``_cmd_drain`` was the only ``_cmd_*`` module reaching back into ``cli``
@@ -21,11 +21,27 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
+
+
+def _iso_date(value: str) -> date:
+    """Argparse type for an ISO-8601 ``YYYY-MM-DD`` ``--as-of`` date (issue #308).
+
+    Unlike the fail-open frontmatter date parse, an operator explicitly
+    requesting an as-of view with a malformed date gets a loud parse error
+    rather than a silent today-view.
+    """
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid ISO date (expected YYYY-MM-DD): {value!r}"
+        ) from None
 
 
 def _positive_int(value: str) -> int:
