@@ -26,6 +26,7 @@ import sys
 import pytest
 
 from athenaeum.json_utils import (
+    extract_json_array,
     extract_json_object,
     loads_lenient,
     repair_json_control_chars,
@@ -402,3 +403,71 @@ class TestRepairJsonControlChars:
         # rather than silently accepting garbage.
         with pytest.raises(json.JSONDecodeError):
             loads_lenient('[{"name": "x"')
+
+
+# ---------------------------------------------------------------------------
+# extract_json_array — the balanced-array analogue of extract_json_object
+# (issue #607, M16). The recall-hot-path topic extractor routes through this.
+# ---------------------------------------------------------------------------
+
+
+def test_array_plain_strict_json() -> None:
+    assert extract_json_array('["Return Path", "consulting"]') == [
+        "Return Path",
+        "consulting",
+    ]
+
+
+def test_array_empty_is_returned_not_none() -> None:
+    # A legitimately-empty array is a balanced array — it must return [], NOT
+    # None, so callers can distinguish "model said no topics" from a parse miss.
+    assert extract_json_array("[]") == []
+
+
+def test_array_trailing_prose_after_array() -> None:
+    # The balanced scan stops at the payload's own closing ']' — trailing prose
+    # (with no second array) is tolerated where the greedy regex would have
+    # swallowed it into an unparseable blob.
+    assert extract_json_array(
+        '["alpha", "beta"]\n\nThose are the topics I found in your message.'
+    ) == ["alpha", "beta"]
+
+
+def test_array_two_arrays_is_ambiguous_none() -> None:
+    # Two top-level arrays (real payload + a second example array) is ambiguous;
+    # like extract_json_object with two objects, it returns None rather than
+    # guessing — the caller degrades visibly instead of silently picking one.
+    assert extract_json_array('["real", "topics"]\nexample: [1, 2, 3]') is None
+
+
+def test_array_fenced_block_wins() -> None:
+    # A fenced array is the deliberate answer; unfenced brackets in prose
+    # (e.g. a citation "[1]") must not compete with it.
+    text = 'Here are the topics (see [1]):\n```json\n["one", "two"]\n```\n'
+    assert extract_json_array(text) == ["one", "two"]
+
+
+def test_array_unterminated_is_none() -> None:
+    # A truncated/unterminated array does not decode -> None (a parse miss),
+    # not a partial guess.
+    assert extract_json_array('["a", "b"') is None
+
+
+def test_array_control_chars_inside_strings_repaired() -> None:
+    # A bare newline inside a string value is illegal JSON; loads_lenient's
+    # control-char repair (reused by the array scanner) recovers it instead of
+    # sinking the whole array.
+    assert extract_json_array('["line one\nline two", "ok"]') == [
+        "line one\nline two",
+        "ok",
+    ]
+
+
+def test_array_no_array_present_is_none() -> None:
+    assert extract_json_array("no brackets here at all") is None
+
+
+def test_array_nested_array_not_counted_separately() -> None:
+    # A nested array inside the top-level array is part of it, not a second
+    # top-level candidate — so this is exactly one array, returned whole.
+    assert extract_json_array('[["a", "b"], ["c"]]') == [["a", "b"], ["c"]]

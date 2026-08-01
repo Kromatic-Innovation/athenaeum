@@ -266,3 +266,74 @@ def test_no_direct_anthropic_construction_outside_provider() -> None:
         "anthropic.Anthropic must only be constructed in provider.py "
         "(route through build_llm_client instead):\n" + "\n".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# M16 (#607): the greedy-regex parse is replaced by json_utils.extract_json_array.
+# A genuine parse miss now emits a WARNING (a malformed topic-model regime must
+# be visible); a legitimately-empty [] answer stays quiet.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_miss_emits_warning_and_degrades(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    # An unterminated array — the model returned text but no balanced array
+    # can be extracted. Old behavior: silent []. New: WARNING + [].
+    fake = FakeLLMClient(text='["Return Path", "consulting"')
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "Anthropic", fake)
+
+    with caplog.at_level(logging.WARNING, logger="athenaeum.query_topics"):
+        assert query_topics.extract_topics("Tell me about Return Path") == []
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "expected a WARNING on an unparseable topic array"
+    assert any("no parseable topic array" in r.getMessage() for r in warnings)
+
+
+def test_empty_array_answer_is_quiet(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    # A legitimately-empty answer (the prompt has no substantive topic). This
+    # is a NORMAL response and must not raise a WARNING.
+    fake = FakeLLMClient(text="[]")
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "Anthropic", fake)
+
+    with caplog.at_level(logging.WARNING, logger="athenaeum.query_topics"):
+        assert query_topics.extract_topics("what is the time") == []
+
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "no parseable topic array" in r.getMessage()
+    ]
+    assert not warnings, "an empty [] answer must not warn about a parse miss"
+
+
+def test_trailing_prose_after_array_still_extracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    # The exact shape the greedy regex mishandled: a valid array followed by
+    # prose. The balanced scan stops at the array's ']' and extracts cleanly.
+    fake = FakeLLMClient(
+        text='["Return Path", "consulting"]\n\nThose are the topics I found.'
+    )
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "Anthropic", fake)
+
+    assert query_topics.extract_topics("Tell me about Return Path") == [
+        "Return Path",
+        "consulting",
+    ]
