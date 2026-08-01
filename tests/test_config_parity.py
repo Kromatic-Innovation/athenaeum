@@ -768,4 +768,4 @@ class TestTemplateAdvertisesNewKeys:
         assert "#   write:" in _DEFAULT_CONFIG_CONTENT
         assert "#   topic:" in _DEFAULT_CONFIG_CONTENT
         # Issue #513: the resolver knob joined the same block.
-        assert "#   resolve: claude-opus-4-7" in _DEFAULT_CONFIG_CONTENT
+        assert "#   resolve: claude-opus-5" in _DEFAULT_CONFIG_CONTENT
