@@ -62,10 +62,11 @@ def test_summary_empty(tmp_path: Path, _tiers_enabled: None) -> None:
     (tmp_path / "wiki").mkdir()
     rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
     assert rc == 0
-    assert json.loads(out) == {
-        "T1": {"sampled": 0, "reviewed": 0, "overturned": 0},
-        "T2": {"sampled": 0, "reviewed": 0, "overturned": 0},
+    empty_bucket = {
+        "sampled": 0, "reviewed": 0, "overturned": 0,
+        "applied": 0, "overturned_applied": 0,
     }
+    assert json.loads(out) == {"T1": empty_bucket, "T2": empty_bucket}
 
 
 def test_summary_after_sampling(tmp_path: Path, _tiers_enabled: None) -> None:
@@ -94,7 +95,10 @@ def test_review_overturn_flow(tmp_path: Path, _tiers_enabled: None) -> None:
     assert json.loads(out)["overturned"] is True
 
     rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
-    assert json.loads(out)["T2"] == {"sampled": 1, "reviewed": 1, "overturned": 1}
+    assert json.loads(out)["T2"] == {
+        "sampled": 1, "reviewed": 1, "overturned": 1,
+        "applied": 0, "overturned_applied": 0,
+    }
 
 
 def test_review_unknown_id_exits_nonzero(tmp_path: Path, _tiers_enabled: None) -> None:
