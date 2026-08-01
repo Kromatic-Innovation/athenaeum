@@ -306,7 +306,7 @@ class TestT2DecisionLogging:
             tier="T2",
             verdict="escalate",
             reason="not confident enough",
-            model="claude-opus-4-1-20250805",
+            model="claude-opus-4-8",
             proposal_id="p1",
         )
         ok = record_reasoning_tier_t2_decision(wiki_root, decision)
@@ -323,7 +323,7 @@ class TestT2DecisionLogging:
         }
         assert rec["tier"] == "T2"
         assert rec["decision"] == "escalate"
-        assert rec["model"] == "claude-opus-4-1-20250805"
+        assert rec["model"] == "claude-opus-4-8"
         assert rec["proposal_id"] == "p1"
 
     def test_t1_and_t2_decisions_share_one_log_queryable_by_tier(
@@ -548,3 +548,33 @@ class TestAmendVerdict:
         assert decision.verdict == "amend"
         assert decision.amended_sources == (str(src_a),)
         assert decision.drafted_body is None
+
+
+# ---------------------------------------------------------------------------
+# AC (issue #633) — the T2 default must price at a real, non-blended rate.
+# The whole reason this hop is independent of #577 is that the chosen id
+# matches an existing rate-table prefix; guard that so a future default bump
+# to an unpriced family (which would silently fall through to the blended
+# fallback and mis-price every T2 call) fails loudly here.
+# ---------------------------------------------------------------------------
+
+
+class TestT2DefaultPricesNonBlended:
+    def test_default_t2_model_resolves_to_non_blended_rate(self) -> None:
+        from athenaeum.models import (
+            _BLENDED_INPUT_USD_PER_MTOK,
+            _BLENDED_OUTPUT_USD_PER_MTOK,
+            _rates_for_model,
+        )
+
+        rates = _rates_for_model(DEFAULT_T2_MODEL)
+        blended = (_BLENDED_INPUT_USD_PER_MTOK, _BLENDED_OUTPUT_USD_PER_MTOK)
+        assert rates != blended, (
+            f"DEFAULT_T2_MODEL {DEFAULT_T2_MODEL!r} falls through to the blended "
+            f"fallback rate {blended} — it matches no prefix in "
+            "models._MODEL_RATES_USD_PER_MTOK, so every T2 call would be "
+            "mis-priced. Add a rate-table prefix (see #577) or pick an id that "
+            "matches an existing one."
+        )
+        # Opus 4.8 matches the existing ``claude-opus-4`` prefix → $5/$25.
+        assert rates == (5.0, 25.0)
