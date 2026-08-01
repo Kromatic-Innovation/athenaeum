@@ -388,6 +388,164 @@ def name_field_holds_pii(meta: dict[str, Any]) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# 2c. Name-is-an-email local-part -> display-name derivation (issue #505)
+# ---------------------------------------------------------------------------
+#
+# #502 found ~80 live pages whose ``name:`` / ``preferred_name:`` IS an email
+# address (Streak email-only import) and deliberately left them unmigrated —
+# renaming a page changes its slug and breaks inbound ``related:``/alias
+# edges, so it needed its own slice (this one). The operator's decision
+# (#505, APPROACH 1): derive a human-readable display name from the
+# local-part when possible (e.g. ``jane.doe@acme.com`` -> ``Jane Doe``), move
+# the address to the excluded contact record, and rewrite inbound edges — the
+# page stays in the corpus under a human-readable name. When a confident name
+# cannot be derived, LEAVE the page for manual naming (never guess).
+
+#: Local-parts that are ALWAYS role/service addresses, never a person's name —
+#: matched case-insensitively against the WHOLE local-part (not a substring
+#: check, so ``information@`` is not mistaken for ``info@``). Deliberately a
+#: closed, auditable list rather than a heuristic: renaming ``sales@acme.com``
+#: to "Sales" would invent a fictitious person.
+ROLE_LOCALPARTS: frozenset[str] = frozenset(
+    {
+        "info",
+        "information",
+        "sales",
+        "support",
+        "admin",
+        "administrator",
+        "noreply",
+        "no-reply",
+        "donotreply",
+        "contact",
+        "hello",
+        "help",
+        "office",
+        "team",
+        "billing",
+        "accounts",
+        "hr",
+        "jobs",
+        "careers",
+        "press",
+        "media",
+        "marketing",
+        "webmaster",
+        "postmaster",
+        "abuse",
+        "security",
+        "privacy",
+        "legal",
+        "enquiries",
+        "inquiries",
+        "general",
+        "mail",
+        "email",
+        "newsletter",
+        "subscribe",
+        "unsubscribe",
+        "notifications",
+        "alerts",
+        "feedback",
+        "service",
+        "services",
+        "orders",
+        "shop",
+        "store",
+    }
+)
+
+#: Separators that plausibly join name PARTS in a human local-part
+#: (``jane.doe``, ``jane_doe``, ``jane-doe``). A local-part with none of
+#: these (a single unbroken token) is only confident when it independently
+#: looks like a whole first name — see :func:`derive_display_name_from_email`.
+_NAME_PART_SEPARATORS = re.compile(r"[._-]")
+
+#: A local-part containing a digit is treated as opaque/system-generated
+#: (``jdoe123``, ``a12345``, ``2026report``) rather than a human name — a
+#: conservative exclusion, since a real name-part essentially never carries a
+#: digit in this corpus's data (the Streak import's numeric/opaque local-parts
+#: are exactly the shape the issue calls out to defer).
+_HAS_DIGIT_RE = re.compile(r"\d")
+
+#: A ``+tag`` suffix (``jane.doe+work@...``) is a routing tag, not part of the
+#: name — but its PRESENCE at all marks the address as one a human deliberately
+#: annotated for filtering, which the issue calls out as ambiguous; deferred
+#: rather than derived-from-the-part-before-the-plus, so an operator confirms.
+_PLUS_TAG_RE = re.compile(r"\+")
+
+#: Minimum length for each name-part segment once split on separators. A
+#: 1-2 character segment (``j.doe``, initials) is exactly the "initial-blob"
+#: shape the issue says to defer, not guess at.
+_MIN_NAME_PART_LEN = 3
+
+
+def derive_display_name_from_email(email: str) -> str | None:
+    """Derive a human-readable display name from an email local-part, or ``None``.
+
+    Implements the #505 CONFIDENCE GATE for approach 1. Returns a title-cased
+    display name (separators -> spaces) when the local-part looks like a
+    dotted/underscored/hyphenated human name (``jane.doe`` -> ``"Jane Doe"``,
+    ``jane_doe`` -> ``"Jane Doe"``). Returns ``None`` (DEFER — do not guess)
+    for:
+
+    - a role/service local-part (:data:`ROLE_LOCALPARTS`, e.g. ``info@``,
+      ``sales@``, ``noreply@``) — reused via whole-local-part membership;
+    - a ``+tag`` address (``first.last+tag@``) — the tag itself is a
+      routing/filter annotation a human added, which the issue treats as
+      ambiguous rather than something to strip-and-guess through;
+    - a local-part containing any digit (opaque or numeric local-parts,
+      e.g. ``jdoe123``, ``2016import``);
+    - a BARE (no ``.``/``_``/``-`` separator) local-part, e.g. ``jdoe``,
+      ``mjs``, or even ``jane`` — with no separator there is no reliable,
+      dictionary-free way to tell a genuine first name from an initials
+      blob (issue #505 names ``jdoe``/``mjs`` explicitly; a bare token is
+      conservatively deferred across the board rather than guessing which
+      unseparated tokens happen to be real first names);
+    - an initial-blob EVEN WITH separators (``j.doe``) — any part shorter
+      than :data:`_MIN_NAME_PART_LEN` defers the whole address;
+    - a malformed/empty local-part (no ``@``, or nothing before it).
+
+    A service address (``git@github.com``) is not specially handled here —
+    it is filtered upstream by :func:`is_service_address` before this is ever
+    called on a genuine contact address, but calling this directly on one
+    would still defer (a bare token, no separator) rather than mis-derive a
+    name.
+    """
+    if "@" not in email:
+        return None
+    local = email.split("@", 1)[0].strip()
+    if not local:
+        return None
+
+    if _PLUS_TAG_RE.search(local):
+        return None  # `first.last+tag@...` — ambiguous, defer.
+
+    if local.lower() in ROLE_LOCALPARTS:
+        return None  # role/service address — never invent a person.
+
+    if _HAS_DIGIT_RE.search(local):
+        return None  # opaque or numeric local-part — defer.
+
+    parts = [p for p in _NAME_PART_SEPARATORS.split(local) if p]
+    if len(parts) < 2:
+        # No separator (or nothing but separators): conservatively defer —
+        # a bare token is exactly the initials-blob shape (`jdoe`, `mjs`)
+        # the issue calls out, and there is no reliable way to distinguish
+        # it from a genuine short first name without a dictionary.
+        return None
+
+    # Separator-joined: every part must be alphabetic and long enough — a
+    # part like `j` or `mc` (initials) defers the whole address rather than
+    # guessing a partial name.
+    for part in parts:
+        if not part.isalpha() or len(part) < _MIN_NAME_PART_LEN:
+            return None
+
+    return " ".join(p.capitalize() for p in parts)
+
+
 def _frontmatter_contact_values(meta: dict[str, Any]) -> dict[str, list[str]]:
     """Return ``{field: [values]}`` for any non-empty contact field present."""
     found: dict[str, list[str]] = {}
@@ -873,6 +1031,8 @@ __all__ = [
     "DURABLE_IDENTIFIER_FIELDS",
     "NAME_FIELDS",
     "name_field_holds_pii",
+    "ROLE_LOCALPARTS",
+    "derive_display_name_from_email",
     "OBSERVATION_LOG_VERSION",
     "OBSERVATION_LOG_FILENAME",
     "SUPERSESSION_LOG_FILENAME",
