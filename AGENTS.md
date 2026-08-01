@@ -60,6 +60,30 @@ reviewers cannot read it.
 - Run: `pytest`
 - Coverage: `pytest --cov=athenaeum`
 
+## Checking the merge queue
+
+Never hand-parse `wiki/_pending_merges.md` with grep/awk — it's a hand-rolled
+markdown sidecar with nested code fences and multi-line fields, and doing
+this by hand has already cost a full investigation arc (four failed attempts
+on one question `athenaeum merges revalidate` answers in one call).
+`parse_pending_merges()` (`src/athenaeum/pending_merges.py`) is the only
+sanctioned reader; `athenaeum merges {list,next,count,revalidate,provenance}`
+(source: `src/athenaeum/_cmd_merges.py`) is the sanctioned CLI surface built
+on it. Full flag reference: [README.md § One unified "decisions needed"
+list](README.md#one-unified-decisions-needed-list).
+
+**"Is the merge queue healthy?" → run `athenaeum merges revalidate` first.**
+It re-validates every unresolved proposal against the *current* suppression
+gate, reports per-proposal `n_sources` and the suppression reason, and is
+**dry-run by default** — `--apply` archives stale proposals to
+`wiki/_pending_merges_archive.md` (moved, never deleted). Verified
+2026-08-01: it retired 5 stale over-cluster proposals (36 → 31).
+
+The MCP `list_pending_decisions` view carries **derived fields that do not
+exist in the file** — `sources_omitted` (computed in `decisions.py`) is the
+known example. Don't assume a field seen in that view is present in the raw
+markdown or in `athenaeum merges` JSON output.
+
 ## Bundled skills
 
 - `skills/adapter-authoring/SKILL.md` — **adapter-authoring**: how to build a
