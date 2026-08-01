@@ -1719,9 +1719,9 @@ search_backend: fts5
 #   ``models.resolve`` is unset. Prefer this block for all four knobs.
 # models:
 #   classify: claude-haiku-4-5-20251001
-#   write: claude-sonnet-4-6
+#   write: claude-sonnet-5
 #   topic: claude-haiku-4-5-20251001
-#   resolve: claude-opus-4-7
+#   resolve: claude-opus-5
 
 # Cross-scope contradiction detection (issue #125).
 # cross_scope_mode: off | ancestor (default) | similarity | both.
@@ -1751,9 +1751,9 @@ search_backend: fts5
 # model: LEGACY key for the model used to propose a winner once Haiku flags a
 #   contradiction. Prefer ``models.resolve`` above; this key is read only when
 #   ``models.resolve`` is unset, and is kept working for pre-existing configs.
-#   Defaults to claude-opus-4-7. Env override: ATHENAEUM_RESOLVE_MODEL.
+#   Defaults to claude-opus-5. Env override: ATHENAEUM_RESOLVE_MODEL.
 # resolve:
-#   model: claude-opus-4-7
+#   model: claude-opus-5
 
 # Pluggable storage-surface layer (issue #429). Maps each entity class (the
 # wiki frontmatter `type`) onto a STORAGE ADAPTER — a backing store + a corpus
