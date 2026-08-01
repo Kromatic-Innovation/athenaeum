@@ -16,7 +16,13 @@ Layers exercised end-to-end against a real Claude API call:
 | Detector  | Haiku (`ATHENAEUM_CLASSIFY_MODEL`) | 10 clusters     | ≥ 8/10 |
 | Resolver  | Opus (`ATHENAEUM_RESOLVE_MODEL`)   | 5 flagged pairs | ≥ 4/5  |
 | Recall    | Haiku (`ATHENAEUM_TOPIC_MODEL`)    | 6 prompts       | ≥ 5/6  |
+| Classify  | Haiku (`ATHENAEUM_CLASSIFY_MODEL`) | 6 raw intakes   | ≥ 4/6  |
+| Merge     | Sonnet (`ATHENAEUM_WRITE_MODEL`)   | 4 merge cases   | ≥ 3/4  |
 | Backfill  | deferred until #328                | —               | —      |
+
+Classify and Merge (issue #552) cover `tiers.py`'s Tier-2 CLASSIFY and
+Tier-3 WRITE/MERGE stages — see `docs/evals-inventory.md` for the full
+module-by-module inventory of which stages warrant a live eval and why.
 
 Each per-case test appends its outcome to the session accumulator; only
 the aggregate floor is asserted, so single-case model noise does not
