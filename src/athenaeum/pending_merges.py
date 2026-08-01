@@ -160,6 +160,13 @@ class PendingMerge:
     # by an existing wiki page). Pre-#421 blocks lack the line and default to
     # ``create-merged``.
     write_kind: str = "create-merged"
+    # Issue #602: True iff this block was approved by the T2 auto-finalize
+    # path (:func:`resolve_merge` called with ``auto_applied=True``) rather
+    # than by a human. Only ever set on an already-resolved (``approve``)
+    # block — see ``_rewrite_block_resolved``'s ``**Auto-applied**:`` line,
+    # the human-readable twin of the provenance ledger's ``auto_applied``
+    # field (:func:`athenaeum.provenance.build_merge_provenance_record`).
+    auto_applied: bool = False
 
 
 def _make_id(sources: list[str], target_name: str) -> str:
@@ -326,6 +333,7 @@ def _parse_block(block_text: str) -> PendingMerge | None:
     decision = ""
     note = ""
     write_kind = "create-merged"
+    auto_applied = False
 
     in_sources = False
     in_draft = False
@@ -386,6 +394,10 @@ def _parse_block(block_text: str) -> PendingMerge | None:
             in_sources = False
             note = s.removeprefix("**Note**:").strip()
             continue
+        if s.startswith("**Auto-applied**:"):
+            in_sources = False
+            auto_applied = s.removeprefix("**Auto-applied**:").strip().lower() == "true"
+            continue
         if in_sources and s.startswith("- "):
             sources.append(s[2:].strip())
             continue
@@ -409,6 +421,7 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         decision=decision if decision in ("approve", "reject") else "",
         note=note,
         write_kind=write_kind,
+        auto_applied=auto_applied,
     )
 
 
@@ -558,8 +571,20 @@ def _rewrite_block_resolved(
     block_text: str,
     decision: Literal["approve", "reject"],
     note: str,
+    *,
+    auto_applied: bool = False,
 ) -> str:
-    """Flip the checkbox and tag the block with decision + note."""
+    """Flip the checkbox and tag the block with decision + note.
+
+    ``auto_applied`` (issue #602): when ``True``, an additional
+    ``**Auto-applied**: true`` line is written — the human-readable marker
+    that this ``approve`` was finalized by the T2 reasoning tier's
+    auto-finalize path, not by a human reviewing the block. Never written
+    on a ``reject`` (auto-finalize never rejects) or on an ordinary
+    human approve (the default, ``False``, adds nothing — a pre-#602
+    resolved block and an ordinary human approve are byte-identical to
+    before this existed).
+    """
     lines = block_text.splitlines()
     new_lines: list[str] = []
     flipped = False
@@ -575,6 +600,8 @@ def _rewrite_block_resolved(
     new_lines.append(f"**Decision**: {decision}")
     if note:
         new_lines.append(f"**Note**: {note}")
+    if auto_applied:
+        new_lines.append("**Auto-applied**: true")
     return "\n".join(new_lines).rstrip() + "\n"
 
 
@@ -917,12 +944,27 @@ def resolve_merge(
     cache_dir: Path | None = None,
     search_backend: str | None = None,
     embedding_model: str | None = None,
+    auto_applied: bool = False,
 ) -> dict:
     """Mark a pending-merge block as resolved.
 
     Args:
         merges_path: Path to ``_pending_merges.md``.
         merge_id: Id returned by :func:`list_pending_merges`.
+        auto_applied: Issue #602. When ``True``, this ``"approve"`` is being
+            finalized by the T2 reasoning tier's auto-finalize path, NOT by
+            a human — the caller (:func:`athenaeum.merge.t2_screen_merge_proposal`)
+            is the ONLY production caller that ever passes ``True``. This
+            reuses the existing approve-time fold/write mechanics byte for
+            byte (no second write path); the only effect is two durable
+            markers: a ``**Auto-applied**: true`` line in the resolved block
+            (human-readable, in the wiki sidecar itself) and
+            ``auto_applied: true`` on the provenance ledger record (queryable
+            via ``athenaeum merges provenance``). Ignored (has no effect) on
+            ``decision="reject"`` — there is no such thing as an
+            "auto-applied reject". Defaults to ``False`` so every existing
+            caller (the human MCP/CLI approve path) is byte-identical to
+            before this parameter existed.
         decision: ``"approve"`` dispatches on the proposal's ``write_kind``
             (issue #421 classification, issue #425 write paths):
 
@@ -1022,7 +1064,12 @@ def resolve_merge(
                 "resolved_block": None,
             }
         target_pm = pm
-        resolved_text = _rewrite_block_resolved(block_text, decision, note)
+        resolved_text = _rewrite_block_resolved(
+            block_text,
+            decision,
+            note,
+            auto_applied=auto_applied and decision == "approve",
+        )
         rewritten.append(resolved_text)
 
     if target_pm is None:
@@ -1093,6 +1140,7 @@ def resolve_merge(
             write_kind=write_kind,
             canonical_slug=target_slug,
             source_paths=list(target_pm.sources),
+            auto_applied=auto_applied,
         )
     elif decision == "reject" and len(target_pm.sources) >= 2:
         # Write a `refines:` declaration into the first source memory

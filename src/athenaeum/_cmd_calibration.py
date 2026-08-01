@@ -83,10 +83,23 @@ def cmd_calibration(args: argparse.Namespace) -> int:
             sys.stdout.write(json.dumps(summary) + "\n")
             return 0
         for tier, counts in summary.items():
-            print(
+            line = (
                 f"{tier}: sampled {counts['sampled']}, "
                 f"reviewed {counts['reviewed']}, overturned {counts['overturned']}"
             )
+            if counts.get("applied"):
+                line += f", applied {counts['applied']}"
+            # Issue #602: surface an overturn of an ALREADY-APPLIED (auto-
+            # finalized, live-in-the-wiki) merge prominently — this is the
+            # one number that means "a human caught a bad write that
+            # already happened", never buried inside the plain
+            # ``overturned`` count.
+            if counts.get("overturned_applied"):
+                line += (
+                    f" *** {counts['overturned_applied']} OVERTURN(S) OF AN "
+                    "APPLIED MERGE — already live in the wiki ***"
+                )
+            print(line)
         return 0
 
     # sub == "review"
@@ -104,11 +117,18 @@ def cmd_calibration(args: argparse.Namespace) -> int:
         sys.stdout.write(json.dumps(record) + "\n")
     else:
         outcome = "overturned" if record["overturned"] else "confirmed"
-        print(
+        line = (
             f"{outcome} audit item {record['id']} "
             f"(tier {record['tier']}: {record['original_verdict']!r} "
             f"-> human {record['human_verdict']!r})"
         )
+        if record.get("overturned_applied"):
+            line += (
+                " *** THIS MERGE WAS ALREADY AUTO-APPLIED (live in the wiki) "
+                "— automated unwinding is out of scope; a human must "
+                "manually correct the wiki page ***"
+            )
+        print(line)
     return 0
 
 
