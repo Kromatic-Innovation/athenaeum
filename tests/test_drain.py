@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum import drain, spend
+from athenaeum import drain, drain_advisor, spend
 from athenaeum.cli import main
 from athenaeum.config import resolve_drain_warn_days
 from athenaeum.models import TokenUsage
@@ -86,7 +86,7 @@ class TestEstimateFilesPerNight:
             _ledger_record(files_processed=20),
             _ledger_record(files_processed=30),
         ]
-        rate, source = drain.estimate_files_per_night(records)
+        rate, source = drain_advisor.estimate_files_per_night(records)
         assert source == "ledger"
         assert rate == 20.0  # (10 + 20 + 30) / 3
 
@@ -97,17 +97,17 @@ class TestEstimateFilesPerNight:
             _ledger_record(input_tokens=5),  # no files_processed (pre-#470)
             _ledger_record(files_processed=0),  # zero — not usable
         ]
-        rate, source = drain.estimate_files_per_night(records)
+        rate, source = drain_advisor.estimate_files_per_night(records)
         assert source == "ledger"
         assert rate == 10.0
 
     def test_fallback_to_this_run(self) -> None:
-        rate, source = drain.estimate_files_per_night([], this_run_files=7)
+        rate, source = drain_advisor.estimate_files_per_night([], this_run_files=7)
         assert source == "this-run"
         assert rate == 7.0
 
     def test_none_when_no_history_and_no_this_run(self) -> None:
-        rate, source = drain.estimate_files_per_night([], this_run_files=0)
+        rate, source = drain_advisor.estimate_files_per_night([], this_run_files=0)
         assert source == "none"
         assert rate == 0.0
 
@@ -115,20 +115,20 @@ class TestEstimateFilesPerNight:
         records = [_ledger_record(files_processed=100)] + [
             _ledger_record(files_processed=10) for _ in range(3)
         ]
-        rate, source = drain.estimate_files_per_night(records, max_history=3)
+        rate, source = drain_advisor.estimate_files_per_night(records, max_history=3)
         assert source == "ledger"
         assert rate == 10.0  # oldest (100) excluded by the window
 
 
 class TestEstimateEtaNights:
     def test_basic(self) -> None:
-        assert drain.estimate_eta_nights(202, 11) == 19  # ceil(202/11)
+        assert drain_advisor.estimate_eta_nights(202, 11) == 19  # ceil(202/11)
 
     def test_empty_backlog_is_zero(self) -> None:
-        assert drain.estimate_eta_nights(0, 11) == 0
+        assert drain_advisor.estimate_eta_nights(0, 11) == 0
 
     def test_unknown_rate_is_inf(self) -> None:
-        assert drain.estimate_eta_nights(50, 0) == math.inf
+        assert drain_advisor.estimate_eta_nights(50, 0) == math.inf
 
 
 class TestObservedTokensPerFile:
@@ -137,18 +137,18 @@ class TestObservedTokensPerFile:
             _ledger_record(files_processed=2, input_tokens=100, output_tokens=10),
             _ledger_record(files_processed=3, input_tokens=200, output_tokens=20),
         ]
-        avg_in, avg_out = drain.observed_tokens_per_file(records)
+        avg_in, avg_out = drain_advisor.observed_tokens_per_file(records)
         assert avg_in == 60.0  # 300 tokens / 5 files
         assert avg_out == 6.0  # 30 tokens / 5 files
 
     def test_none_when_no_history(self) -> None:
-        assert drain.observed_tokens_per_file([]) is None
+        assert drain_advisor.observed_tokens_per_file([]) is None
 
 
 class TestEstimateDrainCostUsd:
     def test_price_table_with_batch_discount(self) -> None:
         # sonnet-4 rates: $3/MTok in, $15/MTok out.
-        full = drain.estimate_drain_cost_usd(
+        full = drain_advisor.estimate_drain_cost_usd(
             backlog=1,
             avg_input_per_file=1_000_000,
             avg_output_per_file=1_000_000,
@@ -156,7 +156,7 @@ class TestEstimateDrainCostUsd:
             batch=False,
         )
         assert full == pytest.approx(18.0)  # 3 + 15
-        batched = drain.estimate_drain_cost_usd(
+        batched = drain_advisor.estimate_drain_cost_usd(
             backlog=1,
             avg_input_per_file=1_000_000,
             avg_output_per_file=1_000_000,
@@ -166,7 +166,7 @@ class TestEstimateDrainCostUsd:
         assert batched == pytest.approx(9.0)  # half of 18
 
     def test_unknown_model_uses_blended_rate(self) -> None:
-        cost = drain.estimate_drain_cost_usd(
+        cost = drain_advisor.estimate_drain_cost_usd(
             backlog=1,
             avg_input_per_file=1_000_000,
             avg_output_per_file=1_000_000,
@@ -176,7 +176,7 @@ class TestEstimateDrainCostUsd:
         assert cost == pytest.approx(9.0)  # blended 1.5 in + 7.5 out
 
     def test_scales_with_backlog(self) -> None:
-        cost = drain.estimate_drain_cost_usd(
+        cost = drain_advisor.estimate_drain_cost_usd(
             backlog=100,
             avg_input_per_file=1000,
             avg_output_per_file=100,
@@ -195,13 +195,13 @@ class TestEstimateModelResolution:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("ATHENAEUM_WRITE_MODEL", raising=False)
-        assert drain._resolve_estimate_model(None) == drain.DEFAULT_WRITE_MODEL
+        assert drain_advisor._resolve_estimate_model(None) == drain_advisor.DEFAULT_WRITE_MODEL
 
     def test_env_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ATHENAEUM_WRITE_MODEL", "claude-opus-4-8")
-        assert drain._resolve_estimate_model(None) == "claude-opus-4-8"
+        assert drain_advisor._resolve_estimate_model(None) == "claude-opus-4-8"
         assert (
-            drain._resolve_estimate_model({"models": {"write": "claude-haiku-4"}})
+            drain_advisor._resolve_estimate_model({"models": {"write": "claude-haiku-4"}})
             == "claude-opus-4-8"  # env beats yaml
         )
 
@@ -210,7 +210,7 @@ class TestEstimateModelResolution:
     ) -> None:
         monkeypatch.delenv("ATHENAEUM_WRITE_MODEL", raising=False)
         assert (
-            drain._resolve_estimate_model({"models": {"write": "claude-opus-4-8"}})
+            drain_advisor._resolve_estimate_model({"models": {"write": "claude-opus-4-8"}})
             == "claude-opus-4-8"
         )
 
@@ -227,10 +227,10 @@ class TestEstimateModelResolution:
             avg_output_per_file=1_500,
             batch=False,
         )
-        opus = drain.estimate_drain_cost_usd(
+        opus = drain_advisor.estimate_drain_cost_usd(
             config={"models": {"write": "claude-opus-4-8"}}, **kw
         )
-        sonnet = drain.estimate_drain_cost_usd(
+        sonnet = drain_advisor.estimate_drain_cost_usd(
             config={"models": {"write": "claude-sonnet-4"}}, **kw
         )
         assert opus > sonnet
@@ -242,10 +242,10 @@ class TestRoundUpBudget:
         [(0.3, 0.5), (0.6, 1.0), (1.2, 2.0), (3.0, 5.0), (7.0, 10.0), (12.0, 20.0)],
     )
     def test_nice_rounding(self, value: float, expected: float) -> None:
-        assert drain._round_up_budget(value) == expected
+        assert drain_advisor._round_up_budget(value) == expected
 
     def test_zero(self) -> None:
-        assert drain._round_up_budget(0) == 0.0
+        assert drain_advisor._round_up_budget(0) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -256,14 +256,14 @@ class TestRoundUpBudget:
 class TestBuildAdvisory:
     def test_empty_backlog_is_silent(self) -> None:
         assert (
-            drain.build_advisory(backlog=0, ledger_records=[], warn_days=3) is None
+            drain_advisor.build_advisory(backlog=0, ledger_records=[], warn_days=3) is None
         )
 
     def test_below_threshold_is_silent(self) -> None:
         records = [_ledger_record(files_processed=50)]  # 50/night
         # backlog 100 -> 2 nights, threshold 3 -> silent.
         assert (
-            drain.build_advisory(backlog=100, ledger_records=records, warn_days=3)
+            drain_advisor.build_advisory(backlog=100, ledger_records=records, warn_days=3)
             is None
         )
 
@@ -271,17 +271,17 @@ class TestBuildAdvisory:
         records = [
             _ledger_record(files_processed=10, input_tokens=20_000, output_tokens=1_500)
         ]
-        adv = drain.build_advisory(backlog=200, ledger_records=records, warn_days=3)
+        adv = drain_advisor.build_advisory(backlog=200, ledger_records=records, warn_days=3)
         assert adv is not None
         assert adv.eta_nights == 20  # ceil(200/10)
         assert adv.rate_source == "ledger"
-        assert adv.line.startswith(drain.DRAIN_ADVISOR_PREFIX + ":")
+        assert adv.line.startswith(drain_advisor.DRAIN_ADVISOR_PREFIX + ":")
         assert "athenaeum drain --max-usd" in adv.command
         assert "200 deferred file(s)" in adv.summary
         assert adv.suggested_max_usd > 0
 
     def test_unknown_rate_still_warns(self) -> None:
-        adv = drain.build_advisory(
+        adv = drain_advisor.build_advisory(
             backlog=42, ledger_records=[], warn_days=3, this_run_files=0
         )
         assert adv is not None
