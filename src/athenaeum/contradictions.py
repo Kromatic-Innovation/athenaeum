@@ -33,11 +33,13 @@ Out of scope (deliberate):
 **Layering:** L3 service. Imports L0-L2 (:mod:`athenaeum._retry`,
 :mod:`athenaeum.config`, :mod:`athenaeum.json_utils`, :mod:`athenaeum.models`,
 :mod:`athenaeum.prompt_safety`) plus a sibling L3 module
-(:mod:`athenaeum.provider`) normally. The one narrow exception:
-``from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL`` reaches UP into the L4
-pipeline module, but only for a model-id string constant (single-sourcing the
-default so this detector's knob never drifts from tier2's) — no L4 behavior
-or capability is imported. Consumed by :mod:`athenaeum.merge` (L4).
+(:mod:`athenaeum.provider`) normally. The shared classify-model default is read
+from the :mod:`athenaeum.config` leaf (``DEFAULT_CLASSIFY_MODEL``), single-
+sourcing the default so this detector's knob never drifts from tier2's. Issue
+#640 moved that constant down to ``config`` from ``tiers``; before that this
+module reached UP into the L4 ``tiers`` hub for it, forming the
+``contradictions`` <-> ``tiers`` back-edge of a residual import SCC. Consumed by
+:mod:`athenaeum.merge` (L4).
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
 from athenaeum._retry import TransientAPIError, with_retry
-from athenaeum.config import resolve_model
+from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
@@ -60,7 +62,6 @@ from athenaeum.models import (
 )
 from athenaeum.prompt_safety import defang_tag
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
-from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 if TYPE_CHECKING:
     import anthropic
@@ -70,10 +71,11 @@ log = logging.getLogger(__name__)
 
 # Model override uses the SAME env var as tier2_classify. Keeping a single
 # knob avoids a C4-only dial that sessions would have to learn separately.
-# The default is single-sourced from tiers.DEFAULT_CLASSIFY_MODEL (issue #571,
-# M19): the detector shares the classify knob, so a divergent literal here only
-# ever surfaced as an inconsistent default on a model bump. This collapses the
-# DEFAULT; the env knob (ATHENAEUM_CLASSIFY_MODEL, below) is unchanged.
+# The default is single-sourced from config.DEFAULT_CLASSIFY_MODEL (issue #571,
+# M19; relocated from tiers to the config leaf in #640): the detector shares the
+# classify knob, so a divergent literal here only ever surfaced as an
+# inconsistent default on a model bump. This collapses the DEFAULT; the env knob
+# (ATHENAEUM_CLASSIFY_MODEL, below) is unchanged.
 DEFAULT_CONTRADICTION_MODEL = DEFAULT_CLASSIFY_MODEL
 
 # Per-member body trim. 800 chars comfortably captures the "claim" section

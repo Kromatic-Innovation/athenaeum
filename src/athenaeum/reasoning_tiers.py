@@ -108,13 +108,12 @@ from athenaeum.authority import (
     find_duplicate_source,
     load_authority_manifest,
 )
-from athenaeum.config import resolve_model
+from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
 from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge
 from athenaeum.pii import is_pii_flagged
 from athenaeum.prompt_safety import data_only_clause, fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
-from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 log = logging.getLogger(__name__)
 
@@ -133,9 +132,10 @@ _T2_MAX_TOKENS = 4096
 
 #: T1 is the cheap reject-and-route tier — haiku-class by default. Overridable
 #: via ``ATHENAEUM_REASONING_T1_MODEL`` env or ``models.reasoning_t1`` yaml.
-#: The DEFAULT is single-sourced from ``tiers.DEFAULT_CLASSIFY_MODEL`` (issue
-#: #571, M19) so a haiku-class bump touches one file, not four; the T1 env knob
-#: above is unchanged.
+#: The DEFAULT is single-sourced from ``config.DEFAULT_CLASSIFY_MODEL`` (issue
+#: #571, M19; relocated from ``tiers`` to the ``config`` leaf in #640) so a
+#: haiku-class bump touches one file, not four; the T1 env knob above is
+#: unchanged.
 DEFAULT_T1_MODEL = DEFAULT_CLASSIFY_MODEL
 
 

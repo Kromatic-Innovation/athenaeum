@@ -30,15 +30,16 @@ import DEFAULT_CACHE_DIR`` — is unrelated to any cycle: :mod:`athenaeum.cluste
 is an L3 service module that does not import this module back; deferred for
 cost/ordering, not cycle-breaking.)
 
-``merge.py`` remains in a PRE-EXISTING residual SCC that #545 did NOT target
-(out of its named scope): ``{merge, pending_merges, calibration,
-reasoning_tiers}``. ``pending_merges.py`` owns one half —
-``pending_merges.revalidate_pending_merges`` function-locally imports
-``_merge_proposal_suppression_reason`` FROM this module because this module
-imports ``write_pending_merge`` FROM ``pending_merges`` at top level — and
-``reasoning_tiers``/``calibration`` join via their top-level ``tiers`` +
-``pending_merges`` imports. This residual is pinned as a baseline by
-``tests/test_import_graph_acyclic.py``; a follow-up issue tracks dissolving it.
+``merge.py`` was formerly in a PRE-EXISTING residual SCC that #545 did NOT
+target (out of its named scope): ``{merge, pending_merges, calibration,
+reasoning_tiers}``. ``pending_merges.revalidate_pending_merges`` function-
+locally imported ``_merge_proposal_suppression_reason`` FROM this module while
+this module imports ``write_pending_merge`` FROM ``pending_merges`` at top level
+— a ``pending_merges`` <-> ``merge`` back-edge. Issue #640 dissolved that cycle
+by hoisting ``_merge_proposal_suppression_reason`` DOWN to the
+:mod:`athenaeum.merge_type_gate` gate leaf (which both this module and
+``pending_merges`` already sit above), so ``pending_merges`` no longer reaches
+up into this hub.
 
 Scope for this module (kept narrow on purpose — see issue #197):
 
@@ -93,11 +94,8 @@ from athenaeum.config import (
     resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
     resolve_heartbeat_interval,
-    resolve_max_merge_sources,
     resolve_min_cluster_cohesion,
     resolve_min_cluster_cohesion_scopes,
-    resolve_min_merge_confidence,
-    resolve_min_merge_mean_similarity,
     resolve_operational_markers,
     resolve_reasoning_tier_auditing_enabled,
 )
@@ -123,7 +121,11 @@ from athenaeum.fingerprint import (
     resolve_not_a_conflict_ttl_days,
 )
 from athenaeum.intake import discover_auto_memory_files
-from athenaeum.merge_type_gate import build_cite_proposal, cross_class_precheck
+from athenaeum.merge_type_gate import (
+    _merge_proposal_suppression_reason,
+    build_cite_proposal,
+    cross_class_precheck,
+)
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
     AutoMemoryFile,
@@ -1163,67 +1165,6 @@ def _is_low_cohesion_cross_scope(
     if entry.cluster_centroid_score >= floor:
         return False
     return len(entry.origin_scopes) >= min_scopes
-
-
-def _merge_proposal_suppression_reason(
-    *,
-    n_sources: int,
-    confidence: float,
-    config: dict[str, Any] | None,
-    mean_similarity: float = 1.0,
-    min_pairwise: float = 1.0,
-    cluster_threshold: float = 0.0,
-) -> str | None:
-    """Return a human-readable reason to SUPPRESS a resolver merge proposal, or None.
-
-    Issue #400 introduced the size cap + opt-in confidence floor here. Issue #421
-    tightens the mechanical guardrails so the resolver stops emitting garbage the
-    reasoning/human tiers would only have to reject. Every gate is checked BEFORE
-    the proposal is written, so a suppressed cluster never reaches
-    ``wiki/_pending_merges.md`` and is not re-emitted on the next run:
-
-    * size cap — ``librarian.max_merge_sources`` (default **5**, active, #421):
-      a proposal folding more than N sources is not the pairwise/small-group
-      refinement a merge proposal is for.
-    * complete-linkage — ``min_pairwise < cluster_threshold`` (#421): single-
-      linkage only guarantees each member is transitively CONNECTED at the
-      threshold, so one weak ``cosine >= threshold`` bridge can chain dissimilar
-      members into a giant component (the 1,711-page incident). A genuine merge
-      is a complete-linkage clique — EVERY pair clears the threshold — so a
-      cluster whose minimum pairwise cosine falls below the clustering threshold
-      is a chain, not a merge, and is suppressed. ``cluster_threshold <= 0``
-      (the default when a caller does not supply it) disables this arm.
-    * mean-similarity floor — ``librarian.min_merge_mean_similarity`` (default
-      **0.6**, ACTIVE, #421): a proposal whose cluster mean pairwise cosine is
-      below the floor is too incohesive to be worth a human's review.
-    * confidence floor — ``librarian.min_merge_confidence`` (default 0.0, opt-in):
-      a proposal below the resolver-confidence floor is not confident enough.
-
-    The cross-scope cohesion floor (:func:`_is_low_cohesion_cross_scope`) is a
-    separate, upstream gate on DURABLE wiki pages and is unchanged.
-
-    Suppression is deterministic in the cluster's shape (source count + mean and
-    min pairwise similarity + confidence), so the same over-cluster is
-    suppressed on every run without any new sidecar state.
-    """
-    max_sources = resolve_max_merge_sources(config)
-    if max_sources > 0 and n_sources > max_sources:
-        return f"over-cluster: {n_sources} sources > max_merge_sources={max_sources}"
-    if cluster_threshold > 0.0 and min_pairwise < cluster_threshold:
-        return (
-            f"single-linkage chain: min pairwise {min_pairwise:.2f} < "
-            f"cluster_threshold {cluster_threshold:.2f} (not complete-linkage)"
-        )
-    min_mean = resolve_min_merge_mean_similarity(config)
-    if min_mean > 0.0 and mean_similarity < min_mean:
-        return (
-            f"low cohesion: mean pairwise {mean_similarity:.2f} < "
-            f"min_merge_mean_similarity={min_mean:.2f}"
-        )
-    min_conf = resolve_min_merge_confidence(config)
-    if min_conf > 0.0 and confidence < min_conf:
-        return f"low confidence: {confidence:.2f} < min_merge_confidence={min_conf:.2f}"
-    return None
 
 
 def _classify_merge_write_kind(merge_target_name: str, wiki_root: Path) -> str:

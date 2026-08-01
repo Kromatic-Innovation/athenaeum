@@ -931,7 +931,7 @@ def resolve_drain_warn_days(config: dict[str, Any] | None) -> int:
     default 3) from ``librarian.drain_warn_days``.
 
     At the end of any run that leaves raw intake undrained (and in ``athenaeum
-    status``), the backlog-drain advisor (:func:`athenaeum.drain.build_advisory`)
+    status``), the backlog-drain advisor (:func:`athenaeum.drain_advisor.build_advisory`)
     projects time-to-drain from observed throughput and emits a WARNING — naming
     the one-command ``athenaeum drain`` remedy — only when that projection
     EXCEEDS this many days. Below the threshold the run stays silent. Lives
@@ -1390,6 +1390,17 @@ def resolve_spend_max_usd_per_day(config: dict[str, Any] | None) -> float | None
         config, "spend", "max_usd_per_day",
         "ATHENAEUM_SPEND_MAX_USD_PER_DAY", cast=float,
     )
+
+
+#: Code default for the classify-model knob (env ``ATHENAEUM_CLASSIFY_MODEL`` >
+#: yaml ``models.classify`` > this literal, via :func:`resolve_model`).
+#: Single-sourced HERE (issue #640) rather than in :mod:`athenaeum.tiers`:
+#: ``contradictions``, ``reasoning_tiers``, ``query_topics`` and ``claim_kind``
+#: all read it, and importing it top-level from the L4 ``tiers`` hub was the
+#: ``contradictions`` -> ``tiers`` back-edge that pinned the
+#: ``{answers, contradictions, resolutions, tiers}`` residual import SCC (#545
+#: audit M8). ``config`` is a low leaf every reader can depend on acyclically.
+DEFAULT_CLASSIFY_MODEL = "claude-haiku-4-5-20251001"
 
 
 def resolve_model(

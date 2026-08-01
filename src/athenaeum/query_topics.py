@@ -30,11 +30,11 @@ path, not this module).
 
 **Layering:** L3 service on the RECALL HOT PATH (the per-turn
 ``UserPromptSubmit`` hook, budgeted at ``timeout`` seconds — default 3s).
-Module scope imports only :mod:`athenaeum.config`; the L4
-:mod:`athenaeum.tiers` import is for a single model-id constant
-(:data:`DEFAULT_CLASSIFY_MODEL`), not a capability — see the comment at
-:data:`DEFAULT_TOPIC_MODEL` for why that import adds no load cost on this
-path. :mod:`athenaeum.provider`, :mod:`athenaeum.spend`, and
+Module scope imports only :mod:`athenaeum.config` — including the shared
+classify-model default (:data:`DEFAULT_CLASSIFY_MODEL`), a single model-id
+constant relocated to the ``config`` leaf in issue #640 (formerly reached up
+into the L4 :mod:`athenaeum.tiers` hub). :mod:`athenaeum.provider`,
+:mod:`athenaeum.spend`, and
 :mod:`athenaeum.llm_schemas` are all deferred INSIDE :func:`extract_topics` so
 their heavier dependencies (``anthropic``, ``pydantic``) never load before a
 prompt actually needs the LLM path — this module's own invariant, stated at
@@ -46,17 +46,16 @@ from __future__ import annotations
 import logging
 import os
 
-from athenaeum.config import resolve_model
-from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
+from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
 
 log = logging.getLogger(__name__)
 
-# Single-sourced from ``tiers.DEFAULT_CLASSIFY_MODEL`` (issue #571, M19) rather
-# than a fourth copy of the literal — a haiku-class bump now touches one file.
-# The topic env knob (``ATHENAEUM_TOPIC_MODEL``, in ``_get_topic_model``) is
-# unchanged; only the DEFAULT collapses. Importing ``tiers`` adds no load cost
-# on the recall-hook path: ``athenaeum/__init__`` already imports ``librarian``
-# (which pulls ``tiers``), so it is resident before this module runs.
+# Single-sourced from ``config.DEFAULT_CLASSIFY_MODEL`` (issue #571, M19;
+# relocated from ``tiers`` to the ``config`` leaf in #640) rather than a fourth
+# copy of the literal — a haiku-class bump now touches one file. The topic env
+# knob (``ATHENAEUM_TOPIC_MODEL``, in ``_get_topic_model``) is unchanged; only
+# the DEFAULT collapses. ``config`` is a low leaf already resident on the
+# recall-hook path, so this adds no load cost.
 DEFAULT_TOPIC_MODEL = DEFAULT_CLASSIFY_MODEL
 
 # Topic-extraction output budget (issue #575): a short JSON array of topic

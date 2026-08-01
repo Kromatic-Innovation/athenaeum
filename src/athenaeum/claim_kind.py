@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from athenaeum._retry import with_retry
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import resolve_model
+from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     CLAIM_KINDS,
@@ -51,7 +51,6 @@ from athenaeum.models import (
 )
 from athenaeum.prompt_safety import defang_tag
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
-from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 if TYPE_CHECKING:
     import anthropic
