@@ -188,7 +188,7 @@ def execute_batch(
         if waited >= timeout:
             try:
                 client.messages.batches.cancel(batch.id)
-            except Exception:
+            except Exception:  # noqa: BLE001 — cancel is best-effort
                 log.warning("could not cancel timed-out batch %s", batch.id)
             raise BatchExecutionError(
                 f"batch {batch.id} did not end within {timeout:.0f}s "

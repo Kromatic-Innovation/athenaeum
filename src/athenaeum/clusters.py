@@ -214,7 +214,7 @@ def _resolve_embeddings(
 
             backend = VectorBackend()
             raw_hits = backend.fetch_embeddings(id_to_file.keys(), cache_dir)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — degrade to fallback on any error
             log.debug("VectorBackend.fetch_embeddings failed: %s", exc)
             raw_hits = {}
         for idx_id, vec in raw_hits.items():

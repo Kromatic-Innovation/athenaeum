@@ -451,7 +451,7 @@ def detect_contradictions(
         return ContradictionResult(
             detected=False, rationale="llm-unavailable", incomplete=True
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- non-transient: fail open, no re-queue
         # A non-transient failure (e.g. a 400 on malformed input) will not be
         # cured by re-running, so degrade WITHOUT the incomplete flag.
         log.warning(

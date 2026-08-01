@@ -1796,7 +1796,7 @@ def propose_resolution(
                 exc,
             )
             return _fallback("resolver-unavailable", incomplete=True)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- non-transient: fall back, no re-queue
             log.warning(
                 "resolutions: resolver call failed (%s); returning fallback",
                 exc,
@@ -2700,7 +2700,7 @@ def propose_freetext_source_edits(
             ),
             description="resolver_freetext_edit",
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 -- transient give-up or hard failure: annotate
         log.warning(
             "resolutions: propose_freetext_source_edits — API call failed; "
             "falling back to annotation"
