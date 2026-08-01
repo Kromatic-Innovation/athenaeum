@@ -137,6 +137,8 @@ class TestRunContext:
         ctx.deferred_refs = ["a.md", "b.md"]
         ctx.failed_files = ["c.md"]
         ctx.stuck_files = [{"ref": "d.md", "failures": 3, "action": "update:X", "error": "E"}]
+        ctx.entity_budget_tripped = True
+        ctx.processed_count = 5
         ctx.export_run_stats()
         assert stats == {
             "beyond_window": 3,
@@ -144,6 +146,10 @@ class TestRunContext:
             "failed_files": ["c.md"],
             # Issue #663: stuck files exported as machine-detectable run state.
             "stuck_files": [{"ref": "d.md", "failures": 3, "action": "update:X", "error": "E"}],
+            # Issue #669: the entity-share yield (#440) as machine-detectable state.
+            "entity_budget_tripped": True,
+            "entity_files_claimed": 5,
+            "entity_files_deferred": 2,
         }
 
     def test_mutation_through_context_is_visible_to_next_phase(
