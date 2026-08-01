@@ -217,6 +217,72 @@ accepts the pre-#232 `resolve.model` key for backward compatibility.
 >
 > ² The reasoning-tier knobs are read by `athenaeum.reasoning_tiers`. That subsystem currently has no production caller (`DEFAULT_TIER_CHAIN` is empty), so setting these has no runtime effect today — they are documented here for completeness because `src/` reads them. If the subsystem is removed, these two rows go with it.
 
+### Sampling parameters are absent by design (#579)
+
+Athenaeum sends **no sampling parameters** to any LLM call site, and that is
+**deliberate — not an oversight to be "fixed."** The three sampling knobs a
+contributor might reach for — **`temperature`**, **`top_p`**, and **`top_k`** —
+appear in none of the params dicts this codebase builds, and they must stay
+absent.
+
+**Why (operational fact first).** These parameters were **removed from the API**
+on the current-generation model families and now **return HTTP 400** rather than
+being accepted-and-ignored:
+
+| Model family | `temperature` / `top_p` / `top_k` |
+|---|---|
+| Claude Opus 5 (`claude-opus-5`) | **removed — HTTP 400** |
+| Claude Opus 4.8 (`claude-opus-4-8`) | **removed — HTTP 400** |
+| Claude Opus 4.7 (`claude-opus-4-7`) | **removed — HTTP 400** |
+| Claude Sonnet 5 (`claude-sonnet-5`) | **removed — a non-default value is rejected** |
+| Claude Fable 5 (`claude-fable-5`) | **removed — HTTP 400** |
+| Claude Sonnet 4.6 (`claude-sonnet-4-6`) | accepted |
+| Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) | accepted |
+
+Applied against this repo's current defaults, adding a blanket sampling
+parameter today would **400 exactly one stage — the Opus resolver**
+(`models.resolve` defaults to `claude-opus-4-7`, the single most consequential
+call) — and would break **every** stage the moment an operator points a model
+knob at a 4.7+/5-family model. So the absence is load-bearing, not incidental.
+
+**Ownership rule.** Any future model-aware determinism change is owned by
+**`src/athenaeum/provider.py`** and is expressed as per-stage *intent* in config,
+never as a raw wire parameter at a call site. The provider layer resolves the
+model and decides whether a given wire parameter may exist on it — this is
+exactly the normalization role `provider.py` already plays for `cache_control`,
+which it strips on the `claude-cli` backend that does not accept it. A
+determinism request is therefore a per-stage config intent that the provider
+translates (or drops) for the resolved model; it is **not** a `temperature` key
+that individual stages set. The machine-readable counterpart is the model-level
+sampling-capability set colocated with the pricing table in
+`src/athenaeum/models.py` (see #577) — consult that prefix set programmatically
+rather than hard-coding a family list at a call site.
+
+**Where this even matters.** The determinism concern is real **only** for the
+stages that run on Haiku 4.5 or Sonnet 4.6 (the classifier, topic extractor, and
+writer defaults), where the parameters are still accepted. On the 4.7+/5
+families the API default is the **only** available behavior, so determinism
+tuning there is moot — there is nothing to set.
+
+**Source of truth, and its limits.** The affected-family list above is the
+bundled **`claude-api` skill**, the designated catalog for Anthropic model IDs
+and behavior (do **not** answer model-behavior questions from memory; consult it)
+— **verified 2026-08-01**. Treat that catalog as a **cached snapshot with its own
+cache date, not an oracle**: it can lag real model launches. Concretely, its
+2026-06-24 snapshot **omitted `claude-opus-5` for at least five weeks**, which
+caused two false `premise-check` kickbacks on this very issue before the model's
+existence was confirmed against live state. **Tie-break rule: where the cached
+catalog and the live runtime disagree, the live runtime wins.** The `temperature`
+/ `top_p` / `top_k` removal itself is stable across that gap and confirmed
+against the catalog directly.
+
+> This subsection is a guardrail, not an example. The audit finding **H5** (from
+> epic #516's precursor) recommended adding a sampling parameter *everywhere* —
+> that recommendation was **wrong**, and this note is its correction. A future
+> contributor reading H5 should stop here rather than re-open it. A lint or test
+> that *enforces* the absence is worth having, but it is a code change and
+> belongs in its own issue.
+
 ## LLM provider selection (#330)
 
 Athenaeum's librarian pipeline talks to Claude through a single **provider
