@@ -249,6 +249,68 @@ def test_share_disabled_lets_entity_use_the_whole_window(
     assert _last_subject(root).startswith("librarian: processed 3 file(s)")
 
 
+def test_upstream_phase_time_eats_the_entity_share_not_the_reserve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The share is an offset from RUN START, not from the entity phase's start.
+
+    This is the assertion the other tests cannot make: they run the fake clock
+    from 0 with no upstream cost, where "share of the run window" and "share
+    measured from where the entity phase happens to begin" are numerically
+    identical. Here the #290 wiki-dedup pass burns 500s of a 1000s window
+    first, leaving only 100s of the 600s entity share.
+
+    The entity phase must therefore yield after ONE file — the upstream cost
+    came out of ENTITY's budget. Were the share measured from the entity phase's
+    own start it would resolve to 500+600=1100, the yield would never fire, and
+    all three files would compile: the guarantee C4 depends on would invert,
+    with a slow upstream phase silently eating the reserve instead.
+    """
+    root = _seed_knowledge_root(tmp_path, n_files=3)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+    monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+    monkeypatch.delenv("ATHENAEUM_ENTITY_RUNTIME_SHARE", raising=False)
+
+    clock = _FakeClock(start=0.0)
+    monkeypatch.setattr("athenaeum.librarian.time.monotonic", clock.monotonic)
+    compile_calls = _auto_memory_spy(monkeypatch)
+
+    # Upstream wiki-dedup runs long: 0 -> 500 of a 1000s window.
+    def _slow_dedup(*_a, **_k) -> None:
+        clock.now = 500.0
+
+    monkeypatch.setattr("athenaeum.wiki_dedupe.propose_wiki_page_merges", _slow_dedup)
+
+    # File 1 then costs 150s (500 -> 650), crossing the 600s entity share while
+    # staying far inside the 1000s run deadline.
+    def _bump() -> None:
+        clock.now = 650.0
+
+    monkeypatch.setattr(
+        "athenaeum.librarian.process_one",
+        _writing_process_one_factory(root / "wiki", bump_clock=_bump, bump_after=1),
+    )
+
+    rc = run(
+        raw_root=root / "raw",
+        wiki_root=root / "wiki",
+        knowledge_root=root,
+        max_api_calls=100,
+        max_runtime=1000,
+    )
+
+    assert rc == 0
+    assert compile_calls, "the C4 reserve must survive a slow upstream phase"
+    assert (root / "wiki" / "entity-1.md").exists()
+    assert not (root / "wiki" / "entity-2.md").exists(), (
+        "upstream phase time must come out of the ENTITY share — a second file "
+        "here means the share is being measured from the entity phase's own "
+        "start, which would let a slow upstream phase eat C4's reserve"
+    )
+    manifest = (root / "wiki" / "_deferred_work.md").read_text(encoding="utf-8")
+    assert "yielded to the C4 detector" in manifest
+
+
 def test_disabled_run_deadline_disables_the_share_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
