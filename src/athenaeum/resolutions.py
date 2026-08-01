@@ -110,7 +110,7 @@ _FREETEXT_EDIT_MAX_TOKENS = 8192  # was 4096 (2x): flagged "medium risk"
 
 # Default model is the most capable available; users CAN configure a
 # cheaper one. Both env var and athenaeum.yaml key are honored.
-DEFAULT_RESOLVE_MODEL = "claude-opus-4-7"
+DEFAULT_RESOLVE_MODEL = "claude-opus-5"
 
 # Per-run cap on Opus calls. When the detector flags more contradictions
 # than this in a single ingest, the surplus is escalated WITHOUT a
@@ -1753,12 +1753,15 @@ def propose_resolution(
             # is the largest stable prefix in the codebase (3,387 tokens per the
             # Anthropic count-tokens endpoint with the Opus tokenizer; a live
             # Sonnet run's cache counters reported 2,437) and the resolver is
-            # called repeatedly within a run. 3,387 tokens is BELOW the Opus-tier
-            # 4,096-token minimum cacheable prefix, so on the default Opus
-            # resolver this breakpoint no-ops and the run summary's cache
-            # counters correctly read 0; caching engages on Sonnet-tier overrides
-            # (2,048-token minimum). Below a model's minimum cacheable prefix the
-            # marker is a silent no-op (no error, no extra cost).
+            # called repeatedly within a run. The minimum cacheable prefix is
+            # per-model (issue #580): Opus 5 = 512, Opus 4.8 = 1,024,
+            # Opus 4.7 = 2,048, Opus 4.6/4.5 = 4,096, Sonnet 5 / Sonnet 4.6 =
+            # 1,024, Haiku 4.5 = 4,096. The prefix clears the minimum on both the
+            # Opus 5 resolve default (3,387 > 512) and the Sonnet-tier overrides
+            # (2,437 > 1,024), so on the defaulted models this breakpoint is
+            # expected to engage rather than no-op. Below a model's minimum
+            # cacheable prefix the marker is a silent no-op (no error, no extra
+            # cost).
             response = with_retry(
                 lambda: client.messages.create(
                     model=resolve_model,

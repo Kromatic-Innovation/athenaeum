@@ -123,7 +123,7 @@ log = logging.getLogger(__name__)
 # :mod:`athenaeum.config` (issue #640) to break the ``contradictions`` -> ``tiers``
 # top-level back-edge; it is imported from there above and stays reachable as
 # ``athenaeum.tiers.DEFAULT_CLASSIFY_MODEL`` for backwards compatibility.
-DEFAULT_WRITE_MODEL = "claude-sonnet-4-6"
+DEFAULT_WRITE_MODEL = "claude-sonnet-5"
 
 
 def _get_classify_model(config: dict[str, Any] | None = None) -> str:
