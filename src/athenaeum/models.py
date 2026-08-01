@@ -1334,16 +1334,28 @@ class EscalationItem:
 # Per-model rate table (issue #247). Maps a model-id PREFIX to its
 # (input, output) price in USD per million tokens. Matched by LONGEST
 # prefix so dated ids (``claude-haiku-4-5-20251001``) resolve to the
-# right family. Source: Anthropic public pricing
-# (https://www.anthropic.com/pricing), as of 2026-06-17.
+# right family. The SOURCE OF TRUTH for model IDs and pricing is the
+# ``claude-api`` skill's model catalog — NOT a training prior (see hestia#1055,
+# where four issues were falsely blocked by a recalled catalog). Cross-checked
+# against Anthropic public pricing (https://www.anthropic.com/pricing).
+# Verified 2026-08-01 for the Claude 5 family additions below.
 #
-# PERIODIC REVIEW: these are hard-coded Anthropic public list prices captured
-# on the date above. They do NOT auto-update — Anthropic price changes (new
-# model families, rate cuts, tier changes) require a manual edit HERE. This
-# constant is the single update site for model pricing; nothing else in the
-# codebase hard-codes per-MTok rates. Re-check against the pricing page when a
-# new Claude generation ships or when cost estimates drift from billing.
+# PERIODIC REVIEW: these are hard-coded Anthropic public list prices. They do
+# NOT auto-update — Anthropic price changes (new model families, rate cuts,
+# tier changes) require a manual edit HERE, after re-reading the ``claude-api``
+# skill. This constant is the single update site for model pricing; nothing
+# else in the codebase hard-codes per-MTok rates.
 _MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
+    # Claude 5 family (issue #577, precondition B1 of epic #516). Recorded
+    # BEFORE any DEFAULT_*_MODEL moves to it (#580) so a bump can never fall
+    # through to the blended fallback and silently under-report spend. Sonnet 5
+    # carries an introductory $2/$10 through 2026-08-31, but this table has NO
+    # time dimension — a prefix-keyed rate cannot expire — so the STANDARD rate
+    # is recorded (Occam decision 2026-07-31): encoding the promo would go
+    # silently wrong on 2026-09-01, and standard errs toward over-reporting
+    # spend, the safe direction for a financial consumer.
+    "claude-opus-5": (5.0, 25.0),
+    "claude-sonnet-5": (3.0, 15.0),
     "claude-opus-4": (5.0, 25.0),
     "claude-sonnet-4": (3.0, 15.0),
     "claude-haiku-4": (1.0, 5.0),
@@ -1370,6 +1382,47 @@ def _rates_for_model(model: str | None) -> tuple[float, float]:
         if best is not None:
             return best
     return (_BLENDED_INPUT_USD_PER_MTOK, _BLENDED_OUTPUT_USD_PER_MTOK)
+
+
+# Model-level sampling-parameter capability (issue #577; epic #515 deliverable 4,
+# which lands here ONCE — #573 reads this rather than re-declaring it). Records
+# where ``temperature`` / ``top_p`` / ``top_k`` return HTTP 400: the Claude 4.7+
+# / 5-family request surface removed them, while earlier tiers still accept them.
+# This is a DECLARATION for callers to consult, NOT a step toward sending sampling
+# parameters — athenaeum sends none on any path. Verified 2026-08-01 against the
+# ``claude-api`` skill (the source of truth for model facts, per hestia#1055).
+# Keyed by the same longest-prefix ``startswith`` style as the rate table above;
+# maintain the two tables together.
+_SAMPLING_PARAMS_REJECTED_PREFIXES: dict[str, bool] = {
+    # Rejected — sampling parameters return HTTP 400 on these models.
+    "claude-opus-5": True,
+    "claude-opus-4-8": True,
+    "claude-opus-4-7": True,
+    "claude-sonnet-5": True,
+    "claude-fable-5": True,
+    # Accepted — sampling parameters are still honored on these tiers.
+    "claude-haiku-4-5": False,
+    "claude-sonnet-4-6": False,
+}
+
+
+def _sampling_params_rejected(model: str | None) -> bool | None:
+    """Whether ``temperature`` / ``top_p`` / ``top_k`` return HTTP 400 for
+    *model* (longest-prefix match), or ``None`` if *model* matches no recorded
+    prefix.
+
+    Declaration only (issue #577): athenaeum sends no sampling parameters —
+    this exists so a caller (e.g. #573) can consult one authoritative table
+    instead of re-deriving the request-surface rule from a training prior.
+    """
+    if not model:
+        return None
+    best: bool | None = None
+    best_len = -1
+    for prefix, rejected in _SAMPLING_PARAMS_REJECTED_PREFIXES.items():
+        if model.startswith(prefix) and len(prefix) > best_len:
+            best, best_len = rejected, len(prefix)
+    return best
 
 
 @dataclass
