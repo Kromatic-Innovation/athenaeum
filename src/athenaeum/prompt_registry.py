@@ -74,15 +74,19 @@ class PromptMeta:
 _META_ROWS: list[tuple[str, str, str, int]] = [
     ("tiers.classify_system", "CLASSIFY_SYSTEM", "classify", 4096),
     ("tiers.classify_user_template", "CLASSIFY_USER_TEMPLATE", "classify", 4096),
-    ("tiers.create_system", "CREATE_SYSTEM", "write", 2048),
-    ("tiers.create_template", "CREATE_TEMPLATE", "write", 2048),
-    ("tiers.merge_system", "MERGE_SYSTEM", "write", 2048),
-    ("tiers.merge_system_full", "MERGE_SYSTEM_FULL", "write", 8192),
-    ("tiers.merge_template", "MERGE_TEMPLATE", "write", 2048),
-    ("tiers.merge_template_full", "MERGE_TEMPLATE_FULL", "write", 8192),
+    # write-knob budgets re-baselined by issue #578 (Sonnet-5-bound + adaptive
+    # thinking headroom): create/merge_patch 2048 -> 6144, merge_full 8192 -> 12288.
+    ("tiers.create_system", "CREATE_SYSTEM", "write", 6144),
+    ("tiers.create_template", "CREATE_TEMPLATE", "write", 6144),
+    ("tiers.merge_system", "MERGE_SYSTEM", "write", 6144),
+    ("tiers.merge_system_full", "MERGE_SYSTEM_FULL", "write", 12288),
+    ("tiers.merge_template", "MERGE_TEMPLATE", "write", 6144),
+    ("tiers.merge_template_full", "MERGE_TEMPLATE_FULL", "write", 12288),
     ("contradictions.detect_system", "_DETECT_SYSTEM", "classify", 1024),
-    ("resolutions.resolve_system", "_RESOLVE_SYSTEM", "resolve", 1024),
-    ("resolutions.freetext_edit_system", "_FREETEXT_EDIT_SYSTEM", "resolve", 4096),
+    # resolve-knob budgets re-baselined by issue #578 (Opus-5-bound adaptive
+    # thinking headroom): resolve 1024 -> 8192, freetext_edit 4096 -> 8192.
+    ("resolutions.resolve_system", "_RESOLVE_SYSTEM", "resolve", 8192),
+    ("resolutions.freetext_edit_system", "_FREETEXT_EDIT_SYSTEM", "resolve", 8192),
     ("claim_kind.claim_kind_system", "CLAIM_KIND_SYSTEM", "classify", 64),
     ("query_topics.system_prompt", "_SYSTEM_PROMPT", "topic", 256),
     ("query_topics.user_template", "_USER_TEMPLATE", "topic", 256),

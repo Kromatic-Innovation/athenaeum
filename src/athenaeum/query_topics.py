@@ -121,6 +121,8 @@ def extract_topics(
             build_llm_client,
             resolve_max_tokens,
             resolve_provider,
+            resolve_thinking,
+            response_text,
         )
 
         provider = resolve_provider(config)
@@ -143,6 +145,13 @@ def extract_topics(
             model=_get_topic_model(config),
             max_tokens=resolve_max_tokens(
                 "topic", "ATHENAEUM_TOPIC_MAX_TOKENS", _TOPIC_MAX_TOKENS, config
+            ),
+            # Issue #578: this call runs on the recall HOT PATH under a
+            # ``timeout`` budget (default 3s) — adaptive thinking's added
+            # latency is exactly what this path cannot afford, and a short
+            # topic-extraction array does not need it. Disabled explicitly.
+            thinking=resolve_thinking(
+                "topic", "ATHENAEUM_TOPIC_THINKING", "disabled", config
             ),
             system=_SYSTEM_PROMPT,
             messages=[
@@ -211,7 +220,11 @@ def extract_topics(
             log.debug("query-topics: ledger spend recording failed", exc_info=True)
 
     try:
-        text = response.content[0].text.strip()
+        # Issue #578: response_text skips any leading thinking block (this
+        # recall-hot-path stage runs disabled today; the helper is
+        # text-block-equivalent for a text-only response and keeps the site
+        # robust if the posture changes).
+        text = response_text(response).strip()
     except (AttributeError, IndexError, TypeError):
         return []
 

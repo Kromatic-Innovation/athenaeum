@@ -32,6 +32,7 @@ from athenaeum.provider import (
     reported_stop_reason,
     resolve_max_tokens,
     resolve_provider,
+    resolve_thinking,
 )
 from athenaeum.tiers import _record_usage
 
@@ -672,3 +673,94 @@ class TestResolveMaxTokens:
         config = {"max_tokens": {"merge_full": 8192}}
         # A knob absent from the section falls to the default, not another knob.
         assert resolve_max_tokens("classify", self._ENV, 4096, config) == 4096
+
+
+# ---------------------------------------------------------------------------
+# resolve_thinking — per-stage thinking posture, env > yaml > default (#578)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveThinking:
+    _ENV = "ATHENAEUM_RESOLVE_THINKING"
+
+    def test_default_when_nothing_set(self, monkeypatch):
+        monkeypatch.delenv(self._ENV, raising=False)
+        assert resolve_thinking("resolve", self._ENV, "adaptive", None) == {
+            "type": "adaptive"
+        }
+        assert resolve_thinking("resolve", self._ENV, "adaptive", {}) == {
+            "type": "adaptive"
+        }
+
+    def test_default_disabled(self, monkeypatch):
+        monkeypatch.delenv(self._ENV, raising=False)
+        assert resolve_thinking("classify", self._ENV, "disabled", None) == {
+            "type": "disabled"
+        }
+
+    def test_env_wins_over_yaml_and_default(self, monkeypatch):
+        monkeypatch.setenv(self._ENV, "disabled")
+        config = {"thinking": {"resolve": "adaptive"}}
+        assert resolve_thinking("resolve", self._ENV, "adaptive", config) == {
+            "type": "disabled"
+        }
+
+    def test_env_is_case_insensitive_and_trims_whitespace(self, monkeypatch):
+        monkeypatch.setenv(self._ENV, "  ADAPTIVE  ")
+        assert resolve_thinking("resolve", self._ENV, "disabled", None) == {
+            "type": "adaptive"
+        }
+
+    def test_yaml_over_default(self, monkeypatch):
+        monkeypatch.delenv(self._ENV, raising=False)
+        config = {"thinking": {"resolve": "disabled"}}
+        assert resolve_thinking("resolve", self._ENV, "adaptive", config) == {
+            "type": "disabled"
+        }
+
+    def test_invalid_env_falls_through_with_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv(self._ENV, "enabled")  # not a valid posture
+        with caplog.at_level("WARNING"):
+            got = resolve_thinking("resolve", self._ENV, "adaptive", None)
+        assert got == {"type": "adaptive"}
+        assert any(
+            "not 'adaptive' or 'disabled'" in r.getMessage() for r in caplog.records
+        )
+
+    def test_invalid_yaml_falls_through_to_default(self, monkeypatch):
+        monkeypatch.delenv(self._ENV, raising=False)
+        config = {"thinking": {"resolve": "budget_tokens"}}
+        assert resolve_thinking("resolve", self._ENV, "adaptive", config) == {
+            "type": "adaptive"
+        }
+
+    @pytest.mark.parametrize("bad", [123, True, None, ["adaptive"]])
+    def test_non_string_yaml_falls_through_to_default(self, monkeypatch, bad):
+        monkeypatch.delenv(self._ENV, raising=False)
+        config = {"thinking": {"resolve": bad}}
+        assert resolve_thinking("resolve", self._ENV, "adaptive", config) == {
+            "type": "adaptive"
+        }
+
+    def test_only_the_named_knob_is_read(self, monkeypatch):
+        monkeypatch.delenv(self._ENV, raising=False)
+        config = {"thinking": {"merge_patch": "disabled"}}
+        # A knob absent from the section falls to the default, not another knob.
+        assert resolve_thinking("resolve", self._ENV, "adaptive", config) == {
+            "type": "adaptive"
+        }
+
+    def test_never_returns_none(self, monkeypatch):
+        # Per issue #578's acceptance criteria: prefer an explicit disabled
+        # dict over None so no stage relies on the model default.
+        monkeypatch.delenv(self._ENV, raising=False)
+        result = resolve_thinking("resolve", self._ENV, "disabled", None)
+        assert result is not None
+        assert result == {"type": "disabled"}
+
+    def test_returns_the_dict_shape_the_sdk_expects(self, monkeypatch):
+        monkeypatch.delenv(self._ENV, raising=False)
+        result = resolve_thinking("resolve", self._ENV, "adaptive", None)
+        assert isinstance(result, dict)
+        assert set(result) == {"type"}
+        assert result["type"] in ("adaptive", "disabled")

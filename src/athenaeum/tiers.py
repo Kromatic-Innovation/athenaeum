@@ -104,6 +104,8 @@ from athenaeum.provider import (
     reported_stop_reason,
     resolve_max_tokens,
     resolve_provider,
+    resolve_thinking,
+    response_text,
 )
 from athenaeum.search import embed_texts
 
@@ -462,6 +464,14 @@ def tier2_request_params(
         "max_tokens": resolve_max_tokens(
             "classify", "ATHENAEUM_CLASSIFY_MAX_TOKENS", _TIER2_CLASSIFY_MAX_TOKENS, config
         ),
+        # Issue #578: tier-2 classify stays on Haiku (fast, cheap, high-volume
+        # entity extraction) — thinking would only add latency/cost with no
+        # quality benefit for this bounded-schema JSON-array task. Disabled
+        # explicitly (not omitted) so this stage never inherits a
+        # model-dependent default if its serving model ever changes.
+        "thinking": resolve_thinking(
+            "classify", "ATHENAEUM_CLASSIFY_THINKING", "disabled", config
+        ),
         "system": CLASSIFY_SYSTEM,
         "messages": [{"role": "user", "content": user_msg}],
     }
@@ -538,7 +548,10 @@ def tier2_classify(
     from athenaeum.config import resolve_owner
 
     owner = resolve_owner(config)
-    first_text = response.content[0].text
+    # Issue #578: response_text skips any leading thinking block. This stage
+    # runs disabled today, but the helper is text-block-equivalent for a
+    # text-only response and keeps the site robust if the posture ever changes.
+    first_text = response_text(response)
     # #574: a backend that cannot reliably report stop_reason (claude-cli)
     # yields None here, so a dropped-all response is classed as a generic
     # degrade rather than a truncation — which avoids the futile bigger-budget
@@ -623,7 +636,7 @@ def tier2_classify(
         _record_usage(retry_response, usage, model=retry_params["model"])
         retry_stats = Tier2ParseStats()
         retry_entities = parse_tier2_entities(
-            retry_response.content[0].text,
+            response_text(retry_response),
             raw.ref,
             valid_types,
             valid_tags,
@@ -921,7 +934,7 @@ def tier2_reclassify_larger_budget(
     _record_usage(response, usage, model=params["model"])
     retry_stats = Tier2ParseStats()
     entities = parse_tier2_entities(
-        response.content[0].text,
+        response_text(response),
         raw.ref,
         valid_types,
         valid_tags,
@@ -1079,19 +1092,41 @@ _EXISTING_PAGE_TAG = "existing_page"
 # _MAX_EXISTING_BODY_CHARS's token-equivalent. Only used by the full-echo
 # fallback path now (issue #469); an output-truncated fallback is caught by
 # the stop_reason guard in parse_tier3_merge.
-_MERGE_MAX_TOKENS = 8192
+#
+# Issue #578 re-baseline: this stage runs on the ``write`` model, which will
+# move to Sonnet 5 under issue #580. Sonnet 5's tokenizer counts ~30% MORE
+# tokens for the same text (8192 * 1.3 ~= 10650), and this stage now enables
+# ADAPTIVE thinking (see ``tier3_merge_full_params``) — ``max_tokens`` caps
+# thinking + response TOGETHER, so the budget needs headroom for thinking on
+# top of the tokenizer shift, not just the shift alone. Rounded up to 12288
+# (8192 * 1.5) to cover both without guessing a precise split.
+_MERGE_MAX_TOKENS = 12288
 
 # Patch-mode output budget (issue #469): a patch response is a short JSON
 # ops list (a few edits + footnote text), independent of page size, so this
 # is small. A max_tokens truncation of the ops list is caught in
 # parse_merge_ops_response and routed to the full-echo fallback rather than
 # half-applied.
-_MERGE_PATCH_MAX_TOKENS = 2048
+#
+# Issue #578 re-baseline: same ``write``-model / Sonnet-5-bound reasoning as
+# ``_MERGE_MAX_TOKENS`` above. The pre-bump budget (2048) was already TIGHT
+# (flagged "high risk" in issue #578) — a bare 1.3x tokenizer adjustment would
+# leave almost no room for adaptive thinking before the ops-list output even
+# starts. Raised to 6144 (2048 * 3) so a stage that now thinks before emitting
+# a short JSON payload has real headroom, not just enough for the larger
+# tokenizer.
+_MERGE_PATCH_MAX_TOKENS = 6144
 
 # Tier-3 CREATE output budget (issue #575): a fresh entity page from one
 # observation. Formerly a bare ``2048`` literal in tier3_create_params; named
-# and resolved through the seam like the merge budgets. Value unchanged.
-_TIER3_CREATE_MAX_TOKENS = 2048
+# and resolved through the seam like the merge budgets.
+#
+# Issue #578 re-baseline: same ``write``-model / Sonnet-5-bound reasoning,
+# also flagged "high risk" pre-bump. Raised to 6144 (2048 * 3), matching
+# ``_MERGE_PATCH_MAX_TOKENS``'s headroom rationale — a full entity page is
+# more output-heavy than a short ops list, so the same multiplier keeps
+# comparable thinking headroom rather than a tighter absolute margin.
+_TIER3_CREATE_MAX_TOKENS = 6144
 
 MERGE_TEMPLATE = """## Existing page content
 {existing_body}
@@ -1159,6 +1194,14 @@ def tier3_create_params(
             _TIER3_CREATE_MAX_TOKENS,
             config,
         ),
+        # Issue #578: the ``write`` model is bound for Sonnet 5 (issue #580).
+        # Adaptive thinking benefits this stage — composing a fresh entity
+        # page from one observation is a genuine drafting task, not a
+        # mechanical transform — so it is enabled explicitly rather than
+        # relying on Sonnet 5's omit-means-adaptive default.
+        "thinking": resolve_thinking(
+            "merge_create", "ATHENAEUM_MERGE_CREATE_THINKING", "adaptive", config
+        ),
         "system": CREATE_SYSTEM,
         "messages": [{"role": "user", "content": user_msg}],
     }
@@ -1181,7 +1224,9 @@ def tier3_create(
     )
     _record_usage(response, usage, model=params["model"])
 
-    return tier3_entity_from_text(action, response.content[0].text, config=config)
+    # Issue #578: tier3_create enables adaptive thinking — response_text skips
+    # any leading thinking block and returns the created page body.
+    return tier3_entity_from_text(action, response_text(response), config=config)
 
 
 def tier3_entity_from_text(
@@ -1274,6 +1319,14 @@ def tier3_merge_params(
             _MERGE_PATCH_MAX_TOKENS,
             config,
         ),
+        # Issue #578: the ``write`` model is bound for Sonnet 5 (issue #580).
+        # Adaptive thinking benefits this stage — deciding where anchored
+        # edit ops go and whether a contradiction should escalate instead
+        # takes real reasoning — so it is enabled explicitly rather than
+        # relying on Sonnet 5's omit-means-adaptive default.
+        "thinking": resolve_thinking(
+            "merge_patch", "ATHENAEUM_MERGE_PATCH_THINKING", "adaptive", config
+        ),
         "system": MERGE_SYSTEM,
         "messages": [{"role": "user", "content": user_msg}],
     }
@@ -1304,6 +1357,12 @@ def tier3_merge_full_params(
         "model": _get_write_model(config),
         "max_tokens": resolve_max_tokens(
             "merge_full", "ATHENAEUM_MERGE_FULL_MAX_TOKENS", _MERGE_MAX_TOKENS, config
+        ),
+        # Issue #578: same ``write``-model / Sonnet-5-bound reasoning as
+        # ``tier3_merge_params`` above — this is the fallback path for the
+        # same stage, so it gets the same posture.
+        "thinking": resolve_thinking(
+            "merge_full", "ATHENAEUM_MERGE_FULL_THINKING", "adaptive", config
         ),
         "system": MERGE_SYSTEM_FULL,
         "messages": [{"role": "user", "content": user_msg}],
@@ -1612,7 +1671,9 @@ def tier3_merge(
     _record_usage(response, usage, model=params["model"])
 
     body, escalation, needs_fallback = parse_merge_ops_response(
-        response.content[0].text,
+        # Issue #578: patch merge enables adaptive thinking — skip any leading
+        # thinking block and read the anchored-ops JSON answer.
+        response_text(response),
         action,
         source_ref,
         existing_body,
@@ -1651,7 +1712,9 @@ def tier3_merge_full(
     _record_usage(response, usage, model=params["model"])
 
     return parse_tier3_merge(
-        response.content[0].text,
+        # Issue #578: full-echo merge enables adaptive thinking — skip any
+        # leading thinking block and read the merged-body answer.
+        response_text(response),
         action,
         source_ref,
         # #574: None on a backend that cannot report stop_reason (claude-cli),
