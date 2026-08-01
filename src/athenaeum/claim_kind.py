@@ -50,7 +50,7 @@ from athenaeum.models import (
     render_frontmatter,
 )
 from athenaeum.prompt_safety import defang_tag
-from athenaeum.provider import resolve_max_tokens
+from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 if TYPE_CHECKING:
@@ -159,6 +159,12 @@ def classify_claim_kind(
                     _CLAIM_KIND_MAX_TOKENS,
                     config,
                 ),
+                # Issue #578: same ``classify``-model / Haiku posture as
+                # tier2_classify — a single-label classification does not
+                # benefit from thinking. Disabled explicitly.
+                thinking=resolve_thinking(
+                    "claim_kind", "ATHENAEUM_CLAIM_KIND_THINKING", "disabled", config
+                ),
                 system=CLAIM_KIND_SYSTEM,
                 messages=[{"role": "user", "content": user_msg}],
             ),
@@ -175,7 +181,10 @@ def classify_claim_kind(
         usage.add(input_toks, output_toks, cache_creation, cache_read, model=model)
 
     try:
-        raw_text = response.content[0].text
+        # Issue #578: response_text skips any leading thinking block (this
+        # stage runs disabled today; the helper is text-block-equivalent for a
+        # text-only response and keeps the site robust if the posture changes).
+        raw_text = response_text(response)
     except (AttributeError, IndexError):
         log.warning("claim_kind: malformed classify response; unclassified")
         return ""

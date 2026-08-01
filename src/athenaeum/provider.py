@@ -20,9 +20,11 @@ serving them. Two backends ship:
     No credential handling: exactly like the git-push path (#284), athenaeum
     relies on the operator's own ``claude`` login. The adapter mirrors the
     slice of the SDK surface the call sites use — ``client.messages.create(
-    **params)`` returning an object with ``.content[0].text`` plus a ``.usage``
-    carrying the four token counters :func:`athenaeum.models.cache_usage_counts`
-    reads — so the call sites need no change.
+    **params)`` returning an object whose text answer is read via
+    :func:`response_text` (the first ``type == "text"`` content block, skipping
+    any leading thinking blocks — issue #578) plus a ``.usage`` carrying the
+    four token counters :func:`athenaeum.models.cache_usage_counts` reads — so
+    the call sites need no change.
 
 Known constraints (implemented here / at the call sites, documented in
 ``docs/configuration.md``):
@@ -166,7 +168,8 @@ def preflight_provider(provider: str) -> str | None:
 # anthropic SDK surface the call sites consume:
 #
 # * ``messages.create(**params)`` — the one method every backend must serve;
-# * the response the callers read — ``.content[0].text`` and ``.stop_reason``;
+# * the response the callers read — its text answer (via :func:`response_text`,
+#   the first ``type == "text"`` block — issue #578) and ``.stop_reason``;
 # * the four normalized ``.usage`` counters
 #   :func:`athenaeum.models.cache_usage_counts` reads (issue #230).
 #
@@ -192,7 +195,9 @@ class LLMUsage(Protocol):
 
 @runtime_checkable
 class LLMTextBlock(Protocol):
-    """One content block. Callers read ``response.content[0].text``."""
+    """One content block. Callers read the text answer via
+    :func:`response_text` (the first ``type == "text"`` block, skipping any
+    leading thinking blocks — issue #578)."""
 
     text: str
 
@@ -209,10 +214,11 @@ class LLMResponse(Protocol):
     concrete backend satisfies the contract by exposing compatible attributes —
     which is exactly the "must ACTUALLY satisfy" guarantee issue #572 requires.
 
-    ``content`` is a sequence of text blocks (callers read ``content[0].text``);
-    ``stop_reason`` is the terminal reason (``"max_tokens"``, ``"end_turn"``,
-    ...) or ``None`` when a backend cannot report it; ``usage`` carries the four
-    normalized token counters.
+    ``content`` is a sequence of blocks (callers read the text answer via
+    :func:`response_text`, which skips any leading thinking blocks — issue
+    #578); ``stop_reason`` is the terminal reason (``"max_tokens"``,
+    ``"end_turn"``, ...) or ``None`` when a backend cannot report it; ``usage``
+    carries the four normalized token counters.
     """
 
     @property
@@ -368,6 +374,48 @@ def reported_stop_reason(
     return value if isinstance(value, str) else None
 
 
+def response_text(response: Any) -> str:
+    """Return the model's TEXT answer from a Messages API response (issue #578).
+
+    The call sites parse the model's answer out of ``response.content`` — but
+    ``response.content[0]`` is NOT always the text block. When a stage enables
+    adaptive thinking (issue #578 wired the resolver / tier-3 / merge stages to
+    ``thinking: {"type": "adaptive"}``, which is supported on the CURRENT
+    Opus 4.7 / Sonnet 4.6 defaults, not only on a future Opus 5 / Sonnet 5),
+    the response begins with one or more ``type == "thinking"`` (or
+    ``"redacted_thinking"``) blocks that PRECEDE the text block. With
+    ``display`` omitted those thinking blocks carry empty/opaque text and, on
+    the anthropic SDK, are ``ThinkingBlock`` objects with no ``.text``
+    attribute at all — so a bare ``response.content[0].text`` either raises
+    ``AttributeError`` or reads the wrong block.
+
+    This helper walks ``response.content`` and returns the ``.text`` of the
+    FIRST block whose ``type == "text"``, skipping thinking blocks. It works on
+    both provider paths:
+
+    * the live ``anthropic`` response, whose blocks expose ``.type`` (``"text"``
+      / ``"thinking"`` / ``"redacted_thinking"``);
+    * the ``claude-cli`` backend's constructed :class:`_CliResponse`, whose
+      single :class:`_CliTextBlock` already carries ``type == "text"``.
+
+    If no ``type == "text"`` block is found (a block with no ``.type``, or a
+    genuinely text-less response), it falls back to ``response.content[0].text``
+    — preserving today's exact behavior for single-block / text-only responses
+    and letting the same ``AttributeError`` / ``IndexError`` the call sites
+    already catch surface unchanged on a truly malformed response.
+    """
+    content = getattr(response, "content", None)
+    if content:
+        for block in content:
+            if getattr(block, "type", None) == "text":
+                return block.text
+    # No text-typed block found (or empty/absent content): fall back to the
+    # historical extraction so single-block and text-only responses — and the
+    # malformed-response error paths the call sites already handle — are
+    # byte-for-byte unchanged.
+    return response.content[0].text
+
+
 def capabilities_for(provider: str) -> ProviderCapabilities:
     """Return the :class:`ProviderCapabilities` for backend *provider* (#573).
 
@@ -450,8 +498,97 @@ def resolve_max_tokens(
 
 
 # ---------------------------------------------------------------------------
-# claude-cli adapter — response shapes mirroring the anthropic SDK surface
-# the four call sites consume (``.content[0].text`` + ``.usage`` counters).
+# Per-stage ``thinking`` knob (issue #578 / epic #516's B2)
+#
+# No call site sets ``thinking`` today (harmless while every stage defaults to
+# a model that runs without thinking when the param is omitted). But the
+# moment a stage's default model moves to Opus 5 / Sonnet 5 (issue #580,
+# blocked_by this issue), OMITTING ``thinking`` on those tiers runs ADAPTIVE
+# thinking silently — and ``max_tokens`` caps thinking + response TOGETHER, so
+# a budget sized for a no-thinking response becomes a truncation risk. This
+# resolver makes ``thinking`` an explicit, per-stage, config-overridable knob
+# — mirroring :func:`resolve_max_tokens`'s env > yaml > default precedence —
+# so no call site ever relies on a model-dependent default again.
+# ---------------------------------------------------------------------------
+
+#: The two postures a stage may declare. ``"adaptive"`` lets the model decide
+#: when and how much to think (recommended for resolver/merge/reasoning
+#: stages); ``"disabled"`` turns thinking off explicitly (recommended for
+#: cheap/fast classification stages where thinking would only add latency).
+_VALID_THINKING_TYPES = ("adaptive", "disabled")
+
+
+def _coerce_thinking_type(raw: str) -> str | None:
+    """Return *raw*, lowercased/stripped, iff it names a valid posture."""
+    value = raw.strip().lower()
+    return value if value in _VALID_THINKING_TYPES else None
+
+
+def resolve_thinking(
+    knob: str,
+    env_var: str,
+    default: str,
+    config: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Resolve a stage's ``thinking`` posture from env > yaml
+    ``thinking.<knob>`` > code default (issue #578).
+
+    Mirrors :func:`resolve_max_tokens`'s precedence exactly: the *env_var*
+    wins over the yaml ``thinking.<knob>`` key (read only when the operator
+    set it), and *default* — the stage's chosen posture — is the code
+    default. No seed in config ``_DEFAULTS`` so the code default stays
+    reachable (issue #231, same rationale as :func:`resolve_max_tokens`).
+
+    Args:
+        knob: the stage name, e.g. ``"resolve"``, ``"merge_patch"``,
+            ``"classify"`` — same knob namespace convention as
+            :func:`resolve_max_tokens` and :func:`athenaeum.config.resolve_model`.
+        env_var: the env var name, e.g. ``"ATHENAEUM_RESOLVE_THINKING"``.
+        default: ``"adaptive"`` or ``"disabled"`` — the stage's code default.
+        config: optional resolved athenaeum.yaml dict.
+
+    Returns:
+        The dict the SDK expects for the ``thinking`` request param —
+        ``{"type": "adaptive"}`` or ``{"type": "disabled"}``. Deliberately
+        never ``None``: per issue #578's acceptance criteria, every call site
+        should send an EXPLICIT disabled dict rather than omit the parameter,
+        so no stage silently rides a model-dependent default (adaptive on
+        Opus 5 / Sonnet 5 by omission, no-thinking on Opus 4.7/4.8 by
+        omission) once the serving model changes under it.
+
+    An invalid env or yaml value (anything other than ``"adaptive"`` /
+    ``"disabled"``, case-insensitive) is IGNORED with a warning and falls
+    through to *default* — a mistyped override should not silently disable
+    thinking on a stage that needs it, or vice versa.
+    """
+    env = os.environ.get(env_var)
+    if env is not None and env.strip():
+        parsed = _coerce_thinking_type(env)
+        if parsed is not None:
+            return {"type": parsed}
+        log.warning(
+            "%s=%r is not 'adaptive' or 'disabled'; using default thinking=%r",
+            env_var,
+            env,
+            default,
+        )
+    if isinstance(config, dict):
+        section = config.get("thinking")
+        if isinstance(section, dict):
+            raw = section.get(knob)
+            if isinstance(raw, str):
+                parsed = _coerce_thinking_type(raw)
+                if parsed is not None:
+                    return {"type": parsed}
+    return {"type": default}
+
+
+# ---------------------------------------------------------------------------
+# claude-cli adapter — response shapes mirroring the anthropic SDK surface the
+# call sites consume (the text answer via :func:`response_text` + ``.usage``
+# counters). ``_CliTextBlock`` carries ``type == "text"`` so :func:`response_text`
+# treats it as the answer block (issue #578) — the CLI never emits a thinking
+# block, so its single block is always the text.
 # ---------------------------------------------------------------------------
 
 
@@ -467,7 +604,8 @@ class _CliUsage:
 
 @dataclass
 class _CliTextBlock:
-    """One content block; mirrors ``response.content[0].text``."""
+    """One content block; its ``type == "text"`` default makes it the answer
+    block :func:`response_text` returns (issue #578)."""
 
     text: str
     type: str = "text"

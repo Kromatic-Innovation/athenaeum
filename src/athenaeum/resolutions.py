@@ -83,7 +83,7 @@ from athenaeum.models import (
     validity_windows_disjoint,
 )
 from athenaeum.prompt_safety import data_only_clause, defang_tag
-from athenaeum.provider import resolve_max_tokens
+from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
 from athenaeum.scoped_claims import ScopeTree, ScopeVerdict, scope_comparison
 
 if TYPE_CHECKING:
@@ -93,9 +93,19 @@ log = logging.getLogger(__name__)
 
 # Per-stage output budgets (issue #575): formerly bare literals at the call
 # sites below; named and resolved through the provider seam so each is a
-# config-overridable knob. Values unchanged.
-_RESOLVER_MAX_TOKENS = 1024
-_FREETEXT_EDIT_MAX_TOKENS = 4096
+# config-overridable knob.
+#
+# Issue #578 re-baseline: both stages run on the ``resolve`` model, which
+# defaults to Opus 4.7 today and is bound for Opus 5 under issue #580. Opus 5
+# omitting ``thinking`` runs ADAPTIVE thinking silently, and ``max_tokens``
+# caps thinking + response TOGETHER — so with both stages now explicitly
+# enabling adaptive thinking (see the call sites below), the pre-bump budgets
+# (flagged "high"/"medium" risk in issue #578) need real headroom for
+# thinking tokens, not just the response itself. Opus 5 does not carry
+# Sonnet 5's tokenizer shift, so this is a THINKING-headroom bump, not a
+# tokenizer-shift bump.
+_RESOLVER_MAX_TOKENS = 8192  # was 1024 (8x): flagged "high risk", tightest budget
+_FREETEXT_EDIT_MAX_TOKENS = 8192  # was 4096 (2x): flagged "medium risk"
 
 # Default model is the most capable available; users CAN configure a
 # cheaper one. Both env var and athenaeum.yaml key are honored.
@@ -1757,6 +1767,15 @@ def propose_resolution(
                         _RESOLVER_MAX_TOKENS,
                         config,
                     ),
+                    # Issue #578: the resolver benefits from adaptive thinking
+                    # — weighing source precedence, opinion-attribution, and
+                    # validity-window overlap is genuine reasoning, not a
+                    # mechanical transform — so it is enabled explicitly
+                    # rather than relying on Opus 5's omit-means-adaptive
+                    # default.
+                    thinking=resolve_thinking(
+                        "resolve", "ATHENAEUM_RESOLVE_THINKING", "adaptive", config
+                    ),
                     system=[
                         {
                             "type": "text",
@@ -1801,7 +1820,10 @@ def propose_resolution(
         )
 
         try:
-            text = response.content[0].text
+            # Issue #578: the resolver enables adaptive thinking, which emits a
+            # thinking block BEFORE the text block on Opus 4.7 / Sonnet 4.6 —
+            # response_text skips it and returns the text answer.
+            text = response_text(response)
         except (AttributeError, IndexError) as exc:
             log.warning("resolutions: resolver response malformed (%s)", exc)
             return _fallback("resolver-malformed-response")
@@ -2666,6 +2688,13 @@ def propose_freetext_source_edits(
                     _FREETEXT_EDIT_MAX_TOKENS,
                     config,
                 ),
+                # Issue #578: same ``resolve``-model / Opus-5-bound reasoning
+                # as ``propose_resolution`` above — translating a human's
+                # free-text ruling into concrete source-file edits benefits
+                # from adaptive thinking, enabled explicitly.
+                thinking=resolve_thinking(
+                    "freetext_edit", "ATHENAEUM_FREETEXT_EDIT_THINKING", "adaptive", config
+                ),
                 system=_FREETEXT_EDIT_SYSTEM,
                 messages=[{"role": "user", "content": user_msg}],
             ),
@@ -2693,7 +2722,9 @@ def propose_freetext_source_edits(
     )
 
     try:
-        text = response.content[0].text
+        # Issue #578: freetext_edit enables adaptive thinking — skip any
+        # leading thinking block and read the text answer.
+        text = response_text(response)
     except (AttributeError, IndexError):
         log.warning(
             "resolutions: propose_freetext_source_edits — malformed response; "
