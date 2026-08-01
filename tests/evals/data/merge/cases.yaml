@@ -1,0 +1,102 @@
+# Merge (Tier-3 WRITE/MERGE) golden set (issue #552)
+#
+# Synthetic scenario: "Meridian Advisory", the same fictional 12-person
+# consultancy the detector/resolver/classify golden sets use. Every case is
+# invented — nothing here is drawn from a live knowledge tree.
+#
+# Each case feeds an existing wiki page body + a new observation to
+# tiers.tier3_merge(), using a real Anthropic call (default: the WRITE model,
+# ATHENAEUM_WRITE_MODEL / DEFAULT_WRITE_MODEL). tier3_merge tries the
+# anchored-ops patch path first and falls back to full-echo on any
+# unparseable/truncated/inapplicable response (issue #469) — this eval
+# exercises the SAME live call sites tier3_merge itself uses, so either path
+# succeeding counts as a pass; we score the RESULT SHAPE, not which path was
+# taken.
+#
+# ``outcome_class`` values (the merge-specific taxonomy):
+#   - clean_insert    : a genuinely new fact folds into the page (no
+#                       contradiction) -> expect the new fact present, no
+#                       escalation
+#   - reconfirmation   : the new observation merely restates existing
+#                       content -> expect no new near-duplicate bullet (the
+#                       #297 dedup policy); body may be unchanged or gain a
+#                       footnote, but must not duplicate the claim
+#   - factual_contradiction : a verifiable-fact conflict -> expect no
+#                       escalation (the merge prompt directs "keep the more
+#                       reliable source, note the discrepancy") and the body
+#                       reflects awareness of the discrepancy
+#   - principled_escalate   : a values/axiom-level tension -> expect the
+#                       ESCALATE: branch (an EscalationItem, not a silent
+#                       merge)
+#
+# Scoring (see test_merge_eval.py): shape/keyword-presence checks over the
+# resulting body + whether escalation fired — never exact prose.
+
+- id: clean_insert_new_fact
+  outcome_class: clean_insert
+  existing_body: |
+    # Meridian Advisory — Client Onboarding
+
+    Meridian's standard onboarding for a new retainer client takes two weeks.[^1]
+
+    [^1]: sessions/2026-01-05.md
+  observation: >-
+    Onboarding now includes a mandatory kickoff call with the client's
+    finance lead in week one, added after the Atlas engagement onboarding
+    review.
+  source_ref: "sessions/2026-03-02.md"
+  expected:
+    escalates: false
+    must_include_substrings: ["finance lead"]
+
+- id: reconfirmation_no_duplicate_bullet
+  outcome_class: reconfirmation
+  existing_body: |
+    # Meridian Advisory — PTO Policy
+
+    The firm's PTO policy is 25 days per year plus UK bank holidays.[^1]
+
+    [^1]: sessions/2026-01-05.md
+  observation: >-
+    Reconfirming: PTO is still 25 days annually plus UK bank holidays, no
+    changes since the last review.
+  source_ref: "sessions/2026-04-10.md"
+  expected:
+    escalates: false
+    max_occurrences:
+      "25 days": 1
+
+- id: factual_contradiction_keep_reliable
+  outcome_class: factual_contradiction
+  existing_body: |
+    # Meridian Advisory — Office Location
+
+    Meridian's office is at 14 Kingsway, WeWork floor 3.[^1]
+
+    [^1]: sessions/2026-01-10.md
+  observation: >-
+    Correction from the office manager (authoritative, dated 2026-05-01):
+    Meridian's office moved to 220 Regent Street, suite 5B, as of last
+    month. The Kingsway address is no longer current.
+  source_ref: "sessions/2026-05-02.md"
+  expected:
+    escalates: false
+    must_include_substrings: ["Regent"]
+
+- id: principled_tension_escalates
+  outcome_class: principled_escalate
+  existing_body: |
+    # Meridian Advisory — Client Confidentiality Principle
+
+    Meridian never discloses one client's engagement details to another
+    client, under any circumstances, as a core firm value.[^1]
+
+    [^1]: sessions/2026-01-01.md
+  observation: >-
+    A partner argued in a leadership meeting that for two clients who are
+    formal joint-venture partners, engagement details SHOULD be shared
+    between them going forward as a matter of policy — a direct challenge
+    to the firm's confidentiality principle above.
+  source_ref: "sessions/2026-06-01.md"
+  expected:
+    escalates: true
