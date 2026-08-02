@@ -19,8 +19,8 @@ Usage:
 
 Environment:
   ANTHROPIC_API_KEY          Required for Tier 2/3 LLM calls.
-  ATHENAEUM_CLASSIFY_MODEL   Override the Tier 2 model (default: claude-haiku-4-5-20251001)
-  ATHENAEUM_WRITE_MODEL      Override the Tier 3 model (default: claude-sonnet-4-6)
+  ATHENAEUM_CLASSIFY_MODEL   Override the Tier 2 model (default: config.DEFAULT_CLASSIFY_MODEL)
+  ATHENAEUM_WRITE_MODEL      Override the Tier 3 model (default: tiers.DEFAULT_WRITE_MODEL)
   ATHENAEUM_MAX_FILES        Override the per-run intake batch size (default: 50)
   ATHENAEUM_BATCH_MODE       Opt into Batch API mode for tier-2/3 calls (default: off)
 
