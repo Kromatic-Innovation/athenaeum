@@ -87,6 +87,34 @@ REFERENCE_RECORDS_FILENAME = "_push_references.jsonl"
 #: measured usage figure.
 _CHARS_PER_TOKEN = 4
 
+#: Environment variables carrying the consuming Claude Code session's id, in
+#: PRECEDENCE order (issue athenaeum#734). Claude Code exports
+#: ``CLAUDE_CODE_SESSION_ID`` to the stdio MCP servers it spawns;
+#: ``CLAUDE_SESSION_ID`` — the name earlier code (``mcp_server``,
+#: ``query_topics``) read — is set by NOTHING in the runtime, so the
+#: ``if session_id:`` guard was always false and zero push records were ever
+#: written. The older name is kept as a fallback so any environment that does
+#: export it keeps working. Asserted explicitly in a test, so reading a name
+#: nothing exports becomes a visible diff rather than a silent no-op.
+SESSION_ID_ENV_VARS: tuple[str, ...] = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID")
+
+
+def resolve_session_id() -> str:
+    """Resolve the consuming session's id from the environment, or ``""``.
+
+    Reads :data:`SESSION_ID_ENV_VARS` in precedence order and returns the first
+    non-empty value, else the empty string. This is the ONE place the session-id
+    variable name is resolved (issue athenaeum#734): every call site — the
+    ``mcp_server`` push-record path and ``query_topics`` spend recording — routes
+    through it, so a future rename is a single-line change here rather than a
+    silent divergence across sites (the exact defect athenaeum#734 fixes).
+    """
+    for name in SESSION_ID_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return ""
+
 
 def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
@@ -229,9 +257,10 @@ def build_push_record(
     """Build a :class:`PushRecord` from rendered recall hits.
 
     Args:
-        session_id: the consuming session's id (``CLAUDE_SESSION_ID``, or the
-            MCP caller's session id when available). Never empty-string
-            silently accepted by the writer — see :func:`record_push`.
+        session_id: the consuming session's id (``CLAUDE_CODE_SESSION_ID``, or
+            the MCP caller's session id when available; resolved via
+            :func:`resolve_session_id`). Never empty-string silently accepted
+            by the writer — see :func:`record_push`.
         query: the raw recall query text. Only its hash is retained.
         backend: the search backend name actually used (``keyword`` /
             ``fts5`` / ``vector``) — the retrieval mechanism tier.
@@ -369,7 +398,7 @@ def _find_session_transcript(
 ) -> tuple[Path, str] | None:
     """Locate ``<projects_root>/<scope>/<session_id>.jsonl`` by scanning scopes.
 
-    Push records carry only a session id (mirroring ``CLAUDE_SESSION_ID``,
+    Push records carry only a session id (mirroring ``CLAUDE_CODE_SESSION_ID``,
     the ambient identifier the rest of athenaeum already keys telemetry on —
     see ``query_topics.py`` and ``docs/configuration.md`` "Ambient telemetry
     variable"), never the Claude Code project-path-hash "scope" directory

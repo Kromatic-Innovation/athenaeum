@@ -636,7 +636,7 @@ Return STRICT JSON, no prose, no markdown fence:
 ## `query_topics.system_prompt`
 
 - **Constant:** `athenaeum.query_topics._SYSTEM_PROMPT`
-- **Source:** `src/athenaeum/query_topics.py:66`
+- **Source:** `src/athenaeum/query_topics.py:65`
 - **Model knob:** `topic` &middot; **max_tokens:** `256`
 - **sha256:** `e2ebbc91d4989c2598e1d743b9e31a530e250017fd033605e93d6def9a5d0137`
 
@@ -647,7 +647,7 @@ You extract substantive search topics from a user's message for a librarian to u
 ## `query_topics.user_template`
 
 - **Constant:** `athenaeum.query_topics._USER_TEMPLATE`
-- **Source:** `src/athenaeum/query_topics.py:76`
+- **Source:** `src/athenaeum/query_topics.py:75`
 - **Model knob:** `topic` &middot; **max_tokens:** `256`
 - **sha256:** `28527df798d54cea459bc40fbc7b0b81580b5ef2aa3ea96573febbe7358bbecb`
 

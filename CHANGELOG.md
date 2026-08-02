@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **push-metrics: read the session-id variable Claude Code actually exports
+  (athenaeum#734).** athenaeum#711's push-record instrumentation read
+  `CLAUDE_SESSION_ID` — a name Claude Code never sets (it exports
+  `CLAUDE_CODE_SESSION_ID`). Because the guard is `if session_id:`, the id was
+  always empty and **no push record was ever written**, silently burning
+  athenaeum#711's one-shot pre-change baseline window. A single helper
+  `push_metrics.resolve_session_id()` now resolves the id from
+  `CLAUDE_CODE_SESSION_ID` first, then `CLAUDE_SESSION_ID` (fallback), then
+  empty; the candidate-name tuple `push_metrics.SESSION_ID_ENV_VARS` is asserted
+  explicitly in a test so a future rename is a visible diff, not a silent no-op.
+  Both call sites — `mcp_server`'s push path and `query_topics.py:211`'s spend
+  recording — route through the helper; no direct `os.environ.get(
+  "CLAUDE_SESSION_ID")` remains in `src/`. Push records are unchanged in shape
+  and still carry **no claim content and no personal data**. `docs/
+  configuration.md` names the real variable and the fallback in both places.
+- **`lint-pii` phone axis: exclude labeled identifiers and the residual shapes
+  athenaeum#720 partially covered (athenaeum#732).** After athenaeum#720 the
+  live phone axis still reported 187 findings, dominated by values the
+  surrounding prose already types as record ids — `QBO realm 1008563730`, GA4
+  `stream 5139685489`, `ISBN 9798183760910`. A **preceding-token** exclusion
+  (`pii.LABELED_IDENTIFIER_PREFIXES`, a data list — a new label is a data entry,
+  not a code path) retires that class with no model call, and **ISBN-13 is now
+  excluded structurally** (13 digits with a `978`/`979` Bookland prefix) so an
+  unlabeled ISBN needs no adjacent prose. Three smaller deterministic shapes are
+  also closed: the **4-group single-dash** issue list (`410-414-416-412`) via a
+  group-count bound expressed as a lower bound with **no upper limit** (a 5-/6-
+  group list cannot reopen it), **datetime-with-space** (`2026-04-23 05`), and
+  **four-part dates** (`2018-05-06-07`). The genuine numbers `917-231-6130` and
+  `206-330-3783` stay flagged (pinned negative tests) and the **email axis is
+  unchanged** (pinned with a count assertion). No live-store mutation; the
+  operator confirms the new live count on athenaeum#726.
+
 ### Added
 
 - **Recorded eval fixtures seeded for all five replay layers (athenaeum#610).** The

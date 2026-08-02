@@ -290,6 +290,60 @@ def _is_bare_id_fragment(candidate: str) -> bool:
     return not (_BARE_PHONE_MIN_DIGITS <= len(candidate) <= _BARE_PHONE_MAX_DIGITS)
 
 
+#: Preceding-token labels that TYPE the digit run that follows as a labeled
+#: identifier, not a phone (issue athenaeum#732). A value the surrounding prose
+#: already names — ``QBO realm 1008563730``, GA4 ``stream 5139685489``,
+#: ``ISBN 978…`` — is a self-identifying record id; a preceding-token match
+#: retires it with no model call. This is a DATA list: adding a new label is an
+#: entry here, never a new code path. Matched case-insensitively against the
+#: word immediately before the run, tolerating the quote / backtick / paren /
+#: colon punctuation that commonly sits between a label and its value
+#: (``stream `5139685489```, ``realm: 1008563730``).
+LABELED_IDENTIFIER_PREFIXES: tuple[str, ...] = (
+    "qbo realm",
+    "realm",
+    "stream",
+    "isbn",
+)
+
+#: Anchored at the END of the text preceding a candidate: an optional run of
+#: separator punctuation, then one of the labels above, bounded on its left by a
+#: non-alphanumeric (so ``realm`` matches but ``overwhelm`` does not). The gap
+#: class includes ``-`` so ``ISBN-13 9798…`` matches (the ``13 `` the phone
+#: regex bleeds off ``ISBN-13`` sits between the label and the value).
+_LABELED_PREFIX_RE = re.compile(
+    r"(?:^|[^A-Za-z0-9])(?:"
+    + "|".join(re.escape(label) for label in LABELED_IDENTIFIER_PREFIXES)
+    + r")[\s`'\"(:=\-]*$",
+    re.IGNORECASE,
+)
+
+
+def _has_labeled_identifier_prefix(preceding_text: str) -> bool:
+    """True when *preceding_text* ends with a labeled-identifier prefix.
+
+    *preceding_text* is the corpus text immediately before a phone-shaped run.
+    Only the tail is relevant, so this bounds the scan to the last 64 chars —
+    long enough to hold ``QBO realm `` and its punctuation, short enough to stay
+    cheap on a large page (issue athenaeum#732).
+    """
+    return bool(_LABELED_PREFIX_RE.search(preceding_text[-64:]))
+
+
+def _is_isbn13(candidate: str) -> bool:
+    """True when *candidate* is a bare ISBN-13 — 13 digits with a 978/979 prefix.
+
+    An ISBN-13's Bookland prefix (``978``/``979``) at exactly 13 digits is a
+    structural tell independent of any adjacent ``ISBN`` label (issue
+    athenaeum#732), so an unlabeled ISBN is retired without relying on
+    surrounding prose. A 13-digit run sits INSIDE the E.164-plausible band, so
+    :func:`_is_bare_id_fragment` does not catch it — this rule does. No genuine
+    phone is a bare 13-digit run beginning 978/979 (there is no such country
+    code), so nothing real is dropped.
+    """
+    return len(candidate) == 13 and candidate.isdigit() and candidate[:3] in ("978", "979")
+
+
 def _normalize_phone_token(token: str) -> str:
     """Strip a single leading ``+``/``(`` and a single trailing ``)`` from *token*.
 
@@ -333,15 +387,22 @@ def _is_excluded_phone_shape(token: str) -> bool:
       (:func:`_looks_like_date`) — ``02-08-2018``, ``2020--2021``.
     * **Bare id/analytics fragment** — a separator-free run outside the
       E.164-plausible length band (:func:`_is_bare_id_fragment`, athenaeum#500).
+    * **Bare ISBN-13** — 13 digits with a ``978``/``979`` Bookland prefix
+      (:func:`_is_isbn13`, athenaeum#732), caught structurally so an unlabeled
+      ISBN needs no adjacent ``ISBN`` prose.
     * **Multi-character separator run** between digit groups (``--``, ``..``) —
       list or range punctuation, never phone grouping (``445--436--435--374``).
-    * **Short unprefixed grouped run** — a separator-joined sequence with no
-      explicit international ``+`` prefix and fewer than a full national
-      number's digits (10) is an issue-number / reference list, not a phone
-      (``256-257-280`` = 9 digits). ``+1-555-0100`` (``+`` prefix) and
-      ``917-231-6130`` (10 digits) are kept.
-    * **Too many groups** — more than four digit groups is a list; a phone has
-      at most country/area/prefix/line.
+    * **Four or more groups without a ``+``** — a phone has at most four digit
+      groups (country/area/prefix/line) and a real four-group run carries the
+      ``+`` a country code implies; a bare four-group run is an issue list, a
+      four-part date, or a datetime that bled past its date across a space
+      (athenaeum#732: ``410-414-416-412``, ``2018-05-06-07``, ``2026-04-23 05``).
+      A lower bound with no upper limit, so a 5-/6-group list stays closed.
+    * **More than four groups** — a list even with a ``+`` (athenaeum#720).
+    * **Short unprefixed grouped run** — a 2-3 group separator-joined sequence
+      with no ``+`` and fewer than a full national number's digits (10) is an
+      issue-number / reference list, not a phone (``256-257-280`` = 9 digits).
+      ``+1-555-0100`` (``+`` prefix) and ``917-231-6130`` (10 digits) are kept.
 
     None of these can be a genuine phone, so applying the rule on the egress
     path removes false positives without dropping any real number.
@@ -352,7 +413,7 @@ def _is_excluded_phone_shape(token: str) -> bool:
         return True
 
     candidate = _normalize_phone_token(token)
-    if _looks_like_date(candidate) or _is_bare_id_fragment(candidate):
+    if _looks_like_date(candidate) or _is_bare_id_fragment(candidate) or _is_isbn13(candidate):
         return True
 
     # Structural segmentation on the paren-free candidate: balanced parens wrap
@@ -371,10 +432,25 @@ def _is_excluded_phone_shape(token: str) -> bool:
 
     if any(len(sep) > 1 for sep in internal_seps):
         return True
-    if len(groups) > 4:
-        return True
     has_plus = token.startswith("+")
     total_digits = sum(len(g) for g in groups)
+    # A phone has at most four digit groups (country/area/prefix/line), and a
+    # genuine four-group run carries the international '+' a country code
+    # implies. So a run of four OR MORE groups without a '+' is a list, a
+    # four-part date, or a datetime that bled past its date across a space —
+    # never a phone (issue athenaeum#732: `410-414-416-412`, `2018-05-06-07`,
+    # `2026-04-23 05`). Expressed as a lower bound with NO upper limit, so a 5-
+    # or 6-group list cannot reopen the class (athenaeum#732 AC3). `917-231-6130`
+    # (3 groups) and `+1-555-234-5678` (has '+') are kept.
+    if len(groups) >= 4 and not has_plus:
+        return True
+    # More than four groups is a list even WITH a '+' — a phone never exceeds
+    # four groups (retains athenaeum#720's upper-count guard for the +-prefixed case).
+    if len(groups) > 4:
+        return True
+    # A short separator-joined run with no '+' and fewer than a national
+    # number's digits is a 2-3 group issue/reference list (athenaeum#720:
+    # `256-257-280` = 9 digits). `917-231-6130` (10 digits) is kept.
     if len(groups) >= 2 and not has_plus and total_digits < 10:
         return True
     return False
@@ -419,13 +495,25 @@ def find_inline_phones(text: str) -> list[str]:
     trailing ``)`` the regex folds into its group (issue athenaeum#683) before applying
     the checks; every genuine phone fixture (carrying a '+', parens, or
     separators) still matches and is returned verbatim.
+
+    Additionally excludes a run the surrounding prose already TYPES as a record
+    id via a preceding-token label (:func:`_has_labeled_identifier_prefix`,
+    issue athenaeum#732) — ``QBO realm 1008563730``, GA4 ``stream 5139685489``,
+    ``ISBN 978…`` — which needs the match position and so is applied here rather
+    than in the token-only :func:`_is_excluded_phone_shape`.
     """
+    source = text or ""
     seen: list[str] = []
-    for m in _PHONE_RE.finditer(text or ""):
+    for m in _PHONE_RE.finditer(source):
         token = m.group(1)
         if not _has_enough_digits(token):
             continue
         if _is_excluded_phone_shape(token):
+            continue
+        # A run the surrounding prose already labels as a record id — `QBO realm
+        # 1008563730`, GA4 `stream 5139685489`, `ISBN 978…` — is a self-
+        # identifying identifier, not a phone (issue athenaeum#732).
+        if _has_labeled_identifier_prefix(source[: m.start(1)]):
             continue
         if token not in seen:
             seen.append(token)
