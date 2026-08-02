@@ -1,4 +1,4 @@
-"""Unit tests for the `athenaeum.decisions` core helpers (issue #401)."""
+"""Unit tests for the `athenaeum.decisions` core helpers (issue athenaeum#401)."""
 
 from __future__ import annotations
 

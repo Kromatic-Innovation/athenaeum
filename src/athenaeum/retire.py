@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Move-then-retire lifecycle for raw auto-memory (issue #261, slice B of #259).
+"""Move-then-retire lifecycle for raw auto-memory (issue athenaeum#261, slice B of athenaeum#259).
 
 L4 domain/pipeline.
 
@@ -23,7 +23,7 @@ the fate of every cluster's raw intake:
 - **contradictory** → the raw files are *held* in the queue for human
   confirmation. They are NEVER deleted while a contradiction is pending.
 
-Hard rules (see issue #261):
+Hard rules (see issue athenaeum#261):
 
 - A delete must NEVER race a pending confirmation. A raw file is retired only
   when its cluster produced no contradiction AND its members resolved to live
@@ -48,7 +48,7 @@ filename.
 Layering (L4 domain/pipeline). ``retire.py`` imports ``athenaeum.merge``
 (``MergedWikiEntry``, ``render_merged_entry``, ``resolve_member_path``) at
 module TOP level — a normal downward dependency. This module has NO deferred
-imports of its own and, after issue #545 dissolved the librarian-centered
+imports of its own and, after issue athenaeum#545 dissolved the librarian-centered
 named-8 coupling, ``retire.py`` is NOT part of any import SCC: it imports no
 module that imports it back. ``librarian.py`` still function-locally imports
 this module's ``run_retire_pass`` (``_run_retire_pass``), but that is a
@@ -81,7 +81,7 @@ MOVE = "move"
 HOLD = "hold"
 SKIP = "skip"
 
-# Issue #261 / Quine M1: ``detect_contradictions`` returns ``detected=False``
+# Issue athenaeum#261 / Quine M1: ``detect_contradictions`` returns ``detected=False``
 # both for a genuine clean verdict AND when it degraded (offline, API error,
 # unparseable response). A degraded not-detected verdict is NOT trustworthy —
 # retiring a genuinely-contradictory cluster on a degraded verdict would delete
@@ -119,7 +119,7 @@ class RetireReport:
     held: list[str] = field(default_factory=list)
     wiki_updated: list[str] = field(default_factory=list)
     dispositions: list[FileDisposition] = field(default_factory=list)
-    # Issue #388: ``<scope>/<file>.md`` pointers dropped from each affected
+    # Issue athenaeum#388: ``<scope>/<file>.md`` pointers dropped from each affected
     # scope's sibling ``MEMORY.md`` index because this pass retired the member.
     index_pruned: list[str] = field(default_factory=list)
 
@@ -271,7 +271,7 @@ def _attach_inline_markers(
     return body
 
 
-# Issue #262 (slice C of #259): the contradiction rationales that represent a
+# Issue athenaeum#262 (slice C of athenaeum#259): the contradiction rationales that represent a
 # genuine RESOLVED verdict worth persisting on the moved fact's footnote. A
 # plain clean move (``singleton`` / empty rationale) carries no verdict; only
 # these settled outcomes do. ``confirmation-pass-cleared`` is the merge.py
@@ -296,7 +296,7 @@ _VERDICT_RATIONALES: dict[str, str] = {
 def _resolved_verdict(entry: MergedWikiEntry) -> str | None:
     """Return the persistable resolved verdict for a moved entry, or None.
 
-    Issue #262: when a contradiction was settled (the confirmation pass
+    Issue athenaeum#262: when a contradiction was settled (the confirmation pass
     cleared a detector over-fire, or the members declared a
     supersession/refinement) the resulting verdict is recorded on the wiki
     fact's footnote so a future memory can reuse it instead of re-paying to
@@ -320,7 +320,7 @@ def _enrich_entry(entry: MergedWikiEntry, projects_root: Path | None) -> None:
     provenance). Then per-fact inline markers are attached and the entry is
     flagged ``retired``.
 
-    Issue #262 (slice C of #259): every moved member also stamps the granular
+    Issue athenaeum#262 (slice C of athenaeum#259): every moved member also stamps the granular
     ``claim`` text (and a resolved ``verdict``, when one exists) onto its
     source so the wiki footnote becomes the diff target the contradiction
     engine compares future intake against — the retired raw atom is gone.
@@ -378,7 +378,7 @@ def _plan_index_sweep(
     *,
     require_absent: bool,
 ) -> dict[Path, tuple[str, list[str]]]:
-    """Plan the ``MEMORY.md`` rewrite for each scope this pass is retiring (#388).
+    """Plan the ``MEMORY.md`` rewrite for each scope this pass is retiring (athenaeum#388).
 
     Returns ``{index_path: (new_text, dropped_targets)}`` for every affected
     scope whose sibling index actually loses a pointer. Only pointers to members
@@ -387,7 +387,7 @@ def _plan_index_sweep(
     retire commit stays scoped to its own deletions). Scopes with no index, an
     unreadable index, or nothing to drop are omitted.
 
-    Fail-closed on ``require_absent`` (issue #682). ``MEMORY.md`` is loaded into
+    Fail-closed on ``require_absent`` (issue athenaeum#682). ``MEMORY.md`` is loaded into
     **every** Claude Code session and is written in place (a scope's raw index
     is hardlinked to the operator's live ``~/.claude/projects/<scope>/memory/
     MEMORY.md``), so dropping a pointer whose target still exists silently
@@ -421,7 +421,7 @@ def _plan_index_sweep(
             continue
         should_drop: Callable[[str], bool]
         if require_absent:
-            # Fail closed (#682): retired this pass AND now absent on disk. Both
+            # Fail closed (athenaeum#682): retired this pass AND now absent on disk. Both
             # captured names are used immediately (passed to rewrite_index on the
             # next line), so closing over the loop variables is safe.
             def should_drop(target: str) -> bool:
@@ -551,11 +551,11 @@ def run_retire_pass(
             report.wiki_updated.append(entry.filename)
 
     if dry_run:
-        # Issue #388: report the index pointers a real run WOULD sweep, without
+        # Issue athenaeum#388: report the index pointers a real run WOULD sweep, without
         # touching disk. Computed from the retired member set, so it needs no
         # deletion to have happened — ``require_absent=False`` predicts the
         # sweep because a dry run deletes nothing, so on-disk absence (the real
-        # run's #682 fail-closed guard) cannot yet be observed.
+        # run's athenaeum#682 fail-closed guard) cannot yet be observed.
         for index_path, (_new_text, dropped) in _plan_index_sweep(
             retiring, require_absent=False
         ).items():
@@ -589,7 +589,7 @@ def run_retire_pass(
 
     # Commit A — provenance snapshot. Commits the raw intake about to be
     # retired (scoped add, Quine C2) so every file we are about to git rm is
-    # recoverable from history. Issue #682: ALSO snapshot each affected scope's
+    # recoverable from history. Issue athenaeum#682: ALSO snapshot each affected scope's
     # ``MEMORY.md`` BEFORE it is rewritten, so the pre-prune index bytes are a
     # committed, git-recoverable backup taken strictly before any modification.
     # This is a genuine "back up before write" for a file that — because the raw
@@ -622,7 +622,7 @@ def run_retire_pass(
         wiki_rel.append(str(page.resolve().relative_to(kr)))
 
     # Retire: git rm the moved raw files (staged deletion, recoverable). Issue
-    # #682: this happens BEFORE the index sweep so the sweep's fail-closed
+    # athenaeum#682: this happens BEFORE the index sweep so the sweep's fail-closed
     # absence check (below) observes the post-deletion disk state — a member
     # whose file genuinely went away is pruned; one that survived is kept.
     del_rel = [
@@ -630,9 +630,9 @@ def run_retire_pass(
     ]
     _git(knowledge_root, "rm", "--quiet", "--", *del_rel)
 
-    # Issue #388/#682: rewrite each retired member's sibling ``MEMORY.md`` in the
+    # Issue athenaeum#388/#682: rewrite each retired member's sibling ``MEMORY.md`` in the
     # SAME commit as the deletion, so the always-on index never keeps a pointer
-    # to a file this pass removed. Fail closed (#682): a pointer is dropped ONLY
+    # to a file this pass removed. Fail closed (athenaeum#682): a pointer is dropped ONLY
     # when its target was retired this pass AND is now genuinely absent on disk
     # — a present target (e.g. a hardlinked live memory git rm could not unlink)
     # keeps its pointer, and every drop is logged BY NAME, not merely counted.

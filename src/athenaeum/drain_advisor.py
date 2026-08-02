@@ -1,27 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Backlog-drain ETA advisor — pure estimators over the #378 spend ledger.
+"""Backlog-drain ETA advisor — pure estimators over the athenaeum#378 spend ledger.
 
-Extracted from :mod:`athenaeum.drain` in issue #640. This is "Feature 1" of the
-issue #470 drain work: pure functions that project how long the raw-intake
+Extracted from :mod:`athenaeum.drain` in issue athenaeum#640. This is "Feature 1" of the
+issue athenaeum#470 drain work: pure functions that project how long the raw-intake
 backlog will take to drain at the OBSERVED nightly throughput (not a hardcoded
 guess), plus :func:`build_advisory`, which :func:`athenaeum.librarian.run` emits
 as a WARNING (and ``athenaeum status`` surfaces) when that projection exceeds
 ``librarian.drain_warn_days``.
 
-WHY IT LIVES HERE (issue #640): both :mod:`athenaeum.librarian` and
+WHY IT LIVES HERE (issue athenaeum#640): both :mod:`athenaeum.librarian` and
 :mod:`athenaeum.status` need :func:`build_advisory`, but they sit BELOW the
 :mod:`athenaeum.drain` orchestrator (``drain`` calls ``librarian.run``). When
 the advisor lived in ``drain``, ``librarian`` and ``status`` reached back UP
 into ``drain`` for it — the ``librarian`` <-> ``drain`` / ``status`` -> ``drain``
 back-edges that pinned the ``{drain, librarian, status}`` residual import SCC
-(#545 audit M8). Hoisting the advisor DOWN to this leaf — it imports only the
+(athenaeum#545 audit M8). Hoisting the advisor DOWN to this leaf — it imports only the
 :mod:`athenaeum.config`, :mod:`athenaeum.models` and :mod:`athenaeum.tiers`
 services, none of which import ``drain``/``librarian``/``status`` back —
 dissolves that cycle: ``librarian``/``status``/``drain`` all now depend on this
 module one-directionally.
 
 The estimate promises COST plus "hours, not nights", never wall-clock precision:
-same-page merges serialize on the batch path (the deliberate #236 grouping), so
+same-page merges serialize on the batch path (the deliberate athenaeum#236 grouping), so
 the advisor's night count is a caps/provider projection, not a runtime promise.
 
 Factoring rule: ONLY the pure ETA estimators + :class:`DrainAdvisory` +
@@ -48,7 +48,7 @@ DRAIN_ADVISOR_PREFIX = "backlog-drain-advisor"
 def _resolve_estimate_model(config: dict[str, Any] | None = None) -> str:
     """Model id used to PRICE the drain cost estimate and suggested budget.
 
-    Issue #571 (M18): resolved from the ``models.write`` knob (env
+    Issue athenaeum#571 (M18): resolved from the ``models.write`` knob (env
     ``ATHENAEUM_WRITE_MODEL`` > yaml ``models.write`` > code default
     :data:`athenaeum.tiers.DEFAULT_WRITE_MODEL`), NOT a hardcoded literal. The
     drain writes entities at the write model, so the estimate must price at
@@ -68,7 +68,7 @@ def _resolve_estimate_model(config: dict[str, Any] | None = None) -> str:
 DEFAULT_AVG_INPUT_TOKENS_PER_FILE: float = 20_000
 DEFAULT_AVG_OUTPUT_TOKENS_PER_FILE: float = 1_500
 
-#: Anthropic Messages Batch API discount (issue #236): batch-attributed tokens
+#: Anthropic Messages Batch API discount (issue athenaeum#236): batch-attributed tokens
 #: bill at half list price. Mirrors the ``0.5`` applied in
 #: :meth:`athenaeum.models.TokenUsage._cost_for`.
 BATCH_DISCOUNT = 0.5
@@ -92,7 +92,7 @@ def _librarian_records_with_files(records: list[dict[str, Any]]) -> list[dict[st
     """Ledger records from librarian runs that recorded a positive files count.
 
     A ``files_processed`` field is present only on records written after issue
-    #470 (older records lack it and are skipped — they cannot inform a rate).
+    athenaeum#470 (older records lack it and are skipped — they cannot inform a rate).
     ``bool`` is rejected explicitly (``True``/``False`` are ``int`` subclasses).
     """
     out: list[dict[str, Any]] = []
@@ -121,7 +121,7 @@ def estimate_files_per_night(
     * ``"ledger"`` — averaged over the most recent librarian runs that recorded
       a ``files_processed`` count (the real observed throughput);
     * ``"this-run"`` — fallback to the count THIS run drained, when the ledger
-      carries no usable history yet (issue #470: "fall back to this-run's rate");
+      carries no usable history yet (issue athenaeum#470: "fall back to this-run's rate");
     * ``"none"`` — no history and this run drained nothing; the caller cannot
       project a finite ETA.
     """
@@ -180,11 +180,11 @@ def estimate_drain_cost_usd(
     """Coarse USD to drain *backlog* files at *model* list prices.
 
     *model* defaults to the resolved ``models.write`` id
-    (:func:`_resolve_estimate_model`, issue #571/M18) when not given explicitly,
+    (:func:`_resolve_estimate_model`, issue athenaeum#571/M18) when not given explicitly,
     so the estimate tracks the model the drain actually writes with; pass
     *config* to route the yaml ``models.write`` knob.
 
-    ``backlog × avg-tokens-per-file × per-MTok rate``, with the #236 batch
+    ``backlog × avg-tokens-per-file × per-MTok rate``, with the athenaeum#236 batch
     discount applied when *batch* is set. Priced via the single per-model rate
     table in :mod:`athenaeum.models` (never a second hardcoded price site).
     """
@@ -219,7 +219,7 @@ def _fmt_usd_arg(value: float) -> str:
 
 @dataclass
 class DrainAdvisory:
-    """A backlog-drain ETA advisory (issue #470, Feature 1)."""
+    """A backlog-drain ETA advisory (issue athenaeum#470, Feature 1)."""
 
     backlog: int
     files_per_night: float

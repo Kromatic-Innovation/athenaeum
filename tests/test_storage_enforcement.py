@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Enforcement tests for the storage-adapter corpus policy (issue #532, H4/M34).
+"""Enforcement tests for the storage-adapter corpus policy (issue athenaeum#532, H4/M34).
 
 ``tests/test_storage.py`` already unit-tests the ``is_embedded`` /
 ``is_recallable`` predicates in isolation. Those predicates existed but were
@@ -11,9 +11,9 @@ fail-closed guarantees while two did nothing (a class configured
 These tests pin the enforcement that closes that gap:
 
 * ``is_embedded`` is honored at index BUILD (a non-embedded class never enters
-  the FTS5 / vector store), mirroring the #427 PII drop.
+  the FTS5 / vector store), mirroring the athenaeum#427 PII drop.
 * ``is_recallable`` is honored at recall RENDER (a non-recallable class is never
-  returned even if it slipped into the index), mirroring the #312 audience
+  returned even if it slipped into the index), mirroring the athenaeum#312 audience
   Layer-C re-check.
 * Both are strict no-ops for the default (unconfigured) knowledge base.
 
@@ -178,7 +178,7 @@ class TestAdapterExtensionPointContract:
         _write_page(wiki, "vault.md", "skillnote", "dropmarker")
 
         # Register a code-defined adapter with a no-corpus policy and map a
-        # class to it — the #426 skill-sync seam shape.
+        # class to it — the athenaeum#426 skill-sync seam shape.
         register_adapter(
             StorageAdapter(
                 name="skill-sync-test",

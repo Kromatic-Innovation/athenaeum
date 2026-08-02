@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Lenient JSON extraction from LLM response text (issue #219).
+"""Lenient JSON extraction from LLM response text (issue athenaeum#219).
 
 Both the contradiction detector (:mod:`athenaeum.contradictions`) and the
 resolver (:mod:`athenaeum.resolutions`) instruct the model to return
@@ -17,9 +17,9 @@ trailing text. Fenced content is preferred over unfenced text, with a
 whole-text fallback when fences yield no object, and an ambiguous
 multi-object scan yields ``None`` rather than a guess (see the function
 docstring for the precise contract).
-Retry-on-parse-failure is deliberately out of scope for #219.
+Retry-on-parse-failure is deliberately out of scope for athenaeum#219.
 
-Settling note (issue #539): :func:`scan_json_objects`, :func:`loads_lenient`,
+Settling note (issue athenaeum#539): :func:`scan_json_objects`, :func:`loads_lenient`,
 and :func:`repair_json_control_chars` are LIVE, not test-only — the audit's
 "no src callers" reading (§4.4, at ``4324f04``) is stale. The reasoning-tier
 LLM-output parser consumes them (:mod:`athenaeum.tiers` calls
@@ -46,7 +46,7 @@ _DECODER = json.JSONDecoder()
 
 #: A markdown code fence: line-leading ``` plus an optional language tag
 #: (any case, e.g. ``json``/``JSON``), then everything up to a closing
-#: line-leading ```. Both delimiters must start a line (issue #222) — an
+#: line-leading ```. Both delimiters must start a line (issue athenaeum#222) — an
 #: inline backtick run in prose (e.g. "wrap it in ``` fences") must not
 #: pair with the real fence opener and shift every subsequent block
 #: boundary. Per CommonMark, fence delimiters may be indented by up to
@@ -194,7 +194,7 @@ def scan_json_objects(text: str, limit: int = 8) -> list[dict[str, Any]]:
     (returns ``None``) when a whole-text scan finds more than one balanced
     object, this returns every candidate it found so a caller can apply its
     OWN disambiguation — e.g. "prefer the object carrying an ``ops`` key"
-    (issue #496) — at the call site, leaving the shared util's refusal intact
+    (issue athenaeum#496) — at the call site, leaving the shared util's refusal intact
     for the many callers that rely on it. Fences are not treated specially
     here; the whole text is scanned. Nested objects are not counted
     separately. Returns ``[]`` when no parseable object exists.
@@ -204,7 +204,7 @@ def scan_json_objects(text: str, limit: int = 8) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Lenient JSON repair — bare control characters inside string literals (#472)
+# Lenient JSON repair — bare control characters inside string literals (athenaeum#472)
 # ---------------------------------------------------------------------------
 #
 # Tier-2 classification (and, in principle, any LLM asked for JSON) periodically
@@ -295,7 +295,7 @@ def loads_lenient(text: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Balanced-array extraction (issue #607, M16)
+# Balanced-array extraction (issue athenaeum#607, M16)
 # ---------------------------------------------------------------------------
 #
 # The module above extracts JSON *objects*. Some LLM responses are a bare JSON

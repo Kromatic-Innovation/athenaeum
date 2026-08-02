@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the auto-memory merge pass (C3, issue #197).
+"""Tests for the auto-memory merge pass (C3, issue athenaeum#197).
 
 Covers :mod:`athenaeum.merge`. All fixtures synthesize a full
 ``raw/auto-memory/<scope>/`` tree plus a pre-written cluster JSONL
@@ -235,7 +235,7 @@ def contradiction_merge_root(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def escalation_dedupe_root(tmp_path: Path) -> Path:
-    """Same source-file PAIR pulled into 3 overlapping clusters (issue #146).
+    """Same source-file PAIR pulled into 3 overlapping clusters (issue athenaeum#146).
 
     The two opposing-guidance feedback files appear in three distinct
     cluster rows (different ``cluster_id``s, different centroid scores).
@@ -313,7 +313,7 @@ def escalation_dedupe_root(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def distinct_conflicts_root(tmp_path: Path) -> Path:
-    """Two DIFFERENT source-file pairs in two clusters (issue #146).
+    """Two DIFFERENT source-file pairs in two clusters (issue athenaeum#146).
 
     Each cluster flags a distinct conflict — dedup must NOT collapse them;
     both must produce their own pending question.
@@ -390,7 +390,7 @@ def distinct_conflicts_root(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def suppress_then_detect_root(tmp_path: Path) -> Path:
-    """Same source-file PAIR in two clusters (issue #146 / #145 interaction).
+    """Same source-file PAIR in two clusters (issue athenaeum#146 / athenaeum#145 interaction).
 
     Cluster 1 flags the pair but the resolver confirmation pass suppresses
     it (``not_a_conflict``). Cluster 2 flags the SAME pair and the resolver
@@ -744,7 +744,7 @@ class TestVoltaireFixture:
 
 
 class TestContradictionFixture:
-    """C4 (#198): contradictions are detector-driven now.
+    """C4 (athenaeum#198): contradictions are detector-driven now.
 
     The old C3 behaviour keyed off ``centroid_score < 0.75``. With the
     detector stubbed out (no ``ANTHROPIC_API_KEY``, no client passed),
@@ -833,7 +833,7 @@ class TestContradictionFixture:
         self,
         contradiction_merge_root: Path,
     ) -> None:
-        """Issue #145: when the Haiku detector flags a cluster but the
+        """Issue athenaeum#145: when the Haiku detector flags a cluster but the
         resolver confirmation pass returns ``not_a_conflict``, NO pending
         question is written and the wiki entry is NOT flagged.
         """
@@ -882,16 +882,16 @@ class TestContradictionFixture:
         meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
         assert meta["contradictions_detected"] is False
         assert "status" not in meta
-        # The whole point of #145: no human-queue entry for a false positive.
+        # The whole point of athenaeum#145: no human-queue entry for a false positive.
         assert not (wiki / "_pending_questions.md").exists()
 
-    # -- Issue #400: degenerate over-cluster merge-proposal suppression --------
+    # -- Issue athenaeum#400: degenerate over-cluster merge-proposal suppression --------
 
     @staticmethod
     def _detector_and_merge_clients(confidence: float):
         """A fake client that returns detected=true then a propose_merge verdict
         at *confidence* — driving the resolver down the ``_pending_merges.md``
-        emission path so the #400 gate in ``_emit_escalation`` runs."""
+        emission path so the athenaeum#400 gate in ``_emit_escalation`` runs."""
         from unittest.mock import MagicMock
 
         detector_payload = (
@@ -926,7 +926,7 @@ class TestContradictionFixture:
     def test_over_cluster_merge_proposal_suppressed_by_size_cap(
         self, contradiction_merge_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Issue #400: a merge proposal whose source count exceeds
+        """Issue athenaeum#400: a merge proposal whose source count exceeds
         ``max_merge_sources`` is dropped before it reaches ``_pending_merges.md``
         — neither proposed nor escalated as a pending question. The 2-member
         cluster with cap=1 stands in for the observed 1,700-source over-cluster.
@@ -971,7 +971,7 @@ class TestContradictionFixture:
     def test_merge_proposal_suppressed_by_confidence_floor(
         self, contradiction_merge_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Issue #400: an opt-in confidence floor keeps a low-confidence merge
+        """Issue athenaeum#400: an opt-in confidence floor keeps a low-confidence merge
         (well under the size cap) out of the human queue."""
         monkeypatch.delenv("ATHENAEUM_MAX_MERGE_SOURCES", raising=False)
         monkeypatch.setenv("ATHENAEUM_MIN_MERGE_CONFIDENCE", "0.5")
@@ -988,9 +988,9 @@ class TestContradictionFixture:
         contradiction_merge_root: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Issue #145: with the resolver budget at 0, the confirmation
+        """Issue athenaeum#145: with the resolver budget at 0, the confirmation
         pass cannot run — the cluster escalates WITHOUT a proposal block,
-        exactly as before #145.
+        exactly as before athenaeum#145.
         """
         from unittest.mock import MagicMock
 
@@ -1030,7 +1030,7 @@ class TestContradictionFixture:
         self,
         contradiction_merge_root: Path,
     ) -> None:
-        """Issue #148: when the resolver confirmation pass returns a
+        """Issue athenaeum#148: when the resolver confirmation pass returns a
         genuine verdict (a real ``keep_a`` / ``keep_b`` / ``merge``
         action, NOT ``not_a_conflict``), the cluster still escalates AND
         the pending question carries a ``**Proposed resolution**`` block.
@@ -1097,7 +1097,7 @@ class TestContradictionFixture:
         self,
         contradiction_merge_root: Path,
     ) -> None:
-        """Issue #148 (fail-safe): a resolver that *replies* but with no
+        """Issue athenaeum#148 (fail-safe): a resolver that *replies* but with no
         parseable JSON must NOT silently suppress a real conflict. The
         mock returns a well-formed response object whose ``.content[0].text``
         is plain prose, so execution flows through ``_parse_response``,
@@ -1160,7 +1160,7 @@ class TestContradictionFixture:
         self,
         contradiction_merge_root: Path,
     ) -> None:
-        """Issue #148 (fail-safe): a malformed resolver *response object*
+        """Issue athenaeum#148 (fail-safe): a malformed resolver *response object*
         — one where accessing ``response.content[0].text`` raises — must
         NOT silently suppress a real conflict. With ``content == []`` the
         ``[0]`` index raises ``IndexError``, so ``propose_resolution``
@@ -1222,10 +1222,10 @@ class TestContradictionFixture:
 
 
 class TestBudgetExhaustedC4Guard:
-    """Issue #461, AC3: the C4 detector/resolver call sites must not burn API
+    """Issue athenaeum#461, AC3: the C4 detector/resolver call sites must not burn API
     calls past an already-spent run-level ``max_api_calls`` budget.
 
-    After the #461 reorder, the entity phase claims the shared budget FIRST;
+    After the athenaeum#461 reorder, the entity phase claims the shared budget FIRST;
     this guard is what stops the (whole-corpus) C4 pass from spending further
     once that budget is gone, mirroring the existing deterministic
     ``detected=False`` short-circuits (declared-pair, disjoint-validity).
@@ -1248,7 +1248,7 @@ class TestBudgetExhaustedC4Guard:
         monkeypatch.setattr("athenaeum.merge.detect_contradictions", detect_spy)
 
         # Usage already AT the ceiling before merge ever runs — exactly the
-        # post-#461 scenario where the entity phase spent the whole budget.
+        # post-athenaeum#461 scenario where the entity phase spent the whole budget.
         usage = TokenUsage()
         usage.api_calls = 5
 
@@ -1285,7 +1285,7 @@ class TestBudgetExhaustedC4Guard:
         contradiction_merge_root: Path,
     ) -> None:
         """``max_api_calls=None`` (the default) must be byte-identical to the
-        pre-#461 unbounded behaviour — the detector-positive path still fires
+        pre-athenaeum#461 unbounded behaviour — the detector-positive path still fires
         even with a pre-spent ``usage`` counter, since there is no ceiling."""
         from unittest.mock import MagicMock
 
@@ -1321,7 +1321,7 @@ class TestBudgetExhaustedC4Guard:
 
 
 class TestSpendCeilingC4Guard:
-    """Issue #568 (H7): the C4 pass — the most expensive phase, running the
+    """Issue athenaeum#568 (H7): the C4 pass — the most expensive phase, running the
     Haiku detector AND the Opus resolver — must honor the operator's spend
     ceiling, not just the ``max_api_calls`` count. Historically ``merge.py``
     contained zero ``ceiling_tripped`` checks, so an operator who set
@@ -1416,7 +1416,7 @@ class TestSpendCeilingC4Guard:
 
 
 class TestDetectionIncompleteMarker:
-    """Issue #569 (H6): a cluster whose detector gave up after transient-error
+    """Issue athenaeum#569 (H6): a cluster whose detector gave up after transient-error
     retries is marked detection-incomplete so the next run's delta set
     re-examines it; a cluster examined to completion has any marker cleared."""
 
@@ -1526,7 +1526,7 @@ class TestDetectionIncompleteMarker:
 
 
 class TestEscalationDedupe:
-    """Issue #146: dedup escalations by the flagged source-file SET, not
+    """Issue athenaeum#146: dedup escalations by the flagged source-file SET, not
     by cluster slug, across the whole run."""
 
     @staticmethod
@@ -1571,7 +1571,7 @@ class TestEscalationDedupe:
 
         pending = escalation_dedupe_root / "wiki" / "_pending_questions.md"
         assert pending.exists()
-        # The whole point of #146: one conflict, one pending question.
+        # The whole point of athenaeum#146: one conflict, one pending question.
         assert self._count_escalations(pending) == 1
 
     def test_distinct_pairs_each_produce_their_own_escalation(
@@ -1703,7 +1703,7 @@ class TestEscalationDedupe:
         recorded. Cluster 2 flags the SAME pair P and is genuinely detected.
         Exactly ONE escalation (cluster 2's) must result.
 
-        This pins the ordering: the #146 dedup check sits AFTER the #145
+        This pins the ordering: the athenaeum#146 dedup check sits AFTER the athenaeum#145
         suppress early-return in ``_emit_escalation``. A future refactor
         moving the dedup check above the suppress return would record P on
         the suppressed cluster and silently drop cluster 2's real
@@ -1856,7 +1856,7 @@ class TestMergeOnlyCLI:
 
 
 # ---------------------------------------------------------------------------
-# Issue #181: self-reference lint applies to cluster-shim path
+# Issue athenaeum#181: self-reference lint applies to cluster-shim path
 # ---------------------------------------------------------------------------
 
 
@@ -1864,7 +1864,7 @@ class TestClusterShimSelfReferenceLint:
     """The shim branch in :func:`merge_cluster_row` builds an
     :class:`AutoMemoryFile` on the fly when a cluster row references a
     file that C1 didn't discover. That branch must apply the same
-    self-reference lint as the discovery path (issue #181)."""
+    self-reference lint as the discovery path (issue athenaeum#181)."""
 
     def test_refines_self_dropped_on_shim(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -1925,7 +1925,7 @@ class TestClusterShimSelfReferenceLint:
 
 
 # ---------------------------------------------------------------------------
-# Issue #249: incremental confirmation pass — cache not_a_conflict verdicts
+# Issue athenaeum#249: incremental confirmation pass — cache not_a_conflict verdicts
 # ---------------------------------------------------------------------------
 
 
@@ -1946,7 +1946,7 @@ class _StubEmbedder:
 
 
 class TestNotAConflictCache:
-    """Issue #249: the nightly confirmation pass caches ``not_a_conflict``
+    """Issue athenaeum#249: the nightly confirmation pass caches ``not_a_conflict``
     verdicts so the expensive Opus confirmation call is skipped for claim
     pairs already settled as false positives.
 
@@ -2143,7 +2143,7 @@ class TestNotAConflictCache:
     ) -> None:
         """A pair settled by a HUMAN ``keep_a`` verdict is NOT in the
         ``not_a_conflict`` skip set, so the resolver still runs (the verdict
-        can flow to tier4_escalate for enactment). Issue #249's scoping
+        can flow to tier4_escalate for enactment). Issue athenaeum#249's scoping
         refinement: only ``not_a_conflict`` verdicts short-circuit Opus."""
         from unittest.mock import MagicMock
 
@@ -2368,7 +2368,7 @@ class TestNotAConflictCache:
 
 
 class TestNotAConflictDecay:
-    """Issue #251: read-time decay of stale auto ``not_a_conflict``
+    """Issue athenaeum#251: read-time decay of stale auto ``not_a_conflict``
     suppressions. With a positive ``not_a_conflict_ttl_days``, an auto
     suppression older than the ttl is treated as ABSENT when building the
     skip set, so the pair re-enters the Opus confirmation pass. The cache
@@ -2750,7 +2750,7 @@ class TestNotAConflictDecay:
 
 
 # ---------------------------------------------------------------------------
-# Cluster-cohesion floor (issue #278)
+# Cluster-cohesion floor (issue athenaeum#278)
 # ---------------------------------------------------------------------------
 
 
@@ -2868,7 +2868,7 @@ _FLOOR_OFF_CFG = {"recall": {"extra_intake_roots": ["raw/auto-memory"]}}
 
 
 class TestClusterCohesionFloor:
-    """Cohesion floor suppresses low-cohesion cross-scope over-clusters (#278)."""
+    """Cohesion floor suppresses low-cohesion cross-scope over-clusters (athenaeum#278)."""
 
     def _slugs_on_disk(self, knowledge_root: Path) -> set[str]:
         wiki = knowledge_root / "wiki"
@@ -3156,7 +3156,7 @@ class TestClusterCohesionFloor:
 
 
 # ---------------------------------------------------------------------------
-# Issue #327 — opinion pair kept-both-with-attribution (never re-queues)
+# Issue athenaeum#327 — opinion pair kept-both-with-attribution (never re-queues)
 # ---------------------------------------------------------------------------
 
 

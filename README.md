@@ -106,7 +106,7 @@ a missed label is merely annoying, not a leak.
 
 **What:** `athenaeum run` enforces a per-run API-call budget
 (`ATHENAEUM_MAX_API_CALLS`, default 800) and takes a shared run lock
-(`RunLock`, issue #309) so `run`, `ingest`, `reindex`, and `session-end` are
+(`RunLock`, issue athenaeum#309) so `run`, `ingest`, `reindex`, and `session-end` are
 single-flight against each other on the same knowledge root.
 
 **Why:** The librarian is an LLM-driven background process with no human
@@ -298,19 +298,19 @@ athenaeum run \
   --verbose
 ```
 
-### On-demand ingest & reindex (issue #349)
+### On-demand ingest & reindex (issue athenaeum#349)
 
 The nightly `athenaeum run` is the batch path. When an agent (or you) needs a
 just-`remember`ed fact to become recallable **now** — decoupled from the
 nightly cadence — use the two on-demand commands. Both are single-flight (they
-share the same run lock as `run`, issue #309) and print a one-line JSON summary
+share the same run lock as `run`, issue athenaeum#309) and print a one-line JSON summary
 with counts and duration; both exit non-zero on failure.
 
 ```bash
 # Compile only raw intake that is new/changed since the last ingest, then
 # refresh the search index — the round-trip that makes a memory recallable.
 athenaeum ingest              # --incremental is the DEFAULT (fast no-op if none)
-athenaeum reindex             # --incremental hash-diff delta (depends on #348)
+athenaeum reindex             # --incremental hash-diff delta (depends on athenaeum#348)
 
 athenaeum ingest --full       # recompile all pending raw intake
 athenaeum reindex --full      # rebuild the index from scratch
@@ -318,14 +318,14 @@ athenaeum ingest --session <id>   # scope new/changed detection to one session
 ```
 
 `ingest --incremental` tracks a content-hash stamp
-(`~/.cache/athenaeum/ingest-manifest.json`, mirroring the #348 index manifest),
+(`~/.cache/athenaeum/ingest-manifest.json`, mirroring the athenaeum#348 index manifest),
 so it is a fast no-op when nothing has changed. `tier0_passthrough`
 pre-structured intake compiles with **no LLM cost**. `reindex` is the canonical
 name; `rebuild-index` remains as a back-compat alias for the exact same
 command. The reusable engine lives at `athenaeum.librarian.ingest` (the
-SessionEnd path, issue #350, calls it directly).
+SessionEnd path, issue athenaeum#350, calls it directly).
 
-### Cross-agent same-day recall — `session-end` (issue #350)
+### Cross-agent same-day recall — `session-end` (issue athenaeum#350)
 
 `remember` writes only to `raw/`; `recall` reads only the compiled `wiki/`
 index; the librarian that compiles `raw/`→`wiki/` runs **nightly**. Without
@@ -352,7 +352,7 @@ Both steps are change-gated so an idle SessionEnd is cheap:
 
 The result is a memory `remember`ed in session A becoming recallable — as a
 fully-resolved wiki entry — in session B the moment A ends, no waiting for the
-nightly librarian. It is single-flight (shares the `run` lock, #309) and prints
+nightly librarian. It is single-flight (shares the `run` lock, athenaeum#309) and prints
 a one-line JSON summary nesting the ingest counts plus the reindex page count.
 The reusable engine is `athenaeum.librarian.session_end`; the CLI is a thin
 wrapper. The hook that fires this at SessionEnd lives in your Claude Code
@@ -383,7 +383,7 @@ athenaeum dedupe wiki-pages --dry-run --threshold 0.6
 ```
 
 `dedupe wiki-pages` clusters already-compiled concept/reference/principle
-`wiki/*.md` entity pages by topic/embedding similarity (issue #290) —
+`wiki/*.md` entity pages by topic/embedding similarity (issue athenaeum#290) —
 complementing the raw-intake clustering that runs during `athenaeum run`.
 True duplicates are routed through the existing `wiki/_pending_merges.md` /
 `resolve_merge` approval flow (never auto-applied). Writing a proposal is
@@ -401,13 +401,13 @@ athenaeum ingest-merges --path ~/knowledge
 ```
 
 `resolve_merge` does **not** archive on its own — like `resolve_question`,
-it only flips the checkbox in place. Run `ingest-merges` (issue #299) to
+it only flips the checkbox in place. Run `ingest-merges` (issue athenaeum#299) to
 move every resolved block out of `wiki/_pending_merges.md` into
 `wiki/_pending_merges_archive.md` (newest-first, append-only), keeping the
 live sidecar limited to genuinely open proposals. Idempotent — this must
 be scheduled (or run periodically); nothing else archives resolved merges,
 which is exactly how the live file grew to 5MB/67K lines in production
-before this command existed (#299).
+before this command existed (athenaeum#299).
 
 ```bash
 # Dry-run (default): print the kill-list + retained-list, change nothing.
@@ -472,7 +472,7 @@ exposes the full 11-tool surface documented above, including:
   next `ingest-answers` pass.
 - `list_pending_decisions()` returns the **unified** queue — pending
   questions AND resolver merge proposals in one call, each tagged
-  `type: "question" | "merge"` (issue #401). Merges name their source pages
+  `type: "question" | "merge"` (issue athenaeum#401). Merges name their source pages
   by human title with a one-line gist so the item reads as an answerable
   question.
 
@@ -507,12 +507,12 @@ athenaeum merges provenance [--canonical-slug S] [--merge-id ID] [--json]
 re-runs the current suppression gate (size cap + confidence floor) against
 every unresolved proposal and reports each one's `n_sources` and the
 suppression reason for anything that would now be rejected. Proposals queued
-before the gate tightened (issue #400/#421) don't get re-checked on their
+before the gate tightened (issue athenaeum#400/#421) don't get re-checked on their
 own — this command is how you find them. It is **dry-run by default**; pass
 `--apply` to archive the stale ones to `wiki/_pending_merges_archive.md`
 (non-destructive — moved, never deleted). `provenance` is the read side for
 merges that already executed: which source pages a completed merge relied
-on, from `wiki/_merge_provenance.jsonl` (issue #425).
+on, from `wiki/_merge_provenance.jsonl` (issue athenaeum#425).
 
 **Never hand-parse `wiki/_pending_merges.md`.** It is a hand-rolled markdown
 sidecar with nested code fences and multi-line fields — grep/awk against it
@@ -632,10 +632,10 @@ yaml key, and CLI flag with its code default and precedence chain — lives in
 | `ATHENAEUM_CLAUDE_CLI_BIN` | No | Path or name of the `claude` binary for the `claude-cli` provider (default: `claude`, resolved on `PATH`) |
 | `ATHENAEUM_CLAUDE_CLI_TIMEOUT` | No | Per-call timeout in seconds for the `claude-cli` subprocess (default: `300`) |
 | `ATHENAEUM_RESOLVE_MODEL` | No | Override the contradiction-resolver model (default: `claude-opus-4-7`) |
-| `ATHENAEUM_RESOLVE_MAX_PER_RUN` | No | Cap resolver calls per ingest run (default: `250`, raised from 50 in #187) |
+| `ATHENAEUM_RESOLVE_MAX_PER_RUN` | No | Cap resolver calls per ingest run (default: `250`, raised from 50 in athenaeum#187) |
 | `ATHENAEUM_MAX_API_CALLS` | No | Run-level API call budget for `athenaeum run`. Precedence: `--max-api-calls` CLI flag > env > `librarian.max_api_calls` in `athenaeum.yaml` > default `800`. Env `0` is valid and defers the entire intake (writes `wiki/_deferred_work.md` and logs the DEGRADED summary); the CLI flag rejects `0` |
 | `ATHENAEUM_MAX_FILES` | No | Per-run intake batch size for `athenaeum run`. Precedence: `--max-files` CLI flag > env > `librarian.max_files` in `athenaeum.yaml` > default `50`. Env `0` is valid (defer-everything window); the CLI flag rejects `0` |
-| `ATHENAEUM_BATCH_MODE` | No | Opt-in [Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing) mode for `athenaeum run` (#236): tier-2/tier-3 calls are submitted as batches at a 50% token discount. Latency-tolerant — most batches finish within an hour, 24h worst case — intended for the nightly run. Precedence: `--batch-mode` / `--no-batch-mode` CLI flags > env > `librarian.batch_mode` in `athenaeum.yaml` > default off (`--no-batch-mode` forces the synchronous path even when env/yaml turn batch mode on) |
+| `ATHENAEUM_BATCH_MODE` | No | Opt-in [Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing) mode for `athenaeum run` (athenaeum#236): tier-2/tier-3 calls are submitted as batches at a 50% token discount. Latency-tolerant — most batches finish within an hour, 24h worst case — intended for the nightly run. Precedence: `--batch-mode` / `--no-batch-mode` CLI flags > env > `librarian.batch_mode` in `athenaeum.yaml` > default off (`--no-batch-mode` forces the synchronous path even when env/yaml turn batch mode on) |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY` | No | Auto-apply high-confidence resolutions (default: `true`). See [`docs/auto-resolve.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/auto-resolve.md) |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | No | Confidence floor for auto-apply, in `[0.0, 1.0]` (default: `0.90`) |
 | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | No | Per-side body cap for the resolver's full-body context, ~4 chars/token (default: `1500`; must be positive) |
@@ -730,7 +730,7 @@ opt-in, for exit-code-based alerting.
 > auto-memory by default.** `raw/auto-memory/` is an *expiring intake queue*,
 > not a permanent store. As of 0.10.0, once the librarian has compiled a
 > cluster into its canonical `wiki/auto-<topic>.md` entry and the
-> contradiction detector has run clean, the move-then-retire pass (issue #261)
+> contradiction detector has run clean, the move-then-retire pass (issue athenaeum#261)
 > **moves** each non-contradictory raw fact into the wiki entry (as an
 > origin-traced footnote) and **`git rm`s the raw file** so it no longer
 > re-enters the nightly loop. This is on by default. If you upgrade and run
@@ -763,7 +763,7 @@ squash/rebase that collapses the snapshot commits, or simply never committing
 (running on a dirty repo) / never pushing to a backup remote. If you rely on
 retired-raw recovery, keep the knowledge repo's history intact and pushed.
 
-**Pushing after every run (opt-in, issue #284).** A scheduled nightly run
+**Pushing after every run (opt-in, issue athenaeum#284).** A scheduled nightly run
 commits locally, but does not push by default — so origin silently drifts and
 the git-only recovery story only holds on the machine that ran the librarian.
 Two ways to turn on a post-run push so origin stays current:
@@ -833,7 +833,7 @@ release line:
   single-user wikis do not hit it in practice, but hardened multi-writer
   safety remains future work. The `athenaeum run` / `ingest` / `reindex`
   (`rebuild-index`) commands are single-flight against each other via the run
-  lock (issue #309); the residual race is only with the example shell hook,
+  lock (issue athenaeum#309); the residual race is only with the example shell hook,
   which does not take that lock.
 - **The `keyword` search backend is a scan-on-query fallback.** It reads
   every wiki page on every query; fine under ~1,000 entities, painful past

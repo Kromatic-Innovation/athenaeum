@@ -9,8 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Public-safe OSS lint as a required CI check (athenaeum#693).** Athenaeum is
+  periodically re-exported to this public tree, and a 2026-07-31 extraction
+  shipped absolute home paths, bare internal issue references, and personal
+  attributions into public git history (which is not revocable). This adopts
+  the canonical, org-agnostic `public-safe-lint` template from
+  `code-workspace-config` **byte-for-byte** — `public-safe-lint.sh` at the repo
+  root (`git hash-object 8fa6671`) and `.github/workflows/public-safe-lint.yml`
+  (`503f12a`), verified identical to cwc `develop` and never forked or
+  hand-edited (fixes go to cwc). The scanner catches only generic *shapes* — a
+  `/Users/`/`/home/` personal path, a `~/`-rooted path, a bare `#NNN` issue
+  ref, a `+alias@` email, a personal-attribution phrase — carries zero
+  org-specific data, and needs no secret, so it runs identically on a fork PR
+  (the population most likely to leak by accident and the one CI secrets never
+  reach). It reports `file:line` + rule name only (never the matched text, which
+  would republish the leak), asserts a canary before trusting a clean verdict,
+  and prints a files-scanned/rules-evaluated denominator. The check is folded
+  into the existing **`CI Required`** aggregate (a new `public-safe-lint` job
+  added to `needs:` + the aggregate result check) so a hit blocks
+  merge/promotion — no new branch protection — while the standalone workflow
+  additionally covers fork PRs; the same adoption shape as ideate-core#118. To
+  make the tree green without editing the template: this repo's ~3,700 bare
+  `#NNN` tracker citations were scripted to `athenaeum#NNN` (a cross-repo ref
+  qualified to its own repo, e.g. a `code-workspace-config#340` fixture), the
+  convention is now recorded in `AGENTS.md`/`CONTRIBUTING.md` so the next lane's
+  first commit stays green, the two genuine findings (a `/Users/` doc path, a
+  false-positive attribution phrase) were fixed, and the legitimate
+  `~/`-config-path documentation (athenaeum's own storage surface) plus the PII
+  leak-detector test fixtures are exempted via a committed
+  `.public-safe-lintignore` (path+rule only, hits still reported) — leaving the
+  genuine personal-path leak rules fully enforced.
 - **Push-precision + coverage baseline instrumentation (v6 memory-model MVP
-  (a), #711).** The v6 epic's definition of done requires push precision
+  (a), athenaeum#711).** The v6 epic's definition of done requires push precision
   ("referenced / pushed" per session) to improve over a baseline recorded
   BEFORE any later slice changes what `recall` pushes — this is that
   instrument, shipped first so the number starts accruing now. A **push
@@ -38,7 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disable it; confirmed byte-identical recall output with instrumentation on
   vs off.
 
-- **Prompt + schema-fragment byte attribution on the run summary and `status` (#567).**
+- **Prompt + schema-fragment byte attribution on the run summary and `status` (athenaeum#567).**
   A classify/create regression could not be attributed to *which* bytes a run
   used — the operator's (possibly edited) schema fragments vs. the shipped
   prompts. Two forensic surfaces now close that gap, adding no new phase, log,
@@ -49,14 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a single aggregate `prompt_manifest=<sha8>` key over the whole prompt
   set. (2) `athenaeum status` gains one divergence line per schema fragment
   (`default` vs `edited (sha8 …)`). Source of truth is unchanged —
-  `tiers.schema_fragment_state` (#563) for the fragment bytes and the new
-  `prompt_registry.prompt_manifest_hash` aggregating `prompt_manifest` (#561);
+  `tiers.schema_fragment_state` (athenaeum#563) for the fragment bytes and the new
+  `prompt_registry.prompt_manifest_hash` aggregating `prompt_manifest` (athenaeum#561);
   no hashing is re-implemented. **No auto-update and no upgrade-time notice**
   were added: the write-once copy semantics stay, and the run-summary hash
-  provides forensics regardless (per #517's settled operator decision).
+  provides forensics regardless (per athenaeum#517's settled operator decision).
 
-- **`models.resolve` — the resolver model joins the `models:` block (#513).**
-  #232 introduced the `models:` yaml section and the shared
+- **`models.resolve` — the resolver model joins the `models:` block (athenaeum#513).**
+  athenaeum#232 introduced the `models:` yaml section and the shared
   `config.resolve_model()` precedence helper, but routed only three of the four
   model knobs through it; the contradiction resolver kept a hand-rolled
   env/yaml/default chain reading a standalone `resolve.model` key. That was a
@@ -65,16 +95,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logic, so a future change to the shared helper would silently skip the
   resolver). `resolutions._get_model` now delegates to `config.resolve_model`
   with knob `resolve`. **Backward compatible — no config edit required:** the
-  pre-#232 `resolve.model` key is still honored, threaded in as the helper's
+  pre-athenaeum#232 `resolve.model` key is still honored, threaded in as the helper's
   default so it sits below `models.resolve` but above the code default. Full
   precedence, highest first: `ATHENAEUM_RESOLVE_MODEL` env >
   `models.resolve` > `resolve.model` (legacy) > `DEFAULT_RESOLVE_MODEL`.
   The config template and `docs/configuration.md` now advertise
   `models.resolve` as the preferred key and mark `resolve.model` legacy.
-  Not to be confused with #234 (multi-provider support) — all four knobs
+  Not to be confused with athenaeum#234 (multi-provider support) — all four knobs
   remain free-form model-id strings passed to the Anthropic SDK.
 
-- **Bulk PII migration + corpus-wide PII lint (#495).** #479 shipped
+- **Bulk PII migration + corpus-wide PII lint (athenaeum#495).** athenaeum#479 shipped
   `athenaeum storage migrate-pii` as a single-page tool, but the live corpus
   needs the transform over ~11.5k entity pages, and 790 pages carry an email in
   body text of `_`-prefixed queue/index/archive files the entity-page lint
@@ -94,19 +124,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     **every** file under `wiki/` — `_`-prefixed queue/index/archive files and
     stray `.bak` files included, recursing into subdirectories — for an inline
     email/phone token, and exits non-zero (2) on any finding so a body-text
-    email cannot silently regrow after the sweep. Reuses the #427/#455
+    email cannot silently regrow after the sweep. Reuses the athenaeum#427/#455
     `find_inline_emails` / `find_inline_phones` detectors (one definition of
     "looks like contact data"). The excluded surface lives outside `wiki/` by
     construction, so migrated records are never scanned. Library entry points:
     `athenaeum.storage_migrate.iter_entity_pages` / `iter_glob_pages` and
     `athenaeum.pii.scan_corpus_pii` / `iter_corpus_files` /
     `CorpusPiiFinding`.
-- **Permanent per-phase run summary (#464, slice E of #460).** Pure
-  observability for the #440 nightly-cost profiling epic: `run()` now emits
+- **Permanent per-phase run summary (athenaeum#464, slice E of athenaeum#460).** Pure
+  observability for the athenaeum#440 nightly-cost profiling epic: `run()` now emits
   ONE machine-greppable `librarian-run-summary` log line at the end of every
-  exit path — the normal finalize AND every `_stop_on_deadline` (issue #396)
+  exit path — the normal finalize AND every `_stop_on_deadline` (issue athenaeum#396)
   124 trip — covering the phases that actually ran (wiki-dedup, the entity
-  loop, the auto-memory C2-C4 compile, retire, #188 reresolve), with each
+  loop, the auto-memory C2-C4 compile, retire, athenaeum#188 reresolve), with each
   phase's wall-clock seconds, LLM call counts, and work counts. Working
   hypothesis this unblocks measuring: C4's nightly cost is dominated by
   per-call latency of the `claude-cli` subprocess backend times the number
@@ -146,7 +176,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     or writes are affected. Additive log output + additive out-params only.
 
 - **Live-client delta-scoped auto-memory compile + periodic full-compile
-  cadence (#463, slice D of #460).** Extends the #370 PR2 delta-scoped
+  cadence (athenaeum#463, slice D of athenaeum#460).** Extends the athenaeum#370 PR2 delta-scoped
   cluster/merge machinery — previously reachable ONLY on the deterministic
   `client is None` path (session_end / ingest tier0; the original D5
   fallback ALWAYS forced a whole-corpus compile under any live LLM client)
@@ -186,7 +216,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `athenaeum run --full-compile` CLI flag (threaded into both the
     dry-run and locked `run()` call sites in `_cmd_run`) — the manual escape
     hatch for an immediate whole-corpus reconciliation.
-  - **Implementer decision:** issue #251 TTL expiry does **not**, by itself,
+  - **Implementer decision:** issue athenaeum#251 TTL expiry does **not**, by itself,
     force affected-cluster re-detection on an otherwise-eligible delta
     night — only the scheduled full-compile reconciliation re-enters
     TTL-decayed auto `not_a_conflict` suppressions. Keeping this out of the
@@ -201,8 +231,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     patch needed because the production fallback embedder's token bucketing
     uses Python's per-process-salted `hash()`).
 
-- **Outbound-draft PII lint (emails/phones) — interim mitigation (#455, split
-  from #428, epic #422).** A reusable, offline, deterministic lint that scans
+- **Outbound-draft PII lint (emails/phones) — interim mitigation (athenaeum#455, split
+  from athenaeum#428, epic athenaeum#422).** A reusable, offline, deterministic lint that scans
   outbound-destined text (email draft, Buffer post, public issue) for PII
   before it ships. Detects email addresses and phone numbers (in several
   formats), reports each finding's class + location (line/column + offsets),
@@ -212,7 +242,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silent-pass).
   - New `src/athenaeum/outbound_pii.py`: `scan_outbound_text` (flag),
     `redact_outbound_text` (strip), and the `lint_outbound_text` wrapper, plus
-    an `Allowlist` helper. Reuses the #427 `athenaeum.pii` email/phone patterns
+    an `Allowlist` helper. Reuses the athenaeum#427 `athenaeum.pii` email/phone patterns
     as the single source of truth (no second, driftable copy). No network, no
     live-store access, no LLM call.
   - New `athenaeum outbound-lint` CLI (`src/athenaeum/_cmd_outbound.py`): reads
@@ -220,9 +250,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `--json`; exits non-zero when PII is found in flag mode so a shell can gate
     a send on a clean scan. Delivers the mechanism only — wiring it into any
     specific outbound surface is separate per-surface work, and egress
-    *refusal* stays parked on #428.
+    *refusal* stays parked on athenaeum#428.
 - **Entity source-handle registry — schema + `registry.json` index builder
-  (#453, epic #422).** Adds the source-handle frontmatter keys to the
+  (athenaeum#453, epic athenaeum#422).** Adds the source-handle frontmatter keys to the
   `person`/`company` scaffold templates and a deterministic CLI step that
   compiles them into an `entity uid → handle set` index for the fact-mining
   adapters.
@@ -236,16 +266,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `wiki/*.md` and emits `registry.json`, recording only entities with at
     least one populated handle. Deterministic (uid-sorted, canonical key
     order) and LLM-free. Emits a well-formed **empty** registry when no
-    handles are populated yet — the operator-only seed (#454) is never a
+    handles are populated yet — the operator-only seed (athenaeum#454) is never a
     precondition. Tooling only; no client data lands in this public repo.
 - **Memory taxonomy — data model, validation, inference-block parser
-  (#424).** Adds `memory_class:` as a third, orthogonal frontmatter axis —
+  (athenaeum#424).** Adds `memory_class:` as a third, orthogonal frontmatter axis —
   `fact | guideline | axiom | reference | entity | decision | procedure` —
-  layered BESIDE the existing entity-schema `type:` (#93's `KNOWN_TYPES`)
+  layered BESIDE the existing entity-schema `type:` (athenaeum#93's `KNOWN_TYPES`)
   and intake `memory_type:`, both of which are untouched and remain
   byte-identical.
   - `WikiBase.memory_class` (`src/athenaeum/schemas.py`): a value outside
-    the 7 is flagged via `UserWarning` (mirrors the #93 `KNOWN_TYPES`
+    the 7 is flagged via `UserWarning` (mirrors the athenaeum#93 `KNOWN_TYPES`
     precedent); an absent value is tolerated (legacy pages don't break) and
     reported via the new `schemas.is_untyped_memory_class` /
     `_lint.lint_untyped_memory_class` predicates.
@@ -253,27 +283,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `## Inference` body blocks (`**Basis**:` wikilinks + `**Confidence**:`)
     inside a `memory_class: fact` page, parsed to addressable
     `InferenceBlock` units. Malformed blocks are flagged, not dropped or
-    silently accepted. Retraction machinery is out of scope — #433.
+    silently accepted. Retraction machinery is out of scope — athenaeum#433.
   - `WikiBase.observed_at` + `models.parse_observed_at`: the staleness axis
     for standing-state facts (true-when-observed vs. currently-true),
     distinct from `created`/`updated` and from `valid_from`/`valid_until`
-    (#308). Round-trips through parse/render.
+    (athenaeum#308). Round-trips through parse/render.
   - New [`docs/memory-taxonomy.md`](docs/memory-taxonomy.md): axis
     reconciliation, merge-vs-cite semantics (within-class merge,
-    across-class cite-never-destroy — enforcement is #433), and the
+    across-class cite-never-destroy — enforcement is athenaeum#433), and the
     inference-block grammar.
   - Data model + validation + parser + doc only — zero behavior change to
     merge/recall/embed.
 - **PII off-corpus — excluded contacts surface, entity-page lint, observation
-  log + supersession fold (#427).** Code-only slice: keeps durable identity
+  log + supersession fold (athenaeum#427).** Code-only slice: keeps durable identity
   data on entity pages and archival contact data OUT of the
   embedded/recalled/merged corpus — corpus hygiene + ambient-egress
   reduction, NOT encryption (recall injects pages into arbitrary agent
   prompts; retrieval-layer exclusion is the cheapest egress reduction).
-  Migrating live entity pages is operator task #437; the retraction cascade
-  is #435 — both out of scope here.
+  Migrating live entity pages is operator task athenaeum#437; the retraction cascade
+  is athenaeum#435 — both out of scope here.
   - New internal module [`athenaeum/pii.py`](../src/athenaeum/pii.py):
-    `contacts_surface_root` (thin convenience over #429's `excluded` adapter —
+    `contacts_surface_root` (thin convenience over athenaeum#429's `excluded` adapter —
     no hardcoded path), `is_pii_flagged` (the `pii: true` belt-and-suspenders
     frontmatter flag, mirroring `authority.is_pointer_stub`'s coercion
     contract), and the entity-page lint (`has_inline_contact_fields` /
@@ -284,12 +314,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     narrative on a page not (yet) moved to the excluded surface.
     `wiki_dedupe.discover_wiki_dedupe_candidates` does the same for merge
     candidates. A page on the `excluded` storage surface was already outside
-    every consumer's scan set by construction (#429) — no code change needed
+    every consumer's scan set by construction (athenaeum#429) — no code change needed
     there; this slice adds a test per consumer proving it.
   - `schemas.WikiBase` gains a model validator flagging inline `emails:` /
     `phones:` frontmatter on any entity page via `UserWarning` — mirrors the
-    #93 `KNOWN_TYPES` / #424 `memory_class` precedent (recoverable, not a
-    hard failure; migrating pre-existing pages is #437). Silenced by
+    athenaeum#93 `KNOWN_TYPES` / athenaeum#424 `memory_class` precedent (recoverable, not a
+    hard failure; migrating pre-existing pages is athenaeum#437). Silenced by
     `pii: true` (the explicit "every corpus consumer already excludes this"
     acknowledgment).
   - Append-only observation log `(identifier, person_id, observed_at,
@@ -314,7 +344,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     observation-log append/read/tolerant-reader tests; fold tests covering
     the shared-address and Jason/Janice correction shapes.
 - **Pluggable storage-adapter layer — entity class → surface + corpus policy
-  (#429).** Generalizes "PII lives on an excluded path" (#427) into a
+  (athenaeum#429).** Generalizes "PII lives on an excluded path" (athenaeum#427) into a
   config-swappable layer: each entity class (the wiki frontmatter `type:`)
   resolves to a *storage surface* whose backing store AND corpus policy
   (embedded / recallable / merge-eligible) are a configuration choice,
@@ -328,14 +358,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Two adapters ship built in: **`wiki-markdown-embedded`** (the default —
     today's flat `wiki/`, full corpus participation, so an unconfigured base is
     byte-identical) and **`excluded`** (a surface outside `wiki/`, no
-    embed/recall/merge — what #427's PII surface consumes). An excluded surface
+    embed/recall/merge — what athenaeum#427's PII surface consumes). An excluded surface
     is excluded from the corpus **by construction** (its root is outside the
-    scanners' search set), the fail-closed property #427 requires — no change to
+    scanners' search set), the fail-closed property athenaeum#427 requires — no change to
     the embed/recall/merge core.
   - Config-driven via a new `storage:` block in `athenaeum.yaml`
     (`storage.mapping` entity-class → adapter, `storage.adapters` custom
     definitions; `corpus_policy` keys fail closed). Adding a surface is config +
-    an adapter with no core change — the seam #426's deferred skill-file-sync
+    an adapter with no core change — the seam athenaeum#426's deferred skill-file-sync
     surface will consume.
   - The wiki-dedup merge pass now consults the layer's `merge_eligible` policy
     (`wiki_dedupe.discover_wiki_dedupe_candidates`) so a class routed to a
@@ -344,7 +374,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New [`docs/storage-adapter-contract.md`](docs/storage-adapter-contract.md),
     explicitly disambiguated from the source → raw-intake adapter contract.
 - **Documented the source → raw-intake adapter contract + a bundled
-  adapter-authoring skill (#419).** The raw-intake write API is the seam any
+  adapter-authoring skill (athenaeum#419).** The raw-intake write API is the seam any
   external source uses to feed data into the wiki, but it wasn't documented or
   packaged as a reusable "adapter" contract for OSS consumers.
   - New [`docs/adapter-contract.md`](docs/adapter-contract.md) specifies the
@@ -365,7 +395,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`prune-code-entities` no longer treats a bare `/` in an entity name as a
-  file path (#721).** #680's retire sweep keyed on the entity name being
+  file path (athenaeum#721).** athenaeum#680's retire sweep keyed on the entity name being
   file-shaped by *extension OR path separator*. The extension half works, but
   the path-separator half had no discriminating power in a corpus where slashes
   are ordinary punctuation in human and organization names — on the live store
@@ -389,9 +419,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direction. The dry run now prints the matched rule per entry and an
   extension/non-extension split (`by rule: extension=N`) so an operator can
   audit the kill-list by class. Re-running the live dry run to confirm the new
-  kill count and split is the operator step on #695.
+  kill count and split is the operator step on athenaeum#695.
 - **`lint-pii` no longer counts issue-number lists, non-ISO dates, or
-  date-into-text bleed as phone-axis PII (#720).** #683 normalized a leading
+  date-into-text bleed as phone-axis PII (athenaeum#720).** athenaeum#683 normalized a leading
   paren and cut `lint-pii` from 911 findings/107 files to 456/274, but four
   false-positive shapes survived because the fix only reached the *leading*
   paren: double/single-hyphen issue-number lists (`445--436--435--374`,
@@ -404,17 +434,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matches, unbalanced parens, dates in any ordering, year ranges in any
   separator style, multi-character separator runs, short unprefixed grouped
   runs (`<10` digits, no `+`), and lists of more than four groups — so a new
-  separator style needs no new rule. Every #500/#683 genuine-phone fixture
+  separator style needs no new rule. Every athenaeum#500/#683 genuine-phone fixture
   (`+1-555-0100`, `(555) 010-0100`, `5551234567`, `+447911123456`,
   `917-231-6130`) is preserved, and the **email axis is untouched** (pinned by
   a count assertion). The live 456→residue drop is an operator-run step
   (`athenaeum storage lint-pii` against `~/knowledge/wiki`); the deterministic
   exclusions are pinned per-shape to the values in the issue's table.
 - **The entity phase no longer starves the C4 contradiction detector of the
-  whole run window (#440).** `max_runtime` (#396) is a single deadline shared
+  whole run window (athenaeum#440).** `max_runtime` (athenaeum#396) is a single deadline shared
   by every phase, and the entity loop stopped only when that WHOLE budget was
   gone — so once the entity phase became slow enough, everything downstream of
-  it (the auto-memory compile and the C4 contradiction detector, which #461
+  it (the auto-memory compile and the C4 contradiction detector, which athenaeum#461
   moved after it) got nothing. Measured on the live corpus: entity took 3690s
   of a 3944s window (93.6%) on 3 files, and C4 received **0 seconds on 10+
   consecutive nights**, so contradictions were not being detected slowly — they
@@ -422,7 +452,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max_runtime` (`librarian.entity_runtime_share` /
   `ATHENAEUM_ENTITY_RUNTIME_SHARE`, default `0.6`) for claiming new files;
   when it is spent the phase defers the remaining intake to
-  `wiki/_deferred_work.md` (resumable, exactly like the #220 budget trip) and
+  `wiki/_deferred_work.md` (resumable, exactly like the athenaeum#220 budget trip) and
   the run **continues into C2-C4** instead of exiting `124`. Deliberately not
   the `deadline_tripped` path — that flag skips the auto-memory block, which is
   the starvation being fixed. The real wall-clock deadline still takes
@@ -433,8 +463,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`storage migrate-pii`: detect PII in ANY frontmatter value, not only
   `emails:` / `phones:`, and invalidate the search index after `--apply`
-  (#502).** After the live bulk sweep (#495) 690 pages still carried inline
-  contact data the migrator never looked at — #479's `plan_pii_migration` read
+  (athenaeum#502).** After the live bulk sweep (athenaeum#495) 690 pages still carried inline
+  contact data the migrator never looked at — athenaeum#479's `plan_pii_migration` read
   only the `emails:` / `phones:` keys, but the residual lived in `aliases:`
   (dominant — and *more* exposed than `emails:`, since aliases are recall
   matching keys), `former_emails:` / `alt_emails:` / `source:` provenance
@@ -444,13 +474,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     detectors, so a newly-invented contact key can't reopen the hole. Durable
     identifiers (`athenaeum.pii.DURABLE_IDENTIFIER_FIELDS` — name,
     `linkedin_url`, `handles_verified`, record IDs, `google_contact*`) are
-    **preserved verbatim** per #427; real aliases and non-PII provenance
+    **preserved verbatim** per athenaeum#427; real aliases and non-PII provenance
     context survive (list entries that are pure contact data are dropped; an
     address embedded in a `source:` string is redacted in place).
   - The **name-is-an-email population** (~80 pages whose `name:` /
     `preferred_name:` is itself an address) is **excluded** from this automatic
     path — renaming an entity page changes its slug and breaks inbound
-    `related:` / alias edges — and is filed as its own slice (#505). Bulk mode
+    `related:` / alias edges — and is filed as its own slice (athenaeum#505). Bulk mode
     reports the excluded count so it is visible, not silently dropped.
   - `--apply` no longer prints an unqualified success while the migrated data is
     still recallable: it now instructs a reindex (incremental suffices — a
@@ -460,7 +490,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     stays reachable via `recall`.
 
 - **Librarian: run the entity compile loop BEFORE the auto-memory block so a
-  slow C2-C4 pass can no longer starve entity intake (#461).** `run()` used
+  slow C2-C4 pass can no longer starve entity intake (athenaeum#461).** `run()` used
   to sequence the whole-corpus auto-memory block (C1 discover, C2 cluster,
   C3 merge, C4 detect) BEFORE the per-file entity tier loop. On a slow night
   the auto-memory block could consume the entire shared `max_runtime`
@@ -468,7 +498,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entity intake even though it is typically far cheaper to compile.
   - The entity phase (raw-file discovery, `EntityIndex` load, the per-file
     tier loop and its SIGTERM/SIGINT partial-commit guard, the terminal
-    commit) now runs immediately after the #290 wiki-dedup pass and its
+    commit) now runs immediately after the athenaeum#290 wiki-dedup pass and its
     deadline check (and after the `merge_only` early return), claiming the
     shared deadline and `max_api_calls` budget FIRST. The auto-memory block
     then runs after, consuming whatever budget/time remains — skipped
@@ -478,7 +508,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     returns before either phase).
   - An empty entity/raw intake no longer short-circuits the whole run: the
     auto-memory block is independent of raw entity intake and always ran
-    regardless in the pre-#461 ordering, so the empty-intake path now falls
+    regardless in the pre-athenaeum#461 ordering, so the empty-intake path now falls
     through to it instead of returning early.
   - New `max_api_calls` guard on `merge_clusters_to_wiki` (both the primary
     per-cluster C4 detector call site and the cross-scope similarity sweep):
@@ -487,7 +517,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     detector call is skipped with a deterministic `rationale=
     "budget-exhausted"` result, mirroring the existing declared-pair /
     disjoint-validity short-circuits. `None` (the default; every existing
-    caller) preserves the pre-#461 unbounded behaviour byte-for-byte.
+    caller) preserves the pre-athenaeum#461 unbounded behaviour byte-for-byte.
   - Natural consequence of the reorder: the `EntityIndex` load now happens
     before this run's own C3 merge (re)writes `wiki/auto-*.md` pages, so the
     entity tiers see auto-memory pages as they stood at the end of the
@@ -497,17 +527,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     they run AFTER both phases. Because the entity phase now runs first, the
     shared run-level `TokenUsage` keeps accruing the auto-memory C4
     detector/resolver spend after the entity loop — recording at the end of
-    the entity phase (its pre-#461 home, when it ran last) would silently
+    the entity phase (its pre-athenaeum#461 home, when it ran last) would silently
     undercount every run by the entire C4 cost, defeating the observability
-    the #460 epic depends on. Both now reflect the WHOLE run's spend, as they
-    did pre-#461.
+    the athenaeum#460 epic depends on. Both now reflect the WHOLE run's spend, as they
+    did pre-athenaeum#461.
 
 - **Librarian: persist the C3 merge output BEFORE C4 detection so a deadline
-  trip keeps the compiled pages (#462, slice B of #460).**
+  trip keeps the compiled pages (athenaeum#462, slice B of athenaeum#460).**
   `merge_clusters_to_wiki` used to build every entry (C3, deterministic), run
   the deadline-checked C4 detector/resolver loop, and only THEN write the
   pages. When C4 tripped the wall-clock deadline — which it did on 10+
-  consecutive nights (#440) — the exception propagated before the write loop
+  consecutive nights (athenaeum#440) — the exception propagated before the write loop
   and the ENTIRE C3 build was discarded: every night re-paid the full C3 build
   and banked nothing.
   - The merged pages are now written immediately after the C3 build (+ cohesion
@@ -517,15 +547,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     changed (flag added or a stale flag cleared), per entry as detection
     completes, so a later C4 trip leaves every already-detected entry persisted
     with its flag and every unprocessed entry with its durable C3 page.
-  - The #145 contract holds: no `contradiction-flagged` status is ever written
+  - The athenaeum#145 contract holds: no `contradiction-flagged` status is ever written
     without a pending question, because the flag is only rendered after
     detection + escalation. A page flagged by a prior run whose cluster now
     clears is overwritten unflagged. Dry-run still writes nothing. Escalations
     stay a single end-of-pass `tier4_escalate` batch — a C4 trip loses only the
     current run's pending-escalation batch (idempotently re-escalated next run
-    via the #157 open-block dedup + #249 resolved-records cache), never the
-    compiled pages. `out_wiki_root` (compile-as-of, #359) and `only_cluster_ids`
-    (delta, #370) semantics are unchanged.
+    via the athenaeum#157 open-block dedup + athenaeum#249 resolved-records cache), never the
+    compiled pages. `out_wiki_root` (compile-as-of, athenaeum#359) and `only_cluster_ids`
+    (delta, athenaeum#370) semantics are unchanged.
   - README gains a "Building your own adapter" section; `AGENTS.md` references
     the skill by path and name so agent sessions surface it.
 
@@ -534,7 +564,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **One unified "human decisions needed" list — `athenaeum decisions` +
-  `athenaeum merges` + `list_pending_decisions` MCP tool (#401).** Athenaeum
+  `athenaeum merges` + `list_pending_decisions` MCP tool (athenaeum#401).** Athenaeum
   accumulated two separate human-decision queues — pending **questions**
   (contradiction detector) and pending **merges** (resolver proposals) — but
   merges had **no CLI and appeared in no briefing**, so a real backlog (34
@@ -555,7 +585,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and misleads without the pages' own words. A human can decide approve/reject
     from one `decisions list` item without opening the raw wiki files.
 
-- **Kill switch — `athenaeum disable` / `enable` / `status` (#379).** One
+- **Kill switch — `athenaeum disable` / `enable` / `status` (athenaeum#379).** One
   discoverable, reversible command stops all athenaeum background work instead
   of hand-editing the hook commands out of `~/.claude/settings.json` and
   `pkill`-ing in-flight detectors. Backed by a state file
@@ -573,7 +603,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The env override wins over the file; `ATHENAEUM_DISABLED=1` (or `all` /
     `compile`) forces the state without touching the file — handy for a scoped
     one-off — and `athenaeum enable` warns when the env is still forcing it off.
-- **Durable LLM-spend ledger + `athenaeum spend` + a spend ceiling (#378).**
+- **Durable LLM-spend ledger + `athenaeum spend` + a spend ceiling (athenaeum#378).**
   Athenaeum runs on two cost models that must never be blended — the
   `claude-cli` **subscription** path (no invoice; consumes subscription quota,
   constrained in TOKENS) and the metered `anthropic` **API** path (real
@@ -600,17 +630,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     dollars). On breach the librarian pass stops early and loudly and defers
     the remaining intake (like the `max_api_calls` budget) rather than silently
     continuing. Off unless configured.
-- **Configurable pre-run pull to sync the knowledge repo (#399).** `athenaeum
+- **Configurable pre-run pull to sync the knowledge repo (athenaeum#399).** `athenaeum
   run` can now pull the knowledge repo before a run and push intake + outcomes
   after, so a run starts from and lands back to GitHub instead of drifting from
   the remote.
-- **Progress heartbeat for the merge + post-compile phases (#398).** Both
+- **Progress heartbeat for the merge + post-compile phases (athenaeum#398).** Both
   phases now emit periodic progress lines, so a long-running (or wedged) run is
   legible instead of logging zero output for hours.
 
 ### Fixed
 
-- **Move-then-retire no longer leaves dangling `MEMORY.md` pointers (#388).**
+- **Move-then-retire no longer leaves dangling `MEMORY.md` pointers (athenaeum#388).**
   The move-then-retire pass (`retire.py`) `git rm`'d a retired raw member but
   never rewrote the sibling per-scope `MEMORY.md` index that pointed at it, so
   every retirement left a dangling pointer — and unlike the compiled wiki page,
@@ -620,33 +650,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pointers to members that run retired; a pre-existing dangling pointer is left
   for the backfill), so index and deletion stay atomic. Cross-tree links
   (`../wiki/…`), URLs, anchors, headings and prose are preserved verbatim.
-  - **Backfill: `athenaeum auto-memory prune-index` (#388).** A one-shot sweep
-    for pointers already orphaned by pre-#388 runs — dry-run by default (prints
+  - **Backfill: `athenaeum auto-memory prune-index` (athenaeum#388).** A one-shot sweep
+    for pointers already orphaned by pre-athenaeum#388 runs — dry-run by default (prints
     the dangling-per-scope list, exit 2), `--apply` rewrites the affected
     indexes in one labeled, git-recoverable commit. A pointer is dangling when
     its bare `<file>.md` target no longer exists in the scope directory.
-- **Stale pre-#330 docstrings in `cli.py` (#378 drive-by).** `_cmd_ingest_answers`
+- **Stale pre-athenaeum#330 docstrings in `cli.py` (athenaeum#378 drive-by).** `_cmd_ingest_answers`
   and `_cmd_reresolve_questions` described "builds a live Anthropic client from
   `ANTHROPIC_API_KEY`"; both now build through the provider seam
-  (`build_llm_client`), matching the actual post-#330 behavior.
-- **Resolver over-cluster merges are capped and floored (#400).** Degenerate
+  (`build_llm_client`), matching the actual post-athenaeum#330 behavior.
+- **Resolver over-cluster merges are capped and floored (athenaeum#400).** Degenerate
   merge proposals (thousands of sources at low confidence, re-proposed and
   regenerated every run) are now suppressed by a cohesion floor plus a size cap.
-- **`athenaeum run` now has a wall-clock deadline (#396).** A hung
+- **`athenaeum run` now has a wall-clock deadline (athenaeum#396).** A hung
   post-checkpoint phase can no longer wedge a run indefinitely while holding the
   run-lock; the run aborts at the deadline instead.
-- **Runlock auto-recovers an alive-but-wedged holder (#397).** A stuck lock
+- **Runlock auto-recovers an alive-but-wedged holder (athenaeum#397).** A stuck lock
   holder is now detected and recovered automatically instead of blocking every
   writer until a manual `--force`.
-- **`_pending_merges.md` no longer regrows unbounded (#394).** Fixes a
-  regression of #299/#303 that let the file balloon (to ~13MB) and flood each
+- **`_pending_merges.md` no longer regrows unbounded (athenaeum#394).** Fixes a
+  regression of athenaeum#299/#303 that let the file balloon (to ~13MB) and flood each
   run with tens of thousands of malformed-header warnings.
-- **Keyword-backend scoring uses term frequency, not presence (#384).**
+- **Keyword-backend scoring uses term frequency, not presence (athenaeum#384).**
   Corrects the keyword search backend's scoring, fixing a Python 3.13 CI flake.
 
 ### Security
 
-- **Workflow hardening for OpenSSF Scorecard (#405).** Added a least-privilege
+- **Workflow hardening for OpenSSF Scorecard (athenaeum#405).** Added a least-privilege
   top-level `permissions: { contents: read }` block to `ci.yml` (closes the
   Token-Permissions / High alert) and SHA-pinned the remaining tag-referenced
   third-party actions — `dependabot/fetch-metadata`, `1password/load-secrets-action`,
@@ -657,8 +687,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.14.1] - 2026-07-12
 
-Session-end / incremental-compile efficiency (issue #370) plus a self-healing
-index backstop (#373). No public API change; opt-in config knobs only.
+Session-end / incremental-compile efficiency (issue athenaeum#370) plus a self-healing
+index backstop (athenaeum#373). No public API change; opt-in config knobs only.
 
 > **Upgrade note:** `session-end --dry-run` changed semantics — it is now a
 > cheap manifest-diff preview (no compile, no cluster/merge, no chromadb, no
@@ -668,12 +698,12 @@ index backstop (#373). No public API change; opt-in config knobs only.
 
 ### Changed — behavior
 
-- **`session-end --dry-run` is now a cheap manifest-diff preview (#370).** It no
+- **`session-end --dry-run` is now a cheap manifest-diff preview (athenaeum#370).** It no
   longer compiles, clusters, or merges, and never opens chromadb or loads the
   embedding model — it reports intended-work counts (`new_or_changed`,
   `reindex.would_change`) from the manifest diff and exits. Previously a dry-run
   paid the full whole-corpus cost.
-- **Incremental compile is delta-scoped on the `client=None` path (#370).** A
+- **Incremental compile is delta-scoped on the `client=None` path (athenaeum#370).** A
   `session-end`/`ingest` now re-clusters and re-merges only the clusters a change
   actually touches (the changed file's prior cluster plus any above-threshold
   neighbors, closed to a fixpoint over cached embeddings); other `auto-*.md` are
@@ -686,32 +716,32 @@ index backstop (#373). No public API change; opt-in config knobs only.
 
 ### Added
 
-- **Stat (mtime/size) pre-filter on the index and ingest manifests (#370).**
+- **Stat (mtime/size) pre-filter on the index and ingest manifests (athenaeum#370).**
   Unchanged files reuse their stored content hash instead of re-reading and
   re-hashing every wiki file on each build. A page whose validity window expires
   still drops with zero reads (the `valid_until` bound is recorded in the
   manifest). `--full` still forces a complete re-hash.
-- **Self-healing periodic full re-hash backstop (#373).** Config
+- **Self-healing periodic full re-hash backstop (athenaeum#373).** Config
   `librarian.reindex.full_rehash_max_age_days` (default 7): when the manifest has
   not had a full re-hash in that window, the next incremental reindex re-hashes
   every file (catching a content edit that preserved both mtime and size) while
   still applying only the delta — seconds, not a full re-embed.
 - **Delta config knobs:** `librarian.delta.enabled` (default true),
   `librarian.delta.max_affected_clusters` (8), `librarian.delta.max_affected_members`
-  (200) (#370).
+  (200) (athenaeum#370).
 
 ### Fixed
 
 - **`fetch_embeddings` crashed on chromadb's numpy embeddings array** (ambiguous
   truth-value) whenever embeddings were returned, which had effectively broken
-  vector-backend clustering; fixed on the read path (#370).
+  vector-backend clustering; fixed on the read path (athenaeum#370).
 
 
 ## [0.14.0] - 2026-07-11
 
 ### Changed — behavior
 
-- **Resolver source-precedence taxonomy expanded 7 → 9 tiers (#328).** A new
+- **Resolver source-precedence taxonomy expanded 7 → 9 tiers (athenaeum#328).** A new
   `agent-observed:<model>:<session-ref>` tier is inserted at **rank 5** (below
   `wikipedia`, above `claude:`), which re-ranks the lower tiers
   (`claude:` → 6, `script:` → 7, `model-prior:` → 8, `unsourced` → 9). Conflict
@@ -719,14 +749,14 @@ index backstop (#373). No public API change; opt-in config knobs only.
   **different winner than in 0.13.x**. The change to the taxonomy itself is
   additive (no field removed); the behavior change is in ranking.
 - **`repair --backfill-sources` rewrites the `source:` scalar of existing
-  DEFAULTED `claude:inferred` memories (#328).** With `--apply`, claims whose
+  DEFAULTED `claude:inferred` memories (athenaeum#328).** With `--apply`, claims whose
   origin transcript shows the user stated them are lifted to `user:<ref>`
   (tier 1) and claims derived from in-session artifacts to
   `agent-observed:<...>` (tier 5). This raises their precedence, so **future
   resolutions over pre-existing data can change outcome.** Dry-run by default;
   only `DEFAULTED` inferred claims are touched; idempotent (a confirmed claim
   gets `inferred_verified: true` and is never re-examined).
-- **Opinions no longer lose to precedence (#327).** Pairs classified
+- **Opinions no longer lose to precedence (athenaeum#327).** Pairs classified
   `claim_kind: opinion` with different (or unknown) asserters resolve to the
   new `attribute_both` action — both stay active, neither is superseded.
   Same-asserter dated opinions still supersede (newer wins). This changes the
@@ -735,47 +765,47 @@ index backstop (#373). No public API change; opt-in config knobs only.
 
 ### Added
 
-- **Incremental indexing for both search backends (#348).** Whole-file
+- **Incremental indexing for both search backends (athenaeum#348).** Whole-file
   content-hash diffing rebuilds only changed/new/deleted pages; an unchanged
   corpus is a sub-second no-op instead of a full re-embed. Adds `--full` and a
   config seam for the embedding model (default `all-MiniLM-L6-v2` unchanged).
-- **On-demand `athenaeum ingest` / `athenaeum reindex` (`--incremental|--full`) (#349)**
+- **On-demand `athenaeum ingest` / `athenaeum reindex` (`--incremental|--full`) (athenaeum#349)**
   — change-gated compile + index with one-line JSON summaries, single-flight.
-- **`athenaeum session-end` for cross-agent same-day recall (#350).** A
+- **`athenaeum session-end` for cross-agent same-day recall (athenaeum#350).** A
   change-gated compile-then-index entrypoint: a `remember` written in one
   session becomes recallable in another after that session ends, without
   waiting for the nightly librarian. No-op when nothing changed.
-- **`claim_kind` classification + `attribute_both` resolver action (#327)**,
+- **`claim_kind` classification + `attribute_both` resolver action (athenaeum#327)**,
   including asserter-identity comparison (`same` / `different` / `unknown`)
   with a keep-both fallback when identity is unavailable.
-- **`repair --backfill-sources` (#328)** — re-classify DEFAULTED
+- **`repair --backfill-sources` (athenaeum#328)** — re-classify DEFAULTED
   `claude:inferred` provenance from origin transcripts to `user-stated`,
   `agent-observed`, or confirmed-inferred.
-- **Scoped claims: org/locale dimensions + three-way overlap verdict (#329)**
+- **Scoped claims: org/locale dimensions + three-way overlap verdict (athenaeum#329)**
   (DISJOINT / OVERRIDE / OVERLAP), disjoint scopes short-circuit to
   not-a-conflict without an LLM call.
-- **Temporal `recall --as-of <date>` view and per-claim compiled validity (#308).**
+- **Temporal `recall --as-of <date>` view and per-claim compiled validity (athenaeum#308).**
   A historical read-time view over validity windows, and per-source validity
   stamped into compiled entries.
 - **`athenaeum compile --as-of <date> --out <dir>` — historical recompiled wiki
-  view (#359).** Distinct from the read-time `recall --as-of` filter: re-runs the
+  view (athenaeum#359).** Distinct from the read-time `recall --as-of` filter: re-runs the
   deterministic C3 blend with `as_of` threaded into the per-member validity
   predicate, writing to a scratch dir (live wiki never touched, no LLM spend), so
   a member expired-as-of-today is re-included when the date precedes its
   `valid_until` close. Valid-time rewind; transaction-time replay is documented as
   deferred (the frontmatter model lacks per-member assertion timestamps).
-- **`athenaeum serve` honors `KNOWLEDGE_RAW_PATH` / `KNOWLEDGE_WIKI_PATH` (#355)**
+- **`athenaeum serve` honors `KNOWLEDGE_RAW_PATH` / `KNOWLEDGE_WIKI_PATH` (athenaeum#355)**
   — each env var overrides its root individually; otherwise falls back to
   `<path>/raw|wiki`. Makes athenaeum's MCP server a drop-in for the standalone
   local knowledge server.
 
 ### Fixed
 
-- **Resolver aggregate eval floor recalibrated + JSON-repair retry (#345).**
+- **Resolver aggregate eval floor recalibrated + JSON-repair retry (athenaeum#345).**
   Two mislabeled golden fixtures corrected, the golden set enlarged 5 → 8, the
   floor re-derived with slack, and `propose_resolution` now retries once with a
   strict-JSON reminder when the first response has no parseable JSON object.
-- **`TestBatchSyncEquivalence` no longer hangs locally (#362).** The batch-mode
+- **`TestBatchSyncEquivalence` no longer hangs locally (athenaeum#362).** The batch-mode
   test double now reports an immediately-completing batch at create time, so the
   poll loop's real 30s sleep is skipped under test (suite runs in seconds, not
   ~60s/test); production poll cadence unchanged.
@@ -786,20 +816,20 @@ index backstop (#373). No public API change; opt-in config knobs only.
 ### Documentation
 
 - **Surface the `claude-cli` subscription backend in the top-level docs
-  (#336).** The README environment-variable table now documents
+  (athenaeum#336).** The README environment-variable table now documents
   `ATHENAEUM_LLM_PROVIDER` (`api` | `claude-cli`, default `api`) plus
   `ATHENAEUM_CLAUDE_CLI_BIN` and `ATHENAEUM_CLAUDE_CLI_TIMEOUT`, pointing to
   `docs/configuration.md` → "LLM provider selection" as the source of truth.
   `SECURITY.md`'s scope section now names the `claude-cli` subprocess backend
   — argv-list construction (no shell interpolation), ambient Claude Code auth
   (no credential handling), and neutral-cwd invocation. Docs-only; no code or
-  behavior change (the provider seam shipped in #330 / v0.13.10).
+  behavior change (the provider seam shipped in athenaeum#330 / v0.13.10).
 
 ## [0.13.12] - 2026-07-06
 
 ### Changed
 
-- **Librarian: hardened the #337 interrupt guard (post-#338 review).** The
+- **Librarian: hardened the athenaeum#337 interrupt guard (post-athenaeum#338 review).** The
   writing phase (batch/sync branch through the terminal commit) is now
   wrapped in `try/finally`, so the SIGTERM/SIGINT handlers are restored on
   **every** exit path — normal, interrupt, or an exception from
@@ -807,7 +837,7 @@ index backstop (#373). No public API change; opt-in config knobs only.
   run for an in-process caller. Documented that the partial-commit message's
   file count is tracked only by the synchronous loop: a batch-mode interrupt
   still commits any pages already written (clean tree) but reports `0
-  file(s)` (accurate batch-interrupt accounting is #236-adjacent and out of
+  file(s)` (accurate batch-interrupt accounting is athenaeum#236-adjacent and out of
   scope). No behavior change on the normal or synchronous-interrupt paths.
 
 ## [0.13.11] - 2026-07-06
@@ -815,7 +845,7 @@ index backstop (#373). No public API change; opt-in config knobs only.
 ### Changed
 
 - **Librarian: a timeout-killed run no longer strands its compile output
-  (#337).** The pre-dawn sweep bounds the librarian with a wall-clock
+  (athenaeum#337).** The pre-dawn sweep bounds the librarian with a wall-clock
   `timeout` (SIGTERM, then KILL after a grace). Previously a timeout landing
   between the start-of-run `pre-processing snapshot` commit and the terminal
   `librarian: processed N file(s)` commit left every wiki page written so far
@@ -830,25 +860,25 @@ index backstop (#373). No public API change; opt-in config knobs only.
   A normally-completing run is unchanged (still exactly one `processed N
   file(s)` commit). The handler is opt-in (CLI-only) so in-process callers
   (the MCP server, tests) keep their own signal handling. Newly relevant
-  under the `claude-cli` backend (#330), whose per-call subprocess latency
+  under the `claude-cli` backend (athenaeum#330), whose per-call subprocess latency
   makes timeouts more frequent.
 
 ## [0.13.10] - 2026-07-06
 
 ### Added
 
-- **LLM provider seam + `claude-cli` subscription backend (#330).** A new
+- **LLM provider seam + `claude-cli` subscription backend (athenaeum#330).** A new
   `athenaeum.provider` module centralizes LLM client construction behind
   `build_llm_client(config)` and `resolve_provider(config)` (env
   `ATHENAEUM_LLM_PROVIDER` > yaml `llm.provider` > `api`). Two first-party
   backends:
   - `api` (default): wraps `anthropic.Anthropic(...)` verbatim — params pass
-    through **unchanged**, so prompt caching (#230), the Messages Batch API
-    (#236), retries, and cost accounting are byte-for-byte identical to before.
+    through **unchanged**, so prompt caching (athenaeum#230), the Messages Batch API
+    (athenaeum#236), retries, and cost accounting are byte-for-byte identical to before.
   - `claude-cli`: drives the operator's ambient Claude Code **subscription**
     login via `claude -p --system-prompt <sys> --model <id> --output-format
     json`. No credential handling (same ambient-auth stance as the git-push
-    path, #284). The adapter mirrors `client.messages.create(**params)` so the
+    path, athenaeum#284). The adapter mirrors `client.messages.create(**params)` so the
     compile-path call sites (`tiers`, `contradictions`, `resolutions`) are
     unchanged; the recall-time `query_topics` preprocessor stays on the `api`
     path by design (a per-recall subprocess would add seconds to every query).
@@ -860,13 +890,13 @@ index backstop (#373). No public API change; opt-in config knobs only.
   `ATHENAEUM_BATCH_MODE` is a loud startup error (no silent fallback); and
   `claude-cli` token COUNTS are still recorded in `TokenUsage` while
   `estimated_cost_usd` reports **$0** (subscription-covered). See
-  `docs/configuration.md` → "LLM provider selection (#330)".
+  `docs/configuration.md` → "LLM provider selection (athenaeum#330)".
 
 ## [0.13.9] - 2026-07-06
 
 ### Added
 
-- **Resolver interval-close on temporal supersession (#308 slice 2).** When a
+- **Resolver interval-close on temporal supersession (athenaeum#308 slice 2).** When a
   resolution establishes a TEMPORAL supersession — the loser is
   *valid-then-replaced* history, not a wrong claim —
   `resolutions.enact_resolution` now stamps the loser's `valid_until` in
@@ -881,20 +911,20 @@ index backstop (#373). No public API change; opt-in config knobs only.
   - Never closes for `correct_*` / `forget_*` / `deprecate_both` /
     `retain_both_with_context` / `merge` / `propose_merge`.
   **Only-close-never-widen:** an existing earlier `valid_until` is preserved.
-  **Boundary reconciliation with #324:** `validity_windows_disjoint` uses a
+  **Boundary reconciliation with athenaeum#324:** `validity_windows_disjoint` uses a
   strict `<` on the inclusive `valid_until`, so `loser.valid_until =
   winner.valid_from` leaves the pair non-disjoint at the shared boundary day by
   design — safe because the superseded loser is also inactive via
   `is_inactive_memory`. No minus-one-day is subtracted. Exact stamped value
   pinned by `tests/test_conflict_resolution.py::TestIntervalCloseSlice2`.
-  Follow-up #329 generalizes the close to non-time scopes (org/locale).
+  Follow-up athenaeum#329 generalizes the close to non-time scopes (org/locale).
 
 ## [0.13.8] - 2026-07-06
 
 ### Added
 
 - **Detector skips disjoint-validity pairs; scope header in member snippets
-  (#324).** Two claims whose validity windows are DISJOINT (A true through
+  (athenaeum#324).** Two claims whose validity windows are DISJOINT (A true through
   March, B true from April) are sequential states of the world and cannot
   conflict — yet the C4 detector kept re-flagging them every compile, wasting a
   Haiku call and re-queuing already-answered pending questions. A shared
@@ -905,7 +935,7 @@ index backstop (#373). No public API change; opt-in config knobs only.
   - **Pre-detection short-circuit (merge.py).** When every undeclared pair in a
     cluster is pairwise-disjoint, the detector LLM call is skipped entirely and
     the cluster records `detected=False` with rationale `disjoint-validity` —
-    mirroring the declared-relationship short-circuit (#167). The
+    mirroring the declared-relationship short-circuit (athenaeum#167). The
     similarity-sweep path skips disjoint pairs the same way.
   - **Post-detection guard (merge.py).** An otherwise-overlapping cluster can
     still have the detector flag a specific disjoint pair; that verdict is
@@ -925,7 +955,7 @@ index backstop (#373). No public API change; opt-in config knobs only.
 
 ### Added
 
-- **Provenance/context header on `recall` hits (#325).** Each recall hit now
+- **Provenance/context header on `recall` hits (athenaeum#325).** Each recall hit now
   renders a compact metadata header between its `**Tags:**` line and snippet so
   a consuming agent can judge a fact's trust and currency without opening the
   page: a `·`-joined `**Source:**` (`source_type` + the date part of
@@ -948,7 +978,7 @@ index backstop (#373). No public API change; opt-in config knobs only.
 ### Documentation
 
 - **Surface `serve --audience` where operators wire up agents.** The
-  audience-scoped read access added in 0.13.4 (#312) was documented only in
+  audience-scoped read access added in 0.13.4 (athenaeum#312) was documented only in
   `docs/configuration.md` / `docs/security-posture.md`. The README "MCP memory
   server" section now shows `athenaeum serve --audience`, states the default is
   full-wiki-readable, and clarifies it is a single-owner read filter (not a
@@ -960,7 +990,7 @@ index backstop (#373). No public API change; opt-in config knobs only.
 ### Added
 
 - **Claim-level temporal validity — `valid_from` / `valid_until` foundation
-  (#308, slice 1).** Supersession was a flat boolean tombstone
+  (athenaeum#308, slice 1).** Supersession was a flat boolean tombstone
   (`superseded_by` / `deprecated`) that cannot say *when* a fact stopped being
   true or answer "what did we believe on date X". This slice adds optional
   ISO-8601 date frontmatter — `valid_from:` / `valid_until:` — declaring the
@@ -995,7 +1025,7 @@ index backstop (#373). No public API change; opt-in config knobs only.
 ### Added
 
 - **Audience-scoped recall — fail-closed read access for secondary agents
-  (#312).** The MCP `recall` tool and the FTS5/vector/keyword recall index
+  (athenaeum#312).** The MCP `recall` tool and the FTS5/vector/keyword recall index
   previously exposed the WHOLE wiki to any caller, with no read scoping. A
   scheduled routine (e.g. a Voltaire-style email-drafting agent) that needs
   operational knowledge could also read the owner's PII / client-confidential /
@@ -1041,7 +1071,7 @@ index backstop (#373). No public API change; opt-in config knobs only.
 
 ### Added
 
-- **Warn-only wiki page-size guardrails (#310).** Nothing bounded or flagged
+- **Warn-only wiki page-size guardrails (athenaeum#310).** Nothing bounded or flagged
   wiki page size; long pages blow the tier-3 merge budget (merges reproduce
   the whole body, so token cost scales with size), crowd out other recall
   breadcrumbs, and usually signal poorly-factored knowledge. `athenaeum
@@ -1064,7 +1094,7 @@ index backstop (#373). No public API change; opt-in config knobs only.
 
 ### Added
 
-- **Single-machine run lock guards overlapping mutating runs (#309).** There
+- **Single-machine run lock guards overlapping mutating runs (athenaeum#309).** There
   was no concurrency guard on `athenaeum run` (or the other mutating
   subcommands), so a nightly cron overlapping a manual run — or two sessions —
   could race whole-file wiki writes (lost updates), interleave block appends
@@ -1086,7 +1116,7 @@ index backstop (#373). No public API change; opt-in config knobs only.
   without `fcntl` degrade gracefully (logged warning, no lock). A new
   `librarian.lock_timeout` knob (env `ATHENAEUM_LOCK_TIMEOUT`, default `0` =
   fail-fast) sets the default wait window.
-- **Atomic sidecar appends (#309).** Every append/rewrite of the
+- **Atomic sidecar appends (athenaeum#309).** Every append/rewrite of the
   `_pending_questions.md` / `_pending_merges.md` sidecars (and their
   `_archive.md` siblings) now goes through `athenaeum.atomic_io.atomic_write_text`
   — a same-directory temp file plus `os.replace`, so a crash mid-append can
@@ -1097,7 +1127,7 @@ index backstop (#373). No public API change; opt-in config knobs only.
 
 ### Fixed
 
-- **Cluster JSONL rotations no longer accumulate forever (#311).** Every
+- **Cluster JSONL rotations no longer accumulate forever (athenaeum#311).** Every
   `athenaeum run` writes a timestamped `<stem>-<UTC-iso>.jsonl` rotation
   next to the canonical cluster report; nothing pruned them, so they grew
   unbounded (~365/yr). The cluster pass now prunes old rotations after each
@@ -1118,7 +1148,7 @@ it exposed, and hardens against a self-resolving-document injection surface.
 
 ### Added
 
-- **`athenaeum ingest-merges` CLI command (#299, #303).** Archives
+- **`athenaeum ingest-merges` CLI command (athenaeum#299, athenaeum#303).** Archives
   resolved (`[x]`-checked) blocks out of the live `_pending_merges.md`
   sidecar into `_pending_merges_archive.md`, mirroring `ingest-answers`
   for the pending-questions sidecar. Nothing else drains this file, so
@@ -1130,19 +1160,19 @@ it exposed, and hardens against a self-resolving-document injection surface.
 ### Fixed
 
 - **Tier 2 classification hallucinating placeholder-label entities
-  (#296).** `CLASSIFY_SYSTEM` guardrail plus a post-filter regex in
+  (athenaeum#296).** `CLASSIFY_SYSTEM` guardrail plus a post-filter regex in
   `parse_tier2_entities` reject any classified name matching the exact
   "Member N"/"Member a" shape the pipeline's own contradiction/resolution
   prompts use as scratch labels, with a warning log on drop.
 - **Tier 3 merge accumulating near-duplicate "confirmed again" bullets
-  (#297, #302).** `MERGE_SYSTEM` now instructs folding a re-confirming
+  (athenaeum#297, athenaeum#302).** `MERGE_SYSTEM` now instructs folding a re-confirming
   observation into an existing bullet's footnotes instead of appending a
   duplicate. The `existing_body` input cap was raised from 4,000 to
   20,000 characters so the guard isn't blind on already-bloated pages,
   with the merge call's output budget (`max_tokens`) raised in lockstep
   and a `stop_reason == "max_tokens"` guard that refuses to overwrite a
   page with a truncated response, escalating for human review instead.
-- **Self-resolving documents bypassing pipeline judgment (#300, #304).**
+- **Self-resolving documents bypassing pipeline judgment (athenaeum#300, athenaeum#304).**
   `CLASSIFY_SYSTEM`/`CREATE_SYSTEM`/`MERGE_SYSTEM` now instruct treating
   an embedded claim of the document's own human confirmation/ratification
   as untrusted, not independent verification. A new deterministic
@@ -1160,7 +1190,7 @@ fence-parsing hardening that the wiki-dedup drafts depend on.
 
 ### Added
 
-- **Wiki-page clustering against each other (#290).** The merge-detection
+- **Wiki-page clustering against each other (athenaeum#290).** The merge-detection
   pass now clusters already-compiled `wiki/*.md` entity pages by
   topic/embedding similarity, not just `raw/auto-memory/*` intake, routing
   true duplicates through the existing `_pending_merges.md` /
@@ -1168,7 +1198,7 @@ fence-parsing hardening that the wiki-dedup drafts depend on.
   subcommand runs the pass standalone; `athenaeum run` also runs it
   automatically whenever `wiki/` exists (append-only proposals, failures
   are logged and non-fatal).
-- **Opt-in post-run `git push` (#284).** New `librarian.push_after_run`
+- **Opt-in post-run `git push` (athenaeum#284).** New `librarian.push_after_run`
   config knob (default off) pushes the librarian's commits to the
   configured remote/branch after a run completes, closing a recovery gap
   where processed knowledge stayed local-only. Uses the ambient git
@@ -1178,7 +1208,7 @@ fence-parsing hardening that the wiki-dedup drafts depend on.
 
 ### Fixed
 
-- **`pending_merges.py` fence-parsing bugs (#289, #291, #292).**
+- **`pending_merges.py` fence-parsing bugs (athenaeum#289, athenaeum#291, athenaeum#292).**
   `_split_blocks()` now tracks fence state so `---`/`## ` lines inside a
   fenced `**Draft**:` body (YAML frontmatter, markdown subheadings) are no
   longer mistaken for block/paragraph delimiters, and a block whose fence
@@ -1198,16 +1228,16 @@ literals from the shipped package.
 
 ### Added
 
-- **Cross-entity recurring-claim detector — `athenaeum claims --find` (#272,
-  slice 1 of #258).** New read-only `recurring_claims` module extracts claim
-  occurrences from wiki entities (footnote source claims per #262, else a
+- **Cross-entity recurring-claim detector — `athenaeum claims --find` (athenaeum#272,
+  slice 1 of athenaeum#258).** New read-only `recurring_claims` module extracts claim
+  occurrences from wiki entities (footnote source claims per athenaeum#262, else a
   body-sentence fallback), groups cross-entity restatements via an injected
   embedding provider and pairwise cosine `>=` threshold, and renders a YAML
   report. Group keys are stable and order-independent (mirroring
   `fingerprint.claim_pair_fingerprint`). The new `athenaeum claims --find`
   CLI subcommand runs the detector over the recall-index embedding provider.
   **READ-ONLY: never mutates `wiki/`.**
-- **Ephemeral auto-memory intake classifier (#280, part 1 of #278).** New
+- **Ephemeral auto-memory intake classifier (athenaeum#280, part 1 of athenaeum#278).** New
   `ephemeral` module with `classify_ephemeral` (raw intake) and
   `classify_ephemeral_page` (compiled page). Precision order:
   explicit `ephemeral: true` frontmatter flag > ephemeral-scope glob >
@@ -1220,14 +1250,14 @@ literals from the shipped package.
   `ephemeral_scopes` (scope glob patterns, default-empty) and
   `operational_markers` (lower-cased content substrings, default-empty;
   needs `>= 2` to fire). See [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md).
-- **`athenaeum auto-memory prune` CLI for existing operational pages (#280,
-  part 2 of #278).** New `auto_memory_prune` module builds a kill-list of
+- **`athenaeum auto-memory prune` CLI for existing operational pages (athenaeum#280,
+  part 2 of athenaeum#278).** New `auto_memory_prune` module builds a kill-list of
   operational `wiki/auto-*.md` pages using the same classifier (not loose
   keyword matching). `--dry-run` is the **default** (prints kill-list +
   retained-list with reasons, exits `2` when candidates exist); `--apply`
   `git rm`s only the listed files in one labeled commit and rebuilds the
   recall index. Recovery is git-only.
-- **Cluster-cohesion floor for cross-scope over-clusters (#281, #278).** Two
+- **Cluster-cohesion floor for cross-scope over-clusters (athenaeum#281, athenaeum#278).** Two
   default-off yaml knobs under `librarian:` suppress the
   `similarity`-clustering path's low-cohesion blend pages (single-linkage
   chaining a coherent doc together with vaguely-similar session-notes from
@@ -1245,18 +1275,18 @@ literals from the shipped package.
 
 ### Internal
 
-- **Purged operator identity literals from shipped `src/` (#269).** OSS-hygiene
+- **Purged operator identity literals from shipped `src/` (athenaeum#269).** OSS-hygiene
   pass removing personal names, usernames, and machine paths from the
   published package source. No behavior change; the runtime owner remains
-  config-driven (#263) and inert when no owner is configured.
+  config-driven (athenaeum#263) and inert when no owner is configured.
 
 ## [0.10.0] - 2026-06-27
 
-The expiring-intake-queue epic (#259) lands as four slices. `raw/auto-memory/`
+The expiring-intake-queue epic (athenaeum#259) lands as four slices. `raw/auto-memory/`
 becomes a queue that drains into the wiki instead of a permanent store.
 
 > **Upgrade impact — `athenaeum run` now MOVES and DELETES raw auto-memory by
-> default (slice B, #261).** Once the librarian compiles a cluster into its
+> default (slice B, athenaeum#261).** Once the librarian compiles a cluster into its
 > `wiki/auto-<topic>.md` entry and the contradiction detector runs clean, the
 > new move-then-retire pass moves each non-contradictory raw fact into the wiki
 > (as an origin-traced footnote) and **`git rm`s the raw file**. This is
@@ -1269,7 +1299,7 @@ becomes a queue that drains into the wiki instead of a permanent store.
 
 ### Added
 
-- **Move-then-retire lifecycle for raw auto-memory (#261, slice B of #259).**
+- **Move-then-retire lifecycle for raw auto-memory (athenaeum#261, slice B of athenaeum#259).**
   New `retire.py`. After the C3 merge + C4 detection, `athenaeum run` MOVES
   non-contradictory raw facts into their canonical wiki entry (with footnotes
   and a `retired: true` marker) and `git rm`s the raw so it stops re-entering
@@ -1284,8 +1314,8 @@ becomes a queue that drains into the wiki instead of a permanent store.
   opt-out via the `athenaeum run --no-retire` CLI flag or the
   `librarian.retire` yaml toggle (default `true`); when disabled the raw is
   neither moved nor deleted.
-- **Origin-traced source footnotes for compiled facts (#260, slice A of
-  #259).** The source schema gains `source_type`
+- **Origin-traced source footnotes for compiled facts (athenaeum#260, slice A of
+  athenaeum#259).** The source schema gains `source_type`
   (`user-stated` | `external` | `document` | `inferred`, default `inferred`)
   and `source_ref`, rendered by `render_source_footnotes`. A new read-only
   `transcript_verify` module verifies user-stated claims against the session
@@ -1294,7 +1324,7 @@ becomes a queue that drains into the wiki instead of a permanent store.
   transcript confirms it (never citing the raw `auto-memory/...` filename as
   the ultimate source). New citation policy at
   `policies/auto-memory-citation.md`.
-- **Owner-singleton invariant (#263, slice D of #259).** A config-driven
+- **Owner-singleton invariant (athenaeum#263, slice D of athenaeum#259).** A config-driven
   `owner` block (`config.resolve_owner`, never hardcoded in source) keeps the
   knowledge base's owner a single canonical person instead of fragmenting
   across commit-authorship and footnotes. Owner fragments auto-bind in
@@ -1307,20 +1337,20 @@ becomes a queue that drains into the wiki instead of a permanent store.
 
 ### Changed
 
-- **Retarget the contradiction engine from raw atoms to wiki footnotes (#262,
-  slice C of #259).** The cross-scope similarity sweep
+- **Retarget the contradiction engine from raw atoms to wiki footnotes (athenaeum#262,
+  slice C of athenaeum#259).** The cross-scope similarity sweep
   (`cross_scope.cross_scope_similarity_pairs`) no longer cross-products
   `wiki/**` against itself. A new `require_raw_side` argument (default `True`)
   drops candidate pairs where both sides are wiki entries, so re-detection only
   compares NEW raw intake against the matching (topically-similar) wiki entry.
-  With move-then-retire (#261) deleting the raw atom on move, this collapses the
+  With move-then-retire (athenaeum#261) deleting the raw atom on move, this collapses the
   number of detector/adjudication (Haiku/Opus) calls from O(corpus²) — one per
   topically-similar wiki pair — to **O(new intake + open contradictions)**. The
   sweep also short-circuits before the wiki embedding fetch + N² cosine loop
   when there is no raw intake at all, so an unchanged corpus with zero new
   intake does no corpus-scale work and produces 0 detector calls (instead of
   one per wiki-pair).
-- **Persist the granular diff target on the wiki footnote (#262).** When a fact
+- **Persist the granular diff target on the wiki footnote (athenaeum#262).** When a fact
   is moved into a wiki entry, `retire.py` now stamps the atomic `claim` text —
   and a resolved `verdict`/disposition when one exists (a cleared detector
   over-fire or a declared supersession/refinement) — onto the fact's source.
@@ -1331,8 +1361,8 @@ becomes a queue that drains into the wiki instead of a permanent store.
 
 ### Deprecated
 
-- **`contradiction.resolved_similarity_threshold` (#211) and
-  `contradiction.not_a_conflict_ttl_days` (#251) are deprecated (#262).** They
+- **`contradiction.resolved_similarity_threshold` (athenaeum#211) and
+  `contradiction.not_a_conflict_ttl_days` (athenaeum#251) are deprecated (athenaeum#262).** They
   existed only to babysit the permanent-raw design — suppressing re-detection of
   the same raw atoms forever, or for a TTL window. With retire-on-move +
   footnote-targeting the atom never re-enters the sweep, so both knobs are moot.
@@ -1343,7 +1373,7 @@ becomes a queue that drains into the wiki instead of a permanent store.
 
 ### Known limitations
 
-- **Wiki-vs-wiki drift not re-detected (#2, accepted per #259).** Two facts
+- **Wiki-vs-wiki drift not re-detected (#2, accepted per athenaeum#259).** Two facts
   that live only in the wiki (their raw originals retired) and that never
   attract a new topically-similar raw intake are no longer compared against
   each other, so a contradiction emerging purely between two settled wiki facts
@@ -1375,10 +1405,10 @@ _Honest per-run LLM cost accounting, and an incremental contradiction pass that 
 
 ### Added
 
-- **Read-time decay of stale auto `not_a_conflict` suppressions (#251).** A new
+- **Read-time decay of stale auto `not_a_conflict` suppressions (athenaeum#251).** A new
   `contradiction.not_a_conflict_ttl_days` knob (env
   `ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS`, code default `0` = disabled, not seeded in
-  `_DEFAULTS` per #231) decays cached auto `not_a_conflict` verdicts at read
+  `_DEFAULTS` per athenaeum#231) decays cached auto `not_a_conflict` verdicts at read
   time. When set `> 0`, an auto suppression whose `resolved_at` is older than the
   TTL is dropped from the confirmation-pass skip set (`merge.py`), so the
   claim-pair re-enters the Opus confirmation instead of being suppressed
@@ -1396,13 +1426,13 @@ _Honest per-run LLM cost accounting, and an incremental contradiction pass that 
   simply re-interpreted. Re-validation flows through the existing
   `resolve_max_per_run` cap, so a large expired backlog spreads across nights
   rather than spiking one Opus bill.
-- **Incremental `not_a_conflict` caching for the nightly contradiction pass (#249).** Auto-cleared `not_a_conflict` claim-pairs are now cached (`resolved_by: "auto"` rows in `raw/_resolved_contradictions.jsonl`) so the nightly Opus confirmation pass skips pairs it already settled, cutting a full re-confirmation run from roughly seven hours to minutes. A material edit to either claim changes the fingerprint and re-escalates that pair; a per-run write-dedup set bounds cache-file growth. Read-time decay of these auto verdicts (#251) is a later, opt-in follow-up.
-- **Usage accounting for the `ingest-answers` free-text path (#248).**
+- **Incremental `not_a_conflict` caching for the nightly contradiction pass (athenaeum#249).** Auto-cleared `not_a_conflict` claim-pairs are now cached (`resolved_by: "auto"` rows in `raw/_resolved_contradictions.jsonl`) so the nightly Opus confirmation pass skips pairs it already settled, cutting a full re-confirmation run from roughly seven hours to minutes. A material edit to either claim changes the fingerprint and re-escalates that pair; a per-run write-dedup set bounds cache-file growth. Read-time decay of these auto verdicts (athenaeum#251) is a later, opt-in follow-up.
+- **Usage accounting for the `ingest-answers` free-text path (athenaeum#248).**
   `propose_freetext_source_edits` (the last LLM call invisible to cost
   accounting) gains an optional `usage: TokenUsage | None = None` keyword and
   accumulates its response's token + cache counts via `add_tokens(...,
   model=<resolved model>)` — tokens and cache counters only, never an
-  `api_calls` bump (the caller counts attempts, per the #239 convention). The
+  `api_calls` bump (the caller counts attempts, per the athenaeum#239 convention). The
   `ingest-answers` CLI path (`answers.ingest_answers`) now creates a run-level
   `TokenUsage`, threads it through `_writeback_source` into the proposer,
   bumps `api_calls` once per attempted proposer call at the call site, and
@@ -1415,7 +1445,7 @@ _Honest per-run LLM cost accounting, and an incremental contradiction pass that 
 
 ### Changed
 
-- **Per-model cost attribution in `TokenUsage.estimated_cost_usd` (#247).**
+- **Per-model cost attribution in `TokenUsage.estimated_cost_usd` (athenaeum#247).**
   Token-accumulation methods (`TokenUsage.add` / `add_tokens` /
   `add_batch_tokens`) gain an optional `model=` keyword; the call sites that
   know the serving model (tier-2/tier-3 in `tiers.py`, the C4 detector in
@@ -1435,7 +1465,7 @@ _Honest per-run LLM cost accounting, and an incremental contradiction pass that 
 
 ### Added
 
-- **Opt-in Batch API mode for the librarian's tier-2/tier-3 calls (#236).**
+- **Opt-in Batch API mode for the librarian's tier-2/tier-3 calls (athenaeum#236).**
   `athenaeum run --batch-mode` (env `ATHENAEUM_BATCH_MODE`, yaml
   `librarian.batch_mode`; CLI > env > yaml > default off) restructures the
   entity-tier loop into phased fan-out against the
@@ -1444,7 +1474,7 @@ _Honest per-run LLM cost accounting, and an incremental contradiction pass that 
   tier-2 classification, phase 2 batches every tier-3 create plus the
   tier-3 merges whose target page is touched exactly once this run —
   same-page merges stay synchronous, serialized in intake order. The
-  run-level API budget (#220) is enforced at batch-assembly time (each
+  run-level API budget (athenaeum#220) is enforced at batch-assembly time (each
   batched request counts as one `api_calls` attempt; the truncated
   remainder lands in the `_deferred_work.md` manifest), per-result
   `errored`/`expired`/`canceled` outcomes map onto the existing per-file
@@ -1453,35 +1483,35 @@ _Honest per-run LLM cost accounting, and an incremental contradiction pass that 
   `estimated_cost_usd` via new batch-attributed counters. The synchronous
   path is untouched when the flag is off. The C4 detector and resolver
   calls are not batched (tier-2/tier-3 dominate spend).
-- **Resolver-phase cache observability (#239).** The merge-phase
+- **Resolver-phase cache observability (athenaeum#239).** The merge-phase
   contradiction detector (Haiku) and resolver (Opus) calls — including the
-  #188 reresolve heal pass — now feed their token and prompt-cache counters
+  athenaeum#188 reresolve heal pass — now feed their token and prompt-cache counters
   into the run-level `TokenUsage`, so the librarian run summary's
   `(cache: N written, N read)` line reflects resolver traffic instead of
   only the entity tiers. Previously these call sites only bumped
   `api_calls`. New `TokenUsage.add_tokens()` accumulates counters without
   incrementing `api_calls`, for call sites that count attempts separately.
-- **Cache-aware `estimated_cost_usd` (#239).** The API's `input_tokens`
+- **Cache-aware `estimated_cost_usd` (athenaeum#239).** The API's `input_tokens`
   excludes cached tokens, so the run-summary cost estimate now folds in
   the cache counters at the documented multipliers — cache writes at
   1.25x the blended input rate, cache reads at ~0.1x — instead of
   silently omitting cached traffic.
-- **Prompt caching on the resolver system prompt (#230).** The
+- **Prompt caching on the resolver system prompt (athenaeum#230).** The
   contradiction-resolver call now sets a `cache_control: ephemeral`
   breakpoint on its static system prompt, so repeated resolver calls
   within a run hit the Anthropic prompt cache instead of re-billing the
   full prompt as fresh input tokens, and cache usage (cache writes /
-  cache reads) is logged per call. Shipped via PR #237; the
-  resolver-phase cache observability work above (#239) builds on these
+  cache reads) is logged per call. Shipped via PR athenaeum#237; the
+  resolver-phase cache observability work above (athenaeum#239) builds on these
   counters.
-- **Canonical configuration reference at `docs/configuration.md` (#233).**
+- **Canonical configuration reference at `docs/configuration.md` (athenaeum#233).**
   One page listing every operator-tunable knob — librarian run budgets,
   model selection, contradiction/resolver tuning, recall/search, and the
   hook/sidecar environment — with env var, yaml key, CLI flag, code
   default, and the global precedence convention (CLI > env > yaml > code
   default). Includes the `ANTHROPIC_BASE_URL` escape hatch for serving
   alternative models through a LiteLLM proxy or any Anthropic-compatible
-  gateway (multi-provider support tracked in #234). The README env table
+  gateway (multi-provider support tracked in athenaeum#234). The README env table
   gains the previously undocumented rows (`ATHENAEUM_CACHE_DIR`,
   `ATHENAEUM_TIER4_DEDUP`, `ATHENAEUM_CROSS_SCOPE_MODE`,
   `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD`,
@@ -1489,28 +1519,28 @@ _Honest per-run LLM cost accounting, and an incremental contradiction pass that 
   `ATHENAEUM_PYTHON`) and links to the full reference; the duplicated
   config tables in `docs/auto-resolve.md` and
   `docs/contradiction-detection.md` are trimmed to link there instead.
-- **`--max-files` gains env and yaml knobs (#232).** The per-run intake batch
+- **`--max-files` gains env and yaml knobs (athenaeum#232).** The per-run intake batch
   size now resolves CLI `--max-files` > `ATHENAEUM_MAX_FILES` env >
-  `librarian.max_files` yaml > default 50, mirroring the #220
+  `librarian.max_files` yaml > default 50, mirroring the athenaeum#220
   `--max-api-calls` pattern. The flag also now validates positive integers
   at parse time (zero/negative/non-numeric values are an argparse error,
   matching `--max-api-calls`).
-- **New `models:` yaml section for the env-only model knobs (#232).**
+- **New `models:` yaml section for the env-only model knobs (athenaeum#232).**
   `models.classify` (Tier-2 classifier + C4 contradiction detector, env
   `ATHENAEUM_CLASSIFY_MODEL`), `models.write` (Tier-3 writer, env
   `ATHENAEUM_WRITE_MODEL`), and `models.topic` (recall query-topic
   extraction, env `ATHENAEUM_TOPIC_MODEL`). Per knob: env wins over yaml,
   yaml wins over the code default. The contradiction-resolver model is
   unchanged and stays at `resolve.model`. None of the new keys are seeded
-  into config defaults, preserving the #231 fix.
-- **GitHub Release automation in `release.yml` (#235).** After the PyPI
+  into config defaults, preserving the athenaeum#231 fix.
+- **GitHub Release automation in `release.yml` (athenaeum#235).** After the PyPI
   publish job succeeds, a new `github-release` job creates the GitHub
   Release for the pushed tag, with the matching `[X.Y.Z]` section of
   CHANGELOG.md as the release notes. Idempotent: if a release already
   exists for the tag (e.g. cut manually with `gh release create`), the job
   skips cleanly instead of failing or duplicating. Uses the workflow's
   `GITHUB_TOKEN` with job-scoped `contents: write` — no new secrets.
-- **Startup warning when the API budget resolves to 0 (#235).** Env/yaml
+- **Startup warning when the API budget resolves to 0 (athenaeum#235).** Env/yaml
   `0` is a valid defer-everything cap, but it is also the most likely
   accidental misconfiguration. `athenaeum run` now logs a prominent
   warning at run start ("API budget is 0 — all LLM tiers deferred this
@@ -1519,31 +1549,31 @@ _Honest per-run LLM cost accounting, and an incremental contradiction pass that 
 
 ### Changed
 
-- **anthropic SDK floor raised from `>=0.30.0` to `>=0.39.0` (#236).** The
+- **anthropic SDK floor raised from `>=0.30.0` to `>=0.39.0` (athenaeum#236).** The
   Messages Batch API surface used by the new `--batch-mode` requires SDK
   0.39.0. Environments pinned to anthropic 0.30–0.38 must upgrade the SDK
   before installing this release; the `<1.0` upper bound is unchanged.
-- **README polish (#235).** Tagline reworded from "production-grade" to
+- **README polish (athenaeum#235).** Tagline reworded from "production-grade" to
   "production-tested" (consistent with the honest pre-1.0 framing in Known
   Limitations), and the hero image moved below the value-prop line and
   shrunk so the install command stays above the fold on small windows.
-- **CONTRIBUTING.md gains a project-continuity note (#235).** One paragraph
+- **CONTRIBUTING.md gains a project-continuity note (athenaeum#235).** One paragraph
   stating plainly that the project has a single primary maintainer today,
   and what users can rely on if it goes quiet: Apache-2.0 fork rights, the
   repo and history staying public, and releases reproducible from source.
 - **docs/configuration.md records the env-0/CLI-0 asymmetry decision
-  (#235).** A design-decision note next to the budget table: CLI flags
+  (athenaeum#235).** A design-decision note next to the budget table: CLI flags
   reject `0` (typo guard at the interactive surface) while env/yaml accept
   `0` as a deliberate defer-everything cap — intentional, decided
-  2026-06-12, refs #235 and the #240 review.
+  2026-06-12, refs athenaeum#235 and the athenaeum#240 review.
 
 ### Fixed
 
-- **Config `_DEFAULTS` no longer shadow module code defaults (#231).**
+- **Config `_DEFAULTS` no longer shadow module code defaults (athenaeum#231).**
   `load_config()` seeded concrete values for `contradiction.*` and
   `librarian.cluster_threshold` / `cluster_output` into every loaded
   config, so resolver functions always saw a "user-set" value and their
-  own code defaults were unreachable. Most visibly, the #187 resolver-cap
+  own code defaults were unreachable. Most visibly, the athenaeum#187 resolver-cap
   raise (50 -> 250) never took effect through the config path — the
   default resolver cap was silently 50. Those keys are removed from
   `_DEFAULTS`; the module-level defaults (and their env > yaml > default
@@ -1561,21 +1591,21 @@ work instead of reporting a clean "Done".
 
 ### Added
 
-- **`athenaeum run --path` as an alias for `--knowledge-root` (#227).** `run`
+- **`athenaeum run --path` as an alias for `--knowledge-root` (athenaeum#227).** `run`
   now accepts the same `--path` spelling as `init`/`status`/`serve`;
   `--knowledge-root` keeps working unchanged.
-- **`athenaeum run --strict-budget` (#227).** Opt-in flag that makes a
+- **`athenaeum run --strict-budget` (athenaeum#227).** Opt-in flag that makes a
   budget-tripped (DEGRADED) run exit nonzero for exit-code-based alerting.
   Default behavior is unchanged: exit 0 with the warning summary and the
   `wiki/_deferred_work.md` manifest.
 
 ### Changed
 
-- **Run-level API call budget is configurable and counts every call (#220).**
+- **Run-level API call budget is configurable and counts every call (athenaeum#220).**
   The budget now resolves `ATHENAEUM_MAX_API_CALLS` env var over
   `librarian.max_api_calls` yaml over the default, and the default is raised
   from 200 to 800 — quadrupling the default per-run API cost ceiling — to fit
-  the post-#187 full-coverage confirmation-pass profile. Operators who want
+  the post-athenaeum#187 full-coverage confirmation-pass profile. Operators who want
   the previous ceiling should pin it explicitly via the env var, yaml key, or
   CLI flag. The counter now includes merge-phase detector/resolver and
   nightly re-resolve calls, making it a true run-level ceiling. The CLI
@@ -1587,7 +1617,7 @@ work instead of reporting a clean "Done".
 
 ### Fixed
 
-- **Lenient JSON extraction for LLM responses (#219).** The contradiction
+- **Lenient JSON extraction for LLM responses (athenaeum#219).** The contradiction
   detector and resolver parsed model output with a strict first-to-last-brace
   regex and silently dropped clusters when the model wrapped its JSON in
   markdown ```json fences or surrounding prose — 38 silent drops were
@@ -1595,26 +1625,26 @@ work instead of reporting a clean "Done".
   (`athenaeum.json_utils`) prefers fenced content, applies an exactly-one
   rule for unfenced text, and returns None on ambiguity so callers keep
   their loud safe fallback. RecursionError is contained and decode
-  diagnostics are logged at debug level. (PR #221)
+  diagnostics are logged at debug level. (PR athenaeum#221)
 - **Fence pairing is robust to inline backticks, and the last legacy parse
-  site is migrated (#222).** Only line-leading ``` (CommonMark, up to three
+  site is migrated (athenaeum#222).** Only line-leading ``` (CommonMark, up to three
   spaces of indentation) delimits a fence, so stray inline backticks can no
   longer shift fence pairing. When fences yield no object, the helper falls
   back to a whole-text exactly-one scan. `propose_freetext_source_edits` is
-  migrated off the greedy first-to-last-brace regex. (PR #223)
-- **Librarian run-level budget exhaustion is no longer silent (#220).** When
+  migrated off the greedy first-to-last-brace regex. (PR athenaeum#223)
+- **Librarian run-level budget exhaustion is no longer silent (athenaeum#220).** When
   the budget trips, the run now writes a `wiki/_deferred_work.md` manifest
   itemizing deferred intake (in-window and beyond-window, with failed files
   listed separately) and logs a warning-level `Done (DEGRADED — budget
   exhausted)` summary with deferred counts instead of a clean "Done". Stale
-  manifests are cleared by the next clean run. (PR #224)
+  manifests are cleared by the next clean run. (PR athenaeum#224)
 - **`athenaeum init` now creates the `raw/auto-memory/` intake directory**, so
   first runs no longer warn about a missing extra-intake root.
 - **Yaml `resolve_max_per_run: yes` (a bool) is no longer accepted as an
   integer cap of 1** — bools fall through to the default, using the same guard
   as `librarian.max_api_calls`.
 - **`athenaeum test-mcp` now declares `sources=` on its own `remember()`
-  call**, so the smoke test no longer trips the issue-#90 provenance warning.
+  call**, so the smoke test no longer trips the issue-athenaeum#90 provenance warning.
 
 ## [0.7.2] - 2026-06-09
 
@@ -1627,7 +1657,7 @@ the 0.7.0 source write-back.
 ### Added
 
 - **Vector + member-pair matching for the resolved-contradiction decision log
-  (#211).** The decision log keyed each record by a SHA-1 of the exact passage
+  (athenaeum#211).** The decision log keyed each record by a SHA-1 of the exact passage
   text the detector quoted; the detector re-quotes a drifting snippet every
   run, so the key never matched and an already-resolved contradiction
   re-escalated indefinitely. Matching now flows fingerprint → member-pair key
@@ -1635,7 +1665,7 @@ the 0.7.0 source write-back.
   `contradiction.resolved_similarity_threshold` (default 0.83). Member-pair
   matching is deterministic and works without chromadb; the embedding layer is
   the optional `[vector]` extra and degrades gracefully when absent.
-- **Nightly re-resolve pass for open proposal-less questions (#188).** A
+- **Nightly re-resolve pass for open proposal-less questions (athenaeum#188).** A
   question first escalated without a proposal (resolver budget exhausted or
   offline) previously stayed raw forever, because the open-pair dedup merged
   re-detections into the existing block instead of re-running the resolver.
@@ -1646,7 +1676,7 @@ the 0.7.0 source write-back.
 
 ### Changed
 
-- **Free-text answers enact a source edit, not just an annotation (#210).**
+- **Free-text answers enact a source edit, not just an annotation (athenaeum#210).**
   When a human resolves a contradiction with a free-text ruling (no verdict
   token), the resolver now interprets that ruling into a concrete edit of the
   source memory file(s) via an LLM-backed proposer and applies it through the
@@ -1656,22 +1686,22 @@ the 0.7.0 source write-back.
 
 ### Fixed
 
-- **Write-back resolves the true source files from `Members involved:` (#214,
-  follow-up to #210).** The auto-memory contradiction blocks attribute their
+- **Write-back resolves the true source files from `Members involved:` (athenaeum#214,
+  follow-up to athenaeum#210).** The auto-memory contradiction blocks attribute their
   real source via a `Members involved:` line (refs relative to
   `raw/auto-memory/`) while their `source:` header names a compiled wiki page.
   The write-back only parsed `**Member paths**:` and resolved under `raw/` +
   `wiki/`, so on real blocks it resolved nothing and edited nothing. It now
   parses `Members involved:` and resolves under the configured intake roots.
 - **Decision-log records persist a non-empty `member_key` and full `pair_text`
-  (#216, follow-up to #211).** The human-resolution record site derived
+  (athenaeum#216, follow-up to athenaeum#211).** The human-resolution record site derived
   `member_key` from `pq.source` (a wiki page) and `pair_text` from the
   `**`-truncated `pq.description`, recording empty keys that the matcher could
   never hit. Both are now derived from the full raw block.
 
 ## [0.7.1] - 2026-06-08
 
-Patch release addressing two follow-up nits from the #207 Zenodotus review.
+Patch release addressing two follow-up nits from the athenaeum#207 Zenodotus review.
 No behavior change under normal execution.
 
 ### Fixed
@@ -1679,10 +1709,10 @@ No behavior change under normal execution.
 - Hardened the transient-retry exhaustion guard in `_retry.py` so it survives
   `python -O` (replaced an `assert` used for control flow with an explicit
   runtime guard); the exhausted-retries path still re-raises the captured
-  transient error. (#207)
+  transient error. (athenaeum#207)
 - Resolved-contradiction cache records now write a single authoritative
   `action` key instead of duplicate `verdict`/`action` keys; the reader still
-  tolerates legacy `verdict`-only records. (#207)
+  tolerates legacy `verdict`-only records. (athenaeum#207)
 
 ## [0.7.0] - 2026-06-08
 
@@ -1708,7 +1738,7 @@ regenerating on the next wiki build.
 
 ### Added
 
-- **Source write-back when answering a pending question (#197).** Answering a
+- **Source write-back when answering a pending question (athenaeum#197).** Answering a
   pending question now writes the ratified verdict back to the source-of-truth
   memory file(s) via the existing `enact_resolution` machinery — `pq.source`
   plus every involved member — rather than only emitting a sibling
@@ -1717,13 +1747,13 @@ regenerating on the next wiki build.
   `not_a_conflict` annotate non-destructively; the provenance doc is still
   written. This stops adjudicated contradictions from regenerating on the next
   wiki build.
-- **Resolved-contradiction fingerprint cache (#198).** Adjudicated claim-pairs
+- **Resolved-contradiction fingerprint cache (athenaeum#198).** Adjudicated claim-pairs
   now get a page-independent, order-independent fingerprint persisted to
   `raw/_resolved_contradictions.jsonl` on resolution (human or auto). The
   detector suppresses already-resolved fingerprints and logs the suppression
   count. A material change to a claim changes its fingerprint and re-enables
   escalation.
-- **Auto-apply of prior human-ratified verdicts (#199).** A newly-detected
+- **Auto-apply of prior human-ratified verdicts (athenaeum#199).** A newly-detected
   conflict that matches a prior **human** verdict is auto-applied without
   re-escalation and routed through source write-back. Only human-ratified
   verdicts auto-apply — prior auto-resolutions never do. The match is
@@ -1735,20 +1765,20 @@ regenerating on the next wiki build.
 ### Fixed
 
 - **Failed auto-apply enact now escalates instead of silently suppressing
-  (#203).** If applying a prior verdict's enact fails (file-op error or no-op),
+  (athenaeum#203).** If applying a prior verdict's enact fails (file-op error or no-op),
   the conflict escalates to a pending question rather than being silently
   suppressed.
-- **Keep/deprecate verdicts are now enacted on the source (#191).** Resolving a
+- **Keep/deprecate verdicts are now enacted on the source (athenaeum#191).** Resolving a
   contradiction with a keep/deprecate verdict writes supersede/deprecate
   markers to the source memory file rather than only recording the decision.
-- **Correct/forget verdicts are now enacted, not just recorded (#166).**
+- **Correct/forget verdicts are now enacted, not just recorded (athenaeum#166).**
   Resolving with a `correct` or `forget` verdict applies the edit to the source
   memory file. Adds a disambiguation mode for pairs that are distinct entities
   rather than a true contradiction, and routes `correct`/`forget` through the
   tier and merge render paths. Pending-question blocks that lost their checkbox
   line are now recovered rather than dropped.
 - **Transient Anthropic overload no longer becomes a permanent librarian
-  backlog** (#193). The per-file classification path (`tiers.py` tier2/tier3
+  backlog** (athenaeum#193). The per-file classification path (`tiers.py` tier2/tier3
   calls) now retries HTTP 429 (`RateLimitError`), 529 (`OverloadedError`),
   and `APIConnectionError` with bounded exponential backoff + jitter (5
   attempts, capped at 60s, honoring `Retry-After` when present) via the new
@@ -1763,30 +1793,30 @@ regenerating on the next wiki build.
 ### Changed
 
 - Resolver per-run Opus call cap (`DEFAULT_RESOLVE_MAX_PER_RUN`) raised
-  50 → 250 (#187). On a full-knowledge-base ingest the detector can flag
+  50 → 250 (athenaeum#187). On a full-knowledge-base ingest the detector can flag
   well over 50 contradictions; at the old default the confirmation pass
   ran out of budget partway through and the surplus escalated raw into
   `_pending_questions.md` instead of being suppressed as `not_a_conflict`.
   The cap is a ceiling, not a target — small bases never approach it.
   Override via `contradiction.resolve_max_per_run` (yaml) or
   `ATHENAEUM_RESOLVE_MAX_PER_RUN` (env).
-- **Destructive auto-DELETE bar raised to 0.95 confidence (#166).** The
+- **Destructive auto-DELETE bar raised to 0.95 confidence (athenaeum#166).** The
   auto-resolver now requires 0.95 confidence before applying a destructive
   DELETE, and the principled-escalation render path is locked so low-confidence
   conflicts escalate to a human rather than being auto-deleted.
-- CI: bumped `dependabot/fetch-metadata` v2→v3 (#194) and
-  `1password/load-secrets-action` v2→v4 (#195).
+- CI: bumped `dependabot/fetch-metadata` v2→v3 (athenaeum#194) and
+  `1password/load-secrets-action` v2→v4 (athenaeum#195).
 
 ## [0.6.1] - 2026-05-24
 
-Patch bundle: the self-reference lint added in #173 now runs on every
+Patch bundle: the self-reference lint added in athenaeum#173 now runs on every
 `AutoMemoryFile` construction site, not just `discover_auto_memory_files`.
 
 ### Changed
 
 - **Self-reference lint applied to all `AutoMemoryFile` construction sites**
-  (#181, #183) — the lint that strips a memory's own name from its
-  `refines` / `supersedes` lists (originally added in #173) now also runs
+  (athenaeum#181, athenaeum#183) — the lint that strips a memory's own name from its
+  `refines` / `supersedes` lists (originally added in athenaeum#173) now also runs
   in the similarity-sweep path (`cross_scope.candidate_to_auto_memory_files`)
   and the cluster-shim path (`merge.merge_cluster_row`). Extracted to
   `athenaeum._lint._strip_self_reference` so all three sites share one
@@ -1794,7 +1824,7 @@ Patch bundle: the self-reference lint added in #173 now runs on every
 
 ## [0.6.0] - 2026-05-24
 
-The librarian-reasoner epic (#166) lands as a single backward-compatible
+The librarian-reasoner epic (athenaeum#166) lands as a single backward-compatible
 minor bump. The 0.5.x auto-apply + dedupe foundation now stands on a
 richer reasoning surface: declared refines/supersedes relationships
 short-circuit the detector, the resolver sees full-body context and
@@ -1802,31 +1832,31 @@ field-level provenance, the prompt taxonomy adds a `propose_merge`
 action with a `_pending_merges.md` sidecar, and the auto-apply gate is
 asymmetric per action so cheap suppressions auto-apply while wiki-body
 mutations stay behind a higher bar. This release also bundles five
-follow-up polish items (#172, #173, #175, #177, #179).
+follow-up polish items (athenaeum#172, athenaeum#173, athenaeum#175, athenaeum#177, athenaeum#179).
 
 ### Added
 
-- **Declared refines / supersedes in frontmatter** (#167) — memories
+- **Declared refines / supersedes in frontmatter** (athenaeum#167) — memories
   can now declare a relationship to a sibling memory via
   `refines: [name]` or `supersedes: [{name, as_of, reason}]` in YAML
   frontmatter. The detector short-circuits any pair (or fully-declared
   chunk) covered by a declaration, and the resolver surfaces both lists
   in the prompt so the LLM has the audit context even when the
   short-circuit did not fire.
-- **Full-body resolver context with token budget** (#168) — the Opus
+- **Full-body resolver context with token budget** (athenaeum#168) — the Opus
   resolver now sees each member's full body (default 1500-token cap
   per side, char-heuristic) plus `created_at` / `updated_at` /
   `originSessionId` frontmatter and one-hop `[[wikilink]]`
   descriptions. Asymmetric truncation is normal; the conflict passage
   is always emitted regardless of body inclusion.
-- **`propose_merge` action + `_pending_merges.md` sidecar** (#169) —
+- **`propose_merge` action + `_pending_merges.md` sidecar** (athenaeum#169) —
   the resolver can propose a merged body for human review rather than
   picking a winner. Proposals land in `wiki/_pending_merges.md`;
   `list_pending_merges` / `resolve_merge` MCP tools triage them.
   Approval writes the draft merged body to wiki; rejection writes a
   `refines:` declaration into the first source so the detector's
   declared-refinement short-circuit suppresses the pair on future runs.
-- **Asymmetric per-action auto-apply thresholds** (#170) —
+- **Asymmetric per-action auto-apply thresholds** (athenaeum#170) —
   `not_a_conflict` defaults to 0.75 (false-suppress is cheap; detector
   re-fires next run), `keep_a` / `keep_b` to 0.90 (mutates wiki bodies;
   higher bar), `propose_merge` NEVER auto-applies (the draft body must
@@ -1837,30 +1867,30 @@ follow-up polish items (#172, #173, #175, #177, #179).
 ### Changed
 
 - **`_filter_declared_pairs` prunes declared pairs from multi-member
-  chunks** (#172) — previously all-or-nothing: one undeclared pair
+  chunks** (athenaeum#172) — previously all-or-nothing: one undeclared pair
   sent the whole chunk (including already-declared pairs) to Haiku.
   Now members whose every partner in the chunk is declared are
   dropped before the detector sees the chunk.
 - **Self-reference in `refines:` / `supersedes:` is dropped + warned**
-  (#173) — a post-load lint pass in `discover_auto_memory_files`
+  (athenaeum#173) — a post-load lint pass in `discover_auto_memory_files`
   silently strips entries that name the file's own memory and emits a
   `WARNING` log so the YAML authoring mistake surfaces without
   blocking ingest.
 - **Per-call sibling-index cache + clarified `field_sources` semantics**
-  (#175) — the resolver now caches `slug → description` per scope dir
+  (athenaeum#175) — the resolver now caches `slug → description` per scope dir
   per `_build_user_message` call instead of re-globbing + re-parsing
   per member per conflict (O(N·M·K) → O(N·M+K)). The prompt ships ALL
   `field_sources` keys (the earlier "filter to passage-substring"
   comment was aspirational, never wired up; full shipping is the right
   call for provenance-aware resolution).
 - **Threshold error wording + gate-decision threshold returned to
-  caller** (#179) — non-numeric threshold values now say "not a numeric
+  caller** (athenaeum#179) — non-numeric threshold values now say "not a numeric
   value" instead of "out of range" (latter implies a numeric typo).
   `_should_auto_apply` returns `(should_apply, threshold)` so the
   caller logs the resolved threshold from the gate decision rather
   than re-resolving via a second lookup.
 - **MCP `resolve_merge` emits legacy aliases for symmetry with
-  `resolve_question`** (#177) — `block` (= `resolved_block`) and
+  `resolve_question`** (athenaeum#177) — `block` (= `resolved_block`) and
   `error` (= `message` on failure) are now present on `resolve_merge`'s
   return shape. New callers should still prefer `error_code` +
   `message` + `resolved_block`.
@@ -1869,7 +1899,7 @@ follow-up polish items (#172, #173, #175, #177, #179).
 
 All changes are additive. Configs targeting 0.5.x continue to load
 unchanged; the legacy scalar `resolve.auto_apply_threshold` still
-applies to `keep_a` / `keep_b` so a pre-#170 deployment behaves the
+applies to `keep_a` / `keep_b` so a pre-athenaeum#170 deployment behaves the
 same after upgrading. Frontmatter without `refines:` / `supersedes:`
 keys round-trips byte-for-byte.
 
@@ -1885,7 +1915,7 @@ high-confidence resolutions and dedupe escalations by source pair.
 
 ### Added
 
-- **Auto-apply lane for high-confidence resolutions** (#156, PR #158) —
+- **Auto-apply lane for high-confidence resolutions** (athenaeum#156, PR athenaeum#158) —
   when `auto_apply` is enabled and a `ResolutionProposal` reaches the
   threshold, `tier4_escalate` writes the question block as already
   answered (`- [x]`) with an `**Answer:** <rationale>` paragraph and an
@@ -1894,7 +1924,7 @@ high-confidence resolutions and dedupe escalations by source pair.
   `**Rationale**` / `**Source precedence**` block is preserved. The
   rewrite is idempotent and round-trips through `ingest-answers` into
   both `raw/answers/` and `_pending_questions_archive.md`.
-- **Configurable model and threshold** (#156) — all three config
+- **Configurable model and threshold** (athenaeum#156) — all three config
   surfaces are honored with precedence env > yaml > defaults:
   - Env: `ATHENAEUM_RESOLVE_MODEL`, `ATHENAEUM_RESOLVE_AUTO_APPLY`,
     `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD`.
@@ -1903,7 +1933,7 @@ high-confidence resolutions and dedupe escalations by source pair.
   - Defaults: `claude-opus-4-7`, `auto_apply: true`,
     `auto_apply_threshold: 0.90`. Out-of-range threshold raises with
     the source named (`env` vs `yaml`).
-- **Source-pair dedup at escalation time** (#157, PRs #159 and #160) —
+- **Source-pair dedup at escalation time** (athenaeum#157, PRs athenaeum#159 and athenaeum#160) —
   before appending a new question block, `tier4_escalate` checks whether
   the same source-memory pair already has an open block in the file (or
   another item in the current batch). If so, the destination entity is
@@ -1912,7 +1942,7 @@ high-confidence resolutions and dedupe escalations by source pair.
   `Members involved:` is unsourced. Auto-resolved (`[x]`) blocks are
   excluded from the open-pair index so a resurrected conflict still
   produces a fresh question.
-- **Highest-confidence-wins auto-apply on merge** (PR #160) — when items
+- **Highest-confidence-wins auto-apply on merge** (PR athenaeum#160) — when items
   collapse into an existing block, auto-apply is evaluated against the
   highest-confidence proposal seen for the source-pair key in the
   current batch, not just the first. Prevents a low-confidence primary
@@ -1920,8 +1950,8 @@ high-confidence resolutions and dedupe escalations by source pair.
   triggered auto-apply on its own. Cross-batch case is also covered:
   an existing open block can be auto-resolved when a fresh batch brings
   a high-confidence proposal for the same pair.
-- **Dedup escape hatch** (#157) — `ATHENAEUM_TIER4_DEDUP=false` reverts
-  to pre-#157 always-append behavior. Default is ON.
+- **Dedup escape hatch** (athenaeum#157) — `ATHENAEUM_TIER4_DEDUP=false` reverts
+  to pre-athenaeum#157 always-append behavior. Default is ON.
 - **`docs/auto-resolve.md`** — explains the audit trail, how to disable
   auto-apply (env or yaml), how to tune the threshold, and how to
   reverse an auto-resolution.
@@ -1932,7 +1962,7 @@ high-confidence resolutions and dedupe escalations by source pair.
 
 - `tier4_escalate` signature accepts a `config: dict | None = None`
   argument so the auto-apply gate can read the resolved model and
-  threshold. Pre-#156 callers passing `config=None` retain the prior
+  threshold. Pre-athenaeum#156 callers passing `config=None` retain the prior
   always-append behavior — no auto-apply, no dedup.
 - `EscalationItem.proposal` is a new optional attribute carrying the
   resolver's verdict through to `tier4_escalate`. Legacy callers that
@@ -1956,12 +1986,12 @@ in 0.4.0.
 
 ### Fixed
 
-- **Contradiction confirmation pass** (#145) — the Opus resolver now runs a
+- **Contradiction confirmation pass** (athenaeum#145) — the Opus resolver now runs a
   confirmation pass over Haiku-detector hits and suppresses detector false
   positives before they reach the pending-questions queue. Genuine
   contradictions still escalate, now with the resolver's proposed
   resolution attached.
-- **Escalation dedup keyed on source-file set** (#146) — escalations are
+- **Escalation dedup keyed on source-file set** (athenaeum#146) — escalations are
   deduplicated by the set of flagged source files rather than the cluster
   slug, so the same conflict surfaced by different clusters escalates once
   per run.
@@ -1972,81 +2002,81 @@ in 0.4.0.
 ### Internal
 
 - Test coverage for the confirmation-pass resolver-verdict and
-  malformed-response escalation paths (#148), and the contradiction-merge
-  `<2`-member fallthrough (#146 review).
+  malformed-response escalation paths (athenaeum#148), and the contradiction-merge
+  `<2`-member fallthrough (athenaeum#146 review).
 
 ## [0.4.0] - 2026-05-11
 
 This release ships three coherent streams of work: (a) the auto-memory
-intake → cluster → merge → contradiction-detection pipeline (#195, #196,
-#197, #198), which lets the librarian fold per-scope Claude Code memory
+intake → cluster → merge → contradiction-detection pipeline (athenaeum#195, athenaeum#196,
+athenaeum#197, athenaeum#198), which lets the librarian fold per-scope Claude Code memory
 and other auto-captured turns into the wiki without manual triage;
 (b) per-claim provenance, per-value `field_sources`, cross-uid dedupe,
 legacy-slug repair tooling, and an Opus-backed contradiction resolver
-(#90, #102, #103, #97, #126, #128); and (c) the Apollo connector
-extraction and `athenaeum people` filter CLI (#82, #112). Includes **two
+(athenaeum#90, athenaeum#102, athenaeum#103, athenaeum#97, athenaeum#126, athenaeum#128); and (c) the Apollo connector
+extraction and `athenaeum people` filter CLI (athenaeum#82, athenaeum#112). Includes **two
 BREAKING changes**; see Removed.
 
 ### Added
 
 #### Auto-memory pipeline
-- **Auto-memory contradiction detection (C4)** (#198) — see details below.
-- **Auto-memory cluster merge (C3)** (#197) — see details below.
-- **Auto-memory cluster pass (C2)** (#196) — see details below.
-- **Auto-memory ingest path** (#195) — see details below.
-- **Claude Code auto-memory integration guide** (#200) — see details below.
-- **`raw/auto-memory` indexed as first-class recall source** (#192) — the
+- **Auto-memory contradiction detection (C4)** (athenaeum#198) — see details below.
+- **Auto-memory cluster merge (C3)** (athenaeum#197) — see details below.
+- **Auto-memory cluster pass (C2)** (athenaeum#196) — see details below.
+- **Auto-memory ingest path** (athenaeum#195) — see details below.
+- **Claude Code auto-memory integration guide** (athenaeum#200) — see details below.
+- **`raw/auto-memory` indexed as first-class recall source** (athenaeum#192) — the
   FTS5/vector index now ingests `raw/auto-memory/<scope>/*.md` alongside
   wiki pages so recall surfaces auto-captured turns before they’re merged.
 
 #### Provenance, dedupe, and contradiction tooling
-- **Per-claim `source:` on every CLAIM** (#90) — every emitted claim now
+- **Per-claim `source:` on every CLAIM** (athenaeum#90) — every emitted claim now
   carries a typed `<type>:<ref>` provenance pointer.
-- **Per-value `field_sources` for list fields** (#102) — list-valued
+- **Per-value `field_sources` for list fields** (athenaeum#102) — list-valued
   frontmatter (tags, aliases, etc.) carries per-value provenance instead
   of a single field-level source.
 - **Tier 3 emits `source`/`field_sources` + `KNOWN_TYPES` allowlist** —
   the Sonnet writer now produces provenance-shaped output natively.
-- **Cross-uid reference rewriter for dedupe** (#103) — `athenaeum dedupe
+- **Cross-uid reference rewriter for dedupe** (athenaeum#103) — `athenaeum dedupe
   persons --apply` rewrites every cross-uid reference to the survivor uid
   in one pass; idempotent.
-- **Opus-backed contradiction resolver with provenance precedence** (#126)
+- **Opus-backed contradiction resolver with provenance precedence** (athenaeum#126)
   — `athenaeum contradictions resolve` calls Opus on flagged clusters and
   applies a deterministic source-precedence tie-breaker.
-- **Cross-scope contradiction-detection mode toggle** (#125) — per-scope
+- **Cross-scope contradiction-detection mode toggle** (athenaeum#125) — per-scope
   / cross-scope contradiction detection is now configurable.
-- **Pending-questions installable sidecar** (#128) — `athenaeum questions`
+- **Pending-questions installable sidecar** (athenaeum#128) — `athenaeum questions`
   CLI (list / next / count) replaces ad-hoc grep against
   `_pending_questions.md`; consumed by the example SessionStart hook and
   the `resolve-questions` skill.
-- **Legacy bare-slug repair migration** (#97) — `athenaeum repair
-  --legacy-source-slugs` rewrites pre-#90 `source:` slugs to typed
+- **Legacy bare-slug repair migration** (athenaeum#97) — `athenaeum repair
+  --legacy-source-slugs` rewrites pre-athenaeum#90 `source:` slugs to typed
   `script:<slug>` form; the live tree was migrated 2026-05-09 before the
   parser branch was retired (see Removed).
 - **`athenaeum repair` CLI** — dry-run-by-default YAML-frontmatter repair
   for tag-indent corruption, missing fields, and legacy slug migration.
 
 #### Tooling and ingest
-- **`athenaeum people` CLI** (#82) — frontmatter-only `type:person` filter
+- **`athenaeum people` CLI** (athenaeum#82) — frontmatter-only `type:person` filter
   (company / tag / tier / score, plus `--title-regex` / `--company-regex`).
   No LLM, no embeddings — deterministic over the wiki tree.
-- **`athenaeum recall <query>` CLI** (#71) — shell-accessible wrapper
+- **`athenaeum recall <query>` CLI** (athenaeum#71) — shell-accessible wrapper
   around the MCP recall tool; see details below.
-- **MCP `remember(sources=…)` wrappers** (#96) — the MCP `remember` tool
+- **MCP `remember(sources=…)` wrappers** (athenaeum#96) — the MCP `remember` tool
   now accepts an optional list of typed source pointers; the server
   routes them into the same provenance pipeline the librarian uses.
-- **Init templates for entity-author markdown** (#89) — `athenaeum init`
+- **Init templates for entity-author markdown** (athenaeum#89) — `athenaeum init`
   scaffolds example entity templates so first-time authors have a working
   shape to copy.
 - **`tier0_passthrough` preserves pre-structured raw-intake** — raw files
   that already carry `uid` + `type` + `name` round-trip byte-for-byte
   through the librarian without LLM tier costs.
-- **Pydantic models + write-time validation** (#88) — wiki frontmatter is
+- **Pydantic models + write-time validation** (athenaeum#88) — wiki frontmatter is
   validated against typed schemas at write time.
 - **`extra_intake_root` config warns when missing** — stale config paths
   no longer fail silently at discovery time.
-- **p95 search-latency benchmark harness** (#69) — see details below.
-- **Auto-memory contradiction detection (C4) (#198) [details]** — new
+- **p95 search-latency benchmark harness** (athenaeum#69) — see details below.
+- **Auto-memory contradiction detection (C4) (athenaeum#198) [details]** — new
   `athenaeum.contradictions` module runs one claim-level Haiku call per
   merged cluster to decide whether member bodies state or prescribe
   contradictory things (factual or prescriptive). Wires into
@@ -2059,7 +2089,7 @@ BREAKING changes**; see Removed.
   `ANTHROPIC_API_KEY` is unset, every cluster reports `detected=False`
   with `rationale="llm-unavailable"`. Includes
   `scripts/measure_contradiction_baseline.py` for local corpus baselining.
-- **Claude Code auto-memory integration guide (#200) [details]** — new
+- **Claude Code auto-memory integration guide (athenaeum#200) [details]** — new
   `docs/integrations/claude-code.md` documents the generic symlink-bridge
   pattern from `~/.claude/projects/<scope>/memory/` into
   `raw/auto-memory/<scope>/`, a citation frontmatter policy, and an
@@ -2069,7 +2099,7 @@ BREAKING changes**; see Removed.
   validator), and `examples/claude-code/auto-memory-frontmatter.example.md`
   (reference memory file). `examples/claude-code/README.md` gains an
   "Auto-memory integration" section linking the three.
-- **Auto-memory cluster merge (C3) (#197) [details]** — new
+- **Auto-memory cluster merge (C3) (athenaeum#197) [details]** — new
   `athenaeum.merge` module consumes the C2 cluster JSONL and emits one
   consolidated wiki entry per cluster at `wiki/auto-<topic-slug>.md` with
   a deduped `sources[]` union (dedupe key: `(session, turn)`), propagated
@@ -2078,7 +2108,7 @@ BREAKING changes**; see Removed.
   clusters ARE emitted as wiki entries; raw intake files remain
   untouched. New `--merge-only` CLI flag mirrors `--cluster-only` for
   iterating on merge output without re-embedding.
-- **p95 search-latency benchmark harness (#69) [details]** — new
+- **p95 search-latency benchmark harness (athenaeum#69) [details]** — new
   `tests/benchmarks/test_search_bench.py` checks in the ad-hoc benchmark
   used for the Session-2 recall budget as a pytest-benchmark fixture.
   One bench per backend (keyword, fts5; vector opt-in via
@@ -2086,7 +2116,7 @@ BREAKING changes**; see Removed.
   pinned baseline. Ignored by the default `pytest` run (so CI stays
   fast); execute with `pytest tests/benchmarks/ --benchmark-only`.
   `pytest-benchmark` is an optional `[bench]` extra, not a runtime dep.
-- **Auto-memory cluster pass (C2) (#196) [details]** — new
+- **Auto-memory cluster pass (C2) (athenaeum#196) [details]** — new
   `athenaeum.clusters` module groups `AutoMemoryFile` records into
   near-duplicate clusters using the existing chromadb `VectorBackend`
   embedder (no parallel embedding pipeline). Single-linkage clustering
@@ -2094,8 +2124,8 @@ BREAKING changes**; see Removed.
   (default 0.55, tuned against the voltaire/nanoclaw regression fixture).
   Writes JSONL cluster report to `raw/_librarian-clusters.jsonl` with
   rotated timestamped siblings. New `--cluster-only` CLI flag skips the
-  tier pipeline. C3 merge (#197) consumes the JSONL output.
-- **Auto-memory ingest path (#195) [details]** — librarian now discovers
+  tier pipeline. C3 merge (athenaeum#197) consumes the JSONL output.
+- **Auto-memory ingest path (athenaeum#195) [details]** — librarian now discovers
   files under `raw/auto-memory/<scope>/*.md` as a parallel intake channel
   alongside the entity-schema `discover_raw_files`. New
   `AUTO_MEMORY_FILE_RE`, `discover_auto_memory_files()`, and
@@ -2104,8 +2134,8 @@ BREAKING changes**; see Removed.
   tiers. Discovery uses `resolve_extra_intake_roots()` so config is
   single-sourced with recall; `MEMORY.md` and `_migration-log.jsonl`
   are excluded; `_unscoped/` is ingested as a first-class scope.
-  Clustering (#196) and wiki merge (#197) ship in subsequent lanes.
-- **`athenaeum recall <query>` CLI (#71) [details]** — shell-accessible
+  Clustering (athenaeum#196) and wiki merge (athenaeum#197) ship in subsequent lanes.
+- **`athenaeum recall <query>` CLI (athenaeum#71) [details]** — shell-accessible
   wrapper around the MCP `recall` tool for validation harnesses and
   operator debugging. Prints one tab-separated hit per line
   (`<score>\t<filename>\t<preview>`). Respects configured `search_backend`
@@ -2114,7 +2144,7 @@ BREAKING changes**; see Removed.
 
 ### Removed
 - **BREAKING: retired `provenance._LEGACY_SCALAR_RE` and the legacy
-  bare-slug `source:` parser branch.** Pre-#90 wikis stored `source:` as
+  bare-slug `source:` parser branch.** Pre-athenaeum#90 wikis stored `source:` as
   a bare slug (`extended-tier-build`, `warm-network-detect`); the live
   tree was migrated on 2026-05-09 via
   `athenaeum repair --legacy-source-slugs --apply` (15,403 wikis rewritten
@@ -2125,12 +2155,12 @@ BREAKING changes**; see Removed.
   form. The migration tool (`repair.migrate_legacy_source_slugs`) keeps
   its own internal slug regex and ships unchanged for any future tree
   that needs it. Completes athenaeum#97 acceptance criterion "Remove
-  legacy regex branch + its tests" which was deferred from #120 pending
+  legacy regex branch + its tests" which was deferred from athenaeum#120 pending
   live-tree migration. The field-keyed `field_sources` legacy reader
   (per `docs/provenance-shape.md` §2.3) is a different legacy form and
   remains accepted on read.
 - **BREAKING: extracted `enrich` subcommand and `connectors/apollo` module**
-  (#112) — the Apollo people-match connector and the `athenaeum enrich
+  (athenaeum#112) — the Apollo people-match connector and the `athenaeum enrich
   --persons` CLI subcommand have been removed from the OSS package. Both
   were Kromatic-specific (operator-curated wiki + Apollo API key) and now
   live in a separate private toolkit alongside the
@@ -2147,11 +2177,11 @@ error-path code; no behavior change under normal execution.
 
 ### Fixed
 - **`answers._parse_block` no longer relies on `assert` for control flow**
-  (#64). Under `python -O` the assert is stripped and the subsequent
+  (athenaeum#64). Under `python -O` the assert is stripped and the subsequent
   `cb_match.group(...)` would raise `AttributeError` on malformed blocks
   instead of returning `None`. Replaced with an explicit `if cb_match is
   None: return None` guard so `-O` behaves the same as default execution.
-- **CLI error output now includes the exception class name** (#65).
+- **CLI error output now includes the exception class name** (athenaeum#65).
   `Error: {msg}` → `Error ({ExceptionClass}): {msg}`. Makes operator
   triage and Sentry correlation meaningfully easier without changing the
   exit-code contract.
@@ -2349,12 +2379,12 @@ same sharp edges the review found.
 > `docs/recall-architecture.md` before simplifying any of them.
 
 ### Added
-- **Vector search backend** with chromadb + `all-MiniLM-L6-v2` (#31, #32)
-- `athenaeum query-topics` CLI — Haiku-based query preprocessor that extracts substantive topics from instruction-heavy prompts and ignores meta-instructions (#41, #42)
-- `athenaeum rebuild-index` CLI for on-demand index rebuilds (#34)
-- `athenaeum test-mcp` CLI subcommand for verifying MCP setup (#36)
-- Observation filter wired as the tunable capture authority for the sidecar flow (#37)
-- `athenaeum.yaml` config with `auto_recall` toggle and `search_backend` selection (#30)
+- **Vector search backend** with chromadb + `all-MiniLM-L6-v2` (athenaeum#31, athenaeum#32)
+- `athenaeum query-topics` CLI — Haiku-based query preprocessor that extracts substantive topics from instruction-heavy prompts and ignores meta-instructions (athenaeum#41, athenaeum#42)
+- `athenaeum rebuild-index` CLI for on-demand index rebuilds (athenaeum#34)
+- `athenaeum test-mcp` CLI subcommand for verifying MCP setup (athenaeum#36)
+- Observation filter wired as the tunable capture authority for the sidecar flow (athenaeum#37)
+- `athenaeum.yaml` config with `auto_recall` toggle and `search_backend` selection (athenaeum#30)
 - Example Claude Code hooks — SessionStart builds the FTS5 index, UserPromptSubmit queries it per turn, PreCompact nudges save-before-compact
 - FTS5-based per-turn wiki recall hook
 - `docs/recall-architecture.md` describing the hybrid FTS5+vector pipeline, why each backend is load-bearing, and the four invariants a future "simplification" must not remove
@@ -2366,11 +2396,11 @@ same sharp edges the review found.
 - Apache 2.0 `SPDX-License-Identifier` header on all Python source files
 
 ### Fixed
-- **UserPromptSubmit hook JSON shape** — must be `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"..."}}`; a flat `{"additionalContext":...}` payload was silently ignored by Claude Code (#39, #40)
-- **Stale chromadb state across rebuilds** — `VectorBackend.build_index` now nukes `vector_dir` and calls `SharedSystemClient.clear_system_cache()` to avoid "Collection already exists" on repeat builds in the same process (#33)
-- `serve` CLI now forwards `search_backend` + `cache_dir` to the MCP server (#38)
+- **UserPromptSubmit hook JSON shape** — must be `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"..."}}`; a flat `{"additionalContext":...}` payload was silently ignored by Claude Code (athenaeum#39, athenaeum#40)
+- **Stale chromadb state across rebuilds** — `VectorBackend.build_index` now nukes `vector_dir` and calls `SharedSystemClient.clear_system_cache()` to avoid "Collection already exists" on repeat builds in the same process (athenaeum#33)
+- `serve` CLI now forwards `search_backend` + `cache_dir` to the MCP server (athenaeum#38)
 - Recall now fires after the first message, not only at session start
-- Stale "vector backend is a stub for issue #32" comment in `search.py`
+- Stale "vector backend is a stub for issue athenaeum#32" comment in `search.py`
 
 ## [0.1.0] - 2026-04-16
 

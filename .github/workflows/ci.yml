@@ -25,7 +25,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Least-privilege default (Scorecard Token-Permissions, #405). CI only reads
+# Least-privilege default (Scorecard Token-Permissions, athenaeum#405). CI only reads
 # the repo and runs tests, so `contents: read` is sufficient; jobs that need
 # more can widen this at the job level.
 permissions:
@@ -64,7 +64,7 @@ jobs:
   # hestia#596 — BLOCKING type check. The package ships `py.typed` (a PEP 561
   # assertion of type correctness to downstream consumers); mypy now enforces
   # that assertion. The backlog that hestia#550 sized (and the two systemic
-  # slices #594/#595 plus #596 cleared) is empty, so this job is wired into
+  # slices athenaeum#594/#595 plus athenaeum#596 cleared) is empty, so this job is wired into
   # `CI Required` (`needs: [test, types]` below) and the mypy step is no longer
   # `continue-on-error` — a type regression now gates merge and `main`
   # promotion. Runs on a single Python version — mypy is Python-version-agnostic
@@ -90,6 +90,25 @@ jobs:
       - name: Type check with mypy
         run: mypy
 
+  # athenaeum#693 — org-agnostic public-safety leak scan, folded into the
+  # required `CI Required` gate below (added to `needs:` + checked in the
+  # aggregate) so a hit BLOCKS merge/promotion rather than being advisory, and
+  # WITHOUT any new branch protection. The standalone `public-safe-lint.yml`
+  # workflow additionally covers fork PRs (which receive no secrets); this job
+  # is what makes the check part of this repo's required status set — the same
+  # adoption shape as ideate-core#118/#119. Uses the canonical scanner from
+  # code-workspace-config, unmodified (`bash public-safe-lint.sh .`); it carries
+  # no org-specific data and needs no secret, so it runs identically here and on
+  # a fork PR. Per-repo exemptions live in `.public-safe-lintignore` (path+rule
+  # only), never in the scanner.
+  public-safe-lint:
+    name: Public-safe lint (org-agnostic leak shapes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Run public-safe-lint scan
+        run: bash public-safe-lint.sh .
+
   # hestia#557 — a single, always-present aggregate status that is intended to
   # be the ONE required check on develop/main. It runs on every event
   # (`if: always()`) so it reports a concrete conclusion instead of vanishing
@@ -109,7 +128,7 @@ jobs:
   # here explicitly — not restore a blanket `skipped)` branch.
   ci-required:
     name: CI Required
-    needs: [test, types]
+    needs: [test, types, public-safe-lint]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -117,13 +136,16 @@ jobs:
         env:
           TEST_RESULT: ${{ needs.test.result }}
           TYPES_RESULT: ${{ needs.types.result }}
+          PUBLIC_SAFE_LINT_RESULT: ${{ needs.public-safe-lint.result }}
         run: |
-          echo "test=$TEST_RESULT types=$TYPES_RESULT"
+          echo "test=$TEST_RESULT types=$TYPES_RESULT public-safe-lint=$PUBLIC_SAFE_LINT_RESULT"
           # `success` → the job ran and passed. Anything else
-          # (skipped/failure/cancelled) → fail the gate. Neither `test` nor
-          # `types` may legitimately skip today (see the hestia#548 note above);
-          # `types` (mypy) became blocking in hestia#596, so a type regression
-          # now fails this aggregate exactly as a test failure does.
+          # (skipped/failure/cancelled) → fail the gate. None of `test`,
+          # `types`, or `public-safe-lint` may legitimately skip today (see the
+          # hestia#548 note above); `types` (mypy) became blocking in hestia#596
+          # and `public-safe-lint` (athenaeum#693) is blocking on adoption, so a
+          # type regression or a public-safety leak fails this aggregate exactly
+          # as a test failure does.
           if [ "$TEST_RESULT" != "success" ]; then
             echo "::error::test job result '$TEST_RESULT' is not green — failing the aggregate gate."
             exit 1
@@ -132,5 +154,9 @@ jobs:
             echo "::error::types (mypy) job result '$TYPES_RESULT' is not green — failing the aggregate gate."
             exit 1
           fi
-          echo "CI Required: green (test=$TEST_RESULT types=$TYPES_RESULT)"
+          if [ "$PUBLIC_SAFE_LINT_RESULT" != "success" ]; then
+            echo "::error::public-safe-lint job result '$PUBLIC_SAFE_LINT_RESULT' is not green — failing the aggregate gate."
+            exit 1
+          fi
+          echo "CI Required: green (test=$TEST_RESULT types=$TYPES_RESULT public-safe-lint=$PUBLIC_SAFE_LINT_RESULT)"
           exit 0

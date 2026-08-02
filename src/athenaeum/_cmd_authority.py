@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum authority {lint,convert}`` — authority manifest CLI (issue #426).
+"""``athenaeum authority {lint,convert}`` — authority manifest CLI (issue athenaeum#426).
 
 Mirrors ``athenaeum merges`` / ``athenaeum questions`` in shape: a thin CLI
 dispatcher over library functions in :mod:`athenaeum.authority`, no logic of
@@ -13,8 +13,8 @@ Two subcommands:
 - ``convert``  convert ONE duplicating page (by path) into a one-line
                  pointer stub. Default is dry-run (prints the would-be
                  result); ``--apply`` writes it. Never runs over the whole
-                 corpus — issue #426 is explicit that converting the live
-                 corpus is a separate operator task (#437); this CLI only
+                 corpus — issue athenaeum#426 is explicit that converting the live
+                 corpus is a separate operator task (athenaeum#437); this CLI only
                  ever touches the single ``--page`` path given.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
@@ -125,7 +125,7 @@ def _cmd_authority_convert(args: argparse.Namespace) -> int:
     Default is dry-run (prints the converted text without writing);
     ``--apply`` writes it. Scoped to exactly the ``--page`` given — this
     command never walks the corpus (running the converter against the whole
-    live corpus is operator task #437, out of scope here).
+    live corpus is operator task athenaeum#437, out of scope here).
     """
     knowledge_root = _resolve_knowledge_root(args)
     manifest = _load_manifest_or_exit(knowledge_root)
@@ -163,7 +163,7 @@ def add_authority_subparser(subparsers: argparse._SubParsersAction) -> None:
         "authority",
         help="Authority manifest: detect + convert memories that duplicate a "
         "live source (skill file, code path, config) into pointer stubs "
-        "(issue #426).",
+        "(issue athenaeum#426).",
     )
     a_parser.set_defaults(func=cmd_authority)
     a_sub = a_parser.add_subparsers(dest="authority_target")
@@ -189,7 +189,7 @@ def add_authority_subparser(subparsers: argparse._SubParsersAction) -> None:
         "convert",
         help="Convert ONE page into a one-line pointer stub for a given "
         "manifest source. Default is dry-run; --apply writes the file. "
-        "Scoped to a single --page; never walks the corpus (see #437).",
+        "Scoped to a single --page; never walks the corpus (see athenaeum#437).",
     )
     convert_p.add_argument(
         "--path",

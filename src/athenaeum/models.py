@@ -51,7 +51,7 @@ def generate_uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
-# --- Origin-traced source provenance (issue #260, slice A of #259) ---
+# --- Origin-traced source provenance (issue athenaeum#260, slice A of athenaeum#259) ---
 
 # The legal ``source_type`` values for an origin-traced citation. The
 # librarian must cite the ULTIMATE source of a fact — the user, an external
@@ -59,7 +59,7 @@ def generate_uid() -> str:
 # ``inferred``. It must NEVER cite the raw ``auto-memory/...`` filename as the
 # source. See ``policies/auto-memory-citation.md``.
 #
-# Channel split (issue #326): three AI provenance channels were previously
+# Channel split (issue athenaeum#326): three AI provenance channels were previously
 # collapsed under ``inferred``. They are now distinguished:
 #
 #   ``user-stated``     — human utterance in a session.
@@ -86,7 +86,7 @@ SOURCE_TYPES: frozenset[str] = frozenset(
 )
 
 # The three AI-attributed channels. All three carry a ``model:`` claim
-# annotation (per issue #326) — a `model-prior` without a model is
+# annotation (per issue athenaeum#326) — a `model-prior` without a model is
 # untraceable to a cutoff date; an `agent-observed` without a model
 # cannot be cross-checked against a specific model's known reasoning
 # quirks. Callers should stamp ``model:`` when writing these channels;
@@ -104,7 +104,7 @@ DEFAULT_SOURCE_TYPE = "inferred"
 def coerce_source_type(value: object) -> str:
     """Return a valid ``source_type``, defaulting unknown input to ``inferred``.
 
-    Backward-compatible: legacy sources written before #260 carry no
+    Backward-compatible: legacy sources written before athenaeum#260 carry no
     ``source_type`` (``None``) and resolve to ``inferred``. A typo'd or
     out-of-vocabulary value is also coerced rather than raising — the
     citation policy is enforced at write time, and a bad value must not
@@ -127,10 +127,10 @@ def coerce_source_type(value: object) -> str:
 def is_filename_like_ref(ref: object) -> bool:
     """True when a ``source_ref`` looks like a raw ``auto-memory`` filename.
 
-    The load-bearing #260 invariant: a citation must point at the ULTIMATE
+    The load-bearing athenaeum#260 invariant: a citation must point at the ULTIMATE
     source (session+turn / URL / document), never at the transient raw
     ``auto-memory/<scope>/<prefix>_<slug>.md`` view that retires on move
-    (#259). A ref is filename-shaped when it references the auto-memory tree
+    (athenaeum#259). A ref is filename-shaped when it references the auto-memory tree
     or ends in ``.md``.
     """
     if not isinstance(ref, str) or not ref:
@@ -142,7 +142,7 @@ def is_filename_like_ref(ref: object) -> bool:
 def safe_source_ref(candidate: object, fallback: str) -> str:
     """Return ``candidate`` unless it is filename-shaped, else ``fallback``.
 
-    Enforces the #260 invariant on the EXPLICIT path: a producer that stamps
+    Enforces the athenaeum#260 invariant on the EXPLICIT path: a producer that stamps
     a raw filename into ``source_ref`` is rejected and replaced with a safe
     session-anchored fallback. Empty candidate also falls back.
     """
@@ -157,7 +157,7 @@ def safe_source_ref(candidate: object, fallback: str) -> str:
     return fallback
 
 
-# --- Model recording + asserter identity (issue #326) ---
+# --- Model recording + asserter identity (issue athenaeum#326) ---
 #
 # AI-attributed claims (`agent-observed`, `inferred`, `model-prior`) carry a
 # ``model:`` model-id string so provenance audits can trace a stale claim to a
@@ -233,7 +233,7 @@ ASSERTER_TYPES: frozenset[str] = frozenset({"person", "software_agent", "organiz
 def parse_asserter(meta: dict[str, object] | None) -> dict[str, object]:
     """Return the frontmatter ``asserter:`` block, or ``{}`` when absent/malformed.
 
-    Shape (issue #326):
+    Shape (issue athenaeum#326):
 
     .. code-block:: yaml
 
@@ -339,7 +339,7 @@ def asserter_identity_key(asserter: dict[str, object] | None) -> tuple[str, ...]
     return ()
 
 
-# --- Claim kind (issue #327) ---
+# --- Claim kind (issue athenaeum#327) ---
 #
 # ``claim_kind`` classifies a claim by its EPISTEMIC shape, orthogonal to
 # ``source_type`` (which classifies its ORIGIN channel). Classified once at
@@ -360,7 +360,7 @@ def asserter_identity_key(asserter: dict[str, object] | None) -> tuple[str, ...]
 #   ``definition``  — a naming/terminology fixing ("X means Y").
 #
 # Absent / unrecognized => ``""`` (unclassified). Fail-open: an unclassified
-# claim behaves exactly as it did before #327 (the resolver's stance
+# claim behaves exactly as it did before athenaeum#327 (the resolver's stance
 # short-circuit does not fire; the LLM path decides as before).
 CLAIM_KINDS: frozenset[str] = frozenset(
     {"fact", "observation", "opinion", "decision", "policy", "definition"}
@@ -375,10 +375,10 @@ OPINION_CLAIM_KIND = "opinion"
 def parse_claim_kind(meta: dict[str, object] | None) -> str:
     """Return the frontmatter ``claim_kind:`` value, or ``""`` when absent/invalid.
 
-    Fail-open (issue #327): a missing key, a non-string value, or a value
+    Fail-open (issue athenaeum#327): a missing key, a non-string value, or a value
     outside :data:`CLAIM_KINDS` all resolve to ``""`` (unclassified) rather
     than raising — an unrecognized claim_kind must never crash the compile,
-    and an unclassified claim keeps pre-#327 behavior. An out-of-vocabulary
+    and an unclassified claim keeps pre-athenaeum#327 behavior. An out-of-vocabulary
     non-empty value logs a breadcrumb (typo / stale schema); absent/empty
     stays quiet (the ordinary legacy path).
     """
@@ -404,7 +404,7 @@ def compare_asserters(
 ) -> str:
     """Compare two ``asserter:`` blocks → ``"same"`` / ``"different"`` / ``"unknown"``.
 
-    Issue #327. Uses :func:`asserter_identity_key` (the OIDC-durable
+    Issue athenaeum#327. Uses :func:`asserter_identity_key` (the OIDC-durable
     ``(iss, sub)`` / Entra ``(iss, "entra", tid, oid)`` key) so an email
     change never re-classifies two claims as different asserters.
 
@@ -412,7 +412,7 @@ def compare_asserters(
       identifier declared). This is the COMMON case for Claude-session
       intake, which carries no OIDC identity. The resolver's opinion path
       treats ``"unknown"`` as the keep-both fallback — it NEVER supersedes or
-      deletes an opinion by precedence when identity is missing (#327).
+      deletes an opinion by precedence when identity is missing (athenaeum#327).
     - ``"same"`` when both keys are non-empty and equal.
     - ``"different"`` when both keys are non-empty and unequal.
     """
@@ -559,7 +559,7 @@ def parse_superseded_by(meta: Mapping[str, object] | None) -> str:
 
 
 def parse_deprecated(meta: Mapping[str, object] | None) -> bool:
-    """Return the truthy ``deprecated`` frontmatter flag (deprecate_both, #191).
+    """Return the truthy ``deprecated`` frontmatter flag (deprecate_both, athenaeum#191).
 
     Accepts a real bool, or a string variant (``true``/``1``/``yes``,
     case-insensitive); any other truthy value coerces via ``bool``.
@@ -575,7 +575,7 @@ def parse_deprecated(meta: Mapping[str, object] | None) -> bool:
     return bool(dep)
 
 
-# --- Claim-level temporal validity (issue #308, slice 1) ---
+# --- Claim-level temporal validity (issue athenaeum#308, slice 1) ---
 #
 # ``valid_from:`` / ``valid_until:`` are optional ISO-8601 date frontmatter
 # fields declaring the real-world window over which a claim is true. They sit
@@ -587,15 +587,15 @@ def parse_deprecated(meta: Mapping[str, object] | None) -> bool:
 # Slice 3 (this change) threads the ``as_of`` parameter out to an operator-facing
 # ``--as-of DATE`` recall view (``search.build_index`` / ``query`` + the CLI
 # ``recall`` / ``rebuild-index`` commands) — a read-only historical rewind
-# through the upper bound + #191 tombstones. The lower bound (``valid_from``)
-# stays ungated (it would collide with #324's disjoint detector — see
+# through the upper bound + athenaeum#191 tombstones. The lower bound (``valid_from``)
+# stays ungated (it would collide with athenaeum#324's disjoint detector — see
 # :func:`is_inactive_memory`). See ``docs/provenance-shape.md`` §8.
 
 
 def _coerce_iso_date(value: object) -> date | None:
     """Coerce a frontmatter value to a :class:`datetime.date`, or ``None``.
 
-    Fail-OPEN (issue #308): a missing, empty, or UNPARSEABLE value returns
+    Fail-OPEN (issue athenaeum#308): a missing, empty, or UNPARSEABLE value returns
     ``None`` (treated as an open bound / no constraint), mirroring
     :func:`coerce_source_type`'s "must not crash the nightly compile" contract.
     Silently dropping a page on a bad date is worse than keeping it visible for
@@ -636,7 +636,7 @@ def parse_valid_from(meta: Mapping[str, object] | None) -> date | None:
     """Return the frontmatter ``valid_from`` as a date, or ``None`` (open lower bound).
 
     Fail-open: missing / unparseable => ``None`` (valid since always). Parsed for
-    round-trip and for #324's disjoint-validity comparison
+    round-trip and for athenaeum#324's disjoint-validity comparison
     (:func:`validity_windows_disjoint`), but deliberately NOT part of the
     ``is_inactive_memory`` active predicate — see that function for why the lower
     bound stays ungated.
@@ -701,16 +701,16 @@ def valid_until_expired(
     return (as_of or date.today()) > until
 
 
-# --- Staleness axis: observed_at (issue #424) ---
+# --- Staleness axis: observed_at (issue athenaeum#424) ---
 #
 # ``observed_at:`` is a THIRD date-ish frontmatter field, distinct from both
 # ``created``/``updated`` (write-time bookkeeping) and ``valid_from``/
-# ``valid_until`` (the claim-VALIDITY window, #308). A standing-state fact
+# ``valid_until`` (the claim-VALIDITY window, athenaeum#308). A standing-state fact
 # ("Acme has 40 employees") is true-WHEN-OBSERVED, not necessarily
 # currently-true — ``observed_at`` records the former without asserting the
 # latter. Data-model + validation only here (this issue); no reader treats
 # an old ``observed_at`` as inactive — that policy call is out of scope
-# (would belong with #433's enforcement work, not this data-model issue).
+# (would belong with athenaeum#433's enforcement work, not this data-model issue).
 
 
 def parse_observed_at(meta: dict[str, object] | None) -> date | None:
@@ -720,7 +720,7 @@ def parse_observed_at(meta: dict[str, object] | None) -> date | None:
     :func:`parse_valid_until`: a missing, empty, or unparseable value
     returns ``None`` rather than raising.
 
-    Intentional, retained helper (issue #539 settling of §4.4). It has no
+    Intentional, retained helper (issue athenaeum#539 settling of §4.4). It has no
     in-repo caller today but is the documented parser for the ``observed_at``
     staleness axis — see ``docs/memory-taxonomy.md`` §5, which names it — and
     is the read-side companion to ``parse_valid_from`` / ``parse_valid_until``.
@@ -738,9 +738,9 @@ def is_inactive_memory(
     """True when a memory file is marked inactive and must not surface as a live claim.
 
     Inactive == frontmatter declares ANY of: a non-empty ``superseded_by``
-    (keep_a/keep_b loser, issue #191), a truthy ``deprecated`` flag
-    (deprecate_both, issue #191), OR a ``valid_until`` in the past relative to
-    ``as_of`` (claim-level temporal validity, issue #308). Inactive members are
+    (keep_a/keep_b loser, issue athenaeum#191), a truthy ``deprecated`` flag
+    (deprecate_both, issue athenaeum#191), OR a ``valid_until`` in the past relative to
+    ``as_of`` (claim-level temporal validity, issue athenaeum#308). Inactive members are
     preserved on disk for audit but are skipped by recall (search index) and by
     the C3 merge compile so their claims drop out of the live wiki.
 
@@ -749,12 +749,12 @@ def is_inactive_memory(
     interval (fail-open — the claim stays active).
 
     Note the predicate keys on the UPPER bound only. The lower bound
-    (``valid_from``) is intentionally NOT gated here: issue #324's
+    (``valid_from``) is intentionally NOT gated here: issue athenaeum#324's
     disjoint-validity detector short-circuit relies on a future-dated member
     (``valid_from`` after today) remaining active so a sequential/disjoint pair
     can form — a not-yet-valid claim is a recorded FUTURE state, not a hidden
     one. Slice 3's ``as_of`` rewind therefore views history through the upper
-    bound and the #191 tombstones (both honored below), which is where the
+    bound and the athenaeum#191 tombstones (both honored below), which is where the
     supersession-as-interval value lives.
     """
     if not meta:
@@ -769,7 +769,7 @@ def is_inactive_memory(
 def validity_windows_disjoint(
     meta_a: Mapping[str, object] | None, meta_b: Mapping[str, object] | None
 ) -> bool:
-    """True when two claims' validity windows cannot overlap in time (issue #324).
+    """True when two claims' validity windows cannot overlap in time (issue athenaeum#324).
 
     Two claims are DISJOINT — sequential states of the world that cannot
     contradict (A true through March, B true from April) — iff one side has a
@@ -803,7 +803,7 @@ def validity_windows_disjoint(
     return False
 
 
-# --- Audience / access scoping (issue #312) ---
+# --- Audience / access scoping (issue athenaeum#312) ---
 #
 # Read-scoping for secondary agents/routines. The audience model is
 # RBAC-compatible: ``audience:`` is a free-form list of opaque role/group
@@ -856,7 +856,7 @@ def parse_access(meta: dict[str, object] | None) -> str:
 def parse_audience(meta: dict[str, object] | None) -> list[str]:
     """Coerce a frontmatter ``audience:`` value into a clean list of role ids.
 
-    The single normalization point for the read-scoping control (issue #312),
+    The single normalization point for the read-scoping control (issue athenaeum#312),
     sibling to :func:`parse_refines`/:func:`parse_supersedes`. Accepts:
 
     - ``None`` / missing key → ``[]`` (no explicit grant).
@@ -951,7 +951,7 @@ def is_page_authorized_at(
     *,
     base: str | Path | None = None,
 ) -> bool:
-    """Fail-closed authorize a caller against a page identified by PATH (#538).
+    """Fail-closed authorize a caller against a page identified by PATH (athenaeum#538).
 
     The path-resolving counterpart to :func:`is_page_authorized`, used by the
     MCP pending-decision list tools (``list_pending_merges`` /
@@ -989,7 +989,7 @@ def all_sources_authorized(
     *,
     base: str | Path | None = None,
 ) -> bool:
-    """True iff a restricted caller may read EVERY page in ``sources`` (#538).
+    """True iff a restricted caller may read EVERY page in ``sources`` (athenaeum#538).
 
     The fail-closed predicate the MCP pending-decision list tools apply to
     withhold any pending item whose underlying source pages a restricted caller
@@ -1114,7 +1114,7 @@ class AutoMemoryFile:
     origin_session_id: str | None = None
     origin_turn: int | None = None
     sources: list[str] = field(default_factory=list)
-    # Lane 1 / #167: declared relationships to other memories. Both
+    # Lane 1 / athenaeum#167: declared relationships to other memories. Both
     # default to empty list. ``refines`` lists ``name:`` slugs of
     # memories this one narrows (general + exception — BOTH stay
     # active). ``supersedes`` lists ``{name, as_of, reason}`` records
@@ -1123,21 +1123,21 @@ class AutoMemoryFile:
     # by ``name:`` slug, not path.
     refines: list[str] = field(default_factory=list)
     supersedes: list[dict[str, str]] = field(default_factory=list)
-    # Issue #191: non-destructive inactive markers written by the resolver's
+    # Issue athenaeum#191: non-destructive inactive markers written by the resolver's
     # keep_a/keep_b (superseded_by = winner name) and deprecate_both
     # (deprecated = True) enactment. An inactive member is preserved on disk
     # for audit but excluded from recall + the C3 compile so it does not
     # resurface as a live claim.
     superseded_by: str = ""
     deprecated: bool = False
-    # Issue #260 (slice A of #259): origin-traced provenance. ``source_type``
+    # Issue athenaeum#260 (slice A of athenaeum#259): origin-traced provenance. ``source_type``
     # is one of :data:`SOURCE_TYPES` (default ``inferred`` so memories written
     # before the citation policy still parse). ``source_ref`` is the ULTIMATE
     # reference — session-id+turn, URL, or document path — NEVER this file's
     # own ``raw/auto-memory/...`` name. Empty when unestablished.
     source_type: str = DEFAULT_SOURCE_TYPE
     source_ref: str = ""
-    # Issue #326: channel-split provenance annotations. All three are
+    # Issue athenaeum#326: channel-split provenance annotations. All three are
     # optional and empty by default so legacy auto-memory files round-trip
     # unchanged. ``model`` is the model-id for AI-attributed claims
     # (``agent-observed`` / ``inferred`` / ``model-prior``). ``on_behalf_of``
@@ -1149,14 +1149,14 @@ class AutoMemoryFile:
     model: str = ""
     on_behalf_of: str = ""
     asserter: dict[str, object] = field(default_factory=dict)
-    # Issue #327: epistemic claim kind, classified once at intake by a cheap
+    # Issue athenaeum#327: epistemic claim kind, classified once at intake by a cheap
     # LLM pass (:mod:`athenaeum.claim_kind`). One of :data:`CLAIM_KINDS` or ""
     # (unclassified). Routes the resolver's opinion-attribution short-circuit:
     # an ``opinion`` pair keeps BOTH sides with explicit attribution rather
     # than being resolved by source precedence. Empty by default so legacy /
-    # unclassified members round-trip unchanged and keep pre-#327 behavior.
+    # unclassified members round-trip unchanged and keep pre-athenaeum#327 behavior.
     claim_kind: str = ""
-    # Issue #308 (slice 1): claim-level temporal validity. Both are the RAW
+    # Issue athenaeum#308 (slice 1): claim-level temporal validity. Both are the RAW
     # frontmatter string form (``YYYY-MM-DD`` or "" when absent) so the
     # dataclass predicate re-parses to the SAME date as the dict predicate
     # sees — keeping :meth:`is_inactive` in lockstep with
@@ -1178,7 +1178,8 @@ class AutoMemoryFile:
         return f"{self.origin_scope}/{self.path.name}"
 
     def is_inactive(self, as_of: date | None = None) -> bool:
-        """True when this member is inactive (#191 marker OR expired #308 validity).
+        """True when this member is inactive (athenaeum#191 marker OR expired
+        athenaeum#308 validity).
 
         Mirrors :func:`is_inactive_memory` on the dataclass path (C3 compile):
         inactive iff a ``superseded_by`` pointer or ``deprecated`` flag is set,
@@ -1218,22 +1219,22 @@ class WikiEntity:
     created: str = ""
     updated: str = ""
     body: str = ""
-    # Per-claim provenance (issue #90 / #95). Optional so old wikis
+    # Per-claim provenance (issue athenaeum#90 / athenaeum#95). Optional so old wikis
     # without provenance still round-trip cleanly. ``source`` is the
     # wiki-level default; ``field_sources`` overrides per field.
     source: str | dict | None = None
     # ``field_sources`` per-field value is ``str``/``dict`` (legacy)
     # OR ``list[dict]`` of ``{"value", "source"}`` records (per-value
-    # attribution for list fields, issue #102).
+    # attribution for list fields, issue athenaeum#102).
     field_sources: dict[str, str | dict | list] | None = None
-    # Issue #260: origin-traced provenance threaded onto the entity. Both
+    # Issue athenaeum#260: origin-traced provenance threaded onto the entity. Both
     # optional so legacy entities round-trip unchanged. ``source_type`` is one
     # of :data:`SOURCE_TYPES`; ``source_ref`` is the ultimate reference and is
     # never the raw ``auto-memory/...`` filename. Rendered into frontmatter
     # only when set.
     source_type: str | None = None
     source_ref: str | None = None
-    # Issue #326: channel-split provenance annotations. All three are
+    # Issue athenaeum#326: channel-split provenance annotations. All three are
     # optional and rendered into frontmatter only when set — legacy
     # entities without them round-trip byte-for-byte unchanged. See the
     # matching fields on :class:`AutoMemoryFile` for semantics.
@@ -1325,14 +1326,14 @@ class EscalationItem:
     # Absolute paths of the flagged member files in resolver ``a``/``b``
     # order (``members[0]`` is side ``a``, ``members[1]`` is side ``b``).
     # Populated by :func:`athenaeum.merge._emit_escalation` so the
-    # enactment lane (#166 follow-up) can DELETE the target member when a
+    # enactment lane (athenaeum#166 follow-up) can DELETE the target member when a
     # high-confidence ``forget_*`` / ``correct_*`` verdict auto-applies.
     # Empty for non-source-attributed escalations (the enactment lane then
     # no-ops). Stored as strings to keep the dataclass trivially copyable.
     members: list[str] = field(default_factory=list)
 
 
-# Per-model rate table (issue #247). Maps a model-id PREFIX to its
+# Per-model rate table (issue athenaeum#247). Maps a model-id PREFIX to its
 # (input, output) price in USD per million tokens. Matched by LONGEST
 # prefix so dated ids (``claude-haiku-4-5-20251001``) resolve to the
 # right family. The SOURCE OF TRUTH for model IDs and pricing is the
@@ -1347,8 +1348,8 @@ class EscalationItem:
 # skill. This constant is the single update site for model pricing; nothing
 # else in the codebase hard-codes per-MTok rates.
 _MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
-    # Claude 5 family (issue #577, precondition B1 of epic #516). Recorded
-    # BEFORE any DEFAULT_*_MODEL moves to it (#580) so a bump can never fall
+    # Claude 5 family (issue athenaeum#577, precondition B1 of epic athenaeum#516). Recorded
+    # BEFORE any DEFAULT_*_MODEL moves to it (athenaeum#580) so a bump can never fall
     # through to the blended fallback and silently under-report spend. Sonnet 5
     # carries an introductory $2/$10 through 2026-08-31, but this table has NO
     # time dimension — a prefix-keyed rate cannot expire — so the STANDARD rate
@@ -1364,7 +1365,7 @@ _MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
 
 # Blended fallback rate (USD per million tokens) for tokens accumulated
 # WITHOUT a model tag, or tagged with an id that matches no prefix above
-# (e.g. routed via a proxy). Matches the historical pre-#247 estimate.
+# (e.g. routed via a proxy). Matches the historical pre-athenaeum#247 estimate.
 _BLENDED_INPUT_USD_PER_MTOK = 1.50
 _BLENDED_OUTPUT_USD_PER_MTOK = 7.50
 
@@ -1385,8 +1386,8 @@ def _rates_for_model(model: str | None) -> tuple[float, float]:
     return (_BLENDED_INPUT_USD_PER_MTOK, _BLENDED_OUTPUT_USD_PER_MTOK)
 
 
-# Model-level sampling-parameter capability (issue #577; epic #515 deliverable 4,
-# which lands here ONCE — #573 reads this rather than re-declaring it). Records
+# Model-level sampling-parameter capability (issue athenaeum#577; epic athenaeum#515 deliverable 4,
+# which lands here ONCE — athenaeum#573 reads this rather than re-declaring it). Records
 # where ``temperature`` / ``top_p`` / ``top_k`` return HTTP 400: the Claude 4.7+
 # / 5-family request surface removed them, while earlier tiers still accept them.
 # This is a DECLARATION for callers to consult, NOT a step toward sending sampling
@@ -1412,8 +1413,8 @@ def _sampling_params_rejected(model: str | None) -> bool | None:
     *model* (longest-prefix match), or ``None`` if *model* matches no recorded
     prefix.
 
-    Declaration only (issue #577): athenaeum sends no sampling parameters —
-    this exists so a caller (e.g. #573) can consult one authoritative table
+    Declaration only (issue athenaeum#577): athenaeum sends no sampling parameters —
+    this exists so a caller (e.g. athenaeum#573) can consult one authoritative table
     instead of re-deriving the request-surface rule from a training prior.
     """
     if not model:
@@ -1433,12 +1434,12 @@ class TokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     api_calls: int = 0
-    # Prompt-caching counters (issue #230). ``input_tokens`` from the API
+    # Prompt-caching counters (issue athenaeum#230). ``input_tokens`` from the API
     # excludes cached tokens, so these accumulate separately: creation is
     # billed at ~1.25x the input rate, reads at ~0.1x.
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
-    # Batch API counters (issue #236). Batch traffic is folded into the
+    # Batch API counters (issue athenaeum#236). Batch traffic is folded into the
     # main counters above (so totals and the run-summary log include it)
     # AND tracked separately here so ``estimated_cost_usd`` can apply the
     # Batch API's 50% discount to exactly the batch-attributed share.
@@ -1446,7 +1447,7 @@ class TokenUsage:
     batch_output_tokens: int = 0
     batch_cache_creation_input_tokens: int = 0
     batch_cache_read_input_tokens: int = 0
-    # Per-model attribution (issue #247). Keyed by the model-id string the
+    # Per-model attribution (issue athenaeum#247). Keyed by the model-id string the
     # call site passed to ``messages.create``; each value tracks the same
     # six counters as the scalar fields above but for THAT model's share.
     # The scalar fields stay authoritative for totals/run-summary; this
@@ -1455,7 +1456,7 @@ class TokenUsage:
     # the blended rate for the untagged remainder. Excluded from ``repr``
     # to keep run-summary logging concise.
     per_model: dict[str, dict[str, int]] = field(default_factory=dict, repr=False)
-    # Subscription-covered flag (issue #330). When the run is served by the
+    # Subscription-covered flag (issue athenaeum#330). When the run is served by the
     # ``claude-cli`` provider, the operator's Claude Code SUBSCRIPTION pays for
     # the tokens — there is no per-token API bill. Token COUNTS still
     # accumulate (and appear in the run summary) exactly as for the API
@@ -1474,7 +1475,7 @@ class TokenUsage:
         *,
         is_batch: bool,
     ) -> None:
-        """Accumulate this call's counts into the per-model subset (#247)."""
+        """Accumulate this call's counts into the per-model subset (athenaeum#247)."""
         bucket = self.per_model.setdefault(
             model,
             {
@@ -1508,7 +1509,7 @@ class TokenUsage:
     ) -> None:
         """Record tokens from one API call.
 
-        *model* (issue #247) is the serving model-id; when given, the
+        *model* (issue athenaeum#247) is the serving model-id; when given, the
         counts are additionally attributed to that model for per-model
         cost estimation. Untagged calls fall back to the blended rate.
         """
@@ -1529,15 +1530,15 @@ class TokenUsage:
         cache_read_input_tokens: int = 0,
         model: str | None = None,
     ) -> None:
-        """Accumulate token counters WITHOUT counting an API call (#239).
+        """Accumulate token counters WITHOUT counting an API call (athenaeum#239).
 
         For callees whose orchestrating call site counts ``api_calls``
         separately (attempt counting — e.g. the merge-phase detector/
-        resolver loop and the #188 reresolve pass): the call site bumps
+        resolver loop and the athenaeum#188 reresolve pass): the call site bumps
         ``api_calls`` before the request; the callee lands the response's
         token + cache counts here once they are known.
 
-        *model* (issue #247) optionally tags the serving model-id for
+        *model* (issue athenaeum#247) optionally tags the serving model-id for
         per-model cost attribution.
         """
         self.input_tokens += input_tokens
@@ -1562,7 +1563,7 @@ class TokenUsage:
         cache_read_input_tokens: int = 0,
         model: str | None = None,
     ) -> None:
-        """Accumulate token counters from a Batch API result (#236).
+        """Accumulate token counters from a Batch API result (athenaeum#236).
 
         Folds the counts into the main counters (so ``total_tokens`` and
         the run-summary line include batch traffic) and additionally into
@@ -1570,9 +1571,9 @@ class TokenUsage:
         the Batch API's 50% discount. Does NOT bump ``api_calls`` — batch
         call sites count one attempt per request at batch-assembly time
         (budget enforcement point, mirroring :meth:`add_tokens`'s
-        attempt-counting contract from #239).
+        attempt-counting contract from athenaeum#239).
 
-        *model* (issue #247) optionally tags the serving model-id; the
+        *model* (issue athenaeum#247) optionally tags the serving model-id; the
         batch share is attributed per model so the 50% discount composes
         with that model's rates.
         """
@@ -1615,12 +1616,12 @@ class TokenUsage:
         batch_cache_read_input_tokens: int,
         rates_usd_per_mtok: tuple[float, float],
     ) -> float:
-        """Price one model's share at *rates*, composing cache + batch (#247).
+        """Price one model's share at *rates*, composing cache + batch (athenaeum#247).
 
         ``input_tokens`` from the API excludes cached tokens, so the cache
-        counters are folded in at the documented multipliers (#239): cache
+        counters are folded in at the documented multipliers (athenaeum#239): cache
         writes bill at 1.25x the input rate, cache reads at ~0.1x. Batch
-        API traffic (#236) bills at 50% of the synchronous rate, so half of
+        API traffic (athenaeum#236) bills at 50% of the synchronous rate, so half of
         the batch-attributed share is subtracted.
         """
         input_rate = rates_usd_per_mtok[0] / 1_000_000
@@ -1641,7 +1642,7 @@ class TokenUsage:
 
     @property
     def estimated_cost_usd(self) -> float:
-        """Estimate cost with per-model attribution (issue #247).
+        """Estimate cost with per-model attribution (issue athenaeum#247).
 
         Tokens tagged with a known model (via the ``model=`` kwarg on the
         accumulation methods) price at that model's rates from
@@ -1649,13 +1650,13 @@ class TokenUsage:
         Tokens accumulated WITHOUT a model tag — or tagged with an id that
         matches no known prefix (e.g. routed through a proxy) — fall back
         to the blended rate ($1.50/M input, $7.50/M output). The cache
-        multipliers (#239) and the Batch API 50% discount (#236) compose
+        multipliers (athenaeum#239) and the Batch API 50% discount (athenaeum#236) compose
         unchanged per model.
 
         Caveat: untagged/unknown-model traffic is still only approximated
         at the blended rate; it cannot be attributed to a specific model.
 
-        Subscription-covered runs (issue #330 ``claude-cli`` backend) short-
+        Subscription-covered runs (issue athenaeum#330 ``claude-cli`` backend) short-
         circuit to $0: the operator's Claude Code subscription pays for the
         tokens, so pricing them at API list rates would be wrong. The token
         COUNTS remain in the accumulators and the run summary.
@@ -1666,7 +1667,7 @@ class TokenUsage:
 
     @property
     def notional_cost_usd(self) -> float:
-        """Counterfactual API-rate cost of this run's tokens (issue #487).
+        """Counterfactual API-rate cost of this run's tokens (issue athenaeum#487).
 
         The same per-model pricing as :attr:`estimated_cost_usd` but WITHOUT the
         subscription short-circuit — what these tokens WOULD have cost at API
@@ -1680,10 +1681,10 @@ class TokenUsage:
         return self._cost_at_api_rates()
 
     def _cost_at_api_rates(self) -> float:
-        """Price every accumulated token at API list rates, per model (#247).
+        """Price every accumulated token at API list rates, per model (athenaeum#247).
 
         Extracted from :attr:`estimated_cost_usd` so the provider-tagged
-        estimate and the notional counterfactual (#487) share one
+        estimate and the notional counterfactual (athenaeum#487) share one
         implementation rather than drifting apart.
         """
         total = 0.0
@@ -1743,7 +1744,7 @@ class TokenUsage:
 
 
 def cache_usage_counts(response: object) -> tuple[int, int, int, int]:
-    """Extract token counts from an Anthropic API response (issue #230).
+    """Extract token counts from an Anthropic API response (issue athenaeum#230).
 
     Returns ``(input_tokens, output_tokens, cache_creation_input_tokens,
     cache_read_input_tokens)``. Missing or non-int fields coerce to 0 so
@@ -1774,12 +1775,12 @@ class ProcessingResult:
     skipped: list[str] = field(default_factory=list)
     escalated: list[EscalationItem] = field(default_factory=list)
     #: Count of Tier-2 classification responses that dropped ALL entities
-    #: because no parseable JSON array could be recovered (issue #472). Almost
+    #: because no parseable JSON array could be recovered (issue athenaeum#472). Almost
     #: always 0 or 1 per file; surfaced as ``degraded=N`` in the run summary.
     degraded: int = 0
     #: Count of Tier-2 classification responses that dropped ALL entities
     #: because they were TRUNCATED at the output-token budget
-    #: (``stop_reason == "max_tokens"``, issue #476). Kept SEPARATE from
+    #: (``stop_reason == "max_tokens"``, issue athenaeum#476). Kept SEPARATE from
     #: ``degraded`` — a truncation is fixed by a bigger budget, not escaping —
     #: and surfaced as ``truncated=N`` in the run summary.
     truncated: int = 0

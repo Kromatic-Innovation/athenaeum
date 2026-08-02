@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Scoped-claim poset model + three-way overlap verdict (issue #329).
+"""Scoped-claim poset model + three-way overlap verdict (issue athenaeum#329).
 
-#308 gave claims a TIME dimension (``valid_from`` / ``valid_until``). Time is
+athenaeum#308 gave claims a TIME dimension (``valid_from`` / ``valid_until``). Time is
 one dimension of a general pattern: two claims can BOTH be true when separated
 by ORGANIZATIONAL scope (team A's rule vs team B's), SPECIFICITY (an org-wide
 default vs a team's local exception), or LOCALE. Without a way to represent
 that, scope-separated claims surface as contradictions and get winner-picked.
 
-Formal core (small and testable — the buildable subset of #329's design pass):
+Formal core (small and testable — the buildable subset of athenaeum#329's design pass):
 
 - Each dimension is a **poset** with TOP = *unscoped* (absent coordinate).
     * ``org`` / ``locale`` are **trees**: a descendant node ⊑ its ancestor
@@ -24,13 +24,13 @@ The org/locale tree is a small **versioned config** (``scope.org`` /
 scope values that are not in the tree — the hard lesson from Cyc's microtheory
 proliferation. An out-of-tree value **fails open to detection**: it is treated
 as *unscoped* (adds no constraint) so a typo can never silently hide a claim,
-matching the fail-open posture of #308's temporal validity.
+matching the fail-open posture of athenaeum#308's temporal validity.
 
 Three-way verdict (:func:`scope_comparison`) replaces the binary
 conflict/no-conflict split:
 
 - **DISJOINT** — the meet is empty in some dimension → the two claims can never
-  both apply, so they cannot contradict. (Generalizes #324's disjoint-validity
+  both apply, so they cannot contradict. (Generalizes athenaeum#324's disjoint-validity
   time pre-filter to org/locale.)
 - **OVERRIDE** — one context is strictly below the other in the *tree*
   dimensions (org/locale): the specific claim is an exception carving out its
@@ -42,17 +42,17 @@ conflict/no-conflict split:
 
 DELIBERATELY DEFERRED to the ADR (design-only, not built here):
 
-- **Time-interval nesting does NOT trigger OVERRIDE.** #324 shipped a semantic
+- **Time-interval nesting does NOT trigger OVERRIDE.** athenaeum#324 shipped a semantic
   where overlapping-but-nested validity windows still reach the resolver (only
   DISJOINT time short-circuits). Auto-promoting a sub-interval to a silent
   override would change that shipped behavior, so tree-specificity alone drives
   OVERRIDE here; time only contributes to DISJOINT. Whether a bounded-time
-  exception should override an always-valid claim is left to the #329 ADR.
+  exception should override an always-valid claim is left to the athenaeum#329 ADR.
 - **Recall caller-context filter** (``serve --scope org:...``) and the broader
-  team/multi-tenant scope-IDENTITY system are out of scope (#314).
+  team/multi-tenant scope-IDENTITY system are out of scope (athenaeum#314).
 
 Layering: L0/L1-boundary primitive. Imports only :mod:`athenaeum.models` (the
-L1 hub, for the #308 ``valid_from``/``valid_until`` parsers) plus stdlib — no
+L1 hub, for the athenaeum#308 ``valid_from``/``valid_until`` parsers) plus stdlib — no
 config, no LLM client. Factoring rule: this module owns ONLY the poset
 math (meet/leq/three-way verdict) and the frontmatter → coordinate parse; it
 has no opinion on what a caller DOES with a DISJOINT/OVERRIDE/OVERLAP verdict
@@ -120,7 +120,7 @@ class TreeDimension:
         if norm not in self.nodes:
             log.debug(
                 "scope[%s]: value %r is not a declared tree node; treating as "
-                "unscoped (authors may not mint scope values, #329)",
+                "unscoped (authors may not mint scope values, athenaeum#329)",
                 self.name,
                 norm,
             )
@@ -189,7 +189,7 @@ def interval_meet_empty(
 ) -> bool:
     """True when intervals ``a`` and ``b`` cannot overlap in time.
 
-    Mirrors :func:`athenaeum.models.validity_windows_disjoint` (issue #324):
+    Mirrors :func:`athenaeum.models.validity_windows_disjoint` (issue athenaeum#324):
     ``valid_until`` is the INCLUSIVE last-valid date, so the comparison is
     strict ``<`` — an interval ending on X and another starting on X share day
     X and are NOT disjoint. Open bounds overlap by default.
@@ -213,7 +213,7 @@ class ScopeCoordinate:
     """One claim's context: a coordinate per scope dimension.
 
     ``org`` / ``locale`` are normalized tree nodes (``None`` = unscoped/TOP).
-    ``valid_from`` / ``valid_until`` are the #308 temporal bounds (``None`` =
+    ``valid_from`` / ``valid_until`` are the athenaeum#308 temporal bounds (``None`` =
     open). Built by :meth:`ScopeTree.coordinate`.
     """
 
@@ -228,7 +228,7 @@ class ScopeCoordinate:
 
 
 class ScopeVerdict(Enum):
-    """Three-way overlap verdict (issue #329)."""
+    """Three-way overlap verdict (issue athenaeum#329)."""
 
     DISJOINT = "disjoint"
     OVERRIDE = "override"
@@ -265,7 +265,7 @@ class ScopeTree:
         """Build a :class:`ScopeTree` from ``config['scope']['org'|'locale']``.
 
         Each is a list of node strings. Missing / malformed → empty dimension
-        (no ``_DEFAULTS`` seed, per issue #231). Node values are case-folded
+        (no ``_DEFAULTS`` seed, per issue athenaeum#231). Node values are case-folded
         and whitespace-trimmed; non-string / empty entries are dropped.
         """
         org_nodes: list[str] = []
@@ -294,9 +294,9 @@ class ScopeTree:
         """Parse a member's frontmatter into a normalized :class:`ScopeCoordinate`.
 
         Reads the nested ``scope: {org:, locale:}`` block (org/locale) and the
-        top-level ``valid_from`` / ``valid_until`` (#308, temporal). Unknown
+        top-level ``valid_from`` / ``valid_until`` (athenaeum#308, temporal). Unknown
         org/locale values normalize to ``None`` (unscoped); malformed dates
-        fail open to ``None`` via the shared #308 parsers.
+        fail open to ``None`` via the shared athenaeum#308 parsers.
         """
         org_raw: Any = None
         locale_raw: Any = None
@@ -338,7 +338,7 @@ def scope_leq(a: ScopeCoordinate, b: ScopeCoordinate, tree: ScopeTree) -> bool:
     only) so time-interval nesting does not silently drive an override — see the
     module docstring's deferred-design note.
 
-    Intentional, retained helper (issue #539 settling of §4.4): it is the
+    Intentional, retained helper (issue athenaeum#539 settling of §4.4): it is the
     full-poset counterpart to the deliberately-narrower :func:`tree_leq` the
     shipped comparison path uses, kept so the complete order stays expressed and
     tested alongside the design decision to narrow it. Not dead; an intentional

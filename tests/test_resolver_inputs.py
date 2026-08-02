@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the expanded resolver-input payload (Lane 2 / issue #168).
+"""Tests for the expanded resolver-input payload (Lane 2 / issue athenaeum#168).
 
 Covers ``_build_user_message``'s richer context:
 
@@ -427,7 +427,7 @@ def test_token_cap_negative_rejected_via_env(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Issue #175 — boundary and tolerance tests
+# Issue athenaeum#175 — boundary and tolerance tests
 # ---------------------------------------------------------------------------
 
 

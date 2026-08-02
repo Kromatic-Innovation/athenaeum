@@ -1,10 +1,10 @@
-# Source-Handle Registry — Data Model (issue #453)
+# Source-Handle Registry — Data Model (issue athenaeum#453)
 
 > **Status:** schema + index builder only (this document + the templates +
 > `athenaeum registry`). Populating real handles for existing client/company
 > pages is a separate, operator-only, private-store operation —
 > [#454](https://github.com/Kromatic-Innovation/athenaeum/issues/454), blocked
-> by this issue. The builder is designed so #454 is **not** a precondition: it
+> by this issue. The builder is designed so athenaeum#454 is **not** a precondition: it
 > emits a well-formed registry even when zero handles are populated. Part of
 > epic [#422](https://github.com/Kromatic-Innovation/athenaeum/issues/422);
 > consumed downstream by the prospector adapters
@@ -61,7 +61,7 @@ The canonical key list and their list/scalar split live in one place —
 These templates and this repo are public OSS. **No real domains, emails, Slack
 ids, board ids, or LinkedIn URLs land here** — the scaffolds ship empty and the
 tests use synthetic fixtures. Real handle values are seeded only against the
-private `~/knowledge/` store by the operator-only #454 workflow, via raw
+private `~/knowledge/` store by the operator-only athenaeum#454 workflow, via raw
 intake / tier0 — never hand-committed to this repo.
 
 ## 4. The index builder — `athenaeum registry`
@@ -106,4 +106,4 @@ Only populated keys appear under `handles` — an entity with an empty
 `slack_channels: []` simply omits it. When **no** entity has any populated
 handle (the seed-not-landed-yet case), the registry is still well-formed:
 `entity_count` is `0` and `entities` is `{}`. That degenerate case is a
-first-class, tested behaviour — the builder never requires #454 to have run.
+first-class, tested behaviour — the builder never requires athenaeum#454 to have run.

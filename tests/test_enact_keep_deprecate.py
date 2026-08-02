@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #191: keep_a/keep_b/deprecate_both enact NON-DESTRUCTIVE markers.
+"""Issue athenaeum#191: keep_a/keep_b/deprecate_both enact NON-DESTRUCTIVE markers.
 
-PR #190 wired enactment for the destructive forget_*/correct_* verdicts
-(delete the loser). #191 closes the remaining gap: keep_a/keep_b mark the
+PR athenaeum#190 wired enactment for the destructive forget_*/correct_* verdicts
+(delete the loser). athenaeum#191 closes the remaining gap: keep_a/keep_b mark the
 LOSING member ``superseded_by: <winner name>`` and deprecate_both marks BOTH
 members ``deprecated: true``. Nothing is deleted; the markers make a member
 inactive so the C3 compile + recall skip it.

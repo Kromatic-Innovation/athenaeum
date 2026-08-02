@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for intake-side sensitive-content screening (issue #320).
+"""Tests for intake-side sensitive-content screening (issue athenaeum#320).
 
 Covers the design-pass §7 acceptance criteria: the medical detection
 catalogue and false-positive posture, the config resolution + precedence, the
@@ -287,7 +287,7 @@ class TestScreenerAccessPropagation:
         # personal is authoritative and stuck.
         assert page_meta.get("access") == "personal"
 
-        # Read-time gate (#312): a restricted caller is withheld the page; the
+        # Read-time gate (athenaeum#312): a restricted caller is withheld the page; the
         # owner (caller_audience=None) still receives it.
         restricted = recall_search(
             wiki_root, "diabetes health status", caller_audience={"secondary"}

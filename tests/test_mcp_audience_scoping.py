@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Audience scoping across the whole MCP surface (issue #538).
+"""Audience scoping across the whole MCP surface (issue athenaeum#538).
 
-Before #538 only ``recall`` applied ``caller_audience``. A restricted caller
+Before athenaeum#538 only ``recall`` applied ``caller_audience``. A restricted caller
 could route around it by asking a page-content-bearing LIST tool for the same
 bytes, and could mutate the operator's human-decision queue unchecked. These
 tests pin the closed hole on both axes:

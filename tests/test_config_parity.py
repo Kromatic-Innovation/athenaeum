@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #232 — config parity: CLI > env > yaml > code default.
+"""Issue athenaeum#232 — config parity: CLI > env > yaml > code default.
 
 Covers:
 - ``--max-files`` gains ``ATHENAEUM_MAX_FILES`` env + ``librarian.max_files``
-  yaml, mirroring the #220 ``--max-api-calls`` precedence chain.
+  yaml, mirroring the athenaeum#220 ``--max-api-calls`` precedence chain.
 - New ``models:`` yaml section for the previously env-only model knobs
   (``models.classify`` / ``models.write`` / ``models.topic``). Env wins over
   yaml per knob. The resolver model joined the same block as
-  ``models.resolve`` in the #232 follow-up (issue #513); the pre-#232
+  ``models.resolve`` in the athenaeum#232 follow-up (issue athenaeum#513); the pre-athenaeum#232
   ``resolve.model`` key is still honored as a lower-precedence fallback.
 - Regression guard: none of the new keys are seeded into ``config._DEFAULTS``
-  (the #231 shadowing bug) — yaml is read only when the operator set it.
+  (the athenaeum#231 shadowing bug) — yaml is read only when the operator set it.
 
 No live API calls; every client is a fake.
 """
@@ -252,7 +252,7 @@ class TestMaxFilesCLI:
 
 
 class TestModelDefaultConsolidation:
-    """Issue #571 (M19): the four haiku-class stage defaults are single-sourced.
+    """Issue athenaeum#571 (M19): the four haiku-class stage defaults are single-sourced.
 
     ``tiers.DEFAULT_CLASSIFY_MODEL`` is the one literal; the classifier, the
     contradiction detector (which shares the ``classify`` knob), the recall
@@ -439,7 +439,7 @@ class TestModelPlumbing:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         captured: dict[str, Any] = {}
 
-        # Issue #554 (L11): left ad-hoc rather than repointed at
+        # Issue athenaeum#554 (L11): left ad-hoc rather than repointed at
         # tests.conftest.FakeLLMClient — this file's fakes are built around
         # MagicMock-based clients asserting on `call_args` elsewhere in the
         # module, a different pattern than the shared canned-response double.
@@ -493,7 +493,7 @@ class TestModelPlumbing:
     ) -> None:
         """--knowledge-root must route a non-default root's athenaeum.yaml
         (and its ``models.topic``) into extract_topics — operators with
-        non-default roots could not reach the knob before (#232 QA)."""
+        non-default roots could not reach the knob before (athenaeum#232 QA)."""
         (tmp_path / "athenaeum.yaml").write_text(
             "models:\n  topic: root-topic-model\n", encoding="utf-8"
         )
@@ -628,8 +628,8 @@ class TestModelPlumbingProductionPath:
 
 class TestResolverModelPrecedence:
     """The contradiction-resolver model reads ``models.resolve`` like every
-    other knob, with the pre-#232 ``resolve.model`` key kept working as a
-    lower-precedence fallback (issue #513).
+    other knob, with the pre-athenaeum#232 ``resolve.model`` key kept working as a
+    lower-precedence fallback (issue athenaeum#513).
 
     Ordering under test, highest first: ``ATHENAEUM_RESOLVE_MODEL`` env >
     ``models.resolve`` > ``resolve.model`` > ``DEFAULT_RESOLVE_MODEL``.
@@ -656,7 +656,7 @@ class TestResolverModelPrecedence:
     def test_legacy_resolve_model_still_resolves(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Backward compat: pre-#232 configs keep working untouched."""
+        """Backward compat: pre-athenaeum#232 configs keep working untouched."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
         cfg = {**self._MODELS_ONLY, "resolve": {"model": "my-resolver"}}
         assert resolutions_mod._get_model(cfg) == "my-resolver"
@@ -713,7 +713,7 @@ class TestResolverModelPrecedence:
     def test_end_to_end_through_load_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """models.resolve must survive load_config's merge (issue #231:
+        """models.resolve must survive load_config's merge (issue athenaeum#231:
         the key is NOT seeded into _DEFAULTS, so it passes through only
         when the operator actually set it)."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MODEL", raising=False)
@@ -725,13 +725,13 @@ class TestResolverModelPrecedence:
 
 
 # ---------------------------------------------------------------------------
-# #231 regression guard + template documentation
+# athenaeum#231 regression guard + template documentation
 # ---------------------------------------------------------------------------
 
 
 class TestNoNewDefaultsSeeded:
     """New keys must NOT be seeded into _DEFAULTS — resolvers read yaml
-    only-if-set, else fall through to env/code default (issue #231)."""
+    only-if-set, else fall through to env/code default (issue athenaeum#231)."""
 
     def test_models_and_librarian_not_seeded(self, tmp_path: Path) -> None:
         assert "models" not in _DEFAULTS
@@ -767,5 +767,5 @@ class TestTemplateAdvertisesNewKeys:
         assert "#   classify:" in _DEFAULT_CONFIG_CONTENT
         assert "#   write:" in _DEFAULT_CONFIG_CONTENT
         assert "#   topic:" in _DEFAULT_CONFIG_CONTENT
-        # Issue #513: the resolver knob joined the same block.
+        # Issue athenaeum#513: the resolver knob joined the same block.
         assert "#   resolve: claude-opus-5" in _DEFAULT_CONFIG_CONTENT

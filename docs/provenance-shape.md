@@ -1,7 +1,7 @@
 # Provenance Shape — Per-Value Attribution and the MCP `remember` API
 
 This document is the DESIGN LOCK for athenaeum's per-claim provenance
-on-disk shape. It settles the questions that #102, #97, and #96 each
+on-disk shape. It settles the questions that athenaeum#102, athenaeum#97, and athenaeum#96 each
 implement against, so those three issues land against ONE decided shape
 and don't drift.
 
@@ -9,7 +9,7 @@ Companion to `docs/conflict-resolution.md` — that doc locks how
 disagreements are RESOLVED; this one locks how attribution is REPRESENTED
 on disk and at the MCP boundary.
 
-This document is the SHIPPED lock: #96, #97, and #102 have all landed
+This document is the SHIPPED lock: athenaeum#96, athenaeum#97, and athenaeum#102 have all landed
 against the shape decided here (`src/athenaeum/provenance.py` —
 `parse_per_value_field_sources`, `validate_field_sources`,
 `resolve_remember_sources`). It remains the target contract for any future
@@ -22,16 +22,16 @@ together, not the doc as future-tense design ahead of the code.
 
 ### Already shipped
 
-- **#90 — per-claim provenance primitives** (PR #94): `WikiBase.source`
+- **athenaeum#90 — per-claim provenance primitives** (PR athenaeum#94): `WikiBase.source`
   and `WikiBase.field_sources` round-trip on disk. `provenance.py` parses
   the scalar `<type>:<ref>` form and the structured `{type, ref, ts?,
   confidence?, notes?}` dict form. (A legacy single-token form
   — `extended-tier-build`, `warm-network-detect` — was accepted on read
-  until #97 migrated the live tree on 2026-05-09; see §5.)
-- **#95 — Tier 3 emits `field_sources`**: when Tier 3 creates or merges
+  until athenaeum#97 migrated the live tree on 2026-05-09; see §5.)
+- **athenaeum#95 — Tier 3 emits `field_sources`**: when Tier 3 creates or merges
   a person/company wiki, the relevant Apollo-namespace fields are
   attributed via `field_sources.<key> = "api:apollo:<date>"`.
-- **dedupe coalesce coverage** (#100, Lane E of the foundation refactor):
+- **dedupe coalesce coverage** (athenaeum#100, Lane E of the foundation refactor):
   `_merge_field_sources` carries `field_sources` forward across a
   duplicate-pair merge. Canonical wins per key; absorbed-only keys are
   carried forward. Pruned when the underlying field is gone. Locked in
@@ -39,17 +39,17 @@ together, not the doc as future-tense design ahead of the code.
 
 ### Also already shipped (settled by this doc)
 
-- **Per-VALUE attribution for list fields** (#102). Previously
+- **Per-VALUE attribution for list fields** (athenaeum#102). Previously
   `field_sources.emails` was one source for the whole list, so a contact
   with `emails: [a@x.com, b@y.com]` where `a@x` came from Apollo and `b@y`
   came from a LinkedIn export lost the second source. Now shipped as the
   co-indexed `list[{value, source}]` shape (§2), parsed and validated by
   `provenance.parse_per_value_field_sources` / `provenance.validate_field_sources`.
-- **MCP `remember(sources=...)` shape** (#96). The three on-the-wire shapes
+- **MCP `remember(sources=...)` shape** (athenaeum#96). The three on-the-wire shapes
   that used to collide (with a pathological disambiguation case) are
   replaced by the explicit wrapper keys (§4), shipped in
   `provenance.resolve_remember_sources`.
-- ~~**Legacy slug → typed migration** (#97).~~ Resolved 2026-05-09:
+- ~~**Legacy slug → typed migration** (athenaeum#97).~~ Resolved 2026-05-09:
   `athenaeum repair --legacy-source-slugs --apply` migrated 15,403 wikis
   from `<bare-slug>` to `script:<slug>`. The `_LEGACY_SCALAR_RE` branch
   in `provenance.parse_source` retired in the follow-up PR.
@@ -116,7 +116,7 @@ Match key for "is this the same value": `repr(value)` of the dict, the
 same identity used by `dedupe._perform_merge`'s list-union (see
 `docs/conflict-resolution.md` §7 known-edge-cases). Two semantically-equal
 dicts with different YAML key order would NOT match; this is a known
-limitation accepted at #100 and out of scope here.
+limitation accepted at athenaeum#100 and out of scope here.
 
 If a future requirement needs sub-field attribution inside a dict, the
 caller should split the dict into separate scalar fields rather than
@@ -157,7 +157,7 @@ Migration path:
   as wikis are organically updated. The legacy reader branch stays
   forever — the cost is one isinstance check per parse.
 
-### 2.4 Validator changes (shipped — #102)
+### 2.4 Validator changes (shipped — athenaeum#102)
 
 `provenance.validate_field_sources` accepts either:
 
@@ -194,7 +194,7 @@ amendment.
 
 ## 4. MCP `remember(sources=...)` API
 
-Resolves #96.
+Resolves athenaeum#96.
 
 ### 4.1 Status quo and the pathological case
 
@@ -243,7 +243,7 @@ Rules:
 - `sources is dict` → accepts ANY combination of the allowed wrapper/extra
   keys: `_source`, `_field_sources`, and the channel-split extras
   (`_source_type`, `_source_ref`, `_model`, `_on_behalf_of`, `_asserter`,
-  issue #326). `_source` and `_field_sources` MAY co-occur in the same
+  issue athenaeum#326). `_source` and `_field_sources` MAY co-occur in the same
   call — a caller wanting a wiki-level default AND per-field overrides
   passes both. A dict with none of the allowed keys, or with any unknown
   key, is a `ValueError`.
@@ -266,7 +266,7 @@ The MCP API does not yet accept per-VALUE attribution for list fields.
 The `_field_sources` value is `{<field>: <source>}` only — same shape as
 today's on-disk legacy `field_sources`. `remember()` callers that want
 per-value attribution should pass the structured form via the future
-typed `RememberPayload` shape (deferred; not in #96 scope).
+typed `RememberPayload` shape (deferred; not in athenaeum#96 scope).
 
 Rationale: `remember` is the boundary where the LLM agent dictates a
 single source for a single creation event. Per-value attribution arises
@@ -275,7 +275,7 @@ that doesn't go through MCP.
 
 ---
 
-## 5. Legacy slug migration (#97)
+## 5. Legacy slug migration (athenaeum#97)
 
 ### 5.1 Live-tree inventory
 
@@ -317,12 +317,12 @@ that would need a username pulled from elsewhere in the wiki. If one
 ever appears (it would fail the inventory check above and abort the
 migration), the implementation issue gets reopened with a discussion of
 context-extraction rules. **OPEN QUESTION — Tristan to decide before
-#97 lands**: only if a non-context-free bare slug appears in a future
+athenaeum#97 lands**: only if a non-context-free bare slug appears in a future
 inventory.
 
 ### 5.4 Idempotency and dry-run
 
-The `athenaeum repair --legacy-source-slugs` command (per #97) MUST:
+The `athenaeum repair --legacy-source-slugs` command (per athenaeum#97) MUST:
 
 1. Run by default in DRY-RUN. Print: `would migrate <N> wikis: <slug>
    → <typed>` per slug class. Exit 0.
@@ -371,13 +371,13 @@ Out of scope, by design:
   the current answer and is not affected by this doc.
 - **Cross-wiki provenance graph.** Tracking which wiki cites which other
   wiki is separate from per-field source attribution and is out of scope
-  for the implementations of #96/#97/#102.
+  for the implementations of athenaeum#96/#97/#102.
 
 ---
 
 ## 7. Declared memory relationships (`refines` / `supersedes`)
 
-Issue #167 (Lane 1 of #166). Two optional frontmatter fields on
+Issue athenaeum#167 (Lane 1 of athenaeum#166). Two optional frontmatter fields on
 auto-memory files declare an explicit relationship to another memory.
 They sit alongside `source:` / `field_sources:` and round-trip through
 tier0 passthrough byte-for-byte.
@@ -478,14 +478,14 @@ ingest; downstream tooling (a future lint pass) can surface them.
   script lane.
 - MCP / agent-facing tooling to declare from the agent side — separate
   lane.
-- Resolver input expansion (Lane 2, #168), prompt rewrite (Lane 3,
-  #169), threshold tuning (Lane 4, #170).
+- Resolver input expansion (Lane 2, athenaeum#168), prompt rewrite (Lane 3,
+  athenaeum#169), threshold tuning (Lane 4, athenaeum#170).
 
 ---
 
 ## 8. Claim-level temporal validity (`valid_from` / `valid_until`)
 
-Issue #308 (slice 1). Two optional frontmatter fields on auto-memory members
+Issue athenaeum#308 (slice 1). Two optional frontmatter fields on auto-memory members
 declare the real-world window over which a claim is true. They sit alongside
 `source:` / `field_sources:` / `refines:` / `supersedes:` and round-trip through
 tier0 passthrough byte-for-byte (same contract as §3 and §7).
@@ -509,13 +509,13 @@ source_ref: <session>:<turn>
   optional. `valid_until` is the **last date the claim was valid (inclusive)**;
   a claim is inactive when `as_of > valid_until`. The **active predicate keys on
   the upper bound only** — `valid_from` is parsed and round-tripped, and feeds
-  #324's disjoint-window comparison, but does NOT gate activeness (§8.3).
-- **Orthogonal to `source:`.** `source_type` / `source_ref` (#260) answer *where
+  athenaeum#324's disjoint-window comparison, but does NOT gate activeness (§8.3).
+- **Orthogonal to `source:`.** `source_type` / `source_ref` (athenaeum#260) answer *where
   the claim came from* and *when it was ingested*; `valid_from` / `valid_until`
   answer *over what real-world window the claim is true*. This is the bi-temporal
   split (ingestion time vs. valid time) — they sit **beside** `source:`, never
   inside it.
-- **Augments, does not replace, `superseded_by` / `deprecated` (#191).** Those
+- **Augments, does not replace, `superseded_by` / `deprecated` (athenaeum#191).** Those
   remain the pointer (who won) and the both-stale flag; `valid_until` is the
   interval close. As of **slice 2** the resolver auto-stamps this interval on a
   temporal supersession (see §8.4) — the `superseded_by` mark and the
@@ -554,11 +554,11 @@ changes.
 
 **Upper bound only — `valid_from` stays ungated.** The active predicate keys on
 `valid_until`, NOT `valid_from`. Gating on the lower bound would hide a
-future-dated claim, which collides with §7.3 / #324: the disjoint-validity
+future-dated claim, which collides with §7.3 / athenaeum#324: the disjoint-validity
 detector short-circuit relies on a member whose `valid_from` is after today
 staying **active** so a sequential (disjoint) pair can form — a not-yet-valid
 claim is a recorded FUTURE state, not a hidden one. Slice 3's as-of rewind
-therefore views history through the upper bound and the #191 tombstones, which is
+therefore views history through the upper bound and the athenaeum#191 tombstones, which is
 exactly where the supersession-as-interval value lives (the slice-2 resolver
 closes intervals by stamping `valid_until`).
 
@@ -582,16 +582,16 @@ It is **read-only**: no resolver decision, no wiki mutation. Two surfaces:
   is not overwritten, then `recall --cache-dir <scratch>`.
 
 The as-of rewind operates through the **upper bound** (`valid_until`) and the
-#191 tombstones: a claim valid on DATE but expired now is **included** (its
+athenaeum#191 tombstones: a claim valid on DATE but expired now is **included** (its
 `valid_until` had not yet passed on DATE). Because `valid_from` is ungated
 (§8.3), a claim not yet valid on DATE is NOT excluded by this view — that is the
-deliberate cost of keeping #324's disjoint detector working, and the
+deliberate cost of keeping athenaeum#324's disjoint detector working, and the
 supersession-as-interval value (slice-2 `valid_until` closes) is unaffected. The
 MCP `recall` tool stays at today (default `as_of`). The C3 *compile*-as-of is a
-SEPARATE capability (§8.7, #359) — it recompiles rather than filters, so it is
+SEPARATE capability (§8.7, athenaeum#359) — it recompiles rather than filters, so it is
 not a read-time view over the live wiki.
 
-### 8.7 Compile-as-of (recompiled historical snapshot, #359)
+### 8.7 Compile-as-of (recompiled historical snapshot, athenaeum#359)
 
 Slice 3 (§8.5) is a **read-time view**: it filters the ALREADY-compiled live
 wiki so it can only HIDE pages/claims outside the as-of window. It cannot
@@ -614,7 +614,7 @@ re-derived as they would have compiled then. The result is written to a scratch
   `wiki/` (raises).
 - **Reuses existing plumbing.** No parallel machinery: the same
   `is_inactive(as_of)` predicate slice 3 keys on (upper bound `valid_until` +
-  #191 tombstones), the same `merge_clusters_to_wiki` C3 compile, threaded with
+  athenaeum#191 tombstones), the same `merge_clusters_to_wiki` C3 compile, threaded with
   an `out_wiki_root` override.
 
 **Scope & limitations (honest).**
@@ -637,7 +637,7 @@ re-derived as they would have compiled then. The result is written to a scratch
 
 ### 8.4 Resolver interval-close (slice 2)
 
-**Slice 2 (#308) makes `resolutions.enact_resolution` auto-stamp the loser's
+**Slice 2 (athenaeum#308) makes `resolutions.enact_resolution` auto-stamp the loser's
 `valid_until` when a resolution establishes a TEMPORAL supersession** — the
 loser is *valid-then-replaced* history, not a wrong claim. The stamp AUGMENTS,
 never replaces, the existing mark (§8.1): the loser stays `superseded_by` the
@@ -665,7 +665,7 @@ last-valid date (`YYYY-MM-DD`; a claim is inactive iff `as_of > valid_until`,
 a resolution must not EXTEND validity; only the earlier of (existing, new bound)
 is kept.
 
-**Boundary reconciliation with #324.** `models.validity_windows_disjoint` uses a
+**Boundary reconciliation with athenaeum#324.** `models.validity_windows_disjoint` uses a
 STRICT `<` on the inclusive `valid_until`, so a loser ending on date X and a
 winner starting on date X SHARE day X and are **not** disjoint. Stamping
 `loser.valid_until = winner.valid_from` therefore leaves the pair non-disjoint
@@ -685,7 +685,7 @@ page.
 
 **The claim is the member; its window travels with it into the entry.** A C3
 compile blends many raw members (each one claim) into one wiki entry whose
-`sources:` list is the per-claim provenance record (§3, §7; #262 already carries
+`sources:` list is the per-claim provenance record (§3, §7; athenaeum#262 already carries
 per-source `claim` / `verdict`). Slice 4 stamps each surviving member's
 `valid_from` / `valid_until` onto the source records that member contributes
 (`merge._stamp_member_validity`), so the compiled entry records **which window
@@ -707,14 +707,14 @@ to the claim, applied to each of its citations).
   only ever carries currently-active (or future-dated, §8.3) claims; slice 4
   surfaces each surviving claim's window (e.g. a still-active claim's
   `valid_from`, or a future `valid_until`) without changing what is compiled.
-  The #324 disjoint detector and the slice-2 resolver interval-close are
+  The athenaeum#324 disjoint detector and the slice-2 resolver interval-close are
   untouched — they operate on raw members, upstream of the compile.
 
 Pinned by `tests/test_temporal_validity.py::TestPerClaimCompiledValiditySlice4`.
 
 ## 9. Multi-dimensional scoped claims (`scope: {org, locale}` + time)
 
-Issue #329 (buildable subset of the design pass). Generalizes §8's TIME
+Issue athenaeum#329 (buildable subset of the design pass). Generalizes §8's TIME
 dimension to a small **product poset** over `{org, locale, time}`. Two claims
 can BOTH be true when separated by organizational scope, specificity, or locale;
 the detector/resolver represents that so scope-separated claims stop surfacing as
@@ -727,7 +727,7 @@ short-circuit + `scope_*` actions in `resolutions.py`.
 ---
 type: reference
 name: deploy-policy
-valid_from: 2026-04-01        # TIME dimension (§8, #308) — unchanged
+valid_from: 2026-04-01        # TIME dimension (§8, athenaeum#308) — unchanged
 scope:
   org: kromatic/platform      # node in the versioned org tree; absent = org-wide
   locale: en-US               # absent = everywhere
@@ -757,7 +757,7 @@ scope:
 A coordinate value **not in the tree** normalizes to *unscoped* (TOP) with a
 debug breadcrumb — the hard lesson from Cyc's microtheory proliferation. This
 **fails open toward detection**: a typo adds no constraint rather than silently
-carving a phantom scope that could hide a claim. No `_DEFAULTS` seed (#231): a
+carving a phantom scope that could hide a claim. No `_DEFAULTS` seed (athenaeum#231): a
 fresh install has empty trees, so every declared org/locale value is inert and
 single-user behavior is unchanged.
 
@@ -777,7 +777,7 @@ single-user behavior is unchanged.
 **Deferred (ADR).** Time-interval NESTING does **not** trigger OVERRIDE — only
 org/locale tree-specificity does — so §8/#324's shipped "nested time still reaches
 the resolver" semantic is preserved. Whether a bounded-time exception should
-override an always-valid claim is left to the #329 ADR.
+override an always-valid claim is left to the athenaeum#329 ADR.
 
 ### 9.4 Scope-edit resolver actions (`scope_a` / `scope_b`)
 
@@ -796,11 +796,11 @@ coordinate PINNING is deferred to the ADR; when the pair has no time boundary,
 `ENACTING_ACTIONS` + `flip_action`; auto-apply threshold 0.90.
 
 The broader team/multi-tenant scope-IDENTITY system and the recall
-`serve --scope` caller-context filter are out of scope (#314), deferred design.
+`serve --scope` caller-context filter are out of scope (athenaeum#314), deferred design.
 
 ## 10. Channel split, model recording, IdP-compatible asserter identity
 
-Issue #326. Extends `source_type` (#260) — which collapsed three materially
+Issue athenaeum#326. Extends `source_type` (athenaeum#260) — which collapsed three materially
 different AI channels into `inferred`, recorded nothing about WHICH model
 asserted a claim, and had no person identity for `user-stated` beyond a
 session ref — with a channel split, a `model:` recording field, and an
@@ -815,7 +815,7 @@ The `source_type` vocabulary gains two values (see
 
 | value | meaning |
 |---|---|
-| `user-stated` | human utterance in a session (unchanged from #260) |
+| `user-stated` | human utterance in a session (unchanged from athenaeum#260) |
 | `agent-observed` | **new** — AI derived it from in-session artifacts (file contents, tool output); verifiable against the transcript |
 | `inferred` | AI leap without artifact backing (unchanged; stays the coercion default) |
 | `model-prior` | **new** — asserted from training-data knowledge with no session evidence |
@@ -836,13 +836,13 @@ only the model that guessed, and dates from that model's cutoff.
 2. `linkedin:<username>` / `twitter:<username>`
 3. `api:apollo` / `api:<vendor>`
 4. `wikipedia:<page>`
-5. **`agent-observed:<model>:<session-ref>` (new — issue #328)**
+5. **`agent-observed:<model>:<session-ref>` (new — issue athenaeum#328)**
 6. `claude:tier3-...`
 7. `script:<slug>`
-8. **`model-prior:<model-id>` (new — issue #326)**
+8. **`model-prior:<model-id>` (new — issue athenaeum#326)**
 9. `unsourced` / empty (lowest)
 
-`agent-observed` (issue #328) ranks BELOW `wikipedia:<page>` — it is not
+`agent-observed` (issue athenaeum#328) ranks BELOW `wikipedia:<page>` — it is not
 a curated public authority — but ABOVE `claude:tier3`/inferred: it is
 grounded in a real in-session artifact the agent READ (file contents or
 tool output), verifiable against the transcript, not an unsupported
@@ -859,7 +859,7 @@ taxonomy in its §3), the `_RESOLVE_SYSTEM` prompt + its
 `tests/data/resolve_system.txt` snapshot, AND the corresponding test in
 `tests/test_conflict_resolution.py` in the same change.
 
-### 10.1a Source backfill — `repair --backfill-sources` (issue #328)
+### 10.1a Source backfill — `repair --backfill-sources` (issue athenaeum#328)
 
 A memory written through `remember()` with no `sources` gets the
 DEFAULTED scalar `source: claude:inferred` (`mcp_server._DEFAULT_INFERRED_SOURCE`).
@@ -885,7 +885,7 @@ fallback first non-frontmatter line) as a normalized substring:
 
 The pass touches ONLY provenance keys (body + all other frontmatter lines
 are byte-for-byte preserved, per the §3 tier0 discipline), runs under the
-#309 run lock on `--apply`, writes atomically (`atomic_io`), and SKIPS
+athenaeum#309 run lock on `--apply`, writes atomically (`atomic_io`), and SKIPS
 (never guesses) when the transcript is missing/rolled off. Dry-run
 (default) prints per-memory proposed upgrades and writes nothing.
 
@@ -966,7 +966,7 @@ remember(text="...", sources={
     # SourceRef surface (from §4) — unchanged
     "_source": "user-stated:session-abc#turn-5",
 
-    # Channel-split extras (issue #326)
+    # Channel-split extras (issue athenaeum#326)
     "_source_type": "user-stated",                  # coarse channel
     "_source_ref":  "session-abc#turn-5",           # ULTIMATE reference
     "_model":       "claude-opus-4-7",              # AI model-id (optional)
@@ -994,7 +994,7 @@ the read-side parsers (`models.parse_asserter`,
 ### 10.5 What this doc does NOT decide
 
 - **Rendering `model:` / `asserter:` into the resolver's per-member
-  passages.** Issue #326 does the source-precedence prompt update,
+  passages.** Issue athenaeum#326 does the source-precedence prompt update,
   but the resolver already receives each member's frontmatter dict — a
   future lane can surface `model:` / `asserter:` in the rendered
   passage without a lock change.
@@ -1012,18 +1012,18 @@ the read-side parsers (`models.parse_asserter`,
 
 | Section | Issue | What the issue implements |
 |---------|-------|---------------------------|
-| §2 per-value `field_sources` | #102 | Validator + readers accept the new list-of-records shape; writers emit it; legacy shape stays loadable. |
+| §2 per-value `field_sources` | athenaeum#102 | Validator + readers accept the new list-of-records shape; writers emit it; legacy shape stays loadable. |
 | §3 tier0 byte-for-byte | (no issue — already invariant) | Existing tier0 passthrough already satisfies the rule. Add a regression test asserting per-value shape round-trips. |
-| §4 MCP `remember(sources=...)` | #96 | Replace the bare-dict heuristic with the `_source`/`_field_sources` wrapper keys; update docstring + integration test. |
-| §5 legacy slug migration | #97 | `athenaeum repair --legacy-source-slugs` with dry-run/apply, the fixed mapping table, and post-migration validation. |
-| §8 claim-level temporal validity | #308 | Slice 1: `valid_from` / `valid_until` parse + round-trip; shared `valid_until_expired` helper; currently-valid-by-default filter. **Slice 2 (shipped): resolver interval-close (§8.4) — `enact_resolution` stamps the loser's `valid_until` on `keep_a`/`keep_b` and sequential-snapshot `not_a_conflict`, only-close-never-widen.** **Slice 3 (shipped, #354): read-time `--as-of` view (§8.5) — `recall --as-of` / `reindex --as-of` filter the compiled wiki by the upper bound + #191 tombstones, no recompile.** **Slice 4 (shipped): per-claim compiled validity (§8.6).** **compile-as-of (shipped, #359, §8.7): `compile --as-of --out` RE-RUNS the deterministic C3 blend into a scratch dir — resurrects members expired now but valid then; valid-time only.** #329 generalizes the close to non-time scopes. |
-| §9 multi-dimensional scoped claims | #329 | Buildable subset: `scope: {org, locale}` poset (trees) + time, versioned tree config (`scope.org`/`scope.locale`), three-way `scope_comparison` verdict (DISJOINT / OVERRIDE / OVERLAP) wired into `resolutions._scope_verdict_proposal`, and `scope_a`/`scope_b` resolver actions (time-dimension narrowing enactment). **Deferred (ADR):** time-nesting OVERRIDE, org/locale coordinate pinning enactment, recall `serve --scope` filter, team/multi-tenant scope-identity (#314). |
-| §10 channel split + model + asserter | #326 | Extend `SOURCE_TYPES` with `agent-observed` and `model-prior`; add `model:` / `on_behalf_of:` / `asserter:` claim-level frontmatter fields; extend `remember(sources=...)` with `_source_type` / `_source_ref` / `_model` / `_on_behalf_of` / `_asserter` wrapper keys; drop `model-prior:<model-id>` into the resolver's precedence taxonomy below `script:`. |
-| §12 claim kind + opinion attribution | #327 | Add `claim_kind:` (`fact`/`observation`/`opinion`/`decision`/`policy`/`definition`) classified once at intake (`claim_kind.classify_claim_kind`, tier2-style), round-tripped by tier0; add `compare_asserters` (`same`/`different`/`unknown`) over the §10.3 identity key; add the `attribute_both` resolver action + `_stance_attribution_verdict` short-circuit + detector `stance` conflict type. An opinion is NEVER resolved by precedence; unknown asserter → keep-both fallback. |
+| §4 MCP `remember(sources=...)` | athenaeum#96 | Replace the bare-dict heuristic with the `_source`/`_field_sources` wrapper keys; update docstring + integration test. |
+| §5 legacy slug migration | athenaeum#97 | `athenaeum repair --legacy-source-slugs` with dry-run/apply, the fixed mapping table, and post-migration validation. |
+| §8 claim-level temporal validity | athenaeum#308 | Slice 1: `valid_from` / `valid_until` parse + round-trip; shared `valid_until_expired` helper; currently-valid-by-default filter. **Slice 2 (shipped): resolver interval-close (§8.4) — `enact_resolution` stamps the loser's `valid_until` on `keep_a`/`keep_b` and sequential-snapshot `not_a_conflict`, only-close-never-widen.** **Slice 3 (shipped, athenaeum#354): read-time `--as-of` view (§8.5) — `recall --as-of` / `reindex --as-of` filter the compiled wiki by the upper bound + athenaeum#191 tombstones, no recompile.** **Slice 4 (shipped): per-claim compiled validity (§8.6).** **compile-as-of (shipped, athenaeum#359, §8.7): `compile --as-of --out` RE-RUNS the deterministic C3 blend into a scratch dir — resurrects members expired now but valid then; valid-time only.** athenaeum#329 generalizes the close to non-time scopes. |
+| §9 multi-dimensional scoped claims | athenaeum#329 | Buildable subset: `scope: {org, locale}` poset (trees) + time, versioned tree config (`scope.org`/`scope.locale`), three-way `scope_comparison` verdict (DISJOINT / OVERRIDE / OVERLAP) wired into `resolutions._scope_verdict_proposal`, and `scope_a`/`scope_b` resolver actions (time-dimension narrowing enactment). **Deferred (ADR):** time-nesting OVERRIDE, org/locale coordinate pinning enactment, recall `serve --scope` filter, team/multi-tenant scope-identity (athenaeum#314). |
+| §10 channel split + model + asserter | athenaeum#326 | Extend `SOURCE_TYPES` with `agent-observed` and `model-prior`; add `model:` / `on_behalf_of:` / `asserter:` claim-level frontmatter fields; extend `remember(sources=...)` with `_source_type` / `_source_ref` / `_model` / `_on_behalf_of` / `_asserter` wrapper keys; drop `model-prior:<model-id>` into the resolver's precedence taxonomy below `script:`. |
+| §12 claim kind + opinion attribution | athenaeum#327 | Add `claim_kind:` (`fact`/`observation`/`opinion`/`decision`/`policy`/`definition`) classified once at intake (`claim_kind.classify_claim_kind`, tier2-style), round-tripped by tier0; add `compare_asserters` (`same`/`different`/`unknown`) over the §10.3 identity key; add the `attribute_both` resolver action + `_stance_attribution_verdict` short-circuit + detector `stance` conflict type. An opinion is NEVER resolved by precedence; unknown asserter → keep-both fallback. |
 
 ## 12. Claim kind + opinion attribution (`claim_kind:`, `attribute_both`)
 
-**Status: locked, implemented (issue #327).** Adds an EPISTEMIC classification
+**Status: locked, implemented (issue athenaeum#327).** Adds an EPISTEMIC classification
 orthogonal to `source_type`, and an asserter-comparison rule so evaluative
 claims are never resolved by source precedence.
 
@@ -1034,7 +1034,7 @@ Classified ONCE at intake by a cheap LLM pass (`claim_kind.classify_claim_kind`,
 same pattern / model knob as tier2 classification), stored in frontmatter, and
 round-tripped byte-for-byte by tier0 passthrough (§3). **Absent / unrecognized
 → `""` (unclassified), fail-open** via `models.parse_claim_kind` — an
-unclassified claim keeps pre-#327 behavior. `claim_kind` classifies the SHAPE
+unclassified claim keeps pre-athenaeum#327 behavior. `claim_kind` classifies the SHAPE
 of the claim (is it evaluative?); `source_type` classifies its ORIGIN channel.
 The two are independent.
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the tiered reasoning-pass pipeline skeleton + T1 tier (#423).
+"""Tests for the tiered reasoning-pass pipeline skeleton + T1 tier (athenaeum#423).
 
 Covers each acceptance criterion named in the issue:
 
@@ -313,7 +313,7 @@ class TestSkeletonToleratesAbsentT2:
         self, tmp_path: Path
     ) -> None:
         # Simulates the full path: T1 (only tier configured; T2 absent per
-        # #432 not yet landing) passes a proposal up, and the proposal is
+        # athenaeum#432 not yet landing) passes a proposal up, and the proposal is
         # then written to _pending_merges.md exactly as it is today with NO
         # reasoning pipeline in front of it at all -- list_pending_decisions
         # sees it unchanged.
@@ -339,7 +339,7 @@ class TestSkeletonToleratesAbsentT2:
         assert result.passed_up is True
 
         # Caller behavior on a pass-up with T2 absent: write the proposal to
-        # the human queue exactly like the pre-#423 call sites do.
+        # the human queue exactly like the pre-athenaeum#423 call sites do.
         write_pending_merge(
             wiki_root / "_pending_merges.md",
             merge_target_name=proposal.merge_target_name,

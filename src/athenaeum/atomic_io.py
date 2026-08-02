@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Atomic whole-file writes for the pending-* sidecars (issue #309).
+"""Atomic whole-file writes for the pending-* sidecars (issue athenaeum#309).
 
 The ``wiki/_pending_questions.md`` and ``wiki/_pending_merges.md`` sidecars
 (plus their ``_archive.md`` siblings) are mutated by a read-existing +

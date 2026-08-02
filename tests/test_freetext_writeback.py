@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for issue #210 — free-text answers must enact source-file edits.
+"""Tests for issue athenaeum#210 — free-text answers must enact source-file edits.
 
 Covers:
 - Test 1 (career.md case): stubbed LLM removes "primary venture" framing;
@@ -173,7 +173,7 @@ class TestProposeFreetextSourceEdits:
         assert result == {}
 
     def test_fenced_json_response_parsed(self, tmp_path: Path) -> None:
-        """Issue #222: model wraps the edits object in ```json fences —
+        """Issue athenaeum#222: model wraps the edits object in ```json fences —
         the shared extractor must still recover the edits."""
         src = tmp_path / "mem.md"
         original_body = "Old claim.\n"
@@ -191,7 +191,7 @@ class TestProposeFreetextSourceEdits:
         assert result == {src: new_body}
 
     def test_prose_wrapped_json_response_parsed(self, tmp_path: Path) -> None:
-        """Issue #222: leading/trailing prose around the edits object."""
+        """Issue athenaeum#222: leading/trailing prose around the edits object."""
         src = tmp_path / "mem.md"
         original_body = "Old claim.\n"
         new_body = "Corrected claim.\n"
@@ -208,7 +208,7 @@ class TestProposeFreetextSourceEdits:
         assert result == {src: new_body}
 
     def test_fenced_response_with_trailing_example_brace(self, tmp_path: Path) -> None:
-        """The #219 failure shape at this call site: fenced object plus a
+        """The athenaeum#219 failure shape at this call site: fenced object plus a
         later brace span in trailing prose. The old greedy ``\\{.*\\}``
         regex swallowed both and failed to decode; the shared extractor
         prefers the fenced object."""

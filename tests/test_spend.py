@@ -1,4 +1,4 @@
-"""Tests for the durable LLM-spend ledger (issue #378).
+"""Tests for the durable LLM-spend ledger (issue athenaeum#378).
 
 Covers the ledger writer, reader, summariser, the `athenaeum spend` command,
 the spend ceiling, and the config resolvers — pinning the invariants that
@@ -122,9 +122,9 @@ class TestRecordSpend:
     def test_write_failure_logs_loudly_at_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        # Issue #568 (H1): a failed ledger write used to be invisible at
+        # Issue athenaeum#568 (H1): a failed ledger write used to be invisible at
         # log.debug, blinding the cumulative drain ceiling (and reporting $0 to
-        # the #487 cross-repo accounting contract). It must now be LOUD.
+        # the athenaeum#487 cross-repo accounting contract). It must now be LOUD.
         monkeypatch.setenv("ATHENAEUM_SPEND_LEDGER", "/proc/nonexistent/cannot/spend.jsonl")
         with caplog.at_level(logging.WARNING, logger="athenaeum"):
             wrote = spend.record_spend(
@@ -437,7 +437,7 @@ class TestSpendCommand:
 
 
 # ---------------------------------------------------------------------------
-# Schema v2 (issue #487) — per-model attribution, billing_mode, notional_usd,
+# Schema v2 (issue athenaeum#487) — per-model attribution, billing_mode, notional_usd,
 # and the unpriceable pre-v2 contract. cwc#1629 accounting conformance.
 # ---------------------------------------------------------------------------
 
@@ -445,7 +445,7 @@ class TestSpendCommand:
 def _mixed_model_api_usage() -> TokenUsage:
     """A metered run spanning two models, as a librarian pass does — Haiku for
     the tier-2 classify and Sonnet for the tier-3 write — each tagged so the
-    accumulator carries per-model attribution (#247). No batch traffic, so the
+    accumulator carries per-model attribution (athenaeum#247). No batch traffic, so the
     row reprices cleanly from input/output/cache alone."""
     u = TokenUsage()
     u.add(300_000, 40_000, 100_000, 5_000, model="claude-haiku-4-5-20251001")
@@ -457,7 +457,7 @@ class TestSchemaV2:
     def test_two_model_run_is_repriceable_per_model(self, ledger: Path) -> None:
         """A mixed Haiku/Sonnet run writes per-model token counts, and the row
         can be repriced per model — the defect a flat aggregate row cannot fix
-        (issue #487 acceptance #1). Exercises the real write path end to end:
+        (issue athenaeum#487 acceptance #1). Exercises the real write path end to end:
         record_spend -> build_record -> _append_line -> read_ledger off disk."""
         assert spend.record_spend(_mixed_model_api_usage(), run_type="librarian", provider="api")
         rec = spend.read_ledger(ledger)[0]
@@ -495,7 +495,7 @@ class TestSchemaV2:
 
     def test_tokens_by_model_preserves_cache_and_batch_splits(self, ledger: Path) -> None:
         """The per-model entry is a SUPERSET of hestia's core shape — it keeps
-        athenaeum's cache/batch splits (#487 scope; #239/#236 cost relevance)."""
+        athenaeum's cache/batch splits (athenaeum#487 scope; athenaeum#239/#236 cost relevance)."""
         u = TokenUsage()
         u.add(1_000, 500, 200, 50, model="claude-sonnet-4-6")
         u.add_batch_tokens(400, 100, 0, 0, model="claude-sonnet-4-6")
@@ -511,7 +511,7 @@ class TestSchemaV2:
 
     def test_billing_mode_and_real_vs_notional_never_summed(self, ledger: Path) -> None:
         """Every row carries billing_mode; real API dollars and subscription
-        notional are two separate metrics (#487 acceptance #2)."""
+        notional are two separate metrics (athenaeum#487 acceptance #2)."""
         spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
         spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
         sub_rec, api_rec = spend.read_ledger(ledger)
@@ -534,7 +534,7 @@ class TestSchemaV2:
 
     def test_pre_v2_rows_readable_and_counted_unpriceable(self, ledger: Path) -> None:
         """A pre-v2 row (no per-model attribution) stays readable and is counted
-        as unpriceable — never silently dropped or repriced (#487 acceptance
+        as unpriceable — never silently dropped or repriced (athenaeum#487 acceptance
         #3, cwc#1627's failure mode)."""
         # A genuine v1 row, exactly as an older athenaeum wrote it (no
         # tokens_by_model / billing_mode / notional_usd).
@@ -570,7 +570,7 @@ class TestSchemaV2:
     ) -> None:
         """`athenaeum spend --json` keeps its existing top-level shape (cwc#1218
         /good-morning must not regress) and only ADDS unpriceable_records
-        (#487 acceptance #4)."""
+        (athenaeum#487 acceptance #4)."""
         spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
         spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
         rc = main(["spend", "--since", "30d", "--json", "--ledger", str(ledger)])
@@ -599,7 +599,7 @@ class TestQueryTopicsLedger:
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
-        # Issue #554 (L11): repointed at the shared FakeLLMClient double.
+        # Issue athenaeum#554 (L11): repointed at the shared FakeLLMClient double.
         fake = FakeLLMClient(
             response=make_llm_response(
                 '["Return Path"]',
@@ -620,7 +620,7 @@ class TestQueryTopicsLedger:
         assert recs[0]["provider"] == "anthropic"  # metered API path
         assert recs[0]["input_tokens"] == 120
         assert recs[0]["estimated_cost_usd"] > 0.0
-        # v2 conformance on a genuinely LLM-driven write (issue #487): the row
+        # v2 conformance on a genuinely LLM-driven write (issue athenaeum#487): the row
         # carries billing_mode, per-model attribution, and the notional figure.
         assert recs[0]["v"] == 2
         assert recs[0]["billing_mode"] == "api"

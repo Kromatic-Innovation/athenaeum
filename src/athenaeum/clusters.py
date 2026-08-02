@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Auto-memory cluster pass (issue #196, C2).
+"""Auto-memory cluster pass (issue athenaeum#196, C2).
 
 Groups :class:`~athenaeum.models.AutoMemoryFile` records (discovered by
 C1, :func:`athenaeum.librarian.discover_auto_memory_files`) into
@@ -10,14 +10,14 @@ Scope for this module:
 
 - Input: a list of ``AutoMemoryFile`` records + a chromadb cache dir
   that already holds embeddings for those records (the recall index
-  build populates this via ``extra_roots``, see issue #192).
+  build populates this via ``extra_roots``, see issue athenaeum#192).
 - Output: a JSONL report at ``raw/_librarian-clusters.jsonl`` (path
   configurable) with one row per cluster. A timestamped sibling file
   is written on every run; the canonical name is atomically replaced.
 - Clustering: complete-linkage on pairwise cosine similarity, threshold
   configured by ``librarian.cluster_threshold`` (default 0.6). Single-linkage
   connected components are computed first as a cheap scoping step, then refined
-  into complete-linkage cliques (issue #681) so a weak bridging edge can no
+  into complete-linkage cliques (issue athenaeum#681) so a weak bridging edge can no
   longer chain a giant component; every multi-member cluster is a clique in
   which EVERY pair clears the threshold.
 - Singletons: size-1 clusters pass through unchanged. There is NO
@@ -25,8 +25,8 @@ Scope for this module:
 
 Out of scope (deliberate — later lanes):
 
-- Merging clusters into wiki entries (C3, #197).
-- Contradiction detection inside a cluster (C4, #198).
+- Merging clusters into wiki entries (C3, athenaeum#197).
+- Contradiction detection inside a cluster (C4, athenaeum#198).
 
 The embedder MUST be the shared chromadb collection. This module does
 not import sentence_transformers, openai, cohere, or any other
@@ -68,7 +68,7 @@ log = logging.getLogger(__name__)
 # Default cache dir mirrors search.py's expectations — callers usually
 # pass this in explicitly (librarian.run() resolves it against the
 # knowledge root), but we expose a default for shell/library callers.
-# Issue #521: resolved through the shared config resolver (arg > env > default)
+# Issue athenaeum#521: resolved through the shared config resolver (arg > env > default)
 # so ~/.cache/athenaeum is constructed in exactly one place.
 DEFAULT_CACHE_DIR = resolve_cache_dir()
 
@@ -87,7 +87,7 @@ DEFAULT_CLUSTER_THRESHOLD = 0.55
 # Default output path, resolved relative to the knowledge root.
 DEFAULT_CLUSTER_OUTPUT = "raw/_librarian-clusters.jsonl"
 
-# Default number of timestamped rotation siblings to keep (issue #311).
+# Default number of timestamped rotation siblings to keep (issue athenaeum#311).
 # Each run writes one ``<stem>-<UTC-iso>.jsonl`` rotation next to the
 # canonical report; without pruning these accumulate unbounded (~365/yr).
 # They are debugging artifacts only — recovery is git-based — so a modest
@@ -102,13 +102,13 @@ class Cluster:
     cluster_id: str
     member_paths: list[str] = field(default_factory=list)
     centroid_score: float = 0.0
-    # Issue #421: minimum pairwise cosine among members (complete-linkage
-    # coherence metric). 1.0 for singletons and pre-#421 rows that lack the
+    # Issue athenaeum#421: minimum pairwise cosine among members (complete-linkage
+    # coherence metric). 1.0 for singletons and pre-athenaeum#421 rows that lack the
     # field. A cluster is a complete-linkage clique at ``threshold`` iff this
-    # is ``>= threshold``. Issue #681 makes formation itself complete-linkage,
+    # is ``>= threshold``. Issue athenaeum#681 makes formation itself complete-linkage,
     # so a freshly-written multi-member cluster now ALWAYS has ``min_pairwise
     # >= threshold`` and the merge-proposal gate's min-pairwise arm is a
-    # backstop for legacy/pre-#681 rows rather than the load-bearing gate.
+    # backstop for legacy/pre-athenaeum#681 rows rather than the load-bearing gate.
     min_pairwise_score: float = 1.0
     rationale: str = ""
 
@@ -256,7 +256,7 @@ def _build_adjacency(
     The adjacency list (index → neighbour set, ``cosine >= threshold``) drives
     :func:`_single_linkage`. Alongside it we capture ``edge_sim[(i, j)]`` (``i <
     j``) = the actual cosine for each edge that cleared the threshold — reused by
-    :func:`_complete_linkage` (issue #681) to refine each connected component
+    :func:`_complete_linkage` (issue athenaeum#681) to refine each connected component
     into complete-linkage cliques WITHOUT a second ``O(n^2)`` cosine pass.
     Pairs below the threshold are absent from both structures (they never form
     an edge and never merge two members into one cluster).
@@ -310,14 +310,14 @@ def _complete_linkage(
 ) -> list[list[int]]:
     """Refine a single-linkage *component* into complete-linkage clusters.
 
-    Issue #681. :func:`_single_linkage` only requires each member to be
+    Issue athenaeum#681. :func:`_single_linkage` only requires each member to be
     transitively CONNECTED at ``threshold``, so a single weak bridging edge can
     chain thousands of loosely-related pages into one giant component — the
-    ~2,200-source cluster the merge-proposal gate (#400/#421) then rebuilds and
+    ~2,200-source cluster the merge-proposal gate (athenaeum#400/#421) then rebuilds and
     discards on every run. This refines each connected component into
     complete-linkage clusters: every returned cluster is a clique at
     ``threshold`` — EVERY pair of members has ``cosine >= threshold`` — so the
-    giant component is never formed in the first place. The #421 min-pairwise
+    giant component is never formed in the first place. The athenaeum#421 min-pairwise
     suppression arm becomes a redundant backstop (formation now guarantees what
     it used to check) rather than the load-bearing gate.
 
@@ -442,7 +442,7 @@ def _min_intra_similarity(
 ) -> float:
     """Minimum pairwise cosine among cluster members; 1.0 for singletons.
 
-    Issue #421: the complete-linkage coherence metric for the merge-proposal
+    Issue athenaeum#421: the complete-linkage coherence metric for the merge-proposal
     path. Single-linkage (:func:`_single_linkage`) only guarantees each member
     is transitively CONNECTED to the cluster at ``threshold`` — a weak
     ``cosine >= threshold`` bridge can chain otherwise-dissimilar members into
@@ -517,7 +517,7 @@ def cluster_auto_memory_files(
             :func:`athenaeum.librarian.discover_auto_memory_files`, OR any
             other sequence of :class:`AutoMemoryFile`-shaped records —
             e.g. the wiki-page wrapper built by
-            :mod:`athenaeum.wiki_dedupe` (issue #290). Nothing below this
+            :mod:`athenaeum.wiki_dedupe` (issue athenaeum#290). Nothing below this
             line branches on ``memory_type``/``origin_scope`` semantics
             specific to raw auto-memory intake, so any caller that can
             produce ``AutoMemoryFile`` records (or a lightweight stand-in
@@ -536,7 +536,7 @@ def cluster_auto_memory_files(
             supplied.
         threshold: Cosine similarity cutoff for clustering — every pair
             within a returned multi-member cluster clears it (complete
-            linkage, issue #681). Defaults to :data:`DEFAULT_CLUSTER_THRESHOLD`.
+            linkage, issue athenaeum#681). Defaults to :data:`DEFAULT_CLUSTER_THRESHOLD`.
         embeddings: Optional precomputed ``{str(path): vector}`` map. When
             supplied, the chromadb lookup + hashing-trick fallback in
             :func:`_resolve_embeddings` is skipped entirely and this map is
@@ -566,7 +566,7 @@ def cluster_auto_memory_files(
     adj, edge_sim = _build_adjacency(file_ids, embeddings, threshold)
     # Single-linkage first — cheaply scopes complete-linkage refinement to each
     # connected component (two members in different components share no
-    # ``>= threshold`` edge, so they can never land in one clique). Issue #681:
+    # ``>= threshold`` edge, so they can never land in one clique). Issue athenaeum#681:
     # every multi-member component is then split into complete-linkage cliques
     # so a weak bridging edge can no longer chain a giant component that the
     # merge-proposal gate would only rebuild and discard.
@@ -578,7 +578,7 @@ def cluster_auto_memory_files(
             components.extend(_complete_linkage(comp, adj, edge_sim, threshold))
 
     # Stable cluster id: a content-address over the sorted member relpaths,
-    # prefixed by a human-readable scope hint. Issue #370 (delta compile):
+    # prefixed by a human-readable scope hint. Issue athenaeum#370 (delta compile):
     # the previous positional ``f"{scope_hint}-{seq:04d}"`` id was UNSTABLE —
     # the same cluster got a different id depending on how many other
     # clusters the component enumeration happened to precede it with. A
@@ -790,7 +790,7 @@ def resolve_rotation_retention(
     knowledge_root: Path,
     config: dict[str, Any] | None = None,
 ) -> int:
-    """Resolve the rotation-retention window (issue #311).
+    """Resolve the rotation-retention window (issue athenaeum#311).
 
     Precedence: ``ATHENAEUM_ROTATION_RETENTION`` env > ``librarian.
     rotation_retention`` yaml > :data:`DEFAULT_ROTATION_RETENTION` (30).

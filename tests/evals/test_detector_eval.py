@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Detector live-API eval (issue #331).
+"""Detector live-API eval (issue athenaeum#331).
 
 Runs :func:`detect_contradictions` against every case in
 ``tests/evals/data/detector/cases.yaml`` using a real Anthropic Haiku call.

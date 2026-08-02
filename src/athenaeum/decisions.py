@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unified "human decisions needed" view (issue #401).
+"""Unified "human decisions needed" view (issue athenaeum#401).
 
 Athenaeum accumulates two separate queues that need a human:
 
@@ -50,7 +50,7 @@ from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
 from athenaeum.retraction_cascade import read_retraction_reviews
 
-# Keys the resolver appends to a pending-question block tail (issue #126),
+# Keys the resolver appends to a pending-question block tail (issue athenaeum#126),
 # re-extracted verbatim when ``--with-proposal`` is requested. Kept in sync
 # with :mod:`athenaeum._cmd_questions`.
 _PROPOSAL_KEYS = (
@@ -71,7 +71,7 @@ _MEMORY_PREFIXES = ("feedback_", "project_", "reference_", "user_", "recall_")
 # Cap for a one-line gist so a ``decisions list`` line stays readable.
 _GIST_LIMIT = 160
 
-# Fallback cap on rendered sources per merge item (issue #431) used when a
+# Fallback cap on rendered sources per merge item (issue athenaeum#431) used when a
 # caller does not resolve its own value from config. Mirrors the code default
 # in :func:`athenaeum.config.resolve_decisions_max_sources_per_merge` (kept as
 # a plain literal here, not an import, to avoid a decisions->config->decisions
@@ -168,7 +168,7 @@ def _merge_question(target_name: str, source_infos: list[dict]) -> str:
 
     e.g. ``Merge these 2 pages into "auth"? — "MCP Public Auth Design": <gist>;
     "OAuth 2.1 Refresh-Token Rotation": <gist>``. This is the field the
-    live-triage comment on #401 requires so cosine similarity alone can't
+    live-triage comment on athenaeum#401 requires so cosine similarity alone can't
     mislead the human.
     """
     n = len(source_infos)
@@ -185,7 +185,7 @@ def merge_to_rich(pm: PendingMerge) -> dict:
     """Convert a :class:`PendingMerge` to the ``merges`` CLI/MCP dict.
 
     Carries per-source ``title`` + ``gist`` and a phrased ``question`` so the
-    output is decidable without opening the raw wiki files (issue #401).
+    output is decidable without opening the raw wiki files (issue athenaeum#401).
     """
     source_infos = [source_info(s) for s in pm.sources]
     return {
@@ -204,7 +204,7 @@ def merge_to_decision(
 ) -> dict:
     """Convert a :class:`PendingMerge` to a unified decision dict.
 
-    Issue #431 (read-path defense-in-depth): the decisions view previously
+    Issue athenaeum#431 (read-path defense-in-depth): the decisions view previously
     rendered EVERY source of a merge with no cap, so a proposal with a very
     large source list could blow out a single decision item's payload. The
     rendered ``payload["sources"]`` list is capped to ``max_sources`` entries;
@@ -266,7 +266,7 @@ def question_to_decision(pq: PendingQuestion, *, with_proposal: bool = False) ->
 def retraction_to_decision(rec: dict) -> dict:
     """Convert a retraction-cascade review record to a unified decision dict.
 
-    A ``type: "retraction"`` item (issue #435): a supporting source of a
+    A ``type: "retraction"`` item (issue athenaeum#435): a supporting source of a
     completed merge was retracted, so the merge is flagged for a human to
     decide whether it still holds. The merge is never auto-unmerged — this is
     purely a "please look" signal. ``confidence`` is ``None`` (there is no
@@ -296,7 +296,7 @@ def retraction_to_decision(rec: dict) -> dict:
 
 
 def audit_to_decision(rec: dict) -> dict:
-    """Convert a sampled tier-audit item to a unified decision dict (issue #438).
+    """Convert a sampled tier-audit item to a unified decision dict (issue athenaeum#438).
 
     A ``type: "audit"`` item — distinguishable from an ordinary escalation —
     surfaces a randomly-sampled T1 reject or T2 approval for human
@@ -352,18 +352,18 @@ def list_pending_decisions(
     ``created_at`` ascending so the oldest decision — the one most at risk of
     rotting unseen — leads the list.
 
-    ``max_sources_per_merge`` (issue #431) caps how many sources are rendered
+    ``max_sources_per_merge`` (issue athenaeum#431) caps how many sources are rendered
     per merge item — see :func:`merge_to_decision` and
     :func:`athenaeum.config.resolve_decisions_max_sources_per_merge` for the
     config-resolved default (env > yaml > 20). Callers that already loaded
     config (the CLI, the MCP tool) should resolve it there and pass it
     through; this default keeps direct callers working unchanged.
 
-    Issue #538 (audience scoping): a restricted ``caller_audience`` (non-owner)
+    Issue athenaeum#538 (audience scoping): a restricted ``caller_audience`` (non-owner)
     sees only the decisions whose underlying pages it is authorized to read —
     the same fail-closed predicate ``recall`` applies. A question is withheld
     unless its ``source`` memory authorizes; a merge unless EVERY source page
-    authorizes (checked over the FULL source set, before the #431 render cap);
+    authorizes (checked over the FULL source set, before the athenaeum#431 render cap);
     and ``retraction`` / ``audit`` calibration items — which reference pages by
     slug/proposal-id rather than a readable source path — are withheld
     wholesale from a restricted caller (adjudicating them is owner-only, mirror-
@@ -388,7 +388,7 @@ def list_pending_decisions(
     ]
     if caller_audience is None:
         # Retraction/audit calibration items are owner-only for a restricted
-        # caller (no readable source-page path to authorize against, #538).
+        # caller (no readable source-page path to authorize against, athenaeum#538).
         decisions += [
             retraction_to_decision(rec) for rec in read_retraction_reviews(wiki_root)
         ]

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the deterministic self-resolving-document guard (#300 follow-up, #304)."""
+"""Deterministic self-resolving-document guard (athenaeum#300 follow-up, athenaeum#304)."""
 
 from __future__ import annotations
 

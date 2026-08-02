@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for `athenaeum calibration {summary,review}` (issue #438)."""
+"""Tests for `athenaeum calibration {summary,review}` (issue athenaeum#438)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def _run(argv: list[str]) -> tuple[int, str]:
 
 @pytest.fixture
 def _tiers_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Enable the reasoning-tier surface (issue #518 — default OFF)."""
+    """Enable the reasoning-tier surface (issue athenaeum#518 — default OFF)."""
     monkeypatch.setenv("ATHENAEUM_REASONING_TIER_AUDITING_ENABLED", "1")
 
 
@@ -48,7 +48,7 @@ def _seed_audit(knowledge_root: Path, *, tier: str, verdict: str, pid: str) -> s
 
 
 def test_summary_gated_off_by_default(tmp_path: Path) -> None:
-    """Issue #518: with the tiers disabled (the default), the summary reports
+    """Issue athenaeum#518: with the tiers disabled (the default), the summary reports
     an explicit not-enabled state — not a 0/0/0 all-clear that lies."""
     (tmp_path / "wiki").mkdir()
     rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])

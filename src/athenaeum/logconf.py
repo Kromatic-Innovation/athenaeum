@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Central logging configuration + per-run correlation id (issue #540, M25).
+"""Central logging configuration + per-run correlation id (issue athenaeum#540, M25).
 
 Before this module the CLI configured logging in three near-duplicate
 ``logging.basicConfig`` calls whose format carried neither a date

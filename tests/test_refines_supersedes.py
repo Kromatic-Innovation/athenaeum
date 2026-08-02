@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for Lane 1 / #167 — `refines:` and `supersedes:` frontmatter fields.
+"""Tests for Lane 1 / athenaeum#167 — `refines:` and `supersedes:` frontmatter fields.
 
 Covers:
 
@@ -260,7 +260,7 @@ class TestDetectorSkip:
     def test_two_declared_one_undeclared_prunes_fully_declared_member(
         self, tmp_path: Path
     ) -> None:
-        """Issue #172: a 3-member chunk with 2 declared pairs + 1 undeclared
+        """Issue athenaeum#172: a 3-member chunk with 2 declared pairs + 1 undeclared
         pair should prune the fully-covered member before the detector
         sees it. ``a`` declares both ``b`` and ``c``; only the (b, c)
         pair is undeclared. The Haiku detector should NEVER see ``a``.
@@ -393,12 +393,12 @@ class TestResolverAutoPrefer:
 
 
 # ---------------------------------------------------------------------------
-# Quine review #171 follow-ups
+# Quine review athenaeum#171 follow-ups
 # ---------------------------------------------------------------------------
 
 
 class TestDeclaredWinnerEdgeCases:
-    """Quine review of PR #171 — short-circuit refusal + mutual cases."""
+    """Quine review of PR athenaeum#171 — short-circuit refusal + mutual cases."""
 
     def _llm_reply(self) -> MagicMock:
         client = MagicMock()

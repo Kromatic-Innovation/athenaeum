@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Recorder / replay round-trip tests for the eval harness (issue #684).
+"""Recorder / replay round-trip tests for the eval harness (issue athenaeum#684).
 
-The pre-#684 recorder read ``response.content[0].text`` and silently wrote
+The pre-athenaeum#684 recorder read ``response.content[0].text`` and silently wrote
 ``response_text=""`` when the first block was not a text block — which is
 exactly what a thinking-enabled stage (the resolver, wired to adaptive
-thinking by #578) returns: one or more leading ``ThinkingBlock`` objects with
+thinking by athenaeum#578) returns: one or more leading ``ThinkingBlock`` objects with
 no ``.text`` before the text block. 6 of 8 resolver fixtures recorded empty and
 passed every check until replay.
 
@@ -99,7 +99,7 @@ class TestRecorder:
 
     def test_no_text_block_raises_and_writes_nothing(self) -> None:
         # AC: a response with NO text block raises rather than writing an empty
-        # fixture — the actual defect behind #684.
+        # fixture — the actual defect behind athenaeum#684.
         with pytest.raises(EmptyRecordingError):
             _record_one(_response(_THINKING_BLOCK))
         assert not recorded_path(LAYER_RESOLVER, "case-1").exists()
@@ -145,7 +145,7 @@ class TestReplayReconstructsBlocks:
         assert provider_response_text(response) == '{"decision": "merge"}'
 
     def test_from_json_backward_compat_synthesizes_single_text_block(self) -> None:
-        # A pre-#684 fixture carried only response_text; from_json synthesises a
+        # A pre-athenaeum#684 fixture carried only response_text; from_json synthesises a
         # single text block so replay still reconstructs a faithful response.
         legacy = {
             "case_id": "c",

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #463 (slice D of #460) — live-client delta + full-compile cadence.
+"""Issue athenaeum#463 (slice D of athenaeum#460) — live-client delta + full-compile cadence.
 
-Extends the #370 PR2 delta machinery (proven byte-equivalent by
+Extends the athenaeum#370 PR2 delta machinery (proven byte-equivalent by
 ``test_delta_compile_equivalence.py``) to the nightly LIVE-client run, which
 previously ALWAYS forced a whole-corpus compile (the original D5 fallback).
 Two new cache-dir stamps (``auto-memory-manifest.json``,
@@ -19,7 +19,7 @@ stubbed to a deterministic, call-counting fake — no live API, no network.
 moved/removed after a compile, letting a SECOND run see (and delta against)
 the same corpus plus whatever the test adds.
 
-Issue #370's ``_fallback_embeddings`` (the graceful-degradation path used when
+Issue athenaeum#370's ``_fallback_embeddings`` (the graceful-degradation path used when
 chromadb / the ``[vector]`` extra is unavailable, as in this environment) hash-
 buckets tokens with Python's builtin ``hash()``, which is salted per-process by
 ``PYTHONHASHSEED`` — fine for its intended purpose (a same-run cosine
@@ -376,7 +376,7 @@ def test_first_run_no_manifest_is_whole_corpus_and_writes_baseline(
 
 
 # ---------------------------------------------------------------------------
-# Config resolvers (issue #463)
+# Config resolvers (issue athenaeum#463)
 # ---------------------------------------------------------------------------
 
 

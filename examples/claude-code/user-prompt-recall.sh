@@ -33,7 +33,7 @@
 
 set -euo pipefail
 
-# ── Kill switch (issue #379) ───────────────────────────────────────────────
+# ── Kill switch (issue athenaeum#379) ───────────────────────────────────────────────
 # Honour ~/.cache/athenaeum/disabled (+ ATHENAEUM_DISABLED). Mirrors
 # athenaeum.killswitch.is_disabled("recall"): the "all" scope no-ops every
 # hook; the "compile" scope leaves recall on. Costs no Python startup.
@@ -105,7 +105,7 @@ fi
 
 if [ -z "$TERMS" ]; then
   # Read the canonical stopword list cached at SessionStart. Single
-  # source of truth with athenaeum.search.STOPWORDS (issue #46); the
+  # source of truth with athenaeum.search.STOPWORDS (issue athenaeum#46); the
   # file is rewritten on every session start so list updates pick up
   # automatically. If the cache is missing (e.g. SessionStart hook
   # didn't run), fall back to a minimal baked-in list so the hook

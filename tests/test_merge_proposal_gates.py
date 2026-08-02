@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #400 — suppress degenerate over-cluster merge proposals.
+"""Issue athenaeum#400 — suppress degenerate over-cluster merge proposals.
 
 The resolver's ``propose_merge`` path had no size cap or confidence floor, so a
 degenerate over-cluster (1,600+ source memories folded into one proposed page at
@@ -26,7 +26,7 @@ from athenaeum.merge import (
 
 class TestResolveMaxMergeSources:
     def test_default_active(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Issue #421 tightened the merge-proposal fan-in cap from 25 to 5.
+        # Issue athenaeum#421 tightened the merge-proposal fan-in cap from 25 to 5.
         monkeypatch.delenv("ATHENAEUM_MAX_MERGE_SOURCES", raising=False)
         assert resolve_max_merge_sources(None) == 5
         assert resolve_max_merge_sources({}) == 5
@@ -96,7 +96,7 @@ class TestResolveMinMergeConfidence:
 
 class TestSuppressionReason:
     def test_over_cluster_suppressed_by_size_cap(self) -> None:
-        # The #400 incident shape: 1,700 sources at 0.33 confidence.
+        # The athenaeum#400 incident shape: 1,700 sources at 0.33 confidence.
         reason = _merge_proposal_suppression_reason(
             n_sources=1700, confidence=0.33, config=None
         )
@@ -110,8 +110,8 @@ class TestSuppressionReason:
         )
 
     def test_size_cap_boundary_inclusive_keep(self) -> None:
-        # Issue #421: default cap is now 5. Exactly at the cap is kept; one over
-        # is suppressed (strict >). The 6-source boundary is the #421 AC case.
+        # Issue athenaeum#421: default cap is now 5. Exactly at the cap is kept; one over
+        # is suppressed (strict >). The 6-source boundary is the athenaeum#421 AC case.
         assert (
             _merge_proposal_suppression_reason(n_sources=5, confidence=0.9, config=None)
             is None
@@ -147,7 +147,7 @@ class TestSuppressionReason:
 
 
 class TestResolveMinMergeMeanSimilarity:
-    """Issue #421 — the ACTIVE-by-default mean-pairwise-cohesion floor."""
+    """Issue athenaeum#421 — the ACTIVE-by-default mean-pairwise-cohesion floor."""
 
     def test_default_active(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY", raising=False)
@@ -198,7 +198,7 @@ class TestResolveMinMergeMeanSimilarity:
 
 
 class TestCompleteLinkageGate:
-    """Issue #421 — complete-linkage: min pairwise below cluster threshold = chain."""
+    """Issue athenaeum#421 — complete-linkage: min pairwise below cluster threshold = chain."""
 
     def test_chain_suppressed(self) -> None:
         # A 4-member cluster whose weakest pair (0.40) is below the 0.55
@@ -258,7 +258,7 @@ class TestCompleteLinkageGate:
 
 
 class TestMeanSimilarityFloor:
-    """Issue #421 — mean pairwise 0.59 suppressed, 0.61 passes (the AC boundary)."""
+    """Issue athenaeum#421 — mean pairwise 0.59 suppressed, 0.61 passes (the AC boundary)."""
 
     def test_below_floor_suppressed(self) -> None:
         reason = _merge_proposal_suppression_reason(
@@ -300,7 +300,7 @@ class TestMeanSimilarityFloor:
 
 
 class TestGateOrdering:
-    """Issue #421 — size cap, then complete-linkage, then mean, then confidence."""
+    """Issue athenaeum#421 — size cap, then complete-linkage, then mean, then confidence."""
 
     def test_size_cap_before_complete_linkage(self) -> None:
         reason = _merge_proposal_suppression_reason(
@@ -327,7 +327,7 @@ class TestGateOrdering:
 
     def test_incident_shape_zero_proposals(self) -> None:
         # The 1,711-source / mean-sim-0.33 incident produces a suppression under
-        # the #421 defaults (size cap fires first; complete-linkage + mean would
+        # the athenaeum#421 defaults (size cap fires first; complete-linkage + mean would
         # also fire). Regression alongside test_over_cluster_suppressed_by_size_cap.
         reason = _merge_proposal_suppression_reason(
             n_sources=1711,
@@ -341,7 +341,7 @@ class TestGateOrdering:
 
 
 class TestClassifyMergeWriteKind:
-    """Issue #421 — slug-collision precheck classification."""
+    """Issue athenaeum#421 — slug-collision precheck classification."""
 
     def test_create_merged_when_slug_free(self, tmp_path) -> None:
         (tmp_path).mkdir(parents=True, exist_ok=True)

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Durable LLM-spend ledger (issue #378).
+"""Durable LLM-spend ledger (issue athenaeum#378).
 
 Athenaeum runs on two cost models that must never be blended:
 
@@ -12,7 +12,7 @@ Athenaeum runs on two cost models that must never be blended:
 The in-memory :class:`~athenaeum.models.TokenUsage` accumulator is logged at
 end-of-run and then DISCARDED — nothing persists spend across runs, so
 "how much has athenaeum spent, and is any of it real money?" is unanswerable
-from data (a code audit once mis-answered exactly this — see issue #378).
+from data (a code audit once mis-answered exactly this — see issue athenaeum#378).
 
 This module appends **one JSONL record per pipeline run** to
 ``~/.cache/athenaeum/spend.jsonl``. Each record carries:
@@ -28,7 +28,7 @@ This module appends **one JSONL record per pipeline run** to
   subscription path so subscription rows can never be summed into the dollar
   total.
 
-Schema v2 (issue #487, conforming to cwc#1629's accounting contract) adds,
+Schema v2 (issue athenaeum#487, conforming to cwc#1629's accounting contract) adds,
 additively — pre-v2 readers keep working:
 
 * ``billing_mode`` — ``subscription`` | ``api``. The canonical vocabulary
@@ -76,7 +76,7 @@ if TYPE_CHECKING:  # avoid an import cycle at runtime (models imports nothing he
 log = logging.getLogger(__name__)
 
 #: Schema version stamped on every record so a future reader can migrate.
-#: v2 (issue #487) adds per-model token attribution (``tokens_by_model``),
+#: v2 (issue athenaeum#487) adds per-model token attribution (``tokens_by_model``),
 #: the ``billing_mode`` vocabulary, and the ``notional_usd`` counterfactual —
 #: all ADDITIVE. Pre-v2 rows stay readable and are counted as *unpriceable*
 #: (they lack per-model attribution, so they cannot be repriced), never
@@ -108,7 +108,7 @@ def default_cache_dir() -> Path:
     """Default athenaeum cache dir (``ATHENAEUM_CACHE_DIR`` env, else
     ``~/.cache/athenaeum``).
 
-    Issue #521: routes through the shared resolver so the spend ledger lands
+    Issue athenaeum#521: routes through the shared resolver so the spend ledger lands
     under the same cache dir the rest of athenaeum honours, instead of ignoring
     ``ATHENAEUM_CACHE_DIR``.
     """
@@ -150,8 +150,8 @@ def _now_utc() -> datetime:
 
 
 #: Per-model counters carried on ``tokens_by_model`` beyond hestia's core
-#: ``{input, output, total}`` — athenaeum's cache/batch splits (#487 keeps
-#: them; #239/#236 make them cost-relevant). A hestia-shaped reader that only
+#: ``{input, output, total}`` — athenaeum's cache/batch splits (athenaeum#487 keeps
+#: them; athenaeum#239/#236 make them cost-relevant). A hestia-shaped reader that only
 #: reads ``input``/``output``/``total`` ignores these extra keys, so one reader
 #: serves both ledgers.
 _PER_MODEL_DETAIL_KEYS: tuple[str, ...] = (
@@ -165,14 +165,14 @@ _PER_MODEL_DETAIL_KEYS: tuple[str, ...] = (
 
 
 def tokens_by_model(usage: "TokenUsage") -> dict[str, dict[str, int]]:
-    """Per-model token attribution for a ledger row (issue #487).
+    """Per-model token attribution for a ledger row (issue athenaeum#487).
 
     Keyed by model-id, each value is a SUPERSET of hestia's
     ``cost-ledger.ts`` ``CostLedgerTokens`` shape — the core
     ``{input, output, total}`` (``total`` excludes cache, matching hestia so
     cwc#1627's one reader serves both ledgers) plus athenaeum's cache/batch
     detail. Sourced from :attr:`TokenUsage.per_model`, which the tier/batch
-    call sites populate with the ``model=`` kwarg (#247). Empty when the run
+    call sites populate with the ``model=`` kwarg (athenaeum#247). Empty when the run
     tagged no model — such a row carries no per-model attribution and is
     therefore *unpriceable* (see :func:`summarize`).
     """
@@ -204,9 +204,9 @@ def build_record(
     accumulator's ``subscription_covered`` flag — so subscription rows can
     never be summed into a dollar total downstream.
 
-    *files_processed* (issue #470) is the count of raw intake files the run
+    *files_processed* (issue athenaeum#470) is the count of raw intake files the run
     actually drained (compiled + removed from the queue). Added only when given
-    so pre-#470 readers and non-file run types (``answers`` / ``query-topics``)
+    so pre-athenaeum#470 readers and non-file run types (``answers`` / ``query-topics``)
     are unaffected; the backlog-drain advisor reads it to derive observed
     files-per-run throughput across runs.
     """
@@ -219,7 +219,7 @@ def build_record(
         "ts": stamp.isoformat().replace("+00:00", "Z"),
         "run_type": run_type,
         "provider": prov,
-        # ``billing_mode`` (issue #487, cwc#1629) is the canonical vocabulary;
+        # ``billing_mode`` (issue athenaeum#487, cwc#1629) is the canonical vocabulary;
         # ``subscription_covered`` is retained ADDITIVELY so pre-v2 readers keep
         # working. Real ``api`` dollars and ``subscription`` notional are never
         # summed.
@@ -227,7 +227,7 @@ def build_record(
         "subscription_covered": is_subscription,
         "session_id": session_id,
         "models": sorted(usage.per_model.keys()),
-        # Per-model token attribution (issue #487): the fact is
+        # Per-model token attribution (issue athenaeum#487): the fact is
         # tokens x model x timestamp, so a mixed-model row stays repriceable per
         # model instead of collapsing into an unrepriceable blended total.
         "tokens_by_model": tokens_by_model(usage),
@@ -241,7 +241,7 @@ def build_record(
         "total_tokens": usage.total_tokens,
         # ``estimated_cost_usd`` stays provider-tagged (0 on the subscription
         # path — never summed into a dollar total). ``notional_usd`` (issue
-        # #487) is the counterfactual API-rate cost of the same tokens: it
+        # athenaeum#487) is the counterfactual API-rate cost of the same tokens: it
         # equals ``estimated_cost_usd`` on an api row and reveals a subscription
         # row's utilization instead of leaving it reading as $0 of activity.
         "estimated_cost_usd": usd,
@@ -307,16 +307,16 @@ def record_spend(
         _append_line(target, json.dumps(record, separators=(",", ":")) + "\n")
         return True
     except Exception as exc:  # noqa: BLE001 — ledger must never break a run
-        # Issue #568 (H1): a failed ledger write was invisible at debug level,
+        # Issue athenaeum#568 (H1): a failed ledger write was invisible at debug level,
         # yet ``drain.run_drain``'s MANDATORY cumulative dollar ceiling is
         # computed by re-reading this ledger — a silent failure makes it read
         # $0 forever (unbounded real spend), and reports $0 to the cross-repo
-        # accounting contract (#487), indistinguishable from an idle day. Log
+        # accounting contract (athenaeum#487), indistinguishable from an idle day. Log
         # LOUDLY (WARNING) and keep returning ``False`` so callers can act.
         log.warning(
             "spend ledger write FAILED (%s): %s — cumulative spend ceilings "
             "that read this ledger will under-count; the drain guard verifies "
-            "writability at startup (issue #568)",
+            "writability at startup (issue athenaeum#568)",
             type(exc).__name__,
             exc,
         )
@@ -454,7 +454,7 @@ def summarize(
         bucket = subscription if prov == PROVIDER_CLAUDE_CLI else api
         _accumulate(bucket, record)
         # A row with no per-model attribution (pre-v2, or a v2 run that tagged
-        # no model) cannot be repriced at a new rate table (issue #487,
+        # no model) cannot be repriced at a new rate table (issue athenaeum#487,
         # cwc#1627's failure mode). Count it as unpriceable — it is NOT dropped
         # and stays in ``record_count`` and its billing bucket; the count just
         # tells a repricing consumer how many rows it must treat as opaque.
@@ -484,7 +484,7 @@ def summarize(
     summary: dict[str, Any] = {
         "record_count": len(records),
         # Count of rows with no per-model attribution — pre-v2 rows and any v2
-        # run that tagged no model (issue #487). Additive; the existing
+        # run that tagged no model (issue athenaeum#487). Additive; the existing
         # ``subscription``/``api``/``record_count`` shape is unchanged so
         # cwc#1218's /good-morning section does not regress.
         "unpriceable_records": unpriceable,
@@ -545,7 +545,7 @@ def format_summary(
 
 
 # ---------------------------------------------------------------------------
-# Spend ceiling (issue #378, part 4) — halt the pass on breach
+# Spend ceiling (issue athenaeum#378, part 4) — halt the pass on breach
 # ---------------------------------------------------------------------------
 
 

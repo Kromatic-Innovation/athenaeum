@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #210 follow-up regression: write-back must resolve the true source
+"""Issue athenaeum#210 follow-up regression: write-back must resolve the true source
 files from a ``Members involved:`` line even when the block ``source:`` header
 points at a compiled wiki page and the refs are relative to ``raw/auto-memory``.
 
-The original #210 lane only parsed ``**Member paths**:`` and resolved under
+The original athenaeum#210 lane only parsed ``**Member paths**:`` and resolved under
 ``raw/`` + ``wiki/`` — so on the REAL detector block shape (wiki-page source +
 ``Members involved:`` refs under ``raw/auto-memory/``) it resolved zero files
 and edited nothing. These tests pin the real shape.
@@ -121,7 +121,7 @@ def test_ingest_edits_source_via_members_involved(tmp_path: Path) -> None:
 
 
 def test_record_member_key_and_pair_text_from_full_block(tmp_path: Path) -> None:
-    """Issue #216: the decision-log record must carry a non-empty member_key
+    """Issue athenaeum#216: the decision-log record must carry a non-empty member_key
     (from ``Members involved:``) and a pair_text that survives a ``**``-prefixed
     line between Passage 1 and Passage 2 (which truncates pq.description)."""
     import json

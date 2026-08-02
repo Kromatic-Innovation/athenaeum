@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for PII off-corpus (issue #427): excluded contacts surface, entity-page
+"""Tests for PII off-corpus (issue athenaeum#427): excluded contacts surface, entity-page
 lint, and the append-only observation log + supersession fold.
 
 Structure mirrors the issue's acceptance criteria:
@@ -7,8 +7,8 @@ Structure mirrors the issue's acceptance criteria:
 - ``TestExcludedSurfaceFailsClosed`` — a page on the contacts (excluded)
   surface never appears in embeddings (vector), FTS5 recall, keyword recall,
   or merge proposals. One test per consumer, proving the exclusion is
-  inherited BY CONSTRUCTION through #429's adapter interface (fail-closed) —
-  no #427-specific code path in the consumer, just the adapter's excluded
+  inherited BY CONSTRUCTION through athenaeum#429's adapter interface (fail-closed) —
+  no athenaeum#427-specific code path in the consumer, just the adapter's excluded
   surface root sitting outside the scanned tree.
 - ``TestPiiFlagBeltAndSuspenders`` — a ``pii: true``-flagged page (still on
   the default wiki surface) is ALSO excluded from every consumer.
@@ -105,7 +105,7 @@ class TestExcludedSurfaceFailsClosed:
 
     def test_unconfigured_pii_class_defaults_to_wiki(self, tmp_path: Path) -> None:
         # No storage.mapping => byte-identical default: pii resolves to the
-        # ordinary wiki surface, matching #429's "unconfigured = default" rule.
+        # ordinary wiki surface, matching athenaeum#429's "unconfigured = default" rule.
         knowledge_root = tmp_path / "knowledge"
         assert contacts_surface_root(knowledge_root, None) == knowledge_root / "wiki"
         assert not is_pii_class_excluded(None)
@@ -160,7 +160,7 @@ class TestExcludedSurfaceFailsClosed:
         )
         # discover_wiki_dedupe_candidates only ever globs wiki_root itself, so
         # the excluded-surface file (living outside wiki/) is never even a
-        # glob candidate — by construction, not a #427-specific filter.
+        # glob candidate — by construction, not a athenaeum#427-specific filter.
         names = {
             c.path.name
             for c in discover_wiki_dedupe_candidates(wiki_root, config=EXCLUDED_CONFIG)
@@ -254,7 +254,7 @@ class TestEntityPageLint:
     def test_find_inline_phones(self) -> None:
         assert find_inline_phones("call +1-555-0100 now") == ["+1-555-0100"]
         assert find_inline_phones("(555) 010-0100") == ["(555) 010-0100"]
-        assert find_inline_phones("issue #427 page 12") == []
+        assert find_inline_phones("issue athenaeum#427 page 12") == []
 
     def test_has_inline_contact_fields_frontmatter(self) -> None:
         assert has_inline_contact_fields({"emails": ["a@example.com"]})
@@ -324,20 +324,20 @@ class TestEntityPageLint:
 
 
 # ---------------------------------------------------------------------------
-# Phone detector — corpus false positives must NOT match (issue #500)
+# Phone detector — corpus false positives must NOT match (issue athenaeum#500)
 # ---------------------------------------------------------------------------
 #
 # The permissive phone regex matched ISO dates, year ranges, and bare id/
 # analytics fragments — confirmed 2026-07-28 against the live corpus, where a
 # lint-pii pass flagged 1,885 pages on "phone" hits dominated by CRM-timeline
 # dates (e.g. `2015-12-03`) and id fragments (page uid prefixes, GA4 property
-# ids). These are the concrete corpus samples from #500, pinned as non-matches
+# ids). These are the concrete corpus samples from athenaeum#500, pinned as non-matches
 # alongside the true-positive fixtures so the detector cannot regress.
 
 
 class TestPhoneDetectorFalsePositives:
     #: The exact "phone" hits migrate-pii reported on the two live pages named
-    #: in #500 — all CRM-timeline / frontmatter dates, no real phone numbers.
+    #: in athenaeum#500 — all CRM-timeline / frontmatter dates, no real phone numbers.
     ISO_DATE_FALSE_POSITIVES = (
         "2015-12-03",  # blekinge page: "First contact"
         "2021-07-16",  # blekinge page: "Last CRM update"
@@ -345,7 +345,7 @@ class TestPhoneDetectorFalsePositives:
         "2026-04-16",  # dawn-b page: its own `updated:` frontmatter date
     )
 
-    #: Bare digit runs #500 calls out: a page uid prefix and a GA4 property id.
+    #: Bare digit runs athenaeum#500 calls out: a page uid prefix and a GA4 property id.
     ID_FRAGMENT_FALSE_POSITIVES = ("00075741", "387473359")
 
     def test_iso_dates_not_matched(self) -> None:
@@ -360,7 +360,7 @@ class TestPhoneDetectorFalsePositives:
             assert find_inline_phones(f"uid {frag} tail") == [], frag
 
     def test_crm_timeline_block_reports_no_phones(self) -> None:
-        # The exact shape #500 flags: a CRM Timeline of dates, zero phones.
+        # The exact shape athenaeum#500 flags: a CRM Timeline of dates, zero phones.
         body = (
             "## CRM Timeline\n"
             "- First contact: 2015-12-03\n"
@@ -379,10 +379,10 @@ class TestPhoneDetectorFalsePositives:
 
 
 # ---------------------------------------------------------------------------
-# Phone detector — a leading paren must NOT defeat the exclusions (issue #683)
+# Phone detector — a leading paren must NOT defeat the exclusions (issue athenaeum#683)
 # ---------------------------------------------------------------------------
 #
-# #500's date/id exclusions were anchored (`^\d`) / `isdigit()`-gated, so a
+# athenaeum#500's date/id exclusions were anchored (`^\d`) / `isdigit()`-gated, so a
 # single leading '(' — the dominant shape in the live corpus, where
 # parenthesized dates in prose and parenthesized page-uid prefixes in
 # `_index.md` produced 911 lint-pii findings across 107 files — slipped every
@@ -398,39 +398,39 @@ class TestPhoneDetectorParenthesized:
         "text",
         [
             "2026-07-29",  # correct today
-            "(2026-07-29)",  # WRONG before #683
+            "(2026-07-29)",  # WRONG before athenaeum#683
             "52785095",  # correct today
-            "(52785095)",  # WRONG before #683
+            "(52785095)",  # WRONG before athenaeum#683
             "2019-2020",  # correct today
-            "(2019-2020)",  # WRONG before #683
+            "(2019-2020)",  # WRONG before athenaeum#683
         ],
     )
     def test_reproduction_cases_report_no_phone(self, text: str) -> None:
-        # The six find_inline_phones cases from #683's Reproduction section.
+        # The six find_inline_phones cases from athenaeum#683's Reproduction section.
         assert find_inline_phones(text) == [], text
 
-    #: Excluded shapes taken VERBATIM from the live corpus (#683's impact table
-    #: and #500's body) rather than retyped in canonical form — dates, year
+    #: Excluded shapes taken VERBATIM from the live corpus (athenaeum#683's impact table
+    #: and athenaeum#500's body) rather than retyped in canonical form — dates, year
     #: ranges, and bare uid/analytics id fragments. Each must stay a non-match
     #: regardless of the punctuation wrapped around it.
     EXCLUDED_SAMPLES = (
-        "2026-07-29",  # #683: parenthesized date in prose
-        "2026-06-12",  # #683: parenthesized date in prose
-        "2015-12-03",  # #500: CRM-timeline date
-        "2026-04-16",  # #500: frontmatter `updated:` date
-        "2019-2020",  # #683 / #500: year range
-        "52785095",  # #683: `_index.md` page uid prefix
-        "69541219",  # #683: `_index.md` page uid prefix
-        "00075741",  # #500: page uid prefix
-        "387473359",  # #500: GA4 property id
+        "2026-07-29",  # athenaeum#683: parenthesized date in prose
+        "2026-06-12",  # athenaeum#683: parenthesized date in prose
+        "2015-12-03",  # athenaeum#500: CRM-timeline date
+        "2026-04-16",  # athenaeum#500: frontmatter `updated:` date
+        "2019-2020",  # athenaeum#683 / athenaeum#500: year range
+        "52785095",  # athenaeum#683: `_index.md` page uid prefix
+        "69541219",  # athenaeum#683: `_index.md` page uid prefix
+        "00075741",  # athenaeum#500: page uid prefix
+        "387473359",  # athenaeum#500: GA4 property id
     )
 
     @pytest.mark.parametrize("sample", EXCLUDED_SAMPLES)
     def test_exclusions_are_punctuation_invariant(self, sample: str) -> None:
         # An exclusion must not be defeated by surrounding punctuation — the
-        # invariant behind BOTH #500 and #683. This kills the class, not just
-        # the six literals above (Quine retro on #683): it would have failed on
-        # the day #500 merged.
+        # invariant behind BOTH athenaeum#500 and athenaeum#683. This kills the class, not just
+        # the six literals above (Quine retro on athenaeum#683): it would have failed on
+        # the day athenaeum#500 merged.
         base = find_inline_phones(sample)
         assert base == [], sample
         for wrapped in (f"({sample})", f"[{sample}]", f"{sample},", f"({sample}"):
@@ -445,10 +445,10 @@ class TestPhoneDetectorParenthesized:
 
 
 # ---------------------------------------------------------------------------
-# Phone detector — the shapes #683's paren fix did not reach (issue #720)
+# Phone detector — the shapes athenaeum#683's paren fix did not reach (issue athenaeum#720)
 # ---------------------------------------------------------------------------
 #
-# #683 normalized a LEADING paren, cutting lint-pii from 911/107 to 456/274.
+# athenaeum#683 normalized a LEADING paren, cutting lint-pii from 911/107 to 456/274.
 # The residual 456 was dominated by four shapes the paren fix did not cover
 # (measured on the live corpus, develop @ 5513d80):
 #   * issue-number lists joined by single or double hyphens
@@ -456,7 +456,7 @@ class TestPhoneDetectorParenthesized:
 #   * a match that runs PAST a closing paren / across a newline into the next
 #     number (the permissive `[\d\-.\s()]` class admits spaces and, via `\s`,
 #     newlines)
-# Each row of #720's table is pinned below to the EXACT example value the
+# Each row of athenaeum#720's table is pinned below to the EXACT example value the
 # issue cites, so a regression re-surfaces the specific corpus shape. The
 # exclusion is normalization + structural classification (segment into digit
 # groups + separator runs), not a literal blocklist — a new separator style
@@ -464,7 +464,7 @@ class TestPhoneDetectorParenthesized:
 
 
 class TestPhoneDetectorIssueNumberAndDateShapes:
-    #: (label, example value taken verbatim from #720's table, source page).
+    #: (label, example value taken verbatim from athenaeum#720's table, source page).
     #: Each value must classify as a non-phone regardless of surrounding prose.
     UNCOVERED_SHAPES = (
         ("double-dash issue-number list", "445--436--435--374"),
@@ -505,7 +505,7 @@ class TestPhoneDetectorIssueNumberAndDateShapes:
         assert find_inline_phones("Issue 1778 (2026-08-01 shipped") == []
 
     def test_genuine_phones_unaffected_by_720(self) -> None:
-        # The #683/#500 true positives must survive the #720 tightening.
+        # The athenaeum#683/#500 true positives must survive the athenaeum#720 tightening.
         assert find_inline_phones("call +1-555-0100 now") == ["+1-555-0100"]
         assert find_inline_phones("(555) 010-0100") == ["(555) 010-0100"]
         assert find_inline_phones("cell 5551234567 anytime") == ["5551234567"]
@@ -515,7 +515,7 @@ class TestPhoneDetectorIssueNumberAndDateShapes:
     def test_email_axis_is_untouched(self) -> None:
         # AC3: no email-axis change — the widened phone exclusions must not
         # alter which email-shaped tokens are found. Pinned with a count
-        # assertion over a body carrying both a real email and every #720
+        # assertion over a body carrying both a real email and every athenaeum#720
         # false-positive phone shape.
         body = (
             "Contact alice@example.com about issues 445--436--435--374 and\n"
@@ -528,7 +528,7 @@ class TestPhoneDetectorIssueNumberAndDateShapes:
 
     def test_corpus_scan_reduction_mechanism(self, tmp_path: Path) -> None:
         # The reduction lint-pii sees on the live corpus, in miniature: a page
-        # full of #720 false-positive shapes yields ZERO findings, while a page
+        # full of athenaeum#720 false-positive shapes yields ZERO findings, while a page
         # with a genuine phone still yields one. This is the deterministic
         # mechanism behind the 456 -> tens drop the operator confirms live.
         wiki = tmp_path / "wiki"

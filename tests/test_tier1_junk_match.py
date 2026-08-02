@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #662 — junk Tier-1 matches must not inflate the Tier-3 call count.
+"""Issue athenaeum#662 — junk Tier-1 matches must not inflate the Tier-3 call count.
 
 ``tier1_programmatic_match`` matches any indexed page name >= 3 chars, and the
 wiki index accumulates junk pages (``here``, ``get``, ``main``, ``reach``,

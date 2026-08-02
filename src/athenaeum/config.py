@@ -33,7 +33,7 @@ to a single function body — it is not a real import cycle (screening never
 imports config back) and must stay deferred so `import athenaeum.config`
 itself never pulls in L3.
 
-Malformed-env-value policy (issue #519/#528)
+Malformed-env-value policy (issue athenaeum#519/#528)
 --------------------------------------------
 Every numeric env override (``ATHENAEUM_*``) is read through
 :func:`_env_number`, which enforces ONE policy for a value that fails to
@@ -68,7 +68,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 # The single source of truth for the default knowledge-directory root (issue
-# #537). This is the *tilde template* form used as the CLI ``--path`` default
+# athenaeum#537). This is the *tilde template* form used as the CLI ``--path`` default
 # and as the fallback in resolver helpers; every consumer expands it via
 # ``.expanduser()`` (directly, or through the argparse value it seeds). Keeping
 # it here — rather than as 38 copies of ``Path("~/knowledge")`` scattered across
@@ -83,7 +83,7 @@ _T = TypeVar("_T")
 def _env_number(name: str, cast: Callable[[str], _T]) -> _T | None:
     """Parse env var *name* via *cast*, or ``None`` if unset **or malformed**.
 
-    The one place numeric env overrides are read (issue #519/#524). A ``None``
+    The one place numeric env overrides are read (issue athenaeum#519/#524). A ``None``
     return means "no usable env value — fall through to yaml/default"; a
     non-``None`` return is the parsed override and is **authoritative over
     yaml** (M1), including a parsed ``0``.
@@ -94,7 +94,7 @@ def _env_number(name: str, cast: Callable[[str], _T]) -> _T | None:
     to its default with no signal at any level.
 
     This settles the malformed-value policy for numeric knobs — WARN and fall
-    back — that #528 sweeps across the remaining hand-rolled resolvers.
+    back — that athenaeum#528 sweeps across the remaining hand-rolled resolvers.
     """
     raw = os.environ.get(name)
     if raw is None:
@@ -111,7 +111,7 @@ def _env_number(name: str, cast: Callable[[str], _T]) -> _T | None:
         )
         return None
 
-# Issue #519/#521 (H9 + L3): the single canonical default cache-dir location
+# Issue athenaeum#519/#521 (H9 + L3): the single canonical default cache-dir location
 # and the single resolver honouring the ``ATHENAEUM_CACHE_DIR`` override.
 #
 # Before this, ``~/.cache/athenaeum`` was constructed by hand at ~13 sites
@@ -143,8 +143,8 @@ _DEFAULTS: dict[str, Any] = {
     "search_backend": "fts5",
     "vector": {
         "provider": "chromadb",
-        # Issue #315 seam: the embedding model. Kept at the documented
-        # default; incremental seeding (issue #348) is the one-time re-embed
+        # Issue athenaeum#315 seam: the embedding model. Kept at the documented
+        # default; incremental seeding (issue athenaeum#348) is the one-time re-embed
         # that makes evaluating a stronger model cheap. Do NOT change this
         # default without a recorded eval — swapping it forces a full
         # re-embed of the whole corpus.
@@ -160,13 +160,13 @@ _DEFAULTS: dict[str, Any] = {
         # list to restrict recall to the compiled wiki only.
         "extra_intake_roots": ["raw/auto-memory"],
     },
-    # NOTE (issue #231): only seed a key here when this dict is its single
+    # NOTE (issue athenaeum#231): only seed a key here when this dict is its single
     # source of truth. Keys whose defaults live next to their consumer code
     # (librarian.cluster_threshold / cluster_output, contradiction.*) must
     # NOT be seeded: load_config() would merge the seed into every config,
     # the resolver would see it as "user-set", and the module-level code
     # default — plus any future change to it — becomes unreachable. That is
-    # how the #187 resolver-cap raise (50 -> 250) was silently reverted to
+    # how the athenaeum#187 resolver-cap raise (50 -> 250) was silently reverted to
     # 50 through the config path.
 }
 
@@ -195,7 +195,7 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
     # from _DEFAULTS pass through untouched so module-level code defaults
     # (and their env > yaml > default precedence chains) stay live and
     # user-set sections like ``contradiction:`` or ``resolve:`` are not
-    # dropped (issue #231). Deep-copy the seed so callers mutating nested
+    # dropped (issue athenaeum#231). Deep-copy the seed so callers mutating nested
     # values (e.g. ``recall.extra_intake_roots``) cannot corrupt _DEFAULTS
     # process-wide.
     result: dict[str, Any] = copy.deepcopy(_DEFAULTS)
@@ -210,7 +210,7 @@ def load_config(knowledge_root: Path | None = None) -> dict[str, Any]:
 
 
 def resolve_owner(config: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Resolve the workspace owner identity from config (issue #263).
+    """Resolve the workspace owner identity from config (issue athenaeum#263).
 
     The owner is the single canonical person the knowledge base belongs to.
     Athenaeum ships to PyPI, so the owner identity must NEVER be hardcoded in
@@ -229,7 +229,7 @@ def resolve_owner(config: dict[str, Any] | None) -> dict[str, Any] | None:
     least one usable field is set, else ``None``. A ``None`` return makes every
     owner-aware behavior (auto-bind, owner join keys, ``user_*`` routing) inert
     so the package works for any user with no owner configured. No default is
-    seeded into ``_DEFAULTS`` (issue #231) — an unset owner is genuinely empty.
+    seeded into ``_DEFAULTS`` (issue athenaeum#231) — an unset owner is genuinely empty.
     """
     if not isinstance(config, dict):
         return None
@@ -255,13 +255,13 @@ def resolve_owner(config: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def resolve_owner_asserter(config: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return the owner's OIDC ``asserter`` identity block, or ``None`` (#328).
+    """Return the owner's OIDC ``asserter`` identity block, or ``None`` (athenaeum#328).
 
     Read from ``owner.asserter`` in ``athenaeum.yaml``. Used by
     ``repair --backfill-sources`` to stamp ``on_behalf_of`` on a
     ``user-stated`` upgrade WHEN a durable identity is configured. Transcripts
     carry no OIDC identity, so an unset block leaves ``on_behalf_of`` absent
-    (the #327 fallback). Returns the raw dict unchanged for
+    (the athenaeum#327 fallback). Returns the raw dict unchanged for
     :func:`athenaeum.models.asserter_identity_key` to key on; a non-dict or
     empty block is inert.
     """
@@ -277,7 +277,7 @@ def resolve_owner_asserter(config: dict[str, Any] | None) -> dict[str, Any] | No
 
 
 def _normalize_audience_roles(values: Any) -> set[str]:
-    """Case-fold, trim, and drop empties from an iterable of role ids (#312)."""
+    """Case-fold, trim, and drop empties from an iterable of role ids (athenaeum#312)."""
     if not isinstance(values, (list, tuple, set)):
         return set()
     return {v.strip().lower() for v in values if isinstance(v, str) and v.strip()}
@@ -287,7 +287,7 @@ def resolve_audience(
     config: dict[str, Any] | None,
     cli_value: str | None = None,
 ) -> set[str] | None:
-    """Resolve the serve-time read-scope audience pin (issue #312).
+    """Resolve the serve-time read-scope audience pin (issue athenaeum#312).
 
     Returns the role set this ``serve`` / ``recall`` process is pinned to, or
     ``None`` for the owner / default caller (FULL access — every page,
@@ -304,7 +304,7 @@ def resolve_audience(
     empty yaml list) resolves to ``None`` = owner: to RESTRICT a caller you must
     name at least one non-empty role. Role ids are opaque, case-folded, and
     whitespace-trimmed; athenaeum assigns them no meaning (they map onto the
-    operator's external RBAC). No seed in ``_DEFAULTS`` (issue #231).
+    operator's external RBAC). No seed in ``_DEFAULTS`` (issue athenaeum#231).
     """
     if cli_value is not None:
         roles = _normalize_audience_roles(cli_value.split(","))
@@ -328,7 +328,7 @@ def resolve_audience(
 
 
 def resolve_google_contact_keys(config: dict[str, Any] | None) -> list[str]:
-    """Resolve extra Google-contact dedup join-key field-names (issue #269).
+    """Resolve extra Google-contact dedup join-key field-names (issue athenaeum#269).
 
     The dedupe merge always treats the generic ``google_contact`` frontmatter
     field as a join/merge key. Some operators carry the same Google contact id
@@ -345,7 +345,7 @@ def resolve_google_contact_keys(config: dict[str, Any] | None) -> list[str]:
     ``google_contact`` key is implicit and not included here). Returns an
     empty list when unset -- a fresh install dedups on the generic
     ``google_contact`` key only, with no personal namespace literal in source.
-    No seed in ``_DEFAULTS`` (issue #231).
+    No seed in ``_DEFAULTS`` (issue athenaeum#231).
     """
     if not isinstance(config, dict):
         return []
@@ -359,13 +359,13 @@ def resolve_google_contact_keys(config: dict[str, Any] | None) -> list[str]:
 
 
 def resolve_retire(config: dict[str, Any] | None) -> bool:
-    """Resolve the move-then-retire opt-out from yaml ``librarian.retire`` (#259).
+    """Resolve the move-then-retire opt-out from yaml ``librarian.retire`` (athenaeum#259).
 
-    The move-then-retire pass (issue #261) moves non-contradictory raw
+    The move-then-retire pass (issue athenaeum#261) moves non-contradictory raw
     auto-memory into the wiki and ``git rm``s it. It is DEFAULT-ON
     (owner-confirmed): only ``librarian.retire: false`` in ``athenaeum.yaml``
     turns it off, and the ``athenaeum run --no-retire`` CLI flag overrides to
-    off at the call site. No seed in ``_DEFAULTS`` (issue #231) — the default
+    off at the call site. No seed in ``_DEFAULTS`` (issue athenaeum#231) — the default
     lives here in code so it stays reachable. Non-bool yaml values fall through
     to the default (on).
     """
@@ -379,7 +379,7 @@ def resolve_retire(config: dict[str, Any] | None) -> bool:
 
 
 def resolve_push_after_run(config: dict[str, Any] | None) -> bool:
-    """Resolve the post-run ``git push`` opt-in (issue #284).
+    """Resolve the post-run ``git push`` opt-in (issue athenaeum#284).
 
     Closes the move-then-retire recovery gap: a scheduled nightly ``athenaeum
     run`` commits locally but, without this opt-in, never pushes — so the
@@ -389,7 +389,7 @@ def resolve_push_after_run(config: dict[str, Any] | None) -> bool:
     after a successful run that produced at least one commit, using the
     operator's ambient git credentials. Default OFF: no push without explicit
     opt-in, and athenaeum itself handles no tokens/secrets. No seed in
-    ``_DEFAULTS`` (issue #231). Non-bool yaml values fall through to off.
+    ``_DEFAULTS`` (issue athenaeum#231). Non-bool yaml values fall through to off.
     """
     if isinstance(config, dict):
         cfg = config.get("librarian")
@@ -401,7 +401,7 @@ def resolve_push_after_run(config: dict[str, Any] | None) -> bool:
 
 
 def resolve_push_remote(config: dict[str, Any] | None) -> str:
-    """Resolve the post-run push remote from ``librarian.push_remote`` (#284).
+    """Resolve the post-run push remote from ``librarian.push_remote`` (athenaeum#284).
 
     Defaults to ``origin`` — the conventional name the knowledge repo's
     remote will carry on every operator we ship to. A non-string or empty
@@ -417,7 +417,7 @@ def resolve_push_remote(config: dict[str, Any] | None) -> str:
 
 
 def resolve_push_branch(config: dict[str, Any] | None) -> str | None:
-    """Resolve the post-run push branch from ``librarian.push_branch`` (#284).
+    """Resolve the post-run push branch from ``librarian.push_branch`` (athenaeum#284).
 
     Returns ``None`` when unset (the librarian will push the knowledge repo's
     current branch, which is what nightly schedulers expect). A non-string
@@ -433,9 +433,9 @@ def resolve_push_branch(config: dict[str, Any] | None) -> str | None:
 
 
 def resolve_pull_before_run(config: dict[str, Any] | None) -> bool:
-    """Resolve the pre-run ``git pull`` opt-in (issue #399).
+    """Resolve the pre-run ``git pull`` opt-in (issue athenaeum#399).
 
-    Symmetric to :func:`resolve_push_after_run` (#284): with
+    Symmetric to :func:`resolve_push_after_run` (athenaeum#284): with
     ``librarian.pull_before_run: true`` (or the ``athenaeum run --pull`` CLI
     override), the librarian invokes ``git pull --ff-only --autostash`` on
     the knowledge repo BEFORE the run starts, so the run compiles against
@@ -461,12 +461,12 @@ def resolve_pull_before_run(config: dict[str, Any] | None) -> bool:
 
 
 # Default glob patterns for inherently-throwaway auto-memory scope dirs
-# (issue #278). These live in the CONFIG LAYER on purpose: the discover /
+# (issue athenaeum#278). These live in the CONFIG LAYER on purpose: the discover /
 # prune pipeline logic carries no host-specific scope literals, it only asks
 # this resolver for the active glob set. An operator overrides or extends the
 # set via ``athenaeum.yaml`` ``librarian.ephemeral_scopes``. Patterns are
 # matched against the scope DIRECTORY NAME with :func:`fnmatch.fnmatch`.
-# No seed in ``_DEFAULTS`` (issue #231) -- the default lives here so it stays
+# No seed in ``_DEFAULTS`` (issue athenaeum#231) -- the default lives here so it stays
 # reachable and a user-set key is treated as authoritative.
 _DEFAULT_EPHEMERAL_SCOPES: tuple[str, ...] = (
     "*hestia-routine*",
@@ -480,7 +480,7 @@ _DEFAULT_EPHEMERAL_SCOPES: tuple[str, ...] = (
 
 
 def resolve_ephemeral_scopes(config: dict[str, Any] | None) -> list[str]:
-    """Resolve glob patterns for throwaway auto-memory scope dirs (issue #278).
+    """Resolve glob patterns for throwaway auto-memory scope dirs (issue athenaeum#278).
 
     Returns the operator's ``librarian.ephemeral_scopes`` list when set
     (authoritative -- it REPLACES the defaults so an operator owns the full
@@ -499,14 +499,14 @@ def resolve_ephemeral_scopes(config: dict[str, Any] | None) -> list[str]:
 
 
 def resolve_operational_markers(config: dict[str, Any] | None) -> list[str]:
-    """Resolve content markers for operational auto-memory families (issue #278).
+    """Resolve content markers for operational auto-memory families (issue athenaeum#278).
 
     These are lower-cased substrings; the classifier requires a MULTI-SIGNAL
     match (>= 2 distinct markers present) before it will drop an intake on
     markers alone, so a single incidental word can never clobber a legit
     architecture note. DEFAULT-EMPTY: a fresh install never classifies on
     markers -- only the operator opts in via ``librarian.operational_markers``.
-    No seed in ``_DEFAULTS`` (issue #231).
+    No seed in ``_DEFAULTS`` (issue athenaeum#231).
     """
     if isinstance(config, dict):
         cfg = config.get("librarian")
@@ -522,7 +522,7 @@ def resolve_operational_markers(config: dict[str, Any] | None) -> list[str]:
 
 
 def resolve_min_cluster_cohesion(config: dict[str, Any] | None) -> float:
-    """Resolve the cluster-cohesion floor from ``librarian.min_cluster_cohesion`` (#278).
+    """Resolve the cluster-cohesion floor from ``librarian.min_cluster_cohesion`` (athenaeum#278).
 
     The cross-scope ``similarity`` clustering path over-clusters: single-linkage
     chains a coherent source doc together with vaguely-similar operational
@@ -537,7 +537,7 @@ def resolve_min_cluster_cohesion(config: dict[str, Any] | None) -> float:
     DEFAULT 0.0 (OFF): athenaeum ships to PyPI, and the clean ~0.47 cohesion gap
     is specific to one corpus -- a baked-in non-zero floor could suppress
     legitimate clusters in a corpus with a different cohesion distribution.
-    Operators opt in via ``athenaeum.yaml``. No seed in ``_DEFAULTS`` (#231) so
+    Operators opt in via ``athenaeum.yaml``. No seed in ``_DEFAULTS`` (athenaeum#231) so
     the code default stays reachable. ``bool`` (an ``int`` subclass) and
     non-numeric / negative yaml values fall through to 0.0 (off).
     """
@@ -557,7 +557,7 @@ def resolve_min_cluster_cohesion(config: dict[str, Any] | None) -> float:
 
 
 def resolve_min_cluster_cohesion_scopes(config: dict[str, Any] | None) -> int:
-    """Resolve the distinct-origin-scope floor for the cohesion gate (#278).
+    """Resolve the distinct-origin-scope floor for the cohesion gate (athenaeum#278).
 
     The cohesion floor (:func:`resolve_min_cluster_cohesion`) only suppresses a
     cluster that ALSO spans at least this many distinct ``origin_scopes`` -- the
@@ -567,7 +567,7 @@ def resolve_min_cluster_cohesion_scopes(config: dict[str, Any] | None) -> int:
 
     DEFAULT 4: observed over-clusters span 8-17 origin scopes while legitimate
     auto-memory pages span 1-3, so a floor of 4 sits in the clean margin. No
-    seed in ``_DEFAULTS`` (#231). ``bool`` and non-int / ``< 2`` yaml values
+    seed in ``_DEFAULTS`` (athenaeum#231). ``bool`` and non-int / ``< 2`` yaml values
     fall through to the default.
     """
     default = 4
@@ -581,7 +581,7 @@ def resolve_min_cluster_cohesion_scopes(config: dict[str, Any] | None) -> int:
 
 
 def resolve_max_merge_sources(config: dict[str, Any] | None) -> int:
-    """Resolve the resolver merge-proposal source-count cap (#400).
+    """Resolve the resolver merge-proposal source-count cap (athenaeum#400).
 
     The resolver's merge-proposal path (``propose_merge`` → ``_pending_merges.md``)
     had no size cap, so a degenerate over-cluster — 1,600+ source memories folded
@@ -591,9 +591,9 @@ def resolve_max_merge_sources(config: dict[str, Any] | None) -> int:
     suppressed before it reaches ``_pending_merges.md`` (neither proposed nor
     escalated as a pending question).
 
-    DEFAULT 5 (active) — tightened from 25 (#421, settled design). A merge
+    DEFAULT 5 (active) — tightened from 25 (athenaeum#421, settled design). A merge
     PROPOSAL is a pairwise / small-group refinement; a fold of more than ~5
-    sources is not that shape, and complete-linkage (#421) means the members of
+    sources is not that shape, and complete-linkage (athenaeum#421) means the members of
     a genuine small merge are mutually similar, so 5 sits well inside the
     legitimate-merge margin while excluding the observed 1,600-1,700-source
     degenerates decisively. (The wider size-25 cap still governs the pooled
@@ -601,11 +601,11 @@ def resolve_max_merge_sources(config: dict[str, Any] | None) -> int:
     — this cap is specifically the merge-PROPOSAL fan-in.)
     Env ``ATHENAEUM_MAX_MERGE_SOURCES`` > yaml ``librarian.max_merge_sources`` >
     this default; ``0`` (or negative) disables the cap. No seed in ``_DEFAULTS``
-    (#231) so the code default stays reachable. ``bool`` and non-numeric yaml
+    (athenaeum#231) so the code default stays reachable. ``bool`` and non-numeric yaml
     values fall through to the default.
     """
     default = 5
-    # Issue #524 (M2): a parsed env value is authoritative (0/negative disables
+    # Issue athenaeum#524 (M2): a parsed env value is authoritative (0/negative disables
     # the cap); a malformed value now logs a WARNING instead of silently
     # falling back to the default.
     value = _env_number("ATHENAEUM_MAX_MERGE_SOURCES", int)
@@ -621,7 +621,7 @@ def resolve_max_merge_sources(config: dict[str, Any] | None) -> int:
 
 
 def resolve_min_merge_confidence(config: dict[str, Any] | None) -> float:
-    """Resolve the resolver merge-proposal confidence floor (#400).
+    """Resolve the resolver merge-proposal confidence floor (athenaeum#400).
 
     A second, opt-in gate on the merge-proposal path: a proposal whose resolver
     confidence is strictly below this floor is suppressed before it reaches
@@ -634,7 +634,7 @@ def resolve_min_merge_confidence(config: dict[str, Any] | None) -> float:
     ships disabled and is opt-in via ``athenaeum.yaml`` — mirroring
     :func:`resolve_min_cluster_cohesion`. Env ``ATHENAEUM_MIN_MERGE_CONFIDENCE`` >
     yaml ``librarian.min_merge_confidence`` > this default. No seed in
-    ``_DEFAULTS`` (#231). Issue #524 (M1): a parsed env value is authoritative
+    ``_DEFAULTS`` (athenaeum#231). Issue athenaeum#524 (M1): a parsed env value is authoritative
     over yaml — ``ATHENAEUM_MIN_MERGE_CONFIDENCE=0`` (or negative) disables the
     floor even when yaml sets one, instead of silently falling through. A
     malformed env value logs a WARNING (M2, via :func:`_env_number`) and falls
@@ -643,7 +643,7 @@ def resolve_min_merge_confidence(config: dict[str, Any] | None) -> float:
     """
     value = _env_number("ATHENAEUM_MIN_MERGE_CONFIDENCE", float)
     if value is not None:
-        # Issue #524 (M1): the parsed env value is authoritative over yaml.
+        # Issue athenaeum#524 (M1): the parsed env value is authoritative over yaml.
         # ATHENAEUM_MIN_MERGE_CONFIDENCE=0 disables the floor even when yaml
         # sets one — an emergency override that previously failed the `> 0.0`
         # guard and silently fell through to the yaml value. A negative value
@@ -670,17 +670,17 @@ def _resolve_sample_rate(
 ) -> float:
     """Resolve a bounded [0.0, 1.0] sampling rate (env > yaml > default).
 
-    Shared by the tier-audit sampler knobs (#438). Out-of-range values are
+    Shared by the tier-audit sampler knobs (athenaeum#438). Out-of-range values are
     clamped into ``[0.0, 1.0]`` (a rate above 1 samples everything, below 0
     nothing); ``bool`` / non-numeric values fall through to *default*. No seed
-    in ``_DEFAULTS`` (#231) — the sampler is ON by default, so *default* is a
+    in ``_DEFAULTS`` (athenaeum#231) — the sampler is ON by default, so *default* is a
     real non-zero rate the resolver owns, not a disabled floor.
     """
 
     def _clamp(value: float) -> float:
         return max(0.0, min(1.0, value))
 
-    # Issue #528: malformed env now WARNs + falls back (was silent fall-through).
+    # Issue athenaeum#528: malformed env now WARNs + falls back (was silent fall-through).
     value = _env_number(env_var, float)
     if value is not None:
         return _clamp(value)
@@ -697,7 +697,7 @@ def _resolve_sample_rate(
 
 
 def resolve_audit_sample_rate_t2_approvals(config: dict[str, Any] | None) -> float:
-    """Resolve the share of T2 approvals sampled for human audit (#438).
+    """Resolve the share of T2 approvals sampled for human audit (athenaeum#438).
 
     The calibration loop catches false-APPROVES: a random share of T2's
     approve verdicts is surfaced for a human to confirm or overturn. Env
@@ -714,7 +714,7 @@ def resolve_audit_sample_rate_t2_approvals(config: dict[str, Any] | None) -> flo
 
 
 def resolve_audit_sample_rate_t1_rejects(config: dict[str, Any] | None) -> float:
-    """Resolve the share of T1 rejects sampled for human audit (#438).
+    """Resolve the share of T1 rejects sampled for human audit (athenaeum#438).
 
     The calibration loop catches false-REJECTS: a random share of T1's reject
     verdicts is surfaced for a human to confirm or overturn. Env
@@ -731,7 +731,7 @@ def resolve_audit_sample_rate_t1_rejects(config: dict[str, Any] | None) -> float
 
 
 def resolve_reasoning_tier_auditing_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve the reasoning-tier opt-in (issue #518). DEFAULT OFF.
+    """Resolve the reasoning-tier opt-in (issue athenaeum#518). DEFAULT OFF.
 
     Gates BOTH halves of the tiered-reasoning subsystem behind one explicit
     switch:
@@ -747,7 +747,7 @@ def resolve_reasoning_tier_auditing_enabled(config: dict[str, Any] | None) -> bo
 
     Env ``ATHENAEUM_REASONING_TIER_AUDITING_ENABLED`` (``1``/``true``/``yes``/``on``,
     case-insensitive) > yaml ``librarian.reasoning_tier_auditing_enabled`` >
-    default ``False``. No seed in ``_DEFAULTS`` (issue #231). Default OFF is
+    default ``False``. No seed in ``_DEFAULTS`` (issue athenaeum#231). Default OFF is
     deliberate: wiring the T1 screen changes what reaches the human merge
     queue, so it stays opt-in until an operator turns it on — production merge
     behavior is byte-identical to today until then. Non-bool yaml values and
@@ -766,12 +766,12 @@ def resolve_reasoning_tier_auditing_enabled(config: dict[str, Any] | None) -> bo
 
 
 def resolve_min_merge_mean_similarity(config: dict[str, Any] | None) -> float:
-    """Resolve the merge-proposal mean-pairwise-similarity floor (#421).
+    """Resolve the merge-proposal mean-pairwise-similarity floor (athenaeum#421).
 
     A merge proposal whose cluster mean pairwise cosine
     (``cluster_centroid_score``) is strictly below this floor is suppressed
     before it reaches ``_pending_merges.md``. This is the ACTIVE-by-default
-    cohesion gate the #421 settled design calls for: unlike the corpus-specific
+    cohesion gate the athenaeum#421 settled design calls for: unlike the corpus-specific
     :func:`resolve_min_cluster_cohesion` (which suppresses durable wiki pages
     and so ships OFF), the merge-PROPOSAL path is a human review queue — a
     low-mean-similarity fold is noise there regardless of corpus, so a modest
@@ -783,12 +783,12 @@ def resolve_min_merge_mean_similarity(config: dict[str, Any] | None) -> float:
     linkage MIN-pairwise gate (a chain can have high mean but a sub-threshold
     min) and the size cap. Env ``ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY`` > yaml
     ``librarian.min_merge_mean_similarity`` > this default; ``0`` (or negative)
-    disables the floor. No seed in ``_DEFAULTS`` (#231) so the code default
+    disables the floor. No seed in ``_DEFAULTS`` (athenaeum#231) so the code default
     stays reachable. ``bool`` and non-numeric yaml values fall through to the
     default.
     """
     default = 0.6
-    # Issue #528: malformed env now WARNs + falls back (was silent fall-through).
+    # Issue athenaeum#528: malformed env now WARNs + falls back (was silent fall-through).
     value = _env_number("ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY", float)
     if value is not None:
         return value
@@ -806,7 +806,7 @@ def resolve_min_merge_mean_similarity(config: dict[str, Any] | None) -> float:
 
 
 def resolve_delta_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve the delta-scoped-compile opt-in (#370 PR2) from ``librarian.delta``.
+    """Resolve the delta-scoped-compile opt-in (athenaeum#370 PR2) from ``librarian.delta``.
 
     When TRUE (the default), the deterministic ``client=None`` compile path
     (session_end / ingest tier0) may scope the cluster + merge passes to only
@@ -831,7 +831,7 @@ def resolve_delta_enabled(config: dict[str, Any] | None) -> bool:
 
 
 def resolve_delta_max_affected_clusters(config: dict[str, Any] | None) -> int:
-    """Resolve the delta closure's affected-cluster cap (#370 PR2, default 8).
+    """Resolve the delta closure's affected-cluster cap (athenaeum#370 PR2, default 8).
 
     When the change-closure fixpoint pulls in MORE than this many clusters, the
     delta is no longer a small local update — the run falls back to a full
@@ -852,7 +852,7 @@ def resolve_delta_max_affected_clusters(config: dict[str, Any] | None) -> int:
 
 
 def resolve_delta_max_affected_members(config: dict[str, Any] | None) -> int:
-    """Resolve the delta closure's pooled-member cap (#370 PR2, default 200).
+    """Resolve the delta closure's pooled-member cap (athenaeum#370 PR2, default 200).
 
     Companion to :func:`resolve_delta_max_affected_clusters`: when the pool of
     files entering the delta re-cluster exceeds this many members, fall back to
@@ -875,17 +875,17 @@ def resolve_delta_max_affected_members(config: dict[str, Any] | None) -> int:
 
 def resolve_live_delta_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the live-client delta-scoped-compile opt-in from
-    ``librarian.delta.live_client`` (issue #463, slice D of #460).
+    ``librarian.delta.live_client`` (issue athenaeum#463, slice D of athenaeum#460).
 
     When TRUE (the default), the nightly LLM ``run`` (a live client) MAY also
-    take the delta-scoped cluster + merge path — previously (#370 PR2) delta
+    take the delta-scoped cluster + merge path — previously (athenaeum#370 PR2) delta
     was gated to the deterministic ``client is None`` path ONLY (fallback
     trigger D5). The live-client delta path is additionally gated by
     ``full_compile_due`` (the periodic whole-corpus reconciliation, see
     :func:`athenaeum.config.resolve_full_compile_every_days`) regardless of
     this flag — see :func:`athenaeum.librarian._compile_auto_memory`. Set
     ``librarian.delta.live_client: false`` to keep the nightly run
-    whole-corpus-only (the pre-#463 behaviour) even when a live client is
+    whole-corpus-only (the pre-athenaeum#463 behaviour) even when a live client is
     present. ``bool`` yaml values are honored; anything else falls through to
     the TRUE default.
     """
@@ -901,10 +901,10 @@ def resolve_live_delta_enabled(config: dict[str, Any] | None) -> bool:
 
 
 def resolve_full_compile_every_days(config: dict[str, Any] | None) -> int:
-    """Resolve the periodic whole-corpus reconciliation cadence (issue #463,
+    """Resolve the periodic whole-corpus reconciliation cadence (issue athenaeum#463,
     default 7 days) from ``librarian.full_compile_every_days``.
 
-    The live-client delta path (#463) is a corpus-consistency optimization
+    The live-client delta path (athenaeum#463) is a corpus-consistency optimization
     over the auto-memory C2-C4 compile; this cadence is its backstop. When the
     last successful whole-corpus compile (:func:`athenaeum.librarian.
     _load_full_compile_stamp`) is at least this many days old — or there has
@@ -927,7 +927,7 @@ def resolve_full_compile_every_days(config: dict[str, Any] | None) -> int:
 
 
 def resolve_drain_warn_days(config: dict[str, Any] | None) -> int:
-    """Resolve the backlog-drain ETA warning threshold in days (issue #470,
+    """Resolve the backlog-drain ETA warning threshold in days (issue athenaeum#470,
     default 3) from ``librarian.drain_warn_days``.
 
     At the end of any run that leaves raw intake undrained (and in ``athenaeum
@@ -953,9 +953,9 @@ def resolve_reindex_full_rehash_max_age_days(
     knowledge_root: Path,
     config: dict[str, Any] | None = None,
 ) -> float:
-    """Resolve the periodic full-re-hash backstop age in days (#373, default 7).
+    """Resolve the periodic full-re-hash backstop age in days (athenaeum#373, default 7).
 
-    The #370 stat pre-filter reuses a stored content hash whenever a file's
+    The athenaeum#370 stat pre-filter reuses a stored content hash whenever a file's
     ``(mtime_ns, size)`` match the manifest, so a content edit that preserved
     BOTH would slip past until a full re-hash. On an INCREMENTAL build, when the
     manifest has not recorded a full re-hash within this many days, the search
@@ -982,7 +982,7 @@ def resolve_reindex_full_rehash_max_age_days(
 
 
 def resolve_lock_timeout(config: dict[str, Any] | None) -> float:
-    """Resolve the default run-lock wait (seconds) from env > yaml > 0 (#309).
+    """Resolve the default run-lock wait (seconds) from env > yaml > 0 (athenaeum#309).
 
     The single-machine run lock (:mod:`athenaeum.runlock`) fails fast by default
     when another ``athenaeum run`` (or other mutating command) already holds
@@ -995,10 +995,10 @@ def resolve_lock_timeout(config: dict[str, Any] | None) -> float:
 
     Precedence: ``ATHENAEUM_LOCK_TIMEOUT`` env, then ``librarian.lock_timeout``
     yaml, then ``0`` (fail-fast). The per-command ``--wait`` flag overrides this.
-    No seed in ``_DEFAULTS`` (#231) so the code default stays reachable. ``bool``
+    No seed in ``_DEFAULTS`` (athenaeum#231) so the code default stays reachable. ``bool``
     and non-numeric / negative values fall through to 0.0.
     """
-    # Issue #528: malformed env now WARNs + falls back (was a silent hard-zero).
+    # Issue athenaeum#528: malformed env now WARNs + falls back (was a silent hard-zero).
     value = _env_number("ATHENAEUM_LOCK_TIMEOUT", float)
     if value is not None:
         return value if value > 0 else 0.0
@@ -1018,10 +1018,10 @@ def resolve_lock_timeout(config: dict[str, Any] | None) -> float:
 
 
 def resolve_heartbeat_interval(config: dict[str, Any] | None) -> float:
-    """Resolve the progress-heartbeat emit interval (seconds) (#398).
+    """Resolve the progress-heartbeat emit interval (seconds) (athenaeum#398).
 
-    The dark-zone phases (T3 merge, C4 contradiction detection, the #290
-    wiki-dedup pass, the #188 re-resolve pass) emit a periodic
+    The dark-zone phases (T3 merge, C4 contradiction detection, the athenaeum#290
+    wiki-dedup pass, the athenaeum#188 re-resolve pass) emit a periodic
     ``librarian-heartbeat`` progress line via :class:`athenaeum.progress.PhaseHeartbeat`
     so a stall in one of these phases is visible in the log and detectable by
     a watchdog. This resolves how often (in seconds) a slow/wedged phase
@@ -1038,7 +1038,7 @@ def resolve_heartbeat_interval(config: dict[str, Any] | None) -> float:
     fail-fast collapse).
     """
     default = 60.0
-    # Issue #528: malformed env now WARNs + falls back to yaml/default (was a
+    # Issue athenaeum#528: malformed env now WARNs + falls back to yaml/default (was a
     # silent return-default that skipped yaml).
     value = _env_number("ATHENAEUM_HEARTBEAT_INTERVAL", float)
     if value is not None:
@@ -1058,13 +1058,13 @@ def resolve_heartbeat_interval(config: dict[str, Any] | None) -> float:
 
 
 def resolve_lock_break_stale_after(config: dict[str, Any] | None) -> float | None:
-    """Resolve the auto-break staleness threshold in seconds (#397, default 6h).
+    """Resolve the auto-break staleness threshold in seconds (athenaeum#397, default 6h).
 
     A contended :meth:`~athenaeum.runlock.RunLock.acquire` auto-breaks a
     wedged-but-alive holder's lock — WITHOUT requiring a human to pass
     ``--force`` — once the holder's heartbeat age exceeds this many seconds.
     Six hours is comfortably above any healthy librarian run (and well below
-    the pathological multi-hour wedge seen in issue #396); operators can
+    the pathological multi-hour wedge seen in issue athenaeum#396); operators can
     lower it once the librarian reliably refreshes the lock heartbeat::
 
         librarian:
@@ -1076,7 +1076,7 @@ def resolve_lock_break_stale_after(config: dict[str, Any] | None) -> float | Non
     disables auto-break entirely (returns ``None``).
     """
     default = 21600.0
-    # Issue #528: malformed env now WARNs + falls back (was silent return-default).
+    # Issue athenaeum#528: malformed env now WARNs + falls back (was silent return-default).
     value = _env_number("ATHENAEUM_LOCK_BREAK_STALE_AFTER", float)
     if value is not None:
         return value if value > 0 else None
@@ -1097,7 +1097,7 @@ def resolve_lock_break_stale_after(config: dict[str, Any] | None) -> float | Non
 
 
 def resolve_lock_warn_stale_after(config: dict[str, Any] | None) -> float | None:
-    """Resolve the loud-warning staleness threshold in seconds (#397, default 2h).
+    """Resolve the loud-warning staleness threshold in seconds (athenaeum#397, default 2h).
 
     A contended :meth:`~athenaeum.runlock.RunLock.acquire` logs a prominent
     "likely wedged" warning naming the holder once its heartbeat age exceeds
@@ -1114,7 +1114,7 @@ def resolve_lock_warn_stale_after(config: dict[str, Any] | None) -> float | None
     disables the warning entirely (returns ``None``).
     """
     default = 7200.0
-    # Issue #528: malformed env now WARNs + falls back (was silent return-default).
+    # Issue athenaeum#528: malformed env now WARNs + falls back (was silent return-default).
     value = _env_number("ATHENAEUM_LOCK_WARN_STALE_AFTER", float)
     if value is not None:
         return value if value > 0 else None
@@ -1142,15 +1142,15 @@ def _resolve_positive_int_knob(
 ) -> int:
     """Resolve a positive-int ``librarian.<key>`` knob (env > yaml > default).
 
-    Shared helper for the wiki page-size guardrails (issue #310). Mirrors
+    Shared helper for the wiki page-size guardrails (issue athenaeum#310). Mirrors
     :func:`athenaeum.clusters.resolve_rotation_retention`'s precedence and
     coercion contract: the ``env_var`` wins when it parses to a positive int,
     otherwise the yaml key is read, otherwise *default*. ``bool`` (an ``int``
     subclass) and non-int / ``<= 0`` values fall through so ``page_warn_bytes:
     yes`` cannot become ``1`` and a nonsensical zero/negative byte count cannot
-    silently disable the guardrail. No seed in ``_DEFAULTS`` (issue #231).
+    silently disable the guardrail. No seed in ``_DEFAULTS`` (issue athenaeum#231).
     """
-    # Issue #524 (M2): malformed env values now WARN (via _env_number) instead
+    # Issue athenaeum#524 (M2): malformed env values now WARN (via _env_number) instead
     # of silently falling through. The `> 0` rejection is deliberate and kept
     # (a zero/negative byte count must not disable the guardrail), so 0 is NOT
     # authoritative here — unlike the disable-semantics knobs (M1).
@@ -1173,7 +1173,7 @@ def _resolve_positive_int_knob(
 
 
 def resolve_page_warn_bytes(config: dict[str, Any] | None) -> int:
-    """Resolve the wiki-page soft-warn size threshold in bytes (issue #310).
+    """Resolve the wiki-page soft-warn size threshold in bytes (issue athenaeum#310).
 
     Precedence: ``ATHENAEUM_PAGE_WARN_BYTES`` env > ``librarian.page_warn_bytes``
     yaml > ``8192``. A page whose UTF-8 size (frontmatter + body) exceeds this
@@ -1187,7 +1187,7 @@ def resolve_page_warn_bytes(config: dict[str, Any] | None) -> int:
 
 
 def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
-    """Resolve the wiki-page flag-for-split size threshold in bytes (issue #310).
+    """Resolve the wiki-page flag-for-split size threshold in bytes (issue athenaeum#310).
 
     Precedence: ``ATHENAEUM_PAGE_FLAG_BYTES`` env > ``librarian.page_flag_bytes``
     yaml > ``16384``. A page over this is flagged more loudly (and logged during
@@ -1201,10 +1201,10 @@ def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
 
 
 def resolve_merge_body_preview_chars(config: dict[str, Any] | None) -> int:
-    """Resolve the ``list_pending_merges`` draft-body preview cap (issue #431).
+    """Resolve the ``list_pending_merges`` draft-body preview cap (issue athenaeum#431).
 
     Complements the write-path suppression in :func:`resolve_max_merge_sources`
-    (#400): that gate keeps a degenerate over-cluster from ever reaching
+    (athenaeum#400): that gate keeps a degenerate over-cluster from ever reaching
     ``_pending_merges.md``, but a single legitimate-looking proposal can still
     carry an oversized ``draft_merged_body`` (the withdrawn runaway that
     prompted this issue had a ~878 KB draft). The raw MCP tool returned that
@@ -1227,12 +1227,12 @@ def resolve_merge_body_preview_chars(config: dict[str, Any] | None) -> int:
 
 
 def resolve_decisions_max_sources_per_merge(config: dict[str, Any] | None) -> int:
-    """Resolve the decisions-view per-merge source fan-out cap (issue #431).
+    """Resolve the decisions-view per-merge source fan-out cap (issue athenaeum#431).
 
     The ``decisions`` view (:func:`athenaeum.decisions.merge_to_decision`)
     rendered EVERY source of a pending merge with no cap — a merge proposal
     with a very large source list (or the pathological over-cluster shape
-    #400 targets on the write path) would blow out a single decision item's
+    athenaeum#400 targets on the write path) would blow out a single decision item's
     payload. This bounds the rendered source list to this many entries, with
     the remainder surfaced as an accurate ``sources_omitted`` count rather
     than silently dropped.
@@ -1260,16 +1260,16 @@ def _resolve_optional_positive_number(
 ) -> Any | None:
     """Resolve an OPTIONAL positive number ``<block>.<key>`` (env > yaml > None).
 
-    Shared helper for the spend ceilings (issue #378). Unlike
+    Shared helper for the spend ceilings (issue athenaeum#378). Unlike
     :func:`_resolve_positive_int_knob`, an unset knob resolves to ``None`` — a
     ceiling is off unless the operator opts in — rather than a code default.
     ``env_var`` wins when it parses to a positive number, otherwise the yaml key
     is read, otherwise ``None``. ``bool`` (an ``int`` subclass) and non-numeric
     / ``<= 0`` values fall through to ``None`` so ``max_usd_per_day: yes`` cannot
     become ``1`` and a nonsensical zero/negative ceiling cannot silently pin the
-    pass to a no-op. No seed in ``_DEFAULTS`` (issue #231).
+    pass to a no-op. No seed in ``_DEFAULTS`` (issue athenaeum#231).
     """
-    # Issue #524 (M2): malformed env values now WARN (via _env_number) instead
+    # Issue athenaeum#524 (M2): malformed env values now WARN (via _env_number) instead
     # of silently falling through. The `> 0` rejection is deliberate and kept
     # (a zero/negative ceiling must not silently pin the pass to a no-op), so 0
     # is NOT authoritative here — unlike the disable-semantics knobs (M1).
@@ -1292,7 +1292,7 @@ def _resolve_optional_positive_number(
 
 
 def resolve_spend_ledger_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve whether the spend ledger is written (env > yaml > True) (#378).
+    """Resolve whether the spend ledger is written (env > yaml > True) (athenaeum#378).
 
     The durable LLM-spend ledger (``~/.cache/athenaeum/spend.jsonl``) is ON by
     default — it is append-only, crash-safe, and records only counts (never
@@ -1300,7 +1300,7 @@ def resolve_spend_ledger_enabled(config: dict[str, Any] | None) -> bool:
     ``ATHENAEUM_SPEND_LEDGER_ENABLED`` env > ``spend.ledger_enabled`` yaml >
     ``True``. Any env value other than a falsey token (``0`` / ``false`` /
     ``no`` / ``off``, case-insensitive) is truthy; a non-bool yaml value falls
-    through to the default. No seed in ``_DEFAULTS`` (issue #231).
+    through to the default. No seed in ``_DEFAULTS`` (issue athenaeum#231).
     """
     env = os.environ.get("ATHENAEUM_SPEND_LEDGER_ENABLED")
     if env is not None:
@@ -1315,7 +1315,7 @@ def resolve_spend_ledger_enabled(config: dict[str, Any] | None) -> bool:
 
 
 def resolve_push_metrics_enabled(config: dict[str, Any] | None) -> bool:
-    """Resolve whether push-precision/coverage instrumentation runs (#711).
+    """Resolve whether push-precision/coverage instrumentation runs (athenaeum#711).
 
     ON by default: it is passive measurement — one small append-only JSONL
     row per recall push and per session-end reference determination, both
@@ -1325,7 +1325,7 @@ def resolve_push_metrics_enabled(config: dict[str, Any] | None) -> bool:
     ``ATHENAEUM_PUSH_METRICS_ENABLED`` env > ``push_metrics.enabled`` yaml >
     ``True``. Any env value other than a falsey token (``0`` / ``false`` /
     ``no`` / ``off``, case-insensitive) is truthy; a non-bool yaml value falls
-    through to the default. No seed in ``_DEFAULTS`` (issue #231) — mirrors
+    through to the default. No seed in ``_DEFAULTS`` (issue athenaeum#231) — mirrors
     :func:`resolve_spend_ledger_enabled`'s shape exactly.
     """
     env = os.environ.get("ATHENAEUM_PUSH_METRICS_ENABLED")
@@ -1341,12 +1341,12 @@ def resolve_push_metrics_enabled(config: dict[str, Any] | None) -> bool:
 
 
 def resolve_spend_ledger_path(config: dict[str, Any] | None) -> Path | None:
-    """Resolve an explicit spend-ledger path override (env > yaml > None) (#378).
+    """Resolve an explicit spend-ledger path override (env > yaml > None) (athenaeum#378).
 
     ``None`` means "use the default" — ``<cache_dir>/spend.jsonl`` under
     ``~/.cache/athenaeum`` (see :func:`athenaeum.spend.default_ledger_path`).
     Precedence: ``ATHENAEUM_SPEND_LEDGER`` env > ``spend.ledger_path`` yaml >
-    ``None``. Chiefly a test/relocation seam. No seed in ``_DEFAULTS`` (#231).
+    ``None``. Chiefly a test/relocation seam. No seed in ``_DEFAULTS`` (athenaeum#231).
     """
     env = os.environ.get("ATHENAEUM_SPEND_LEDGER")
     if env is not None and env.strip():
@@ -1361,7 +1361,7 @@ def resolve_spend_ledger_path(config: dict[str, Any] | None) -> Path | None:
 
 
 def resolve_spend_max_tokens_per_run(config: dict[str, Any] | None) -> int | None:
-    """Resolve the per-run SUBSCRIPTION token ceiling (env > yaml > None) (#378).
+    """Resolve the per-run SUBSCRIPTION token ceiling (env > yaml > None) (athenaeum#378).
 
     A run served by the ``claude-cli`` provider consumes subscription quota
     rather than dollars, so its ceiling is a TOKEN count. When set and the
@@ -1377,7 +1377,7 @@ def resolve_spend_max_tokens_per_run(config: dict[str, Any] | None) -> int | Non
 
 
 def resolve_spend_max_tokens_per_day(config: dict[str, Any] | None) -> int | None:
-    """Resolve the per-day SUBSCRIPTION token ceiling (env > yaml > None) (#378).
+    """Resolve the per-day SUBSCRIPTION token ceiling (env > yaml > None) (athenaeum#378).
 
     Summed across every ledger record on the subscription path since the start
     of the current UTC day, plus the current run's accrued tokens. Precedence:
@@ -1391,7 +1391,7 @@ def resolve_spend_max_tokens_per_day(config: dict[str, Any] | None) -> int | Non
 
 
 def resolve_spend_max_usd_per_run(config: dict[str, Any] | None) -> float | None:
-    """Resolve the per-run API DOLLAR ceiling (env > yaml > None) (#378).
+    """Resolve the per-run API DOLLAR ceiling (env > yaml > None) (athenaeum#378).
 
     A run served by the metered ``anthropic`` API path is constrained in real
     dollars. When set and the run's estimated USD reaches it, the pass stops
@@ -1405,7 +1405,7 @@ def resolve_spend_max_usd_per_run(config: dict[str, Any] | None) -> float | None
 
 
 def resolve_spend_max_usd_per_day(config: dict[str, Any] | None) -> float | None:
-    """Resolve the per-day API DOLLAR ceiling (env > yaml > None) (#378).
+    """Resolve the per-day API DOLLAR ceiling (env > yaml > None) (athenaeum#378).
 
     Summed across every ledger record on the metered API path since the start
     of the current UTC day, plus the current run's accrued USD. Precedence:
@@ -1420,11 +1420,11 @@ def resolve_spend_max_usd_per_day(config: dict[str, Any] | None) -> float | None
 
 #: Code default for the classify-model knob (env ``ATHENAEUM_CLASSIFY_MODEL`` >
 #: yaml ``models.classify`` > this literal, via :func:`resolve_model`).
-#: Single-sourced HERE (issue #640) rather than in :mod:`athenaeum.tiers`:
+#: Single-sourced HERE (issue athenaeum#640) rather than in :mod:`athenaeum.tiers`:
 #: ``contradictions``, ``reasoning_tiers``, ``query_topics`` and ``claim_kind``
 #: all read it, and importing it top-level from the L4 ``tiers`` hub was the
 #: ``contradictions`` -> ``tiers`` back-edge that pinned the
-#: ``{answers, contradictions, resolutions, tiers}`` residual import SCC (#545
+#: ``{answers, contradictions, resolutions, tiers}`` residual import SCC (athenaeum#545
 #: audit M8). ``config`` is a low leaf every reader can depend on acyclically.
 DEFAULT_CLASSIFY_MODEL = "claude-haiku-4-5-20251001"
 
@@ -1437,10 +1437,10 @@ def resolve_model(
 ) -> str:
     """Resolve a model id from env > yaml ``models.<knob>`` > code default.
 
-    Issue #232. Mirrors :func:`athenaeum.librarian.librarian_max_api_calls`:
+    Issue athenaeum#232. Mirrors :func:`athenaeum.librarian.librarian_max_api_calls`:
     the env var wins over the yaml key so an operator can swap a model for a
     single run without editing config, and the yaml key is read only when
-    the operator actually set it — no seed in ``_DEFAULTS`` (issue #231).
+    the operator actually set it — no seed in ``_DEFAULTS`` (issue athenaeum#231).
     Non-string or blank yaml values fall through to *default*. The
     contradiction-resolver model routes through here too, via
     :func:`athenaeum.resolutions._get_model` (knob ``resolve``); that
@@ -1460,7 +1460,7 @@ def resolve_model(
 
 
 def resolve_screening(config: dict[str, Any] | None) -> dict[str, dict[str, str]]:
-    """Resolve intake-screening settings for ``remember()`` (issue #320).
+    """Resolve intake-screening settings for ``remember()`` (issue athenaeum#320).
 
     Returns ``{"medical": {"action", "access"}}``. This first slice screens
     only the ``medical`` category; the action is one of ``off`` (default) /
@@ -1536,7 +1536,7 @@ search_backend: fts5
 #   provider: chromadb
 #   collection: wiki
 
-# Serve-time read-scope audience (issue #312). Pins the MCP `serve` process
+# Serve-time read-scope audience (issue athenaeum#312). Pins the MCP `serve` process
 # (and `athenaeum recall`) to a RESTRICTED read scope so a secondary agent or
 # scheduled routine can recall operational knowledge but never PII /
 # confidential / financial pages. Values are OPAQUE role/group ids the operator
@@ -1551,8 +1551,8 @@ search_backend: fts5
 #     - operations
 #     - voltaire
 
-# Intake screening at remember() time (issue #320). The write-side complement
-# to #312's read-time scoping: classifies sensitive raw intake and stamps a
+# Intake screening at remember() time (issue athenaeum#320). The write-side complement
+# to athenaeum#312's read-time scoping: classifies sensitive raw intake and stamps a
 # read-time `access:` label BEFORE the append-only write, so recall never
 # surfaces regulated content to a restricted caller. UNSET / empty = no
 # screening (existing installs unchanged). This first slice screens `medical`
@@ -1566,7 +1566,7 @@ search_backend: fts5
 #     action: label_restrict   # label_restrict | off   (default: off)
 #     access: personal         # access level stamped when action=label_restrict
 
-# Workspace owner identity (issue #263). Designates the single canonical
+# Workspace owner identity (issue athenaeum#263). Designates the single canonical
 # person this knowledge base belongs to so the librarian keeps the owner a
 # singleton instead of fragmenting across commit-authorship / footnote
 # fragments and a parallel ``user_*`` alias family. ENTIRELY OPTIONAL — when
@@ -1590,7 +1590,7 @@ search_backend: fts5
 #     - <your_user_handle>
 #     - <Your Name>
 
-# Person dedup join keys (issue #269). The merge always dedups on the
+# Person dedup join keys (issue athenaeum#269). The merge always dedups on the
 # generic ``google_contact`` field. Operators whose contacts carry the
 # same Google contact id under additional namespace-specific field names
 # can list those EXTRA field names here so the merge coalesces them too.
@@ -1611,32 +1611,32 @@ search_backend: fts5
 
 # Librarian pipeline configuration.
 # cluster_threshold: cosine cutoff for auto-memory clustering (C2,
-#   issue #196). Higher = tighter clusters; 0.55 is tuned against the
+#   issue athenaeum#196). Higher = tighter clusters; 0.55 is tuned against the
 #   near-duplicate clustering fixture.
 # cluster_output: canonical JSONL output path (relative to knowledge
 #   root). Each run also writes a timestamped sibling and atomically
 #   replaces this path.
 # rotation_retention: number of timestamped cluster-report rotations to
-#   keep; older ones are pruned after each run (issue #311). Rotations are
+#   keep; older ones are pruned after each run (issue athenaeum#311). Rotations are
 #   debugging artifacts, not recovery-critical (recovery is git-based).
 #   Precedence: ATHENAEUM_ROTATION_RETENTION env, then this key, then 30.
 #   0 (or negative) disables pruning (keep all).
 # max_files: per-run intake batch size — stop after processing this many
-#   raw files (issue #232). Precedence: --max-files CLI flag, then
+#   raw files (issue athenaeum#232). Precedence: --max-files CLI flag, then
 #   ATHENAEUM_MAX_FILES env, then this key, then 50.
 # batch_mode: submit tier-2/tier-3 LLM calls via the Anthropic Messages
-#   Batch API at a 50% token discount (issue #236). Latency-tolerant:
+#   Batch API at a 50% token discount (issue athenaeum#236). Latency-tolerant:
 #   most batches finish within an hour, 24h worst case — intended for the
 #   nightly run. Precedence: --batch-mode CLI flag, then
 #   ATHENAEUM_BATCH_MODE env, then this key, then off.
-# retire: move-then-retire of raw auto-memory (issue #261). DEFAULT ON.
+# retire: move-then-retire of raw auto-memory (issue athenaeum#261). DEFAULT ON.
 #   When on, `athenaeum run` MOVES non-contradictory raw/auto-memory facts
 #   into their wiki entry and `git rm`s the raw (recovery is git-only).
 #   Set false to disable; the --no-retire CLI flag overrides to off. See
 #   README "Data lifecycle & upgrade impact".
 # ephemeral_scopes: glob patterns (matched against the auto-memory scope
 #   DIRECTORY NAME) for inherently-throwaway operational scopes whose
-#   intake must NEVER become a durable wiki/auto-*.md page (issue #278).
+#   intake must NEVER become a durable wiki/auto-*.md page (issue athenaeum#278).
 #   A raw file in a matching scope -- or one carrying an explicit
 #   `ephemeral: true` frontmatter flag -- is dropped before clustering.
 #   Setting this key REPLACES the built-in defaults
@@ -1644,13 +1644,13 @@ search_backend: fts5
 #   list disables scope-based dropping. Same set drives `athenaeum
 #   auto-memory prune`.
 # operational_markers: optional lower-cased content substrings for
-#   operational families (issue #278). CONSERVATIVE: the classifier drops
+#   operational families (issue athenaeum#278). CONSERVATIVE: the classifier drops
 #   an intake on markers ONLY when >= 2 distinct markers are present, so a
 #   single incidental word never clobbers a legit note. DEFAULT-EMPTY.
 #   Markers are SUBSTRING-matched: avoid <=3-char markers (e.g. "ci" would
 #   match "decision"/"specific") -- prefer distinctive multi-word phrases.
 # min_cluster_cohesion: cohesion floor that suppresses low-cohesion
-#   cross-scope OVER-CLUSTERS (issue #278). A cluster whose
+#   cross-scope OVER-CLUSTERS (issue athenaeum#278). A cluster whose
 #   cluster_centroid_score (mean intra-cluster cosine) is strictly below
 #   this value AND which spans >= min_cluster_cohesion_scopes distinct
 #   origin scopes is NOT materialized into wiki/auto-*.md; its raw members
@@ -1660,41 +1660,41 @@ search_backend: fts5
 #   floor could mis-suppress on a different corpus. Recommended opt-in for
 #   the reference corpus: 0.47.
 # min_cluster_cohesion_scopes: minimum distinct origin_scopes a cluster
-#   must span for the cohesion floor to apply (issue #278). DEFAULT 4 --
+#   must span for the cohesion floor to apply (issue athenaeum#278). DEFAULT 4 --
 #   observed over-clusters span 8-17 scopes, legitimate pages 1-3, so 4
 #   sits in the clean margin and a low-cohesion single-/few-scope cluster
 #   is never suppressed.
-# max_merge_sources: merge-PROPOSAL fan-in cap (#400, tightened #421).
+# max_merge_sources: merge-PROPOSAL fan-in cap (athenaeum#400, tightened athenaeum#421).
 #   A propose_merge folding more than this many sources is suppressed before
 #   it reaches wiki/_pending_merges.md (a merge proposal is a pairwise /
 #   small-group refinement, not a mega-fold). DEFAULT 5 (active); env
 #   ATHENAEUM_MAX_MERGE_SOURCES > this key > default; 0/negative disables.
 # min_merge_mean_similarity: merge-PROPOSAL mean-pairwise-cohesion floor
-#   (#421). A proposal whose cluster mean pairwise cosine is strictly below
+#   (athenaeum#421). A proposal whose cluster mean pairwise cosine is strictly below
 #   this is suppressed. DEFAULT 0.6 (ACTIVE) -- the human merge queue is
 #   corpus-independent, so a modest floor ships on (unlike min_cluster_cohesion,
 #   which gates durable pages and ships OFF). env
 #   ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY > this key > default; 0/negative
-#   disables. Complements the complete-linkage MIN-pairwise gate (#421): a
+#   disables. Complements the complete-linkage MIN-pairwise gate (athenaeum#421): a
 #   single-linkage chain with a sub-threshold pair is suppressed even if its
 #   mean clears this floor.
 # min_merge_confidence: optional merge-PROPOSAL resolver-confidence floor
-#   (#400). DEFAULT 0.0 (OFF); opt-in. env ATHENAEUM_MIN_MERGE_CONFIDENCE >
+#   (athenaeum#400). DEFAULT 0.0 (OFF); opt-in. env ATHENAEUM_MIN_MERGE_CONFIDENCE >
 #   this key > default.
 # page_warn_bytes: soft byte threshold above which a wiki entity page is
-#   reported as a WARN-level oversized page in `athenaeum status` (#310).
+#   reported as a WARN-level oversized page in `athenaeum status` (athenaeum#310).
 #   Warn-only -- nothing is blocked or modified. Precedence:
 #   ATHENAEUM_PAGE_WARN_BYTES env, then this key, then 8192. A long page
 #   usually means poorly-factored knowledge to split into linked entities.
 # page_flag_bytes: louder byte threshold above which a page is FLAGGED for
 #   splitting -- surfaced in `status` and logged as a non-fatal WARNING
-#   during `athenaeum run` (#310). Still warn-only (the tier-3 merge body
+#   during `athenaeum run` (athenaeum#310). Still warn-only (the tier-3 merge body
 #   cap is separate and unchanged). Precedence: ATHENAEUM_PAGE_FLAG_BYTES
 #   env, then this key, then 16384. Keep comfortably below the merge cap.
-# drain_warn_days: backlog-drain ETA threshold in days (issue #470). At the
+# drain_warn_days: backlog-drain ETA threshold in days (issue athenaeum#470). At the
 #   end of any run that leaves raw intake undrained (and in `athenaeum
 #   status`), the advisor projects time-to-drain from OBSERVED throughput
-#   (the #378 spend ledger) and emits a WARNING naming the `athenaeum drain`
+#   (the athenaeum#378 spend ledger) and emits a WARNING naming the `athenaeum drain`
 #   remedy only when the projection EXCEEDS this many days; below it stays
 #   silent. Precedence: this key, then 3. bool/non-positive fall through.
 # librarian:
@@ -1719,7 +1719,7 @@ search_backend: fts5
 #   page_flag_bytes: 16384
 #   drain_warn_days: 3
 
-# LLM provider selection (issue #330). Chooses the backend the librarian
+# LLM provider selection (issue athenaeum#330). Chooses the backend the librarian
 # compile path (tiers, contradiction detector, resolver) talks to.
 #   api (default): the Anthropic SDK. Requires ANTHROPIC_API_KEY; params
 #     (incl. prompt caching and the Batch API) pass through unchanged.
@@ -1733,7 +1733,7 @@ search_backend: fts5
 # llm:
 #   provider: api
 
-# Model selection (issue #232). Per knob: env var wins over the yaml key,
+# Model selection (issue athenaeum#232). Per knob: env var wins over the yaml key,
 # which wins over the built-in default. Values are free-form model id
 # strings passed to the Anthropic SDK.
 # classify: Tier-2 classifier + C4 contradiction detector
@@ -1749,7 +1749,7 @@ search_backend: fts5
 #   topic: claude-haiku-4-5-20251001
 #   resolve: claude-opus-5
 
-# Cross-scope contradiction detection (issue #125).
+# Cross-scope contradiction detection (issue athenaeum#125).
 # cross_scope_mode: off | ancestor (default) | similarity | both.
 #   - off: per-scope cluster only.
 #   - ancestor: pool each cluster with ancestor scopes (-Users-foo-bar
@@ -1760,19 +1760,19 @@ search_backend: fts5
 #   into newest-first chunks before detection.
 # similarity_threshold: cosine cutoff for the cross-scope sweep.
 # Env override: ATHENAEUM_CROSS_SCOPE_MODE.
-# Opus-backed resolver caps (issue #126).
+# Opus-backed resolver caps (issue athenaeum#126).
 # resolve_max_per_run: cap on resolver calls per ingest. Surplus contradictions
 #   are escalated without a proposal (degraded mode). Default raised from
-#   50 to 250 in issue #187. Env override: ATHENAEUM_RESOLVE_MAX_PER_RUN.
+#   50 to 250 in issue athenaeum#187. Env override: ATHENAEUM_RESOLVE_MAX_PER_RUN.
 # contradiction:
 #   cross_scope_mode: ancestor
 #   cluster_size_cap: 25
 #   similarity_threshold: 0.85
-#   resolve_max_per_run: 250  # raised from 50 in #187
-#   resolved_similarity_threshold: 0.83  # cosine threshold for decision-log matching (#211)
-#   not_a_conflict_ttl_days: 0  # decay stale auto not_a_conflict (#251); 0 = off
+#   resolve_max_per_run: 250  # raised from 50 in athenaeum#187
+#   resolved_similarity_threshold: 0.83  # cosine threshold, decision-log match (athenaeum#211)
+#   not_a_conflict_ttl_days: 0  # decay stale auto not_a_conflict (athenaeum#251); 0 = off
 
-# Contradiction resolver (issue #126). See docs/auto-resolve.md for the
+# Contradiction resolver (issue athenaeum#126). See docs/auto-resolve.md for the
 # full knob set (auto_apply, auto_apply_threshold, full_body_token_cap).
 # model: LEGACY key for the model used to propose a winner once Haiku flags a
 #   contradiction. Prefer ``models.resolve`` above; this key is read only when
@@ -1781,13 +1781,13 @@ search_backend: fts5
 # resolve:
 #   model: claude-opus-5
 
-# Pluggable storage-surface layer (issue #429). Maps each entity class (the
+# Pluggable storage-surface layer (issue athenaeum#429). Maps each entity class (the
 # wiki frontmatter `type`) onto a STORAGE ADAPTER — a backing store + a corpus
 # policy (embedded / recallable / merge_eligible). UNSET = every class uses the
 # built-in `wiki-markdown-embedded` surface (the flat wiki/, full corpus
-# participation) — byte-identical to pre-#429 behavior. Two adapters ship built
+# participation) — byte-identical to pre-athenaeum#429 behavior. Two adapters ship built
 # in and need no definition here: `wiki-markdown-embedded` (default) and
-# `excluded` (a surface OUTSIDE wiki/, no embed/recall/merge — what #427's PII
+# `excluded` (a surface OUTSIDE wiki/, no embed/recall/merge — what athenaeum#427's PII
 # surface consumes). Adding a surface is config + a mapping, no core change.
 # NOTE: this is a STORAGE-surface adapter, NOT the source→raw-intake adapter of
 # docs/adapter-contract.md — different concept, opposite ends of the pipeline.
@@ -1808,7 +1808,7 @@ search_backend: fts5
 #   mapping:
 #     pii: excluded
 
-# Authority manifest (issue #426). Maps authoritative LIVE sources (skill
+# Authority manifest (issue athenaeum#426). Maps authoritative LIVE sources (skill
 # files, code paths, config) to the topics/slugs they own, so a memory that
 # merely duplicates content a live source already owns can be detected and
 # converted to a one-line pointer stub instead of persisting a full copy.
@@ -1866,7 +1866,7 @@ def resolve_extra_intake_roots(
 
 
 def _resolve_glob_list(config: dict[str, Any] | None, key: str) -> list[str] | None:
-    """Read a ``recall.<key>`` list of glob strings (issue #348).
+    """Read a ``recall.<key>`` list of glob strings (issue athenaeum#348).
 
     Returns ``None`` when unset (the default — index everything) so callers
     can pass it straight through to the search backend, which treats ``None``
@@ -1885,7 +1885,7 @@ def _resolve_glob_list(config: dict[str, Any] | None, key: str) -> list[str] | N
 def resolve_index_globs(
     config: dict[str, Any] | None,
 ) -> tuple[list[str] | None, list[str] | None]:
-    """Resolve ``(include_globs, exclude_globs)`` for corpus scoping (issue #348).
+    """Resolve ``(include_globs, exclude_globs)`` for corpus scoping (issue athenaeum#348).
 
     COULD-tier footprint/relevance knob. Default (unset) returns
     ``(None, None)`` — index everything — because the Apollo contact wikis
@@ -1898,7 +1898,7 @@ def resolve_index_globs(
 
 
 def resolve_embedding_model(config: dict[str, Any] | None) -> str | None:
-    """Resolve the configured vector embedding model (issue #315 seam).
+    """Resolve the configured vector embedding model (issue athenaeum#315 seam).
 
     Returns ``None`` when unset so the VectorBackend uses its documented
     default (``all-MiniLM-L6-v2``) unchanged.
@@ -1918,7 +1918,7 @@ def resolve_authority_manifest_path(
     knowledge_root: Path,
     config: dict[str, Any] | None = None,
 ) -> Path:
-    """Resolve the authority manifest path (issue #426).
+    """Resolve the authority manifest path (issue athenaeum#426).
 
     The authority manifest maps authoritative LIVE sources (skill files, code
     paths, config) to the topics/slugs they own, so the librarian can detect a
@@ -1935,7 +1935,7 @@ def resolve_authority_manifest_path(
 
     Does not check for existence — callers (:func:`athenaeum.authority.
     load_authority_manifest`) handle a missing file as "no manifest configured"
-    (empty, not an error). No seed in ``_DEFAULTS`` (issue #231) so this code
+    (empty, not an error). No seed in ``_DEFAULTS`` (issue athenaeum#231) so this code
     default stays reachable.
     """
     env = os.environ.get("ATHENAEUM_AUTHORITY_MANIFEST")
@@ -1956,13 +1956,13 @@ def resolve_authority_manifest_path(
 
 
 def resolve_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
-    """Resolve the ``storage.mapping`` entity-class → adapter-name table (#429).
+    """Resolve the ``storage.mapping`` entity-class → adapter-name table (athenaeum#429).
 
     Maps a wiki frontmatter ``type`` (``person``, ``pii``, …) onto the name of
     a storage adapter (``wiki-markdown-embedded``, ``excluded``, or a custom
     one). Returns an EMPTY dict when unset — the code default that keeps every
     class on the default wiki surface, so an unconfigured base is byte-identical
-    (issue #231: no seed in ``_DEFAULTS`` so this default stays reachable).
+    (issue athenaeum#231: no seed in ``_DEFAULTS`` so this default stays reachable).
     Non-string keys/values and blank entries are dropped defensively.
     """
     if not isinstance(config, dict):
@@ -1984,7 +1984,7 @@ def resolve_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
 
 
 def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    """Resolve the ``storage.adapters`` custom-adapter definitions (#429).
+    """Resolve the ``storage.adapters`` custom-adapter definitions (athenaeum#429).
 
     Returns the raw (still-primitive) per-adapter mapping dicts keyed by adapter
     name; :func:`athenaeum.storage.available_adapters` validates each and builds

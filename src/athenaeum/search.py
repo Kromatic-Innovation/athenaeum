@@ -41,7 +41,7 @@ PII-flagged (:func:`athenaeum.pii.is_pii_flagged`), and audience-unauthorized
 predicate) — pushed INSIDE the backend query (not post-filtered) so a
 forbidden or excluded page can never occupy a top-k slot or push a permitted
 page past the limit. A new backend MUST replicate all three or silently
-regress #191/#312/#427.
+regress athenaeum#191/#312/#427.
 
 Shell hook scripts can call the module-level convenience functions
 (``build_fts5_index``, ``query_fts5_index``, ``build_vector_index``,
@@ -81,8 +81,8 @@ from athenaeum.storage import is_embedded
 # Protocol
 # ---------------------------------------------------------------------------
 
-# Issue #373: default age (days) for the periodic full-re-hash backstop that
-# heals the #370 stat pre-filter's blind spot (a content edit preserving both
+# Issue athenaeum#373: default age (days) for the periodic full-re-hash backstop that
+# heals the athenaeum#370 stat pre-filter's blind spot (a content edit preserving both
 # mtime and size). Referenced by every ``build_index`` signature, so it is
 # defined here before the Protocol; the full rationale lives beside the manifest
 # helpers below. Resolved from config by
@@ -125,18 +125,18 @@ class SearchBackend(Protocol):
                 exists, diff each page's whole-file content hash against
                 the stored manifest and apply only the delta — add new
                 pages, re-index changed pages, delete removed pages
-                (issue #348). A no-op rebuild then touches nothing and
+                (issue athenaeum#348). A no-op rebuild then touches nothing and
                 returns in sub-second time regardless of corpus size.
                 When ``False`` (seeding, ``reindex --full``), wipe and
                 rebuild from scratch. No prior manifest also forces a full
                 build. Setting ``as_of`` (below) also forces a full build.
             include_globs / exclude_globs: Optional corpus-scoping globs
-                matched against the indexed name (issue #348 COULD). The
+                matched against the indexed name (issue athenaeum#348 COULD). The
                 default (``None`` / ``None``) indexes everything — the
                 Apollo contact wikis are legitimate name-recall targets and
                 must stay indexed by default. This is a footprint/relevance
                 knob, not the CPU fix.
-            as_of: Issue #308 slice 3 — the date the index reflects. The
+            as_of: Issue athenaeum#308 slice 3 — the date the index reflects. The
                 inactive filter drops pages outside their
                 ``[valid_from, valid_until]`` window relative to THIS date.
                 ``None`` (default) means today, so the live index is
@@ -147,8 +147,8 @@ class SearchBackend(Protocol):
                 stable manifest to diff against), written into whatever
                 ``cache_dir`` the caller chose (a scratch dir, so the live
                 index is untouched).
-            full_rehash_max_age_days: Issue #373 — the self-healing backstop for
-                the #370 stat pre-filter. On an INCREMENTAL build, when the
+            full_rehash_max_age_days: Issue athenaeum#373 — the self-healing backstop for
+                the athenaeum#370 stat pre-filter. On an INCREMENTAL build, when the
                 manifest has not recorded a full re-hash within this many days,
                 the stat fast-path is skipped for ONE build: every file is
                 re-read and re-hashed so a content edit that preserved both
@@ -157,12 +157,12 @@ class SearchBackend(Protocol):
                 ``0`` / negative = always re-hash; a very large value =
                 effectively never. Ignored on a full or as-of build (both
                 already re-hash everything).
-            config: Issue #532 — the resolved ``athenaeum.yaml`` config, used to
+            config: Issue athenaeum#532 — the resolved ``athenaeum.yaml`` config, used to
                 honor the storage-adapter corpus policy: a page whose entity
                 class (wiki ``type:``) routes to a surface with ``embedded:
                 false`` is dropped from the index at scan time, the same way
-                a ``pii:``-flagged page (#427) is. ``None`` (default) preserves
-                the pre-#532 behavior — every page is indexed — and is what the
+                a ``pii:``-flagged page (athenaeum#427) is. ``None`` (default) preserves
+                the pre-athenaeum#532 behavior — every page is indexed — and is what the
                 shell-hook convenience builders pass. A no-op for the default
                 configuration (every class maps to the all-true wiki surface).
 
@@ -186,14 +186,14 @@ class SearchBackend(Protocol):
         ``wiki_root`` is used by scan-on-query backends (e.g. keyword) that
         don't maintain an on-disk index; indexed backends ignore it.
 
-        ``as_of`` (issue #308 slice 3) pins the temporal view. Indexed
+        ``as_of`` (issue athenaeum#308 slice 3) pins the temporal view. Indexed
         backends (fts5 / vector) filter at BUILD time, so they IGNORE this
         parameter — an as-of view for them is a matching as-of index (see
         ``build_index``). The scan-on-query ``keyword`` backend honors it
         directly, filtering each page against its validity window at query
         time. ``None`` (default) means today.
 
-        ``caller_audience`` (issue #312) pins the query to a restricted read
+        ``caller_audience`` (issue athenaeum#312) pins the query to a restricted read
         scope. ``None`` is the owner / default caller: no filtering, every
         page (untagged included) is eligible. A non-None set restricts the
         result to pages the caller is authorized for, with the audience
@@ -253,7 +253,7 @@ _INTAKE_SKIP_NAMES: frozenset[str] = frozenset({"MEMORY.md"})
 
 
 def _like_escape(value: str) -> str:
-    """Escape SQL ``LIKE`` wildcards in an audience role id (issue #312).
+    """Escape SQL ``LIKE`` wildcards in an audience role id (issue athenaeum#312).
 
     Role ids are operator-controlled, but a stray ``%`` / ``_`` in a role would
     turn the delimiter-anchored ``LIKE`` predicate into an unintended wildcard.
@@ -352,23 +352,23 @@ def _scan_all_entries(
 
 
 # ---------------------------------------------------------------------------
-# Incremental indexing helpers (issue #348)
+# Incremental indexing helpers (issue athenaeum#348)
 # ---------------------------------------------------------------------------
 #
 # Both indexed backends persist a per-page WHOLE-FILE content hash in a JSON
 # sidecar manifest next to their index artifact. On rebuild they diff the
 # current files against the stored hashes and apply only the delta — add
 # new, re-index changed, delete removed. Hashing the whole file (frontmatter
-# + body) means a frontmatter-only change (e.g. issue #312 audience) is
+# + body) means a frontmatter-only change (e.g. issue athenaeum#312 audience) is
 # caught just as a body edit is; a body-only hash would miss it. Inactive
-# memories (issue #191) are filtered out BEFORE hashing, so a page that flips
+# memories (issue athenaeum#191) are filtered out BEFORE hashing, so a page that flips
 # to inactive drops out of the manifest and is treated as a deletion.
 
 # Manifest sidecar filenames (co-located with each backend's index artifact).
 _FTS5_MANIFEST = "fts5-manifest.json"
 _VECTOR_MANIFEST = "vector-manifest.json"
 
-# Issue #373: ``_DEFAULT_FULL_REHASH_MAX_AGE_DAYS`` (defined above the Protocol)
+# Issue athenaeum#373: ``_DEFAULT_FULL_REHASH_MAX_AGE_DAYS`` (defined above the Protocol)
 # bounds the stat pre-filter's blind window — an incremental build that has not
 # re-hashed everything within that many days ignores the stat fast-path for ONE
 # build (re-reads + re-hashes every file) while still applying the change delta
@@ -377,7 +377,7 @@ _VECTOR_MANIFEST = "vector-manifest.json"
 
 # Top-level manifest key recording the epoch-seconds timestamp of the last build
 # that re-hashed every file (a full rebuild or a stale-triggered incremental
-# re-hash). Absent (a pre-#373 manifest) => treated as infinitely stale, so the
+# re-hash). Absent (a pre-athenaeum#373 manifest) => treated as infinitely stale, so the
 # first build after this ships does one full re-hash and stamps it.
 _MANIFEST_REHASH_KEY = "last_full_rehash_at"
 
@@ -386,15 +386,15 @@ def _now() -> float:
     """Return the current epoch seconds.
 
     A module-level indirection (not cached) so tests can monkeypatch the clock
-    to age a manifest past the full-re-hash staleness window (issue #373).
+    to age a manifest past the full-re-hash staleness window (issue athenaeum#373).
     """
     return time.time()
 
 
-# Default embedding model (issue #315 slice). Kept as the documented default;
+# Default embedding model (issue athenaeum#315 slice). Kept as the documented default;
 # the one-time seed re-embed that incremental seeding requires is the natural
 # opportunity to evaluate a stronger model (see VectorBackend).
-# TODO(#315): when seeding the hash-indexed collection from scratch, evaluate a
+# TODO(athenaeum#315): when seeding the hash-indexed collection from scratch, evaluate a
 # stronger embedding model here and record the eval result before changing the
 # default — the seed re-embed is paid once, so it is the cheap moment to swap.
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
@@ -442,28 +442,28 @@ def _scan_indexed_records(
     are absent from both index and manifest — the incremental differ then treats
     an active→inactive flip as a deletion. Unreadable files are skipped.
 
-    Issue #427: a page carrying a truthy ``pii:`` frontmatter flag (see
+    Issue athenaeum#427: a page carrying a truthy ``pii:`` frontmatter flag (see
     :func:`athenaeum.pii.is_pii_flagged`) is ALSO filtered out here, same as
     an inactive memory — belt-and-suspenders exclusion for PII inline in
-    narrative on a page an operator has not (or not yet, #437) moved to the
+    narrative on a page an operator has not (or not yet, athenaeum#437) moved to the
     excluded storage surface. It never enters the index or the manifest, so a
     page later un-flagged picks back up on the next incremental build exactly
     like a re-activated memory would.
 
-    ``as_of`` (issue #308 slice 3) pins the temporal view: a page outside its
+    ``as_of`` (issue athenaeum#308 slice 3) pins the temporal view: a page outside its
     validity window relative to ``as_of`` (default today) is filtered out here,
-    exactly like a #191 tombstone. Only an as-of BUILD passes this (and an as-of
+    exactly like a athenaeum#191 tombstone. Only an as-of BUILD passes this (and an as-of
     build is always full), so the manifest a normal live rebuild diffs against is
     never contaminated by a historical view.
 
-    ``prior`` (issue #370) enables the stat pre-filter: a map ``indexed_name ->
+    ``prior`` (issue athenaeum#370) enables the stat pre-filter: a map ``indexed_name ->
     (mtime_ns, size, valid_until_iso, hash)`` from the last manifest. When a
     file's ``(mtime_ns, size)`` matches its prior entry, its body is NOT read or
     re-hashed — the stored hash is reused (rsync-style heuristic). The page was
     active last build (only active pages are in the manifest) and its content is
     unchanged, so it stays active EXCEPT if its ``valid_until`` has since expired
     relative to ``as_of`` — that time-varying bound is re-checked from the stored
-    date without a read, preserving the #308 date-expiry semantics. Stat-matched
+    date without a read, preserving the athenaeum#308 date-expiry semantics. Stat-matched
     rows yield placeholder ``text=""``/``meta={}``: callers only consume those
     for the add/change delta, whose members always fail the stat match and are
     freshly read. ``prior`` MUST be ``None`` for a full (re)build — a full build
@@ -487,7 +487,7 @@ def _scan_indexed_records(
             # deprecated are content-based and cannot change without a stat
             # change). ``valid_until`` may have crossed ``as_of`` (default
             # today) with no content edit — drop the page then so it becomes a
-            # manifest ``removed`` and leaves the index (issue #308).
+            # manifest ``removed`` and leaves the index (issue athenaeum#308).
             stored_vu = prior_rec[2]
             if stored_vu and valid_until_expired({"valid_until": stored_vu}, as_of):
                 continue
@@ -500,20 +500,20 @@ def _scan_indexed_records(
         content_hash = hashlib.sha256(data).hexdigest()
         text = data.decode("utf-8", errors="replace")
         meta, _ = parse_frontmatter(text)
-        # Issue #191: inactive members never enter the index or the manifest.
-        # Issue #308: an as-of build additionally drops pages outside their
+        # Issue athenaeum#191: inactive members never enter the index or the manifest.
+        # Issue athenaeum#308: an as-of build additionally drops pages outside their
         # validity window relative to ``as_of`` (default today).
         if is_inactive_memory(meta, as_of):
             continue
-        # Issue #427: a ``pii: true``-flagged page never enters the index or
+        # Issue athenaeum#427: a ``pii: true``-flagged page never enters the index or
         # the manifest (belt-and-suspenders — see the docstring above).
         if is_pii_flagged(meta):
             continue
-        # Issue #532 (H4): honor the storage-adapter corpus policy at index
+        # Issue athenaeum#532 (H4): honor the storage-adapter corpus policy at index
         # build. A page whose entity class routes to a surface with
         # ``embedded: false`` never enters the FTS5 / vector store — the
         # ``embedded`` capability the storage contract promises, enforced the
-        # same way #427 excludes PII and ``wiki_dedupe`` drops
+        # same way athenaeum#427 excludes PII and ``wiki_dedupe`` drops
         # non-``merge_eligible`` classes. NO-OP by default: with no ``storage:``
         # config every class maps to the all-true wiki surface, so
         # ``is_embedded`` is ``True`` for every page and nothing is dropped.
@@ -573,7 +573,7 @@ def _manifest_hashes(manifest: dict[str, Any] | None) -> dict[str, str]:
 def _manifest_stats(manifest: dict[str, Any] | None) -> dict[str, tuple[int, int, str]]:
     """Extract the ``{indexed_name: (mtime_ns, size, valid_until)}`` stat map.
 
-    Issue #370's stat pre-filter. Absent (a v1 manifest predating stats) or
+    Issue athenaeum#370's stat pre-filter. Absent (a v1 manifest predating stats) or
     malformed => ``{}``, which forces a one-time full hash of every file and the
     manifest upgrades to v2 on the next write. Each stored entry is a
     ``[mtime_ns, size, valid_until]`` list (JSON has no tuples); rows that do not
@@ -595,9 +595,9 @@ def _manifest_stats(manifest: dict[str, Any] | None) -> dict[str, tuple[int, int
 
 
 def _manifest_last_full_rehash(manifest: dict[str, Any] | None) -> float | None:
-    """Read the manifest's ``last_full_rehash_at`` epoch seconds (issue #373).
+    """Read the manifest's ``last_full_rehash_at`` epoch seconds (issue athenaeum#373).
 
-    ``None`` when absent (a pre-#373 manifest) or malformed — the caller treats
+    ``None`` when absent (a pre-athenaeum#373 manifest) or malformed — the caller treats
     that as infinitely stale and forces one full re-hash. A ``bool`` (a subclass
     of ``int``) is rejected so a stray ``true`` cannot read as ``1.0``.
     """
@@ -612,7 +612,7 @@ def _manifest_last_full_rehash(manifest: dict[str, Any] | None) -> float | None:
 def _scan_prior(
     manifest: dict[str, Any] | None,
 ) -> dict[str, tuple[int, int, str, str]]:
-    """Join a manifest's hashes + stats into the scan's ``prior`` map (#370).
+    """Join a manifest's hashes + stats into the scan's ``prior`` map (athenaeum#370).
 
     Returns ``{indexed_name: (mtime_ns, size, valid_until, hash)}`` for names
     that have BOTH a hash and a stat entry. A name missing either (e.g. every
@@ -638,12 +638,12 @@ def _write_manifest(
 ) -> None:
     """Atomically write the manifest sidecar (temp file + rename).
 
-    ``stats`` (issue #370) persists the per-file ``(mtime_ns, size,
+    ``stats`` (issue athenaeum#370) persists the per-file ``(mtime_ns, size,
     valid_until)`` alongside the hash so the next build's stat pre-filter can
     skip re-reading unchanged files. Bumped to ``version: 2`` when stats are
     written; a reader that only knows ``hashes`` is unaffected (still present).
 
-    ``last_full_rehash_at`` (issue #373) records the epoch seconds of the most
+    ``last_full_rehash_at`` (issue athenaeum#373) records the epoch seconds of the most
     recent build that re-hashed every file (a full rebuild or a stale-triggered
     incremental re-hash). The stale-detection backstop reads it to decide when
     to force the next full re-hash; a fresh incremental build PRESERVES the prior
@@ -665,7 +665,7 @@ def _write_manifest(
 class FTS5Backend:
     """SQLite FTS5 full-text search with BM25 ranking and porter stemming."""
 
-    # Issue #530 (M7): on-disk schema version, stamped into the SQLite DB via
+    # Issue athenaeum#530 (M7): on-disk schema version, stamped into the SQLite DB via
     # ``PRAGMA user_version`` at build time and checked before every incremental
     # build. Bump this whenever the ``wiki`` table shape changes (column set,
     # order, or tokenizer). A DB whose stamp does not match — including a legacy
@@ -673,7 +673,7 @@ class FTS5Backend:
     # rebuilt instead of reused, so a stale-shaped table can never survive an
     # incremental build and turn every audience-filtered query into a silent
     # ``OperationalError`` → empty recall. Version 2 == the ``audience``-aware
-    # shape (#312); anything older (0/1) triggers a one-time full rebuild.
+    # shape (athenaeum#312); anything older (0/1) triggers a one-time full rebuild.
     _SCHEMA_VERSION = 2
 
     # SQL fragments shared by the full and incremental build paths.
@@ -686,7 +686,7 @@ class FTS5Backend:
 
     @staticmethod
     def _db_schema_version(db_path: Path) -> int:
-        """Read the DB's ``PRAGMA user_version`` (issue #530 M7).
+        """Read the DB's ``PRAGMA user_version`` (issue athenaeum#530 M7).
 
         Returns 0 for a missing/unreadable DB or one that was never stamped —
         both of which must NOT be reused for an incremental build.
@@ -704,7 +704,7 @@ class FTS5Backend:
             conn.close()
 
     def _stamp_schema_version(self, conn: sqlite3.Connection) -> None:
-        """Stamp the current schema version into the DB (issue #530 M7).
+        """Stamp the current schema version into the DB (issue athenaeum#530 M7).
 
         ``PRAGMA user_version`` does not accept bound parameters, so the value
         is interpolated — safe because it is our own integer class constant.
@@ -721,7 +721,7 @@ class FTS5Backend:
             # For extra-root entries use the leaf stem (not the prefixed
             # indexed_name) so recall results show a clean title.
             name = path.stem
-        # Issue #312: store each page's effective audience (delimited,
+        # Issue athenaeum#312: store each page's effective audience (delimited,
         # anchored) so Layer B can filter inside the query.
         audience = audience_index_string(meta)
         return (indexed_name, name, tags, aliases, description, audience)
@@ -743,18 +743,18 @@ class FTS5Backend:
 
         See :meth:`SearchBackend.build_index` for the full contract. Wiki
         entries are indexed with a bare filename; extra-root entries with
-        ``<root_name>/<relpath>``. Incremental by default (issue #348):
+        ``<root_name>/<relpath>``. Incremental by default (issue athenaeum#348):
         only added/changed/removed pages are touched, keyed off a whole-file
         content-hash manifest sidecar. An as-of build (``as_of`` set, issue
-        #308) is always a full build reflecting that date's validity windows.
-        ``full_rehash_max_age_days`` (issue #373) periodically forces a full
+        athenaeum#308) is always a full build reflecting that date's validity windows.
+        ``full_rehash_max_age_days`` (issue athenaeum#373) periodically forces a full
         re-hash on the incremental path — see :meth:`SearchBackend.build_index`.
         """
         cache_dir.mkdir(parents=True, exist_ok=True)
         db_path = cache_dir / _DB_NAME
         manifest_path = cache_dir / _FTS5_MANIFEST
 
-        # Issue #308: an as-of view is a historical snapshot — never diff it
+        # Issue athenaeum#308: an as-of view is a historical snapshot — never diff it
         # against (or seed) the live manifest, so force a full build.
         stored = (
             _load_manifest(manifest_path) if incremental and as_of is None else None
@@ -762,7 +762,7 @@ class FTS5Backend:
         # Incremental only when we have BOTH a prior manifest and a live DB;
         # otherwise seed with a clean full rebuild.
         #
-        # Issue #530 (M7): additionally require the on-disk DB to carry the
+        # Issue athenaeum#530 (M7): additionally require the on-disk DB to carry the
         # CURRENT schema version. A DB built by an older athenaeum (e.g. a
         # pre-``audience`` shape, or any DB predating the PRAGMA stamp, which
         # reads back 0) must NOT be reused: ``CREATE VIRTUAL TABLE IF NOT
@@ -788,7 +788,7 @@ class FTS5Backend:
                 "search: FTS5 index at %s has schema version %d, expected %d — "
                 "forcing a full rebuild instead of an incremental one so a "
                 "stale-shaped table cannot silently break audience-filtered "
-                "recall (issue #530)",
+                "recall (issue athenaeum#530)",
                 db_path,
                 self._db_schema_version(db_path),
                 self._SCHEMA_VERSION,
@@ -797,7 +797,7 @@ class FTS5Backend:
             incremental and as_of is None and stored is not None and db_schema_ok
         )
 
-        # Issue #373: self-healing full-re-hash backstop. On the incremental
+        # Issue athenaeum#373: self-healing full-re-hash backstop. On the incremental
         # path, if the manifest has not recorded a full re-hash within the max
         # age, force one this build (``prior=None`` => every file re-read and
         # re-hashed) while STILL applying the change delta incrementally. A fresh
@@ -809,10 +809,10 @@ class FTS5Backend:
         )
         rehash_at = now if (not do_incremental or stale) else last_rehash
 
-        # Issue #370: feed the prior manifest's stats into the scan so unchanged
+        # Issue athenaeum#370: feed the prior manifest's stats into the scan so unchanged
         # files are stat-matched instead of re-read. A full build inserts every
         # scanned record, so it must read every file — ``prior=None`` there. A
-        # stale incremental build (#373) likewise passes ``prior=None`` to force
+        # stale incremental build (athenaeum#373) likewise passes ``prior=None`` to force
         # a re-hash of every file.
         prior = _scan_prior(stored) if (do_incremental and not stale) else None
         current = list(
@@ -835,7 +835,7 @@ class FTS5Backend:
             conn = sqlite3.connect(str(db_path))
             try:
                 conn.execute(self._CREATE_SQL)
-                self._stamp_schema_version(conn)  # issue #530 (M7)
+                self._stamp_schema_version(conn)  # issue athenaeum#530 (M7)
                 rows = [
                     self._row_for(name, path, text, meta)
                     for name, path, _h, text, meta, _s in current
@@ -859,7 +859,7 @@ class FTS5Backend:
         conn = sqlite3.connect(str(db_path))
         try:
             conn.execute(self._CREATE_SQL)  # defensive: table may predate a wipe
-            self._stamp_schema_version(conn)  # issue #530 (M7): keep the stamp current
+            self._stamp_schema_version(conn)  # issue athenaeum#530 (M7): keep the stamp current
             to_delete = removed + changed
             if to_delete:
                 conn.executemany(
@@ -899,7 +899,7 @@ class FTS5Backend:
     ) -> list[tuple[str, str, float]]:
         """Query the FTS5 index. Returns ``(filename, name, score)`` triples."""
         del wiki_root  # FTS5 reads the pre-built index, not the wiki files
-        del as_of  # #308: FTS5 filters at build time; as-of view = as-of index
+        del as_of  # athenaeum#308: FTS5 filters at build time; as-of view = as-of index
         db_path = cache_dir / _DB_NAME
         if not db_path.is_file():
             return []
@@ -924,7 +924,7 @@ class FTS5Backend:
             exclude_clause = f" AND filename NOT IN ({placeholders})"
             params = list(exclude)
 
-        # Issue #312 — Layer B: push the audience predicate INTO the WHERE,
+        # Issue athenaeum#312 — Layer B: push the audience predicate INTO the WHERE,
         # BEFORE ``ORDER BY rank LIMIT``, so the BM25 top-k is selected from
         # permitted rows only. A forbidden page can neither occupy a slot nor
         # push a permitted page past the LIMIT. ``caller_audience=None`` (owner)
@@ -966,7 +966,7 @@ class FTS5Backend:
 _VECTOR_DIR = "wiki-vectors"
 _VECTOR_COLLECTION = "wiki"
 # A build-generation token written into the collection dir on every completed
-# build_index (issue #489). A long-lived server process reads it before each
+# build_index (issue athenaeum#489). A long-lived server process reads it before each
 # query; when it changes, the process's chromadb SharedSystemClient cache is
 # stale (an out-of-process reindex replaced the on-disk collection) and must be
 # cleared so the next open re-reads the true on-disk state instead of serving
@@ -975,12 +975,12 @@ _VECTOR_GENERATION = ".generation"
 
 
 class DegradedIndexError(RuntimeError):
-    """The vector index returned a degenerate (non-ranked) result set (#489).
+    """The vector index returned a degenerate (non-ranked) result set (athenaeum#489).
 
     A collection that yields every neighbour at an identical distance is not
     ranking — it is a degraded/unavailable index (the pre-reindex failure mode
     that returned six unrelated pages all at ``score: 1.5``). Surfacing this as
-    an explicit, actionable error is required by #489 so the silent failure —
+    an explicit, actionable error is required by athenaeum#489 so the silent failure —
     confidently-formatted, completely wrong results with no signal — can never
     reach the caller as if it were a real ranked answer.
     """
@@ -995,7 +995,7 @@ def _read_generation(vector_dir: Path) -> str | None:
 
 
 def _write_generation(vector_dir: Path) -> None:
-    """Stamp a fresh build-generation token into *vector_dir* (issue #489).
+    """Stamp a fresh build-generation token into *vector_dir* (issue athenaeum#489).
 
     Called at the end of every completed build_index. A new random token per
     build guarantees a running server observes the change and re-opens its
@@ -1009,7 +1009,7 @@ def _write_generation(vector_dir: Path) -> None:
             uuid.uuid4().hex, encoding="utf-8"
         )
     except OSError:  # pragma: no cover - best-effort stamp; a missing stamp
-        # only degrades to the pre-#489 "no auto-reopen" behaviour, never worse.
+        # only degrades to the pre-athenaeum#489 "no auto-reopen" behaviour, never worse.
         pass
 
 
@@ -1020,8 +1020,8 @@ def _hits_from_query_results(
 ) -> list[tuple[str, str, float]]:
     """Turn a chromadb ``collection.query`` result into ranked recall hits.
 
-    Pure/deterministic so it is unit-testable without chromadb (issue #489).
-    Two hardenings over the pre-#489 inline loop:
+    Pure/deterministic so it is unit-testable without chromadb (issue athenaeum#489).
+    Two hardenings over the pre-athenaeum#489 inline loop:
 
     - **No ``NoneType`` crash (AC4).** A stale/corrupt collection can return a
       ``None`` metadata entry (or a ``None`` ``metadatas`` list); every access
@@ -1070,7 +1070,7 @@ class VectorBackend:
 
     Requires ``pip install athenaeum[vector]`` (chromadb).
     Uses the default ``all-MiniLM-L6-v2`` embedding model unless an
-    alternate model name is passed (issue #315 config seam).
+    alternate model name is passed (issue athenaeum#315 config seam).
     """
 
     # Text length used both as the embedded document and as the batch cap.
@@ -1080,7 +1080,7 @@ class VectorBackend:
     def __init__(self, embedding_model: str | None = None) -> None:
         """Construct the backend.
 
-        ``embedding_model`` (issue #315 seam) selects the sentence-transformer
+        ``embedding_model`` (issue athenaeum#315 seam) selects the sentence-transformer
         model. ``None`` and the documented default ``all-MiniLM-L6-v2`` both
         use chromadb's built-in default embedding function unchanged — the
         default is NOT changed here. A non-default name is only honored if
@@ -1089,13 +1089,13 @@ class VectorBackend:
         opportunity noted at DEFAULT_EMBEDDING_MODEL).
         """
         self.embedding_model = embedding_model or DEFAULT_EMBEDDING_MODEL
-        # Build-generation this process last opened a client for (issue #489).
+        # Build-generation this process last opened a client for (issue athenaeum#489).
         # ``None`` forces a cache-clear on the first query so a process that
         # started before an out-of-process reindex never serves stale results.
         self._seen_generation: str | None = None
 
     def _refresh_on_reindex(self, vector_dir: Path) -> None:
-        """Clear chromadb's process-global cache if the index was rebuilt (#489).
+        """Clear chromadb's process-global cache if the index was rebuilt (athenaeum#489).
 
         chromadb caches ``PersistentClient`` *systems* per-path at the module
         level (``SharedSystemClient``). An out-of-process ``athenaeum reindex``
@@ -1119,7 +1119,7 @@ class VectorBackend:
             SharedSystemClient.clear_system_cache()
         except Exception:  # noqa: BLE001 — pragma: no cover - chromadb internals moved
             # If the internal moved, we simply don't get auto-reopen — the
-            # pre-#489 behaviour — never a crash from the fix itself.
+            # pre-athenaeum#489 behaviour — never a crash from the fix itself.
             pass
         self._seen_generation = generation
 
@@ -1173,12 +1173,12 @@ class VectorBackend:
             name, _tags, _aliases, _description = _extract_frontmatter_fields(text)
             if not name:
                 name = path.stem
-            # Issue #312 — Layer A: store the effective audience so the query
+            # Issue athenaeum#312 — Layer A: store the effective audience so the query
             # can pre-filter neighbors. chromadb metadata is scalar-only, so
             # the audience is stored as the same delimited string as FTS5 and
             # filtered in Python at query time (Layer B).
             ids.append(indexed_name)
-            # Issue #426 (stub hygiene): a pointer stub contributes NOTHING
+            # Issue athenaeum#426 (stub hygiene): a pointer stub contributes NOTHING
             # beyond its one-line pointer body to embeddings — embedding the
             # full frontmatter+body (like every other page) would defeat the
             # point of converting a duplicate into a stub in the first place.
@@ -1222,11 +1222,11 @@ class VectorBackend:
         """Build a chromadb collection from wiki + extra intake roots.
 
         See :meth:`SearchBackend.build_index` for the full contract.
-        Incremental by default (issue #348): only added/changed/removed
+        Incremental by default (issue athenaeum#348): only added/changed/removed
         pages are (re-)embedded, keyed off a whole-file content-hash
         manifest sidecar. A no-op rebuild re-embeds nothing. An as-of build
-        (``as_of`` set, issue #308) is always a full build reflecting that
-        date's validity windows. ``full_rehash_max_age_days`` (issue #373)
+        (``as_of`` set, issue athenaeum#308) is always a full build reflecting that
+        date's validity windows. ``full_rehash_max_age_days`` (issue athenaeum#373)
         periodically forces a full re-hash on the incremental path — the change
         delta is still applied incrementally (no full re-embed).
         """
@@ -1235,7 +1235,7 @@ class VectorBackend:
         vector_dir = cache_dir / _VECTOR_DIR
         manifest_path = cache_dir / _VECTOR_MANIFEST
 
-        # Issue #308: an as-of view is a historical snapshot — never diff it
+        # Issue athenaeum#308: an as-of view is a historical snapshot — never diff it
         # against (or seed) the live manifest, so force a full build.
         stored = (
             _load_manifest(manifest_path) if incremental and as_of is None else None
@@ -1251,7 +1251,7 @@ class VectorBackend:
             and stored_model == self.embedding_model
         )
 
-        # Issue #373: self-healing full-re-hash backstop (identical to FTS5).
+        # Issue athenaeum#373: self-healing full-re-hash backstop (identical to FTS5).
         # On the incremental path, force a full re-hash of every file when the
         # manifest has not recorded one within the max age — the change delta is
         # still applied incrementally (no rmtree / full re-embed).
@@ -1261,10 +1261,10 @@ class VectorBackend:
             full_rehash_max_age_days * 86400.0
         )
 
-        # Issue #370: stat pre-filter the scan on the incremental path only —
+        # Issue athenaeum#370: stat pre-filter the scan on the incremental path only —
         # a full (re)build embeds every scanned record and cannot use the
         # placeholder text/meta that stat-matched rows carry. A stale incremental
-        # build (#373) also passes ``prior=None`` to force a re-hash of all.
+        # build (athenaeum#373) also passes ``prior=None`` to force a re-hash of all.
         prior = _scan_prior(stored) if (do_incremental and not stale) else None
 
         def _scan(with_prior: dict[str, tuple[int, int, str, str]] | None) -> tuple[
@@ -1293,7 +1293,7 @@ class VectorBackend:
 
         # chromadb caches PersistentClient systems per-path at the module
         # level. Clear it so a fresh client sees the true on-disk state
-        # (avoids stale-collection "already exists" desync — see issue #32).
+        # (avoids stale-collection "already exists" desync — see issue athenaeum#32).
         from chromadb.api.client import SharedSystemClient
 
         SharedSystemClient.clear_system_cache()
@@ -1308,7 +1308,7 @@ class VectorBackend:
             except Exception as exc:  # noqa: BLE001 — corrupt/missing collection: fall back to full rebuild
                 # Corrupt / missing collection despite a manifest — fall back
                 # to a clean full rebuild rather than accreting a bad delta.
-                # Issue #370: log it — a silent full rmtree+re-embed of a 21k
+                # Issue athenaeum#370: log it — a silent full rmtree+re-embed of a 21k
                 # corpus was indistinguishable from a hang. WARNING so a real
                 # (expensive) full rebuild is diagnosable, not silent.
                 import logging
@@ -1330,7 +1330,7 @@ class VectorBackend:
             # Full (re)build — nuke any prior on-disk state before opening a
             # PersistentClient. chromadb's SQLite metadata and the rust
             # binding's collection store can desync; a full wipe is the
-            # simplest robust reset (issue #32).
+            # simplest robust reset (issue athenaeum#32).
             if vector_dir.exists():
                 shutil.rmtree(vector_dir)
             vector_dir.mkdir(parents=True, exist_ok=True)
@@ -1348,7 +1348,7 @@ class VectorBackend:
                 stats=current_stats,
                 last_full_rehash_at=now,
             )
-            _write_generation(vector_dir)  # #489: mark this rebuild for readers
+            _write_generation(vector_dir)  # athenaeum#489: mark this rebuild for readers
             return len(current)
 
         # Incremental path — diff and apply only the delta.
@@ -1372,7 +1372,7 @@ class VectorBackend:
             stats=current_stats,
             last_full_rehash_at=(now if stale else last_rehash),
         )
-        _write_generation(vector_dir)  # #489: mark this rebuild for readers
+        _write_generation(vector_dir)  # athenaeum#489: mark this rebuild for readers
         return total
 
     def query(
@@ -1388,14 +1388,14 @@ class VectorBackend:
     ) -> list[tuple[str, str, float]]:
         """Query the chromadb collection with semantic search."""
         del wiki_root  # Vector reads the pre-built chromadb collection
-        del as_of  # #308: vector filters at build time; as-of view = as-of index
+        del as_of  # athenaeum#308: vector filters at build time; as-of view = as-of index
         chromadb = self._get_chromadb()
 
         vector_dir = cache_dir / _VECTOR_DIR
         if not vector_dir.is_dir():
             return []
 
-        # #489: re-open if an out-of-process reindex replaced the collection.
+        # athenaeum#489: re-open if an out-of-process reindex replaced the collection.
         self._refresh_on_reindex(vector_dir)
 
         client = chromadb.PersistentClient(path=str(vector_dir))
@@ -1430,7 +1430,7 @@ class VectorBackend:
         elif exclude and len(exclude) > 1:
             where = {"filename": {"$nin": list(exclude)}}
 
-        # Issue #312 — Layer B (vector): chromadb metadata is scalar-only, so
+        # Issue athenaeum#312 — Layer B (vector): chromadb metadata is scalar-only, so
         # there is no native substring/list-membership operator to express the
         # audience predicate as a ``where``. Instead OVER-FETCH — for a
         # restricted caller fetch the full ordered neighbor list — then filter
@@ -1452,7 +1452,7 @@ class VectorBackend:
             where=where,
         )
 
-        # #489 AC3/AC4: guard None metadata (no 'NoneType'.get crash) and
+        # athenaeum#489 AC3/AC4: guard None metadata (no 'NoneType'.get crash) and
         # surface a degenerate flat-score result set as an explicit error.
         return _hits_from_query_results(results, n, caller_audience)
 
@@ -1463,13 +1463,13 @@ class VectorBackend:
     ) -> dict[str, list[float]]:
         """Return ``{id: embedding_vector}`` for the given indexed filenames.
 
-        Narrow accessor for clustering (issue #196). Reuses the collection
+        Narrow accessor for clustering (issue athenaeum#196). Reuses the collection
         built by :meth:`build_index` — does NOT invoke a second embedding
         provider. Missing ids are silently omitted so callers can cluster
         over the intersection of "requested" and "actually indexed".
         Returns ``{}`` when the collection does not exist or is empty.
 
-        Issue #370: this is a pure READ of stored embeddings (``get`` with
+        Issue athenaeum#370: this is a pure READ of stored embeddings (``get`` with
         ``include=["embeddings"]`` never embeds), so the collection is opened
         with ``embedding_function=None`` — the default arg is a module-level
         ``DefaultEmbeddingFunction()`` that (in a future chromadb) could pull in
@@ -1485,7 +1485,7 @@ class VectorBackend:
         if not id_list:
             return {}
 
-        # #489: re-open if an out-of-process reindex replaced the collection.
+        # athenaeum#489: re-open if an out-of-process reindex replaced the collection.
         self._refresh_on_reindex(vector_dir)
 
         client = chromadb.PersistentClient(path=str(vector_dir))
@@ -1504,7 +1504,7 @@ class VectorBackend:
         out: dict[str, list[float]] = {}
         # chromadb returns embeddings as a numpy array — ``x or []`` raises
         # "truth value ambiguous" on it, so normalize with an explicit None
-        # check instead of truthiness (issue #370: this read path must work).
+        # check instead of truthiness (issue athenaeum#370: this read path must work).
         result_ids = result.get("ids")
         if result_ids is None:
             result_ids = []
@@ -1526,7 +1526,7 @@ class VectorBackend:
         ids: Iterable[str],
         cache_dir: Path,
     ) -> int:
-        """Delete the given indexed filenames from the collection (issue #425).
+        """Delete the given indexed filenames from the collection (issue athenaeum#425).
 
         Embedding hygiene for a fold-into-existing merge: when the resolver
         deletes old-slug wiki files after folding them into a canonical page,
@@ -1573,7 +1573,7 @@ class VectorBackend:
     ) -> list[tuple[str, float]]:
         """Return ``[(id, distance)]`` for the ``k`` nearest stored neighbors.
 
-        Issue #370 (delta compile): a by-VECTOR nearest-neighbor accessor for
+        Issue athenaeum#370 (delta compile): a by-VECTOR nearest-neighbor accessor for
         the delta-scoped cluster pass. Unlike :meth:`query` (which embeds a
         query *string*), this queries by an already-resolved embedding vector,
         so the collection is opened with ``embedding_function=None`` — this is
@@ -1694,15 +1694,15 @@ class KeywordBackend:
         Returns a count that includes wiki entries + extra-root entries
         (``MEMORY.md`` and non-``.md`` files excluded) so status checks
         see a comparable number to the indexed backends. The ``incremental``
-        / glob knobs (issue #348), ``as_of`` (issue #308), and
-        ``full_rehash_max_age_days`` (issue #373) are accepted for Protocol
+        / glob knobs (issue athenaeum#348), ``as_of`` (issue athenaeum#308), and
+        ``full_rehash_max_age_days`` (issue athenaeum#373) are accepted for Protocol
         parity but inert here — there is no persisted manifest to diff, scope,
         or re-hash, and the temporal filter is applied at QUERY time
         (:meth:`query`), not here.
         """
         del cache_dir, incremental, include_globs, exclude_globs, as_of
         del full_rehash_max_age_days
-        # Issue #532: the storage-adapter ``embedded`` policy is a persisted-index
+        # Issue athenaeum#532: the storage-adapter ``embedded`` policy is a persisted-index
         # concept; the keyword backend has no persisted index, so it is inert
         # here. Recall-time enforcement of the ``recallable`` policy applies to
         # keyword results the same as every backend, at the recall render layer
@@ -1735,7 +1735,7 @@ class KeywordBackend:
     ) -> list[tuple[str, str, float]]:
         """Score every non-underscore wiki page and return the top-n hits.
 
-        ``as_of`` (issue #308 slice 3) filters each page against its validity
+        ``as_of`` (issue athenaeum#308 slice 3) filters each page against its validity
         window at query time — the keyword backend scans on query, so it honors
         an as-of *rewind* directly (no as-of index build needed). ``None`` =
         today.
@@ -1765,17 +1765,17 @@ class KeywordBackend:
                 continue
 
             fm, body = parse_frontmatter(text)
-            # Issue #191: skip inactive members (superseded_by / deprecated).
-            # Issue #308 slice 3: also skip pages outside their validity window
+            # Issue athenaeum#191: skip inactive members (superseded_by / deprecated).
+            # Issue athenaeum#308 slice 3: also skip pages outside their validity window
             # relative to ``as_of`` (default today) — the query-time as-of view.
             if is_inactive_memory(fm, as_of):
                 continue
-            # Issue #427: belt-and-suspenders — a ``pii: true``-flagged page is
+            # Issue athenaeum#427: belt-and-suspenders — a ``pii: true``-flagged page is
             # excluded from keyword recall too, even though this backend scans
             # on query rather than a pre-built index.
             if is_pii_flagged(fm):
                 continue
-            # Issue #312 — Layer B (keyword): authorize BEFORE scoring so a
+            # Issue athenaeum#312 — Layer B (keyword): authorize BEFORE scoring so a
             # forbidden page never enters ``scored`` and cannot occupy a top-n
             # slot. Owner (caller_audience=None) is authorized for everything.
             if not is_page_authorized(fm, caller_audience):
@@ -1803,7 +1803,7 @@ _BACKENDS: dict[str, type[SearchBackend]] = {
 def get_backend(name: str, **kwargs: Any) -> SearchBackend:
     """Return a backend instance by name. Raises ``KeyError`` for unknown names.
 
-    ``kwargs`` are forwarded to the backend's constructor (issue #542) — e.g.
+    ``kwargs`` are forwarded to the backend's constructor (issue athenaeum#542) — e.g.
     ``get_backend("vector", embedding_model="...")`` — so callers that need a
     non-default constructor arg go through the registry instead of
     instantiating a concrete backend class directly.
@@ -1853,13 +1853,13 @@ def build_fts5_index(
     ``extra_roots`` accepts the same list as
     :meth:`FTS5Backend.build_index` (additional intake directories
     scanned recursively, e.g. ``~/knowledge/raw/auto-memory``).
-    ``incremental`` (default ``True``, issue #348) applies only the
+    ``incremental`` (default ``True``, issue athenaeum#348) applies only the
     add/change/delete delta; pass ``False`` to force a full rebuild.
 
-    ``as_of`` (issue #308) builds an as-of *rewind* index: pass an ISO date
+    ``as_of`` (issue athenaeum#308) builds an as-of *rewind* index: pass an ISO date
     string or a ``date`` to reflect the knowledge base as it stood then
     (always a full build). ``None`` (default) means today.
-    ``full_rehash_max_age_days`` (issue #373) sets the periodic full-re-hash
+    ``full_rehash_max_age_days`` (issue athenaeum#373) sets the periodic full-re-hash
     backstop for the stat pre-filter.
     """
     roots = [Path(r) for r in extra_roots] if extra_roots else None
@@ -1904,11 +1904,11 @@ def build_vector_index(
 
     ``extra_roots`` accepts the same list as
     :meth:`VectorBackend.build_index`. ``incremental`` (default ``True``,
-    issue #348) re-embeds only the delta. ``embedding_model`` (issue #315
+    issue athenaeum#348) re-embeds only the delta. ``embedding_model`` (issue athenaeum#315
     seam) defaults to ``all-MiniLM-L6-v2`` — the documented default is not
     changed here; swapping it forces a one-time full re-embed. ``as_of``
-    (issue #308) builds an as-of *rewind* index — see :func:`build_fts5_index`.
-    ``full_rehash_max_age_days`` (issue #373) sets the periodic full-re-hash
+    (issue athenaeum#308) builds an as-of *rewind* index — see :func:`build_fts5_index`.
+    ``full_rehash_max_age_days`` (issue athenaeum#373) sets the periodic full-re-hash
     backstop for the stat pre-filter.
     """
     roots = [Path(r) for r in extra_roots] if extra_roots else None
@@ -1937,7 +1937,7 @@ def query_vector_index(
 
 
 # ---------------------------------------------------------------------------
-# Embedding helpers (issue #211 — decision-log semantic matching)
+# Embedding helpers (issue athenaeum#211 — decision-log semantic matching)
 # ---------------------------------------------------------------------------
 
 # Module-level memoized chromadb embedding function instance.  Loaded lazily

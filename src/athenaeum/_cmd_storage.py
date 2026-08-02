@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum storage`` — storage-surface operator commands (issue #479).
+"""``athenaeum storage`` — storage-surface operator commands (issue athenaeum#479).
 
 A thin CLI dispatcher over :mod:`athenaeum.storage_migrate` (which holds the
 pure transform logic), mirroring :mod:`athenaeum._cmd_authority`'s shape: the
@@ -10,18 +10,18 @@ prints/writes. No business logic lives here.
 Two sub-commands:
 
 - ``migrate-pii`` — move a live entity page's archival contact data
-  (emails/phones) to the #427 excluded surface, dry-run by default (``--apply``
+  (emails/phones) to the athenaeum#427 excluded surface, dry-run by default (``--apply``
   writes). Single page (``--page``) or bulk over the whole entity set
-  (``--all`` / ``--glob``, issue #495). ``--rename-name-email`` (issue #505,
+  (``--all`` / ``--glob``, issue athenaeum#495). ``--rename-name-email`` (issue athenaeum#505,
   bulk-only) additionally migrates the ~80-page name-is-an-email population
-  #502 deliberately excluded: rename a confidently-nameable page (derived
+  athenaeum#502 deliberately excluded: rename a confidently-nameable page (derived
   display name from the local-part), move the address off-corpus, and rewrite
   inbound wikilinks — an ambiguous local-part is left unrenamed and reported
   as a residual count instead.
 - ``lint-pii`` — a corpus-wide PII gate: scan EVERY file under ``wiki/`` (not
   only entity pages — ``_``-prefixed queue/index/archive files and ``.bak``
   files included) for an inline email/phone and exit non-zero on any finding,
-  so a body-text email cannot silently regrow after the sweep (issue #495).
+  so a body-text email cannot silently regrow after the sweep (issue athenaeum#495).
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — this
@@ -58,7 +58,7 @@ from athenaeum.storage_migrate import (
 EXIT_PII_FOUND = 2
 
 #: How often bulk apply/scan emits a progress line to stderr. A silent
-#: 11.5k-page run is indistinguishable from a hung one (issue #495), so
+#: 11.5k-page run is indistinguishable from a hung one (issue athenaeum#495), so
 #: progress is reported every this-many pages plus a final summary.
 _PROGRESS_EVERY = 500
 
@@ -68,7 +68,7 @@ def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
 
 
 def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``storage`` and its sub-commands (issue #479)."""
+    """Register ``storage`` and its sub-commands (issue athenaeum#479)."""
     s_parser = subparsers.add_parser(
         "storage",
         help="Storage-surface operator tasks (migrate a page's PII off-corpus).",
@@ -80,7 +80,7 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         "migrate-pii",
         help=(
             "Move archival contact data (emails/phones) off entity pages to "
-            "the #427 excluded surface, leaving durable identifiers only. "
+            "the athenaeum#427 excluded surface, leaving durable identifiers only. "
             "Single page (--page) or bulk (--all / --glob)."
         ),
     )
@@ -90,8 +90,8 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge root (default: ~/knowledge).",
     )
-    # Exactly one target selector. --page keeps #479's single-page behavior
-    # byte-for-byte; --all / --glob are #495's bulk modes.
+    # Exactly one target selector. --page keeps athenaeum#479's single-page behavior
+    # byte-for-byte; --all / --glob are athenaeum#495's bulk modes.
     target = migrate_p.add_mutually_exclusive_group(required=True)
     target.add_argument(
         "--page",
@@ -135,7 +135,7 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "After a successful --apply, rebuild the search index so the "
-            "migrated contact data is no longer recallable (issue #502). "
+            "migrated contact data is no longer recallable (issue athenaeum#502). "
             "Rewriting a page changes its content hash, so an incremental "
             "reindex evicts the stale index entry and re-embeds the scrubbed "
             "text — WITHOUT this, --apply leaves the pre-migration text live in "
@@ -147,8 +147,8 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--rename-name-email",
         action="store_true",
         help=(
-            "Also migrate the name-is-an-email population (issue #505): a page "
-            "whose name:/preferred_name: IS an email address (the #502 carve-"
+            "Also migrate the name-is-an-email population (issue athenaeum#505): a page "
+            "whose name:/preferred_name: IS an email address (the athenaeum#502 carve-"
             "out) is renamed to a display name derived from the local-part "
             "(e.g. jane.doe@acme.com -> 'Jane Doe'), the address is moved to "
             "the excluded contact record, and inbound [[wikilink]]s are "
@@ -165,7 +165,7 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/"
             "archive/_-prefixed and .bak files included) for an inline email/"
-            "phone; exit non-zero on any finding (issue #495)."
+            "phone; exit non-zero on any finding (issue athenaeum#495)."
         ),
     )
     lint_p.add_argument(
@@ -209,13 +209,13 @@ def _apply_plan(plan: PiiMigrationPlan) -> None:
 def _post_apply_index_step(
     args: argparse.Namespace, knowledge_root: Path, config: dict | None
 ) -> None:
-    """Reindex (if --reindex) and/or emit the required-follow-up notice (#502).
+    """Reindex (if --reindex) and/or emit the required-follow-up notice (athenaeum#502).
 
     ``migrate-pii --apply`` rewrites the markdown but does NOT itself touch the
     search index: with the vector backend the embeddings still carry the
     PRE-migration page text, so every migrated address stays recallable until a
     reindex runs. An operator who sees only "migrated N page(s)" and stops has
-    moved nothing out of reach of ``recall`` (issue #502, live-sweep finding).
+    moved nothing out of reach of ``recall`` (issue athenaeum#502, live-sweep finding).
 
     So after a successful apply this NEVER prints an unqualified success on its
     own — the caller's "migrated" line is always followed here by either the
@@ -336,7 +336,7 @@ def _resolve_bulk_pages(args: argparse.Namespace, wiki_root: Path) -> list[Path]
 
 
 def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
-    """Bulk migrate every targeted page's PII off-corpus (issue #495).
+    """Bulk migrate every targeted page's PII off-corpus (issue athenaeum#495).
 
     Idempotent + resumable by construction: each page is planned independently
     and a page with no contact data is skipped, so a re-run (after a clean
@@ -410,20 +410,20 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
         f"{total_emails} email(s), {total_phones} phone(s)."
     )
     if name_pii_excluded and not getattr(args, "rename_name_email", False):
-        # The name-is-an-email population (#502): EXCLUDED from this automatic
+        # The name-is-an-email population (athenaeum#502): EXCLUDED from this automatic
         # path (renaming breaks slugs/edges) and handled in a separate slice
-        # (issue #505, --rename-name-email below). Surface it so it is
+        # (issue athenaeum#505, --rename-name-email below). Surface it so it is
         # visible, not silently dropped, when that slice was NOT requested.
         print(
             f"NOTE: {name_pii_excluded} page(s) are named after an email "
             "address (name:/preferred_name:) and were NOT migrated — renaming "
             "is unsafe by default; re-run with --rename-name-email to migrate "
-            "this population too (issue #505)."
+            "this population too (issue athenaeum#505)."
         )
 
     rename_report: NameEmailRenameReport | None = None
     if getattr(args, "rename_name_email", False) and args.glob is None:
-        # #505: the name-is-an-email carve-out's own slice. Only meaningful
+        # athenaeum#505: the name-is-an-email carve-out's own slice. Only meaningful
         # over the whole entity-page set (--all), not a single named --glob
         # target, since the population is corpus-wide by construction.
         rename_report = bulk_rename_name_email_pages(
@@ -440,7 +440,7 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
                 f"NOTE: {rename_report.residual} page(s) have an ambiguous "
                 "local-part (role address, +tag, initial-blob, or numeric/"
                 "opaque) and were left unrenamed — manual naming required, "
-                "per issue #505's fallback (never guess)."
+                "per issue athenaeum#505's fallback (never guess)."
             )
         if not args.apply and rename_report.renamed:
             print("re-run with --apply to write the renames.")
@@ -453,7 +453,7 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
 
 
 def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
-    """Corpus-wide PII gate (issue #495): non-zero exit on any inline finding.
+    """Corpus-wide PII gate (issue athenaeum#495): non-zero exit on any inline finding.
 
     Scans EVERY file under ``wiki/`` — not only entity pages, so ``_``-prefixed
     queue/index/archive files and stray ``.bak`` files are covered — for an

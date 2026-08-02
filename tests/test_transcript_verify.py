@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for origin-traced transcript verification (issue #260, slice A of #259).
+"""Tests for origin-traced transcript verification (issue athenaeum#260, slice A of athenaeum#259).
 
 Covers :mod:`athenaeum.transcript_verify`. The verifier reads session
 transcripts under ``<projects_root>/<scope>/*.jsonl`` to attribute the

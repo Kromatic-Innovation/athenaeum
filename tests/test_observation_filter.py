@@ -1,6 +1,6 @@
 """Tests for the observation-filter tuning mechanism.
 
-Issue #29: the filter file is the user-tunable authority for what gets
+Issue athenaeum#29: the filter file is the user-tunable authority for what gets
 captured. These tests pin the contract between the filter schema file
 (copied to wiki/_schema/observation-filter.md on init) and the
 CLAUDE.md.example that instructs Claude to read and update it.

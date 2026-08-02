@@ -30,13 +30,13 @@ def add_serve_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Knowledge directory (default: ~/knowledge). The raw/wiki roots "
         "default to <path>/raw and <path>/wiki; the KNOWLEDGE_RAW_PATH / "
         "KNOWLEDGE_WIKI_PATH environment variables override them individually "
-        "(drop-in parity with the legacy knowledge-mcp server, issue #355).",
+        "(drop-in parity with the legacy knowledge-mcp server, issue athenaeum#355).",
     )
     serve_parser.add_argument(
         "--audience",
         type=str,
         default=None,
-        help="Issue #312: pin this server to a restricted read scope. "
+        help="Issue athenaeum#312: pin this server to a restricted read scope. "
         "Comma-separated role/group ids (e.g. 'operations,voltaire'). The "
         "recall tool then returns only pages tagged for one of these roles "
         "(plus 'access: open' pages); untagged/confidential/personal pages "
@@ -48,7 +48,7 @@ def add_serve_subparser(subparsers: argparse._SubParsersAction) -> None:
         type=Path,
         default=None,
         help="Cache directory holding the compiled index (default: "
-        "ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). Issue #521: serve "
+        "ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum). Issue athenaeum#521: serve "
         "previously hardcoded ~/.cache/athenaeum and ignored ATHENAEUM_CACHE_DIR, "
         "so recall could serve a stale/empty index when the compiler wrote "
         "elsewhere.",
@@ -63,7 +63,7 @@ def _resolve_serve_roots(target: Path) -> tuple[Path, Path]:
     ``KNOWLEDGE_RAW_PATH`` / ``KNOWLEDGE_WIKI_PATH`` environment variables
     override the respective root INDEPENDENTLY. This preserves drop-in parity
     with the legacy standalone ``knowledge-mcp`` server this command supersedes
-    (issue #355): an existing MCP config (or ``start.sh``) that pins those env
+    (issue athenaeum#355): an existing MCP config (or ``start.sh``) that pins those env
     vars keeps working unchanged after the cwc copy is removed. ``--path`` is
     still where config (``athenaeum.yaml``) and extra intake roots resolve, so
     the common case (both under ``~/knowledge``) is unaffected.
@@ -85,7 +85,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     )
     from athenaeum.mcp_server import create_server
 
-    # Issue #540 (M25): the MCP server process previously configured NO logging
+    # Issue athenaeum#540 (M25): the MCP server process previously configured NO logging
     # at all — every mcp_server log line was dropped. Configure the shared
     # ISO-dated, name-tagged, run-id format here so the server's lines are
     # attributable, same as the CLI's.
@@ -101,13 +101,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     cfg = load_config(target)
     backend = cfg.get("search_backend", "fts5")
-    # Issue #521 (H9): route serve's cache dir through the shared resolver so
+    # Issue athenaeum#521 (H9): route serve's cache dir through the shared resolver so
     # ATHENAEUM_CACHE_DIR (and --cache-dir) are honoured — previously hardcoded,
     # so recall served a stale/empty index when the compiler wrote elsewhere.
     cache_dir = resolve_cache_dir(getattr(args, "cache_dir", None))
     extra_roots = resolve_extra_intake_roots(target, cfg)
 
-    # Issue #312: resolve the serve-time read-scope pin (CLI > env > yaml).
+    # Issue athenaeum#312: resolve the serve-time read-scope pin (CLI > env > yaml).
     # None = owner = full access (existing single-user behavior).
     caller_audience = resolve_audience(cfg, getattr(args, "audience", None))
     if caller_audience is not None:
@@ -118,7 +118,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    # Issue #320: resolve intake screening (env > yaml > off). Fails fast with
+    # Issue athenaeum#320: resolve intake screening (env > yaml > off). Fails fast with
     # a clear message on a mis-set screening block rather than serving with a
     # silently inert classifier.
     from athenaeum.screening import ScreeningConfigError

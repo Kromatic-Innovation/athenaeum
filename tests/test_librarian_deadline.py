@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #396 — the librarian run must self-bound with a wall-clock deadline.
+"""Issue athenaeum#396 — the librarian run must self-bound with a wall-clock deadline.
 
 Budget caps (`--max-files` / `--max-api-calls`) bound how MUCH a run does but
 nothing bounded how LONG it ran: a post-checkpoint phase that stopped making
@@ -10,7 +10,7 @@ until externally killed. This suite covers the internal deadline that fixes it:
   value disables the deadline entirely (the explicit unbounded escape hatch).
 - The per-file entity loop, on trip, defers the remaining intake, commits the
   partial progress, writes a deadline-labelled deferred manifest, and returns
-  124 (matching coreutils `timeout` and the #337 interrupt path) — resumable.
+  124 (matching coreutils `timeout` and the athenaeum#337 interrupt path) — resumable.
 - The merge pass (the phase the incident wedged in) checks the deadline at its
   per-cluster loop and raises `RunDeadlineExceeded`, which `run()` catches to
   commit partial + return 124.
@@ -271,7 +271,7 @@ def test_merge_pass_raises_on_past_deadline(
 def test_wiki_dedup_phase_boundary_deadline_exits_124(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The #290 wiki-dedup pass is a listed wedge site. It swallows its own
+    """The athenaeum#290 wiki-dedup pass is a listed wedge site. It swallows its own
     exceptions, so the deadline "covers" it via a between-phase check right
     after it — a long wiki-dedup stops the run before the heavier phases."""
     root = _seed_knowledge_root(tmp_path, n_files=1)
@@ -299,7 +299,7 @@ def test_wiki_dedup_phase_boundary_deadline_exits_124(
 
     assert rc == 124
     assert _porcelain(root) == ""
-    assert "#290 wiki-dedup" in _last_subject(root)
+    assert "athenaeum#290 wiki-dedup" in _last_subject(root)
 
 
 def test_run_catches_merge_deadline_and_exits_124(
@@ -307,7 +307,7 @@ def test_run_catches_merge_deadline_and_exits_124(
 ) -> None:
     """run() wraps the post-compile phase: a RunDeadlineExceeded from the merge
     pass is caught, partial progress is committed, and the run exits 124."""
-    # Issue #461: the entity phase now runs BEFORE the auto-memory block, so
+    # Issue athenaeum#461: the entity phase now runs BEFORE the auto-memory block, so
     # an empty entity intake (n_files=0) isolates this test's actual target
     # (the auto-memory/merge deadline-catch) from the entity loop — a
     # nonempty intake here would have the entity loop's `process_one` make a
@@ -353,7 +353,7 @@ def test_run_catches_merge_deadline_and_exits_124(
 
 
 # ---------------------------------------------------------------------------
-# Issue #461 — entity phase moved ahead of the auto-memory block
+# Issue athenaeum#461 — entity phase moved ahead of the auto-memory block
 # ---------------------------------------------------------------------------
 
 
@@ -363,7 +363,7 @@ def test_461_entity_runs_first_then_automemory_deadline_trips_124(
     """AC1: entity intake is compiled FIRST; a deadline that only trips
     during the (later) auto-memory phase still exits 124 with the
     auto-memory phase name — proving the entity phase got to run before the
-    shared deadline was spent, which is the whole point of the #461 reorder.
+    shared deadline was spent, which is the whole point of the athenaeum#461 reorder.
     """
     root = _seed_knowledge_root(tmp_path, n_files=2)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")

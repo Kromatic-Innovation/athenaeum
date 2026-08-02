@@ -142,7 +142,7 @@ def _entity_page(name: str, uid: str, target_bytes: int) -> str:
 
 
 class TestPageSizeGuardrails:
-    """Issue #310 — warn-only oversized wiki-page reporting."""
+    """Issue athenaeum#310 — warn-only oversized wiki-page reporting."""
 
     def _seed(self, tmp_path: Path) -> Path:
         root = tmp_path / "knowledge"
@@ -198,7 +198,7 @@ class TestPageSizeGuardrails:
         assert "[warn] warnpage.md" in out
 
     def test_format_status_backward_compatible(self) -> None:
-        # A pre-#310 status dict (no pages_* keys) must still format.
+        # A pre-athenaeum#310 status dict (no pages_* keys) must still format.
         info = {
             "raw_pending": 0,
             "entity_count": 0,

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for :mod:`athenaeum.contradictions` (C4, issue #198).
+"""Tests for :mod:`athenaeum.contradictions` (C4, issue athenaeum#198).
 
 Covers:
 
@@ -122,7 +122,7 @@ class TestPositiveDetection:
         assert result.conflict_type == "factual"
 
     def test_stance_conflict_type_supported(self, tmp_path: Path) -> None:
-        # Issue #327: `stance` routes an evaluative (opinion) pair to the
+        # Issue athenaeum#327: `stance` routes an evaluative (opinion) pair to the
         # resolver's opinion-attribution short-circuit.
         scope = tmp_path / "scope"
         m1 = _write_am(scope, "a.md", "Tabs are better than spaces.")
@@ -157,7 +157,7 @@ class TestPositiveDetection:
         assert result.detected is True
 
     def test_fenced_json_response_is_tolerated(self, tmp_path: Path) -> None:
-        """Issue #219: fence-wrapped output + trailing brace span must parse.
+        """Issue athenaeum#219: fence-wrapped output + trailing brace span must parse.
 
         The 2026-06-11 nightly run dropped 38 clusters on this shape —
         the greedy first-``{``-to-last-``}`` regex swallowed the trailing
@@ -184,7 +184,7 @@ class TestPositiveDetection:
         self,
         tmp_path: Path,
     ) -> None:
-        """Issue #219: a bare ``` fence (no language tag) also parses."""
+        """Issue athenaeum#219: a bare ``` fence (no language tag) also parses."""
         scope = tmp_path / "scope"
         m1 = _write_am(scope, "a.md", "Facts A.")
         m2 = _write_am(scope, "b.md", "Facts B.")
@@ -357,7 +357,7 @@ class TestContradictionResult:
 
 
 # ---------------------------------------------------------------------------
-# Run-level usage threading (issue #239)
+# Run-level usage threading (issue athenaeum#239)
 # ---------------------------------------------------------------------------
 
 
@@ -399,7 +399,7 @@ class TestUsageThreading:
 
 
 class TestDetectionIncomplete:
-    """Issue #569 (H6): a detector give-up AFTER transient-error retries flags
+    """Issue athenaeum#569 (H6): a detector give-up AFTER transient-error retries flags
     the verdict ``incomplete`` (so merge re-queues the cluster); a non-transient
     failure or a clean verdict does not."""
 

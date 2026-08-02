@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #236 — opt-in Batch API mode for the librarian's tier-2/tier-3 calls.
+"""Issue athenaeum#236 — opt-in Batch API mode for the librarian's tier-2/tier-3 calls.
 
 Covers:
 - Flag resolution: ``--batch-mode`` CLI > ``ATHENAEUM_BATCH_MODE`` env >
-  yaml ``librarian.batch_mode`` > default off (#232 resolver pattern).
+  yaml ``librarian.batch_mode`` > default off (athenaeum#232 resolver pattern).
 - Equivalence: a batch-mode run produces wiki output identical to the
   synchronous path on the same intake with the same (fake, deterministic)
   responses.
 - Budget semantics: ``ATHENAEUM_MAX_API_CALLS`` enforced at batch-assembly
-  time; remainder deferred via the #220 manifest.
+  time; remainder deferred via the athenaeum#220 manifest.
 - Per-result failures (``errored`` results) map onto the existing per-file
   failure path: raw file stays on disk, run returns 1.
 - Same-page tier-3 merges stay synchronous and serialized in file order.
@@ -89,7 +89,7 @@ class _FakeBatches:
         self._never_end = never_end
         self._fail_marker = fail_marker
         self._create_error = create_error
-        # Issue #476: a request whose content contains this marker is returned
+        # Issue athenaeum#476: a request whose content contains this marker is returned
         # from the batch TRUNCATED (unterminated array + stop_reason
         # max_tokens), so a run-level test can exercise the batch-path
         # bigger-budget retry (the sync ``messages.create`` recovers it).
@@ -143,7 +143,7 @@ class _FakeBatches:
                     ),
                 )
             elif self._truncate_marker and self._truncate_marker in user_msg:
-                # #476: an unterminated array cut off at the output budget.
+                # athenaeum#476: an unterminated array cut off at the output budget.
                 yield SimpleNamespace(
                     custom_id=req["custom_id"],
                     result=SimpleNamespace(
@@ -170,7 +170,7 @@ class _FakeBatches:
 class _FakeClient:
     """Fake Anthropic client exposing sync ``messages.create`` AND batches.
 
-    Issue #554 (L11): left ad-hoc rather than repointed at
+    Issue athenaeum#554 (L11): left ad-hoc rather than repointed at
     ``tests.conftest.FakeLLMClient`` — it also models the
     ``client.messages.batches`` API surface (create/retrieve/results/cancel
     for batch mode), which the shared canned-response double doesn't cover.
@@ -225,7 +225,7 @@ def _scripted_responder(params: dict[str, Any]) -> str:
         name = re.search(r"^Name: (.+)$", user_msg, re.MULTILINE).group(1)
         return f"# {name}\n\nFacts about {name}.\n\n[^1]: src"
     if "## Existing page content" in user_msg:
-        # Issue #469: the merge contract is now anchored edit operations, not
+        # Issue athenaeum#469: the merge contract is now anchored edit operations, not
         # a full-page echo. An append_section op yields the same merged page
         # ("...\n\nMerged note from {src}.") the full-echo responder produced,
         # so every downstream content assertion is unchanged.
@@ -599,15 +599,15 @@ class TestBatchSyncEquivalence:
 
 
 # ---------------------------------------------------------------------------
-# Budget semantics (#220) at batch-assembly time
+# Budget semantics (athenaeum#220) at batch-assembly time
 # ---------------------------------------------------------------------------
 
 
 class TestBatchSelfResolvingGuard:
-    """Issue #300 follow-up (#304): the deterministic self-resolving-claim
+    """Issue athenaeum#300 follow-up (athenaeum#304): the deterministic self-resolving-claim
     guard must fire on the batch transport too, not just the sync path —
-    an opus-model Quine review of the initial #304 PR found batch mode
-    bypassed the guard entirely, the same bypass-class #296 needed a
+    an opus-model Quine review of the initial athenaeum#304 PR found batch mode
+    bypassed the guard entirely, the same bypass-class athenaeum#296 needed a
     post-filter to close.
     """
 
@@ -808,15 +808,15 @@ class TestPhase2BudgetGate:
 
 
 # ---------------------------------------------------------------------------
-# Spend ceiling enforced at batch phase boundaries (issue #483)
+# Spend ceiling enforced at batch phase boundaries (issue athenaeum#483)
 # ---------------------------------------------------------------------------
 
 
 class TestBatchSpendCeiling:
-    """The #378 spend ceiling must halt a batch-mode run at a phase boundary.
+    """The athenaeum#378 spend ceiling must halt a batch-mode run at a phase boundary.
 
-    Before #483 ``spend.ceiling_tripped`` was called only from the synchronous
-    per-file loop, so a ``--batch-mode`` run — the exact path #470's ``drain``
+    Before athenaeum#483 ``spend.ceiling_tripped`` was called only from the synchronous
+    per-file loop, so a ``--batch-mode`` run — the exact path athenaeum#470's ``drain``
     forces — ran both tier batches to completion with ZERO dollar check.
     """
 
@@ -850,7 +850,7 @@ class TestBatchSpendCeiling:
         # Exactly ONE batch submitted (tier-2 classify); tier-3 was gated.
         assert len(client.batches.submitted) == 1
         # No entity page created — every tier-3 create was deferred, not written
-        # (the only wiki/ file is the #220 deferred-work manifest).
+        # (the only wiki/ file is the athenaeum#220 deferred-work manifest).
         assert "widget" not in " ".join(_wiki_snapshot(root)).lower()
         # Both files deferred; their raws stay on disk for the next run.
         text = (root / "wiki" / "_deferred_work.md").read_text(encoding="utf-8")
@@ -1326,8 +1326,8 @@ class TestBatchDryRun:
 
 
 # ---------------------------------------------------------------------------
-# Issue #476 — a Tier-2 batch result truncated at max_tokens is retried
-# SYNCHRONOUSLY with a larger budget at finalize (closing #472's sync-only
+# Issue athenaeum#476 — a Tier-2 batch result truncated at max_tokens is retried
+# SYNCHRONOUSLY with a larger budget at finalize (closing athenaeum#472's sync-only
 # gap), so an entity-dense file recovers instead of silently degrading.
 # ---------------------------------------------------------------------------
 
@@ -1358,7 +1358,7 @@ class TestBatchTruncationRetry:
         # Tier-2 went through the Batch API (first, truncated, attempt).
         assert client.batches.submitted
         # A synchronous classify retry fired with a LARGER budget than the
-        # batch attempt used — the #476 fix, on the batch path.
+        # batch attempt used — the athenaeum#476 fix, on the batch path.
         batch_t2_budget = client.batches.submitted[0][0]["params"]["max_tokens"]
         classify_retries = [
             c

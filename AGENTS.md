@@ -99,3 +99,12 @@ markdown or in `athenaeum merges` JSON output.
 - Apache 2.0 license; contributor sign-off via DCO
 - Public API exposed via `athenaeum/__init__.py`; anything not in `__all__`
   is internal and subject to change without a major-version bump
+- **Tracker citations are written `athenaeum#NNN`, never bare `#NNN`** (a
+  cross-repo ref uses that repo's qualifier, e.g. `hestia#123`). This repo is
+  periodically re-exported to a public tree, where a bare `#NNN` ties public
+  text back to a private tracker with no context; the required
+  `public-safe-lint` check (`.github/workflows/public-safe-lint.yml`, folded
+  into `CI Required`) flags a bare `#NNN` as `bare-issue-ref`. Writing the
+  qualifier keeps your CHANGELOG line and doc/code comments green on their
+  first commit — the check is not a formality, and a lane that writes a bare
+  `#NNN` reds it.

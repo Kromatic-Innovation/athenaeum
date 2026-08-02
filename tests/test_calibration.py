@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the tier audit sampler + calibration ledger (issue #438).
+"""Tests for the tier audit sampler + calibration ledger (issue athenaeum#438).
 
 The calibration loop for the tiered reasoning pass: a random audit share of
 T1 rejects and T2 approvals is surfaced for human confirm/overturn review.

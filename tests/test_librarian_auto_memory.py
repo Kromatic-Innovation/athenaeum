@@ -1,4 +1,4 @@
-"""Tests for auto-memory ingest path (C1, issue #195).
+"""Tests for auto-memory ingest path (C1, issue athenaeum#195).
 
 Covers :func:`athenaeum.librarian.discover_auto_memory_files` and the
 :class:`athenaeum.models.AutoMemoryFile` record schema. The ingest path
@@ -306,7 +306,7 @@ class TestAutoMemoryRecord:
 
 
 # ---------------------------------------------------------------------------
-# Issue #173: self-reference in refines / supersedes is dropped + warned
+# Issue athenaeum#173: self-reference in refines / supersedes is dropped + warned
 # ---------------------------------------------------------------------------
 
 
@@ -372,12 +372,12 @@ class TestSelfReferenceLint:
 
 
 # ---------------------------------------------------------------------------
-# Issue #260: origin-traced source footnotes (source_type / source_ref)
+# Issue athenaeum#260: origin-traced source footnotes (source_type / source_ref)
 # ---------------------------------------------------------------------------
 
 
 class TestSourceTypeSchema:
-    """``_parse_one_source`` carries source_type + source_ref (slice A, #260)."""
+    """``_parse_one_source`` carries source_type + source_ref (slice A, athenaeum#260)."""
 
     def test_dict_source_carries_type_and_ref(self) -> None:
         from athenaeum.merge import _parse_one_source
@@ -577,7 +577,7 @@ class TestSourceFootnoteRendering:
         assert "[^src" not in body_line
 
     def test_footnote_carries_claim_and_verdict(self) -> None:
-        """Issue #262: a footnote renders the granular claim + resolved verdict."""
+        """Issue athenaeum#262: a footnote renders the granular claim + resolved verdict."""
         from athenaeum.merge import MergedWikiEntry, render_source_footnotes
 
         entry = MergedWikiEntry(
@@ -635,7 +635,7 @@ class TestSourceFootnoteRendering:
         assert reparsed["verdict"] == "not_a_conflict"
 
     def test_legacy_source_without_claim_or_verdict_still_renders(self) -> None:
-        """Backward compat: a pre-#262 source (no claim/verdict) is unchanged."""
+        """Backward compat: a pre-athenaeum#262 source (no claim/verdict) is unchanged."""
         from athenaeum.merge import MergedWikiEntry, render_source_footnotes
 
         entry = MergedWikiEntry(
@@ -695,7 +695,7 @@ class TestAutoMemoryFileSourceFields:
 
 
 # ---------------------------------------------------------------------------
-# Issue #261: move-then-retire lifecycle (slice B of #259)
+# Issue athenaeum#261: move-then-retire lifecycle (slice B of athenaeum#259)
 # ---------------------------------------------------------------------------
 
 
@@ -850,7 +850,7 @@ class TestRetireNonContradictory:
     def test_moved_fact_footnote_carries_granular_claim(
         self, retire_root: Path
     ) -> None:
-        """Issue #262: the moved fact's footnote keeps the atomic claim text.
+        """Issue athenaeum#262: the moved fact's footnote keeps the atomic claim text.
 
         After retire-on-move the raw atom is gone, so the wiki footnote must
         carry the granular claim as the diff target for future intake.
@@ -874,7 +874,7 @@ class TestRetireNonContradictory:
     def test_resolved_verdict_lands_in_written_wiki_file(
         self, retire_root: Path
     ) -> None:
-        """Issue #262 / Quine #3b: a settled verdict reaches the wiki on disk.
+        """Issue athenaeum#262 / Quine #3b: a settled verdict reaches the wiki on disk.
 
         Drives a REAL cleared ``ContradictionResult`` (the merge confirmation
         pass labels an over-fire ``confirmation-pass-cleared``) through
@@ -975,7 +975,7 @@ def _seed_index(knowledge_root: Path, body: str) -> Path:
 
 
 class TestRetireIndexSweep:
-    """Issue #388: retiring a member drops its sibling MEMORY.md pointer."""
+    """Issue athenaeum#388: retiring a member drops its sibling MEMORY.md pointer."""
 
     def test_retired_member_pointer_is_dropped(self, retire_root: Path) -> None:
         from athenaeum.merge import merge_clusters_to_wiki
@@ -1298,7 +1298,7 @@ class TestRetireIntegrationViaRun:
         assert meta["retired"] is True
 
     def test_no_retire_flag_skips_retire(self, retire_root: Path) -> None:
-        # Issue #259 opt-out: run(retire=False) skips the retire pass entirely
+        # Issue athenaeum#259 opt-out: run(retire=False) skips the retire pass entirely
         # — the raw is neither moved nor git-removed.
         from athenaeum.librarian import run
         from athenaeum.merge import AUTO_WIKI_PREFIX
@@ -1321,7 +1321,7 @@ class TestRetireIntegrationViaRun:
         assert meta.get("retired") is not True
 
     def test_yaml_retire_false_skips_retire(self, retire_root: Path) -> None:
-        # Issue #259 opt-out via yaml: librarian.retire: false disables the
+        # Issue athenaeum#259 opt-out via yaml: librarian.retire: false disables the
         # pass even though run() is called with retire=None (default resolve).
         from athenaeum.librarian import run
 

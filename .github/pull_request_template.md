@@ -31,4 +31,4 @@
 
 ## Related issues
 
-<!-- Closes #123, refs #456 -->
+<!-- Closes athenaeum#123, refs athenaeum#456 -->

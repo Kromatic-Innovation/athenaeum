@@ -1,4 +1,4 @@
-"""Tests for `athenaeum merges {list,next,count}` (issue #401).
+"""Tests for `athenaeum merges {list,next,count}` (issue athenaeum#401).
 
 The merges half of the unified decisions surface — previously there was NO
 CLI for `wiki/_pending_merges.md` at all. Mirrors `test_questions_cli.py`:
@@ -109,7 +109,7 @@ def test_list_excludes_resolved_and_enriches_sources(knowledge_root: Path) -> No
     merge = payload[0]
     assert merge["merge_target_name"] == "auth"
     assert merge["confidence"] == 0.92
-    # Per-source human title + gist (NOT the uuid-slug) — the #401 contract.
+    # Per-source human title + gist (NOT the uuid-slug) — the athenaeum#401 contract.
     titles = [s["title"] for s in merge["sources"]]
     assert titles == ["MCP Public Auth Design", "OAuth 2.1 Refresh-Token Rotation"]
     gists = {s["title"]: s["gist"] for s in merge["sources"]}
@@ -221,7 +221,7 @@ def test_list_text_multiple_blocks_separated(tmp_path: Path) -> None:
     assert "rationale: r1" in out
 
 
-# --- issue #481: `merges revalidate [--apply]` -----------------------------
+# --- issue athenaeum#481: `merges revalidate [--apply]` -----------------------------
 
 
 def _over_cap_sidecar(tmp_path: Path) -> Path:

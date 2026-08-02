@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""LLM provider seam + first-party backends (issue #330).
+"""LLM provider seam + first-party backends (issue athenaeum#330).
 
 Centralizes LLM client construction behind a single factory so the four
 ``messages.create`` call sites (:mod:`athenaeum.tiers`,
@@ -9,20 +9,20 @@ serving them. Two backends ship:
 
 ``api`` (default)
     Wraps today's :class:`anthropic.Anthropic` client verbatim. Params pass
-    through UNCHANGED, so prompt caching (issue #230), the Messages Batch API
-    (issue #236), retries, and every other SDK behavior are byte-for-byte
-    identical to the pre-#330 code. The returned object *is* a real
+    through UNCHANGED, so prompt caching (issue athenaeum#230), the Messages Batch API
+    (issue athenaeum#236), retries, and every other SDK behavior are byte-for-byte
+    identical to the pre-athenaeum#330 code. The returned object *is* a real
     ``anthropic.Anthropic``.
 
 ``claude-cli``
     Drives the operator's ambient Claude Code subscription login via
     ``claude -p --model <id> --system-prompt <sys> --output-format json``.
-    No credential handling: exactly like the git-push path (#284), athenaeum
+    No credential handling: exactly like the git-push path (athenaeum#284), athenaeum
     relies on the operator's own ``claude`` login. The adapter mirrors the
     slice of the SDK surface the call sites use — ``client.messages.create(
     **params)`` returning an object whose text answer is read via
     :func:`response_text` (the first ``type == "text"`` content block, skipping
-    any leading thinking blocks — issue #578) plus a ``.usage`` carrying the
+    any leading thinking blocks — issue athenaeum#578) plus a ``.usage`` carrying the
     four token counters :func:`athenaeum.models.cache_usage_counts` reads — so
     the call sites need no change.
 
@@ -102,13 +102,13 @@ class ProviderConfigError(ValueError):
 def resolve_provider(config: dict[str, Any] | None) -> str:
     """Resolve the active LLM provider from env > yaml ``llm.provider`` > api.
 
-    Issue #330. Mirrors :func:`athenaeum.config.resolve_model`'s precedence:
+    Issue athenaeum#330. Mirrors :func:`athenaeum.config.resolve_model`'s precedence:
     the ``ATHENAEUM_LLM_PROVIDER`` env var wins over the yaml ``llm.provider``
     key so an operator can swap backends for a single run without editing
     config, and the yaml key is read only when actually set. Values are
     case-folded and whitespace-trimmed. An unrecognized value raises
     :class:`ProviderConfigError` (loud — a typo must never silently fall back
-    to a different backend). No seed in ``_DEFAULTS`` (issue #231) so the code
+    to a different backend). No seed in ``_DEFAULTS`` (issue athenaeum#231) so the code
     default stays reachable.
     """
     raw = os.environ.get("ATHENAEUM_LLM_PROVIDER")
@@ -136,7 +136,7 @@ def resolve_provider(config: dict[str, Any] | None) -> str:
 def preflight_provider(provider: str) -> str | None:
     """Return a startup error message if PROVIDER cannot run, else ``None``.
 
-    Issue #330. The ``claude-cli`` backend authenticates via an ambient
+    Issue athenaeum#330. The ``claude-cli`` backend authenticates via an ambient
     ``claude`` login and has no API-key check, so a missing / mistyped binary
     would otherwise fail per-file at call time — the run would exit rc 0 having
     silently deferred every file and printed no token summary. This probe makes
@@ -158,7 +158,7 @@ def preflight_provider(provider: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# The LLM backend contract (issue #572 / epic #515)
+# The LLM backend contract (issue athenaeum#572 / epic athenaeum#515)
 #
 # The seam is not greenfield: ``build_llm_client`` already hides the backend
 # from the four ``messages.create`` call sites, and ``ClaudeCliClient`` already
@@ -169,9 +169,9 @@ def preflight_provider(provider: str) -> str | None:
 #
 # * ``messages.create(**params)`` — the one method every backend must serve;
 # * the response the callers read — its text answer (via :func:`response_text`,
-#   the first ``type == "text"`` block — issue #578) and ``.stop_reason``;
+#   the first ``type == "text"`` block — issue athenaeum#578) and ``.stop_reason``;
 # * the four normalized ``.usage`` counters
-#   :func:`athenaeum.models.cache_usage_counts` reads (issue #230).
+#   :func:`athenaeum.models.cache_usage_counts` reads (issue athenaeum#230).
 #
 # The concrete backends must ACTUALLY satisfy this contract — the ``# type:
 # ignore[dict-item]`` leaky-registry pattern the audit flagged at
@@ -185,7 +185,7 @@ def preflight_provider(provider: str) -> str | None:
 @runtime_checkable
 class LLMUsage(Protocol):
     """The four token counters :func:`~athenaeum.models.cache_usage_counts`
-    reads off ``response.usage`` (issue #230)."""
+    reads off ``response.usage`` (issue athenaeum#230)."""
 
     input_tokens: int
     output_tokens: int
@@ -197,7 +197,7 @@ class LLMUsage(Protocol):
 class LLMTextBlock(Protocol):
     """One content block. Callers read the text answer via
     :func:`response_text` (the first ``type == "text"`` block, skipping any
-    leading thinking blocks — issue #578)."""
+    leading thinking blocks — issue athenaeum#578)."""
 
     text: str
 
@@ -212,11 +212,11 @@ class LLMResponse(Protocol):
     ``ClaudeCliClient``'s ``content: list[_CliTextBlock]`` against a
     ``Sequence[LLMTextBlock]`` field). Read-only properties are covariant, so a
     concrete backend satisfies the contract by exposing compatible attributes —
-    which is exactly the "must ACTUALLY satisfy" guarantee issue #572 requires.
+    which is exactly the "must ACTUALLY satisfy" guarantee issue athenaeum#572 requires.
 
     ``content`` is a sequence of blocks (callers read the text answer via
     :func:`response_text`, which skips any leading thinking blocks — issue
-    #578); ``stop_reason`` is the terminal reason (``"max_tokens"``,
+    athenaeum#578); ``stop_reason`` is the terminal reason (``"max_tokens"``,
     ``"end_turn"``, ...) or ``None`` when a backend cannot report it; ``usage``
     carries the four normalized token counters.
     """
@@ -238,7 +238,7 @@ class LLMMessages(Protocol):
     Every athenaeum call site invokes ``client.messages.create(**params)`` and
     reads an :class:`LLMResponse` off the result; the parameter dict itself
     stays backend-neutral (a backend that cannot honor a param drops or
-    normalizes it — see the ``ProviderCapabilities`` child, issue #573).
+    normalizes it — see the ``ProviderCapabilities`` child, issue athenaeum#573).
     """
 
     def create(self, **params: Any) -> LLMResponse: ...
@@ -246,7 +246,7 @@ class LLMMessages(Protocol):
 
 @runtime_checkable
 class LLMBackend(Protocol):
-    """The declared LLM backend contract (issue #572 / epic #515).
+    """The declared LLM backend contract (issue athenaeum#572 / epic athenaeum#515).
 
     A backend is anything exposing a ``messages`` facade whose ``create``
     returns an :class:`LLMResponse`. Both shipping backends satisfy it: the
@@ -267,12 +267,12 @@ class LLMBackend(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Provider capabilities (issue #573 / epic #515)
+# Provider capabilities (issue athenaeum#573 / epic athenaeum#515)
 #
 # The load-bearing piece of the epic: each backend DECLARES what it can honor
 # instead of silently no-op'ing a param it drops. The audit found the exact
-# bug this prevents (M15, issue #574): the CLI backend drops ``max_tokens``
-# with no CLI equivalent (``provider.py`` ``_create``), so the #476 truncation
+# bug this prevents (M15, issue athenaeum#574): the CLI backend drops ``max_tokens``
+# with no CLI equivalent (``provider.py`` ``_create``), so the athenaeum#476 truncation
 # retry — whose only change is raising ``max_tokens`` — re-sends a byte-
 # identical request; and it cannot populate ``stop_reason``, so the
 # truncation-detection branches never fire. Two defects, one root cause: a
@@ -294,7 +294,7 @@ class ProviderCapabilities:
     """What a backend can honor. Frozen — a backend's capabilities are fixed.
 
     Callers branch or warn on a ``False`` flag instead of silently sending a
-    request the backend will drop (issue #573). The four flags here are
+    request the backend will drop (issue athenaeum#573). The four flags here are
     TRANSPORT-level (a property of the backend), resolved by
     :func:`capabilities_for`.
 
@@ -302,15 +302,15 @@ class ProviderCapabilities:
     ``top_p`` / ``top_k`` return HTTP 400 on Opus 4.7+, Opus 5, Sonnet 5, and
     Fable 5, and are accepted on Haiku 4.5 / Sonnet 4.6 — a property of the
     *model*, not the transport. The model-level prefix set that records this
-    lands with the pricing table in :mod:`athenaeum.models` (issue #577 / epic
-    #516's B1), which is *"the single update site for model pricing"*; this
-    module reads that set rather than re-declaring it (epic #515: the sampling-
+    lands with the pricing table in :mod:`athenaeum.models` (issue athenaeum#577 / epic
+    athenaeum#516's B1), which is *"the single update site for model pricing"*; this
+    module reads that set rather than re-declaring it (epic athenaeum#515: the sampling-
     capability set *"should land once, not twice"*). The value here is the
     transport-level default (the CLI drops sampling params like ``max_tokens``;
     the ``api`` transport passes them through and the model 400s or does not);
-    per-model refinement is wired in :func:`capabilities_for` once #577's set
+    per-model refinement is wired in :func:`capabilities_for` once athenaeum#577's set
     exists. The flag DESCRIBES reality — it is not a step toward sending the
-    parameter (issues #573/#577 both put that out of scope).
+    parameter (issues athenaeum#573/#577 both put that out of scope).
     """
 
     honors_max_tokens: bool
@@ -321,10 +321,10 @@ class ProviderCapabilities:
 
 
 #: The ``api`` backend wraps the real Anthropic SDK: every param passes through
-#: unchanged (issue #330), so it honors ``max_tokens``, reports ``stop_reason``,
+#: unchanged (issue athenaeum#330), so it honors ``max_tokens``, reports ``stop_reason``,
 #: preserves ``cache_control`` breakpoints, and supports the Messages Batch API.
 #: ``honors_sampling_params`` is the transport-level default (the SDK forwards
-#: the params); whether a given MODEL 400s is #577's model-level set.
+#: the params); whether a given MODEL 400s is athenaeum#577's model-level set.
 _API_CAPABILITIES = ProviderCapabilities(
     honors_max_tokens=True,
     reports_stop_reason=True,
@@ -351,7 +351,7 @@ def reported_stop_reason(
     response: Any, capabilities: ProviderCapabilities
 ) -> str | None:
     """Return *response*'s ``stop_reason``, or ``None`` if the backend cannot
-    reliably report it (issue #574).
+    reliably report it (issue athenaeum#574).
 
     A backend with ``reports_stop_reason=False`` (``claude-cli``) does not
     reliably populate a message-level ``stop_reason``: the ``--output-format
@@ -375,11 +375,11 @@ def reported_stop_reason(
 
 
 def response_text(response: Any) -> str:
-    """Return the model's TEXT answer from a Messages API response (issue #578).
+    """Return the model's TEXT answer from a Messages API response (issue athenaeum#578).
 
     The call sites parse the model's answer out of ``response.content`` — but
     ``response.content[0]`` is NOT always the text block. When a stage enables
-    adaptive thinking (issue #578 wired the resolver / tier-3 / merge stages to
+    adaptive thinking (issue athenaeum#578 wired the resolver / tier-3 / merge stages to
     ``thinking: {"type": "adaptive"}``, which is supported on the CURRENT
     Opus 4.7 / Sonnet 4.6 defaults, not only on a future Opus 5 / Sonnet 5),
     the response begins with one or more ``type == "thinking"`` (or
@@ -417,7 +417,7 @@ def response_text(response: Any) -> str:
 
 
 def capabilities_for(provider: str) -> ProviderCapabilities:
-    """Return the :class:`ProviderCapabilities` for backend *provider* (#573).
+    """Return the :class:`ProviderCapabilities` for backend *provider* (athenaeum#573).
 
     Keyed by backend id (``"api"`` | ``"claude-cli"``). An unrecognized id maps
     to the ``api`` capabilities — the conservative choice, since ``api`` honors
@@ -426,7 +426,7 @@ def capabilities_for(provider: str) -> ProviderCapabilities:
 
     The MODEL-level refinement of ``honors_sampling_params`` (Opus 4.7+/5 etc.
     return HTTP 400) is deferred to :mod:`athenaeum.models`' sampling-capability
-    prefix set (issue #577); when that set lands, this function grows a ``model``
+    prefix set (issue athenaeum#577); when that set lands, this function grows a ``model``
     argument that reads it, rather than re-declaring the prefixes here.
     """
     if provider == "claude-cli":
@@ -435,7 +435,7 @@ def capabilities_for(provider: str) -> ProviderCapabilities:
 
 
 # ---------------------------------------------------------------------------
-# Per-stage params contract (issue #575 / epic #515)
+# Per-stage params contract (issue athenaeum#575 / epic athenaeum#515)
 #
 # Each LLM stage's ``max_tokens`` budget used to be a literal baked into its
 # call-site params dict (the audit counted them "scattered across nine call-site
@@ -445,7 +445,7 @@ def capabilities_for(provider: str) -> ProviderCapabilities:
 # makes each one config-overridable. Today's values are unchanged: this moves
 # WHERE the value lives, not what it is. A backend that cannot honor
 # ``max_tokens`` (``claude-cli``) still drops it downstream — see
-# ``ProviderCapabilities.honors_max_tokens`` (#573/#574).
+# ``ProviderCapabilities.honors_max_tokens`` (athenaeum#573/#574).
 # ---------------------------------------------------------------------------
 
 
@@ -465,14 +465,14 @@ def resolve_max_tokens(
     config: dict[str, Any] | None = None,
 ) -> int:
     """Resolve a stage's ``max_tokens`` from env > yaml ``max_tokens.<knob>`` >
-    code default (issue #575).
+    code default (issue athenaeum#575).
 
     Mirrors :func:`athenaeum.config.resolve_model`'s precedence, but for a
     stage's OUTPUT-TOKEN budget: the ``env_var`` wins over the yaml
     ``max_tokens.<knob>`` key (read only when the operator set it), and
     *default* — today's baked-in literal, unchanged — is the code default. No
     seed in config ``_DEFAULTS`` so the code default stays reachable (issue
-    #231). A non-integer or non-positive override is IGNORED with a warning:
+    athenaeum#231). A non-integer or non-positive override is IGNORED with a warning:
     the code default is far safer than a budget of ``0``, which would truncate
     every response.
     """
@@ -498,11 +498,11 @@ def resolve_max_tokens(
 
 
 # ---------------------------------------------------------------------------
-# Per-stage ``thinking`` knob (issue #578 / epic #516's B2)
+# Per-stage ``thinking`` knob (issue athenaeum#578 / epic athenaeum#516's B2)
 #
 # No call site sets ``thinking`` today (harmless while every stage defaults to
 # a model that runs without thinking when the param is omitted). But the
-# moment a stage's default model moves to Opus 5 / Sonnet 5 (issue #580,
+# moment a stage's default model moves to Opus 5 / Sonnet 5 (issue athenaeum#580,
 # blocked_by this issue), OMITTING ``thinking`` on those tiers runs ADAPTIVE
 # thinking silently — and ``max_tokens`` caps thinking + response TOGETHER, so
 # a budget sized for a no-thinking response becomes a truncation risk. This
@@ -531,13 +531,13 @@ def resolve_thinking(
     config: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Resolve a stage's ``thinking`` posture from env > yaml
-    ``thinking.<knob>`` > code default (issue #578).
+    ``thinking.<knob>`` > code default (issue athenaeum#578).
 
     Mirrors :func:`resolve_max_tokens`'s precedence exactly: the *env_var*
     wins over the yaml ``thinking.<knob>`` key (read only when the operator
     set it), and *default* — the stage's chosen posture — is the code
     default. No seed in config ``_DEFAULTS`` so the code default stays
-    reachable (issue #231, same rationale as :func:`resolve_max_tokens`).
+    reachable (issue athenaeum#231, same rationale as :func:`resolve_max_tokens`).
 
     Args:
         knob: the stage name, e.g. ``"resolve"``, ``"merge_patch"``,
@@ -550,7 +550,7 @@ def resolve_thinking(
     Returns:
         The dict the SDK expects for the ``thinking`` request param —
         ``{"type": "adaptive"}`` or ``{"type": "disabled"}``. Deliberately
-        never ``None``: per issue #578's acceptance criteria, every call site
+        never ``None``: per issue athenaeum#578's acceptance criteria, every call site
         should send an EXPLICIT disabled dict rather than omit the parameter,
         so no stage silently rides a model-dependent default (adaptive on
         Opus 5 / Sonnet 5 by omission, no-thinking on Opus 4.7/4.8 by
@@ -587,14 +587,14 @@ def resolve_thinking(
 # claude-cli adapter — response shapes mirroring the anthropic SDK surface the
 # call sites consume (the text answer via :func:`response_text` + ``.usage``
 # counters). ``_CliTextBlock`` carries ``type == "text"`` so :func:`response_text`
-# treats it as the answer block (issue #578) — the CLI never emits a thinking
+# treats it as the answer block (issue athenaeum#578) — the CLI never emits a thinking
 # block, so its single block is always the text.
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class _CliUsage:
-    """Token counters in the exact shape ``cache_usage_counts`` reads (#230)."""
+    """Token counters in the exact shape ``cache_usage_counts`` reads (athenaeum#230)."""
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -605,7 +605,7 @@ class _CliUsage:
 @dataclass
 class _CliTextBlock:
     """One content block; its ``type == "text"`` default makes it the answer
-    block :func:`response_text` returns (issue #578)."""
+    block :func:`response_text` returns (issue athenaeum#578)."""
 
     text: str
     type: str = "text"
@@ -627,7 +627,7 @@ def _text_from_system(system: Any) -> str:
     Strips ``cache_control`` (and every other block key) by design — the CLI
     path has no caching breakpoints, so only the prompt TEXT survives. This is
     the behavior ``capabilities_for("claude-cli").honors_cache_control is
-    False`` now DECLARES (issue #573, folding the documented-but-unenforced
+    False`` now DECLARES (issue athenaeum#573, folding the documented-but-unenforced
     stripping into the capability set).
     """
     if system is None:
@@ -708,12 +708,12 @@ class _CliMessages:
         return self._client._create(**params)
 
     # NOTE: ``.batches`` is intentionally absent. Batch mode is API-only
-    # (issue #330); the loud startup guard in run_librarian rejects
+    # (issue athenaeum#330); the loud startup guard in run_librarian rejects
     # ``claude-cli`` + batch before any batch call could reach here.
 
 
 class ClaudeCliClient:
-    """Adapter that serves ``messages.create`` via the ``claude`` CLI (#330).
+    """Adapter that serves ``messages.create`` via the ``claude`` CLI (athenaeum#330).
 
     Mirrors the ``anthropic.Anthropic`` surface the call sites use. Ambient
     subscription login only — no API key, no credential handling.
@@ -742,7 +742,7 @@ class ClaudeCliClient:
         self.messages = _CliMessages(self)
 
     def _build_argv(self, model: str, system_text: str) -> list[str]:
-        # Issue #543 (L4): the USER prompt is passed on STDIN (see ``_create``),
+        # Issue athenaeum#543 (L4): the USER prompt is passed on STDIN (see ``_create``),
         # NOT as a ``-p`` argv element — so the user's own notes never sit in the
         # process table (visible to any local user via ``ps`` for the up-to-300s
         # life of the call). ``claude -p`` with no positional prompt reads the
@@ -754,7 +754,7 @@ class ClaudeCliClient:
         if system_text:
             # ``--system-prompt`` (not ``--append-system-prompt``): fully
             # REPLACE Claude Code's default agent persona so the tier prompt
-            # is the entire instruction context (#330).
+            # is the entire instruction context (athenaeum#330).
             argv += ["--system-prompt", system_text]
         return argv
 
@@ -776,7 +776,7 @@ class ClaudeCliClient:
         try:
             proc = subprocess.run(
                 argv,
-                # Issue #543 (L4): user prompt on stdin, never in argv/`ps`.
+                # Issue athenaeum#543 (L4): user prompt on stdin, never in argv/`ps`.
                 input=user_text,
                 capture_output=True,
                 text=True,
@@ -784,7 +784,7 @@ class ClaudeCliClient:
                 cwd=self.cwd,
                 check=False,
                 # Suppress the host Claude Code Stop-hook desktop notification
-                # for these programmatic ``claude -p`` calls (#377). Merged on
+                # for these programmatic ``claude -p`` calls (athenaeum#377). Merged on
                 # top of the inherited environment so PATH/HOME/ambient auth
                 # still reach the subprocess.
                 env={**os.environ, "CLAUDE_SUPPRESS_NOTIFY": "1"},
@@ -817,13 +817,13 @@ class ClaudeCliClient:
         ASSISTANT TEXT it carries (``result``) may still be messy (fenced /
         prose-wrapped JSON) — that is handled downstream by the SAME lenient
         :func:`athenaeum.json_utils.extract_json_object` path the API responses
-        use (#219/#222); this adapter returns the text verbatim.
+        use (athenaeum#219/#222); this adapter returns the text verbatim.
         """
         stdout = stdout.strip()
         try:
             envelope = json.loads(stdout)
         except json.JSONDecodeError as exc:
-            # Issue #543 (L5): redact the raw model output before it lands in an
+            # Issue athenaeum#543 (L5): redact the raw model output before it lands in an
             # error message — the sibling response-log site (tiers.py) already
             # does this; this was the one that didn't.
             redacted_prefix, _findings = redact_outbound_text(stdout[:200])
@@ -878,7 +878,7 @@ class ClaudeCliClient:
 
 
 if TYPE_CHECKING:
-    # Issue #572: ``ClaudeCliClient`` must ACTUALLY satisfy the declared
+    # Issue athenaeum#572: ``ClaudeCliClient`` must ACTUALLY satisfy the declared
     # backend contract — no ``# type: ignore`` escape (the leaky-registry
     # anti-pattern the audit flagged at ``search.py:1654-1657``). If the
     # adapter ever drifts from :class:`LLMBackend` (a renamed ``messages``
@@ -900,9 +900,9 @@ def build_llm_client(
     max_retries: int | None = None,
     timeout: float | None = None,
 ) -> Any | None:
-    """Construct the LLM client for the resolved provider (issue #330).
+    """Construct the LLM client for the resolved provider (issue athenaeum#330).
 
-    The returned client satisfies the :class:`LLMBackend` contract (issue #572):
+    The returned client satisfies the :class:`LLMBackend` contract (issue athenaeum#572):
     ``claude-cli`` returns a :class:`ClaudeCliClient` (the first explicit
     implementor, type-checked against the Protocol above), and ``api`` returns a
     real :class:`anthropic.Anthropic`, which serves the same
@@ -941,7 +941,7 @@ def build_llm_client(
     kwargs: dict[str, Any] = {"api_key": key}
     if max_retries is not None:
         kwargs["max_retries"] = max_retries
-    # Forward a client-level timeout when the caller set one (issue #380). Only
+    # Forward a client-level timeout when the caller set one (issue athenaeum#380). Only
     # the per-turn query_topics call site passes ``timeout`` today, so this is
     # additive for every other caller (they leave it None -> SDK default) while
     # preserving query_topics' 3s hook budget byte-for-byte on the api backend.

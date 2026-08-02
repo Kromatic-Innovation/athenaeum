@@ -1,4 +1,4 @@
-"""Tests for the resolved-contradiction fingerprint cache (issue #198).
+"""Tests for the resolved-contradiction fingerprint cache (issue athenaeum#198).
 
 The contradiction detector compares passage PAIRS per page, so an
 already-adjudicated claim re-escalates as a brand-new pending question on
@@ -34,7 +34,7 @@ def test_suppress_verdict_matches_resolutions_constant() -> None:
     """``fingerprint._SUPPRESS_VERDICT`` is re-declared locally to keep the
     module free of heavy imports; it must stay equal to the canonical
     ``resolutions.SUPPRESS_ACTION``. Enforce mechanically so drift fails the
-    suite instead of relying on the in-code comment (issue #251 cleanup)."""
+    suite instead of relying on the in-code comment (issue athenaeum#251 cleanup)."""
     assert fingerprint._SUPPRESS_VERDICT == resolutions.SUPPRESS_ACTION
 
 
@@ -156,7 +156,7 @@ class TestCacheRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# Single authoritative ``action`` key (issue #207)
+# Single authoritative ``action`` key (issue athenaeum#207)
 # ---------------------------------------------------------------------------
 
 
@@ -169,7 +169,7 @@ def _action_of(record: dict) -> str:
 class TestSingleAuthoritativeActionKey:
     def test_writer_emits_action_not_duplicate_verdict(self, tmp_path: Path) -> None:
         """A freshly written record carries ``action`` and NOT a duplicate
-        ``verdict`` key (issue #207 — drop the redundant key on write)."""
+        ``verdict`` key (issue athenaeum#207 — drop the redundant key on write)."""
         root = _knowledge_root(tmp_path)
         fp = claim_pair_fingerprint(CLAIM_A, CLAIM_B, "factual")
         record_resolution(
@@ -204,7 +204,7 @@ class TestSingleAuthoritativeActionKey:
 
     def test_roundtrip_resolves_correct_action(self, tmp_path: Path) -> None:
         """record_resolution → load_resolved_records yields the right action
-        for the #199 auto-apply path."""
+        for the athenaeum#199 auto-apply path."""
         root = _knowledge_root(tmp_path)
         fp = claim_pair_fingerprint(CLAIM_A, CLAIM_B, "factual")
         record_resolution(root, fingerprint=fp, verdict="forget_b", resolved_by="human")
@@ -240,7 +240,7 @@ class TestEndToEndSuppression:
 
         # Page X surfaces the conflict; record its resolution to the cache.
         # Use an ORIENTATION-AGNOSTIC verdict (not_a_conflict) so this stays a
-        # pure-suppression test: #199's orientation reconciliation only gates
+        # pure-suppression test: athenaeum#199's orientation reconciliation only gates
         # the orientation-DEPENDENT enacting verdicts (correct/keep/forget),
         # which — with no real source members — would correctly escalate
         # rather than silently suppress. not_a_conflict suppresses unchanged.
@@ -351,7 +351,7 @@ class TestResolvedByRecorded:
 
 
 # ---------------------------------------------------------------------------
-# Read-time decay of stale auto not_a_conflict suppressions (issue #251)
+# Read-time decay of stale auto not_a_conflict suppressions (issue athenaeum#251)
 # ---------------------------------------------------------------------------
 
 from datetime import datetime, timezone  # noqa: E402
@@ -478,7 +478,7 @@ from athenaeum.fingerprint import (  # noqa: E402
 
 
 class TestDeprecatedSuppressionKnobsWarn:
-    """Issue #262: the two suppression knobs are tolerated but warn once.
+    """Issue athenaeum#262: the two suppression knobs are tolerated but warn once.
 
     With retire-on-move + footnote-targeting they are moot, but a config that
     still sets them must keep working (tolerate) and emit a deprecation

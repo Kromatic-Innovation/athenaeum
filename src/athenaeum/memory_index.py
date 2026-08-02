@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-scope ``MEMORY.md`` index maintenance (issue #388).
+"""Per-scope ``MEMORY.md`` index maintenance (issue athenaeum#388).
 
 Each ``raw/auto-memory/<scope>/`` directory carries a curated ``MEMORY.md``
 index — one ``- [Title](file.md) — hook`` pointer per raw member. Unlike the
@@ -104,7 +104,7 @@ def rewrite_index(
 
 
 # ---------------------------------------------------------------------------
-# Backfill: prune EXISTING dangling pointers (issue #388, one-shot sweep)
+# Backfill: prune EXISTING dangling pointers (issue athenaeum#388, one-shot sweep)
 # ---------------------------------------------------------------------------
 
 
@@ -138,7 +138,7 @@ def build_dangling_report(intake_roots: list[Path]) -> DanglingReport:
 
     A pointer is *dangling* when its bare ``<file>.md`` target does not exist in
     the same scope directory — exactly the residue move-then-retire left behind
-    before #388. Scopes with no dangling pointer are omitted from the report
+    before athenaeum#388. Scopes with no dangling pointer are omitted from the report
     (nothing to rewrite). Unreadable indexes are recorded as errors and skipped
     (conservative: never rewrite what we could not fully read).
     """
@@ -225,7 +225,7 @@ def apply_prune_index(knowledge_root: Path, report: DanglingReport) -> DanglingR
             "commit",
             "-m",
             f"chore(auto-memory): prune {total} dangling MEMORY.md pointer(s) "
-            f"across {len(rel_paths)} scope(s) (#388)",
+            f"across {len(rel_paths)} scope(s) (athenaeum#388)",
             "--",
             *rel_paths,
         )

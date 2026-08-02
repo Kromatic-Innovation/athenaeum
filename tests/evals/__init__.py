@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Live-API eval suite (issue #331).
+"""Live-API eval suite (issue athenaeum#331).
 
 Every module here carries ``pytestmark = pytest.mark.eval`` — the ``eval``
 marker is deselected by default (``pyproject.toml`` ``addopts``) so nothing

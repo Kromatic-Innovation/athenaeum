@@ -32,7 +32,7 @@
 
 set -euo pipefail
 
-# ── Kill switch (issue #379) ───────────────────────────────────────────────
+# ── Kill switch (issue athenaeum#379) ───────────────────────────────────────────────
 # Honour ~/.cache/athenaeum/disabled (+ ATHENAEUM_DISABLED). Mirrors
 # athenaeum.killswitch.is_disabled("recall"): the "all" scope no-ops this
 # injection; the "compile" scope leaves recall on. Costs no Python startup.

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the wiki-page dedup pass (issue #290).
+"""Tests for the wiki-page dedup pass (issue athenaeum#290).
 
 Mirrors the stub-embedder convention used by
 ``tests/test_recurring_claims.py`` / ``tests/test_resolved_semantic_match.py``
@@ -201,7 +201,7 @@ class TestProposeWikiPageMerges:
     ) -> None:
         """A dry-run preview after a real run must report 0, not re-propose
         what a real run would silently skip as already-present (Quine
-        review of #293) — otherwise the preview lies about what a real
+        review of athenaeum#293) — otherwise the preview lies about what a real
         run would actually do.
         """
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
@@ -228,8 +228,8 @@ class TestProposeWikiPageMerges:
     ) -> None:
         """The reader/approval path must see the SAME draft a real reviewer
         would approve — not just that a block got appended (Quine review
-        of #293, which found the multi-source draft's ``## From ...``
-        headers were silently truncating the block before the #291 fence
+        of athenaeum#293, which found the multi-source draft's ``## From ...``
+        headers were silently truncating the block before the athenaeum#291 fence
         fix). Exercises ``parse_pending_merges``/``list_pending_merges``/
         ``resolve_merge`` end to end against a real wiki_dedupe proposal.
         """
@@ -316,9 +316,9 @@ class TestProposeWikiPageMerges:
         assert proposals == []
 
 
-# --- Issue #478: degenerate-over-cluster suppression on the wiki-dedupe path ---
+# --- Issue athenaeum#478: degenerate-over-cluster suppression on the wiki-dedupe path ---
 #
-# The #400/#421 gates (``max_merge_sources`` default 5, ``min_merge_mean_similarity``
+# The athenaeum#400/#421 gates (``max_merge_sources`` default 5, ``min_merge_mean_similarity``
 # default 0.6 — both active out of the box) were only wired into ``merge.py``'s
 # resolver write path, NOT ``propose_wiki_page_merges``. Because this pass uses the
 # SAME single-linkage clusterer, one weak bridging edge could chain hundreds/
@@ -340,7 +340,7 @@ def _identical_embed(texts: list[str]) -> list[list[float]]:
 
 
 class TestSuppressionGates:
-    """Issue #478: the #400/#421 suppression gates apply on the wiki-dedupe path."""
+    """Issue athenaeum#478: the athenaeum#400/#421 suppression gates apply on wiki-dedupe."""
 
     def _seed_cohesive_cluster(self, tmp_path: Path, n: int) -> Path:
         wiki_root = tmp_path / "knowledge" / "wiki"

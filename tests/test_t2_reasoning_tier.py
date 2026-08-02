@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the T2 (opus) reasoning tier (issue #432).
+"""Tests for the T2 (opus) reasoning tier (issue athenaeum#432).
 
 Covers each acceptance criterion named in the issue:
 
@@ -9,7 +9,7 @@ Covers each acceptance criterion named in the issue:
 - A T2-amended draft body cannot reach "approve" without human review — the
   pipeline itself (not a prompt) rejects rewrite-then-self-approve.
 - Every T2 decision writes a machine-readable reason record in the SAME log
-  shape as T1 (#423), tagged "T2"; escalations/drafts are the pass-up path
+  shape as T1 (athenaeum#423), tagged "T2"; escalations/drafts are the pass-up path
   into the existing human queue (``list_pending_decisions``).
 - Model selection follows the existing provider-aware model config.
 """
@@ -375,7 +375,7 @@ class TestT2DecisionLogging:
     def test_escalate_decision_joins_existing_human_queue(self, tmp_path: Path) -> None:
         # T2 does not maintain a second queue: an escalate/draft decision's
         # caller-side contract is to write the SAME pending-merge block the
-        # pre-#432 (T1-only) path already writes, so list_pending_decisions
+        # pre-athenaeum#432 (T1-only) path already writes, so list_pending_decisions
         # sees it unchanged.
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
@@ -551,8 +551,8 @@ class TestAmendVerdict:
 
 
 # ---------------------------------------------------------------------------
-# AC (issue #633) — the T2 default must price at a real, non-blended rate.
-# The whole reason this hop is independent of #577 is that the chosen id
+# AC (issue athenaeum#633) — the T2 default must price at a real, non-blended rate.
+# The whole reason this hop is independent of athenaeum#577 is that the chosen id
 # matches an existing rate-table prefix; guard that so a future default bump
 # to an unpriced family (which would silently fall through to the blended
 # fallback and mis-price every T2 call) fails loudly here.
@@ -573,7 +573,7 @@ class TestT2DefaultPricesNonBlended:
             f"DEFAULT_T2_MODEL {DEFAULT_T2_MODEL!r} falls through to the blended "
             f"fallback rate {blended} — it matches no prefix in "
             "models._MODEL_RATES_USD_PER_MTOK, so every T2 call would be "
-            "mis-priced. Add a rate-table prefix (see #577) or pick an id that "
+            "mis-priced. Add a rate-table prefix (see athenaeum#577) or pick an id that "
             "matches an existing one."
         )
         # Opus 4.8 matches the existing ``claude-opus-4`` prefix → $5/$25.

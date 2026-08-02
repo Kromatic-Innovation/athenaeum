@@ -463,7 +463,7 @@ class TestTokenUsage:
         assert usage.estimated_cost_usd == 0.0
 
     def test_add_tokens_accumulates_without_counting_a_call(self) -> None:
-        """#239: token-only accumulation for call sites that count attempts
+        """athenaeum#239: token-only accumulation for call sites that count attempts
         separately (merge.py's detector/resolver loop)."""
         from athenaeum.models import TokenUsage
 
@@ -477,7 +477,7 @@ class TestTokenUsage:
         assert usage.api_calls == 0
 
     def test_estimated_cost_includes_cache_terms(self) -> None:
-        """#239: input_tokens excludes cached tokens, so the estimate must
+        """athenaeum#239: input_tokens excludes cached tokens, so the estimate must
         fold in cache writes at 1.25x and cache reads at 0.1x input rate."""
         from athenaeum.models import TokenUsage
 
@@ -501,7 +501,7 @@ class TestTokenUsage:
 
 
 class TestPerModelCostAttribution:
-    """#247: per-model cost attribution in ``estimated_cost_usd``.
+    """athenaeum#247: per-model cost attribution in ``estimated_cost_usd``.
 
     Tokens tagged with a known model price at that model's rate; untagged
     or unknown-model tokens fall back to the blended rate. The existing
@@ -602,7 +602,7 @@ class TestPerModelCostAttribution:
 
 
 class TestCacheUsageCounts:
-    """Direct unit coverage for ``cache_usage_counts`` (#239 nit b)."""
+    """Direct unit coverage for ``cache_usage_counts`` (athenaeum#239 nit b)."""
 
     def test_full_usage_extracted(self) -> None:
         from athenaeum.models import cache_usage_counts
@@ -660,7 +660,7 @@ class TestEntityAction:
 
 
 # ---------------------------------------------------------------------------
-# Issue #191: inactive-member predicate + parse helpers
+# Issue athenaeum#191: inactive-member predicate + parse helpers
 # ---------------------------------------------------------------------------
 
 
@@ -745,7 +745,7 @@ class TestAutoMemoryFileInactive:
 
 
 # ---------------------------------------------------------------------------
-# Issue #326 — channel split, model recording, IdP-compatible asserter identity
+# Issue athenaeum#326 — channel split, model recording, IdP-compatible asserter identity
 # ---------------------------------------------------------------------------
 #
 # Locks `docs/provenance-shape.md` §10 — the two new source_type values and
@@ -758,12 +758,12 @@ class TestAutoMemoryFileInactive:
 
 class TestChannelSplitSourceTypes:
     def test_new_channel_values_are_legal(self) -> None:
-        # #326: two new values on the coarse source_type vocabulary.
+        # athenaeum#326: two new values on the coarse source_type vocabulary.
         assert "agent-observed" in SOURCE_TYPES
         assert "model-prior" in SOURCE_TYPES
 
     def test_existing_source_types_preserved(self) -> None:
-        # Locked #260 values must survive the extension.
+        # Locked athenaeum#260 values must survive the extension.
         assert "user-stated" in SOURCE_TYPES
         assert "inferred" in SOURCE_TYPES
         assert "external" in SOURCE_TYPES
@@ -856,7 +856,7 @@ class TestAsserterIdentityKey:
         ) == ("https://accounts.google.com", "1076...")
 
     def test_email_change_does_not_orphan_identity(self) -> None:
-        # ACCEPTANCE CRITERION 2 (issue #326): an asserter block keyed on
+        # ACCEPTANCE CRITERION 2 (issue athenaeum#326): an asserter block keyed on
         # iss+sub round-trips; email change does not orphan the identity.
         before = {
             "iss": "https://accounts.google.com",
@@ -920,7 +920,7 @@ class TestAsserterIdentityKey:
 
 class TestWikiEntityChannelSplitRoundTrip:
     def test_render_emits_new_fields_when_set(self) -> None:
-        # #326: WikiEntity's `model`, `on_behalf_of`, `asserter` render
+        # athenaeum#326: WikiEntity's `model`, `on_behalf_of`, `asserter` render
         # into frontmatter only when set — legacy entities without them
         # produce byte-identical output.
         we = WikiEntity(
@@ -977,7 +977,7 @@ class TestAutoMemoryFileChannelSplitDefaults:
 
 
 # ---------------------------------------------------------------------------
-# Issue #327 — asserter comparison helper (same / different / unknown)
+# Issue athenaeum#327 — asserter comparison helper (same / different / unknown)
 # ---------------------------------------------------------------------------
 
 

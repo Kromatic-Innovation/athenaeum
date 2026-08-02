@@ -32,7 +32,7 @@
 
 set -euo pipefail
 
-# ── Kill switch (issue #379) ───────────────────────────────────────────────
+# ── Kill switch (issue athenaeum#379) ───────────────────────────────────────────────
 # Honour ~/.cache/athenaeum/disabled (+ ATHENAEUM_DISABLED). Mirrors
 # athenaeum.killswitch.is_disabled("recall"): the "all" scope no-ops every
 # hook; the "compile" scope leaves recall on. Costs no Python startup.
@@ -159,7 +159,7 @@ print(f'[Knowledge] FTS5 index: {count} wiki pages', file=sys.stderr)
 
 # Cache the canonical stopword list once per session. The per-turn
 # recall hook reads this file instead of hard-coding its own copy,
-# which keeps it in sync with the Python FTS5 filter (issue #46).
+# which keeps it in sync with the Python FTS5 filter (issue athenaeum#46).
 # mktemp+mv keeps the write atomic so a concurrent read never sees
 # a partial file.
 _stopwords_tmp=$(mktemp "${CACHE_DIR}/stopwords.txt.XXXXXX")

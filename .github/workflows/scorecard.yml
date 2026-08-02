@@ -1,6 +1,6 @@
 name: OpenSSF Scorecard
 
-# Optional, scheduled supply-chain posture report (issue #390 / hestia#583).
+# Optional, scheduled supply-chain posture report (issue athenaeum#390 / hestia#583).
 # Scorecard is intentionally NOT part of the per-PR OSS-readiness gate
 # (oss-readiness.yml): it runs weekly (and on demand), publishes to the OpenSSF
 # REST API, and uploads SARIF to the repo's code-scanning tab. Because it never

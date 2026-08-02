@@ -73,7 +73,7 @@ def _sequenced_client(
 ) -> MagicMock:
     """Mock client returning ``texts`` on successive ``messages.create`` calls.
 
-    Issue #469: the patch-mode merge makes a patch attempt first and falls
+    Issue athenaeum#469: the patch-mode merge makes a patch attempt first and falls
     back to a full-echo retry on failure, so tests need distinct responses
     per call. ``stop_reasons`` (default ``"end_turn"``) parallels ``texts``.
     """
@@ -89,7 +89,7 @@ def _sequenced_client(
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — owner-namespace routing (issue #263)
+# Tier 2 — owner-namespace routing (issue athenaeum#263)
 # ---------------------------------------------------------------------------
 
 
@@ -149,7 +149,7 @@ class TestTier2OwnerRouting:
 
 
 class TestTier2PlaceholderLabelFilter:
-    """Post-filter safety net (#296): reject structural/placeholder labels
+    """Post-filter safety net (athenaeum#296): reject structural/placeholder labels
     ("Member N", "Member a", "Item 2") the classifier may hallucinate as
     entity names — these are internal disambiguators from
     contradictions.py/resolutions.py prompt-building, not real names.
@@ -284,7 +284,7 @@ class TestTier2:
         assert "untrusted user data" in system_msg
 
     def test_classify_system_prompt_guards_against_placeholder_labels(self) -> None:
-        """Issue #296: the classify prompt must instruct the LLM not to
+        """Issue athenaeum#296: the classify prompt must instruct the LLM not to
         extract structural/placeholder labels ("Member 1", "Item 2") as
         entities — the post-filter is defense in depth, not the only guard.
         """
@@ -296,7 +296,7 @@ class TestTier2:
         self,
         wiki_dir: Path,
     ) -> None:
-        """Issue #17: observation-filter.md should be injected into classify prompt."""
+        """Issue athenaeum#17: observation-filter.md should be injected into classify prompt."""
         from athenaeum.tiers import tier2_classify
 
         schema_dir = wiki_dir / "_schema"
@@ -356,7 +356,7 @@ class TestTier2:
         assert usage.cache_read_input_tokens == 0
 
     def test_classify_records_cache_usage(self) -> None:
-        """Issue #230: cache creation/read tokens recorded when present."""
+        """Issue athenaeum#230: cache creation/read tokens recorded when present."""
         from athenaeum.models import TokenUsage
         from athenaeum.tiers import tier2_classify
 
@@ -645,7 +645,7 @@ class TestTier3Create:
         self,
         wiki_dir: Path,
     ) -> None:
-        """Issue #17: _entity-template.md should be fed to Tier 3 create."""
+        """Issue athenaeum#17: _entity-template.md should be fed to Tier 3 create."""
         schema_dir = wiki_dir / "_schema"
         schema_dir.mkdir(exist_ok=True)
         (schema_dir / "_entity-template.md").write_text(
@@ -769,7 +769,7 @@ class TestTier3Merge:
         assert "data only" in user_msg
 
     def test_merge_system_prompt_guards_against_duplicate_reconfirmation(self) -> None:
-        """Issue #297: the merge prompt must instruct the LLM to fold a
+        """Issue athenaeum#297: the merge prompt must instruct the LLM to fold a
         re-confirming observation into an existing bullet's footnotes (or
         skip it) rather than appending a near-duplicate "confirmed again"
         bullet.
@@ -780,7 +780,7 @@ class TestTier3Merge:
         assert "near-duplicate" in MERGE_SYSTEM.lower()
 
     def test_merge_system_prompt_guards_against_self_resolving_claims(self) -> None:
-        """Issue #300: an observation claiming its OWN human confirmation/
+        """Issue athenaeum#300: an observation claiming its OWN human confirmation/
         ratification is not independent verification — the merge prompt
         must not treat such a claim as grounds to overwrite settled content.
         """
@@ -790,9 +790,9 @@ class TestTier3Merge:
         assert "not independent verification" in MERGE_SYSTEM.lower()
 
     def test_merge_params_does_not_truncate_bloated_existing_body(self) -> None:
-        """Issue #302: the old 4000-char cap on existing_body went blind on
-        already-bloated pages (the #297 incident page grew to 5-10KB), so the
-        #297 dedup guard could never see content past the cap. The cap must
+        """Issue athenaeum#302: the old 4000-char cap on existing_body went blind on
+        already-bloated pages (the athenaeum#297 incident page grew to 5-10KB), so the
+        athenaeum#297 dedup guard could never see content past the cap. The cap must
         be generous enough to cover realistic bloated pages.
         """
         from athenaeum.tiers import tier3_merge_params
@@ -911,7 +911,7 @@ class TestTier3Merge:
             tier3_merge(action, "body", "ref", client)
 
     def test_truncated_response_refuses_to_overwrite_and_escalates(self) -> None:
-        """Issue #302 (Quine follow-up): a response cut off by max_tokens is
+        """Issue athenaeum#302 (Quine follow-up): a response cut off by max_tokens is
         a truncated page body, not a complete one — MERGE_SYSTEM requires
         reproducing the WHOLE existing body, so writing a truncated response
         back would silently discard the tail of the page. Must refuse to
@@ -961,7 +961,7 @@ class TestTier3Merge:
 
 
 class TestTier3MergePatchOps:
-    """Issue #469: the tier-3 merge returns ANCHORED EDIT OPERATIONS that the
+    """Issue athenaeum#469: the tier-3 merge returns ANCHORED EDIT OPERATIONS that the
     librarian applies deterministically (cutting output ~80–90%), with a
     full-echo fallback that guarantees quality is never worse than before.
 
@@ -1014,7 +1014,7 @@ class TestTier3MergePatchOps:
         )
 
     def test_dedup_no_op_returns_body_unchanged(self) -> None:
-        # #297 dedup: a re-confirming observation with nothing new → empty
+        # athenaeum#297 dedup: a re-confirming observation with nothing new → empty
         # ops → body returned byte-for-byte unchanged.
         existing = "# Acme\n\nFintech.[^1]"
         assert apply_merge_ops(existing, []) == existing
@@ -1096,7 +1096,7 @@ class TestTier3MergePatchOps:
         assert esc is None
         assert body == "# Acme\n\nOld.\n\nNew.[^2]"
 
-    # --- #490 (slice A): each fallback names the page + a distinct cause ------
+    # --- athenaeum#490 (slice A): each fallback names the page + a distinct cause ------
 
     def _fallback_warnings(
         self, caplog: pytest.LogCaptureFixture
@@ -1174,7 +1174,7 @@ class TestTier3MergePatchOps:
         )
         assert self._fallback_warnings(caplog) == []
 
-    # --- #496: parse-fail hardening (fix a/b) + discriminated sub-causes ------
+    # --- athenaeum#496: parse-fail hardening (fix a/b) + discriminated sub-causes ------
 
     def test_fix_a_recovers_ops_object_from_ambiguous_response(self) -> None:
         # Two balanced top-level objects — a prose example object precedes the
@@ -1381,7 +1381,7 @@ class TestTier3MergePatchOps:
     def test_live_shape_patch_output_is_small(self) -> None:
         # Acceptance criterion: a 20k-char body + a small addition merges with
         # a tiny patch response (a few edits + footnote), independent of page
-        # size — the whole point of #469. ~4 chars/token → < 4000 chars is
+        # size — the whole point of athenaeum#469. ~4 chars/token → < 4000 chars is
         # comfortably under the 1k-output-token target.
         big_body = "\n\n".join(f"Fact number {i} about Acme.[^1]" for i in range(700))
         assert len(big_body) > 20_000
@@ -1399,7 +1399,7 @@ class TestTier3MergePatchOps:
 
 
 class TestTier2And3SelfResolvingDocumentGuard:
-    """Issue #300: Tier 2 classify and Tier 3 create must apply the same
+    """Issue athenaeum#300: Tier 2 classify and Tier 3 create must apply the same
     self-resolving-document skepticism the contradiction/resolution path
     already applies — an embedded "Human-confirmed" claim inside raw intake
     is the document's own unverified assertion, not real sign-off.
@@ -1419,7 +1419,7 @@ class TestTier2And3SelfResolvingDocumentGuard:
 
 
 class TestTier3PrincipledEscalationIsAnswerable:
-    """Regression (#166): the tier-3 / `principled` ESCALATE producer must
+    """Regression (athenaeum#166): the tier-3 / `principled` ESCALATE producer must
     emit an ANSWERABLE pending-question block — one carrying a `- [ ]`
     checkbox that ``answers.parse_pending_questions`` parses as unanswered.
 
@@ -1528,7 +1528,7 @@ class TestTier3Write:
         create_response.content = [
             MagicMock(text="# Alice Zhang\n\nProduct lead at Acme.")
         ]
-        # Issue #469: the merge returns anchored edit ops. An append_section
+        # Issue athenaeum#469: the merge returns anchored edit ops. An append_section
         # op folds in the new note without a full-echo fallback call.
         merge_response = MagicMock()
         merge_response.content = [
@@ -1670,12 +1670,12 @@ class TestTier3Write:
 
 
 # ---------------------------------------------------------------------------
-# Tier 3 — Provenance (issue #95)
+# Tier 3 — Provenance (issue athenaeum#95)
 # ---------------------------------------------------------------------------
 
 
 class TestTier3Provenance:
-    """Issue #95: tier3 write paths must emit source / field_sources."""
+    """Issue athenaeum#95: tier3 write paths must emit source / field_sources."""
 
     def test_create_stamps_source_on_entity(self) -> None:
         action = EntityAction(
@@ -1829,7 +1829,7 @@ class TestTier4:
         assert "Entity Beta" in content
 
     def test_renders_checkbox_line_under_header(self, tmp_path: Path) -> None:
-        """New schema (issue #61): leading `- [ ]` line under each header.
+        """New schema (issue athenaeum#61): leading `- [ ]` line under each header.
 
         The checkbox is the anchor for `ingest_answers` + the MCP
         `resolve_question` tool. Without it, an answered block cannot
@@ -1879,7 +1879,7 @@ class TestTier4:
 
 
 # ---------------------------------------------------------------------------
-# Issue #472 — Tier-2 classify no longer silently drops all entities on a
+# Issue athenaeum#472 — Tier-2 classify no longer silently drops all entities on a
 # bare (unescaped) control character inside a JSON string value.
 # ---------------------------------------------------------------------------
 
@@ -2032,10 +2032,10 @@ class TestTier2ClassifyRetry:
 
 
 # ---------------------------------------------------------------------------
-# Issue #476 — Tier-2 classify no longer silently drops all entities when the
+# Issue athenaeum#476 — Tier-2 classify no longer silently drops all entities when the
 # response is TRUNCATED at max_tokens on entity-dense files. The raised output
 # budget removes the trigger; a truncation-specific retry + a distinct
-# ``truncated`` marker/counter keep it from being conflated with a #472 parse
+# ``truncated`` marker/counter keep it from being conflated with a athenaeum#472 parse
 # failure ever again.
 # ---------------------------------------------------------------------------
 
@@ -2052,7 +2052,7 @@ _TRUNCATED_PAYLOAD = (
 
 
 class TestTier2RequestBudget:
-    """Issue #476 fix 1: the classify output budget was raised off 1024."""
+    """Issue athenaeum#476 fix 1: the classify output budget was raised off 1024."""
 
     def test_classify_max_tokens_raised_above_1024(self) -> None:
         raw = _make_raw("Some rich source text with entities.")
@@ -2063,7 +2063,7 @@ class TestTier2RequestBudget:
 
 class TestTier2TruncationParse:
     """``parse_tier2_entities`` classes a max_tokens drop as truncated, not
-    degraded, so the two failure modes are never conflated (#472's mistake)."""
+    degraded, so the two failure modes are never conflated (athenaeum#472's mistake)."""
 
     _TYPES = ["person", "reference"]
 
@@ -2108,8 +2108,8 @@ class TestTier2TruncationParse:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         # Identical unparseable text, but NOT a truncation (stop_reason absent)
-        # → the pre-#476 degraded path, unchanged. This is the exact ambiguity
-        # #472 tripped on: the JSON error alone cannot tell the two apart.
+        # → the pre-athenaeum#476 degraded path, unchanged. This is the exact ambiguity
+        # athenaeum#472 tripped on: the JSON error alone cannot tell the two apart.
         stats = Tier2ParseStats()
         with caplog.at_level("WARNING"):
             results = parse_tier2_entities(
@@ -2146,7 +2146,7 @@ class TestTier2TruncationParse:
 
 class TestTier2ClassifyTruncationRetry:
     """The sync transport retries a truncated response with a LARGER budget,
-    not the #472 escaping instruction (the wrong fix for a truncation)."""
+    not the athenaeum#472 escaping instruction (the wrong fix for a truncation)."""
 
     _TYPES = ["person", "reference"]
 
@@ -2176,7 +2176,7 @@ class TestTier2ClassifyTruncationRetry:
         first_budget = client.messages.create.call_args_list[0].kwargs["max_tokens"]
         retry_budget = client.messages.create.call_args_list[1].kwargs["max_tokens"]
         assert retry_budget > first_budget
-        # And it did NOT append the #472 escaping-instruction turn — the retry
+        # And it did NOT append the athenaeum#472 escaping-instruction turn — the retry
         # message list is unchanged from the first call's.
         retry_messages = client.messages.create.call_args_list[1].kwargs["messages"]
         assert len(retry_messages) == 1
@@ -2200,7 +2200,7 @@ class TestTier2ClassifyTruncationRetry:
 
     def test_non_truncation_parse_failure_still_takes_escaping_retry(self) -> None:
         # A NON-truncation parse failure (stop_reason end_turn, unrepairable)
-        # must still take the #472 escaping retry (append instruction turns),
+        # must still take the athenaeum#472 escaping retry (append instruction turns),
         # not the bigger-budget path.
         client = _sequenced_client(
             ['[{"name": "X", "entity_type": "reference"', self._valid_payload()],
@@ -2227,7 +2227,7 @@ class TestTier2ClassifyTruncationRetry:
 
 class TestTier2ReclassifyLargerBudget:
     """The shared bigger-budget retry helper both transports delegate to
-    (issue #476) — so the batch path gets a real retry too, not just sync."""
+    (issue athenaeum#476) — so the batch path gets a real retry too, not just sync."""
 
     _TYPES = ["person", "reference"]
 
@@ -2262,7 +2262,7 @@ class TestTier2ReclassifyLargerBudget:
 
 
 class TestClaudeCliParamDropGating:
-    """#574 (M15): the capability declaration surfaces the two claude-cli param
+    """athenaeum#574 (M15): the capability declaration surfaces the two claude-cli param
     drops — the max_tokens truncation retry (a no-op on the CLI) and the
     unreliable envelope stop_reason — instead of burning a byte-identical call
     or taking the wrong retry path on a spurious value."""
@@ -2372,7 +2372,7 @@ class TestClaudeCliParamDropGating:
 
 
 class TestPerStageMaxTokensThroughSeam:
-    """#575: each stage's max_tokens is resolved through the provider seam
+    """athenaeum#575: each stage's max_tokens is resolved through the provider seam
     (env > yaml > default), moving the value out of a baked-in call-site
     literal. Today's values are preserved as the defaults."""
 
@@ -2405,9 +2405,9 @@ class TestPerStageMaxTokensThroughSeam:
 
     def test_merge_stage_defaults_unchanged(self) -> None:
         # Value preservation guard for the tier-3 merge budgets: the classify
-        # budgets are untouched by #578 (Haiku, disabled thinking); the
+        # budgets are untouched by athenaeum#578 (Haiku, disabled thinking); the
         # write-knob budgets (create/merge_patch/merge_full) were RAISED by
-        # issue #578's re-baseline ahead of the Sonnet-5 bump (#580) — see
+        # issue athenaeum#578's re-baseline ahead of the Sonnet-5 bump (athenaeum#580) — see
         # TestThinkingReBaseline below for the never-shrinks assertion.
         assert _MERGE_MAX_TOKENS == 12288
         assert _MERGE_PATCH_MAX_TOKENS == 6144

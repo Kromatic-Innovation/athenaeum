@@ -112,7 +112,7 @@ def test_git_identity_error_gives_helpful_message(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Issue #10: When git identity is not configured, init should raise
+    """Issue athenaeum#10: When git identity is not configured, init should raise
     SystemExit with a helpful message instead of a raw CalledProcessError."""
     import subprocess
 
@@ -143,7 +143,7 @@ def test_git_identity_error_gives_helpful_message(
 
 
 def test_force_help_mentions_no_backup(capsys: pytest.CaptureFixture[str]) -> None:
-    """`--force` help text should warn that no backup is created (#105)."""
+    """`--force` help text should warn that no backup is created (athenaeum#105)."""
     from athenaeum.cli import main
 
     with pytest.raises(SystemExit):
@@ -157,7 +157,7 @@ def test_templates_dest_without_with_templates_warns(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`--templates-dest` without `--with-templates` must emit a stderr
-    warning so the user notices the flag was silently ignored (#105)."""
+    warning so the user notices the flag was silently ignored (athenaeum#105)."""
     from athenaeum.cli import main
 
     target = tmp_path / "knowledge"

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Semantic decision-log matching tests (issue #211).
+"""Semantic decision-log matching tests (issue athenaeum#211).
 
 Tests that a resolved contradiction is recognized on re-detection even when
 the detector quotes a differently-worded passage, via three complementary
@@ -12,7 +12,7 @@ strategies:
 Additionally verifies:
 - Threshold configurability: a high threshold flips borderline from match→None.
 - Back-compat: an old record lacking member_key/pair_text still matches by fp.
-- #199 preserved: a human enacting verdict matched via member_key auto-applies.
+- athenaeum#199 preserved: a human enacting verdict matched via member_key auto-applies.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ class TestFindResolvedRecord:
     def test_member_key_match_different_pair_text(self, tmp_path: Path) -> None:
         """Strategy 2: same member_key, different pair_text (passage drifted).
 
-        This is the live-case regression for issue #211: fingerprint is
+        This is the live-case regression for issue athenaeum#211: fingerprint is
         different but member pair is the same. Must match WITHOUT chromadb.
         """
         root = _knowledge_root(tmp_path)
@@ -430,7 +430,7 @@ class TestTier4MemberKeyDriftSuppression:
 
 
 class TestTier4MemberKeyHumanVerdictAutoApply:
-    """#199 preserved: human enacting verdict matched via member_key auto-applies."""
+    """athenaeum#199 preserved: human enacting verdict matched via member_key auto-applies."""
 
     def test_human_enacting_verdict_matched_by_member_key_auto_applied(
         self, tmp_path: Path

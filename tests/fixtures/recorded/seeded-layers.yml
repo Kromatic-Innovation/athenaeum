@@ -1,4 +1,4 @@
-# Seeded-layers manifest — issue #551 (audit finding H13).
+# Seeded-layers manifest — issue athenaeum#551 (audit finding H13).
 #
 # WHAT THIS IS: the durable record of which recorded-fixture layers have
 # *ever* been seeded by an `evals.yml` run with `record=true`. It exists so
@@ -16,15 +16,15 @@
 # `test_seeded_manifest_layers_are_populated` fails, naming the layer and
 # pointing at the record command in `tests/evals/README.md`.
 #
-# SHIPS EMPTY (issue #551). With `seeded: {}` the replay suite behaves exactly
+# SHIPS EMPTY (issue athenaeum#551). With `seeded: {}` the replay suite behaves exactly
 # as before this issue — every layer directory is empty and every layer is
 # absent from the manifest, so all replay tests pass trivially and zero-key
-# `develop` CI stays green. Issue #610 (operator: run `evals.yml record=true`
+# `develop` CI stays green. Issue athenaeum#610 (operator: run `evals.yml record=true`
 # with a live `ANTHROPIC_API_KEY`) is what appends the first entry.
 #
 # FORMAT: a top-level `seeded:` mapping, layer-name -> metadata. Each metadata
 # block records when the layer was first seeded and which workflow run produced
-# the fixtures, so the audit trail lives with the manifest. #610 appends like:
+# the fixtures, so the audit trail lives with the manifest. athenaeum#610 appends like:
 #
 #   seeded:
 #     detector:

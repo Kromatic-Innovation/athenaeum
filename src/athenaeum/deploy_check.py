@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Installed-metadata vs. source version-drift check (issue #685).
+"""Installed-metadata vs. source version-drift check (issue athenaeum#685).
 
 An editable install (``pip install -e .``) picks up code changes on a git
 fast-forward but **not** metadata changes: the ``.dist-info`` version is frozen
@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="athenaeum.deploy_check",
-        description="Detect installed-metadata vs pyproject version drift (#685).",
+        description="Detect installed-metadata vs pyproject version drift (athenaeum#685).",
     )
     parser.add_argument(
         "tree",

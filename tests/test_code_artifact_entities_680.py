@@ -1,11 +1,11 @@
-"""Code artifacts must not become wiki entities (issue #680).
+"""Code artifacts must not become wiki entities (issue athenaeum#680).
 
 The librarian was minting durable wiki entities from source-code artifacts
 (``skill.md``, ``project-registry.yaml``, ``registry`` -> ``auto-registry.md``).
 A wiki page describing a file's PAST state is actively harmful: an agent recalls
 it, treats it as current, and spends a session disproving it against the working
 tree. This is a WRITE-side class exclusion applied at entity creation — filenames
-are an unbounded set a stopword list (#662) cannot enumerate — and a companion
+are an unbounded set a stopword list (athenaeum#662) cannot enumerate — and a companion
 sweep retires the ones already on disk via the existing git-rm retire path.
 
 Covers:
@@ -13,7 +13,7 @@ Covers:
   - the shared creation gate both transports use;
   - configurability (AC4: allowlist wins, toggle off, extension extend);
   - the retire sweep (AC3);
-  - independence from #662's stopword mechanism (AC5).
+  - independence from athenaeum#662's stopword mechanism (AC5).
 """
 
 from __future__ import annotations
@@ -143,15 +143,15 @@ class TestCreationGate:
 
 
 # ---------------------------------------------------------------------------
-# AC5 — independence from #662's read-side stopword mechanism
+# AC5 — independence from athenaeum#662's read-side stopword mechanism
 # ---------------------------------------------------------------------------
 
 
 class TestIndependentFrom662:
     def test_gates_are_orthogonal(self) -> None:
-        # A #662 stopword ("main") is NOT a code artifact (no extension), and a
-        # code artifact ("skill.md") is NOT a #662 stopword — the two gates are
-        # complementary, and #680 changes neither the stopword set nor its API.
+        # A athenaeum#662 stopword ("main") is NOT a code artifact (no extension), and a
+        # code artifact ("skill.md") is NOT a athenaeum#662 stopword — the two gates are
+        # complementary, and athenaeum#680 changes neither the stopword set nor its API.
         junk = resolve_junk_match_names(None)
         assert "main" in junk
         assert not is_code_artifact_name("main")
@@ -216,7 +216,7 @@ class TestFilenameEntityPrune:
         assert (kr / "wiki" / "a1-reach.md").exists()
 
         show = _git(kr, "show", "--stat", "--format=%s", "HEAD")
-        assert "retire 2 filename-derived entity page(s) (#680)" in show.stdout
+        assert "retire 2 filename-derived entity page(s) (athenaeum#680)" in show.stdout
         # git-recoverable: the removed page survives in history.
         prior = _git(kr, "show", "HEAD~1:wiki/919f0485-skill-md.md")
         assert "skill.md" in prior.stdout

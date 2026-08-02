@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared helpers for embedding untrusted content in LLM prompts (issue #562).
+"""Shared helpers for embedding untrusted content in LLM prompts (issue athenaeum#562).
 
 Untrusted content — raw observations, existing wiki bodies, memory snippets — was
 fenced four different ways across the codebase, so a new call site inherited
@@ -15,7 +15,7 @@ Surfaces:
 - :func:`defang_tag` — neutralize literal ``<tag>`` / ``</tag>`` markers so the
   content cannot forge the fence boundary. Generalizes the hand-rolled
   ``<memory>`` ``re.sub`` in ``contradictions.py`` / ``claim_kind.py`` (whose
-  collapse onto this helper lands in the sibling child #564).
+  collapse onto this helper lands in the sibling child athenaeum#564).
 - :func:`contains_tag` — whether ``text`` holds a literal fence marker for
   ``tag`` (i.e. whether :func:`defang_tag` would rewrite bytes). Callers on an
   anchor-sensitive path use this to route to a fence-free fallback rather than
@@ -49,7 +49,7 @@ def _tag_pattern(tag: str) -> re.Pattern[str]:
 
     Same shape as the original hand-rolled ``<memory>`` defang in
     ``contradictions.py`` (``r"</?\\s*memory\\s*>"``), so collapsing those sites
-    onto this helper (#564) is byte-preserving.
+    onto this helper (athenaeum#564) is byte-preserving.
     """
     return re.compile(rf"</?\s*{re.escape(tag)}\s*>", re.IGNORECASE)
 

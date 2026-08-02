@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for cross-scope contradiction detection (issue #125).
+"""Tests for cross-scope contradiction detection (issue athenaeum#125).
 
 Covers the four modes (``off``, ``ancestor``, ``similarity``, ``both``),
 ancestor pooling, similarity-pair generation, and the cluster-size cap.
@@ -417,7 +417,7 @@ class _RaisingEmbedder:
     """Embedding provider that fails if ``fetch_embeddings`` is ever called.
 
     Proves the zero-intake short-circuit returns BEFORE any corpus-scale
-    embedding retrieval (issue #262 / Quine #1a).
+    embedding retrieval (issue athenaeum#262 / Quine #1a).
     """
 
     def fetch_embeddings(self, ids: Any, cache_dir: Path) -> dict[str, list[float]]:
@@ -427,7 +427,7 @@ class _RaisingEmbedder:
 
 
 class TestRequireRawSide:
-    """Issue #262 — the sweep no longer cross-products wiki against itself.
+    """Issue athenaeum#262 — the sweep no longer cross-products wiki against itself.
 
     These are the headline cost-acceptance tests: detection now scales with
     NEW raw intake, not with corpus size.
@@ -614,7 +614,7 @@ class TestModeWiring:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Issue #262 / Quine #1c: full nightly path in similarity mode does
+        """Issue athenaeum#262 / Quine #1c: full nightly path in similarity mode does
 
         zero detector work on an unchanged corpus with zero new intake.
 
@@ -911,7 +911,7 @@ class TestCandidateUnwrap:
 
 
 # ---------------------------------------------------------------------------
-# Issue #181: self-reference lint applies to candidate_to_auto_memory_files
+# Issue athenaeum#181: self-reference lint applies to candidate_to_auto_memory_files
 # ---------------------------------------------------------------------------
 
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Raw-intake discovery + tier-0 passthrough primitives (issue #545).
+"""Raw-intake discovery + tier-0 passthrough primitives (issue athenaeum#545).
 
 These three functions — :func:`discover_raw_files`, :func:`discover_auto_memory_files`,
 and :func:`tier0_passthrough` — were previously module-level in
@@ -11,7 +11,7 @@ load-bearing back-edges that formed the librarian-centered import cycle.
 
 Hoisting them DOWN to this leaf module lets every SCC sibling import them at
 TOP level from here, so those deferred back-edges become unnecessary and are
-removed (see issue #545). :mod:`athenaeum.vecmath` (issue #542) is the
+removed (see issue athenaeum#545). :mod:`athenaeum.vecmath` (issue athenaeum#542) is the
 precedent for this "hoist a shared primitive to a lower layer to dissolve a
 cycle" move.
 
@@ -117,7 +117,7 @@ def discover_auto_memory_files(
     if not roots:
         return []
 
-    # Issue #278: resolve the ephemeral/operational classifier inputs once.
+    # Issue athenaeum#278: resolve the ephemeral/operational classifier inputs once.
     # An ephemeral-scope OR ``ephemeral: true``-flagged intake is dropped
     # HERE -- the cleanest choke point -- so it is never clustered or
     # materialized into a durable ``wiki/auto-*.md`` page. Drops are logged
@@ -156,7 +156,7 @@ def discover_auto_memory_files(
                 except (OSError, UnicodeDecodeError):
                     continue
                 meta, _body = parse_frontmatter(text)
-                # Issue #278: drop ephemeral/operational intake before it can
+                # Issue athenaeum#278: drop ephemeral/operational intake before it can
                 # be clustered + merged into a permanent wiki entity.
                 drop_reason = classify_ephemeral(
                     scope,
@@ -198,7 +198,7 @@ def discover_auto_memory_files(
                     sources = [str(s) for s in sources_raw]
                 else:
                     sources = []
-                # Issue #260 (slice A of #259): origin-traced provenance.
+                # Issue athenaeum#260 (slice A of athenaeum#259): origin-traced provenance.
                 # Missing source_type defaults to ``inferred``; source_ref is
                 # the ultimate reference and is never this file's own name.
                 source_type = coerce_source_type(
@@ -206,11 +206,11 @@ def discover_auto_memory_files(
                 )
                 # Guard the explicit path: a frontmatter source_ref that is a
                 # raw filename (or any ``.md``) is rejected to "" rather than
-                # cited as the ultimate source (#260 invariant).
+                # cited as the ultimate source (athenaeum#260 invariant).
                 source_ref = safe_source_ref(
                     meta.get("source_ref") if meta else None, ""
                 )
-                # Lane 1 / #167: declared refines/supersedes relationships.
+                # Lane 1 / athenaeum#167: declared refines/supersedes relationships.
                 # Malformed entries raise — surfacing the bad file rather
                 # than silently dropping the declaration.
                 try:
@@ -225,11 +225,11 @@ def discover_auto_memory_files(
                     )
                     refines = []
                     supersedes = []
-                # Issue #173 / #181: drop refines/supersedes self-references.
+                # Issue athenaeum#173 / athenaeum#181: drop refines/supersedes self-references.
                 refines, supersedes = _strip_self_reference(
                     name, refines, supersedes, fpath
                 )
-                # Issue #191: non-destructive inactive markers.
+                # Issue athenaeum#191: non-destructive inactive markers.
                 meta_for_markers = meta if meta else None
                 files.append(
                     AutoMemoryFile(
@@ -247,14 +247,14 @@ def discover_auto_memory_files(
                         deprecated=parse_deprecated(meta_for_markers),
                         source_type=source_type,
                         source_ref=source_ref,
-                        # Issue #326: channel-split provenance annotations.
+                        # Issue athenaeum#326: channel-split provenance annotations.
                         model=parse_model(meta_for_markers),
                         on_behalf_of=parse_on_behalf_of(meta_for_markers),
                         asserter=parse_asserter(meta_for_markers),
-                        # Issue #327: epistemic claim kind (fail-open when
+                        # Issue athenaeum#327: epistemic claim kind (fail-open when
                         # absent/unrecognized → "" unclassified).
                         claim_kind=parse_claim_kind(meta_for_markers),
-                        # Issue #308: claim-level temporal validity bounds.
+                        # Issue athenaeum#308: claim-level temporal validity bounds.
                         valid_from=validity_bound_str(meta_for_markers, "valid_from"),
                         valid_until=validity_bound_str(meta_for_markers, "valid_until"),
                     )
@@ -262,7 +262,7 @@ def discover_auto_memory_files(
     if dropped_ephemeral:
         log.info(
             "auto-memory: dropped %d ephemeral/operational intake file(s) "
-            "before clustering (issue #278)",
+            "before clustering (issue athenaeum#278)",
             dropped_ephemeral,
         )
     return files
@@ -278,7 +278,7 @@ def discover_raw_files(raw_root: Path) -> list[RawFile]:
         if not source_dir.is_dir():
             continue
         source = source_dir.name
-        # Issue #414: answer fragments under raw/answers/ are resolution
+        # Issue athenaeum#414: answer fragments under raw/answers/ are resolution
         # OUTPUT, not new intake. Re-discovering them feeds already-settled
         # rulings back through tier1-2 classification and tier4 contradiction
         # escalation, so the same ruling re-surfaces as fresh pending

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the issue #156 auto-apply lane.
+"""Tests for the issue athenaeum#156 auto-apply lane.
 
 Covers:
 
@@ -297,7 +297,7 @@ class TestTier4Integration:
         assert "**Auto-resolved**" not in text
 
     def test_no_config_no_auto_apply(self, tmp_path: Path) -> None:
-        """Legacy callers (config=None) get pre-#156 behavior."""
+        """Legacy callers (config=None) get pre-athenaeum#156 behavior."""
         pending = tmp_path / "_pending_questions.md"
         item = EscalationItem(
             raw_ref="wiki/legacy.md",

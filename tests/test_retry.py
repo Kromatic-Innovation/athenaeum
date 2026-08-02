@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the transient-API retry/backoff wrapper (issue #193).
+"""Tests for the transient-API retry/backoff wrapper (issue athenaeum#193).
 
 Covers the standalone ``with_retry`` helper, its integration through
 ``tier2_classify`` (529-then-success retried to success), and the librarian
@@ -138,7 +138,7 @@ class TestWithRetry:
         assert isinstance(excinfo.value.last_error, OverloadedError)
 
     def test_exhaustion_guard_is_O_safe(self) -> None:
-        """The post-loop guard must NOT be a bare ``assert`` (issue #207).
+        """The post-loop guard must NOT be a bare ``assert`` (issue athenaeum#207).
 
         Under ``python -O`` asserts are stripped, so a control-flow guard
         built on ``assert`` vanishes. The real contract: after exhausting
@@ -293,7 +293,7 @@ class TestClassificationRetryIntegration:
 
 class TestRunDistinctGiveUpLog:
     """The run() loop must log a transient-API give-up distinctly from a
-    malformed-file failure (acceptance criterion of #193)."""
+    malformed-file failure (acceptance criterion of athenaeum#193)."""
 
     def _seed_knowledge_root(self, tmp_path: Path) -> Path:
         root = tmp_path / "knowledge"

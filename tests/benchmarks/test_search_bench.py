@@ -34,7 +34,7 @@ from .conftest import BENCH_QUERIES  # noqa: E402
 # ---------------------------------------------------------------------------
 # Baselines (milliseconds, p95 across BENCH_QUERIES on the synthetic wiki).
 # Machine: Darwin 25.4, Apple Silicon, Python 3.14.
-# Measured 2026-04-21 on the develop HEAD at issue #69 ingestion.
+# Measured 2026-04-21 on the develop HEAD at issue athenaeum#69 ingestion.
 # ---------------------------------------------------------------------------
 BASELINES_MS: dict[str, float] = {
     # Measured locally on Apple Silicon / Python 3.14 against the 200-page
@@ -48,7 +48,7 @@ BASELINES_MS: dict[str, float] = {
     # dominates the first build. Enable via ATHENAEUM_BENCH_VECTOR=1.
 }
 
-# 20% regression margin — the Session-2 recall budget from #67.
+# 20% regression margin — the Session-2 recall budget from athenaeum#67.
 TOLERANCE = 1.20
 
 

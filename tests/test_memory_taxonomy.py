@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the memory-taxonomy data model (issue #424).
+"""Tests for the memory-taxonomy data model (issue athenaeum#424).
 
 Covers:
 - ``memory_class:`` validation on ``WikiBase`` / ``validate_wiki_meta``:
@@ -7,16 +7,16 @@ Covers:
   ``UserWarning`` (not silently accepted); an absent value tolerated and
   reported as "untyped" via ``schemas.is_untyped_memory_class`` /
   ``_lint.lint_untyped_memory_class``.
-- The existing ``type:`` (entity schema, #93) and ``memory_type:`` (intake)
+- The existing ``type:`` (entity schema, athenaeum#93) and ``memory_type:`` (intake)
   axes are BYTE-IDENTICAL — unchanged by this issue.
 - ``## Inference`` block schema + parser: valid blocks parse to addressable
   units exposing ``basis`` + ``confidence``; malformed blocks are flagged.
 - ``observed_at`` staleness field: accepted, surfaced, and round-trips
   through parse/serialize.
 
-Explicitly NOT covered here (out of scope for #424): merge/recall/embed
+Explicitly NOT covered here (out of scope for athenaeum#424): merge/recall/embed
 behavior changes (there are none), inference-block retraction machinery
-(#433), axiom governance (#434).
+(athenaeum#433), axiom governance (athenaeum#434).
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ class TestMemoryClassValues:
         with pytest.warns(UserWarning, match="unknown memory_class"):
             m = validate_wiki_meta(meta)
         # Flagged, not silently accepted-and-hidden: the value is still
-        # visible on the model (recoverable, like the #93 KNOWN_TYPES path).
+        # visible on the model (recoverable, like the athenaeum#93 KNOWN_TYPES path).
         assert m.memory_class == "opinion-ish"
 
     def test_unknown_value_does_not_raise(self) -> None:
@@ -133,11 +133,11 @@ class TestUntypedSurfacing:
 
 
 class TestExistingAxesUnchanged:
-    """Issue #424 layers a new axis; type:/memory_type: must not move at all."""
+    """Issue athenaeum#424 layers a new axis; type:/memory_type: must not move at all."""
 
     def test_known_types_frozenset_unchanged(self) -> None:
-        # Exact membership pinned — a regression here would mean #424
-        # accidentally touched the #93 entity-schema axis.
+        # Exact membership pinned — a regression here would mean athenaeum#424
+        # accidentally touched the athenaeum#93 entity-schema axis.
         assert KNOWN_TYPES == {
             "person",
             "company",
@@ -403,7 +403,7 @@ class TestInferenceBlockMalformed:
 
 
 class TestScopeGuard:
-    """Issue #424 is data-model + validation + parser + doc only."""
+    """Issue athenaeum#424 is data-model + validation + parser + doc only."""
 
     def test_schemas_module_exports_new_names(self) -> None:
         import athenaeum.schemas as schemas_mod
@@ -414,9 +414,9 @@ class TestScopeGuard:
     def test_inference_blocks_module_has_no_retraction_machinery(self) -> None:
         import athenaeum.inference_blocks as ib_mod
 
-        # #433 (retraction) is explicitly out of scope for #424 — this
+        # athenaeum#433 (retraction) is explicitly out of scope for athenaeum#424 — this
         # module must expose only the schema + parser, not a retract/apply
-        # function. A future #433 PR adding these is expected; this test
+        # function. A future athenaeum#433 PR adding these is expected; this test
         # documents today's boundary.
         assert not hasattr(ib_mod, "retract_inference")
         assert not hasattr(ib_mod, "apply_retraction")

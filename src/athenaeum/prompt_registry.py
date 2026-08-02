@@ -5,7 +5,7 @@ The prompts themselves still live next to their parsers in their home modules
 (``tiers.py``, ``resolutions.py``, …); this module only *imports* them. It is an
 index, not a home — the load-bearing contract each prompt shares with its
 adjacent parser (e.g. ``MERGE_SYSTEM``'s anchored-ops JSON shape parsed by
-``parse_merge_ops_response``) is left exactly where it is. See issue #561.
+``parse_merge_ops_response``) is left exactly where it is. See issue athenaeum#561.
 
 Two gaps this closes, without moving or changing any prompt text:
 
@@ -74,7 +74,7 @@ class PromptMeta:
 _META_ROWS: list[tuple[str, str, str, int]] = [
     ("tiers.classify_system", "CLASSIFY_SYSTEM", "classify", 4096),
     ("tiers.classify_user_template", "CLASSIFY_USER_TEMPLATE", "classify", 4096),
-    # write-knob budgets re-baselined by issue #578 (Sonnet-5-bound + adaptive
+    # write-knob budgets re-baselined by issue athenaeum#578 (Sonnet-5-bound + adaptive
     # thinking headroom): create/merge_patch 2048 -> 6144, merge_full 8192 -> 12288.
     ("tiers.create_system", "CREATE_SYSTEM", "write", 6144),
     ("tiers.create_template", "CREATE_TEMPLATE", "write", 6144),
@@ -83,7 +83,7 @@ _META_ROWS: list[tuple[str, str, str, int]] = [
     ("tiers.merge_template", "MERGE_TEMPLATE", "write", 6144),
     ("tiers.merge_template_full", "MERGE_TEMPLATE_FULL", "write", 12288),
     ("contradictions.detect_system", "_DETECT_SYSTEM", "classify", 1024),
-    # resolve-knob budgets re-baselined by issue #578 (Opus-5-bound adaptive
+    # resolve-knob budgets re-baselined by issue athenaeum#578 (Opus-5-bound adaptive
     # thinking headroom): resolve 1024 -> 8192, freetext_edit 4096 -> 8192.
     ("resolutions.resolve_system", "_RESOLVE_SYSTEM", "resolve", 8192),
     ("resolutions.freetext_edit_system", "_FREETEXT_EDIT_SYSTEM", "resolve", 8192),
@@ -126,7 +126,7 @@ def prompt_manifest_hash(length: int = 8) -> str:
     """A single short aggregate digest over the whole prompt manifest.
 
     Hashes the canonical ``name=sha256`` lines (name-sorted, so it is stable
-    across dict ordering) into one short hex token. Its purpose (issue #567) is
+    across dict ordering) into one short hex token. Its purpose (issue athenaeum#567) is
     to let a librarian run record *which prompt bytes it used* in ONE
     run-summary key instead of sixteen; it changes iff any registered prompt's
     bytes change.

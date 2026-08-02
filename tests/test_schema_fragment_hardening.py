@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Hardening of the operator-tunable live-wiki schema fragments (issue #563).
+"""Hardening of the operator-tunable live-wiki schema fragments (issue athenaeum#563).
 
 ``tiers._load_schema_text`` reads two fragments (``observation-filter.md`` and
 ``_entity-template.md``) from the operator's live wiki and interpolates them into
 prompt *instruction position* next to the fenced ``<user_document>`` block. This
 pins the three robustness features that hardening added: an 8KB cap (truncate,
 warn, never drop), a ``<user_document>`` fence defang, and the
-``schema_fragment_state`` comparison helper the attribution child (#567) consumes.
+``schema_fragment_state`` comparison helper the attribution child (athenaeum#567) consumes.
 """
 
 from __future__ import annotations
@@ -159,7 +159,7 @@ class TestSchemaFragmentState:
 
     def test_importable_without_wiki_write_or_api_client(self, tmp_path: Path) -> None:
         """Callable against a read-only wiki root with no client — this is the
-        contract the attribution child (#567) relies on."""
+        contract the attribution child (athenaeum#567) relies on."""
         sd = _schema_dir(tmp_path)
         (sd / "observation-filter.md").write_bytes(self._bundled("observation-filter.md"))
         # No exception, dict shape as documented.

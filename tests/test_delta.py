@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the delta-compile primitives (issue #370 PR2).
+"""Unit tests for the delta-compile primitives (issue athenaeum#370 PR2).
 
 Complements the end-to-end equivalence gate (test_delta_compile_equivalence.py)
 with targeted coverage of the building blocks: ``query_neighbors`` (real
@@ -203,7 +203,7 @@ def test_query_neighbors_ranks_near_dups(tmp_path: Path) -> None:
 
 
 class _FakeClient:
-    # Issue #554 (L11): left ad-hoc rather than repointed at
+    # Issue athenaeum#554 (L11): left ad-hoc rather than repointed at
     # tests.conftest.FakeLLMClient — this is a null placeholder (the D5 tests
     # below only check that a "live client" is truthy/non-None; `.messages`
     # is never called), so there is no `messages.create` shape to share.
@@ -230,12 +230,12 @@ def _capture_compile(monkeypatch):
 def test_d5_live_client_delta_eligible_by_default(
     tmp_path: Path, monkeypatch, cross_scope_mode: str
 ) -> None:
-    """Issue #463 supersedes the original D5 fallback: a live client is now
+    """Issue athenaeum#463 supersedes the original D5 fallback: a live client is now
     delta-ELIGIBLE by default (``librarian.delta.live_client`` defaults True,
     ``full_compile_due`` defaults False), REGARDLESS of the cross-scope mode.
 
-    Historical note: prior to #463, ANY live client unconditionally forced a
-    whole-corpus compile (the original D5 fallback trigger). #463 replaces
+    Historical note: prior to athenaeum#463, ANY live client unconditionally forced a
+    whole-corpus compile (the original D5 fallback trigger). athenaeum#463 replaces
     that blanket veto with the periodic full-compile cadence backstop
     (``full_compile_due``) — see ``test_d5_live_client_full_compile_due_forces_
     whole_corpus`` below for the case that still forces whole-corpus.
@@ -277,7 +277,7 @@ def test_d5_live_client_delta_eligible_by_default(
         usage=None,
         changed_paths={p},
     )
-    # #463: the cluster pass DOES receive changed_paths and the merge DOES
+    # athenaeum#463: the cluster pass DOES receive changed_paths and the merge DOES
     # scope to the affected cluster — the live client no longer vetoes delta.
     assert seen["cluster_changed_paths"] == {p}
     assert seen["only_cluster_ids"] == {"alpha-new"}
@@ -289,7 +289,7 @@ def test_d5_live_client_full_compile_due_forces_whole_corpus(
 ) -> None:
     """A live client WITH ``full_compile_due=True`` still forces whole-corpus,
     regardless of the cross-scope mode — the periodic reconciliation cadence
-    (issue #463) is the backstop that replaces the old blanket D5 veto.
+    (issue athenaeum#463) is the backstop that replaces the old blanket D5 veto.
     """
     root = tmp_path
     (root / "athenaeum.yaml").write_text(
@@ -323,7 +323,7 @@ def test_d5_live_client_full_compile_due_forces_whole_corpus(
 def test_d5_live_client_delta_disabled_via_config_forces_whole_corpus(
     tmp_path: Path, monkeypatch, cross_scope_mode: str
 ) -> None:
-    """``librarian.delta.live_client: false`` keeps the pre-#463 whole-corpus-
+    """``librarian.delta.live_client: false`` keeps the pre-athenaeum#463 whole-corpus-
     only behaviour for a live client, regardless of the cross-scope mode.
     """
     root = tmp_path

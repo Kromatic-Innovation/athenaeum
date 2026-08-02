@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Prune existing operational ``wiki/auto-*.md`` pages (issue #278, Part 2).
+"""Prune existing operational ``wiki/auto-*.md`` pages (issue athenaeum#278, Part 2).
 
 Part 1 (the ephemeral-intake classifier) stops NEW operational session notes
 from becoming durable wiki entities. This driver retires the ones already on
@@ -126,7 +126,7 @@ def apply_prune(
     knowledge_root: Path,
     report: PruneReport,
 ) -> PruneReport:
-    """``git rm`` the kill-list in one labeled commit (issue #278).
+    """``git rm`` the kill-list in one labeled commit (issue athenaeum#278).
 
     Removal is git-only (recoverable). Refuses to act without a writable git
     repo -- mirrors the move-then-retire safety contract. A no-op (no commit)
@@ -173,7 +173,7 @@ def apply_prune(
             "commit",
             "-m",
             f"chore(auto-memory): prune {len(rel_paths)} operational "
-            f"auto-memory page(s) (#278)",
+            f"auto-memory page(s) (athenaeum#278)",
             "--",
             *rel_paths,
         )

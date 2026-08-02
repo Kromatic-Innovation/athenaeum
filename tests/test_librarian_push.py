@@ -1,4 +1,4 @@
-"""Tests for the opt-in post-run ``git push`` hook (issue #284).
+"""Tests for the opt-in post-run ``git push`` hook (issue athenaeum#284).
 
 Closes the move-then-retire recovery gap: scheduled nightly runs commit
 locally but, without this opt-in, never push — so origin silently drifts
@@ -7,7 +7,7 @@ and the documented git-only recovery only holds on one machine.
 Covers each acceptance criterion:
 
 - Default OFF (regression test): a normal run behaves byte-identically to
-  pre-#284 (no push).
+  pre-athenaeum#284 (no push).
 - Enabled + commits → push invoked (subprocess mocked).
 - ``--dry-run`` → no push even when enabled.
 - No new commits → no push (the run that processed zero files).
