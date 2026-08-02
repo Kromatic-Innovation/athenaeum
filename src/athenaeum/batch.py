@@ -98,6 +98,7 @@ from athenaeum.tiers import (
     existing_body_needs_full_echo,
     parse_merge_ops_response,
     parse_tier2_entities,
+    partition_code_artifact_classifications,
     stamp_merge_provenance,
     tier1_programmatic_match,
     tier2_reclassify_larger_budget,
@@ -528,6 +529,19 @@ def process_batch_run(
             result.truncated += t2_stats.truncated
             log.info(
                 "  T2 classified %d new entities (%s)", len(classified), st.raw.ref
+            )
+        # Issue #680: never mint a wiki entity from a filename/path (a code
+        # artifact) — the repo is the source of truth for its own code, so a
+        # memory of it is stale by construction. Dropped at creation, on the
+        # batch transport too (complementary to #662's read-side stopwords).
+        classified, _dropped_code = partition_code_artifact_classifications(
+            classified, config
+        )
+        for _name in _dropped_code:
+            log.info(
+                "  T3 create skipped (issue #680, code artifact): %s (%s)",
+                _name,
+                st.raw.ref,
             )
         for c in classified:
             st.actions.append(

@@ -211,6 +211,32 @@ def add_curate_subparsers(subparsers: argparse._SubParsersAction) -> None:
     _add_lock_args(prune_index_parser)
     prune_index_parser.set_defaults(func=cmd_auto_memory)
 
+    # prune-code-entities (issue #680): retire wiki entity pages that were minted
+    # from filenames / paths (``skill.md``, ``project-registry.yaml``). The
+    # write-side gate stops NEW ones; this sweeps the ones already on disk, using
+    # the SAME code-artifact predicate. Default is dry-run; --apply git rm's them.
+    prune_code_parser = auto_memory_sub.add_parser(
+        "prune-code-entities",
+        help="Retire wiki entity pages minted from filenames/paths (issue "
+        "#680) — a page whose entity name is a code artifact (has a source/"
+        "config extension or a path separator). Default is dry-run; --apply "
+        "git rm's the kill-list in one commit.",
+    )
+    prune_code_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="git rm the kill-list in one labeled commit. Without this flag "
+        "the command is a dry-run.",
+    )
+    prune_code_parser.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    _add_lock_args(prune_code_parser)
+    prune_code_parser.set_defaults(func=cmd_auto_memory)
+
 
 def cmd_dedupe(args: argparse.Namespace) -> int:
     """Dispatch ``athenaeum dedupe persons --find|--apply`` / ``dedupe wiki-pages``."""
@@ -384,8 +410,11 @@ def cmd_auto_memory(args: argparse.Namespace) -> int:
         return _cmd_auto_memory_prune(args)
     if target == "prune-index":
         return _cmd_auto_memory_prune_index(args)
+    if target == "prune-code-entities":
+        return _cmd_auto_memory_prune_code_entities(args)
     print(
-        "usage: athenaeum auto-memory {prune,prune-index} [--apply] ...",
+        "usage: athenaeum auto-memory "
+        "{prune,prune-index,prune-code-entities} [--apply] ...",
         file=sys.stderr,
     )
     return 2
@@ -532,6 +561,72 @@ def _cmd_auto_memory_prune_index(args: argparse.Namespace) -> int:
             )
         else:
             print("\n  nothing pruned.")
+        return 0
+    finally:
+        lock.release()
+
+
+def _cmd_auto_memory_prune_code_entities(args: argparse.Namespace) -> int:
+    """Retire wiki entity pages minted from filenames / paths (issue #680).
+
+    The creation gate (:func:`athenaeum.tiers.is_code_artifact_name`) stops NEW
+    code-artifact entities; this one-shot sweep retires the ones already on disk
+    using the SAME predicate, so the operator allowlist / toggle apply
+    identically. Removal is via the existing ``git rm`` retire path (recoverable).
+
+    Exit codes (mirroring ``auto-memory prune`` / ``prune-index``):
+        0 - clean run (nothing to retire, OR ``--apply`` succeeded, no errors).
+        1 - errors encountered (apply without git, unreadable page, ...).
+        2 - dry-run found pages that WOULD be retired.
+    """
+    from athenaeum.config import load_config
+    from athenaeum.filename_entity_prune import (
+        apply_filename_entity_prune,
+        build_filename_entity_report,
+    )
+
+    knowledge_root = args.path.expanduser().resolve()
+    wiki_root = knowledge_root / "wiki"
+    if not wiki_root.is_dir():
+        print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
+        return 1
+
+    cfg = load_config(knowledge_root)
+    report = build_filename_entity_report(wiki_root, config=cfg)
+
+    mode = "APPLY" if args.apply else "DRY RUN"
+    print(f"=== retire filename-derived entity pages ({mode}) ===")
+    print(f"  scanned:  {report.scanned}")
+    print(f"  kill:     {len(report.kill)}")
+    print(f"  retained: {len(report.retained)}")
+
+    if report.kill:
+        print("\n  KILL-LIST:")
+        for cand in report.kill:
+            print(f"    {cand.path.name}: {cand.reason}")
+
+    if not args.apply:
+        for err in report.errors:
+            print(f"  ERR {err}", file=sys.stderr)
+        if report.errors:
+            return 1
+        return 2 if report.kill else 0
+
+    # --apply (mutating): acquire the single-machine run lock (issue #309).
+    lock = _acquire_or_exit(knowledge_root, args, cfg)
+    if isinstance(lock, int):
+        return lock
+    try:
+        report = apply_filename_entity_prune(knowledge_root, report)
+        for err in report.errors:
+            print(f"  ERR {err}", file=sys.stderr)
+        if report.errors:
+            return 1
+        if report.committed:
+            print(f"\n  retired {len(report.kill)} page(s); committed.")
+            _rebuild_recall_index(knowledge_root, cfg, args)
+        else:
+            print("\n  nothing retired.")
         return 0
     finally:
         lock.release()
