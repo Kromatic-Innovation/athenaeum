@@ -220,6 +220,52 @@ accepts the pre-#232 `resolve.model` key for backward compatibility.
 >
 > ² The reasoning-tier knobs are read by `athenaeum.reasoning_tiers`. That subsystem currently has no production caller (`DEFAULT_TIER_CHAIN` is empty), so setting these has no runtime effect today — they are documented here for completeness because `src/` reads them. If the subsystem is removed, these two rows go with it.
 
+### Per-stage token and thinking tuning (#688)
+
+Each LLM stage resolves two knobs through the same seam the model knobs use
+(`provider.resolve_max_tokens` / `provider.resolve_thinking`, precedence: env var
+→ `athenaeum.yaml` → code default):
+
+- **`…_MAX_TOKENS`** — the stage's output-token ceiling (`max_tokens`). An
+  integer; raising it lifts a truncation ceiling at higher spend, lowering it
+  caps cost at the risk of clipping long outputs.
+- **`…_THINKING`** — the stage's extended-thinking posture: `disabled` (no
+  thinking block) or `adaptive` (the model may think first; see #578). Stages on
+  a thinking-enabled posture emit a leading thinking block before their answer.
+
+These are the primary per-stage **spend levers** — they govern token ceilings
+and thinking on a repo that ships explicit spend ceilings
+(`resolve_spend_max_tokens_per_run`). They all default safely to code constants,
+so an unset value degrades silently to the default rather than failing.
+
+| Stage (what runs there) | `…_MAX_TOKENS` (default) | `…_THINKING` (default) |
+|---|---|---|
+| Claim-kind classify (epistemic-kind label) | `ATHENAEUM_CLAIM_KIND_MAX_TOKENS` (`64`) | `ATHENAEUM_CLAIM_KIND_THINKING` (`disabled`) |
+| Tier-2 classify | `ATHENAEUM_CLASSIFY_MAX_TOKENS` (`4096`) | `ATHENAEUM_CLASSIFY_THINKING` (`disabled`) |
+| Tier-2 classify retry (strict-JSON reminder) | `ATHENAEUM_CLASSIFY_RETRY_MAX_TOKENS` (`8192`) | — (no thinking knob) |
+| Contradiction detector | `ATHENAEUM_CONTRADICTION_DETECT_MAX_TOKENS` (`1024`) | `ATHENAEUM_CONTRADICTION_DETECT_THINKING` (`disabled`) |
+| Free-text edit (resolver amend) | `ATHENAEUM_FREETEXT_EDIT_MAX_TOKENS` (`8192`) | `ATHENAEUM_FREETEXT_EDIT_THINKING` (`adaptive`) |
+| Tier-3 merge — create (new page) | `ATHENAEUM_MERGE_CREATE_MAX_TOKENS` (`6144`) | `ATHENAEUM_MERGE_CREATE_THINKING` (`adaptive`) |
+| Tier-3 merge — full echo | `ATHENAEUM_MERGE_FULL_MAX_TOKENS` (`12288`) | `ATHENAEUM_MERGE_FULL_THINKING` (`adaptive`) |
+| Tier-3 merge — anchored patch | `ATHENAEUM_MERGE_PATCH_MAX_TOKENS` (`6144`) | `ATHENAEUM_MERGE_PATCH_THINKING` (`adaptive`) |
+| Resolver (contradiction winner) | `ATHENAEUM_RESOLVE_MAX_TOKENS` (`8192`) | `ATHENAEUM_RESOLVE_THINKING` (`adaptive`) |
+| Recall topic extraction | `ATHENAEUM_TOPIC_MAX_TOKENS` (`256`) | `ATHENAEUM_TOPIC_THINKING` (`disabled`) |
+| Reasoning tier 1 (Haiku pre-screen)² | `ATHENAEUM_REASONING_T1_MAX_TOKENS` (`256`) | `ATHENAEUM_REASONING_T1_THINKING` (`disabled`) |
+| Reasoning tier 2 (escalation)² | `ATHENAEUM_REASONING_T2_MAX_TOKENS` (`4096`) | `ATHENAEUM_REASONING_T2_THINKING` (`adaptive`) |
+
+> `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` (reasoning-tier decision auditing)
+> is documented in [`authority-manifest.md`](authority-manifest.md), where the
+> auditing behaviour it gates is described, rather than duplicated here.
+
+**A CI check keeps this section honest.** `scripts/check_env_docs.py` — gated in
+CI by `tests/test_env_docs.py` (part of the blocking test suite), and runnable
+standalone — diffs every `ATHENAEUM_*` name read by `src/` against the names
+documented here, and fails on any undocumented one.
+The scan is digit-aware (`ATHENAEUM_[A-Z0-9_]+`) — the earlier `[A-Z_]+` sweeps
+silently truncated `ATHENAEUM_REASONING_T1_MAX_TOKENS` to a fragment and
+undercounted. Deliberately-internal vars live in that script's allowlist with a
+one-line reason each.
+
 ### Sampling parameters are absent by design (#579)
 
 Athenaeum sends **no sampling parameters** to any LLM call site, and that is
