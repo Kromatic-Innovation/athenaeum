@@ -175,6 +175,21 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     migrate_p.add_argument(
+        "--rename-to",
+        metavar="NAME",
+        default=None,
+        help=(
+            "Operator-supplied display name for a --page rename (issue athenaeum#745). "
+            "athenaeum#505 refuses to GUESS a name from an ambiguous local-part, but "
+            "offered no way to supply one — so the deferred population had no "
+            "route through the tool and could only be hand-edited, which skips "
+            "the excluded record, the slug rename and the inbound-link "
+            "rewrite. This is a human asserting the name, so it bypasses the "
+            "confidence gate by design. Requires --page and --rename-name-email "
+            "(or --rename-only)."
+        ),
+    )
+    migrate_p.add_argument(
         "--list-deferred",
         action="store_true",
         help=(
@@ -302,7 +317,12 @@ def _run_rename_slice(
     corpus-wide body migration would do in the same run.
     """
     report = bulk_rename_name_email_pages(
-        wiki_root, config, knowledge_root, apply=args.apply, pages=pages
+        wiki_root,
+        config,
+        knowledge_root,
+        apply=args.apply,
+        pages=pages,
+        display_name_override=getattr(args, "rename_to", None),
     )
     mode = "renamed" if args.apply else "[DRY RUN] would rename"
     print(
@@ -330,6 +350,13 @@ def _cmd_storage_migrate_pii(args: argparse.Namespace) -> int:
     # athenaeum#745: --rename-only is the rename slice on its own. It implies
     # --rename-name-email so the two flags cannot disagree.
     if getattr(args, "rename_only", False):
+        args.rename_name_email = True
+    if getattr(args, "rename_to", None):
+        # An operator-supplied name names exactly ONE page; applying it across a
+        # bulk target set would stamp the same name onto every match.
+        if args.page is None:
+            print("error: --rename-to requires --page.", file=sys.stderr)
+            return 2
         args.rename_name_email = True
     if args.all or args.glob is not None:
         return _cmd_storage_migrate_pii_bulk(args)

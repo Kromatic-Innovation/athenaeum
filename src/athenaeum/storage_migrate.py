@@ -478,6 +478,8 @@ def plan_name_email_rename(
     page_path: Path,
     config: dict[str, Any] | None,
     knowledge_root: Path,
+    *,
+    display_name_override: str | None = None,
 ) -> NameEmailRenamePlan:
     """Compute the rename migration for one name-is-an-email page — pure.
 
@@ -527,7 +529,14 @@ def plan_name_email_rename(
         # Not a name-is-an-email page at all — nothing to plan.
         return NameEmailRenamePlan(page_path=page_path, email="", confident=False)
 
-    display_name = derive_display_name_from_email(email)
+    # athenaeum#745: an OPERATOR-SUPPLIED name is the missing half of athenaeum#505's
+    # fallback. athenaeum#505 correctly refuses to guess a display name from an
+    # ambiguous local-part, but it offered no way to *provide* one — so the
+    # deferred population had no route through the tool at all and could only
+    # be hand-edited, which skips the excluded record, the slug rename and the
+    # inbound-link rewrite. An override is a human asserting the name, not the
+    # tool inferring it, so it bypasses the confidence gate by design.
+    display_name = (display_name_override or "").strip() or derive_display_name_from_email(email)
     if display_name is None:
         return NameEmailRenamePlan(
             page_path=page_path,
@@ -651,6 +660,7 @@ def bulk_rename_name_email_pages(
     *,
     apply: bool = False,
     pages: Iterable[Path] | None = None,
+    display_name_override: str | None = None,
 ) -> NameEmailRenameReport:
     """Drive :func:`plan_name_email_rename` over every entity page (issue athenaeum#505).
 
@@ -674,7 +684,12 @@ def bulk_rename_name_email_pages(
     for page_path in iter_entity_pages(wiki_root) if pages is None else pages:
         report.scanned += 1
         try:
-            plan = plan_name_email_rename(page_path, config, knowledge_root)
+            plan = plan_name_email_rename(
+                page_path,
+                config,
+                knowledge_root,
+                display_name_override=display_name_override,
+            )
         except (OSError, UnicodeDecodeError):
             continue
         if not plan.email:

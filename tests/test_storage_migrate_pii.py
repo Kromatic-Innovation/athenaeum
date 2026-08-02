@@ -1398,6 +1398,61 @@ class TestRenameSliceScopingAndRenameOnly:
         # The body address must be gone from the renamed page too.
         assert "other.person@acme.example" not in renamed.read_text(encoding="utf-8")
 
+    def test_rename_to_names_a_page_athenaeum505_refuses_to_guess(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """athenaeum#745: an operator-supplied name is athenaeum#505's missing half.
+
+        athenaeum#505 is right to refuse to GUESS from an ambiguous local-part, but it
+        left that population with no route through the tool at all — hand-editing
+        the frontmatter skips the excluded record, the slug rename and the
+        inbound-link rewrite.
+        """
+        root = tmp_path / "knowledge"
+        self._seed(root)
+        referrer = root / "wiki" / "ref.md"
+        referrer.write_text(
+            "---\nuid: r9\nname: Ref\ntype: person\n---\nSee [[info-at-acme]].\n",
+            encoding="utf-8",
+        )
+
+        rc = main(
+            [
+                "storage", "migrate-pii", "--path", str(root),
+                "--page", str(root / "wiki" / "info-at-acme.md"),
+                "--rename-only", "--apply", "--rename-to", "Ada Lovelace",
+            ]
+        )
+
+        assert rc == 0
+        renamed = root / "wiki" / "ada-lovelace.md"
+        assert renamed.is_file()
+        assert not (root / "wiki" / "info-at-acme.md").exists()
+        # name: is the operator's name, and the address is off the page.
+        text = renamed.read_text(encoding="utf-8")
+        assert "Ada Lovelace" in text
+        assert "info@acme.example" not in text
+        # The address landed on the excluded surface, not nowhere.
+        assert (root / "excluded" / "ada-lovelace.md").is_file()
+        # Inbound wikilinks follow the rename.
+        assert "[[ada-lovelace]]" in referrer.read_text(encoding="utf-8")
+
+    def test_rename_to_requires_page(self, tmp_path: Path, capsys) -> None:
+        root = tmp_path / "knowledge"
+        self._seed(root)
+
+        rc = main(
+            [
+                "storage", "migrate-pii", "--path", str(root),
+                "--all", "--rename-only", "--rename-to", "Ada Lovelace",
+            ]
+        )
+
+        # Stamping one name across a bulk target set would rename every match
+        # to the same thing.
+        assert rc == 2
+        assert "--rename-to requires --page" in capsys.readouterr().err
+
     def test_rename_only_implies_rename_name_email(self, tmp_path: Path, capsys) -> None:
         root = tmp_path / "knowledge"
         self._seed(root)
