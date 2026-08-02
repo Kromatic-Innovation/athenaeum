@@ -531,3 +531,127 @@ class TestCrossAgentRecall:
         out = capsys.readouterr().out
         assert out.strip(), "session B recall returned no hits — gap not closed"
         assert "curie" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Reference-determination wiring (issue #711)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionEndReferenceDetermination:
+    """``session_end`` is the SessionEnd-hook entry point, so it is where
+    per-session reference determination (referenced / pushed precision) is
+    triggered — see ``athenaeum.push_metrics.run_reference_determination``.
+    """
+
+    def test_calls_reference_determination_when_session_given(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import push_metrics
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        calls: list[tuple[str, Path | None]] = []
+
+        def _fake_run_reference_determination(
+            session_id: str, *, cache_dir: Path | None = None, config: object = None, **_: object
+        ) -> None:
+            calls.append((session_id, cache_dir))
+            return None
+
+        monkeypatch.setattr(
+            push_metrics, "run_reference_determination", _fake_run_reference_determination
+        )
+
+        session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-ref-1",
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert calls == [("sess-ref-1", cache)]
+
+    def test_skipped_when_no_session_id(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import push_metrics
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            push_metrics,
+            "run_reference_determination",
+            lambda *a, **kw: calls.append(a[0] if a else kw.get("session_id", "")),
+        )
+
+        session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session=None,
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert calls == []
+
+    def test_skipped_on_dry_run(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import push_metrics
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            push_metrics,
+            "run_reference_determination",
+            lambda *a, **kw: calls.append("called"),
+        )
+
+        session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-dry",
+            cache_dir=cache,
+            backend="fts5",
+            dry_run=True,
+        )
+
+        assert calls == []
+
+    def test_real_reference_determination_never_breaks_session_end(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """End-to-end with the REAL (unmocked) push_metrics function: no push
+        records and no transcript exist for this session id, so
+        ``determine_references`` returns ``None`` internally — but
+        ``session_end`` must still complete normally either way.
+        """
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        result = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-no-transcript",
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert result.exit_code == 0
+        assert result.session == "sess-no-transcript"
