@@ -546,6 +546,137 @@ class TestPhoneDetectorIssueNumberAndDateShapes:
 
 
 # ---------------------------------------------------------------------------
+# Phone detector — labeled identifiers + the shapes athenaeum#720 partially
+# covered (issue athenaeum#732)
+# ---------------------------------------------------------------------------
+#
+# After athenaeum#720 the live phone axis still reported 187 findings. The
+# largest surviving class was NOT ambiguous — the values are typed by their own
+# surrounding prose (`QBO realm 1008563730`, GA4 `stream 5139685489`,
+# `ISBN 9798183760910`). A preceding-token exclusion retires that class with no
+# model call; ISBN-13 additionally has a structural tell (13 digits, 978/979
+# prefix) so an unlabeled ISBN is caught without the prose. Three smaller
+# deterministic shapes survive alongside — the 4-group single-dash issue list
+# (an off-by-one in the group-count bound), datetime-with-space, and four-part
+# dates. Each value below is taken VERBATIM from athenaeum#732's measurement so a
+# regression re-surfaces the exact corpus shape.
+
+
+class TestPhoneDetectorLabeledIdentifiers:
+    #: (label, value) pairs quoted verbatim from athenaeum#732's Class-1 table,
+    #: each shown in the surrounding prose the corpus actually carries.
+    LABELED = (
+        ("QBO realm", 'the business entity "Kromatic" (QBO realm 1008563730)'),
+        ("GA4 stream (backtick-wrapped)", "prod GA4 stream (`G-EYDNWEV55B`, stream `5139685489`)"),
+        ("ISBN paperback (backtick)", "**paperback `9798196294006`;"),
+        ("ISBN hardcover (backtick)", "**hardcover `9798183760910`**"),
+        ("ISBN label + space", "ISBN 9798183760910 in the colophon"),
+        ("ISBN-13 hyphenated label", "ISBN-13 9798196355028 listed"),
+        ("realm with colon", "billing realm: 1008563730 for the tenant"),
+    )
+
+    @pytest.mark.parametrize(
+        "sample", [pytest.param(v, id=label) for label, v in LABELED]
+    )
+    def test_labeled_identifier_is_not_a_phone(self, sample: str) -> None:
+        assert find_inline_phones(sample) == [], sample
+
+    def test_isbn13_is_excluded_structurally_without_a_label(self) -> None:
+        # AC2: the 978/979 Bookland prefix at 13 digits is caught structurally,
+        # so an unlabeled ISBN needs no adjacent prose. All four cited values.
+        for isbn in ("9798183760910", "9798196294006", "9798196355028", "9781700393777"):
+            assert find_inline_phones(f"see {isbn} elsewhere") == [], isbn
+
+    def test_a_new_label_is_a_data_entry_not_a_code_path(self) -> None:
+        # AC1: exclusions are keyed off a DATA list of labels — the same code
+        # path retires every label. Assert the shipped label set explicitly so
+        # dropping one is a visible diff, not a silent regression.
+        from athenaeum.pii import LABELED_IDENTIFIER_PREFIXES
+
+        assert {"qbo realm", "realm", "stream", "isbn"} <= set(LABELED_IDENTIFIER_PREFIXES)
+
+    def test_label_does_not_eat_an_unrelated_following_phone(self) -> None:
+        # The prefix must sit IMMEDIATELY before the run. A genuine phone that
+        # merely follows a label word (with other tokens between) stays flagged.
+        assert find_inline_phones("realm42 917-231-6130") == ["917-231-6130"]
+        assert find_inline_phones("the stream ended; call 917-231-6130") == ["917-231-6130"]
+
+
+class TestPhoneDetectorResidualShapes732:
+    #: The 4-group single-dash issue lists athenaeum#720's group-count bound let
+    #: through (verbatim from the issue), plus datetime-with-space and four-part
+    #: dates. Every one must classify as a non-phone.
+    RESIDUAL_SHAPES = (
+        ("4-group single-dash list", "410-414-416-412"),
+        ("4-group single-dash list", "790-791-792-793"),
+        ("4-group single-dash list", "743-721-714-695"),
+        ("4-group single-dash list", "109-110-111-112"),
+        ("4-group single-dash list", "245-338-339-352"),
+        ("4-group single-dash list", "801-835-841-843"),
+        ("datetime with space", "2026-04-23 05"),
+        ("datetime with space", "2026-05-31 08"),
+        ("datetime with space", "2026-04-24 11"),
+        ("four-part date", "2018-05-06-07"),
+    )
+
+    @pytest.mark.parametrize(
+        "example", [pytest.param(v, id=f"{label}:{v}") for label, v in RESIDUAL_SHAPES]
+    )
+    def test_residual_shape_reports_no_phone(self, example: str) -> None:
+        assert find_inline_phones(example) == [], example
+        assert find_inline_phones(f"ref {example} end") == [], example
+
+    def test_group_count_bound_has_no_upper_limit(self) -> None:
+        # AC3: the bound is a lower bound (>=4 groups, no '+'), so a 5- or
+        # 6-group list does not reopen the class.
+        assert find_inline_phones("410-414-416-412-419") == []
+        assert find_inline_phones("410-414-416-412-419-421") == []
+
+
+class TestPhoneDetector732GenuineNumbersStayFlagged:
+    def test_the_two_pinned_genuine_numbers_remain_flagged(self) -> None:
+        # AC5 — the criterion that keeps the fix honest. These real numbers must
+        # never be retired by any athenaeum#732 rule.
+        assert find_inline_phones("call 917-231-6130 today") == ["917-231-6130"]
+        assert find_inline_phones("reach us at 206-330-3783 please") == ["206-330-3783"]
+
+    def test_prior_genuine_survivors_unaffected(self) -> None:
+        # The athenaeum#500/#683/#720 true positives survive the athenaeum#732 tightening.
+        assert find_inline_phones("call +1-555-0100 now") == ["+1-555-0100"]
+        assert find_inline_phones("(555) 010-0100") == ["(555) 010-0100"]
+        assert find_inline_phones("cell 5551234567 anytime") == ["5551234567"]
+        assert find_inline_phones("intl +447911123456 ok") == ["+447911123456"]
+
+    def test_email_axis_is_untouched(self) -> None:
+        # AC7: NO email-axis change — pinned with a count assertion over a body
+        # carrying a real email and every athenaeum#732 false-positive shape.
+        body = (
+            "Contact alice@example.com re QBO realm 1008563730 and GA4 stream\n"
+            "`5139685489`, ISBN 9798183760910, issues 410-414-416-412, at\n"
+            "2026-04-23 05 on 2018-05-06-07. Cc bob+tag@sub.example.co.uk please."
+        )
+        assert find_inline_emails(body) == ["alice@example.com", "bob+tag@sub.example.co.uk"]
+        # And the phone axis on that same body is empty — all shapes excluded.
+        assert find_inline_phones(body) == []
+
+    def test_corpus_scan_retires_labeled_page_keeps_genuine(self, tmp_path: Path) -> None:
+        # The live reduction in miniature: a page full of athenaeum#732 labeled
+        # identifiers + residual shapes yields ZERO findings, while a page with a
+        # genuine phone still yields one.
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "labeled_ids.md").write_text(
+            "## Ledger\nQBO realm 1008563730\nGA4 stream `5139685489`\n"
+            "ISBN 9798183760910\n## Refs\n410-414-416-412\n2018-05-06-07\n",
+            encoding="utf-8",
+        )
+        (wiki / "real_phone.md").write_text("Reach Alice at 917-231-6130.\n", encoding="utf-8")
+        findings = scan_corpus_pii(wiki)
+        assert [f.path.name for f in findings] == ["real_phone.md"]
+        assert findings[0].phones == ["917-231-6130"]
+
+
+# ---------------------------------------------------------------------------
 # Observation log — append, read, supersession, deterministic fold
 # ---------------------------------------------------------------------------
 
