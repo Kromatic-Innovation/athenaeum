@@ -1,0 +1,20 @@
+{
+  "case_id": "budget_approver_contradict",
+  "content_blocks": [
+    {
+      "text": "```json\n[\"discretionary spend\", \"GBP\"]\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "recall",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:318e5adc4bb7be80ebb0c67d528860275a431b117722f2226f2de0d7b2809bd5",
+  "recorded_at": "2026-08-02T18:05:30.376580+00:00",
+  "response_text": "```json\n[\"discretionary spend\", \"GBP\"]\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 157,
+    "output_tokens": 18
+  }
+}

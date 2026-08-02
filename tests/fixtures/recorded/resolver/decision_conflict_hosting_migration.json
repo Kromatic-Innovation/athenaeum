@@ -1,0 +1,23 @@
+{
+  "case_id": "decision_conflict_hosting_migration",
+  "content_blocks": [
+    {
+      "type": "thinking"
+    },
+    {
+      "text": "{\"recommended_winner\": \"neither\", \"action\": \"scope_a\", \"rationale\": \"DECISION/FACT pair of sequential hosting states \u2014 both were true in separate time windows, so narrow side a (Heroku) to 2026-02-10 through the 2026-05-20 cutover rather than retiring or correcting either claim.\", \"confidence\": 0.88, \"source_precedence_used\": [\"a:unsourced > b:unsourced (tie; resolved by scope, not precedence)\"]}",
+      "type": "text"
+    }
+  ],
+  "layer": "resolver",
+  "model": "claude-opus-5",
+  "prompt_hash": "sha256:5d9190190cb4c6ae25032b0d037495d70ce2c5ec815adac024421694e9f772c2",
+  "recorded_at": "2026-08-02T18:05:43.441882+00:00",
+  "response_text": "{\"recommended_winner\": \"neither\", \"action\": \"scope_a\", \"rationale\": \"DECISION/FACT pair of sequential hosting states \u2014 both were true in separate time windows, so narrow side a (Heroku) to 2026-02-10 through the 2026-05-20 cutover rather than retiring or correcting either claim.\", \"confidence\": 0.88, \"source_precedence_used\": [\"a:unsourced > b:unsourced (tie; resolved by scope, not precedence)\"]}",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 4390,
+    "input_tokens": 359,
+    "output_tokens": 339
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "case_id": "refinement_editor_general_and_csv",
+  "content_blocks": [
+    {
+      "type": "thinking"
+    },
+    {
+      "text": "{\n  \"action\": \"propose_merge\",\n  \"merge_target_name\": \"client-facing-project-docs\",\n  \"rationale\": \"Both sides are PREFERENCES forming a canonical general-rule + explicit-narrower-exception pair (Notion for docs, Google Sheets for CSVs) that compose cleanly and read better as one canonical memory.\",\n  \"draft_merged_body\": \"# Client-facing project docs (consulting team)\\n\\n**General rule:** The consulting team uses Notion for all client-facing project docs.\\n\\n**Exception (CSVs only):** Client-facing project CSVs live in Google Sheets, not Notion.\\n\\nEverything that is not a CSV follows the general Notion rule.\",\n  \"confidence\": 0.9,\n  \"source_precedence_used\": [\"a:unsourced > b:unsourced\"]\n}",
+      "type": "text"
+    }
+  ],
+  "layer": "resolver",
+  "model": "claude-opus-5",
+  "prompt_hash": "sha256:2e7e5562a24a5bef79930a0cfdc3d9abd7b3a862f2e56e886fb576012d889301",
+  "recorded_at": "2026-08-02T18:05:36.502039+00:00",
+  "response_text": "{\n  \"action\": \"propose_merge\",\n  \"merge_target_name\": \"client-facing-project-docs\",\n  \"rationale\": \"Both sides are PREFERENCES forming a canonical general-rule + explicit-narrower-exception pair (Notion for docs, Google Sheets for CSVs) that compose cleanly and read better as one canonical memory.\",\n  \"draft_merged_body\": \"# Client-facing project docs (consulting team)\\n\\n**General rule:** The consulting team uses Notion for all client-facing project docs.\\n\\n**Exception (CSVs only):** Client-facing project CSVs live in Google Sheets, not Notion.\\n\\nEverything that is not a CSV follows the general Notion rule.\",\n  \"confidence\": 0.9,\n  \"source_precedence_used\": [\"a:unsourced > b:unsourced\"]\n}",
+  "usage": {
+    "cache_creation_input_tokens": 4390,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 348,
+    "output_tokens": 305
+  }
+}

@@ -33,4 +33,23 @@
 #
 # Known layer names: detector, resolver, recall, backfill (see
 # tests/evals/harness.py LAYER_* constants).
-seeded: {}
+# SEEDED 2026-08-02 (issue athenaeum#610). Five layers recorded by workflow run
+# 30760264305 against a live key. Every fixture carries a non-empty
+# `response_text`, including the eight `resolver` cases that recorded empty
+# before athenaeum#684 fixed `RecordingClient`'s content-block read.
+seeded:
+  classify:
+    date: 2026-08-02
+    run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/30760264305
+  detector:
+    date: 2026-08-02
+    run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/30760264305
+  merge:
+    date: 2026-08-02
+    run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/30760264305
+  recall:
+    date: 2026-08-02
+    run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/30760264305
+  resolver:
+    date: 2026-08-02
+    run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/30760264305

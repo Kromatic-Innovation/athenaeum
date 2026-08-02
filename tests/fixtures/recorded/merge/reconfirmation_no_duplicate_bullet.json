@@ -1,0 +1,20 @@
+{
+  "case_id": "reconfirmation_no_duplicate_bullet",
+  "content_blocks": [
+    {
+      "text": "{\"ops\": [{\"op\": \"replace\", \"anchor\": \"The firm's PTO policy is 25 days per year plus UK bank holidays.[^1]\", \"text\": \"The firm's PTO policy is 25 days per year plus UK bank holidays.[^1][^2]\"}, {\"op\": \"replace\", \"anchor\": \"[^1]: sessions/2026-01-05.md\", \"text\": \"[^1]: sessions/2026-01-05.md\\n[^2]: sessions/2026-04-10.md\"}]}",
+      "type": "text"
+    }
+  ],
+  "layer": "merge",
+  "model": "claude-sonnet-5",
+  "prompt_hash": "sha256:1ec7704ad7ed45e6d128dec4e49b85e232bcf307cd13b2748caaa34dc960670d",
+  "recorded_at": "2026-08-02T18:05:23.300444+00:00",
+  "response_text": "{\"ops\": [{\"op\": \"replace\", \"anchor\": \"The firm's PTO policy is 25 days per year plus UK bank holidays.[^1]\", \"text\": \"The firm's PTO policy is 25 days per year plus UK bank holidays.[^1][^2]\"}, {\"op\": \"replace\", \"anchor\": \"[^1]: sessions/2026-01-05.md\", \"text\": \"[^1]: sessions/2026-01-05.md\\n[^2]: sessions/2026-04-10.md\"}]}",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 1479,
+    "output_tokens": 169
+  }
+}

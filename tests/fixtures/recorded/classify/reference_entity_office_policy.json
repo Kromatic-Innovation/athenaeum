@@ -1,0 +1,20 @@
+{
+  "case_id": "reference_entity_office_policy",
+  "content_blocks": [
+    {
+      "text": "```json\n[\n  {\n    \"name\": \"Meridian\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Organization or project with an updated expense policy as of this week. New policy requires scanned receipts in Airtable for all expenses over 25 GBP before reimbursement processing, replacing the previous verbal-approval-only process.\"\n  },\n  {\n    \"name\": \"Meridian Expense Policy\",\n    \"entity_type\": \"reference\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Updated expense reimbursement policy requiring scanned receipt documentation in Airtable for expenses exceeding 25 GBP. Replaces prior verbal-approval-only process.\"\n  }\n]\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "classify",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:7140588d998fbaad84e99d862853ccb0dd5f96bd42fce12bc6b815d9e1391c0c",
+  "recorded_at": "2026-08-02T18:05:04.235686+00:00",
+  "response_text": "```json\n[\n  {\n    \"name\": \"Meridian\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Organization or project with an updated expense policy as of this week. New policy requires scanned receipts in Airtable for all expenses over 25 GBP before reimbursement processing, replacing the previous verbal-approval-only process.\"\n  },\n  {\n    \"name\": \"Meridian Expense Policy\",\n    \"entity_type\": \"reference\",\n    \"tags\": [\"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Updated expense reimbursement policy requiring scanned receipt documentation in Airtable for expenses exceeding 25 GBP. Replaces prior verbal-approval-only process.\"\n  }\n]\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 646,
+    "output_tokens": 201
+  }
+}
