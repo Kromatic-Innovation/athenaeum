@@ -44,7 +44,6 @@ each call site, is "stay import-light."
 from __future__ import annotations
 
 import logging
-import os
 
 from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
 
@@ -193,7 +192,7 @@ def extract_topics(
     # (a real SDK response always does) — never a phantom zero-token row.
     if _usage is not None:
         try:
-            from athenaeum import spend
+            from athenaeum import push_metrics, spend
             from athenaeum.models import TokenUsage
 
             _u = TokenUsage()
@@ -208,7 +207,10 @@ def extract_topics(
                 _u,
                 run_type="query-topics",
                 provider=provider,
-                session_id=os.environ.get("CLAUDE_SESSION_ID"),
+                # Resolve via the single helper (issue athenaeum#734); `or None`
+                # preserves this ledger's None-when-unset semantics (the helper
+                # returns "" for absent).
+                session_id=push_metrics.resolve_session_id() or None,
                 config=config,
             )
         except Exception:

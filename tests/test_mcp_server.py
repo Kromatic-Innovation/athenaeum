@@ -806,12 +806,18 @@ class TestRecallPushMetricsInstrumentation:
     there must record a push AND must never alter what recall renders.
     """
 
-    def test_instrumentation_on_writes_a_push_record(
+    def test_instrumentation_writes_a_record_from_the_real_env_var(
         self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # THE test that would have caught athenaeum#734: with only the variable
+        # Claude Code actually exports (CLAUDE_CODE_SESSION_ID) set, and the old
+        # name explicitly DELETED, a recall push writes exactly one record
+        # carrying that id. The pre-fix code read CLAUDE_SESSION_ID — a name
+        # nothing exports — so this would have written nothing.
         from athenaeum import push_metrics
 
-        monkeypatch.setenv("CLAUDE_SESSION_ID", "test-session-711")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "test-session-734")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         monkeypatch.delenv("ATHENAEUM_PUSH_METRICS_ENABLED", raising=False)
         cache_dir = tmp_path / "cache"
 
@@ -819,18 +825,57 @@ class TestRecallPushMetricsInstrumentation:
 
         rows = push_metrics.read_push_records(cache_dir=cache_dir)
         assert len(rows) == 1
-        assert rows[0]["session_id"] == "test-session-711"
+        assert rows[0]["session_id"] == "test-session-734"
         assert rows[0]["pushed_count"] >= 1
         # The opaque uid is recorded, never a raw filename/name.
         ids = [item["id"] for item in rows[0]["items"]]
         assert "a1b2c3d4" in ids
+        # Records still carry NO claim content and NO personal data — ids,
+        # tiers, scopes, counts only (athenaeum#711's criterion, unchanged).
+        for item in rows[0]["items"]:
+            assert set(item) <= {"id", "tier", "scope", "token_cost"}
+
+    def test_code_session_id_wins_over_legacy(
+        self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Precedence: when BOTH are set, CLAUDE_CODE_SESSION_ID wins.
+        from athenaeum import push_metrics
+
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "win-code")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "lose-legacy")
+        monkeypatch.delenv("ATHENAEUM_PUSH_METRICS_ENABLED", raising=False)
+        cache_dir = tmp_path / "cache"
+
+        recall_search(wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_dir)
+
+        rows = push_metrics.read_push_records(cache_dir=cache_dir)
+        assert len(rows) == 1
+        assert rows[0]["session_id"] == "win-code"
+
+    def test_falls_back_to_legacy_session_id_var(
+        self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fallback: an environment that exports only the OLD name still works.
+        from athenaeum import push_metrics
+
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "legacy-fallback")
+        monkeypatch.delenv("ATHENAEUM_PUSH_METRICS_ENABLED", raising=False)
+        cache_dir = tmp_path / "cache"
+
+        recall_search(wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_dir)
+
+        rows = push_metrics.read_push_records(cache_dir=cache_dir)
+        assert len(rows) == 1
+        assert rows[0]["session_id"] == "legacy-fallback"
 
     def test_instrumentation_never_changes_recall_output(
         self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from athenaeum import push_metrics
 
-        monkeypatch.setenv("CLAUDE_SESSION_ID", "sess-compare")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-compare")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
 
         cache_on = tmp_path / "cache_on"
         monkeypatch.delenv("ATHENAEUM_PUSH_METRICS_ENABLED", raising=False)
@@ -851,8 +896,11 @@ class TestRecallPushMetricsInstrumentation:
     def test_no_push_record_when_no_session_id(
         self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # With NEITHER name set, the behaviour is the existing clean no-op:
+        # no record, recall output unaffected.
         from athenaeum import push_metrics
 
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
         monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         cache_dir = tmp_path / "cache"
         recall_search(wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_dir)
@@ -863,7 +911,8 @@ class TestRecallPushMetricsInstrumentation:
     ) -> None:
         from athenaeum import push_metrics
 
-        monkeypatch.setenv("CLAUDE_SESSION_ID", "sess-nohits")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-nohits")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         cache_dir = tmp_path / "cache"
         recall_search(
             wiki_dir, "xyznonexistentquery", search_backend="keyword", cache_dir=cache_dir
