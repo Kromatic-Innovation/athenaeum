@@ -57,7 +57,12 @@ from dataclasses import dataclass, field
 # "what an email/phone looks like" across the two lints is the explicit intent
 # (see the module docstring), and importing them here creates no cycle —
 # athenaeum.pii does not import this module.
-from athenaeum.pii import _EMAIL_RE, _PHONE_RE, _has_enough_digits
+from athenaeum.pii import (
+    _EMAIL_RE,
+    _PHONE_RE,
+    _has_enough_digits,
+    _is_excluded_phone_shape,
+)
 
 #: The two PII classes this lint recognizes (the two #428 names). Exposed as
 #: constants so callers/tests match on a symbol rather than a bare string.
@@ -213,6 +218,12 @@ def scan_outbound_text(text: str, *, allowlist: Allowlist | object = None) -> li
     for m in _PHONE_RE.finditer(source):
         token = m.group(1)
         if not _has_enough_digits(token):
+            continue
+        # Drop shapes that are provably not a phone (ISO dates, year ranges,
+        # bare id fragments) — robust to a leading '+'/'(' the regex folds into
+        # its group. Shared with athenaeum.pii.find_inline_phones (issue #683)
+        # so the egress lint no longer over-flags a parenthesized date/uid.
+        if _is_excluded_phone_shape(token):
             continue
         start, end = m.start(1), m.end(1)
         if any(start < e and s < end for s, e in email_spans):

@@ -137,6 +137,28 @@ class TestNoFalsePositives:
     def test_short_digit_runs_are_not_phones(self, prose: str) -> None:
         assert scan_outbound_text(prose) == []
 
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            "logged (2026-07-29) in the CRM",  # parenthesized date
+            "see (2019-2020) season stats",  # parenthesized year range
+            "page uid (52785095) in the index",  # parenthesized uid prefix
+            "First contact: 2026-07-29 per CRM",  # bare date, 8 digits
+        ],
+    )
+    def test_parenthesized_dates_and_ids_are_not_phones(self, prose: str) -> None:
+        # scan_outbound_text shares _PHONE_RE / _has_enough_digits with
+        # find_inline_phones and inherited the same leading-paren bug (#683):
+        # a parenthesized date/uid was over-flagged on the egress path. It now
+        # applies the same provably-not-a-phone exclusion.
+        assert scan_outbound_text(prose) == []
+
+    def test_genuine_phone_beside_a_date_still_flags(self) -> None:
+        # The exclusion drops only the date; a real phone in the same text is
+        # still reported (the fix never suppresses a genuine number).
+        findings = scan_outbound_text("met 2026-07-29, call (555) 010-0100")
+        assert [f.value for f in findings] == ["(555) 010-0100"]
+
 
 # ---------------------------------------------------------------------------
 # Allowlist
