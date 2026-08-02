@@ -551,6 +551,107 @@ class TestTier0HandleUpsert:
         )
         assert tier0_handle_upsert(raw_bad, index, wiki, ["company"]) is None
 
+    # --- #692: a seed with source handles + type/name but NO uid must resolve
+    # the existing entity by name and land as frontmatter, not degrade to prose.
+
+    def test_uid_less_seed_resolves_by_name_and_merges(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        page = self._existing(wiki)  # uid: company-x, name: X
+        raw = self._make_raw(
+            tmp_path,
+            # No `uid:` — the realistic shape (the seed names the entity, not its
+            # internal wiki uid).
+            "---\ntype: company\nname: X\ndomains:\n  - x.example\n---\n\nseed\n",
+        )
+        out = tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company"])
+        assert out is not None
+        entity, changed = out
+        assert changed is True
+        assert entity.uid == "company-x"  # resolved by name
+        text = page.read_text()
+        assert "domains:" in text and "x.example" in text  # landed as frontmatter
+        assert "Body." in text  # body untouched, not flattened into it
+
+    def test_uid_less_seed_resolves_by_alias(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        page = self._existing(wiki, extra_fm="aliases:\n  - Xco\n")
+        raw = self._make_raw(
+            tmp_path,
+            "---\ntype: company\nname: Xco\ndomains:\n  - x.example\n---\n\nseed\n",
+        )
+        out = tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company"])
+        assert out is not None and out[1] is True
+        assert "x.example" in page.read_text()
+
+    def test_uid_less_reseed_is_idempotent_noop(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        page = self._existing(wiki, extra_fm="domains:\n  - x.example\n")
+        before = page.read_text(encoding="utf-8")
+        raw = self._make_raw(
+            tmp_path,
+            "---\ntype: company\nname: X\ndomains:\n  - x.example\n---\n\nseed\n",
+        )
+        out = tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company"])
+        assert out is not None and out[1] is False
+        assert page.read_text(encoding="utf-8") == before  # byte-for-byte stable
+
+    def test_uid_less_seed_without_handles_falls_through(self, tmp_path: Path) -> None:
+        """A uid-less raw carrying no source handles is left to the LLM tiers."""
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        self._existing(wiki)
+        raw = self._make_raw(
+            tmp_path, "---\ntype: company\nname: X\n---\n\njust a note\n"
+        )
+        assert tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company"]) is None
+
+    def test_uid_less_seed_naming_no_entity_declines_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A handle seed that resolves to no existing entity fails LOUDLY (WARNING)
+        rather than silently degrading to prose — the #692 defect."""
+        import logging
+
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        self._existing(wiki)  # only entity "X" exists
+        raw = self._make_raw(
+            tmp_path,
+            "---\ntype: company\nname: Nonesuch\ndomains:\n  - n.example\n---\n\nseed\n",
+        )
+        with caplog.at_level(logging.WARNING):
+            assert tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company"]) is None
+        assert any(
+            "names no existing entity" in r.getMessage() for r in caplog.records
+        )
+
+    def test_uid_less_seed_cross_type_declines(self, tmp_path: Path) -> None:
+        """A name that resolves to a same-named entity of a DIFFERENT type is not
+        upserted cross-type."""
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        # Existing entity named "X" is a person, not a company.
+        (wiki / "person-x.md").write_text(
+            "---\nuid: person-x\ntype: person\nname: X\naccess: internal\n---\n\n# X\n\nBody.\n",
+            encoding="utf-8",
+        )
+        raw = self._make_raw(
+            tmp_path,
+            "---\ntype: company\nname: X\ndomains:\n  - x.example\n---\n\nseed\n",
+        )
+        assert tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company", "person"]) is None
+        assert "x.example" not in (wiki / "person-x.md").read_text()
+
 
 # ---------------------------------------------------------------------------
 # rebuild_index
