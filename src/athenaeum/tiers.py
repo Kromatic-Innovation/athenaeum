@@ -369,6 +369,125 @@ def tier1_programmatic_match(
 
 
 # ---------------------------------------------------------------------------
+# Issue #680: code artifacts must NOT become wiki entities
+# ---------------------------------------------------------------------------
+#
+# The librarian was minting durable wiki entities from source-code artifacts:
+# ``skill.md``, ``project-registry.yaml``, ``registry`` -> ``auto-registry.md``.
+# A wiki page describing a file's PAST state is actively harmful — an agent
+# recalls it, treats it as current, and then spends a session disproving it
+# against the working tree (the repo is the source of truth for its own code and
+# is always current; a memory of it is stale by construction). This is a WRITE-
+# side CLASS exclusion, not a read-side blacklist: filenames are an unbounded
+# set that a stopword list (#662) cannot enumerate, so the gate is applied at
+# entity CREATION. It is deliberately complementary to and does NOT change
+# #662's ``junk_match_stopwords`` mechanism.
+#
+# Default source/config extension set. A candidate whose name is a single token
+# ending in one of these (or that contains a path separator) is file-shaped and
+# excluded. Operators extend via ``librarian.code_artifact_extensions`` and
+# escape-hatch specific names via ``librarian.code_artifact_allowlist``.
+DEFAULT_CODE_ARTIFACT_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        "md", "markdown", "rst", "txt",
+        "py", "pyi", "ipynb",
+        "ts", "tsx", "js", "jsx", "mjs", "cjs",
+        "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "env",
+        "sh", "bash", "zsh", "fish", "ps1",
+        "go", "rs", "rb", "java", "kt", "swift", "php", "pl",
+        "c", "cc", "cpp", "cxx", "h", "hpp", "cs", "m", "mm",
+        "css", "scss", "sass", "less", "html", "htm", "xml", "svg",
+        "sql", "graphql", "proto", "lock", "mk", "dockerfile", "gradle",
+    }
+)
+
+
+def resolve_exclude_code_artifacts(config: dict[str, Any] | None = None) -> bool:
+    """Whether the #680 code-artifact entity gate is ON (default True).
+
+    Operators disable the whole gate with ``librarian.exclude_code_artifacts:
+    false``; any non-bool / missing value keeps the safe default (ON)."""
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            val = cfg.get("exclude_code_artifacts")
+            if isinstance(val, bool):
+                return val
+    return True
+
+
+def resolve_code_artifact_extensions(config: dict[str, Any] | None = None) -> set[str]:
+    """Resolve the effective code-artifact extension set (issue #680).
+
+    ``DEFAULT_CODE_ARTIFACT_EXTENSIONS ∪ librarian.code_artifact_extensions``,
+    lower-cased and stripped of any leading dot, so both ``"rs"`` and ``".rs"``
+    configure the same extension."""
+    effective = {e.lower().lstrip(".") for e in DEFAULT_CODE_ARTIFACT_EXTENSIONS}
+    effective |= {
+        e.lower().lstrip(".")
+        for e in _config_str_list(config, "code_artifact_extensions")
+    }
+    return effective
+
+
+def resolve_code_artifact_allowlist(config: dict[str, Any] | None = None) -> set[str]:
+    """Resolve the operator allowlist of names to KEEP as entities (issue #680).
+
+    A name here is never treated as a code artifact even if it is file-shaped —
+    the escape hatch for a deployment that legitimately tracks a document by
+    filename. The allowlist WINS (mirrors #662's ``junk_match_allowlist``)."""
+    return {n.strip().lower() for n in _config_str_list(config, "code_artifact_allowlist")}
+
+
+def is_code_artifact_name(name: str, config: dict[str, Any] | None = None) -> bool:
+    """True when *name* is a filename/path-shaped code artifact (issue #680).
+
+    File-shaped means: it contains a path separator (``src/athenaeum/
+    librarian.py``), OR it is a single whitespace-free token ending in a known
+    source/config extension (``skill.md``, ``project-registry.yaml``,
+    ``AGENTS.md``). The whitespace guard is load-bearing: a genuine multi-word
+    entity ("The Registry", "Node JS") is never file-shaped and always survives,
+    and any name in the operator allowlist survives regardless of shape. Gate is
+    ON by default; ``librarian.exclude_code_artifacts: false`` disables it."""
+    if not resolve_exclude_code_artifacts(config):
+        return False
+    key = name.strip()
+    if not key:
+        return False
+    if key.lower() in resolve_code_artifact_allowlist(config):
+        return False
+    # Path-shaped: any path separator is a code artifact outright.
+    if "/" in key or "\\" in key:
+        return True
+    # Filename-shaped: a single token (no whitespace) ending in a code/config
+    # extension. Multi-word names carry whitespace and are never file-shaped.
+    if any(ch.isspace() for ch in key):
+        return False
+    m = re.search(r"\.([A-Za-z0-9]+)$", key)
+    return bool(m and m.group(1).lower() in resolve_code_artifact_extensions(config))
+
+
+def partition_code_artifact_classifications(
+    classified: list[ClassifiedEntity],
+    config: dict[str, Any] | None = None,
+) -> tuple[list[ClassifiedEntity], list[str]]:
+    """Split tier-2 classifications by the #680 code-artifact gate.
+
+    Returns ``(kept, dropped_names)``: a classification whose name is a code
+    artifact (:func:`is_code_artifact_name`) is dropped so it never becomes a
+    tier-3 ``create`` action. Shared by the synchronous and batch transports so
+    the write-side exclusion is applied identically on both."""
+    kept: list[ClassifiedEntity] = []
+    dropped: list[str] = []
+    for c in classified:
+        if is_code_artifact_name(c.name, config):
+            dropped.append(c.name)
+        else:
+            kept.append(c)
+    return kept, dropped
+
+
+# ---------------------------------------------------------------------------
 # Tier 2 — Classification (fast LLM)
 # ---------------------------------------------------------------------------
 
