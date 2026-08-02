@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lint-pii` phone axis: exclude labeled identifiers and the residual shapes
+  athenaeum#720 partially covered (athenaeum#732).** After athenaeum#720 the
+  live phone axis still reported 187 findings, dominated by values the
+  surrounding prose already types as record ids — `QBO realm 1008563730`, GA4
+  `stream 5139685489`, `ISBN 9798183760910`. A **preceding-token** exclusion
+  (`pii.LABELED_IDENTIFIER_PREFIXES`, a data list — a new label is a data entry,
+  not a code path) retires that class with no model call, and **ISBN-13 is now
+  excluded structurally** (13 digits with a `978`/`979` Bookland prefix) so an
+  unlabeled ISBN needs no adjacent prose. Three smaller deterministic shapes are
+  also closed: the **4-group single-dash** issue list (`410-414-416-412`) via a
+  group-count bound expressed as a lower bound with **no upper limit** (a 5-/6-
+  group list cannot reopen it), **datetime-with-space** (`2026-04-23 05`), and
+  **four-part dates** (`2018-05-06-07`). The genuine numbers `917-231-6130` and
+  `206-330-3783` stay flagged (pinned negative tests) and the **email axis is
+  unchanged** (pinned with a count assertion). No live-store mutation; the
+  operator confirms the new live count on athenaeum#726.
+
 ### Added
 
 - **`athenaeum spend --json` documented as a stable consumer contract; unknown
