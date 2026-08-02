@@ -441,11 +441,11 @@ def determine_references(
         return None
 
     haystacks: list[str] = []
-    for rec in transcript_records:
-        if not isinstance(rec, dict):
+    for trec in transcript_records:
+        if not isinstance(trec, dict):
             continue
-        message = rec.get("message")
-        content = message.get("content") if isinstance(message, dict) else rec.get("content")
+        message = trec.get("message")
+        content = message.get("content") if isinstance(message, dict) else trec.get("content")
         if isinstance(content, str):
             haystacks.append(content)
         elif isinstance(content, list):
@@ -463,7 +463,7 @@ def determine_references(
                                     haystacks.append(t)
                 elif isinstance(block, str):
                     haystacks.append(block)
-        tur = rec.get("toolUseResult")
+        tur = trec.get("toolUseResult")
         if isinstance(tur, str):
             haystacks.append(tur)
         elif isinstance(tur, dict):
@@ -777,7 +777,13 @@ def sample_sessions(cache_dir: Path | None, n: int, *, seed: int | None = None) 
     chatty session's many pushes don't crowd out the sample.
     """
     records = read_push_records(cache_dir)
-    sessions = sorted({r.get("session_id") for r in records if r.get("session_id")})
+    sessions = sorted(
+        {
+            sid
+            for r in records
+            if isinstance(sid := r.get("session_id"), str) and sid
+        }
+    )
     if len(sessions) <= n:
         return sessions
     rng = random.Random(seed)
