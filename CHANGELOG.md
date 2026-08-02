@@ -364,6 +364,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`lint-pii` no longer counts issue-number lists, non-ISO dates, or
+  date-into-text bleed as phone-axis PII (#720).** #683 normalized a leading
+  paren and cut `lint-pii` from 911 findings/107 files to 456/274, but four
+  false-positive shapes survived because the fix only reached the *leading*
+  paren: double/single-hyphen issue-number lists (`445--436--435--374`,
+  `256-257-280`), non-ISO and dotted date orderings (`02-08-2018`), and a
+  permissive character class that let a match run past a closing paren or
+  across a newline into the next number (`2026-04-27)\n\n1`, `1778
+  (2026-08-01`). The phone classifier is now **normalization + structural
+  classification** rather than a literal blocklist: it segments a capture into
+  digit groups and the separator runs between them and rejects line-spanning
+  matches, unbalanced parens, dates in any ordering, year ranges in any
+  separator style, multi-character separator runs, short unprefixed grouped
+  runs (`<10` digits, no `+`), and lists of more than four groups — so a new
+  separator style needs no new rule. Every #500/#683 genuine-phone fixture
+  (`+1-555-0100`, `(555) 010-0100`, `5551234567`, `+447911123456`,
+  `917-231-6130`) is preserved, and the **email axis is untouched** (pinned by
+  a count assertion). The live 456→residue drop is an operator-run step
+  (`athenaeum storage lint-pii` against `~/knowledge/wiki`); the deterministic
+  exclusions are pinned per-shape to the values in the issue's table.
 - **The entity phase no longer starves the C4 contradiction detector of the
   whole run window (#440).** `max_runtime` (#396) is a single deadline shared
   by every phase, and the entity loop stopped only when that WHOLE budget was
