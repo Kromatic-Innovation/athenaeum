@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
@@ -154,9 +155,49 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
             "the excluded contact record, and inbound [[wikilink]]s are "
             "rewritten to the new slug. An ambiguous local-part (role address, "
             "+tag, initial-blob, numeric/opaque) is left unrenamed and counted "
-            "as a residual rather than guessed at. Only meaningful with --all "
-            "(the population is corpus-wide, not a single-page concern); "
-            "combines with the ordinary contact-data migration in the same run."
+            "as a residual rather than guessed at. Scoped by whichever target "
+            "selector is in use (--page / --all / --glob); combines with the "
+            "ordinary contact-data migration in the same run unless "
+            "--rename-only is given."
+        ),
+    )
+    migrate_p.add_argument(
+        "--rename-only",
+        action="store_true",
+        help=(
+            "Run ONLY the name-is-an-email rename slice (issue athenaeum#505); skip the "
+            "body-text contact-data migration entirely. Implies "
+            "--rename-name-email. Use this when the body-migration pass would "
+            "act on findings you do not want migrated — e.g. while the phone "
+            "axis still carries detector false positives, where a full "
+            "--all --apply would redact real prose (issue athenaeum#745; the failure "
+            "mode athenaeum#691 spent two restore passes repairing)."
+        ),
+    )
+    migrate_p.add_argument(
+        "--rename-to",
+        metavar="NAME",
+        default=None,
+        help=(
+            "Operator-supplied display name for a --page rename (issue athenaeum#745). "
+            "athenaeum#505 refuses to GUESS a name from an ambiguous local-part, but "
+            "offered no way to supply one — so the deferred population had no "
+            "route through the tool and could only be hand-edited, which skips "
+            "the excluded record, the slug rename and the inbound-link "
+            "rewrite. This is a human asserting the name, so it bypasses the "
+            "confidence gate by design. Requires --page and --rename-name-email "
+            "(or --rename-only)."
+        ),
+    )
+    migrate_p.add_argument(
+        "--list-deferred",
+        action="store_true",
+        help=(
+            "List the pages the rename slice deferred (ambiguous local-part) "
+            "with their reason, instead of only counting them. This is the "
+            "operator's manual-naming worklist — athenaeum#505 deliberately never "
+            "guesses a display name, so the deferred set is work a human has "
+            "to do and needs to be enumerable (issue athenaeum#745)."
         ),
     )
 
@@ -261,7 +302,62 @@ def _post_apply_index_step(
     )
 
 
+def _run_rename_slice(
+    args: argparse.Namespace,
+    wiki_root: Path,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+    pages: list[Path] | None,
+) -> NameEmailRenameReport:
+    """Run + report the name-is-an-email rename slice over *pages* (athenaeum#745).
+
+    Shared by the single-page and bulk drivers so the slice is reachable from
+    every target selector. Before athenaeum#745 it ran only under ``--all``, which
+    meant a rename could not be applied without also accepting whatever the
+    corpus-wide body migration would do in the same run.
+    """
+    report = bulk_rename_name_email_pages(
+        wiki_root,
+        config,
+        knowledge_root,
+        apply=args.apply,
+        pages=pages,
+        display_name_override=getattr(args, "rename_to", None),
+    )
+    mode = "renamed" if args.apply else "[DRY RUN] would rename"
+    print(
+        f"{mode} {report.renamed} name-is-an-email page(s) "
+        f"of {report.scanned} scanned "
+        f"({report.links_rewritten} inbound link(s) rewritten)."
+    )
+    if report.residual:
+        print(
+            f"NOTE: {report.residual} page(s) have an ambiguous local-part "
+            "(role address, +tag, initial-blob, or numeric/opaque) and were "
+            "left unrenamed — manual naming required, per issue athenaeum#505's "
+            "fallback (never guess)."
+        )
+        if getattr(args, "list_deferred", False):
+            print("\n--- deferred: manual naming required ---")
+            for page_path, reason in report.deferred:
+                print(f"  {page_path.name}\t{reason}")
+    if not args.apply and report.renamed:
+        print("re-run with --apply to write the renames.")
+    return report
+
+
 def _cmd_storage_migrate_pii(args: argparse.Namespace) -> int:
+    # athenaeum#745: --rename-only is the rename slice on its own. It implies
+    # --rename-name-email so the two flags cannot disagree.
+    if getattr(args, "rename_only", False):
+        args.rename_name_email = True
+    if getattr(args, "rename_to", None):
+        # An operator-supplied name names exactly ONE page; applying it across a
+        # bulk target set would stamp the same name onto every match.
+        if args.page is None:
+            print("error: --rename-to requires --page.", file=sys.stderr)
+            return 2
+        args.rename_name_email = True
     if args.all or args.glob is not None:
         return _cmd_storage_migrate_pii_bulk(args)
     return _cmd_storage_migrate_pii_single(args)
@@ -301,10 +397,37 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    # athenaeum#745: the rename slice, scoped to this one page. Runs BEFORE the body
+    # migration because a rename moves the file — planning a migration against a
+    # path the rename is about to invalidate would be reading a stale target.
+    renamed_this_run = False
+    if getattr(args, "rename_name_email", False):
+        wiki_root = knowledge_root / "wiki"
+        rename_report = _run_rename_slice(
+            args, wiki_root, config, knowledge_root, [page_path]
+        )
+        if getattr(args, "rename_only", False):
+            if args.apply and rename_report.renamed:
+                _post_apply_index_step(args, knowledge_root, config)
+            return 0
+        if args.apply and rename_report.renamed:
+            # The page MOVED. Retarget the body migration at its new path
+            # rather than skipping it: --rename-name-email without
+            # --rename-only asks for both operations, and the rename only
+            # clears the name: field — body-text contact data on the same page
+            # is a separate finding and would otherwise be silently left
+            # behind (caught in review of athenaeum#745).
+            renamed_this_run = True
+            page_path = wiki_root / f"{rename_report.renames[-1][1]}.md"
+
     plan = plan_pii_migration(page_path, config, knowledge_root)
 
     if not plan.changed:
         print(f"no archival contact data (emails/phones) found in {page_path}; nothing to migrate.")
+        if renamed_this_run:
+            # The rename still wrote; its index step is owed regardless of
+            # whether the body pass found anything.
+            _post_apply_index_step(args, knowledge_root, config)
         return 0
 
     summary = (
@@ -369,6 +492,18 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
         )
 
     pages = _resolve_bulk_pages(args, wiki_root)
+
+    # athenaeum#745: --rename-only runs the rename slice over the SAME target set and
+    # skips the body-text migration entirely. This is the whole point of the
+    # flag: while the phone axis still carries detector false positives, a full
+    # body migration would redact real prose (the athenaeum#691 failure mode), so the
+    # rename must be applicable without it.
+    if getattr(args, "rename_only", False):
+        report = _run_rename_slice(args, wiki_root, config, knowledge_root, pages)
+        if args.apply and report.renamed:
+            _post_apply_index_step(args, knowledge_root, config)
+        return 0
+
     total = len(pages)
     selector = args.glob if args.glob is not None else "--all (entity pages)"
     print(
@@ -422,28 +557,11 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
         )
 
     rename_report: NameEmailRenameReport | None = None
-    if getattr(args, "rename_name_email", False) and args.glob is None:
-        # athenaeum#505: the name-is-an-email carve-out's own slice. Only meaningful
-        # over the whole entity-page set (--all), not a single named --glob
-        # target, since the population is corpus-wide by construction.
-        rename_report = bulk_rename_name_email_pages(
-            wiki_root, config, knowledge_root, apply=args.apply
-        )
-        rename_mode = "renamed" if args.apply else "[DRY RUN] would rename"
-        print(
-            f"{rename_mode} {rename_report.renamed} name-is-an-email page(s) "
-            f"of {rename_report.scanned} scanned "
-            f"({rename_report.links_rewritten} inbound link(s) rewritten)."
-        )
-        if rename_report.residual:
-            print(
-                f"NOTE: {rename_report.residual} page(s) have an ambiguous "
-                "local-part (role address, +tag, initial-blob, or numeric/"
-                "opaque) and were left unrenamed — manual naming required, "
-                "per issue athenaeum#505's fallback (never guess)."
-            )
-        if not args.apply and rename_report.renamed:
-            print("re-run with --apply to write the renames.")
+    if getattr(args, "rename_name_email", False):
+        # athenaeum#505's name-is-an-email carve-out, scoped to the same target set as
+        # the body migration above (athenaeum#745 — previously this was skipped
+        # entirely under --glob and always ran corpus-wide under --all).
+        rename_report = _run_rename_slice(args, wiki_root, config, knowledge_root, pages)
 
     if not args.apply and affected:
         print("re-run with --apply to write the changes.")
