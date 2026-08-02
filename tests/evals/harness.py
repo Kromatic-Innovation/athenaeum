@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+from athenaeum.provider import response_text as provider_response_text
+
 # Hard budget guard — this is the run-level TokenUsage ceiling asserted
 # at session end. A future golden set that balloons past this will fail
 # the run loudly rather than quietly burning budget. Sized generously
@@ -128,7 +130,20 @@ def prompt_hash(model: str, system: Any, messages: Any) -> str:
 
 @dataclasses.dataclass
 class RecordedResponse:
-    """Serialised Anthropic response body + provenance."""
+    """Serialised Anthropic response body + provenance.
+
+    ``content_blocks`` records the ORDERED ``response.content`` block sequence
+    (issue #684): each entry is ``{"type": "thinking"|"text"|…}`` plus a
+    ``"text"`` key on blocks that carry one. It exists so the replay stub can
+    reconstruct the exact block shape production received — a thinking-prefixed
+    response has one or more leading ``type == "thinking"`` blocks with no
+    ``.text`` before the text block (issue #578). Recording only the extracted
+    ``response_text`` (the pre-#684 format) made the replay suite structurally
+    incapable of producing that shape, so a regression in
+    :func:`athenaeum.provider.response_text`'s block-walking was invisible to
+    replay. ``response_text`` is retained as the extracted answer for
+    human-readability and backward compatibility.
+    """
 
     case_id: str
     layer: str
@@ -137,20 +152,31 @@ class RecordedResponse:
     response_text: str
     usage: dict[str, int]
     recorded_at: str
+    content_blocks: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "RecordedResponse":
+        response_text = str(payload["response_text"])
+        raw_blocks = payload.get("content_blocks")
+        if raw_blocks:
+            content_blocks = [dict(block) for block in raw_blocks]
+        else:
+            # Backward compatibility: a pre-#684 fixture carried only the
+            # extracted text. Synthesise a single text block so replay still
+            # reconstructs a faithful (single-block) response.
+            content_blocks = [{"type": "text", "text": response_text}]
         return cls(
             case_id=str(payload["case_id"]),
             layer=str(payload["layer"]),
             model=str(payload["model"]),
             prompt_hash=str(payload["prompt_hash"]),
-            response_text=str(payload["response_text"]),
+            response_text=response_text,
             usage={k: int(v) for k, v in dict(payload.get("usage", {})).items()},
             recorded_at=str(payload.get("recorded_at", "")),
+            content_blocks=content_blocks,
         )
 
 
@@ -198,6 +224,46 @@ def _cache_usage_from_response(response: Any) -> dict[str, int]:
     }
 
 
+def _blocks_of_response(response: Any) -> list[dict[str, Any]]:
+    """Serialise ``response.content`` into an ordered ``[{type, text?}]`` list.
+
+    Captures the block SEQUENCE so replay can reconstruct a thinking-prefixed
+    response faithfully (issue #684). A block's ``.type`` is recorded when it is
+    a string; its ``.text`` is recorded only when present (a ``ThinkingBlock``
+    has none), mirroring the anthropic SDK shape the call sites parse.
+    """
+    blocks: list[dict[str, Any]] = []
+    for block in getattr(response, "content", None) or []:
+        entry: dict[str, Any] = {}
+        btype = getattr(block, "type", None)
+        if isinstance(btype, str):
+            entry["type"] = btype
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            entry["text"] = text
+        blocks.append(entry)
+    return blocks
+
+
+class EmptyRecordingError(BaseException):
+    """Raised when a ``record=true`` run captures a response with no usable text.
+
+    The pre-#684 recorder swallowed ``AttributeError``/``IndexError`` from a
+    bare ``response.content[0].text`` and wrote ``response_text=""`` to disk — a
+    silently-empty fixture that passed every check between the API response and
+    replay (6 of 8 resolver fixtures, issue #684). A recording that captured no
+    text is a FAILED recording: it must go red at record time, not surface weeks
+    later at replay.
+
+    Inherits from :class:`BaseException` — not :class:`Exception` — for the same
+    reason as :class:`FixtureStaleError`: the ``except Exception`` fallbacks in
+    :func:`athenaeum.resolutions.propose_resolution` /
+    :func:`athenaeum.contradictions.detect_contradictions` (which wrap the very
+    ``messages.create`` call the recorder hooks) must NOT swallow it and let the
+    run pass down a fallback path.
+    """
+
+
 class RecordingClient:
     """Wraps a real Anthropic client to persist responses as fixtures.
 
@@ -233,13 +299,34 @@ class _RecordingMessages:
     def create(self, **params: Any) -> Any:
         response = self._parent._inner.messages.create(**params)
         if self._parent._record and self._parent._pending_case is not None:
+            case_id = self._parent._pending_case
+            layer = self._parent._layer
+            # Extract via the ONE shared walker production uses — never a second
+            # copy of "where is the text in a response" (issue #684). It skips
+            # any leading thinking block (#578); a bare content[0].text would
+            # read the wrong block on a thinking-enabled stage (resolver).
             try:
-                text = response.content[0].text
-            except (AttributeError, IndexError):
-                text = ""
+                text = provider_response_text(response)
+            except (AttributeError, IndexError) as exc:
+                raise EmptyRecordingError(
+                    f"record run captured no text block for "
+                    f"{layer}/{case_id} (model {params.get('model', '')!r}); "
+                    "the response has no type=='text' block — re-run the eval, "
+                    "do not commit an empty fixture"
+                ) from exc
+            # A recording that captured nothing is a FAILED recording — raise so
+            # the eval run goes red now, rather than writing "" and surfacing at
+            # replay weeks later (the actual defect behind issue #684).
+            if not text.strip():
+                raise EmptyRecordingError(
+                    f"record run captured empty text for {layer}/{case_id} "
+                    f"(model {params.get('model', '')!r}); output_tokens="
+                    f"{_cache_usage_from_response(response).get('output_tokens', 0)}"
+                    " — re-run the eval, do not commit an empty fixture"
+                )
             rec = RecordedResponse(
-                case_id=self._parent._pending_case,
-                layer=self._parent._layer,
+                case_id=case_id,
+                layer=layer,
                 model=str(params.get("model", "")),
                 prompt_hash=prompt_hash(
                     str(params.get("model", "")),
@@ -249,6 +336,7 @@ class _RecordingMessages:
                 response_text=text,
                 usage=_cache_usage_from_response(response),
                 recorded_at=datetime.now(timezone.utc).isoformat(),
+                content_blocks=_blocks_of_response(response),
             )
             save_recorded(rec)
         return response
@@ -276,12 +364,33 @@ class FixtureStaleError(BaseException):
     """
 
 
+class _ReplayBlock:
+    """A single reconstructed ``response.content`` block for replay.
+
+    Carries ``.type`` and, only when the recorded block had one, ``.text`` —
+    so a recorded ``{"type": "thinking"}`` block reconstructs WITHOUT a
+    ``.text`` attribute (accessing it raises ``AttributeError``), exactly like
+    the anthropic ``ThinkingBlock`` production receives. This is what lets the
+    replay suite exercise :func:`athenaeum.provider.response_text`'s
+    skip-thinking block-walk instead of a synthetic single text block that
+    could never reproduce the shape (issue #684).
+    """
+
+    def __init__(self, block: dict[str, Any]) -> None:
+        self.type = block.get("type")
+        if "text" in block:
+            self.text = block["text"]
+
+
 def replay_client(layer: str, case_id: str) -> Any:
     """Build a stub client that returns a recorded response and enforces
     the staleness contract on the (model, system, messages) it is called
     with. The stub mirrors the ``anthropic.Anthropic`` slice the call
-    sites use — ``client.messages.create(**params)`` returns an object
-    exposing ``.content[0].text`` and ``.usage``.
+    sites use — ``client.messages.create(**params)`` returns an object whose
+    ``.content`` is the RECORDED block sequence (thinking blocks included, in
+    order) and whose ``.usage`` mirrors the fixture, so the same
+    :func:`athenaeum.provider.response_text` walk production uses is exercised
+    (issue #684).
     """
     rec = load_recorded(layer, case_id)
 
@@ -298,7 +407,7 @@ def replay_client(layer: str, case_id: str) -> Any:
                 f"(fixture prompt-hash {rec.prompt_hash} != current {seen})"
             )
         response = MagicMock()
-        response.content = [MagicMock(text=rec.response_text)]
+        response.content = [_ReplayBlock(block) for block in rec.content_blocks]
         response.usage = MagicMock(**rec.usage)
         return response
 
