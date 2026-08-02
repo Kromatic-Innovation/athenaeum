@@ -1,0 +1,20 @@
+{
+  "case_id": "single_person_entity",
+  "content_blocks": [
+    {
+      "text": "```json\n[\n  {\n    \"name\": \"Priya Shah\",\n    \"entity_type\": \"person\",\n    \"tags\": [\"active\", \"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client lead at the firm with four years tenure. Responsible for managing the Meridian retainer. Recently flagged client preference for mid-month check-ins in addition to end-of-month reviews.\"\n  },\n  {\n    \"name\": \"Meridian retainer\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"active\", \"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client retainer project with Q3 roadmap planning underway. Client has requested more frequent check-in cadence, shifting from end-of-month only to include mid-month reviews.\"\n  }\n]\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "classify",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:627dda5072caa9021da136ed075ed6639ac7ec4b0364d12a140cea37bd94798e",
+  "recorded_at": "2026-08-02T18:04:57.397381+00:00",
+  "response_text": "```json\n[\n  {\n    \"name\": \"Priya Shah\",\n    \"entity_type\": \"person\",\n    \"tags\": [\"active\", \"internal\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client lead at the firm with four years tenure. Responsible for managing the Meridian retainer. Recently flagged client preference for mid-month check-ins in addition to end-of-month reviews.\"\n  },\n  {\n    \"name\": \"Meridian retainer\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"active\", \"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client retainer project with Q3 roadmap planning underway. Client has requested more frequent check-in cadence, shifting from end-of-month only to include mid-month reviews.\"\n  }\n]\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 662,
+    "output_tokens": 199
+  }
+}

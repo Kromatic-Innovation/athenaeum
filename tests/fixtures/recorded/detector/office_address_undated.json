@@ -1,0 +1,20 @@
+{
+  "case_id": "office_address_undated",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"scope-office_address_undated/reference_office_wework.md\", \"scope-office_address_undated/reference_office_regent.md\"],\n  \"conflicting_passages\": [\"Meridian's office is at 14 Kingsway, WeWork floor 3.\", \"Meridian's office is at 220 Regent Street, suite 5B.\"],\n  \"rationale\": \"Both snippets state incompatible facts about Meridian's current office location\u2014two different addresses cannot both be the office simultaneously without additional temporal or contextual distinction.\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "detector",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:61d661540734038e4ea498d8bc6f59bc08975d927e7f40d07adeb70c7258317a",
+  "recorded_at": "2026-08-02T18:05:10.256298+00:00",
+  "response_text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"scope-office_address_undated/reference_office_wework.md\", \"scope-office_address_undated/reference_office_regent.md\"],\n  \"conflicting_passages\": [\"Meridian's office is at 14 Kingsway, WeWork floor 3.\", \"Meridian's office is at 220 Regent Street, suite 5B.\"],\n  \"rationale\": \"Both snippets state incompatible facts about Meridian's current office location\u2014two different addresses cannot both be the office simultaneously without additional temporal or contextual distinction.\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 775,
+    "output_tokens": 165
+  }
+}
