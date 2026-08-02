@@ -468,11 +468,13 @@ def _recall_via_backend(
     # failure. Best-effort no-op when instrumentation is disabled (see
     # `config.resolve_push_metrics_enabled`) or no session id is available.
     try:
-        import os
-
         from athenaeum import push_metrics
 
-        session_id = os.environ.get("CLAUDE_SESSION_ID") or ""
+        # Resolve the session id via the single helper (issue athenaeum#734):
+        # Claude Code exports CLAUDE_CODE_SESSION_ID, not the CLAUDE_SESSION_ID
+        # this path used to read — so the guard was always false and no push
+        # record was ever written.
+        session_id = push_metrics.resolve_session_id()
         if session_id:
             record = push_metrics.build_push_record(
                 session_id=session_id,
