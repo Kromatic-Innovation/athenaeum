@@ -262,6 +262,140 @@ class TestSummarize:
 
 
 # ---------------------------------------------------------------------------
+# Unknown is a distinct state from zero (issue athenaeum#694, AC4)
+# ---------------------------------------------------------------------------
+
+
+def _row(**overrides: Any) -> dict[str, Any]:
+    """A minimal well-formed ledger row, overridable per test."""
+    base: dict[str, Any] = {
+        "v": spend.LEDGER_VERSION,
+        "ts": "2026-08-02T00:00:00Z",
+        "provider": "anthropic",
+        "billing_mode": "api",
+        "total_tokens": 100,
+        "input_tokens": 100,
+        "output_tokens": 0,
+        "api_calls": 1,
+        "estimated_cost_usd": 0.5,
+        "tokens_by_model": {"m": {}},
+    }
+    base.update(overrides)
+    return base
+
+
+class TestUnknownBillingDistinctFromZero:
+    def test_resolve_billing_bucket(self) -> None:
+        # billing_mode is authoritative; provider is the pre-v2 fallback; an
+        # undeterminable row is "unknown", never silently "api".
+        assert spend.resolve_billing_bucket(_row(billing_mode="api")) == "api"
+        assert (
+            spend.resolve_billing_bucket(_row(billing_mode="subscription"))
+            == "subscription"
+        )
+        # pre-v2 row: no billing_mode, derived from provider.
+        pre = _row()
+        del pre["billing_mode"]
+        assert spend.resolve_billing_bucket({**pre, "provider": "anthropic"}) == "api"
+        assert (
+            spend.resolve_billing_bucket({**pre, "provider": "claude-cli"})
+            == "subscription"
+        )
+        # undeterminable: no billing_mode AND unrecognized/absent provider.
+        assert spend.resolve_billing_bucket({**pre, "provider": "mystery"}) == "unknown"
+        del pre["provider"]
+        assert spend.resolve_billing_bucket(pre) == "unknown"
+
+    def test_unknown_row_is_not_folded_into_api(self) -> None:
+        # AC4: an undeterminable row's tokens land in `unknown`, never silently
+        # in `api` (which would misattribute them) and never dropped.
+        rows = [
+            _row(provider="anthropic", billing_mode="api", total_tokens=100),
+            {**_row(total_tokens=300, estimated_cost_usd=9.9), "provider": "mystery"},
+        ]
+        for r in rows:
+            if r["provider"] == "mystery":
+                r.pop("billing_mode", None)
+        s = spend.summarize(rows)
+        assert s["api"]["total_tokens"] == 100  # api did NOT absorb the unknown row
+        assert s["unknown"]["total_tokens"] == 300
+        assert s["unknown"]["records"] == 1
+        assert s["record_count"] == 2  # the unknown row is counted, not dropped
+
+    def test_unknown_bucket_always_present_even_when_empty(self) -> None:
+        # AC4: "unknown" is a distinct STATE — present-and-zero, never absent, so
+        # a consumer distinguishes "no undeterminable rows" from "field missing".
+        s = spend.summarize([])
+        assert "unknown" in s
+        assert s["unknown"]["records"] == 0
+        assert s["unknown"]["total_tokens"] == 0
+
+    def test_format_summary_surfaces_unknown_only_when_present(self) -> None:
+        clean = spend.format_summary(spend.summarize([_row()]), since_label="7d")
+        assert "Unknown" not in clean  # no undeterminable rows → no noise line
+        row = _row(provider="mystery")
+        del row["billing_mode"]
+        dirty = spend.format_summary(spend.summarize([row]), since_label="7d")
+        assert "Unknown" in dirty
+        assert "undeterminable" in dirty
+
+
+# ---------------------------------------------------------------------------
+# spend --json is a stable consumer contract (issue athenaeum#694)
+# ---------------------------------------------------------------------------
+
+
+class TestSpendJsonContract:
+    def test_json_shape_documents_the_three_paths(self, ledger: Path) -> None:
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+        out = _run_spend_json(ledger)
+        payload = json.loads(out)
+        # The contract's stable top-level keys.
+        for key in (
+            "since",
+            "ledger_path",
+            "record_count",
+            "unpriceable_records",
+            "subscription",
+            "api",
+            "unknown",
+        ):
+            assert key in payload, key
+        # AC3: api carries dollars, subscription carries tokens at $0 — the two
+        # are separate objects and are NEVER summed into a blended total.
+        assert payload["api"]["estimated_cost_usd"] > 0.0
+        assert payload["subscription"]["estimated_cost_usd"] == 0.0
+        assert payload["subscription"]["total_tokens"] == 1200
+
+    def test_subscription_tokens_never_rendered_as_dollars(self, ledger: Path) -> None:
+        # AC5: nowhere in `athenaeum spend` output is a subscription token count
+        # rendered as a dollar figure. The subscription bucket's only dollar
+        # field is a hard 0.0, in both JSON and the human report.
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        payload = json.loads(_run_spend_json(ledger))
+        assert payload["subscription"]["estimated_cost_usd"] == 0.0
+        human = spend.format_summary(
+            spend.summarize(spend.read_ledger(ledger)), since_label="7d"
+        )
+        # The subscription line reports tokens, not a "$" figure.
+        sub_line = next(ln for ln in human.splitlines() if "Subscription" in ln)
+        assert "$" not in sub_line
+        assert "tokens" in sub_line
+
+
+def _run_spend_json(ledger: Path) -> str:
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = main(["spend", "--json", "--cache-dir", str(ledger.parent)])
+    assert rc == 0
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # ceiling_tripped + spend_today
 # ---------------------------------------------------------------------------
 
