@@ -23,34 +23,17 @@ automatically; MCP server tests need `fastmcp` (already included in `[dev]`).
 - Ensure all existing tests pass
 - Follow the existing code style (enforced by ruff)
 - Keep mechanical reformat commits separate from behavior changes — a reviewer (or release gate) should never have to dig a logic change out of a formatting diff
-- Sign off every commit under the DCO (see the next section)
 - **Write tracker citations as `athenaeum#NNN`, never bare `#NNN`.** Athenaeum is periodically re-exported to a public tree, where a bare `#NNN` (in a CHANGELOG entry, a doc, or a code comment) ties public text back to a private issue tracker with no context. The required `public-safe-lint` check (folded into `CI Required`) flags a bare `#NNN` as `bare-issue-ref`, so qualifying it keeps your first commit green. A reference to another repo's tracker uses that repo's qualifier instead (e.g. `hestia#123`); an already-qualified GitHub link `[#123](https://github.com/owner/repo/issues/123)` is fine as-is.
 
-## Developer Certificate of Origin (DCO)
+## Inbound contribution licensing
 
-Athenaeum requires every commit to be signed off under the [Developer
-Certificate of Origin](https://developercertificate.org/). This is the same
-requirement recorded in `AGENTS.md`; the two documents agree, and this section
-is the authoritative "how." Signing off certifies that you wrote the change (or
-otherwise have the right to submit it) and that it may be distributed under the
-project's Apache 2.0 License.
-
-Add the sign-off with the `-s` / `--signoff` flag when you commit:
-
-```bash
-git commit -s -m "your message"
-```
-
-That appends a trailer in exactly this form, using the real name and email in
-your Git config (`git config user.name` / `git config user.email`):
-
-```
-Signed-off-by: Jane Doe <jane@example.com>
-```
-
-Every commit in a pull request must carry this trailer. If you forget it on the
-most recent commit, `git commit --amend -s --no-edit` adds it; to sign off a
-whole range, use `git rebase --signoff <base>`.
+Athenaeum does **not** require a Developer Certificate of Origin (DCO) sign-off
+or a Contributor License Agreement. Inbound contributions are licensed under the
+project's Apache-2.0 License by **Section 5** of that license: any contribution
+you intentionally submit for inclusion in the work is under the same terms as
+the work itself, with no separate agreement required. Opening a pull request
+against this repository is that intentional submission — nothing further (no
+`Signed-off-by` trailer, no `git commit -s`) is needed to certify it.
 
 ## Branch flow and promotion
 
