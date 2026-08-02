@@ -395,3 +395,124 @@ def test_default_reconcile_cmd_is_hard_reset_to_origin_ref() -> None:
     # (athenaeum#614). This locks the fix's key behavior change.
     out = _source_and_eval("_dg_default_reconcile_cmd /tmp/deploy main", {})
     assert out == 'git -C "/tmp/deploy" reset --hard "origin/main"'
+
+
+# ---------------------------------------------------------------------------
+# Metadata-drift reconcile (issue #685) — an in-sync HEAD with a stale editable
+# install's .dist-info version must be refreshed, or fail loudly.
+# ---------------------------------------------------------------------------
+
+
+def _insync_env(repo: Path, head: str, extra: dict[str, str]) -> dict[str, str]:
+    env = {"ATHENAEUM_DEPLOY_DIR": str(repo), "ATHENAEUM_GUARD_REF_SHA": head}
+    env.update(extra)
+    return env
+
+
+def test_metadata_in_sync_does_not_refresh(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    head = _head(repo)
+    _stamp(repo, head)
+    # version-check reports in-sync (exit 0); the refresh must NOT run (would fail).
+    env = _insync_env(
+        repo,
+        head,
+        {
+            "ATHENAEUM_GUARD_VERSION_CHECK_CMD": "true",
+            "ATHENAEUM_GUARD_METADATA_REFRESH_CMD": "false",
+        },
+    )
+    r = _run([], env)
+    assert r.returncode == 0
+    assert "in-sync" in r.stderr
+    assert "refreshing" not in r.stderr
+    assert _status_porcelain(repo) == ""
+
+
+def test_metadata_drift_triggers_refresh_then_reverifies(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    head = _head(repo)
+    _stamp(repo, head)
+    marker = tmp_path / "refreshed.flag"
+    # Stateful stub: drift (exit 10) until the refresh creates the marker, then
+    # in-sync (exit 0). The refresh creates the marker — proving it ran and that
+    # the guard re-verifies afterward.
+    check = f'bash -c "[ -f {marker} ] && exit 0 || exit 10"'
+    refresh = f"touch {marker}"
+    env = _insync_env(
+        repo,
+        head,
+        {
+            "ATHENAEUM_GUARD_VERSION_CHECK_CMD": check,
+            "ATHENAEUM_GUARD_METADATA_REFRESH_CMD": refresh,
+        },
+    )
+    r = _run([], env)
+    assert r.returncode == 0, r.stderr
+    assert "metadata drift" in r.stderr
+    assert "metadata refreshed" in r.stderr
+    assert marker.exists()
+
+
+def test_metadata_refresh_failure_aborts_loud(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    head = _head(repo)
+    _stamp(repo, head)
+    env = _insync_env(
+        repo,
+        head,
+        {
+            "ATHENAEUM_GUARD_VERSION_CHECK_CMD": 'bash -c "exit 10"',  # always drifted
+            "ATHENAEUM_GUARD_METADATA_REFRESH_CMD": "false",  # refresh fails
+        },
+    )
+    r = _run([], env)
+    assert r.returncode != 0
+    assert "metadata refresh failed" in r.stderr
+
+
+def test_metadata_still_drifted_after_refresh_aborts_loud(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    head = _head(repo)
+    _stamp(repo, head)
+    env = _insync_env(
+        repo,
+        head,
+        {
+            "ATHENAEUM_GUARD_VERSION_CHECK_CMD": 'bash -c "exit 10"',  # never clears
+            "ATHENAEUM_GUARD_METADATA_REFRESH_CMD": "true",  # refresh "succeeds"
+        },
+    )
+    r = _run([], env)
+    assert r.returncode != 0
+    assert "still drifted after refresh" in r.stderr
+
+
+def test_metadata_check_undetermined_warns_but_does_not_block(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    head = _head(repo)
+    _stamp(repo, head)
+    # An undetermined/unrunnable check (e.g. the deploy venv predates the module,
+    # before the one-off pip install -e . in AC5) is WARNED, not a hard abort —
+    # the standalone `python -m athenaeum.deploy_check` surface still reports it.
+    env = _insync_env(
+        repo,
+        head,
+        {
+            "ATHENAEUM_GUARD_VERSION_CHECK_CMD": 'bash -c "exit 20"',
+            "ATHENAEUM_GUARD_METADATA_REFRESH_CMD": "false",  # must not run
+        },
+    )
+    r = _run([], env)
+    assert r.returncode == 0
+    assert "WARN version-check could not confirm metadata" in r.stderr
+
+
+def test_default_version_check_cmd_targets_deploy_venv() -> None:
+    out = _source_and_eval("_dg_default_version_check_cmd /tmp/deploy", {})
+    assert out == '"/tmp/deploy/.venv/bin/python" -m athenaeum.deploy_check --check "/tmp/deploy"'
+
+
+def test_default_metadata_refresh_cmd_is_no_deps_editable() -> None:
+    out = _source_and_eval("_dg_default_metadata_refresh_cmd /tmp/deploy", {})
+    assert out == '"/tmp/deploy/.venv/bin/pip" install -q -e . --no-deps'
