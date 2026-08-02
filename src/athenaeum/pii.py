@@ -206,23 +206,35 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _PHONE_RE = re.compile(r"(?<!\w)([+(]?\d[\d\-.\s()]{6,}\d)(?!\w)")
 
 # The phone regex above is intentionally permissive, which means digit runs
-# that are NOT phone numbers slip through: ISO dates, year ranges, and bare
-# analytics/uid id fragments (issue #500 — confirmed against the live corpus,
-# where `2015-12-03`-style CRM-timeline dates and `00075741`/`387473359`-style
-# id fragments dominated the "phone" false positives). The two exclusions
-# below narrow the match WITHOUT touching genuine phone tokens: every real
-# fixture phone carries a '+', parens, or internal separators, so it is never
-# a bare digit run, and none is date-shaped.
+# that are NOT phone numbers slip through: dates (in any ordering), year
+# ranges, bare analytics/uid id fragments, and — because the character class
+# admits spaces, parens and (via `\s`) newlines — a match that RUNS PAST its
+# number into an adjacent one across a separator (issue #720: `256-257-280`
+# issue-number lists, `02-08-2018` non-ISO dates, `2026-04-27)\n\n1` dates
+# bleeding into the next line, `1778 (2026-08-01` version-and-date pairs). The
+# classifier below narrows the match by NORMALIZATION + STRUCTURAL
+# CLASSIFICATION rather than a growing literal blocklist: it segments the
+# capture into digit groups and the separator runs between them and asks
+# whether that structure can be a phone at all. A new separator style needs no
+# new rule — it is just another separator run. Every genuine fixture phone
+# carries a '+', a balanced `(area)`, or a >=10-digit national run, so none is
+# mistaken for a list, a date, or a bled capture.
 
-# ISO 8601 date: exactly `YYYY-MM-DD`. Validated (month/day in range) in
-# :func:`_looks_like_date` so a hypothetical phone like `5551-23-4567` — same
-# shape but not a real date — is NOT silently dropped.
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# One date component (1–4 digits) separated by a single `-`, `.` or `/`. Used
+# order-agnostically by :func:`_looks_like_date` — which of the three numbers
+# is the year is decided by value, not position, so `2015-12-03` (ISO),
+# `02-08-2018` (D-M-Y / M-D-Y) and `2018.08.02` (dotted) all classify as dates.
+_DATE_RE = re.compile(r"^(\d{1,4})[-./](\d{1,4})[-./](\d{1,4})$")
 
-# Year range: `YYYY-YYYY` where both halves are plausible calendar years
-# (19xx/20xx), e.g. `2019-2020`. Restricting both halves to real-year prefixes
-# keeps a local number like `2015-9988` (2nd half not a year) matchable.
-_YEAR_RANGE_RE = re.compile(r"^(?:19|20)\d{2}-(?:19|20)\d{2}$")
+# A plausible 4-digit calendar year (19xx / 20xx). Single source of truth for
+# "is this component a year" shared by the date and year-range classifiers.
+_YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")
+
+# Year range: two plausible calendar years joined by ANY run of `-`/`.`/space
+# separators — `2019-2020`, `2020--2021` (en-dash-style double hyphen), or
+# `2019.2020`. Restricting both halves to real-year prefixes keeps a local
+# number like `2015-9988` (2nd half not a year) matchable.
+_YEAR_RANGE_RE = re.compile(r"^(?:19|20)\d{2}[-.\s]+(?:19|20)\d{2}$")
 
 # A bare digit run (no '+', no separators) is only phone-shaped when its digit
 # count falls in the E.164-plausible band: a national number is >= 10 digits
@@ -239,16 +251,28 @@ def _has_enough_digits(candidate: str, *, minimum: int = 7) -> bool:
 
 
 def _looks_like_date(candidate: str) -> bool:
-    """True when *candidate* is an ISO date or a plausible year range.
+    """True when *candidate* is a calendar date (any ordering) or a year range.
 
-    Excludes the two date shapes issue #500 found the phone regex matching in
-    the live corpus — ISO dates (`2015-12-03`) and year ranges (`2019-2020`) —
-    without excluding phone-shaped tokens that merely resemble them (an ISO
-    match is accepted only when its month/day are in calendar range).
+    Excludes the date shapes the phone regex matches in the live corpus —
+    ISO dates (`2015-12-03`, #500), non-ISO orderings (`02-08-2018`, #720),
+    dotted dates (`2018.08.02`, #720) and year ranges (`2019-2020` /
+    `2020--2021`) — without excluding phone-shaped tokens that merely resemble
+    them. Ordering-agnostic: of the three numeric components exactly one must
+    be a 4-digit calendar year (at either end), and the other two a plausible
+    month/day pair (each 1–31, at least one 1–12, in either order). A phone
+    like `917-231-6130` has no year component; `5551-23-4567` has a would-be
+    year (`5551`) outside 19xx/20xx — neither is dropped.
     """
-    if _ISO_DATE_RE.match(candidate):
-        _, month, day = candidate.split("-")
-        return 1 <= int(month) <= 12 and 1 <= int(day) <= 31
+    m = _DATE_RE.match(candidate)
+    if m:
+        a, b, c = m.groups()
+        if _YEAR_RE.match(a) and not _YEAR_RE.match(c):
+            d1, d2 = int(b), int(c)
+        elif _YEAR_RE.match(c) and not _YEAR_RE.match(a):
+            d1, d2 = int(a), int(b)
+        else:
+            return False  # no single unambiguous year component — not a date
+        return 1 <= d1 <= 31 and 1 <= d2 <= 31 and (d1 <= 12 or d2 <= 12)
     return bool(_YEAR_RANGE_RE.match(candidate))
 
 
@@ -271,10 +295,11 @@ def _normalize_phone_token(token: str) -> str:
 
     ``_PHONE_RE`` captures its optional leading ``[+(]`` delimiter **inside** the
     capture group, so a parenthesized run like ``(2026-07-29)`` is captured as
-    ``(2026-07-29`` (issue #683). Both exclusion helpers below test the raw token
-    and are defeated by that leading punctuation — ``_ISO_DATE_RE`` is anchored on
-    ``^\\d`` so the ``(`` never matches, and ``_is_bare_id_fragment`` short-circuits
-    because ``'(2026-07-29'.isdigit()`` is ``False``. Stripping the surrounding
+    ``(2026-07-29`` (issue #683). The date/id-fragment exclusion helpers below
+    test the raw token and are defeated by that leading punctuation —
+    ``_DATE_RE`` is anchored on ``^\\d`` so the ``(`` never matches, and
+    ``_is_bare_id_fragment`` short-circuits because ``'(2026-07-29'.isdigit()``
+    is ``False``. Stripping the surrounding
     delimiter for the exclusion *check only* (never the returned value) restores
     the intended date/id-fragment exclusions while leaving genuine phone tokens
     like ``(555) 010-0100`` — whose interior separators mean they are never a bare
@@ -289,21 +314,70 @@ def _normalize_phone_token(token: str) -> str:
 
 
 def _is_excluded_phone_shape(token: str) -> bool:
-    """True when *token* is a provably-non-phone shape (ISO date, year range, or
-    a bare id/analytics fragment), robust to a leading ``+``/``(`` or trailing
-    ``)`` that ``_PHONE_RE`` folds into its capture group.
+    """True when *token* is a provably-non-phone shape.
 
     Shared by :func:`find_inline_phones` (corpus-page lint) and
     :func:`athenaeum.outbound_pii.scan_outbound_text` (egress lint) so the
-    "what is provably not a phone" rule has exactly one definition — the same
-    single-source-of-truth argument those two lints already make for
-    ``_PHONE_RE``/``_has_enough_digits``. The shapes it drops (valid ISO dates,
-    19xx/20xx year ranges, sub-10-digit bare runs) can never be a genuine phone,
-    so applying it on the egress path removes false positives without dropping
-    any real number.
+    "what is provably not a phone" rule has exactly one definition. The
+    classification is structural — it segments the capture into digit groups
+    and the separator runs between them and asks whether that structure can be
+    a phone at all — so a new separator style needs no new rule (issue #720):
+
+    * **Line-spanning** (``\\n``/``\\r``/``\\t``) — the permissive character
+      class lets a match run across whitespace into the next line's number
+      (``2026-04-27)\\n\\n1``). A phone never wraps a line.
+    * **Unbalanced parentheses** — ``(555) 010-0100`` is a balanced area code;
+      an unmatched ``(`` or ``)`` means the match bled across a paren boundary
+      into adjacent text (``1778 (2026-08-01``, ``2026-04-27)``).
+    * **Date / year range** in any ordering or separator style
+      (:func:`_looks_like_date`) — ``02-08-2018``, ``2020--2021``.
+    * **Bare id/analytics fragment** — a separator-free run outside the
+      E.164-plausible length band (:func:`_is_bare_id_fragment`, #500).
+    * **Multi-character separator run** between digit groups (``--``, ``..``) —
+      list or range punctuation, never phone grouping (``445--436--435--374``).
+    * **Short unprefixed grouped run** — a separator-joined sequence with no
+      explicit international ``+`` prefix and fewer than a full national
+      number's digits (10) is an issue-number / reference list, not a phone
+      (``256-257-280`` = 9 digits). ``+1-555-0100`` (``+`` prefix) and
+      ``917-231-6130`` (10 digits) are kept.
+    * **Too many groups** — more than four digit groups is a list; a phone has
+      at most country/area/prefix/line.
+
+    None of these can be a genuine phone, so applying the rule on the egress
+    path removes false positives without dropping any real number.
     """
+    if any(ch in token for ch in "\r\n\t"):
+        return True
+    if token.count("(") != token.count(")"):
+        return True
+
     candidate = _normalize_phone_token(token)
-    return _looks_like_date(candidate) or _is_bare_id_fragment(candidate)
+    if _looks_like_date(candidate) or _is_bare_id_fragment(candidate):
+        return True
+
+    # Structural segmentation on the paren-free candidate: balanced parens wrap
+    # an area code, they are not grouping separators.
+    stripped = candidate.replace("(", "").replace(")", "")
+    pieces = re.findall(r"\d+|\D+", stripped)
+    groups = [p for p in pieces if p.isdigit()]
+    internal_seps = [
+        p
+        for i, p in enumerate(pieces)
+        if not p.isdigit()
+        and 0 < i < len(pieces) - 1
+        and pieces[i - 1].isdigit()
+        and pieces[i + 1].isdigit()
+    ]
+
+    if any(len(sep) > 1 for sep in internal_seps):
+        return True
+    if len(groups) > 4:
+        return True
+    has_plus = token.startswith("+")
+    total_digits = sum(len(g) for g in groups)
+    if len(groups) >= 2 and not has_plus and total_digits < 10:
+        return True
+    return False
 
 
 def is_pii_flagged(meta: dict[str, Any] | None) -> bool:

@@ -41,6 +41,7 @@ from athenaeum.pii import (
     read_observations,
     read_supersessions,
     resolve_identifier,
+    scan_corpus_pii,
 )
 from athenaeum.schemas import PersonWiki, validate_wiki_meta
 from athenaeum.search import FTS5Backend, KeywordBackend
@@ -441,6 +442,107 @@ class TestPhoneDetectorParenthesized:
         assert find_inline_phones("call (555) 010-0100 today") == ["(555) 010-0100"]
         assert find_inline_phones("(+1-555-0100)") == ["+1-555-0100"]
         assert find_inline_phones("num 917-231-6130.") == ["917-231-6130"]
+
+
+# ---------------------------------------------------------------------------
+# Phone detector — the shapes #683's paren fix did not reach (issue #720)
+# ---------------------------------------------------------------------------
+#
+# #683 normalized a LEADING paren, cutting lint-pii from 911/107 to 456/274.
+# The residual 456 was dominated by four shapes the paren fix did not cover
+# (measured on the live corpus, develop @ 5513d80):
+#   * issue-number lists joined by single or double hyphens
+#   * dates in non-ISO orderings, and dotted dates
+#   * a match that runs PAST a closing paren / across a newline into the next
+#     number (the permissive `[\d\-.\s()]` class admits spaces and, via `\s`,
+#     newlines)
+# Each row of #720's table is pinned below to the EXACT example value the
+# issue cites, so a regression re-surfaces the specific corpus shape. The
+# exclusion is normalization + structural classification (segment into digit
+# groups + separator runs), not a literal blocklist — a new separator style
+# needs no new rule, which this class also asserts.
+
+
+class TestPhoneDetectorIssueNumberAndDateShapes:
+    #: (label, example value taken verbatim from #720's table, source page).
+    #: Each value must classify as a non-phone regardless of surrounding prose.
+    UNCOVERED_SHAPES = (
+        ("double-dash issue-number list", "445--436--435--374"),
+        ("single-dash issue-number list", "256-257-280"),
+        ("parenthesized year range", "(2020--2021"),
+        ("dotted / reordered date", "02-08-2018"),
+        ("date bleeding into following text", "2026-04-27)\n\n1"),
+        ("version-and-date", "1778 (2026-08-01"),
+    )
+
+    @pytest.mark.parametrize(
+        "example",
+        [pytest.param(v, id=label) for label, v in UNCOVERED_SHAPES],
+    )
+    def test_uncovered_shape_reports_no_phone(self, example: str) -> None:
+        # Pinned to the literal example from the issue's measurement table.
+        assert find_inline_phones(example) == [], example
+        # …and still a non-match embedded in ordinary surrounding text.
+        assert find_inline_phones(f"see {example} here") == [], example
+
+    def test_issue_number_list_separators_are_generalized(self) -> None:
+        # "a new separator style should not require a new rule" (AC4): the same
+        # list classifies as non-phone whether joined by single hyphens, double
+        # hyphens, dots, or spaces — none is a phone.
+        for sep in ("-", "--", ".", " ", " - "):
+            token = sep.join(("256", "257", "280"))
+            assert find_inline_phones(f"refs {token} done") == [], token
+
+    def test_non_iso_date_orderings_excluded(self) -> None:
+        # Day-Month-Year, Month-Day-Year, and dotted variants — order-agnostic.
+        for date in ("02-08-2018", "08-02-2018", "2018.08.02", "27.04.2026", "2018/08/02"):
+            assert find_inline_phones(f"met on {date} again") == [], date
+
+    def test_date_bleeding_across_paren_or_newline_excluded(self) -> None:
+        # The permissive class let a date run past `)` / across a blank line
+        # into the following number. Both are capture artifacts, not phones.
+        assert find_inline_phones("closed 2026-04-27)\n\n1 item done") == []
+        assert find_inline_phones("Issue 1778 (2026-08-01 shipped") == []
+
+    def test_genuine_phones_unaffected_by_720(self) -> None:
+        # The #683/#500 true positives must survive the #720 tightening.
+        assert find_inline_phones("call +1-555-0100 now") == ["+1-555-0100"]
+        assert find_inline_phones("(555) 010-0100") == ["(555) 010-0100"]
+        assert find_inline_phones("cell 5551234567 anytime") == ["5551234567"]
+        assert find_inline_phones("intl +447911123456 ok") == ["+447911123456"]
+        assert find_inline_phones("num 917-231-6130 today") == ["917-231-6130"]
+
+    def test_email_axis_is_untouched(self) -> None:
+        # AC3: no email-axis change — the widened phone exclusions must not
+        # alter which email-shaped tokens are found. Pinned with a count
+        # assertion over a body carrying both a real email and every #720
+        # false-positive phone shape.
+        body = (
+            "Contact alice@example.com about issues 445--436--435--374 and\n"
+            "256-257-280, dated 02-08-2018 and (2020--2021), ref 1778 (2026-08-01,\n"
+            "closed 2026-04-27)\n\n1. Cc bob+tag@sub.example.co.uk please."
+        )
+        assert find_inline_emails(body) == ["alice@example.com", "bob+tag@sub.example.co.uk"]
+        # And the phone axis on that same body is empty — all shapes excluded.
+        assert find_inline_phones(body) == []
+
+    def test_corpus_scan_reduction_mechanism(self, tmp_path: Path) -> None:
+        # The reduction lint-pii sees on the live corpus, in miniature: a page
+        # full of #720 false-positive shapes yields ZERO findings, while a page
+        # with a genuine phone still yields one. This is the deterministic
+        # mechanism behind the 456 -> tens drop the operator confirms live.
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "false_positives.md").write_text(
+            "## Refs\n445--436--435--374\n256-257-280\n"
+            "## Dates\n02-08-2018\n2026-04-27)\n\n1\n(2020--2021)\n1778 (2026-08-01)\n",
+            encoding="utf-8",
+        )
+        (wiki / "real_phone.md").write_text("Reach Alice at +1-555-0100.\n", encoding="utf-8")
+        findings = scan_corpus_pii(wiki)
+        # Only the genuine-phone page is a finding; the false-positive page is clean.
+        assert [f.path.name for f in findings] == ["real_phone.md"]
+        assert findings[0].phones == ["+1-555-0100"]
 
 
 # ---------------------------------------------------------------------------
