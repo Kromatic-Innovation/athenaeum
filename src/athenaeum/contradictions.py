@@ -60,7 +60,7 @@ from athenaeum.models import (
     parse_frontmatter,
     validity_bound_str,
 )
-from athenaeum.prompt_safety import defang_tag
+from athenaeum.prompt_safety import defang_tag, fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
 
 if TYPE_CHECKING:
@@ -273,9 +273,17 @@ def _build_user_message(members: list[AutoMemoryFile]) -> str:
         scope = _member_scope_header(am)
         if scope:
             lines.append(f"scope: {scope}")
-        lines.append("<memory>")
-        lines.append(snippet)
-        lines.append("</memory>")
+        # Fence the untrusted member body via the shared prompt_safety helper
+        # (#687) rather than hand-appending the <memory> tags, so this site
+        # tracks the canonical fence. `_member_snippet` already truncated to
+        # PER_MEMBER_BODY_CHARS and defanged, so defang=False preserves its
+        # single-defang protection (complementary, not replaced); the metadata
+        # `scope:` line above stays OUTSIDE the fence as trusted context (#324).
+        lines.append(
+            fence_untrusted(
+                snippet, tag="memory", max_chars=PER_MEMBER_BODY_CHARS, defang=False
+            )
+        )
         lines.append("")
     lines.append(
         "Return STRICT JSON per the schema in the system prompt. "
