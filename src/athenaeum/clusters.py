@@ -14,8 +14,12 @@ Scope for this module:
 - Output: a JSONL report at ``raw/_librarian-clusters.jsonl`` (path
   configurable) with one row per cluster. A timestamped sibling file
   is written on every run; the canonical name is atomically replaced.
-- Clustering: single-linkage on pairwise cosine similarity, threshold
-  configured by ``librarian.cluster_threshold`` (default 0.6).
+- Clustering: complete-linkage on pairwise cosine similarity, threshold
+  configured by ``librarian.cluster_threshold`` (default 0.6). Single-linkage
+  connected components are computed first as a cheap scoping step, then refined
+  into complete-linkage cliques (issue #681) so a weak bridging edge can no
+  longer chain a giant component; every multi-member cluster is a clique in
+  which EVERY pair clears the threshold.
 - Singletons: size-1 clusters pass through unchanged. There is NO
   minimum-cluster-size filter.
 
@@ -41,6 +45,7 @@ never pays ``search``'s optional ``chromadb`` import cost.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import logging
 import math
@@ -72,10 +77,11 @@ DEFAULT_CACHE_DIR = resolve_cache_dir()
 # cosines on 4000-char prefixes put the typo clone at ~0.59 against the
 # anchor near-duplicate file and the iMessage variant at
 # ~0.70; unrelated singletons land at ~0.24 (sentry) and ~0.07 (user).
-# At 0.55, single-linkage pulls the typo in through the anchor while
-# leaving the singletons alone. 0.6 was too tight (typo fell out); a
-# drop to 0.55 is the minimum that preserves the load-bearing property
-# of the regression fixture. Tunable via ``librarian.cluster_threshold``.
+# At 0.55 the near-duplicate voltaire/nanoclaw notes are all mutually above
+# the threshold, so complete-linkage keeps them one clique while leaving the
+# singletons alone. 0.6 was too tight (typo fell out); a drop to 0.55 is the
+# minimum that preserves the load-bearing property of the regression fixture.
+# Tunable via ``librarian.cluster_threshold``.
 DEFAULT_CLUSTER_THRESHOLD = 0.55
 
 # Default output path, resolved relative to the knowledge root.
@@ -99,8 +105,10 @@ class Cluster:
     # Issue #421: minimum pairwise cosine among members (complete-linkage
     # coherence metric). 1.0 for singletons and pre-#421 rows that lack the
     # field. A cluster is a complete-linkage clique at ``threshold`` iff this
-    # is ``>= threshold``; the merge-proposal gate uses it to suppress
-    # single-linkage chains without touching the single-linkage grouping.
+    # is ``>= threshold``. Issue #681 makes formation itself complete-linkage,
+    # so a freshly-written multi-member cluster now ALWAYS has ``min_pairwise
+    # >= threshold`` and the merge-proposal gate's min-pairwise arm is a
+    # backstop for legacy/pre-#681 rows rather than the load-bearing gate.
     min_pairwise_score: float = 1.0
     rationale: str = ""
 
@@ -242,10 +250,20 @@ def _build_adjacency(
     file_ids: Sequence[str],
     embeddings: dict[str, list[float]],
     threshold: float,
-) -> list[set[int]]:
-    """Return adjacency list (index → neighbour set) at ``cosine >= threshold``."""
+) -> tuple[list[set[int]], dict[tuple[int, int], float]]:
+    """Return the threshold adjacency AND the weight of every surviving edge.
+
+    The adjacency list (index → neighbour set, ``cosine >= threshold``) drives
+    :func:`_single_linkage`. Alongside it we capture ``edge_sim[(i, j)]`` (``i <
+    j``) = the actual cosine for each edge that cleared the threshold — reused by
+    :func:`_complete_linkage` (issue #681) to refine each connected component
+    into complete-linkage cliques WITHOUT a second ``O(n^2)`` cosine pass.
+    Pairs below the threshold are absent from both structures (they never form
+    an edge and never merge two members into one cluster).
+    """
     n = len(file_ids)
     adj: list[set[int]] = [set() for _ in range(n)]
+    edge_sim: dict[tuple[int, int], float] = {}
     vecs = [embeddings.get(fid) for fid in file_ids]
     for i in range(n):
         vi = vecs[i]
@@ -255,10 +273,12 @@ def _build_adjacency(
             vj = vecs[j]
             if vj is None:
                 continue
-            if cosine(vi, vj) >= threshold:
+            sim = cosine(vi, vj)
+            if sim >= threshold:
                 adj[i].add(j)
                 adj[j].add(i)
-    return adj
+                edge_sim[(i, j)] = sim
+    return adj, edge_sim
 
 
 def _single_linkage(adj: list[set[int]]) -> list[list[int]]:
@@ -280,6 +300,115 @@ def _single_linkage(adj: list[set[int]]) -> list[list[int]]:
             stack.extend(adj[node])
         components.append(sorted(comp))
     return components
+
+
+def _complete_linkage(
+    component: Sequence[int],
+    adj: list[set[int]],
+    edge_sim: dict[tuple[int, int], float],
+    threshold: float,
+) -> list[list[int]]:
+    """Refine a single-linkage *component* into complete-linkage clusters.
+
+    Issue #681. :func:`_single_linkage` only requires each member to be
+    transitively CONNECTED at ``threshold``, so a single weak bridging edge can
+    chain thousands of loosely-related pages into one giant component — the
+    ~2,200-source cluster the merge-proposal gate (#400/#421) then rebuilds and
+    discards on every run. This refines each connected component into
+    complete-linkage clusters: every returned cluster is a clique at
+    ``threshold`` — EVERY pair of members has ``cosine >= threshold`` — so the
+    giant component is never formed in the first place. The #421 min-pairwise
+    suppression arm becomes a redundant backstop (formation now guarantees what
+    it used to check) rather than the load-bearing gate.
+
+    Greedy agglomerative complete linkage: start with each member as its own
+    cluster and repeatedly merge the two clusters whose complete-linkage
+    similarity — the MINIMUM pairwise cosine across the two membership sets, the
+    ``farthest`` pair — is highest, so long as that minimum is ``>= threshold``
+    (which keeps the union a clique). Stop when no admissible merge remains;
+    members left unmerged fall out as singletons, exactly as the single-linkage
+    pass emits isolated nodes.
+
+    Only edges recorded in ``edge_sim`` (pairs that cleared ``threshold``) can
+    ever join two clusters, so the search is confined to the component's
+    internal edges via ``adj``. Cost is driven by those edges, reusing the
+    ``O(n^2)`` cosine pass already paid by :func:`_build_adjacency`; a component
+    that is already a clique collapses in one sweep. Deterministic: the max-heap
+    breaks ties on cluster id, which is assigned in a fixed traversal order.
+    """
+    if len(component) <= 1:
+        return [list(component)]
+
+    comp_set = set(component)
+
+    # Each active cluster is a stable integer id → sorted member indices. Ids
+    # are never reused (``next_id`` only increments), so every cluster-pair key
+    # below is unique and its recorded similarity never mutates in place —
+    # staleness is detected purely by whether a cluster is still ``active``.
+    members: dict[int, list[int]] = {}
+    node_cid: dict[int, int] = {}
+    cadj: dict[int, set[int]] = {}
+    clsim: dict[tuple[int, int], float] = {}
+    next_id = 0
+    for node in sorted(component):
+        members[next_id] = [node]
+        cadj[next_id] = set()
+        node_cid[node] = next_id
+        next_id += 1
+
+    heap: list[tuple[float, int, int]] = []
+
+    def _record_pair(a: int, b: int, sim: float) -> None:
+        lo, hi = (a, b) if a < b else (b, a)
+        clsim[(lo, hi)] = sim
+        cadj[a].add(b)
+        cadj[b].add(a)
+        heapq.heappush(heap, (-sim, lo, hi))
+
+    # Seed admissible cluster pairs from the component's internal edges only.
+    for node in component:
+        for nb in adj[node]:
+            if nb <= node or nb not in comp_set:
+                continue
+            _record_pair(node_cid[node], node_cid[nb], edge_sim[(node, nb)])
+
+    active = set(members)
+    while heap:
+        neg_sim, a, b = heapq.heappop(heap)
+        if a not in active or b not in active:
+            continue  # one side already merged away — stale entry
+        sim = -neg_sim
+        if clsim.get((a, b)) != sim:
+            continue  # superseded (defensive; keys are unique so rare)
+
+        merged = next_id
+        next_id += 1
+        members[merged] = sorted(members[a] + members[b])
+        cadj[merged] = set()
+        active.discard(a)
+        active.discard(b)
+        active.add(merged)
+
+        # A cluster c is admissible with the union iff it was admissible with
+        # BOTH a and b (min cross-sim across the union must clear ``threshold``);
+        # the new complete-linkage sim is the min of the two old sims — already
+        # >= threshold since both inputs were. Clusters admissible with only one
+        # side correctly drop out (one cross pair is sub-threshold).
+        for c in (cadj[a] & cadj[b]) - {a, b}:
+            if c not in active:
+                continue
+            sa = clsim[(a, c) if a < c else (c, a)]
+            sb = clsim[(b, c) if b < c else (c, b)]
+            _record_pair(merged, c, sa if sa < sb else sb)
+
+        # Drop the merged-away ids from their neighbours' adjacency so future
+        # intersections don't reconsider them.
+        for c in cadj[a]:
+            cadj[c].discard(a)
+        for c in cadj[b]:
+            cadj[c].discard(b)
+
+    return [sorted(members[cid]) for cid in sorted(active)]
 
 
 def _mean_intra_similarity(
@@ -405,8 +534,9 @@ def cluster_auto_memory_files(
         cache_dir: Root of the shared embedder cache (chromadb is at
             ``<cache_dir>/wiki-vectors/``). Ignored when ``embeddings`` is
             supplied.
-        threshold: Cosine similarity cutoff for single-linkage
-            clustering. Defaults to :data:`DEFAULT_CLUSTER_THRESHOLD`.
+        threshold: Cosine similarity cutoff for clustering — every pair
+            within a returned multi-member cluster clears it (complete
+            linkage, issue #681). Defaults to :data:`DEFAULT_CLUSTER_THRESHOLD`.
         embeddings: Optional precomputed ``{str(path): vector}`` map. When
             supplied, the chromadb lookup + hashing-trick fallback in
             :func:`_resolve_embeddings` is skipped entirely and this map is
@@ -433,8 +563,19 @@ def cluster_auto_memory_files(
     # unique; avoids Path equality surprises across tempdirs).
     file_ids: list[str] = [str(am.path) for am in files]
 
-    adj = _build_adjacency(file_ids, embeddings, threshold)
-    components = _single_linkage(adj)
+    adj, edge_sim = _build_adjacency(file_ids, embeddings, threshold)
+    # Single-linkage first — cheaply scopes complete-linkage refinement to each
+    # connected component (two members in different components share no
+    # ``>= threshold`` edge, so they can never land in one clique). Issue #681:
+    # every multi-member component is then split into complete-linkage cliques
+    # so a weak bridging edge can no longer chain a giant component that the
+    # merge-proposal gate would only rebuild and discard.
+    components: list[list[int]] = []
+    for comp in _single_linkage(adj):
+        if len(comp) == 1:
+            components.append(comp)
+        else:
+            components.extend(_complete_linkage(comp, adj, edge_sim, threshold))
 
     # Stable cluster id: a content-address over the sorted member relpaths,
     # prefixed by a human-readable scope hint. Issue #370 (delta compile):

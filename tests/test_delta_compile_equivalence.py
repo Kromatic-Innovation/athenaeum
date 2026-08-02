@@ -387,9 +387,16 @@ def test_no_changed_paths_is_byte_identical_to_full(
 
 
 # ---------------------------------------------------------------------------
-# Chain topology: A–B–C where B is the SOLE bridge holding C (probed cosines:
-# A~B=0.61, B~C=0.77, A~C=0.16 — so {A,B,C} is ONE single-linkage cluster).
-# Changing B to drop the B~C link must repartition the WHOLE prior cluster.
+# Chain topology: A–B–C where B is the SOLE bridge linking A and C (probed
+# cosines: A~B=0.61, B~C=0.77, A~C=0.16). Under single-linkage this was ONE
+# cluster; under complete-linkage (#681) it is NOT — greedy complete linkage
+# merges the strongest pair B~C=0.77 into a {B,C} clique and leaves A a
+# singleton (A~C=0.16 forbids the clique from spanning all three). Changing B
+# to drop the B~C link and strengthen A~B must repartition the affected
+# closure: B leaves {B,C} to join A, and C splits into its own singleton —
+# and the delta path must reproduce that whole repartition exactly like a
+# full run, INCLUDING pulling A into the pool via B's new similarity even
+# though A was not in B's prior clique.
 # ---------------------------------------------------------------------------
 
 # B mixes both topics (== the bridge recipe) so it links A (voltaire) and C
@@ -399,12 +406,6 @@ def test_no_changed_paths_is_byte_identical_to_full(
 # delta path rather than the F6 slug-collision fallback (covered separately).
 _CHAIN_B = f"{_A} {_A} {_B} {_B}"
 _CHAIN_DOCK = BASE_FILES["gamma"]["reference_docker_orphan_a.md"]
-
-_CHAIN_MEMBERS = [
-    "chain/project_inbox_triage_a.md",
-    "chain/project_inbox_triage_bridge.md",
-    "chain/reference_pgvector_store.md",
-]
 
 
 def _write_chain_base(root: Path, b_body: str) -> None:
@@ -430,9 +431,11 @@ def _break_bridge(root: Path) -> set[Path]:
 def test_chain_transitive_repartition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A single-linkage chain A–B–C repartitions correctly when the sole bridge
-    B changes: the WHOLE prior cluster {A,B,C} is pooled and re-clustered, so C
-    (unchanged, and no longer linked by B) is split off — matching a full run.
+    """A complete-linkage chain A–B–C repartitions correctly when the sole
+    bridge B changes: B's prior clique {B,C} is pooled, A is pulled into the
+    closure via B's new similarity, and the pool re-clusters so B joins A and C
+    (unchanged, no longer linked by B) splits into its own singleton — matching
+    a full run byte-for-byte.
     """
     pytest.importorskip("chromadb")
 
@@ -441,11 +444,16 @@ def test_chain_transitive_repartition(
     _build_index(golden)
     _compile(golden, changed=None, monkeypatch=monkeypatch)
 
-    # Sanity: GOLDEN really is the A–B–C chain as one cluster + a docker singleton.
+    # Sanity: under complete-linkage (#681) the chain is NOT one cluster — the
+    # strongest pair (B~C=0.77) forms a {B,C} clique and A is a singleton
+    # (A~C=0.16 forbids a clique spanning all three), plus the docker singleton.
     gmem = _cluster_membership(golden)
-    assert any(
-        sorted(m) == _CHAIN_MEMBERS for m in gmem.values()
-    ), f"expected the A-B-C chain as one cluster, got {list(gmem.values())}"
+    gmem_sorted = sorted(sorted(m) for m in gmem.values())
+    assert gmem_sorted == [
+        ["chain/project_inbox_triage_a.md"],
+        ["chain/project_inbox_triage_bridge.md", "chain/reference_pgvector_store.md"],
+        ["misc/reference_docker_note.md"],
+    ], f"expected complete-linkage cliques {{A}}, {{B,C}}, {{docker}}, got {gmem_sorted}"
     golden_wiki = _read_wiki(golden)
     golden_mtimes = _wiki_mtimes(golden)
 
