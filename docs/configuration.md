@@ -464,6 +464,43 @@ spend:
   max_usd_per_day: 5.00           # cap real API dollars per day
 ```
 
+## Push-precision and coverage instrumentation (#711)
+
+The v6 memory-model epic's definition of done requires push precision
+("fraction of pushed items actually referenced by the consuming session") to
+improve over a baseline recorded **before** any later v6 slice changes what
+`recall` pushes. This instrument is that baseline: it is passive measurement,
+**on by default**, and records into two durable JSONL ledgers under the cache
+dir (`~/.cache/athenaeum/_push_records.jsonl` and
+`~/.cache/athenaeum/_push_references.jsonl`) — never inside the wiki/raw
+corpus, so a push record can never become a claim or enter the embedded
+index.
+
+- A **push record** is written every time `recall` renders a hit into a
+  session's response (the `recall` MCP tool / `recall_search`), keyed by the
+  ambient `CLAUDE_SESSION_ID`. It carries only ids, a tier (the page's
+  `access` level), a matched scope (the granted `audience` roles, or `open` /
+  `owner`), and an estimated token cost — **never claim content and never
+  personal data**. A pushed person page's id is its opaque frontmatter `uid`,
+  never the filename (which embeds a name-derived slug).
+- A **reference-determination** record is written at `session_end` (the
+  SessionEnd-hook / nightly-after-librarian path), marking which of that
+  session's pushed ids were actually referenced afterward in the session's
+  own transcript. `precision = referenced / pushed`.
+- `athenaeum push-metrics baseline` computes precision over a window and
+  writes a dated snapshot into `docs/memory-model-measurements.md`.
+  `athenaeum push-metrics coverage-audit` samples sessions into a worksheet
+  file a human reviewer marks for the coverage-floor miss rate.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Instrumentation enabled | `ATHENAEUM_PUSH_METRICS_ENABLED` | `push_metrics.enabled` | `true` | Write push records on every recall push and reference-determination records at session end. Off is a clean no-op (identical recall output either way) — see `athenaeum.push_metrics`. |
+
+```yaml
+push_metrics:
+  enabled: true    # on by default; passive measurement only
+```
+
 ## Contradiction detection and resolver
 
 Detection knobs live under the `contradiction:` yaml block; resolver behavior
@@ -632,6 +669,9 @@ search_backend: fts5
 recall:
   extra_intake_roots:
     - raw/auto-memory
+
+push_metrics:
+  enabled: true    # on by default; passive push-precision/coverage measurement (#711)
 
 librarian:
   cluster_threshold: 0.55

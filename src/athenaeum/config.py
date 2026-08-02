@@ -1314,6 +1314,32 @@ def resolve_spend_ledger_enabled(config: dict[str, Any] | None) -> bool:
     return True
 
 
+def resolve_push_metrics_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve whether push-precision/coverage instrumentation runs (#711).
+
+    ON by default: it is passive measurement — one small append-only JSONL
+    row per recall push and per session-end reference determination, both
+    under the cache dir, never inside the wiki corpus — and the whole point
+    of the v6 memory-model epic's precision baseline is that it starts
+    recording BEFORE any later slice changes what recall pushes. Precedence:
+    ``ATHENAEUM_PUSH_METRICS_ENABLED`` env > ``push_metrics.enabled`` yaml >
+    ``True``. Any env value other than a falsey token (``0`` / ``false`` /
+    ``no`` / ``off``, case-insensitive) is truthy; a non-bool yaml value falls
+    through to the default. No seed in ``_DEFAULTS`` (issue #231) — mirrors
+    :func:`resolve_spend_ledger_enabled`'s shape exactly.
+    """
+    env = os.environ.get("ATHENAEUM_PUSH_METRICS_ENABLED")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off", "")
+    if isinstance(config, dict):
+        cfg = config.get("push_metrics")
+        if isinstance(cfg, dict):
+            raw = cfg.get("enabled")
+            if isinstance(raw, bool):
+                return raw
+    return True
+
+
 def resolve_spend_ledger_path(config: dict[str, Any] | None) -> Path | None:
     """Resolve an explicit spend-ledger path override (env > yaml > None) (#378).
 

@@ -12,7 +12,7 @@ itself contains no per-command branching. A missing subcommand prints help
 and returns 0; an unrecognized one is rejected by argparse itself before
 ``main()`` ever sees ``args.command``.
 
-Fourteen sibling ``_cmd_*.py`` modules each own one or a few related
+Fifteen sibling ``_cmd_*.py`` modules each own one or a few related
 subcommands' argparse setup plus their handler(s):
 ``_cmd_lifecycle`` (init/status/disable/enable/spend), ``_cmd_serve``
 (serve), ``_cmd_run`` (run), ``_cmd_index`` (reindex/rebuild-index/compile/
@@ -21,7 +21,8 @@ stopwords/test-mcp), ``_cmd_pending`` (ingest-answers/ingest-merges/
 reresolve-questions), ``_cmd_curate`` (dedupe/claims/auto-memory),
 ``_cmd_repair`` (repair), ``_cmd_questions``, ``_cmd_merges``,
 ``_cmd_decisions``, ``_cmd_authority``, ``_cmd_axiom``, ``_cmd_calibration``,
-``_cmd_outbound``, ``_cmd_drain``, ``_cmd_storage``.
+``_cmd_outbound``, ``_cmd_drain``, ``_cmd_storage``, ``_cmd_push_metrics``
+(push-metrics baseline/coverage-audit, issue #711).
 
 FACTORING RULE: **every subcommand lives in its own ``_cmd_<name>.py`` module
 (or a small same-domain group module) with an ``add_<name>_subparser(subparsers)``
@@ -76,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_merges import add_merges_subparser
     from athenaeum._cmd_outbound import add_outbound_subparser
     from athenaeum._cmd_pending import add_pending_subparsers
+    from athenaeum._cmd_push_metrics import add_push_metrics_subparser
     from athenaeum._cmd_query import add_query_subparsers
     from athenaeum._cmd_questions import add_questions_subparser
     from athenaeum._cmd_repair import add_repair_subparser
@@ -114,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_outbound_subparser(subparsers)  # outbound-lint
     add_drain_subparser(subparsers)  # drain
     add_storage_subparser(subparsers)  # storage
+    add_push_metrics_subparser(subparsers)  # push-metrics
     add_index_subparsers(
         subparsers
     )  # reindex/rebuild-index, compile, registry, ingest, session-end
