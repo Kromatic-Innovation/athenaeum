@@ -543,6 +543,39 @@ push_metrics:
   enabled: true    # on by default; passive measurement only
 ```
 
+## LLM schema-observation ledger (athenaeum#570 / athenaeum#724)
+
+Every in-scope LLM contract's response is validated **observe-only** against a
+pydantic model (`athenaeum.llm_schemas.observe`): a mismatch is logged and
+counted, but NEVER changes what the pipeline does with the response. athenaeum#724
+made the observation **complete and measurable**:
+
+- Every observation — clean or mismatched — is recorded to a durable,
+  append-only ledger at `~/.cache/athenaeum/_llm_schema_observations.jsonl`
+  (under the cache dir, never in the corpus), so every reported mismatch rate
+  has a real **denominator**. This is required because the `query_topics`
+  contract runs inside the MCP server, whose Python logging is retained nowhere
+  — a log-only marker there is discarded.
+- A **total parse failure** (a response that never yields a JSON object) is
+  counted as a `parse-fail` mismatch from the parse guard, even though it
+  returns before reaching `observe`.
+- Each mismatch carries its **class** — `extra-keys`, `missing-required`,
+  `parse-fail`, `wrong-type` — so the reject-vs-degrade question (athenaeum#608)
+  can be answered per class without re-reading raw logs.
+- `athenaeum.llm_schemas.aggregate_observations()` summarises the ledger
+  per contract. A contract with **zero** observations is reported as an
+  explicit `no_data` row (rate `None`), distinct from 0 mismatches over 400 —
+  so a contract with no production caller (e.g. `claim_kind`, whose stamper is
+  currently unwired) can never read as a false clean 0.
+
+The ledger records only schema **shape** — field paths, error messages, and
+unexpected key *names* — never a field **value**, so no claim content or
+personal data reaches it.
+
+| Knob | Env var | Default | What it does |
+|---|---|---|---|
+| Observation ledger enabled | `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED` | `1` | Append one record per LLM-contract observation. Set `0` to disable (behaviour is otherwise unchanged — observation is passive). |
+
 ## Contradiction detection and resolver
 
 Detection knobs live under the `contradiction:` yaml block; resolver behavior

@@ -206,11 +206,29 @@ def classify_claim_kind(
         raw_text = response_text(response)
     except (AttributeError, IndexError):
         log.warning("claim_kind: malformed classify response; unclassified")
+        # Count the parse failure (athenaeum#724): this early return is ABOVE
+        # observe_claim_kind, so a malformed response was previously uncounted.
+        from athenaeum.llm_schemas import observe_parse_failure
+
+        observe_parse_failure(
+            contract="claim_kind",
+            call_site="claim_kind.classify_claim_kind",
+            detail="malformed-classify-response",
+        )
         return ""
 
     payload = extract_json_object(raw_text)
     if not isinstance(payload, dict):
         log.warning("claim_kind: no JSON object in classify response; unclassified")
+        # Count the parse failure (athenaeum#724): no JSON object at all — the
+        # most extreme missing-required case — never reached observe before.
+        from athenaeum.llm_schemas import observe_parse_failure
+
+        observe_parse_failure(
+            contract="claim_kind",
+            call_site="claim_kind.classify_claim_kind",
+            detail="no-json-object",
+        )
         return ""
     # Observe-only schema validation (athenaeum#570, M17 phase 1): log any delta from the
     # accepted ``{"claim_kind": <CLAIM_KINDS>}`` shape without changing the

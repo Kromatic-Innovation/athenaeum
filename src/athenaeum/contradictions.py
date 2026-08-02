@@ -319,6 +319,16 @@ def _parse_response(
             "contradictions: detector returned no JSON object: %s",
             text[:200],
         )
+        # Count the parse failure (athenaeum#724): this early return sits ABOVE
+        # observe(), so a total parse failure — the most severe mismatch class —
+        # was previously invisible. Record it before returning.
+        from athenaeum.llm_schemas import observe_parse_failure
+
+        observe_parse_failure(
+            contract="contradictions",
+            call_site="contradictions._parse_response",
+            detail="detector-returned-no-json",
+        )
         return ContradictionResult(
             detected=False,
             rationale="detector-returned-no-json",

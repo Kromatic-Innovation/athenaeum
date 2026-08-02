@@ -81,8 +81,12 @@ explicitly, lazily imports an ``observe_*`` wrapper.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from collections.abc import Mapping
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, RootModel, ValidationError
@@ -92,6 +96,50 @@ log = logging.getLogger(__name__)
 #: Greppable marker prefixing every mismatch WARNING (one per response with a
 #: validation error and/or an unexpected key). Aggregate by ``contract=``.
 SCHEMA_MISMATCH_MARKER = "llm-schema-mismatch"
+
+#: Durable, append-only observation ledger (issue athenaeum#724). Under the cache
+#: dir — same discipline as ``push_metrics``' ``_push_records.jsonl`` — because
+#: the ``query_topics`` contract runs inside the MCP server, whose Python logging
+#: is retained NOWHERE (athenaeum#724 defect 3): a log-only marker there is
+#: emitted and discarded, so the mismatch rate is unmeasurable. A ledger the
+#: aggregation reads fixes that. Each line records ONE observation — outcome
+#: ``ok``/``mismatch``, the mismatch class(es), and the contract/call-site — so
+#: every reported rate has a real denominator (athenaeum#724 defect 2), and a
+#: total parse failure (which returns BEFORE the payload ever reaches
+#: :func:`observe`, athenaeum#724 defect 1) is counted via
+#: :func:`observe_parse_failure`.
+OBSERVATIONS_FILENAME = "_llm_schema_observations.jsonl"
+
+#: Schema version stamped on every observation record.
+OBSERVATION_SCHEMA_VERSION = 1
+
+#: The four mismatch classes athenaeum#724 requires so athenaeum#608's
+#: reject-vs-degrade question can be answered per class without re-reading raw
+#: logs. ``extra-keys`` (validated OK, unexpected keys present) is a very
+#: different signal from ``missing-required``; ``parse-fail`` (no JSON at all) is
+#: the most extreme missing-required case and the one the pre-athenaeum#724
+#: instrument could not see; ``wrong-type`` is a present-but-mistyped field.
+MISMATCH_EXTRA_KEYS = "extra-keys"
+MISMATCH_MISSING_REQUIRED = "missing-required"
+MISMATCH_PARSE_FAIL = "parse-fail"
+MISMATCH_WRONG_TYPE = "wrong-type"
+MISMATCH_OTHER = "other"
+
+#: Every contract :func:`observe` instruments, so :func:`aggregate_observations`
+#: can report a contract with ZERO observations as an EXPLICIT *no-data* row
+#: rather than a silent absence (athenaeum#724). ``claim_kind`` in particular has
+#: no production caller today (``stamp_claim_kind`` is unwired — tracked
+#: separately for the wire-vs-remove decision), so it is a structural no-data
+#: row until that is resolved; surfacing it explicitly is what keeps a permanent
+#: no-data contract from reading as "0 mismatches" (a false clean signal).
+INSTRUMENTED_CONTRACTS: tuple[str, ...] = (
+    "query_topics",
+    "claim_kind",
+    "contradictions",
+    "resolutions",
+    "tiers.tier2",
+    "tiers.tier3-merge",
+)
 
 #: Stated-local copies of the two vocabularies these models range over. Kept in
 #: sync with their live sources (``models.CLAIM_KINDS`` /
@@ -289,52 +337,270 @@ def _extra_keys(obj: Any) -> list[str]:
     return keys
 
 
+def _classify_validation_errors(raw_errors: list[Mapping[str, Any]]) -> list[str]:
+    """Map pydantic error dicts to athenaeum#724 mismatch classes, order-stable.
+
+    ``missing`` → ``missing-required``; any ``*_type`` / ``*_parsing`` /
+    ``model_type`` error, plus an out-of-vocabulary ``literal_error`` / ``enum``
+    (a value that does not match the field's expected type/domain) →
+    ``wrong-type``; ``extra_forbidden`` → ``extra-keys`` (not expected under
+    ``extra="allow"``, mapped for completeness); anything else → ``other``.
+    """
+    classes: list[str] = []
+    seen: set[str] = set()
+
+    def _add(cls: str) -> None:
+        if cls not in seen:
+            seen.add(cls)
+            classes.append(cls)
+
+    for err in raw_errors:
+        etype = str(err.get("type", ""))
+        if etype == "missing":
+            _add(MISMATCH_MISSING_REQUIRED)
+        elif etype == "extra_forbidden":
+            _add(MISMATCH_EXTRA_KEYS)
+        elif (
+            etype.endswith("_type")
+            or etype.endswith("_parsing")
+            or "type" in etype
+            or etype in ("literal_error", "enum")
+        ):
+            _add(MISMATCH_WRONG_TYPE)
+        else:
+            _add(MISMATCH_OTHER)
+    return classes
+
+
+def observations_path(cache_dir: Path | None = None) -> Path:
+    """Resolve the observation ledger path under the (resolved) cache dir."""
+    from athenaeum.config import resolve_cache_dir
+
+    return resolve_cache_dir(cache_dir) / OBSERVATIONS_FILENAME
+
+
+def record_observation(
+    *,
+    contract: str,
+    call_site: str,
+    outcome: str,
+    classes: list[str] | None = None,
+    errors: list[str] | None = None,
+    extra_keys: list[str] | None = None,
+    cache_dir: Path | None = None,
+) -> None:
+    """Append ONE observation record to the durable ledger. Best-effort.
+
+    ``outcome`` is ``"ok"`` (a clean parse — the denominator athenaeum#724 defect
+    2 was missing) or ``"mismatch"`` (carrying its ``classes``). Never raises: a
+    telemetry write must not degrade the pipeline. Enabled by default; set
+    ``ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=0`` to disable.
+    """
+    try:
+        if os.environ.get("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1").strip().lower() in (
+            "0",
+            "false",
+            "no",
+        ):
+            return
+        record = {
+            "v": OBSERVATION_SCHEMA_VERSION,
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "contract": contract,
+            "call_site": call_site,
+            "outcome": outcome,
+            "classes": classes or [],
+            # Redaction: only the schema-shape delta is recorded — field paths,
+            # error messages, and unexpected KEY names — never any field VALUE,
+            # so no claim content or personal data reaches the ledger.
+            "errors": errors or [],
+            "extra_keys": extra_keys or [],
+        }
+        path = observations_path(cache_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:  # pragma: no cover - defensive: telemetry must never throw
+        log.debug(
+            "llm-schema: could not record observation for contract=%s call_site=%s",
+            contract,
+            call_site,
+            exc_info=True,
+        )
+
+
+def read_observations(cache_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Read every observation record from the ledger (``[]`` when absent)."""
+    path = observations_path(cache_dir)
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            rows.append(obj)
+    return rows
+
+
+def aggregate_observations(cache_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Per-contract observation summary over the ledger (athenaeum#724 AC7).
+
+    Returns one entry per :data:`INSTRUMENTED_CONTRACTS` (so a contract with no
+    records is an EXPLICIT *no-data* row, not a silent absence that reads as a
+    clean 0). Each entry carries ``observations`` (the denominator),
+    ``mismatches``, a ``by_class`` count, and ``mismatch_rate`` — or
+    ``no_data=True`` and ``mismatch_rate=None`` when ``observations == 0``, so
+    "0 over 0" is never confused with "0 over 400".
+    """
+    rows = read_observations(cache_dir)
+    summary: dict[str, dict[str, Any]] = {
+        contract: {
+            "observations": 0,
+            "mismatches": 0,
+            "by_class": {},
+            "mismatch_rate": None,
+            "no_data": True,
+        }
+        for contract in INSTRUMENTED_CONTRACTS
+    }
+    for row in rows:
+        contract = str(row.get("contract", ""))
+        entry = summary.setdefault(
+            contract,
+            {
+                "observations": 0,
+                "mismatches": 0,
+                "by_class": {},
+                "mismatch_rate": None,
+                "no_data": True,
+            },
+        )
+        entry["observations"] += 1
+        if row.get("outcome") == "mismatch":
+            entry["mismatches"] += 1
+            for cls in row.get("classes") or []:
+                entry["by_class"][cls] = entry["by_class"].get(cls, 0) + 1
+    for entry in summary.values():
+        obs = entry["observations"]
+        entry["no_data"] = obs == 0
+        entry["mismatch_rate"] = None if obs == 0 else entry["mismatches"] / obs
+    return summary
+
+
 def observe(
     model: type[BaseModel],
     payload: Any,
     *,
     contract: str,
     call_site: str,
+    cache_dir: Path | None = None,
 ) -> None:
     """Validate ``payload`` against ``model`` for OBSERVATION ONLY.
 
-    Emits one structured WARNING (the :data:`SCHEMA_MISMATCH_MARKER` line) when
-    validation fails and/or the payload carries unexpected keys, then returns
-    ``None``. This function **never raises and never alters behavior** — the
-    entire body is wrapped so that even a bug in validation cannot touch the
-    pipeline. Callers invoke it *after* their own parse and ignore its result.
+    Records ONE observation to the durable ledger on EVERY call (the denominator
+    athenaeum#724 needs), emits the structured WARNING marker on a mismatch
+    (validation error and/or unexpected key), then returns ``None``. This
+    function **never raises and never alters behavior** — the entire body is
+    wrapped so even a bug in validation cannot touch the pipeline. Callers invoke
+    it *after* their own parse and ignore its result. A TOTAL parse failure never
+    reaches here (the caller returns first); count that via
+    :func:`observe_parse_failure`.
 
     Args:
         model: the contract's response model.
         payload: the already-parsed payload (dict, list, …) to validate.
         contract: the contract name (aggregate mismatch counts by this).
         call_site: a stable label identifying the parse site.
+        cache_dir: override the ledger location (tests / non-default deploys).
     """
     try:
         errors: list[str] = []
+        classes: list[str] = []
         extra_keys: list[str] = []
         try:
             validated = model.model_validate(payload)
         except ValidationError as exc:
-            errors = [_fmt_error(e) for e in exc.errors()]
+            raw = exc.errors()
+            errors = [_fmt_error(e) for e in raw]
+            classes = _classify_validation_errors(list(raw))
         else:
             extra_keys = _extra_keys(validated)
-        if errors or extra_keys:
+            if extra_keys:
+                classes = [MISMATCH_EXTRA_KEYS]
+        is_mismatch = bool(errors or extra_keys)
+        if is_mismatch:
             log.warning(
-                "%s contract=%s call_site=%s error_class=%s errors=%s extra_keys=%s",
+                "%s contract=%s call_site=%s error_class=%s errors=%s extra_keys=%s classes=%s",
                 SCHEMA_MISMATCH_MARKER,
                 contract,
                 call_site,
                 "ValidationError" if errors else "ExtraKeys",
                 errors or "-",
                 extra_keys or "-",
+                ",".join(classes) or "-",
             )
+        record_observation(
+            contract=contract,
+            call_site=call_site,
+            outcome="mismatch" if is_mismatch else "ok",
+            classes=classes,
+            errors=errors,
+            extra_keys=extra_keys,
+            cache_dir=cache_dir,
+        )
     except Exception:  # pragma: no cover - defensive: observation must never throw
         # A failure to *observe* must not degrade the pipeline in any way — the
         # whole point of phase 1 is behavior neutrality. Record at DEBUG so a
         # bug here is diagnosable without adding a failure mode.
         log.debug(
             "llm-schema: observation failed for contract=%s call_site=%s",
+            contract,
+            call_site,
+            exc_info=True,
+        )
+
+
+def observe_parse_failure(
+    *,
+    contract: str,
+    call_site: str,
+    detail: str | None = None,
+    cache_dir: Path | None = None,
+) -> None:
+    """Count a TOTAL parse failure as a ``parse-fail`` mismatch (athenaeum#724 defect 1).
+
+    Called from a parse guard's early-return path — where the response never
+    yielded a JSON object at all, so it never reaches :func:`observe`. A total
+    parse failure is the most extreme missing-required case (athenaeum#608), and
+    exactly the class the pre-athenaeum#724 instrument could not see. Emits the
+    same WARNING marker and records a mismatch to the ledger. Never raises.
+    """
+    try:
+        log.warning(
+            "%s contract=%s call_site=%s error_class=ParseFail errors=%s extra_keys=- classes=%s",
+            SCHEMA_MISMATCH_MARKER,
+            contract,
+            call_site,
+            [detail] if detail else "-",
+            MISMATCH_PARSE_FAIL,
+        )
+        record_observation(
+            contract=contract,
+            call_site=call_site,
+            outcome="mismatch",
+            classes=[MISMATCH_PARSE_FAIL],
+            errors=[detail] if detail else [],
+            cache_dir=cache_dir,
+        )
+    except Exception:  # pragma: no cover - defensive: observation must never throw
+        log.debug(
+            "llm-schema: parse-failure observation failed for contract=%s call_site=%s",
             contract,
             call_site,
             exc_info=True,
