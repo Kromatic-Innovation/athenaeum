@@ -384,6 +384,14 @@ def _recall_via_backend(
     # page's title, tags, snippet, OR body. Rendered blocks are collected
     # first so the "Found N" header counts only the authorized hits.
     blocks: list[str] = []
+    # Issue #711: parallel accumulator of exactly the hits that make it into
+    # `blocks` — i.e. what this call ACTUALLY pushes into the session, post
+    # every filter below (Layer C authorization, the `recallable` policy, and
+    # unreadable-file drops). This is the single point recall assembles a
+    # push payload, so it is the single right place to instrument (see
+    # `athenaeum.push_metrics` module docstring). Kept separate from `blocks`
+    # itself so instrumentation can never influence what is rendered.
+    _pushed_hits: list[tuple[str, dict[str, object], str]] = []
     for filename, name, score in hits:
         page_path, display_prefix = _resolve_hit_path(
             filename,
@@ -445,6 +453,7 @@ def _recall_via_backend(
             f"{meta_block}\n"
             f"{snip}\n"
         )
+        _pushed_hits.append((filename, fm, snip))
 
     if not blocks:
         return f"No wiki pages matched query: {query!r}"
@@ -452,6 +461,28 @@ def _recall_via_backend(
     parts: list[str] = [f"Found {len(blocks)} matching pages:\n"]
     for rank, block in enumerate(blocks, 1):
         parts.append(f"### {rank}. {block}")
+
+    # Issue #711: record the push AFTER blocks are finalized (never before —
+    # instrumentation must observe exactly what was pushed, never influence
+    # it) and wrapped so any failure here can never surface as a recall
+    # failure. Best-effort no-op when instrumentation is disabled (see
+    # `config.resolve_push_metrics_enabled`) or no session id is available.
+    try:
+        import os
+
+        from athenaeum import push_metrics
+
+        session_id = os.environ.get("CLAUDE_SESSION_ID") or ""
+        if session_id:
+            record = push_metrics.build_push_record(
+                session_id=session_id,
+                query=query,
+                backend=backend_name,
+                hits=_pushed_hits,
+            )
+            push_metrics.record_push(record, cache_dir=cache_dir, config=config)
+    except Exception:  # recall must never fail over telemetry
+        log.debug("push-metrics: push-record instrumentation failed", exc_info=True)
 
     return "\n".join(parts)
 
