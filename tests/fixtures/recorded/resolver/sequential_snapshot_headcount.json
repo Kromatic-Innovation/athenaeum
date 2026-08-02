@@ -1,0 +1,20 @@
+{
+  "case_id": "sequential_snapshot_headcount",
+  "content_blocks": [
+    {
+      "text": "{\"recommended_winner\": \"neither\", \"action\": \"not_a_conflict\", \"rationale\": \"Both sides are FACTs \u2014 explicitly dated snapshots (2026-01 vs 2026-06) of an evolving headcount \u2014 so they are sequential snapshots, not contradictory claims.\", \"confidence\": 0.95, \"source_precedence_used\": [\"a:unsourced > b:unsourced\"]}",
+      "type": "text"
+    }
+  ],
+  "layer": "resolver",
+  "model": "claude-opus-5",
+  "prompt_hash": "sha256:f88d14a750535618717ccca1e41f7f2db7d2d5480faac66a2f8ac4b3de0cf043",
+  "recorded_at": "2026-08-02T18:05:51.573285+00:00",
+  "response_text": "{\"recommended_winner\": \"neither\", \"action\": \"not_a_conflict\", \"rationale\": \"Both sides are FACTs \u2014 explicitly dated snapshots (2026-01 vs 2026-06) of an evolving headcount \u2014 so they are sequential snapshots, not contradictory claims.\", \"confidence\": 0.95, \"source_precedence_used\": [\"a:unsourced > b:unsourced\"]}",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 4390,
+    "input_tokens": 308,
+    "output_tokens": 133
+  }
+}

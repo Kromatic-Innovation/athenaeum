@@ -69,6 +69,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Recorded eval fixtures seeded for all five replay layers (athenaeum#610).** The
+  replay layer was real but had nothing to replay: `tests/fixtures/recorded/`
+  was empty, so three of four replay tests collected zero items and passed
+  trivially (audit finding H13). `evals.yml` was dispatched with `record=true`
+  against a live key (run `30760264305`), and its 34 fixtures are now committed
+  across `classify` (6), `detector` (10), `merge` (4), `recall` (6) and
+  `resolver` (8). Every fixture carries a non-empty `response_text`, including
+  the eight `resolver` cases that recorded empty before athenaeum#684 fixed
+  `RecordingClient`'s content-block read. `tests/fixtures/recorded/seeded-layers.yml`
+  records the seeding date and workflow run per layer, so a later loss of any
+  layer's fixtures fails loudly instead of passing as an empty directory
+  (athenaeum#551's guard is now live). The replay suite runs 27 real assertions where
+  it previously ran none, at zero network cost. Two golden-set cases whose
+  stored expectation disagrees with the model are marked `xfail(strict=True)`
+  and adjudicated in athenaeum#737 — neither the golden nor the model's answer is
+  rewritten here, because silently editing an expectation to match observed
+  output destroys the signal the layer exists to produce.
+
 - **`athenaeum spend --json` documented as a stable consumer contract; unknown
   is now distinct from zero (athenaeum#694).** `spend --json` is the surface
   `/good-morning` reads, but its shape lived only in code. It is now documented

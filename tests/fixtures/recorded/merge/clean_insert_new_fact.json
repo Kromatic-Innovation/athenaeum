@@ -1,0 +1,20 @@
+{
+  "case_id": "clean_insert_new_fact",
+  "content_blocks": [
+    {
+      "text": "{\"ops\": [{\"op\": \"insert_after\", \"anchor\": \"Meridian's standard onboarding for a new retainer client takes two weeks.[^1]\", \"text\": \" Onboarding now also includes a mandatory kickoff call with the client's finance lead in week one, added after the Atlas engagement onboarding review.[^2]\"}, {\"op\": \"append_section\", \"text\": \"\\n[^2]: sessions/2026-03-02.md\\n\"}]}",
+      "type": "text"
+    }
+  ],
+  "layer": "merge",
+  "model": "claude-sonnet-5",
+  "prompt_hash": "sha256:bd23fc2eb65f2edf1d92d1fc6402162f5d974e6a9f75af7885e5673770b416de",
+  "recorded_at": "2026-08-02T18:05:20.312178+00:00",
+  "response_text": "{\"ops\": [{\"op\": \"insert_after\", \"anchor\": \"Meridian's standard onboarding for a new retainer client takes two weeks.[^1]\", \"text\": \" Onboarding now also includes a mandatory kickoff call with the client's finance lead in week one, added after the Atlas engagement onboarding review.[^2]\"}, {\"op\": \"append_section\", \"text\": \"\\n[^2]: sessions/2026-03-02.md\\n\"}]}",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 1489,
+    "output_tokens": 150
+  }
+}

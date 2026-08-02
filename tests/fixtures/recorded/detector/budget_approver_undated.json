@@ -1,0 +1,20 @@
+{
+  "case_id": "budget_approver_undated",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"scope-budget_approver_undated/reference_budget_priya.md\", \"scope-budget_approver_undated/reference_budget_amir.md\"],\n  \"conflicting_passages\": [\"Discretionary spend over 500 GBP requires Priya's sign-off.\", \"Discretionary spend over 500 GBP requires Amir's sign-off.\"],\n  \"rationale\": \"The two snippets state incompatible facts about who must approve discretionary spend over 500 GBP\u2014one names Priya and the other names Amir as the required approver for the same threshold.\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "detector",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:791778e217da6a35690abfb565f6510756631bc201b136c6425fa5a0b051b790",
+  "recorded_at": "2026-08-02T18:05:16.612558+00:00",
+  "response_text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"scope-budget_approver_undated/reference_budget_priya.md\", \"scope-budget_approver_undated/reference_budget_amir.md\"],\n  \"conflicting_passages\": [\"Discretionary spend over 500 GBP requires Priya's sign-off.\", \"Discretionary spend over 500 GBP requires Amir's sign-off.\"],\n  \"rationale\": \"The two snippets state incompatible facts about who must approve discretionary spend over 500 GBP\u2014one names Priya and the other names Amir as the required approver for the same threshold.\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 778,
+    "output_tokens": 180
+  }
+}

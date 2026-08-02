@@ -1,0 +1,23 @@
+{
+  "case_id": "undated_budget_approver",
+  "content_blocks": [
+    {
+      "type": "thinking"
+    },
+    {
+      "text": "{\n  \"recommended_winner\": \"neither\",\n  \"action\": \"retain_both_with_context\",\n  \"rationale\": \"FACT/identity conflict over a single attribute (the discretionary-spend approver) with both sides undated and unsourced, so precedence cannot decide \u2014 emit a disambiguation question rather than a silent winner.\",\n  \"confidence\": 0.86,\n  \"source_precedence_used\": [\"a:unsourced > b:unsourced\"],\n  \"disambiguation_options\": [\"Priya\", \"Amir\"]\n}",
+      "type": "text"
+    }
+  ],
+  "layer": "resolver",
+  "model": "claude-opus-5",
+  "prompt_hash": "sha256:19f69b6751b8fffa38aa021af2217c3e1a282fd01bc6192f03c969f7eccdcfd5",
+  "recorded_at": "2026-08-02T18:05:49.432949+00:00",
+  "response_text": "{\n  \"recommended_winner\": \"neither\",\n  \"action\": \"retain_both_with_context\",\n  \"rationale\": \"FACT/identity conflict over a single attribute (the discretionary-spend approver) with both sides undated and unsourced, so precedence cannot decide \u2014 emit a disambiguation question rather than a silent winner.\",\n  \"confidence\": 0.86,\n  \"source_precedence_used\": [\"a:unsourced > b:unsourced\"],\n  \"disambiguation_options\": [\"Priya\", \"Amir\"]\n}",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 4390,
+    "input_tokens": 319,
+    "output_tokens": 209
+  }
+}

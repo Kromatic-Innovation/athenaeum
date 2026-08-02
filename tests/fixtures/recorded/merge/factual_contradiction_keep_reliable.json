@@ -1,0 +1,20 @@
+{
+  "case_id": "factual_contradiction_keep_reliable",
+  "content_blocks": [
+    {
+      "text": "{\"ops\": [{\"op\": \"replace\", \"anchor\": \"Meridian's office is at 14 Kingsway, WeWork floor 3.[^1]\", \"text\": \"Meridian's office is at 220 Regent Street, suite 5B, as of 2026-04.[^1][^2] The previous Kingsway address is no longer current.[^2]\"}, {\"op\": \"replace\", \"anchor\": \"[^1]: sessions/2026-01-10.md\", \"text\": \"[^1]: sessions/2026-01-10.md\\n[^2]: sessions/2026-05-02.md\"}]}",
+      "type": "text"
+    }
+  ],
+  "layer": "merge",
+  "model": "claude-sonnet-5",
+  "prompt_hash": "sha256:1c6193a2f37914948349f0a032910be53ceec2d2ccfcf2d4ddae41672d4d86eb",
+  "recorded_at": "2026-08-02T18:05:26.043319+00:00",
+  "response_text": "{\"ops\": [{\"op\": \"replace\", \"anchor\": \"Meridian's office is at 14 Kingsway, WeWork floor 3.[^1]\", \"text\": \"Meridian's office is at 220 Regent Street, suite 5B, as of 2026-04.[^1][^2] The previous Kingsway address is no longer current.[^2]\"}, {\"op\": \"replace\", \"anchor\": \"[^1]: sessions/2026-01-10.md\", \"text\": \"[^1]: sessions/2026-01-10.md\\n[^2]: sessions/2026-05-02.md\"}]}",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 1507,
+    "output_tokens": 193
+  }
+}

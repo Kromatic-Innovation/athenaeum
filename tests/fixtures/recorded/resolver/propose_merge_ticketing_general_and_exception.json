@@ -1,0 +1,23 @@
+{
+  "case_id": "propose_merge_ticketing_general_and_exception",
+  "content_blocks": [
+    {
+      "type": "thinking"
+    },
+    {
+      "text": "{\n  \"action\": \"propose_merge\",\n  \"merge_target_name\": \"engineering-work-tracking\",\n  \"rationale\": \"PREFERENCE pair: a general rule (Linear for engineering work) plus an explicitly narrower support-intake exception (Zendesk) that compose cleanly and read better as one canonical memory.\",\n  \"draft_merged_body\": \"## Where work items are tracked\\n\\n- **General rule:** The team tracks all engineering work in Linear.\\n- **Exception (support intake):** Support-desk bug reports are logged in Zendesk, not Linear.\\n\\nIf a support-desk report is escalated into engineering work, it should be carried into Linear per the general rule.\",\n  \"confidence\": 0.9,\n  \"source_precedence_used\": [\"a:unsourced > b:unsourced\"]\n}",
+      "type": "text"
+    }
+  ],
+  "layer": "resolver",
+  "model": "claude-opus-5",
+  "prompt_hash": "sha256:4be7a6f577892928b43e804f289f9f89507172e4cb0cd682721b9d0e8009ffe8",
+  "recorded_at": "2026-08-02T18:06:06.379722+00:00",
+  "response_text": "{\n  \"action\": \"propose_merge\",\n  \"merge_target_name\": \"engineering-work-tracking\",\n  \"rationale\": \"PREFERENCE pair: a general rule (Linear for engineering work) plus an explicitly narrower support-intake exception (Zendesk) that compose cleanly and read better as one canonical memory.\",\n  \"draft_merged_body\": \"## Where work items are tracked\\n\\n- **General rule:** The team tracks all engineering work in Linear.\\n- **Exception (support intake):** Support-desk bug reports are logged in Zendesk, not Linear.\\n\\nIf a support-desk report is escalated into engineering work, it should be carried into Linear per the general rule.\",\n  \"confidence\": 0.9,\n  \"source_precedence_used\": [\"a:unsourced > b:unsourced\"]\n}",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 4390,
+    "input_tokens": 345,
+    "output_tokens": 296
+  }
+}

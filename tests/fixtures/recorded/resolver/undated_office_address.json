@@ -1,0 +1,23 @@
+{
+  "case_id": "undated_office_address",
+  "content_blocks": [
+    {
+      "type": "thinking"
+    },
+    {
+      "text": "{\"recommended_winner\":\"neither\",\"action\":\"retain_both_with_context\",\"rationale\":\"FACT/identity conflict: two undated, unsourced, mutually exclusive claims about the same attribute (office address) that precedence cannot resolve, so emit a disambiguation question instead of guessing a winner.\",\"confidence\":0.9,\"source_precedence_used\":[\"a:unsourced == b:unsourced\"],\"disambiguation_options\":[\"14 Kingsway, WeWork floor 3\",\"220 Regent Street, suite 5B\"]}",
+      "type": "text"
+    }
+  ],
+  "layer": "resolver",
+  "model": "claude-opus-5",
+  "prompt_hash": "sha256:d1ce8df52e2b8635f2687d6da7f5396c28a9633bf4aae14e62c9f80f94863def",
+  "recorded_at": "2026-08-02T18:05:46.297377+00:00",
+  "response_text": "{\"recommended_winner\":\"neither\",\"action\":\"retain_both_with_context\",\"rationale\":\"FACT/identity conflict: two undated, unsourced, mutually exclusive claims about the same attribute (office address) that precedence cannot resolve, so emit a disambiguation question instead of guessing a winner.\",\"confidence\":0.9,\"source_precedence_used\":[\"a:unsourced == b:unsourced\"],\"disambiguation_options\":[\"14 Kingsway, WeWork floor 3\",\"220 Regent Street, suite 5B\"]}",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 4390,
+    "input_tokens": 305,
+    "output_tokens": 208
+  }
+}

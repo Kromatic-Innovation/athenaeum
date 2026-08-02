@@ -1,0 +1,20 @@
+{
+  "case_id": "standup_time",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"standup_time/feedback_standup_9am.md\", \"standup_time/feedback_standup_930.md\"],\n  \"conflicting_passages\": [\"Meridian's daily standup is at 9:00 AM sharp every weekday.\", \"The standup starts at 9:30 \u2014 we moved it from 9:00 last week.\"],\n  \"rationale\": \"Member 1 (updated 2026-03-01) states the standup is at 9:00 AM, while Member 2 (updated 2026-03-05, four days later) states it was moved to 9:30 AM. The overlapping validity windows and explicit acknowledgment of a change suggest these represent contradictory facts about the current standup time.\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "detector",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:517268227bc2ff518d5f6590db91a14d28e20a674df899067dc992a982118b53",
+  "recorded_at": "2026-08-02T18:05:05.955036+00:00",
+  "response_text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"standup_time/feedback_standup_9am.md\", \"standup_time/feedback_standup_930.md\"],\n  \"conflicting_passages\": [\"Meridian's daily standup is at 9:00 AM sharp every weekday.\", \"The standup starts at 9:30 \u2014 we moved it from 9:00 last week.\"],\n  \"rationale\": \"Member 1 (updated 2026-03-01) states the standup is at 9:00 AM, while Member 2 (updated 2026-03-05, four days later) states it was moved to 9:30 AM. The overlapping validity windows and explicit acknowledgment of a change suggest these represent contradictory facts about the current standup time.\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 812,
+    "output_tokens": 212
+  }
+}

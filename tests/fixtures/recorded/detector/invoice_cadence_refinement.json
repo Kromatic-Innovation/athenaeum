@@ -1,0 +1,20 @@
+{
+  "case_id": "invoice_cadence_refinement",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"detected\": false,\n  \"conflict_type\": null,\n  \"members_involved\": [],\n  \"conflicting_passages\": [],\n  \"rationale\": \"Member 2 explicitly narrows and refines Member 1 by stating Acme invoices are a documented exception to the general rule, creating a hierarchical relationship (general rule + specific exception) rather than a contradiction.\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "detector",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:0fe09c931172321f6f410b87f07d85236a3a5f533043cd57b7cc4188215a5f4d",
+  "recorded_at": "2026-08-02T18:05:07.326550+00:00",
+  "response_text": "```json\n{\n  \"detected\": false,\n  \"conflict_type\": null,\n  \"members_involved\": [],\n  \"conflicting_passages\": [],\n  \"rationale\": \"Member 2 explicitly narrows and refines Member 1 by stating Acme invoices are a documented exception to the general rule, creating a hierarchical relationship (general rule + specific exception) rather than a contradiction.\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 839,
+    "output_tokens": 98
+  }
+}
