@@ -378,6 +378,72 @@ class TestPhoneDetectorFalsePositives:
 
 
 # ---------------------------------------------------------------------------
+# Phone detector — a leading paren must NOT defeat the exclusions (issue #683)
+# ---------------------------------------------------------------------------
+#
+# #500's date/id exclusions were anchored (`^\d`) / `isdigit()`-gated, so a
+# single leading '(' — the dominant shape in the live corpus, where
+# parenthesized dates in prose and parenthesized page-uid prefixes in
+# `_index.md` produced 911 lint-pii findings across 107 files — slipped every
+# excluded shape back through as a "phone", and `migrate-pii --all` would have
+# rewritten 69 pages on those hits. `_PHONE_RE` folds an optional leading
+# '[+(]' into its capture group, so the fix normalizes that delimiter before
+# the exclusion checks; find_inline_phones and the egress scan_outbound_text
+# share one definition (_is_excluded_phone_shape).
+
+
+class TestPhoneDetectorParenthesized:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "2026-07-29",  # correct today
+            "(2026-07-29)",  # WRONG before #683
+            "52785095",  # correct today
+            "(52785095)",  # WRONG before #683
+            "2019-2020",  # correct today
+            "(2019-2020)",  # WRONG before #683
+        ],
+    )
+    def test_reproduction_cases_report_no_phone(self, text: str) -> None:
+        # The six find_inline_phones cases from #683's Reproduction section.
+        assert find_inline_phones(text) == [], text
+
+    #: Excluded shapes taken VERBATIM from the live corpus (#683's impact table
+    #: and #500's body) rather than retyped in canonical form — dates, year
+    #: ranges, and bare uid/analytics id fragments. Each must stay a non-match
+    #: regardless of the punctuation wrapped around it.
+    EXCLUDED_SAMPLES = (
+        "2026-07-29",  # #683: parenthesized date in prose
+        "2026-06-12",  # #683: parenthesized date in prose
+        "2015-12-03",  # #500: CRM-timeline date
+        "2026-04-16",  # #500: frontmatter `updated:` date
+        "2019-2020",  # #683 / #500: year range
+        "52785095",  # #683: `_index.md` page uid prefix
+        "69541219",  # #683: `_index.md` page uid prefix
+        "00075741",  # #500: page uid prefix
+        "387473359",  # #500: GA4 property id
+    )
+
+    @pytest.mark.parametrize("sample", EXCLUDED_SAMPLES)
+    def test_exclusions_are_punctuation_invariant(self, sample: str) -> None:
+        # An exclusion must not be defeated by surrounding punctuation — the
+        # invariant behind BOTH #500 and #683. This kills the class, not just
+        # the six literals above (Quine retro on #683): it would have failed on
+        # the day #500 merged.
+        base = find_inline_phones(sample)
+        assert base == [], sample
+        for wrapped in (f"({sample})", f"[{sample}]", f"{sample},", f"({sample}"):
+            assert find_inline_phones(wrapped) == base, wrapped
+
+    def test_genuine_phones_survive_surrounding_punctuation(self) -> None:
+        # The normalization is for the exclusion CHECK only — a parenthesized
+        # real phone is still matched and returned verbatim.
+        assert find_inline_phones("call (555) 010-0100 today") == ["(555) 010-0100"]
+        assert find_inline_phones("(+1-555-0100)") == ["+1-555-0100"]
+        assert find_inline_phones("num 917-231-6130.") == ["917-231-6130"]
+
+
+# ---------------------------------------------------------------------------
 # Observation log — append, read, supersession, deterministic fold
 # ---------------------------------------------------------------------------
 
