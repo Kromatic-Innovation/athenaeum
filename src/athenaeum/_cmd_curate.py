@@ -583,6 +583,7 @@ def _cmd_auto_memory_prune_code_entities(args: argparse.Namespace) -> int:
     from athenaeum.filename_entity_prune import (
         apply_filename_entity_prune,
         build_filename_entity_report,
+        kill_rule_counts,
     )
 
     knowledge_root = args.path.expanduser().resolve()
@@ -601,9 +602,15 @@ def _cmd_auto_memory_prune_code_entities(args: argparse.Namespace) -> int:
     print(f"  retained: {len(report.retained)}")
 
     if report.kill:
+        # Per-rule split so an operator can audit the kill-list by class rather
+        # than by eyeball (#721). A bare path separator no longer kills, so this
+        # is expected to be all-``extension``; any other rule flags a regression.
+        counts = kill_rule_counts(report)
+        split = ", ".join(f"{rule}={n}" for rule, n in sorted(counts.items()))
+        print(f"  by rule:  {split}")
         print("\n  KILL-LIST:")
         for cand in report.kill:
-            print(f"    {cand.path.name}: {cand.reason}")
+            print(f"    [{cand.rule}] {cand.path.name}: {cand.reason}")
 
     if not args.apply:
         for err in report.errors:

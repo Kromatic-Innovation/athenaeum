@@ -439,32 +439,67 @@ def resolve_code_artifact_allowlist(config: dict[str, Any] | None = None) -> set
     return {n.strip().lower() for n in _config_str_list(config, "code_artifact_allowlist")}
 
 
-def is_code_artifact_name(name: str, config: dict[str, Any] | None = None) -> bool:
-    """True when *name* is a filename/path-shaped code artifact (issue #680).
+def classify_code_artifact_name(
+    name: str, config: dict[str, Any] | None = None
+) -> str | None:
+    """The rule by which *name* is a code artifact, or ``None`` if it is not (#721).
 
-    File-shaped means: it contains a path separator (``src/athenaeum/
-    librarian.py``), OR it is a single whitespace-free token ending in a known
-    source/config extension (``skill.md``, ``project-registry.yaml``,
-    ``AGENTS.md``). The whitespace guard is load-bearing: a genuine multi-word
-    entity ("The Registry", "Node JS") is never file-shaped and always survives,
-    and any name in the operator allowlist survives regardless of shape. Gate is
-    ON by default; ``librarian.exclude_code_artifacts: false`` disables it."""
+    Returns the matched-rule label so a caller (the #680 retire sweep's dry run,
+    #721) can print WHICH rule killed each page and audit the kill-list by class:
+
+    * ``"extension"`` — a single whitespace-free token ending in a known
+      source/config extension (``skill.md``, ``project-registry.yaml``,
+      ``AGENTS.md``, ``src/athenaeum/librarian.py``). A path with an extension
+      is still file-shaped by its extension, so a full source path is matched
+      here, not by a separate path rule.
+    * ``None`` — not a code artifact: retained.
+
+    **A bare path separator is NOT a signal (issue #721).** #680 additionally
+    treated *any* ``/``/``\\`` in a name as file-shaped. In a corpus where
+    slashes are ordinary punctuation in human and organization names, pronouns
+    (``Suzie Prince (she/her)``), npm packages (``@tanstack/react-query``),
+    skill/label names (``dijkstra/arch-review``), git branches
+    (``feature/408-…``) and slash-commands (``/good-morning``), that predicate
+    put 140 real people, companies and concepts (44% of the kill-list) on a
+    ``git rm`` kill-list. Confirmed against the real 140: the narrower slash
+    signals one might reach for (a slash-separated, space-free, uncapitalized,
+    non-``@`` token) still delete the skill/label/branch/command names above,
+    which are legitimate entities. So a slash no longer contributes at all; an
+    extension-less path-shaped name (``src/athenaeum``, ``scripts/oss-export``)
+    is **retained** — retention is the safe, reversible direction, and such a
+    page is still retired the moment it carries a real extension or an operator
+    lists it explicitly.
+
+    The whitespace guard is load-bearing: a genuine multi-word entity ("The
+    Registry", "Node JS") is never file-shaped and always survives; any name in
+    the operator allowlist survives regardless of shape. Gate is ON by default;
+    ``librarian.exclude_code_artifacts: false`` disables it.
+    """
     if not resolve_exclude_code_artifacts(config):
-        return False
+        return None
     key = name.strip()
     if not key:
-        return False
+        return None
     if key.lower() in resolve_code_artifact_allowlist(config):
-        return False
-    # Path-shaped: any path separator is a code artifact outright.
-    if "/" in key or "\\" in key:
-        return True
+        return None
     # Filename-shaped: a single token (no whitespace) ending in a code/config
     # extension. Multi-word names carry whitespace and are never file-shaped.
+    # A bare path separator is deliberately NOT a signal (#721).
     if any(ch.isspace() for ch in key):
-        return False
+        return None
     m = re.search(r"\.([A-Za-z0-9]+)$", key)
-    return bool(m and m.group(1).lower() in resolve_code_artifact_extensions(config))
+    if m and m.group(1).lower() in resolve_code_artifact_extensions(config):
+        return "extension"
+    return None
+
+
+def is_code_artifact_name(name: str, config: dict[str, Any] | None = None) -> bool:
+    """True when *name* is a filename-shaped code artifact (issue #680 / #721).
+
+    Thin boolean over :func:`classify_code_artifact_name` — see that function
+    for the rule (extension-shaped only; a bare path separator is not a signal
+    since #721)."""
+    return classify_code_artifact_name(name, config) is not None
 
 
 def partition_code_artifact_classifications(
