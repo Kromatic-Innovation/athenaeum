@@ -1304,6 +1304,151 @@ class TestMigratePiiCliRenameNameEmail:
         assert (root / "wiki" / "jane.doe-at-acme.md").is_file()
 
 
+class TestRenameSliceScopingAndRenameOnly:
+    """Issue athenaeum#745 — the rename slice must be reachable without the body migration.
+
+    Before athenaeum#745 ``--rename-name-email`` ran only under ``--all`` (silently
+    skipped under ``--glob``, never reached under ``--page``), and ``--all``
+    always ran the body-text migration in the same pass. On the live corpus
+    that made a safe rename unreachable: applying it required accepting a body
+    migration that would have redacted real prose flagged by phone-axis
+    detector false positives — the athenaeum#691 failure mode.
+    """
+
+    @staticmethod
+    def _seed(root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        # A renameable name-is-an-email page.
+        _write_name_email_page(
+            root / "wiki", "jane.doe-at-acme.md", uid="s1", email="jane.doe@acme.example"
+        )
+        # An ambiguous one (deferred, never guessed).
+        _write_name_email_page(
+            root / "wiki", "info-at-acme.md", uid="s2", email="info@acme.example"
+        )
+        # A page whose PII is in the BODY, not the name — the population the
+        # body migration would act on and --rename-only must leave alone.
+        _write_page(
+            root / "wiki",
+            "bodyonly.md",
+            "uid: s3\nname: Body Only\ntype: person\n",
+            "Reach them at body.person@acme.example any time.",
+        )
+
+    def test_rename_only_skips_the_body_migration_entirely(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = tmp_path / "knowledge"
+        self._seed(root)
+        before = (root / "wiki" / "bodyonly.md").read_text(encoding="utf-8")
+
+        rc = main(
+            ["storage", "migrate-pii", "--path", str(root), "--all", "--apply", "--rename-only"]
+        )
+
+        assert rc == 0
+        # The rename happened.
+        assert (root / "wiki" / "jane-doe.md").is_file()
+        # The body-PII page is byte-for-byte untouched — the whole point.
+        assert (root / "wiki" / "bodyonly.md").read_text(encoding="utf-8") == before
+        assert "body.person@acme.example" in before
+        out = capsys.readouterr().out
+        assert "renamed 1 name-is-an-email page" in out
+        # No body-migration summary line was emitted.
+        assert "excluded contact record(s) to create" not in out
+
+    def test_rename_only_implies_rename_name_email(self, tmp_path: Path, capsys) -> None:
+        root = tmp_path / "knowledge"
+        self._seed(root)
+
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--all", "--rename-only"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        # The rename slice ran without --rename-name-email being passed.
+        assert "would rename 1 name-is-an-email page" in out
+
+    def test_page_scopes_the_slice_to_one_page(self, tmp_path: Path, capsys) -> None:
+        root = tmp_path / "knowledge"
+        self._seed(root)
+
+        rc = main(
+            [
+                "storage", "migrate-pii", "--path", str(root),
+                "--page", str(root / "wiki" / "jane.doe-at-acme.md"),
+                "--rename-only",
+            ]
+        )
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "of 1 scanned" in out  # not the whole corpus
+
+    def test_glob_scopes_the_slice_instead_of_skipping_it(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = tmp_path / "knowledge"
+        self._seed(root)
+
+        rc = main(
+            [
+                "storage", "migrate-pii", "--path", str(root),
+                "--glob", "jane.doe-at-acme.md", "--rename-only",
+            ]
+        )
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Previously `and args.glob is None` suppressed the slice outright.
+        assert "would rename 1 name-is-an-email page" in out
+        assert "of 1 scanned" in out
+
+    def test_all_still_scans_every_entity_page(self, tmp_path: Path, capsys) -> None:
+        root = tmp_path / "knowledge"
+        self._seed(root)
+
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--all", "--rename-only"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "of 3 scanned" in out  # default target set unchanged
+
+    def test_list_deferred_enumerates_the_manual_naming_worklist(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = tmp_path / "knowledge"
+        self._seed(root)
+
+        rc = main(
+            [
+                "storage", "migrate-pii", "--path", str(root),
+                "--all", "--rename-only", "--list-deferred",
+            ]
+        )
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "deferred: manual naming required" in out
+        assert "info-at-acme.md" in out
+
+    def test_without_list_deferred_only_the_count_is_printed(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = tmp_path / "knowledge"
+        self._seed(root)
+
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--all", "--rename-only"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "ambiguous local-part" in out
+        assert "deferred: manual naming required" not in out
+        assert "info-at-acme.md" not in out
+
+
 class TestLintPiiCleanAfterRename:
     """AC: after migration + reindex, lint-pii no longer reports migrated
     pages, except the deliberately-deferred ambiguous residual."""

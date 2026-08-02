@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`storage migrate-pii --rename-only` + target-scoped renames (athenaeum#745).**
+  `--rename-name-email` (athenaeum#505's name-is-an-email slice) was reachable only
+  through `--all`, which always ran the body-text contact-data migration in the
+  same pass — so a rename could not be applied without also accepting every
+  body migration that corpus-wide pass would perform. It was silently skipped
+  under `--glob` and never ran at all under `--page`. This blocked real work:
+  athenaeum#437's residue is entity pages whose `name:` **is** a person's address, but
+  applying the rename required an `--all --apply` that would also have migrated
+  57 phone "findings", almost all detector false positives — redacting real
+  prose, the exact failure athenaeum#691 spent two restore passes repairing. Now
+  `--rename-only` runs the slice alone; the slice is scoped by whichever
+  selector is in use (`--page` / `--all` / `--glob`), with `--all` unchanged as
+  the default corpus-wide set; and `--list-deferred` enumerates the pages
+  athenaeum#505 deliberately refuses to name — the operator's manual-naming worklist,
+  previously only a count. On the single-page path the rename runs **before**
+  the body migration, since a rename moves the file and planning against the
+  pre-rename path would read a target the rename is about to invalidate.
+
 ### Fixed
 
 - **`transcript_verify` honors `CLAUDE_CONFIG_DIR` (athenaeum#723).**

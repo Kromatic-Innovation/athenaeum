@@ -56,7 +56,7 @@ writes to disk. Applying a plan (dry-run vs. ``--apply``) is the L5 CLI's job
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -650,6 +650,7 @@ def bulk_rename_name_email_pages(
     knowledge_root: Path,
     *,
     apply: bool = False,
+    pages: Iterable[Path] | None = None,
 ) -> NameEmailRenameReport:
     """Drive :func:`plan_name_email_rename` over every entity page (issue athenaeum#505).
 
@@ -660,9 +661,17 @@ def bulk_rename_name_email_pages(
     double-processed. A deferred page is likewise re-evaluated (and re-deferred)
     on every run rather than remembered in a side ledger — the frontmatter
     itself is the checkpoint.
+
+    ``pages`` scopes the driver to an explicit target set (issue athenaeum#745).
+    It defaults to every entity page, which is the corpus-wide behaviour this
+    function has always had. Passing a narrower set lets a caller rename ONE
+    page, or a ``--glob`` selection, without also running the body-text
+    migration over the whole corpus — which previously made the rename slice
+    reachable only through ``--all``, and therefore only at the price of
+    accepting every body migration ``--all`` would perform.
     """
     report = NameEmailRenameReport()
-    for page_path in iter_entity_pages(wiki_root):
+    for page_path in iter_entity_pages(wiki_root) if pages is None else pages:
         report.scanned += 1
         try:
             plan = plan_name_email_rename(page_path, config, knowledge_root)
