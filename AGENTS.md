@@ -96,7 +96,8 @@ markdown or in `athenaeum merges` JSON output.
 ## Conventions
 
 - Python 3.11+
-- Apache 2.0 license; contributor sign-off via DCO
+- Apache 2.0 license; inbound contributions are covered by Apache-2.0 §5 (no
+  DCO sign-off or CLA required)
 - Public API exposed via `athenaeum/__init__.py`; anything not in `__all__`
   is internal and subject to change without a major-version bump
 - **Tracker citations are written `athenaeum#NNN`, never bare `#NNN`** (a
