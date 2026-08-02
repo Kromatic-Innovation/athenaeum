@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **LLM schema-observation is now measurable: durable ledger, denominators,
+  parse-fail counting, class-tagged mismatches (athenaeum#724).** The M17
+  observe-only instrument (athenaeum#570) could not measure what athenaeum#608
+  needs: `observe()` sat *below* the parse guard (so total parse failures — the
+  most severe mismatch class — were structurally invisible), nothing counted
+  observations (so a `0` was indistinguishable from "nothing ran"), and the
+  `query_topics` contract runs in the MCP server whose logging is retained
+  nowhere. Now: every observation (clean or mismatched) is recorded to a
+  durable append-only ledger `~/.cache/athenaeum/_llm_schema_observations.jsonl`
+  (a real denominator); a total parse failure is counted as a `parse-fail`
+  mismatch from the parse guard (`observe_parse_failure`, wired into
+  `contradictions._parse_response` and `claim_kind.classify_claim_kind`); each
+  mismatch carries its class (`extra-keys` / `missing-required` / `parse-fail` /
+  `wrong-type`); and `aggregate_observations()` reports per-contract
+  `{observations, mismatches, by_class, mismatch_rate}`, with a zero-observation
+  contract surfaced as an explicit `no_data` row (rate `None`) — so "0 over 0"
+  is never confused with "0 over 400". The ledger records only schema *shape*
+  (field paths, error messages, unexpected key *names*) — never a field value.
+  Observation stays strictly behavior-neutral and never raises; disable with
+  `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=0`. `reasoning_tiers` T1/T2 parse
+  boundaries are untouched. The `claim_kind` contract has no production caller
+  (its stamper is unwired); it now surfaces as an explicit `no_data` row, and
+  the wire-vs-remove decision is tracked in athenaeum#742.
+
 ### Fixed
 
 - **push-metrics: read the session-id variable Claude Code actually exports

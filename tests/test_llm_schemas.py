@@ -30,6 +30,16 @@ def _mismatch_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecor
     return [r for r in caplog.records if SCHEMA_MISMATCH_MARKER in r.getMessage()]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_observation_ledger(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point the athenaeum#724 observation ledger at a per-test tmp cache dir, so
+    observe() writes never touch the real ``~/.cache/athenaeum`` during the run."""
+    monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path_factory.mktemp("obs-cache")))
+    monkeypatch.delenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Vocabulary equivalence — the two Literals are stated locally (import hygiene)
 # but MUST equal their live source sets. A drift fails CI here, not silently in
@@ -195,3 +205,145 @@ def test_tier2_schema_violation_is_behavior_neutral(
     recs = _mismatch_records(caplog)
     assert recs, "expected at least one schema-mismatch WARNING"
     assert all("contract=tiers.tier2" in r.getMessage() for r in recs)
+
+
+# ---------------------------------------------------------------------------
+# Observation ledger — denominator, class-tagged mismatches, parse-fail
+# counting, and the aggregation (issue athenaeum#724)
+# ---------------------------------------------------------------------------
+#
+# Before athenaeum#724 the instrument logged only ON a mismatch, with no
+# denominator, and a total parse failure returned BEFORE reaching observe() — so
+# the athenaeum#608 measurement got "0 across every contract" and could not tell 0/0 from
+# 0/400. These pin the three defects fixed: every observation is counted, every
+# mismatch carries its class, and a parse failure is a countable record.
+
+
+class TestObservationLedger:
+    def test_clean_observation_is_counted_as_the_denominator(self) -> None:
+        llm_schemas.observe_contradictions(
+            {"detected": False, "rationale": "ok"}, call_site="t"
+        )
+        agg = llm_schemas.aggregate_observations()
+        assert agg["contradictions"]["observations"] == 1
+        assert agg["contradictions"]["mismatches"] == 0
+        assert agg["contradictions"]["mismatch_rate"] == 0.0
+        assert agg["contradictions"]["no_data"] is False
+
+    def test_zero_over_zero_is_no_data_not_zero_percent(self) -> None:
+        # AC2: a contract with 0 observations is reportable as *no data*,
+        # distinctly from 0 mismatches over 400.
+        agg = llm_schemas.aggregate_observations()
+        assert agg["resolutions"]["no_data"] is True
+        assert agg["resolutions"]["mismatch_rate"] is None
+        # …and every instrumented contract is present (explicit, not silently
+        # absent) — including claim_kind, which has no production caller.
+        assert set(llm_schemas.INSTRUMENTED_CONTRACTS) <= set(agg)
+        assert agg["claim_kind"]["no_data"] is True
+
+    @pytest.mark.parametrize(
+        "payload,expected_class",
+        [
+            ({}, llm_schemas.MISMATCH_MISSING_REQUIRED),
+            ({"claim_kind": 123}, llm_schemas.MISMATCH_WRONG_TYPE),
+            ({"claim_kind": "fact", "surprise": 1}, llm_schemas.MISMATCH_EXTRA_KEYS),
+        ],
+    )
+    def test_mismatch_carries_its_class(self, payload: dict, expected_class: str) -> None:
+        # AC3: extra-keys / missing-required / wrong-type each tagged.
+        llm_schemas.observe_claim_kind(payload, call_site="t")
+        agg = llm_schemas.aggregate_observations()
+        assert agg["claim_kind"]["by_class"].get(expected_class) == 1
+        assert agg["claim_kind"]["mismatches"] == 1
+
+    def test_parse_failure_is_counted(self) -> None:
+        # AC1: a total parse failure is a countable record with class parse-fail.
+        llm_schemas.observe_parse_failure(
+            contract="contradictions", call_site="t", detail="no-json"
+        )
+        agg = llm_schemas.aggregate_observations()
+        assert agg["contradictions"]["observations"] == 1
+        assert agg["contradictions"]["by_class"].get(llm_schemas.MISMATCH_PARSE_FAIL) == 1
+
+    def test_aggregation_over_a_run_has_nonzero_denominators(self) -> None:
+        # AC7: an aggregation over a run shows non-zero denominators per contract
+        # and at least one deliberately-induced parse-fail counted.
+        for _ in range(5):
+            llm_schemas.observe_contradictions(
+                {"detected": False, "rationale": "ok"}, call_site="t"
+            )
+        llm_schemas.observe_query_topics(["a", "b"], call_site="t")
+        llm_schemas.observe_parse_failure(
+            contract="contradictions", call_site="t", detail="no-json"
+        )
+        agg = llm_schemas.aggregate_observations()
+        assert agg["contradictions"]["observations"] == 6  # 5 clean + 1 parse-fail
+        assert agg["query_topics"]["observations"] == 1
+        assert agg["contradictions"]["by_class"][llm_schemas.MISMATCH_PARSE_FAIL] == 1
+        # every contract with traffic has a real denominator to divide by
+        assert agg["contradictions"]["mismatch_rate"] == pytest.approx(1 / 6)
+
+    def test_ledger_records_no_field_values_only_shape(self) -> None:
+        # Redaction: the ledger carries field paths, error messages, and KEY
+        # names — never a field VALUE, so no claim content or personal data.
+        llm_schemas.observe_contradictions(
+            {"detected": False, "rationale": "SECRET-CONTENT", "leaked_secret": "hunter2"},
+            call_site="t",
+        )
+        rows = llm_schemas.read_observations()
+        blob = "\n".join(str(r) for r in rows)
+        assert "leaked_secret" in blob  # the KEY name is recorded (extra-keys)
+        assert "hunter2" not in blob  # the VALUE is NOT
+        assert "SECRET-CONTENT" not in blob
+
+    def test_disabled_env_writes_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "0")
+        llm_schemas.observe_contradictions(
+            {"detected": False, "rationale": "ok"}, call_site="t"
+        )
+        assert llm_schemas.read_observations() == []
+
+    def test_observe_never_changes_behavior_or_raises(self) -> None:
+        # Behavior neutrality preserved: observe returns None and never raises,
+        # even when the ledger path is unwritable (best-effort).
+        assert llm_schemas.observe_contradictions({"detected": True}, call_site="t") is None
+
+
+class TestParseGuardCallSitesCountFailures:
+    """AC1 pin: feeding UNPARSEABLE text to the real parse sites — which return
+    ABOVE observe() — now produces a countable parse-fail record. Before
+    athenaeum#724 these returns were structurally invisible to the instrument.
+    """
+
+    def test_contradictions_parse_response_counts_a_parse_failure(self) -> None:
+        from athenaeum import contradictions
+
+        result = contradictions._parse_response("this is not json at all", [])
+        # Behavior unchanged: still the detector-returned-no-json fallback.
+        assert result.detected is False
+        assert result.rationale == "detector-returned-no-json"
+        # …and it is now counted.
+        agg = llm_schemas.aggregate_observations()
+        assert agg["contradictions"]["by_class"].get(llm_schemas.MISMATCH_PARSE_FAIL) == 1
+
+    def test_claim_kind_classify_counts_a_parse_failure(self) -> None:
+        from unittest.mock import MagicMock
+
+        from athenaeum import claim_kind
+
+        client = MagicMock()
+        response = MagicMock()
+        response.content = [MagicMock(text="no json object here, just prose")]
+        response.usage = MagicMock(
+            input_tokens=1,
+            output_tokens=1,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        client.messages.create.return_value = response
+
+        # Behavior unchanged: unparseable → unclassified "".
+        assert claim_kind.classify_claim_kind("Some memory body.", client) == ""
+        # …and the parse failure is now counted.
+        agg = llm_schemas.aggregate_observations()
+        assert agg["claim_kind"]["by_class"].get(llm_schemas.MISMATCH_PARSE_FAIL) == 1
