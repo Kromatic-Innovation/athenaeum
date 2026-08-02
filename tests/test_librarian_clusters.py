@@ -250,6 +250,76 @@ class TestSingleLinkage:
         assert sorted(sorted(c) for c in components) == [[0, 1], [2], [3, 4, 5]]
 
 
+class TestCompleteLinkage:
+    """Issue #681: cluster formation refines single-linkage components into
+    complete-linkage cliques so a weak bridging edge can no longer chain a
+    giant component that the merge-proposal gate would only rebuild and discard.
+    """
+
+    @staticmethod
+    def _all_pairs_clear(cluster, edge_sim, threshold) -> bool:
+        """Every pair in *cluster* is an edge >= threshold (the clique invariant)."""
+        for i in range(len(cluster)):
+            for j in range(i + 1, len(cluster)):
+                a, b = cluster[i], cluster[j]
+                key = (a, b) if a < b else (b, a)
+                if edge_sim.get(key, 0.0) < threshold:
+                    return False
+        return True
+
+    def test_chain_does_not_stay_one_giant_cluster(self) -> None:
+        from athenaeum.clusters import _complete_linkage
+
+        # 0-1-2 chain: adjacent pairs clear the threshold, 0-2 does not.
+        # Single-linkage would return {0,1,2}; complete-linkage must not.
+        adj: list[set[int]] = [{1}, {0, 2}, {1}]
+        edge_sim = {(0, 1): 0.9, (1, 2): 0.9}
+        clusters = _complete_linkage([0, 1, 2], adj, edge_sim, 0.55)
+
+        assert [0, 1, 2] not in clusters
+        assert all(self._all_pairs_clear(c, edge_sim, 0.55) for c in clusters)
+        # No member is dropped.
+        assert sorted(m for c in clusters for m in c) == [0, 1, 2]
+
+    def test_true_clique_is_preserved(self) -> None:
+        from athenaeum.clusters import _complete_linkage
+
+        # Every pair clears the threshold → one clique, unchanged.
+        adj: list[set[int]] = [{1, 2}, {0, 2}, {0, 1}]
+        edge_sim = {(0, 1): 0.8, (0, 2): 0.8, (1, 2): 0.8}
+        clusters = _complete_linkage([0, 1, 2], adj, edge_sim, 0.55)
+        assert clusters == [[0, 1, 2]]
+
+    def test_star_hub_cannot_form_clique(self) -> None:
+        from athenaeum.clusters import _complete_linkage
+
+        # Hub 0 bridges 4 leaves that are mutually dissimilar. Single-linkage
+        # would chain all 5; complete-linkage caps every cluster at 2 (the hub
+        # pairs with one leaf) and loses no member.
+        adj: list[set[int]] = [{1, 2, 3, 4}, {0}, {0}, {0}, {0}]
+        edge_sim = {(0, 1): 0.9, (0, 2): 0.9, (0, 3): 0.9, (0, 4): 0.9}
+        clusters = _complete_linkage([0, 1, 2, 3, 4], adj, edge_sim, 0.55)
+        assert max(len(c) for c in clusters) == 2
+        assert sorted(m for c in clusters for m in c) == [0, 1, 2, 3, 4]
+        assert all(self._all_pairs_clear(c, edge_sim, 0.55) for c in clusters)
+
+    def test_deterministic(self) -> None:
+        from athenaeum.clusters import _complete_linkage
+
+        adj: list[set[int]] = [{1}, {0, 2}, {1, 3}, {2}]
+        edge_sim = {(0, 1): 0.7, (1, 2): 0.9, (2, 3): 0.7}
+        results = {
+            tuple(tuple(c) for c in _complete_linkage([0, 1, 2, 3], adj, edge_sim, 0.55))
+            for _ in range(8)
+        }
+        assert len(results) == 1
+
+    def test_singleton_component_passthrough(self) -> None:
+        from athenaeum.clusters import _complete_linkage
+
+        assert _complete_linkage([7], [set()] * 8, {}, 0.55) == [[7]]
+
+
 # ---------------------------------------------------------------------------
 # cluster_auto_memory_files behaviour
 # ---------------------------------------------------------------------------
@@ -320,6 +390,89 @@ class TestClusterVoltaireFixture:
         voltaire_cluster = next(c for c in clusters if len(c.member_paths) > 1)
         assert "cosine" in voltaire_cluster.rationale.lower()
         assert voltaire_cluster.centroid_score > 0.0
+
+
+class TestClusterFormationIsCompleteLinkage:
+    """Issue #681 end-to-end: a single-linkage chain of pages must NOT be
+    formed into one giant cluster by ``cluster_auto_memory_files``. Uses
+    injected embeddings (the ``embeddings=`` override) so the test is
+    deterministic and needs no chromadb.
+    """
+
+    @staticmethod
+    def _chain_files_and_embeddings(tmp_path: Path):
+        import math
+
+        from athenaeum.models import AutoMemoryFile
+
+        # Unit vectors on a circle 20 degrees apart: adjacent pages have
+        # cosine cos(20 deg) ~= 0.94 (an edge at threshold 0.9); pages two
+        # apart have cos(40 deg) ~= 0.77 (below 0.9, NOT an edge). So the five
+        # pages form a single-linkage CHAIN but no clique larger than 2.
+        scope = tmp_path / "raw" / "auto-memory" / "proj"
+        scope.mkdir(parents=True, exist_ok=True)
+        files = []
+        embeddings: dict[str, list[float]] = {}
+        for i in range(5):
+            path = scope / f"project_chain_{i}.md"
+            path.write_text("---\nname: chain\ntype: project\n---\nbody\n", "utf-8")
+            am = AutoMemoryFile(path=path, origin_scope="proj", memory_type="project")
+            files.append(am)
+            angle = math.radians(20 * i)
+            embeddings[str(path)] = [math.cos(angle), math.sin(angle), 0.0]
+        return files, embeddings
+
+    def test_chain_is_not_one_giant_cluster(self, tmp_path: Path) -> None:
+        from athenaeum.clusters import cluster_auto_memory_files
+
+        files, embeddings = self._chain_files_and_embeddings(tmp_path)
+        clusters = cluster_auto_memory_files(
+            files,
+            extra_roots=[tmp_path / "raw" / "auto-memory"],
+            threshold=0.9,
+            embeddings=embeddings,
+        )
+
+        # The degenerate all-five giant cluster must not exist.
+        assert all(len(c.member_paths) < 5 for c in clusters)
+        # Every member is accounted for exactly once.
+        all_members = [p for c in clusters for p in c.member_paths]
+        assert len(all_members) == 5
+        assert len(set(all_members)) == 5
+        # Every multi-member cluster is a genuine complete-linkage clique:
+        # its recorded min pairwise cosine clears the threshold.
+        for c in clusters:
+            if len(c.member_paths) > 1:
+                assert c.min_pairwise_score >= 0.9
+
+    def test_clique_still_forms_one_cluster(self, tmp_path: Path) -> None:
+        import math
+
+        from athenaeum.clusters import cluster_auto_memory_files
+        from athenaeum.models import AutoMemoryFile
+
+        # Three near-identical pages (2 degrees apart) — a true clique.
+        scope = tmp_path / "raw" / "auto-memory" / "proj"
+        scope.mkdir(parents=True, exist_ok=True)
+        files, embeddings = [], {}
+        for i in range(3):
+            path = scope / f"project_clique_{i}.md"
+            path.write_text("---\nname: clique\ntype: project\n---\nbody\n", "utf-8")
+            files.append(
+                AutoMemoryFile(path=path, origin_scope="proj", memory_type="project")
+            )
+            angle = math.radians(2 * i)
+            embeddings[str(path)] = [math.cos(angle), math.sin(angle), 0.0]
+
+        clusters = cluster_auto_memory_files(
+            files,
+            extra_roots=[tmp_path / "raw" / "auto-memory"],
+            threshold=0.9,
+            embeddings=embeddings,
+        )
+        multi = [c for c in clusters if len(c.member_paths) > 1]
+        assert len(multi) == 1
+        assert len(multi[0].member_paths) == 3
 
 
 class TestClusterContradictionFixture:
