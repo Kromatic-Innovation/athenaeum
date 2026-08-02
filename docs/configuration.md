@@ -518,7 +518,9 @@ index.
 
 - A **push record** is written every time `recall` renders a hit into a
   session's response (the `recall` MCP tool / `recall_search`), keyed by the
-  ambient `CLAUDE_SESSION_ID`. It carries only ids, a tier (the page's
+  ambient `CLAUDE_CODE_SESSION_ID` (the variable Claude Code actually exports to
+  the stdio MCP servers it spawns; the older `CLAUDE_SESSION_ID` is accepted as
+  a fallback — athenaeum#734). It carries only ids, a tier (the page's
   `access` level), a matched scope (the granted `audience` roles, or `open` /
   `owner`), and an estimated token cost — **never claim content and never
   personal data**. A pushed person page's id is its opaque frontmatter `uid`,
@@ -621,11 +623,15 @@ intake per the configured action and access.
 chromadb and the `wiki` collection name. Setting either key has no effect
 today.
 
-**Ambient telemetry variable.** `CLAUDE_SESSION_ID` is read by
-`athenaeum.query_topics` and stamped onto recall telemetry so recall activity
-is session-keyed. It is an **ambient / host-provided** variable (Claude Code
+**Ambient telemetry variable.** `CLAUDE_CODE_SESSION_ID` (the variable Claude
+Code actually exports) is read by `athenaeum.query_topics` and the recall
+push-record path and stamped onto recall telemetry so recall activity is
+session-keyed; the older `CLAUDE_SESSION_ID` is accepted as a fallback
+(athenaeum#734). It is an **ambient / host-provided** variable (Claude Code
 sets it), not an operator knob — you do not set it yourself; it is documented
-here only so a reader knows recall telemetry carries a session id.
+here only so a reader knows recall telemetry carries a session id. Both names
+resolve through the single `push_metrics.resolve_session_id()` helper, so the
+name is defined in exactly one place.
 
 ## Kill switch (`athenaeum disable` / `enable`, athenaeum#379)
 

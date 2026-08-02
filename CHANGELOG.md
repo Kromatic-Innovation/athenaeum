@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **push-metrics: read the session-id variable Claude Code actually exports
+  (athenaeum#734).** athenaeum#711's push-record instrumentation read
+  `CLAUDE_SESSION_ID` — a name Claude Code never sets (it exports
+  `CLAUDE_CODE_SESSION_ID`). Because the guard is `if session_id:`, the id was
+  always empty and **no push record was ever written**, silently burning
+  athenaeum#711's one-shot pre-change baseline window. A single helper
+  `push_metrics.resolve_session_id()` now resolves the id from
+  `CLAUDE_CODE_SESSION_ID` first, then `CLAUDE_SESSION_ID` (fallback), then
+  empty; the candidate-name tuple `push_metrics.SESSION_ID_ENV_VARS` is asserted
+  explicitly in a test so a future rename is a visible diff, not a silent no-op.
+  Both call sites — `mcp_server`'s push path and `query_topics.py:211`'s spend
+  recording — route through the helper; no direct `os.environ.get(
+  "CLAUDE_SESSION_ID")` remains in `src/`. Push records are unchanged in shape
+  and still carry **no claim content and no personal data**. `docs/
+  configuration.md` names the real variable and the fallback in both places.
 - **`lint-pii` phone axis: exclude labeled identifiers and the residual shapes
   athenaeum#720 partially covered (athenaeum#732).** After athenaeum#720 the
   live phone axis still reported 187 findings, dominated by values the
