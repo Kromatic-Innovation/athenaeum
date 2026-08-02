@@ -364,6 +364,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`prune-code-entities` no longer treats a bare `/` in an entity name as a
+  file path (#721).** #680's retire sweep keyed on the entity name being
+  file-shaped by *extension OR path separator*. The extension half works, but
+  the path-separator half had no discriminating power in a corpus where slashes
+  are ordinary punctuation in human and organization names — on the live store
+  it put **140 real people, companies and concepts on a `git rm` kill-list**
+  (44% of the 315 proposed deletions): a person matched on their pronouns
+  (`Suzie Prince (she/her)`), companies (`Stora Enso / Chalmers University`,
+  `ITHAKA/JSTOR`), an npm package (`@tanstack/react-query`), skill/label names
+  (`dijkstra/arch-review`, `hestia/needs-human-promotion-review`), git branches
+  (`feature/408-gateway-split-write`) and slash-commands (`/good-morning`).
+  Classification (`tiers.classify_code_artifact_name`) is now **extension-only**:
+  a slash contributes nothing. Confirmed against the real 140 — the narrower
+  slash signals one might reach for (a slash-separated, space-free,
+  uncapitalized, non-`@` token) still delete those legitimate skill/label/branch
+  names, so a slash cannot be a signal at all. The 173 genuine extension-matched
+  artifacts (`deploy-guard.sh`, `wiki_dedupe.py`, `crawlGovernance.ts`,
+  `generate-repo-map.sh`) are still killed, and a full source path keeps being
+  matched by its extension (`src/athenaeum/librarian.py`). **Decision (AC4):** an
+  extension-less path-shaped name (`src/athenaeum`, `scripts/oss-export`) is
+  **retained** — no mechanical slash signal separates it from the legitimate
+  namespace/label/branch names above, and retention is the safe, reversible
+  direction. The dry run now prints the matched rule per entry and an
+  extension/non-extension split (`by rule: extension=N`) so an operator can
+  audit the kill-list by class. Re-running the live dry run to confirm the new
+  kill count and split is the operator step on #695.
 - **`lint-pii` no longer counts issue-number lists, non-ISO dates, or
   date-into-text bleed as phone-axis PII (#720).** #683 normalized a leading
   paren and cut `lint-pii` from 911 findings/107 files to 456/274, but four
