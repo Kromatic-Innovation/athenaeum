@@ -416,6 +416,33 @@ def _blank_bucket() -> dict[str, Any]:
     }
 
 
+def resolve_billing_bucket(record: dict[str, Any]) -> str:
+    """Which cost path a ledger record belongs to: ``api`` / ``subscription`` / ``unknown``.
+
+    ``billing_mode`` (v2, issue athenaeum#487) is authoritative when present and in
+    the known vocabulary. For a pre-``billing_mode`` (pre-v2) row it is derived
+    from ``provider``, which maps unambiguously (the api provider term -> api,
+    the subscription CLI handle -> subscription).
+
+    A row whose billing mode cannot be determined either way — no known
+    ``billing_mode`` AND no recognized ``provider`` (a hand-edited or corrupt
+    row) — resolves to ``"unknown"``, NEVER silently to ``api`` (issue
+    athenaeum#694). Unknown must stay a DISTINCT state from zero so a consumer
+    cannot mistake an undeterminable row for api spend, or for no activity.
+    """
+    billing_mode = record.get("billing_mode")
+    if billing_mode == BILLING_MODE_API:
+        return "api"
+    if billing_mode == BILLING_MODE_SUBSCRIPTION:
+        return "subscription"
+    provider = record.get("provider")
+    if provider == PROVIDER_CLAUDE_CLI:
+        return "subscription"
+    if provider == PROVIDER_ANTHROPIC:
+        return "api"
+    return "unknown"
+
+
 def _accumulate(bucket: dict[str, Any], record: dict[str, Any]) -> None:
     for key in (
         "input_tokens",
@@ -445,14 +472,22 @@ def summarize(
     """
     subscription = _blank_bucket()
     api = _blank_bucket()
+    unknown = _blank_bucket()
+    buckets = {"subscription": subscription, "api": api, "unknown": unknown}
     per_model: dict[str, dict[str, Any]] = {}
     per_run_type: dict[str, dict[str, Any]] = {}
     unpriceable = 0
 
+    def _blank_slot() -> dict[str, Any]:
+        return {
+            "subscription": _blank_bucket(),
+            "api": _blank_bucket(),
+            "unknown": _blank_bucket(),
+        }
+
     for record in records:
-        prov = record.get("provider")
-        bucket = subscription if prov == PROVIDER_CLAUDE_CLI else api
-        _accumulate(bucket, record)
+        path = resolve_billing_bucket(record)
+        _accumulate(buckets[path], record)
         # A row with no per-model attribution (pre-v2, or a v2 run that tagged
         # no model) cannot be repriced at a new rate table (issue athenaeum#487,
         # cwc#1627's failure mode). Count it as unpriceable — it is NOT dropped
@@ -462,22 +497,12 @@ def summarize(
             unpriceable += 1
         if by_model:
             for model in record.get("models") or ["(untagged)"]:
-                slot = per_model.setdefault(
-                    model, {"subscription": _blank_bucket(), "api": _blank_bucket()}
-                )
-                _accumulate(
-                    slot["subscription" if prov == PROVIDER_CLAUDE_CLI else "api"],
-                    record,
-                )
+                slot = per_model.setdefault(model, _blank_slot())
+                _accumulate(slot[path], record)
         if by_provider:
             rt = str(record.get("run_type", "(unknown)"))
-            slot = per_run_type.setdefault(
-                rt, {"subscription": _blank_bucket(), "api": _blank_bucket()}
-            )
-            _accumulate(
-                slot["subscription" if prov == PROVIDER_CLAUDE_CLI else "api"],
-                record,
-            )
+            slot = per_run_type.setdefault(rt, _blank_slot())
+            _accumulate(slot[path], record)
 
     # The subscription path carries no real dollars — surface tokens only.
     subscription["estimated_cost_usd"] = 0.0
@@ -490,6 +515,12 @@ def summarize(
         "unpriceable_records": unpriceable,
         "subscription": subscription,
         "api": api,
+        # Rows whose billing mode could not be determined (issue athenaeum#694):
+        # a DISTINCT state from zero, always present (blank when none) so a
+        # consumer sees an undeterminable row explicitly instead of it being
+        # silently folded into ``api``. Its tokens/dollars stay isolated here and
+        # are never summed into ``api`` or ``subscription``.
+        "unknown": unknown,
     }
     if by_model:
         summary["by_model"] = per_model
@@ -525,6 +556,16 @@ def format_summary(
         f"  API           ${api['estimated_cost_usd']:.2f}"
         f"       ({api['api_calls']} calls, {api['records']} run(s))"
     )
+    # Surface undeterminable rows only when present (issue athenaeum#694) — a
+    # distinct state from zero, reported in TOKENS (its billing mode, and so its
+    # unit, is by definition unknown), never blended into the API dollar figure.
+    unknown = summary.get("unknown")
+    if unknown and unknown["records"] > 0:
+        lines.append(
+            f"  Unknown       {_fmt_tokens(unknown['total_tokens'])} tokens"
+            f"  ({unknown['api_calls']} calls, {unknown['records']} run(s)"
+            f" — billing mode undeterminable)"
+        )
     if by_provider and summary.get("by_run_type"):
         lines.append("  By run type:")
         for rt, slot in sorted(summary["by_run_type"].items()):

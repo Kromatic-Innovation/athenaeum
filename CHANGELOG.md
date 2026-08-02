@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum spend --json` documented as a stable consumer contract; unknown
+  is now distinct from zero (athenaeum#694).** `spend --json` is the surface
+  `/good-morning` reads, but its shape lived only in code. It is now documented
+  in `docs/configuration.md` — every field's name, type, unit, and what it does
+  and does not assert — as a stable contract (athenaeum emits facts; the caller
+  computes ratios). The contract states explicitly that the `api` (dollars) and
+  `subscription` (tokens) buckets are in **different units and must never be
+  summed**, that subscription tokens are never rendered as dollars (its only
+  dollar field is a hard `0.0`), and that athenaeum **does not assert account
+  identity** — a consumer aggregating across accounts owns that itself.
+  Behaviourally, a ledger row whose billing mode cannot be determined (no known
+  `billing_mode` and no recognised `provider`) now resolves to a distinct
+  **`unknown`** bucket — always present (blank when none) and never silently
+  folded into `api` — so an undeterminable row can't be mistaken for API spend
+  or for no activity (`spend.resolve_billing_bucket`; surfaced in both the JSON
+  and the human report). Additive: the existing `subscription`/`api`/
+  `record_count` keys are unchanged.
 - **Public-safe OSS lint as a required CI check (athenaeum#693).** Athenaeum is
   periodically re-exported to this public tree, and a 2026-07-31 extraction
   shipped absolute home paths, bare internal issue references, and personal

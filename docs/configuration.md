@@ -437,6 +437,46 @@ athenaeum spend --since 7d [--by-model] [--by-provider] [--json]
 output keeps **$ (API)** and **tokens (subscription)** on separate rows;
 `--json` is the machine-readable shape `/good-morning` consumes.
 
+### `athenaeum spend --json` — consumer contract (athenaeum#694)
+
+`athenaeum spend --json` is a **stable contract**, not an incidental dump: a
+consumer (e.g. `/good-morning`) reads these fields directly rather than scraping
+the rendered report or the source. **athenaeum emits facts; the caller computes
+ratios.** The shape:
+
+| Field | Type | Unit | What it asserts — and does not |
+|---|---|---|---|
+| `since` | string (ISO-8601 `Z`) | — | Lower bound of the window summarised (inclusive). |
+| `ledger_path` | string | — | Absolute path of the ledger file read. |
+| `record_count` | int | rows | Total ledger rows in the window. Every row is counted here — including `unknown` rows — so a bucket total plus `unknown` reconciles to it. |
+| `unpriceable_records` | int | rows | Rows with no per-model attribution (pre-v2, or a v2 run that tagged no model). They are **not dropped** and stay in their billing bucket; the count tells a re-pricing consumer how many rows it must treat as opaque. |
+| `subscription` | object (bucket) | **tokens** | The `claude-cli` path. Report its **tokens**. `estimated_cost_usd` is hard-`0.0` here and must be ignored — subscription draw has no invoice. |
+| `api` | object (bucket) | **dollars** | The metered `anthropic` path. `estimated_cost_usd` is real money. |
+| `unknown` | object (bucket) | **tokens** | Rows whose billing mode could **not** be determined (no known `billing_mode` and no recognised `provider` — a hand-edited or corrupt row). **Always present** (blank when none) so *unknown is a distinct state from zero*: a consumer must never mistake an undeterminable row for API spend, or for no activity. Never folded into `api`/`subscription`; report its **tokens**, since its unit is by definition unknown. |
+| `by_model` | object | — | Present only with `--by-model`; each model maps to `{subscription, api, unknown}` sub-buckets. |
+| `by_run_type` | object | — | Present only with `--by-provider`; each run type maps to `{subscription, api, unknown}` sub-buckets. |
+
+Each **bucket** object carries: `input_tokens`, `output_tokens`,
+`cache_creation_input_tokens`, `cache_read_input_tokens`, `total_tokens`,
+`api_calls`, `records` (all ints), and `estimated_cost_usd` (float).
+
+Two invariants the contract guarantees, and one thing it deliberately omits:
+
+- **`api` and `subscription` are in different units and must NEVER be summed.**
+  `api.estimated_cost_usd` is dollars; `subscription.total_tokens` is tokens.
+  Adding them, or rendering subscription tokens as a dollar figure, is a
+  category error — the subscription bucket's only dollar field is a hard `0.0`
+  precisely so it cannot be blended.
+- **Unknown ≠ zero.** An undeterminable row appears in `unknown`, explicitly,
+  rather than silently defaulting into `api` or being omitted.
+- **athenaeum does NOT assert account identity.** No field names which account a
+  call was billed to. On the `api` path athenaeum holds only the secret
+  `ANTHROPIC_API_KEY`; on `claude-cli` a subscription CLI handle — and in a
+  shared deployment its account is used by other workloads it cannot see. A
+  consumer that needs to aggregate across accounts **owns that knowledge
+  itself**; athenaeum will not emit a partial (and secret-adjacent) account
+  identifier per record.
+
 The **spend ceiling** is the actual mitigation — a monitor reports after the
 fact, the ceiling stops the burn. When a configured ceiling is reached the
 librarian pass stops early and loudly and defers the remaining intake (exactly
