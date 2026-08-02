@@ -266,6 +266,46 @@ def _is_bare_id_fragment(candidate: str) -> bool:
     return not (_BARE_PHONE_MIN_DIGITS <= len(candidate) <= _BARE_PHONE_MAX_DIGITS)
 
 
+def _normalize_phone_token(token: str) -> str:
+    """Strip a single leading ``+``/``(`` and a single trailing ``)`` from *token*.
+
+    ``_PHONE_RE`` captures its optional leading ``[+(]`` delimiter **inside** the
+    capture group, so a parenthesized run like ``(2026-07-29)`` is captured as
+    ``(2026-07-29`` (issue #683). Both exclusion helpers below test the raw token
+    and are defeated by that leading punctuation — ``_ISO_DATE_RE`` is anchored on
+    ``^\\d`` so the ``(`` never matches, and ``_is_bare_id_fragment`` short-circuits
+    because ``'(2026-07-29'.isdigit()`` is ``False``. Stripping the surrounding
+    delimiter for the exclusion *check only* (never the returned value) restores
+    the intended date/id-fragment exclusions while leaving genuine phone tokens
+    like ``(555) 010-0100`` — whose interior separators mean they are never a bare
+    run or a date — matched and returned verbatim.
+    """
+    normalized = token
+    if normalized[:1] in "+(":
+        normalized = normalized[1:]
+    if normalized[-1:] == ")":
+        normalized = normalized[:-1]
+    return normalized
+
+
+def _is_excluded_phone_shape(token: str) -> bool:
+    """True when *token* is a provably-non-phone shape (ISO date, year range, or
+    a bare id/analytics fragment), robust to a leading ``+``/``(`` or trailing
+    ``)`` that ``_PHONE_RE`` folds into its capture group.
+
+    Shared by :func:`find_inline_phones` (corpus-page lint) and
+    :func:`athenaeum.outbound_pii.scan_outbound_text` (egress lint) so the
+    "what is provably not a phone" rule has exactly one definition — the same
+    single-source-of-truth argument those two lints already make for
+    ``_PHONE_RE``/``_has_enough_digits``. The shapes it drops (valid ISO dates,
+    19xx/20xx year ranges, sub-10-digit bare runs) can never be a genuine phone,
+    so applying it on the egress path removes false positives without dropping
+    any real number.
+    """
+    candidate = _normalize_phone_token(token)
+    return _looks_like_date(candidate) or _is_bare_id_fragment(candidate)
+
+
 def is_pii_flagged(meta: dict[str, Any] | None) -> bool:
     """True when frontmatter carries a truthy ``pii`` flag (belt-and-suspenders).
 
@@ -300,16 +340,18 @@ def find_inline_phones(text: str) -> list[str]:
     """Return every phone-shaped token found in *text*, in order, deduped.
 
     Excludes the corpus false positives issue #500 documented — ISO dates,
-    year ranges, and bare id/analytics fragments — via :func:`_looks_like_date`
-    and :func:`_is_bare_id_fragment`; every genuine phone fixture (carrying a
-    '+', parens, or separators) still matches.
+    year ranges, and bare id/analytics fragments — via
+    :func:`_is_excluded_phone_shape`, which normalizes a leading ``+``/``(`` or
+    trailing ``)`` the regex folds into its group (issue #683) before applying
+    the checks; every genuine phone fixture (carrying a '+', parens, or
+    separators) still matches and is returned verbatim.
     """
     seen: list[str] = []
     for m in _PHONE_RE.finditer(text or ""):
         token = m.group(1)
         if not _has_enough_digits(token):
             continue
-        if _looks_like_date(token) or _is_bare_id_fragment(token):
+        if _is_excluded_phone_shape(token):
             continue
         if token not in seen:
             seen.append(token)
