@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the authority manifest + pointer-stub converter (issue #426).
+"""Tests for the authority manifest + pointer-stub converter (issue athenaeum#426).
 
 Covers each acceptance criterion named in the issue:
 
@@ -52,7 +52,7 @@ sources:
 """
 
 
-# Mirrors the live authority-manifest from issue #488's reproduction: a single
+# Mirrors the live authority-manifest from issue athenaeum#488's reproduction: a single
 # source owning a bare entity topic ("spartacus") AND qualified topics
 # ("spartacus persona", "product-strategy persona"). The bare topic is what
 # makes AC2 (do NOT flag the rich `Spartacus` entity page) non-trivial.
@@ -289,7 +289,7 @@ class TestFindDuplicateSource:
 
 
 class TestFindDuplicateViaName:
-    """#488: page `name` is matched against manifest topics, not only via an
+    """athenaeum#488: page `name` is matched against manifest topics, not only via an
     explicit `topics`/`tags` field — the never-fires bug was that entity /
     concept pages carry `name:` but no `topics:`, so nothing was collected."""
 
@@ -381,7 +381,7 @@ class TestFindDuplicatesInWiki:
     def test_reproduction_scan_flags_persona_not_entity(
         self, tmp_path: Path
     ) -> None:
-        # #488 reproduction, both directions in one corpus scan:
+        # athenaeum#488 reproduction, both directions in one corpus scan:
         # - the persona summary (name "Spartacus persona") IS flagged (AC1)
         # - the rich "Spartacus" entity record is NOT flagged (AC2)
         spartacus = parse_authority_manifest(_SPARTACUS_MANIFEST_YAML)
@@ -528,7 +528,7 @@ class TestStubEmbedsOnlyPointerLine:
     def test_add_records_embeds_only_pointer_line_for_stub(
         self, tmp_path: Path
     ) -> None:
-        """Regression for issue #426 stub hygiene.
+        """Regression for issue athenaeum#426 stub hygiene.
 
         Exercises ``VectorBackend._add_records`` directly against a fake
         chromadb collection (no real chromadb dependency needed for this
@@ -637,7 +637,7 @@ class TestAuthorityLintCLI:
     def test_lint_flags_name_match_and_names_slug_and_reason(
         self, tmp_path: Path
     ) -> None:
-        # #488 end-to-end (AC1 + AC4): a page duplicating a source only via its
+        # athenaeum#488 end-to-end (AC1 + AC4): a page duplicating a source only via its
         # `name` is reported, and the output names both the matched source slug
         # and the reason (the matched topic) so an operator can judge the hit.
         knowledge_root = tmp_path / "knowledge"

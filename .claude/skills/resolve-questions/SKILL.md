@@ -7,7 +7,7 @@ description: Walk the user through unresolved entries in `_pending_questions.md`
 
 Interactive walk-through for `~/knowledge/wiki/_pending_questions.md`. Each
 entry is a contradiction or ambiguity the librarian flagged for human review.
-Some entries carry an Opus-backed proposed resolution (issue #126); some
+Some entries carry an Opus-backed proposed resolution (issue athenaeum#126); some
 don't. The user is the final authority — never resolve without confirmation.
 
 ## Surface

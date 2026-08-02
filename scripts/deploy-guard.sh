@@ -84,7 +84,7 @@
 #   ATHENAEUM_GUARD_STAMP_CMD    stamp command run after a successful refresh
 #                             (default: python3 <scriptdir>/write_build_sha.py against <dir>)
 #   ATHENAEUM_GUARD_VERSION_CHECK_CMD  metadata-drift check run against the deploy
-#                             venv (issue #685; exit 0 in-sync / 10 drift / 20
+#                             venv (issue athenaeum#685; exit 0 in-sync / 10 drift / 20
 #                             undetermined). Default:
 #                             <dir>/.venv/bin/python -m athenaeum.deploy_check --check <dir>
 #   ATHENAEUM_GUARD_METADATA_REFRESH_CMD  metadata-only editable reinstall run on
@@ -173,7 +173,7 @@ _dg_default_stamp_cmd() {
     "$1" "$(_dg_script_dir)"
 }
 
-# --- metadata-drift reconcile (issue #685) ---------------------------------
+# --- metadata-drift reconcile (issue athenaeum#685) ---------------------------------
 # An editable install picks up code on a fast-forward but NOT metadata: the
 # .dist-info version is frozen at install time, so importlib.metadata.version()
 # (== athenaeum.__version__) can silently lag pyproject.toml across a version
@@ -303,7 +303,7 @@ _dg_sync() {
   if [ -n "$head_before" ] && [ "$head_before" = "$refsha" ] && [ "$marker" = "$refsha" ]; then
     echo "deploy-guard: in-sync ${refsha} (${dir} @ origin/${ref})" >&2
     # Git is in-sync, but the editable install's metadata can still be stale
-    # (issue #685) — reconcile it here since no venv refresh runs on this path.
+    # (issue athenaeum#685) — reconcile it here since no venv refresh runs on this path.
     _dg_reconcile_metadata "$dir" || return 1
     return 0
   fi
@@ -350,7 +350,7 @@ _dg_sync() {
   # The venv refresh above (`pip install -e .`) also refreshes .dist-info, so
   # metadata is normally fresh here — but confirm (and refresh if a partial
   # install left it stale) so a synced report can never hide a lying version
-  # string (issue #685).
+  # string (issue athenaeum#685).
   _dg_reconcile_metadata "$dir" || return 1
 
   # Report the OBSERVED post-sync HEAD, never the intended target.

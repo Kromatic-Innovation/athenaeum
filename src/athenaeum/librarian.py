@@ -28,10 +28,10 @@ Layering and the SCC (read this before touching any of librarian / merge /
 tiers / pending_merges / batch / status / retire / wiki_dedupe): these
 modules are L4 domain/pipeline. Historically they formed ONE ~12,000-line
 mutually-recursive cycle held together by function-local (deferred) imports
-BACK into ``librarian`` for three shared raw-intake primitives. Issue #545
+BACK into ``librarian`` for three shared raw-intake primitives. Issue athenaeum#545
 HOISTED those three primitives — ``discover_raw_files``,
 ``discover_auto_memory_files``, ``tier0_passthrough`` — DOWN to the
-:mod:`athenaeum.intake` leaf module (``vecmath`` from #542 is the precedent),
+:mod:`athenaeum.intake` leaf module (``vecmath`` from athenaeum#542 is the precedent),
 so the modules that need them import from ``intake`` at TOP level and the
 librarian-centered back-edges are gone. ``batch``, ``status``, ``retire``, and
 ``wiki_dedupe`` are now fully free of the librarian cycle.
@@ -62,12 +62,12 @@ are NOT librarian<->sibling cycle back-edges and stay deferred:
   deferred for best-effort framing.
 - run loop: local ``from athenaeum.drain_advisor import build_advisory``
   (backlog-drain advisor). ``drain_advisor`` is a low leaf that does NOT import
-  librarian back, so this is a one-way edge. Issue #640 moved ``build_advisory``
+  librarian back, so this is a one-way edge. Issue athenaeum#640 moved ``build_advisory``
   there from the ``drain`` orchestrator precisely so this run-loop call no longer
   reaches up into ``drain`` (``drain`` still imports ``librarian.run`` back,
   function-locally — now a one-directional ``drain`` -> ``librarian`` edge).
 
-The three residual SCCs that #545 left in place were all dissolved in issue #640
+The three residual SCCs that athenaeum#545 left in place were all dissolved in issue athenaeum#640
 (``{librarian, drain, status}``, ``{merge, pending_merges, calibration,
 reasoning_tiers}`` and ``{tiers, contradictions, resolutions, answers}``); the
 full-graph SCC is now empty and ``tests/test_import_graph_acyclic.py`` pins the
@@ -177,7 +177,7 @@ log = logging.getLogger(__name__)
 
 # Defaults — can be overridden via CLI args or the run() API.
 # The pre-expanded runtime default, derived from the single tilde-template
-# source of truth in ``config`` (issue #537). ``.expanduser()`` yields the same
+# source of truth in ``config`` (issue athenaeum#537). ``.expanduser()`` yields the same
 # value as the former ``Path.home() / "knowledge"`` literal, but the
 # ``~/knowledge`` string now lives in exactly one module. These constants are
 # used directly as real filesystem paths (function defaults below), so they must
@@ -187,8 +187,8 @@ DEFAULT_RAW_ROOT = DEFAULT_KNOWLEDGE_ROOT / "raw"
 DEFAULT_WIKI_ROOT = DEFAULT_KNOWLEDGE_ROOT / "wiki"
 
 # Run-level API call budget.
-# Raised 200 -> 800 (issue #220): the 2026-06-11 nightly observed 404 calls
-# hit the 200 cap with intake remaining — now that the #187 confirmation
+# Raised 200 -> 800 (issue athenaeum#220): the 2026-06-11 nightly observed 404 calls
+# hit the 200 cap with intake remaining — now that the athenaeum#187 confirmation
 # pass runs at full coverage, a busy night legitimately needs more than 200
 # calls, and the budget-tripped run stopped early while reporting success.
 # The cap is a ceiling, not a target: quiet runs never approach it and pay
@@ -203,15 +203,15 @@ DEFAULT_WIKI_ROOT = DEFAULT_KNOWLEDGE_ROOT / "wiki"
 # (`contradiction.resolve_max_per_run`).
 DEFAULT_MAX_API_CALLS = 800
 
-# Per-run intake batch size (issue #232). Precedence: `--max-files` (CLI
+# Per-run intake batch size (issue athenaeum#232). Precedence: `--max-files` (CLI
 # flag, wins) > `ATHENAEUM_MAX_FILES` (env) > `librarian.max_files` (yaml)
 # > this default. Resolved by `librarian_max_files()` below.
 DEFAULT_MAX_FILES = 50
 
-# Run-level wall-clock deadline in seconds (issue #396). Budget caps
+# Run-level wall-clock deadline in seconds (issue athenaeum#396). Budget caps
 # (`--max-files` / `--max-api-calls`) bound how MUCH a run does, but nothing
 # bounded how LONG it ran: a post-checkpoint phase that stopped making
-# progress (the #396 incident: a hung `claude -p` merge subprocess) ran ~15h
+# progress (the athenaeum#396 incident: a hung `claude -p` merge subprocess) ran ~15h
 # holding the run-lock until externally killed. The nightly run's ~1h cap
 # came from an external `timeout` wrapper, not athenaeum itself, so any
 # un-wrapped run (a manual backlog drain) was unbounded. This default gives
@@ -223,7 +223,7 @@ DEFAULT_MAX_FILES = 50
 DEFAULT_MAX_RUNTIME = 3600  # 1 hour
 
 # Fraction of ``max_runtime`` the ENTITY phase may spend claiming new files
-# (issue #440). ``run_deadline`` is a single run-level budget shared by every
+# (issue athenaeum#440). ``run_deadline`` is a single run-level budget shared by every
 # phase, and the entity loop only stops when that WHOLE budget is gone — so a
 # slow entity phase starves everything downstream of it. Measured on the live
 # corpus: entity consumed 3690s of a 3944s window (93.6%), and the C4
@@ -231,7 +231,7 @@ DEFAULT_MAX_RUNTIME = 3600  # 1 hour
 # 10+ consecutive nights. Reserving a tail makes the downstream phases'
 # budget structural instead of "whatever entity happens to leave": the entity
 # loop stops CLAIMING new files once ``share * max_runtime`` is spent, defers
-# the rest (resumable, exactly like the #220 budget trip), and lets the run
+# the rest (resumable, exactly like the athenaeum#220 budget trip), and lets the run
 # fall through to the auto-memory / C2-C4 block.
 #
 # NOTE the granularity: the check sits at the per-file boundary, so a file
@@ -241,15 +241,15 @@ DEFAULT_MAX_RUNTIME = 3600  # 1 hour
 # Precedence: ``ATHENAEUM_ENTITY_RUNTIME_SHARE`` (env) >
 # ``librarian.entity_runtime_share`` (yaml) > this default. A resolved value
 # outside ``0 < share < 1`` disables the reserve entirely (entity may use the
-# whole window) — the explicit opt-out that restores pre-#440 behaviour.
+# whole window) — the explicit opt-out that restores pre-athenaeum#440 behaviour.
 DEFAULT_ENTITY_RUNTIME_SHARE = 0.6
 
 # Manifest written next to _pending_questions.md when a budget-tripped run
-# defers intake (issue #220). Overwritten on every tripped run; removed by
+# defers intake (issue athenaeum#220). Overwritten on every tripped run; removed by
 # the next clean run.
 DEFERRED_MANIFEST_NAME = "_deferred_work.md"
 
-# Issue #663: a persistent, cross-run ledger of raw files whose processing has
+# Issue athenaeum#663: a persistent, cross-run ledger of raw files whose processing has
 # failed on the same content N consecutive runs. A single reliably-failing LLM
 # call (e.g. an entity page large enough to time out every night) otherwise
 # makes a raw file a PERMANENT no-progress loop: it is retried whole every
@@ -271,7 +271,7 @@ DEFAULT_STUCK_FILE_THRESHOLD = 3
 
 # Stable, machine-greppable prefix for the WARNING emitted when a file is
 # surfaced as stuck (crossing the threshold, or skipped on a later run). A
-# log-scraper / watchdog can grep this without parsing prose — the #663
+# log-scraper / watchdog can grep this without parsing prose — the athenaeum#663
 # requirement that a permanently-stuck file be LOUD, not merely logged.
 STUCK_FILE_PREFIX = "librarian-stuck-file"
 
@@ -297,7 +297,7 @@ FALLBACK_TAGS = [
 # Raw-intake discovery + tier-0 passthrough primitives (RAW_FILE_RE,
 # AUTO_MEMORY_FILE_RE, _AUTO_MEMORY_SKIP_NAMES, discover_raw_files,
 # discover_auto_memory_files, tier0_passthrough) moved DOWN to the
-# :mod:`athenaeum.intake` leaf module in issue #545 to dissolve the
+# :mod:`athenaeum.intake` leaf module in issue athenaeum#545 to dissolve the
 # librarian-centered import SCC. They are re-imported at the top of this
 # module (``from athenaeum.intake import ...``) so this module's own call
 # sites, the public ``athenaeum.discover_raw_files`` re-export, and existing
@@ -386,7 +386,7 @@ def _maybe_pull_before_run(
 ) -> None:
     """Pull the knowledge repo before the run starts, iff opted in.
 
-    Issue #399 gating, symmetric to :func:`_maybe_push_after_run`: (a)
+    Issue athenaeum#399 gating, symmetric to :func:`_maybe_push_after_run`: (a)
     explicit opt-in, (b) not a ``--dry-run``, (c) a real git repo exists at
     ``knowledge_root``. Reuses the SAME remote/branch resolvers as the
     post-run push (``resolve_push_remote`` / ``resolve_push_branch``) — pull
@@ -415,7 +415,7 @@ def _maybe_push_after_run(
 ) -> None:
     """Push the knowledge repo iff the run committed at least one new commit.
 
-    Issue #284 gating: (a) explicit opt-in, (b) not a ``--dry-run``,
+    Issue athenaeum#284 gating: (a) explicit opt-in, (b) not a ``--dry-run``,
     (c) HEAD moved during the run. Push failure is non-fatal — ``git_push``
     logs a warning; the run's exit code is unchanged.
     """
@@ -434,7 +434,7 @@ def _maybe_push_after_run(
 def _capture_head(knowledge_root: Path) -> str | None:
     """Return the HEAD sha of the knowledge repo, or ``None`` if unreachable.
 
-    Used by the post-run push hook (issue #284) to detect whether the run
+    Used by the post-run push hook (issue athenaeum#284) to detect whether the run
     produced any commit across librarian / retire / future commit sites
     without threading a flag through each one.
     """
@@ -456,7 +456,7 @@ def git_push(
     remote: str = "origin",
     branch: str | None = None,
 ) -> bool:
-    """Push the knowledge repo's current branch to *remote* (issue #284).
+    """Push the knowledge repo's current branch to *remote* (issue athenaeum#284).
 
     Returns ``True`` when the push succeeded, ``False`` otherwise. A failure
     is logged as a clearly-marked WARNING and does NOT roll back the
@@ -508,7 +508,7 @@ def git_pull(
     remote: str = "origin",
     branch: str | None = None,
 ) -> bool:
-    """Pull the knowledge repo's current branch from *remote* (issue #399).
+    """Pull the knowledge repo's current branch from *remote* (issue athenaeum#399).
 
     Runs ``git pull --ff-only --autostash``. ``--ff-only`` refuses to create
     a merge commit on divergent history — this is a compilation pipeline,
@@ -574,16 +574,16 @@ def tier0_handle_upsert(
     dry_run: bool = False,
 ) -> tuple[WikiEntity, bool] | None:
     """Deterministically merge a pre-structured seed's source-handle keys onto
-    an EXISTING entity page, LLM-free (issue #486).
+    an EXISTING entity page, LLM-free (issue athenaeum#486).
 
-    #454 seeds source handles (#453's schema) by writing raw intake that carries
+    athenaeum#454 seeds source handles (athenaeum#453's schema) by writing raw intake that carries
     ``uid``/``type``/``name`` plus the source-handle frontmatter keys. When the
     entity is NEW, :func:`tier0_passthrough` promotes it verbatim and the handles
     land as frontmatter. When it already EXISTS, tier0 declines (uid in index,
     the idempotency gate) and — before this path existed — the raw fell through
     to the Tier 2/3 LLM tiers, which classify the handle block as prose and fold
-    it into the page body. The structured ``source_handles`` schema (#453) was
-    lost, so ``registry.json`` could not resolve the seeded entity and #454's
+    it into the page body. The structured ``source_handles`` schema (athenaeum#453) was
+    lost, so ``registry.json`` could not resolve the seeded entity and athenaeum#454's
     "seed via raw intake, no hand-edit" acceptance was unreachable.
 
     This path applies the seed's populated source-handle keys directly onto the
@@ -591,14 +591,14 @@ def tier0_handle_upsert(
     onto a known entity lands as frontmatter, exactly like a first seed does
     through tier0 passthrough.
 
-    Entity resolution (issue #692): a seed rarely knows the wiki's internal
-    ``uid`` — an agent or #454 source-handle seed names the company but supplies
+    Entity resolution (issue athenaeum#692): a seed rarely knows the wiki's internal
+    ``uid`` — an agent or athenaeum#454 source-handle seed names the company but supplies
     only ``type``/``name`` plus the handle keys. When the raw declares a ``uid``
-    it is used directly (the #486 path); when it does not, the EXISTING entity is
+    it is used directly (the athenaeum#486 path); when it does not, the EXISTING entity is
     resolved deterministically by name/alias via the index, and the handles are
-    upserted onto that page. Before #692 the uid-less shape fell through to the
+    upserted onto that page. Before athenaeum#692 the uid-less shape fell through to the
     LLM tiers, which flattened the handle block into the page body as prose and
-    lost the #453 schema — the bug this closes.
+    lost the athenaeum#453 schema — the bug this closes.
 
     Eligibility (ALL required, else return ``None`` so the caller falls through
     to Tier 1/2/3 with today's behaviour intact): frontmatter parses;
@@ -625,7 +625,7 @@ def tier0_handle_upsert(
     etype = str(meta.get("type", "") or "").strip()
     name = str(meta.get("name", "") or "").strip()
     # type + name are always required; uid is resolved by name below when the
-    # seed does not self-declare one (issue #692).
+    # seed does not self-declare one (issue athenaeum#692).
     if not etype or not name:
         return None
     if etype not in valid_types:
@@ -642,11 +642,11 @@ def tier0_handle_upsert(
             # New entity — tier0_passthrough owns it; nothing to upsert onto.
             return None
     else:
-        # #692: a source-handle seed that carries the handle frontmatter +
+        # athenaeum#692: a source-handle seed that carries the handle frontmatter +
         # ``type``/``name`` but NO internal ``uid`` (the normal shape — an agent
         # or seed naming a company does not know its wiki uid). Before this, such
         # a raw fell through to the LLM tiers and its handle block was flattened
-        # into the page BODY as prose, silently losing the #453 schema. Resolve
+        # into the page BODY as prose, silently losing the athenaeum#453 schema. Resolve
         # the EXISTING entity deterministically by name/alias and upsert onto it,
         # exactly as the uid-bearing path does.
         resolved = index.lookup(name)
@@ -654,7 +654,7 @@ def tier0_handle_upsert(
             # Names no existing entity — this deterministic path only UPSERTS
             # onto an existing page (creating a new entity is tier0_passthrough's
             # job, which requires a uid). Fail LOUDLY rather than let the handle
-            # block degrade to prose downstream (the actual #692 defect).
+            # block degrade to prose downstream (the actual athenaeum#692 defect).
             log.warning(
                 "  T0 handle-upsert: seed for %r (%s) carries source handles "
                 "%s but names no existing entity and declares no uid — not "
@@ -703,7 +703,7 @@ def tier0_handle_upsert(
         return None
 
     # Merge the seed's populated handle keys onto the existing frontmatter, in
-    # cleaned/canonical form (so the compiled page matches #453's schema and the
+    # cleaned/canonical form (so the compiled page matches athenaeum#453's schema and the
     # registry resolves it). Only keys the seed actually populates are touched.
     existing_handles = collect_handles(existing_meta)
     changed = any(existing_handles.get(key) != value for key, value in incoming.items())
@@ -769,13 +769,13 @@ def process_one(
 ) -> ProcessingResult:
     """Process a single raw file through all tiers.
 
-    ``config`` is the resolved athenaeum.yaml dict (issue #232) — it routes
+    ``config`` is the resolved athenaeum.yaml dict (issue athenaeum#232) — it routes
     the ``models:`` section to the Tier 2/3 calls. ``None`` (legacy/test
     callers) keeps env > code-default model resolution.
     """
     result = ProcessingResult(raw_file=raw)
 
-    # Sticky intake access (issue #320 §5): an `access:` stamped on the raw
+    # Sticky intake access (issue athenaeum#320 §5): an `access:` stamped on the raw
     # file at remember() time by the intake screener is CALLER-AUTHORITATIVE —
     # it must survive compile onto the wiki page, not be re-guessed by the LLM
     # tiers (which classify access from scratch and can drop or widen it). Read
@@ -807,7 +807,7 @@ def process_one(
         return result
 
     # --- Tier 0 (upsert): deterministic source-handle seed onto an existing
-    # entity (issue #486). A pre-structured raw carrying #453's source-handle
+    # entity (issue athenaeum#486). A pre-structured raw carrying athenaeum#453's source-handle
     # keys for a uid already in the wiki merges those keys onto the page's
     # frontmatter directly, instead of falling through to the LLM tiers (which
     # would flatten the handle block into prose and lose the structured schema).
@@ -836,7 +836,7 @@ def process_one(
         return result
 
     # --- Tier 1: Programmatic matching ---
-    # Issue #662: pass config so junk-name matches (here/get/main/reach/lane a
+    # Issue athenaeum#662: pass config so junk-name matches (here/get/main/reach/lane a
     # and operator-tuned stopwords) are filtered before they cost a tier-3 call.
     matched = tier1_programmatic_match(raw, index, config=config)
     matched_names = [name for name, _, _ in matched]
@@ -859,8 +859,8 @@ def process_one(
         )
         return result
 
-    # Deterministic self-resolving-document guard (issue #300 follow-up,
-    # #304): flag embedded self-confirmation claims BEFORE any LLM stage
+    # Deterministic self-resolving-document guard (issue athenaeum#300 follow-up,
+    # athenaeum#304): flag embedded self-confirmation claims BEFORE any LLM stage
     # sees the text, so the untrusted-data boundary doesn't depend on the
     # model choosing to notice the claim itself. Mutates only this
     # in-memory RawFile's cached content, not the raw file on disk, so
@@ -872,7 +872,7 @@ def process_one(
     raw._content = flag_self_resolving_claims(raw.content)
 
     # --- Tier 2: Classification ---
-    # #472: thread a stats object so a response that drops all entities on
+    # athenaeum#472: thread a stats object so a response that drops all entities on
     # unparseable JSON (even after the repair pass + one retry) is counted and
     # surfaced in the run summary instead of vanishing into a warning log.
     t2_stats = Tier2ParseStats()
@@ -890,10 +890,10 @@ def process_one(
         stats=t2_stats,
     )
     result.degraded += t2_stats.degraded
-    result.truncated += t2_stats.truncated  # issue #476
+    result.truncated += t2_stats.truncated  # issue athenaeum#476
     log.info("  T2 classified %d new entities", len(classified))
 
-    # Enforce the sticky intake access (issue #320 §5) on every NEW entity the
+    # Enforce the sticky intake access (issue athenaeum#320 §5) on every NEW entity the
     # LLM created from this raw: the screener's label is authoritative and is
     # never downgraded — take the more restrictive of (raw label, LLM guess).
     # Scoped to new entities only; a merge into a pre-existing page (below) does
@@ -904,16 +904,16 @@ def process_one(
         for c in classified:
             c.access = more_restrictive(c.access, sticky_access)
 
-    # Issue #680: a candidate whose name is a filename/path (a code artifact)
+    # Issue athenaeum#680: a candidate whose name is a filename/path (a code artifact)
     # must NOT become a wiki entity — the repo is the source of truth for its own
     # code, so a memory of it is stale by construction and costs a session to
     # disprove. Drop it AT CREATION, before the tier-3 create call (complementary
-    # to, and no change to, #662's read-side stopword gate).
+    # to, and no change to, athenaeum#662's read-side stopword gate).
     classified, _dropped_code = partition_code_artifact_classifications(
         classified, config
     )
     for _name in _dropped_code:
-        log.info("  T3 create skipped (issue #680, code artifact): %s", _name)
+        log.info("  T3 create skipped (issue athenaeum#680, code artifact): %s", _name)
 
     # Build actions
     actions: list[EntityAction] = []
@@ -985,7 +985,7 @@ def process_one(
         # wiki_root is <knowledge_root>/wiki; the config sits at the
         # knowledge_root level. Reuse the caller's resolved config when
         # provided; otherwise resolve it here so the auto-apply lane
-        # (issue #156) sees the operator's yaml settings.
+        # (issue athenaeum#156) sees the operator's yaml settings.
         tier4_escalate(
             escalations,
             wiki_root / "_pending_questions.md",
@@ -1001,7 +1001,7 @@ def _write_cluster_report_and_prune(
     knowledge_root: Path,
     resolved_config: dict[str, object] | None,
 ) -> None:
-    """Write *clusters* to the canonical report and prune old rotations (#311)."""
+    """Write *clusters* to the canonical report and prune old rotations (athenaeum#311)."""
     canonical, timestamped = write_cluster_report(clusters, output_path)
     log.info(
         "cluster report written: %s (rotated copy: %s)",
@@ -1040,12 +1040,12 @@ def _run_cluster_pass(
         - ``None`` in the whole-corpus mode (the merge pass should recompile
           every cluster), including the dry-run, empty-input, and
           no-extra-roots short circuits, AND every delta fallback (D1-D3/D2).
-        - ``set[str]`` when the delta path (issue #370 PR2) engaged: the NEW
+        - ``set[str]`` when the delta path (issue athenaeum#370 PR2) engaged: the NEW
           cluster ids that were (re)clustered and written this pass, so the
           merge pass can recompile ONLY those and leave every unaffected
           ``wiki/auto-*.md`` untouched.
 
-    ``changed_paths`` (issue #370 PR2) is the set of absolute auto-memory paths
+    ``changed_paths`` (issue athenaeum#370 PR2) is the set of absolute auto-memory paths
     that changed this run. When provided AND delta is viable, only those files
     and their affected clusters are re-clustered + spliced into the existing
     report. ``None`` (the default) preserves the whole-corpus behaviour
@@ -1062,7 +1062,7 @@ def _run_cluster_pass(
 
     threshold = resolve_cluster_threshold(knowledge_root, config=resolved_config)
 
-    # Issue #370: a dry-run must not cluster at all — ``cluster_auto_memory_files``
+    # Issue athenaeum#370: a dry-run must not cluster at all — ``cluster_auto_memory_files``
     # opens the chromadb collection (loading ONNX) to fetch embeddings. Return
     # BEFORE that call so a dry-run stays a cheap preview even if some other
     # caller reaches this pass under dry_run (defense-in-depth: ``run()`` also
@@ -1078,7 +1078,7 @@ def _run_cluster_pass(
     cache_dir = _resolve_cache_dir_config()
     output_path = resolve_cluster_output_path(knowledge_root, config=resolved_config)
 
-    # Issue #569 (H6): fold any cluster carrying a detection-incomplete marker
+    # Issue athenaeum#569 (H6): fold any cluster carrying a detection-incomplete marker
     # (its detector/resolver gave up after retries on a PRIOR run) into this
     # run's delta set, REGARDLESS of whether its member files changed. Live-delta
     # only re-examines clusters whose files changed, so without this a cluster
@@ -1094,11 +1094,11 @@ def _run_cluster_pass(
             changed_paths = changed_paths | incomplete_members
             log.info(
                 "delta: %d member file(s) across detection-incomplete cluster(s) "
-                "forced into the delta set for re-detection (issue #569)",
+                "forced into the delta set for re-detection (issue athenaeum#569)",
                 len(incomplete_members),
             )
 
-    # Issue #370 PR2: delta-scoped cluster pass. Only reachable when a caller
+    # Issue athenaeum#370 PR2: delta-scoped cluster pass. Only reachable when a caller
     # threads ``changed_paths`` (ingest / session_end); the nightly ``run``
     # never does, so it always takes the whole-corpus path below. An EMPTY set
     # is a valid delta ("no auto-memory changed this run") — distinct from
@@ -1151,7 +1151,7 @@ def _delta_cluster_pass(
     knowledge_root: Path,
     resolved_config: dict[str, object] | None,
 ) -> set[str] | None:
-    """Delta-scoped cluster pass (issue #370 PR2). ``None`` = fall back to full.
+    """Delta-scoped cluster pass (issue athenaeum#370 PR2). ``None`` = fall back to full.
 
     Reads the prior cluster report, computes the affected scope, re-clusters
     only the affected pool, splices the result back into the report, and returns
@@ -1180,7 +1180,7 @@ def _delta_cluster_pass(
     )
     spliced = splice_cluster_report(prior_rows, scope.affected_ids, new_partial)
 
-    # Issue #681: complete-linkage formation splits a re-clustered pool into
+    # Issue athenaeum#681: complete-linkage formation splits a re-clustered pool into
     # several cliques, most of which are byte-identical to their prior rows
     # (a change usually re-partitions only one corner of a component). The
     # merge pass rewrites the wiki entry for every cluster id we return here,
@@ -1263,14 +1263,14 @@ def _compile_auto_memory(
 ) -> list:
     """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
 
-    Issue #370 PR2: this is the single choke point for the delta-scoped compile,
+    Issue athenaeum#370 PR2: this is the single choke point for the delta-scoped compile,
     extracted from :func:`run` so the equivalence test can drive the EXACT
     orchestration on the deterministic ``client=None`` path (run's own
     pre-flight refuses a keyless ``api``-provider full pipeline, so the test
     cannot reach this logic through run()).
 
-    Delta cadence contract (issue #463, slice D of #460, supersedes the
-    original #370 PR2 D5 fallback): the deterministic ``client is None`` path
+    Delta cadence contract (issue athenaeum#463, slice D of athenaeum#460, supersedes the
+    original athenaeum#370 PR2 D5 fallback): the deterministic ``client is None`` path
     (session_end / ingest tier0, no LLM) is delta-eligible whenever
     ``librarian.delta.enabled`` allows it, unconditionally. The nightly LLM
     run — a live client — is now ALSO delta-eligible by default, gated by BOTH
@@ -1282,10 +1282,10 @@ def _compile_auto_memory(
     ``full_compile_due`` computation) is due, or when the caller forces it
     (``--full-compile`` / ``full_compile=True``). This periodic full compile is
     the corpus-consistency backstop for the live-client delta path: it is the
-    ONLY mechanism that re-enters TTL-decayed (#251) auto ``not_a_conflict``
+    ONLY mechanism that re-enters TTL-decayed (athenaeum#251) auto ``not_a_conflict``
     suppressions and reconciles any drift a scoped delta merge could not see
     (the cross-scope contradiction sweep, run-global slug resolution, etc.).
-    Issue #251 TTL expiry does NOT, by itself, force affected-cluster
+    Issue athenaeum#251 TTL expiry does NOT, by itself, force affected-cluster
     re-detection on an otherwise-eligible delta night — only the scheduled
     full-compile reconciliation does. All existing delta fallbacks (F6 slug
     collision, the D2 affected-cluster/member caps inside
@@ -1295,14 +1295,14 @@ def _compile_auto_memory(
     whole-corpus compile. All new params default to the whole-corpus
     behaviour, so a call with ``changed_paths=None`` (or
     ``full_compile_due=False`` with no live client) is byte-identical to the
-    pre-#370 pipeline.
+    pre-athenaeum#370 pipeline.
 
-    ``max_api_calls`` (issue #461) is threaded straight through to
+    ``max_api_calls`` (issue athenaeum#461) is threaded straight through to
     :func:`athenaeum.merge.merge_clusters_to_wiki`'s C4 budget guard — see
     there for the degrade semantics. ``None`` (the default) preserves the
-    pre-#461 unbounded C4 behaviour byte-for-byte.
+    pre-athenaeum#461 unbounded C4 behaviour byte-for-byte.
 
-    ``out_delta_taken`` (issue #463) is an optional mutable out-param
+    ``out_delta_taken`` (issue athenaeum#463) is an optional mutable out-param
     (mirrors :func:`_raw_hash_snapshot`'s ``out_stats`` convention): when
     given, this function sets ``out_delta_taken["taken"]`` to whether the
     merge that just ran was ACTUALLY delta-scoped (``only_cluster_ids is not
@@ -1313,7 +1313,7 @@ def _compile_auto_memory(
     ``run()`` uses it to decide whether to reset the full-compile cadence
     stamp. ``None`` (the default) skips the out-param write entirely.
 
-    ``out_merge_stats`` (issue #464, slice E of #460) is threaded straight
+    ``out_merge_stats`` (issue athenaeum#464, slice E of athenaeum#460) is threaded straight
     through as :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``out_stats``
     out-param, so the caller gets the detector/resolver call-count breakdown
     (``haiku_calls``, ``resolve_calls``, ``chunks_run``,
@@ -1370,7 +1370,7 @@ def _compile_auto_memory(
         )
         only_cluster_ids = None
 
-    # Issue #463: report whether this compile actually took the delta path
+    # Issue athenaeum#463: report whether this compile actually took the delta path
     # (reflects every fallback uniformly — see the ``out_delta_taken`` docstring
     # above) BEFORE the merge call, since ``only_cluster_ids`` is fully settled
     # here.
@@ -1403,7 +1403,7 @@ def _run_retire(
     dry_run: bool,
     projects_root: Path | None,
 ):
-    """Run the move-then-retire pass (issue #261) over the merged entries.
+    """Run the move-then-retire pass (issue athenaeum#261) over the merged entries.
 
     Thin wrapper around :func:`athenaeum.retire.run_retire_pass` so the run
     loop stays readable. Lazy-imports ``retire`` to avoid a hard import cycle
@@ -1438,7 +1438,7 @@ def _run_reresolve_pass(
     client: anthropic.Anthropic | None,
     usage: TokenUsage | None = None,
 ) -> int:
-    """Re-resolve open, proposal-less pending questions (issue #188).
+    """Re-resolve open, proposal-less pending questions (issue athenaeum#188).
 
     Thin wrapper around :func:`athenaeum.tiers.reresolve_open_questions` so the
     nightly librarian self-heals transient cap-hit / offline escalations on a
@@ -1463,7 +1463,7 @@ def _run_reresolve_pass(
 def librarian_max_api_calls(config: dict[str, object] | None = None) -> int:
     """Resolve the run-level API call cap from env > config > default.
 
-    Issue #220. Environment override wins over the YAML setting so an
+    Issue athenaeum#220. Environment override wins over the YAML setting so an
     operator can bump the cap on a single run without editing config.
     Negative or non-numeric values fall back to
     :data:`DEFAULT_MAX_API_CALLS`. Mirrors
@@ -1491,7 +1491,7 @@ def librarian_max_api_calls(config: dict[str, object] | None = None) -> int:
 def librarian_max_files(config: dict[str, object] | None = None) -> int:
     """Resolve the per-run intake batch size from env > config > default.
 
-    Issue #232. Mirrors :func:`librarian_max_api_calls` (#220): the
+    Issue athenaeum#232. Mirrors :func:`librarian_max_api_calls` (athenaeum#220): the
     environment override wins over the YAML setting so a cron deployment
     can tune the window on a single run without editing config or the
     crontab command line. Negative or non-numeric values fall back to
@@ -1519,7 +1519,7 @@ def librarian_max_files(config: dict[str, object] | None = None) -> int:
 def librarian_max_runtime(config: dict[str, object] | None = None) -> int:
     """Resolve the run-level wall-clock deadline (seconds) from env > config > default.
 
-    Issue #396. Mirrors :func:`librarian_max_files` (#232): the
+    Issue athenaeum#396. Mirrors :func:`librarian_max_files` (athenaeum#232): the
     ``ATHENAEUM_MAX_RUNTIME`` env override wins over the YAML
     ``librarian.max_runtime`` key so a cron deployment can tune the deadline
     on a single run without editing config. The ``--max-runtime`` CLI flag
@@ -1549,7 +1549,7 @@ def librarian_max_runtime(config: dict[str, object] | None = None) -> int:
 def librarian_entity_runtime_share(config: dict[str, object] | None = None) -> float:
     """Resolve the entity phase's share of ``max_runtime`` from env > config > default.
 
-    Issue #440. Mirrors :func:`librarian_max_runtime` (#396) in precedence, but
+    Issue athenaeum#440. Mirrors :func:`librarian_max_runtime` (athenaeum#396) in precedence, but
     the value is a FRACTION of the run deadline rather than a duration, so the
     reserve scales automatically when an operator retunes ``max_runtime``.
 
@@ -1557,7 +1557,7 @@ def librarian_entity_runtime_share(config: dict[str, object] | None = None) -> f
     including a non-numeric string, a bool (``entity_runtime_share: yes``
     parses as ``True``, an int subclass, and must not become a 100% share), or
     an out-of-range number — disables the reserve and is returned as ``0.0``,
-    restoring the pre-#440 behaviour where the entity phase may consume the
+    restoring the pre-athenaeum#440 behaviour where the entity phase may consume the
     entire window. That is a valid explicit choice, not an error.
     """
 
@@ -1588,7 +1588,7 @@ def librarian_entity_runtime_share(config: dict[str, object] | None = None) -> f
 def librarian_batch_mode(config: dict[str, object] | None = None) -> bool:
     """Resolve the Batch API opt-in from env > config > default off.
 
-    Issue #236. Mirrors :func:`librarian_max_files` (#232): the
+    Issue athenaeum#236. Mirrors :func:`librarian_max_files` (athenaeum#232): the
     ``ATHENAEUM_BATCH_MODE`` env var wins over the yaml
     ``librarian.batch_mode`` key so a cron deployment can flip the mode on
     a single run; the CLI ``--batch-mode`` flag (resolved by the caller)
@@ -1612,9 +1612,9 @@ def librarian_batch_mode(config: dict[str, object] | None = None) -> bool:
 
 
 def librarian_stuck_file_threshold(config: dict[str, object] | None = None) -> int:
-    """Resolve the consecutive-failure threshold before a raw file is stuck (#663).
+    """Resolve the consecutive-failure threshold before a raw file is stuck (athenaeum#663).
 
-    Mirrors :func:`librarian_max_files` (#232): the
+    Mirrors :func:`librarian_max_files` (athenaeum#232): the
     ``ATHENAEUM_STUCK_FILE_THRESHOLD`` env override wins over the yaml
     ``librarian.stuck_file_threshold`` key so a cron deployment can tune it on
     a single run. A file that has failed this many CONSECUTIVE runs on the same
@@ -1645,7 +1645,7 @@ def librarian_stuck_file_threshold(config: dict[str, object] | None = None) -> i
 
 
 def _stuck_content_hash(raw: Any) -> str:
-    """Stable short hash of a raw file's content (#663 stuck-file ledger key).
+    """Stable short hash of a raw file's content (athenaeum#663 stuck-file ledger key).
 
     Keying the ledger on (ref, content-hash) means a re-edited raw file — one
     whose author fixed whatever made it time out — starts a FRESH consecutive
@@ -1660,7 +1660,7 @@ def _stuck_content_hash(raw: Any) -> str:
 
 
 def _load_stuck_ledger(wiki_root: Path) -> dict[str, dict[str, Any]]:
-    """Load the persistent stuck-file ledger (#663). Missing/corrupt → empty.
+    """Load the persistent stuck-file ledger (athenaeum#663). Missing/corrupt → empty.
 
     A corrupt ledger must never wedge a run — a parse error is treated as "no
     stuck files known", so at worst a genuinely-stuck file gets one more retry
@@ -1684,7 +1684,7 @@ def _load_stuck_ledger(wiki_root: Path) -> dict[str, dict[str, Any]]:
 
 
 def _write_stuck_ledger(wiki_root: Path, ledger: dict[str, dict[str, Any]]) -> None:
-    """Persist the stuck-file ledger (#663), or remove it when empty.
+    """Persist the stuck-file ledger (athenaeum#663), or remove it when empty.
 
     Written beside the deferred manifest under wiki_root so it rides the run's
     git snapshot (it is durable cross-run state, exactly like the deferred
@@ -1708,7 +1708,7 @@ def _record_stuck_failure(
     action: str | None,
     threshold: int,
 ) -> dict[str, Any] | None:
-    """Increment a raw file's consecutive-failure count in the ledger (#663).
+    """Increment a raw file's consecutive-failure count in the ledger (athenaeum#663).
 
     Keyed by ``raw.ref`` + content hash: a content change (author re-edited the
     file) resets the count. Returns the entry when this failure is the one that
@@ -1736,7 +1736,7 @@ def _record_stuck_failure(
 
 
 def _surface_newly_stuck(ctx: "RunContext", raw: Any, entry: dict[str, Any]) -> None:
-    """Record + loudly log a raw file that just crossed the stuck threshold (#663).
+    """Record + loudly log a raw file that just crossed the stuck threshold (athenaeum#663).
 
     Appends a machine-detectable record to ``ctx.stuck_files`` (exported to
     ``out_run_stats["stuck_files"]``) and emits the greppable
@@ -1754,7 +1754,7 @@ def _surface_newly_stuck(ctx: "RunContext", raw: Any, entry: dict[str, Any]) -> 
     log.warning(
         "%s: %s has now failed %d consecutive run(s) on action %s (%s) — STUCK; "
         "it will be skipped until its content changes or a human intervenes "
-        "(issue #663)",
+        "(issue athenaeum#663)",
         STUCK_FILE_PREFIX,
         raw.ref,
         int(entry.get("failures", 0)),
@@ -1801,9 +1801,9 @@ def _write_deferred_manifest(
     or processing exception); they also stay on disk and are retried next
     run, but they are not "deferred by budget" so they get their own section.
 
-    ``reason`` (issue #396) selects the header wording: ``"budget"`` (the
-    #220 API-call-budget trip), ``"deadline"`` (the wall-clock deadline trip),
-    or ``"entity-share"`` (issue #440 — the entity phase yielded the rest of
+    ``reason`` (issue athenaeum#396) selects the header wording: ``"budget"`` (the
+    athenaeum#220 API-call-budget trip), ``"deadline"`` (the wall-clock deadline trip),
+    or ``"entity-share"`` (issue athenaeum#440 — the entity phase yielded the rest of
     the window to the downstream C4 detector). The rest of the manifest — the
     counts and the deferred-file list — is identical either way; only the
     explanatory header differs.
@@ -1816,7 +1816,7 @@ def _write_deferred_manifest(
             "# Deferred work — librarian run wall-clock deadline exceeded",
             "",
             "The last librarian run stopped early because the run-level",
-            "wall-clock deadline (librarian.max_runtime, issue #396) was",
+            "wall-clock deadline (librarian.max_runtime, issue athenaeum#396) was",
             "exceeded. The raw files below were NOT processed this run; they",
             "remain on disk and the next run picks them up automatically. This",
             "file is overwritten on every tripped run and removed by the next",
@@ -1828,7 +1828,7 @@ def _write_deferred_manifest(
             "",
             "The last librarian run stopped its ENTITY phase early because that",
             "phase had spent its share of the run window",
-            "(librarian.entity_runtime_share, issue #440). This is deliberate,",
+            "(librarian.entity_runtime_share, issue athenaeum#440). This is deliberate,",
             "not a failure: the remainder of the window is reserved for the",
             "auto-memory compile and the C4 contradiction detector downstream.",
             "The raw files below were NOT processed this run; they remain on",
@@ -1882,12 +1882,12 @@ def _write_deferred_manifest(
 
 
 # ---------------------------------------------------------------------------
-# Issue #464 (slice E of #460) — permanent per-phase run summary.
+# Issue athenaeum#464 (slice E of athenaeum#460) — permanent per-phase run summary.
 #
-# The #440 nightly-cost profiling epic needs a durable, greppable record of
+# The athenaeum#440 nightly-cost profiling epic needs a durable, greppable record of
 # where a run's wall-clock and LLM-call spend actually went. This is pure
 # observability: `run()` times each phase it controls (wiki-dedup, the
-# per-file entity loop, the auto-memory C2-C4 compile, retire, #188
+# per-file entity loop, the auto-memory C2-C4 compile, retire, athenaeum#188
 # reresolve) and snapshots `usage.api_calls` before/after each phase for a
 # call-count delta; the auto-memory phase's detector/resolver/similarity-
 # sweep breakdown comes from `merge_clusters_to_wiki`'s `out_stats` (threaded
@@ -1909,7 +1909,7 @@ def _render_schema_fragment_attribution(
     ``token`` is ``default`` when the live fragment is byte-identical to the
     bundled default, else the first 8 hex chars of its sha256 — so an operator's
     edited copy is attributable to a specific byte-state from the run log alone
-    (issue #567). ``name`` drops the redundant ``.md`` suffix; every attributed
+    (issue athenaeum#567). ``name`` drops the redundant ``.md`` suffix; every attributed
     fragment name is otherwise free of the space/``=``/``,``/``:`` separators the
     run-summary line uses, so it stays unambiguously greppable.
     """
@@ -1949,11 +1949,11 @@ def _render_run_summary(
     ``total_secs`` sums the per-phase elapsed times (NOT independently timed)
     so it is always internally consistent with the phase breakdown.
 
-    Attribution (issue #567) rides the head segment, right after ``total_secs``:
+    Attribution (issue athenaeum#567) rides the head segment, right after ``total_secs``:
     ``schema_fragments=`` attributes the operator-tunable fragment bytes and
     ``prompt_manifest=`` the shipped-prompt bytes this run used. Both are
     omitted when their argument is ``None`` (the pure formatting default), so
-    the pre-#567 head and the direct unit-test callers are byte-unchanged. No
+    the pre-athenaeum#567 head and the direct unit-test callers are byte-unchanged. No
     phase logic, ordering, or exit code is affected.
     """
     total_secs = sum(secs for _phase, secs, _fields in profile)
@@ -1976,7 +1976,7 @@ def _render_run_summary(
 
 @dataclass
 class RunContext:
-    """Mutable state threaded through the ``run()`` phase functions (#546).
+    """Mutable state threaded through the ``run()`` phase functions (athenaeum#546).
 
     Carries exactly the locals that used to live in ``run()``'s own frame and
     cross a ``# ---`` section boundary — resolved config, paths, the shared
@@ -2026,19 +2026,19 @@ class RunContext:
     usage: TokenUsage = field(default_factory=TokenUsage)
     merge_client: Any = None
     run_deadline: float | None = None
-    # Issue #440: absolute monotonic instant after which the entity phase stops
+    # Issue athenaeum#440: absolute monotonic instant after which the entity phase stops
     # CLAIMING new files, reserving the remainder of ``run_deadline`` for the
     # phases downstream of it (auto-memory C2/C3 and the C4 contradiction
     # detector). ``None`` when the run deadline is disabled or the share is
     # opted out of — in both cases the entity phase behaves exactly as it did
-    # before #440 and is bounded only by ``run_deadline``.
+    # before athenaeum#440 and is bounded only by ``run_deadline``.
     entity_deadline: float | None = None
 
     # --- per-phase profiling / summary state ------------------------------
     run_profile: list[tuple[str, float, dict]] = field(default_factory=list)
     summary_emitted: bool = False
 
-    # --- entity-phase accumulators (issue #461: shared with auto-memory) --
+    # --- entity-phase accumulators (issue athenaeum#461: shared with auto-memory) --
     total_created: int = 0
     total_updated: int = 0
     total_escalated: int = 0
@@ -2050,15 +2050,15 @@ class RunContext:
     beyond_window: int = 0
     processed_count: int = 0
     deadline_tripped: bool = False
-    # Issue #440: the entity phase stopped on its OWN runtime share rather than
+    # Issue athenaeum#440: the entity phase stopped on its OWN runtime share rather than
     # on the run deadline. Deliberately distinct from ``deadline_tripped``:
     # that flag skips the auto-memory block and exits 124, which is the exact
     # starvation this reserve exists to prevent. An entity-budget stop is a
-    # #220-style deferral — remaining intake is resumable, the run continues
+    # athenaeum#220-style deferral — remaining intake is resumable, the run continues
     # into C2-C4, and it exits 0 unless a LATER phase trips the real deadline.
     entity_budget_tripped: bool = False
     raw_files: list[Any] = field(default_factory=list)
-    # Issue #663: raw files surfaced as STUCK this run — either they crossed the
+    # Issue athenaeum#663: raw files surfaced as STUCK this run — either they crossed the
     # consecutive-failure threshold this run, or they were already over it and
     # were skipped. Each entry is
     # ``{"ref", "failures", "action", "error"}``. Exported to
@@ -2076,14 +2076,14 @@ class RunContext:
         return self.run_deadline is not None and time.monotonic() >= self.run_deadline
 
     def entity_budget_exceeded(self) -> bool:
-        """True once the entity phase has spent its share of the run window (#440)."""
+        """True once the entity phase has spent its share of the run window (athenaeum#440)."""
         return (
             self.entity_deadline is not None
             and time.monotonic() >= self.entity_deadline
         )
 
     def tick_heartbeat(self) -> None:
-        # Issue #526 (H10): refresh the run lock's heartbeat at phase/file
+        # Issue athenaeum#526 (H10): refresh the run lock's heartbeat at phase/file
         # boundaries so ``heartbeat_age_seconds`` reflects PROGRESS, not
         # merely the acquire time.
         if self.heartbeat is not None:
@@ -2094,23 +2094,23 @@ class RunContext:
             self.out_run_stats["beyond_window"] = self.beyond_window
             self.out_run_stats["deferred_refs"] = list(self.deferred_refs)
             self.out_run_stats["failed_files"] = list(self.failed_files)
-            # Issue #663: stuck files (crossed the consecutive-failure threshold
+            # Issue athenaeum#663: stuck files (crossed the consecutive-failure threshold
             # or skipped because they already had) as machine-detectable state,
             # so a consumer can distinguish a permanent no-progress loop from a
             # one-off failure without parsing log text.
             self.out_run_stats["stuck_files"] = list(self.stuck_files)
-            # Issue #669: surface the entity-phase share yield (#440) as
+            # Issue athenaeum#669: surface the entity-phase share yield (athenaeum#440) as
             # machine-detectable run state. cron-fleet#94 detects a capped run by
-            # DURATION (`LIBRARIAN_CAP_DEADLINE`), which the #440 yield made inert
+            # DURATION (`LIBRARIAN_CAP_DEADLINE`), which the athenaeum#440 yield made inert
             # — the entity phase now yields at its share and the run ends well
-            # under the cap, so a #440-shaped stall goes undetected. Emitting the
+            # under the cap, so a athenaeum#440-shaped stall goes undetected. Emitting the
             # flag lets a consumer distinguish "entity yielded on purpose" from
             # "API budget exhausted" WITHOUT parsing WARNING text or the deferred
             # manifest header. The boolean alone can't judge whether the backlog
             # is growing, so the files-claimed / files-deferred counts ride
             # alongside it (this run's compiled count and the intake the yield
             # deferred). This is purely additive observability — the yield
-            # BEHAVIOR from #440 is unchanged.
+            # BEHAVIOR from athenaeum#440 is unchanged.
             self.out_run_stats["entity_budget_tripped"] = self.entity_budget_tripped
             self.out_run_stats["entity_files_claimed"] = self.processed_count
             self.out_run_stats["entity_files_deferred"] = len(self.deferred_refs)
@@ -2119,7 +2119,7 @@ class RunContext:
         if self.summary_emitted:
             return
         self.summary_emitted = True
-        # Issue #567: attribute the operator-fragment + shipped-prompt bytes
+        # Issue athenaeum#567: attribute the operator-fragment + shipped-prompt bytes
         # this run used, on the same greppable line. Computing them touches
         # the wiki (fragment reads) and the prompt registry — neither may
         # ever change an exit code, so any failure degrades to omitting the
@@ -2149,13 +2149,13 @@ class RunContext:
 
     def stop_on_deadline(self, phase: str) -> int:
         """Commit partial progress and return 124 when the deadline trips in
-        a pre-entity phase — mirrors the #337 interrupt-checkpoint path
+        a pre-entity phase — mirrors the athenaeum#337 interrupt-checkpoint path
         (greppable partial commit, exit 124, resumable). The run-lock is
         released by the CLI caller's ``finally`` on return; the deferred
         intake / un-run phases are picked up by the next run."""
         log.warning(
             "librarian: wall-clock deadline (%ds) exceeded during %s — "
-            "committing partial progress and stopping (resumable, issue #396)",
+            "committing partial progress and stopping (resumable, issue athenaeum#396)",
             self.max_runtime,
             phase,
         )
@@ -2165,8 +2165,8 @@ class RunContext:
                 f"librarian: partial run (deadline {self.max_runtime}s exceeded "
                 f"during {phase})",
             )
-        # Issue #464: emit the per-phase summary for whatever ran BEFORE the
-        # trip — the 124 exit paths are exactly the case the #440 profiling
+        # Issue athenaeum#464: emit the per-phase summary for whatever ran BEFORE the
+        # trip — the 124 exit paths are exactly the case the athenaeum#440 profiling
         # epic most needs visibility into (a run that stopped early).
         self.emit_run_summary()
         return 124
@@ -2174,12 +2174,12 @@ class RunContext:
 
 def _run_preconditions(ctx: RunContext) -> int | None:
     """Git/config preconditions gate: provider resolution + preflight, the
-    ANTHROPIC_API_KEY/wiki-root/.git existence checks. Issue #330/#545 seam.
+    ANTHROPIC_API_KEY/wiki-root/.git existence checks. Issue athenaeum#330/#545 seam.
 
     Returns a nonzero exit code to short-circuit ``run()`` on failure, or
     ``None`` to continue. Mutates ``ctx.provider``.
     """
-    # Issue #330: resolve the active LLM provider (env ATHENAEUM_LLM_PROVIDER >
+    # Issue athenaeum#330: resolve the active LLM provider (env ATHENAEUM_LLM_PROVIDER >
     # yaml llm.provider > api). A misconfigured value raises — surface it as a
     # clean run failure rather than a traceback.
     try:
@@ -2188,7 +2188,7 @@ def _run_preconditions(ctx: RunContext) -> int | None:
         log.error("%s", exc)
         return 1
 
-    # Issue #330: fail loudly at startup if the claude-cli binary is missing,
+    # Issue athenaeum#330: fail loudly at startup if the claude-cli binary is missing,
     # instead of silently deferring every file to an rc-0 no-op run.
     preflight_err = preflight_provider(ctx.provider)
     if preflight_err:
@@ -2197,7 +2197,7 @@ def _run_preconditions(ctx: RunContext) -> int | None:
 
     # The ANTHROPIC_API_KEY requirement applies ONLY to the ``api`` backend.
     # The ``claude-cli`` backend authenticates via the operator's ambient
-    # Claude Code subscription login and needs no key (issue #330).
+    # Claude Code subscription login and needs no key (issue athenaeum#330).
     if (
         ctx.provider == "api"
         and not ctx.api_key
@@ -2231,33 +2231,33 @@ def _resolve_run_config(ctx: RunContext) -> int | None:
     """Resolve the several run-level config knobs, in the SAME order the
     original ``run()`` body resolved them (later resolutions — e.g. the
     batch-mode/provider capability check — depend on earlier ones, e.g.
-    ``ctx.provider``). Issue #220/#232/#396/#236/#261/#284/#399/#235 seam.
+    ``ctx.provider``). Issue athenaeum#220/#232/#396/#236/#261/#284/#399/#235 seam.
 
     Returns a nonzero exit code to short-circuit ``run()`` on failure
     (the batch-mode/provider incompatibility), or ``None`` to continue.
     """
-    # Issue #220: resolve the run-level API call budget (explicit arg >
+    # Issue athenaeum#220: resolve the run-level API call budget (explicit arg >
     # env > yaml > default).
     if ctx.max_api_calls is None:
         ctx.max_api_calls = librarian_max_api_calls(ctx.config)
 
-    # Issue #232: resolve the per-run intake batch size the same way
+    # Issue athenaeum#232: resolve the per-run intake batch size the same way
     # (explicit arg > env > yaml > default).
     if ctx.max_files is None:
         ctx.max_files = librarian_max_files(ctx.config)
 
-    # Issue #396: resolve the run-level wall-clock deadline the same way
+    # Issue athenaeum#396: resolve the run-level wall-clock deadline the same way
     # (explicit arg > env > yaml > default). A non-positive resolved value
     # disables the deadline (unbounded run — the explicit escape hatch).
     if ctx.max_runtime is None:
         ctx.max_runtime = librarian_max_runtime(ctx.config)
 
-    # Issue #236: resolve the Batch API opt-in the same way (explicit arg >
+    # Issue athenaeum#236: resolve the Batch API opt-in the same way (explicit arg >
     # env > yaml > default off).
     if ctx.batch_mode is None:
         ctx.batch_mode = librarian_batch_mode(ctx.config)
 
-    # Issue #330/#573: batch mode is API-only — the Messages Batch API is an
+    # Issue athenaeum#330/#573: batch mode is API-only — the Messages Batch API is an
     # Anthropic-endpoint feature with no ``claude`` CLI equivalent. This is now
     # a DECLARED capability (``supports_batches``) rather than an inline
     # provider-id test: reject the combination LOUDLY at startup rather than
@@ -2272,7 +2272,7 @@ def _resolve_run_config(ctx: RunContext) -> int | None:
         )
         return 1
 
-    # Issue #261/#259: resolve the move-then-retire opt-out (explicit arg >
+    # Issue athenaeum#261/#259: resolve the move-then-retire opt-out (explicit arg >
     # yaml `librarian.retire` > default ON). When off, the retire pass is
     # skipped at both call sites below; the destructive `git rm` of raw
     # auto-memory never runs.
@@ -2284,7 +2284,7 @@ def _resolve_run_config(ctx: RunContext) -> int | None:
             "auto-memory will not be moved or git-removed this run"
         )
 
-    # Issue #284: resolve the post-run push opt-in (explicit arg >
+    # Issue athenaeum#284: resolve the post-run push opt-in (explicit arg >
     # yaml `librarian.push_after_run` > default OFF). Default off so a
     # fresh install never side-effects an operator's git remote. The
     # actual push fires after the final commit, only when the run
@@ -2292,13 +2292,13 @@ def _resolve_run_config(ctx: RunContext) -> int | None:
     if ctx.push_after_run is None:
         ctx.push_after_run = resolve_push_after_run(ctx.config)
 
-    # Issue #399: resolve the pre-run pull opt-in the same way (explicit arg
+    # Issue athenaeum#399: resolve the pre-run pull opt-in the same way (explicit arg
     # > yaml `librarian.pull_before_run` > default OFF). Symmetric to the
     # push resolution above.
     if ctx.pull_before_run is None:
         ctx.pull_before_run = resolve_pull_before_run(ctx.config)
 
-    # Issue #235: a resolved budget of 0 is a valid defer-everything cap
+    # Issue athenaeum#235: a resolved budget of 0 is a valid defer-everything cap
     # (env/yaml zero — the CLI flag rejects it), but it is also the most
     # likely accidental misconfiguration: every LLM tier is skipped and the
     # whole intake is deferred. Flag it loudly at run start so an
@@ -2315,19 +2315,19 @@ def _resolve_run_config(ctx: RunContext) -> int | None:
 
 def _run_git_vcs_io(ctx: RunContext) -> None:
     """Pre-run VCS I/O: optional ``git pull --ff-only``, then capture
-    ``head_at_start``. Issue #399/#284 seam.
+    ``head_at_start``. Issue athenaeum#399/#284 seam.
 
     Must run AFTER config resolution (needs ``ctx.pull_before_run``) and
     BEFORE anything that could commit, so ``ctx.head_at_start`` reflects the
     post-pull state and the post-run push only pushes commits THIS run made.
     """
     # ``_resolve_run_config`` runs before this phase and always resolves the
-    # opt-in to a concrete bool (#546: narrows the ``bool | None`` field to
+    # opt-in to a concrete bool (athenaeum#546: narrows the ``bool | None`` field to
     # ``bool`` — a true post-resolution invariant, never fires for a valid run).
     assert ctx.pull_before_run is not None
-    # Issue #399: pull before capturing HEAD so (a) the run starts from
+    # Issue athenaeum#399: pull before capturing HEAD so (a) the run starts from
     # origin's latest and (b) head_at_start reflects the post-pull state, so
-    # the existing post-run push (issue #284) only pushes commits THIS run
+    # the existing post-run push (issue athenaeum#284) only pushes commits THIS run
     # produced, not commits picked up by the pull.
     _maybe_pull_before_run(
         ctx.knowledge_root,
@@ -2336,7 +2336,7 @@ def _run_git_vcs_io(ctx: RunContext) -> None:
         dry_run=ctx.dry_run,
     )
 
-    # Issue #284: capture HEAD at run-start (before ANY commit site fires)
+    # Issue athenaeum#284: capture HEAD at run-start (before ANY commit site fires)
     # so the post-run push can detect whether the run produced any commit
     # across librarian.git_snapshot, retire._commit_paths_if_staged, and
     # the merge-only / cluster-only early-return paths. Per-call-site
@@ -2346,40 +2346,40 @@ def _run_git_vcs_io(ctx: RunContext) -> None:
 
 def _arm_run_deadline(ctx: RunContext) -> None:
     """Build the shared LLM client, initialize ``usage``, and arm the
-    run-level wall-clock deadline. Issue #330/#396 seam.
+    run-level wall-clock deadline. Issue athenaeum#330/#396 seam.
 
     Must run after config resolution (needs ``ctx.provider``,
     ``ctx.max_runtime``) and before any phase that spends budget or checks
     the deadline.
     """
     # ``_resolve_run_config`` runs before this phase and always resolves
-    # ``max_runtime`` to a concrete int (#546: narrows ``int | None`` to
+    # ``max_runtime`` to a concrete int (athenaeum#546: narrows ``int | None`` to
     # ``int`` — a resolved ``<= 0`` still disables the deadline below, but the
     # value is never None post-resolution, so this assert never fires).
     assert ctx.max_runtime is not None
     # One run-level TokenUsage threaded through every phase (cluster, merge
-    # incl. the C4 detector + resolver, #188 reresolve, entity tiers) so
+    # incl. the C4 detector + resolver, athenaeum#188 reresolve, entity tiers) so
     # ``max_api_calls`` is a genuine run-level ceiling. Earlier phases
     # increment the counter; the entity-tier loop below is the enforcement
     # point that defers remaining intake when the budget is spent.
     ctx.usage = TokenUsage()
     if ctx.provider == "claude-cli":
-        # Subscription pays for the tokens (issue #330): counts still
+        # Subscription pays for the tokens (issue athenaeum#330): counts still
         # accumulate and appear in the run summary, but estimated_cost_usd
         # reports $0 instead of pricing them at API list rates.
         ctx.usage.subscription_covered = True
 
-    # Build the shared LLM client early (issue #330 provider seam) so both the
+    # Build the shared LLM client early (issue athenaeum#330 provider seam) so both the
     # entity tiers and the C4 contradiction detector can share it. ``None`` for
     # the api backend when the key is unset (detector degrades deterministically);
     # for claude-cli it is the subscription CLI adapter. ``max_retries=3``
-    # preserves the pre-#330 api-backend construction byte-for-byte.
+    # preserves the pre-athenaeum#330 api-backend construction byte-for-byte.
     ctx.merge_client = build_llm_client(ctx.config, api_key=ctx.api_key, max_retries=3)
 
-    # Issue #396: arm the run-level wall-clock deadline. ``run_deadline`` is an
+    # Issue athenaeum#396: arm the run-level wall-clock deadline. ``run_deadline`` is an
     # absolute :func:`time.monotonic` value (or ``None`` when disabled) covering
     # every phase below — the post-compile phases AND the entity loop — so a
-    # phase that stops making progress (the #396 incident wedged ~3.5h in a
+    # phase that stops making progress (the athenaeum#396 incident wedged ~3.5h in a
     # post-checkpoint merge subprocess holding the run-lock) is bounded instead
     # of running until externally killed. Checked at file/cluster/phase
     # boundaries; the merge pass additionally checks it inside its per-cluster
@@ -2388,11 +2388,11 @@ def _arm_run_deadline(ctx: RunContext) -> None:
         (time.monotonic() + ctx.max_runtime) if ctx.max_runtime > 0 else None
     )
 
-    # Issue #440: carve the entity phase's share out of that same window, so the
+    # Issue athenaeum#440: carve the entity phase's share out of that same window, so the
     # phases AFTER it (auto-memory C2/C3, the C4 contradiction detector) have a
     # structural budget instead of whatever the entity loop happens to leave.
     # Derived from the run deadline rather than from the entity phase's own
-    # start instant on purpose: an upstream phase that ran long (the #290
+    # start instant on purpose: an upstream phase that ran long (the athenaeum#290
     # wiki-dedup pass) eats into the ENTITY share, never into the reserve C4
     # depends on. ``None`` whenever the run deadline is disabled or the share is
     # opted out of.
@@ -2403,7 +2403,7 @@ def _arm_run_deadline(ctx: RunContext) -> None:
         else None
     )
 
-    # Issue #530 (H2): surface truncation/deferral to callers (e.g. ingest())
+    # Issue athenaeum#530 (H2): surface truncation/deferral to callers (e.g. ingest())
     # so a max_files-truncated OR budget/deadline-deferred run — which still
     # exits 0 — is not mistaken for a fully-drained one. ``ingest`` gates its
     # stamp on these: a run that left files uncompiled must never stamp them as
@@ -2419,7 +2419,7 @@ def _arm_run_deadline(ctx: RunContext) -> None:
 
 
 def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
-    """Issue #290 wiki-page dedup pass, then the post-phase deadline check.
+    """Issue athenaeum#290 wiki-page dedup pass, then the post-phase deadline check.
 
     Clusters compiled wiki/*.md concept/reference/principle pages against
     EACH OTHER (not against raw/auto-memory intake) and proposes merges via
@@ -2445,32 +2445,32 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
         except Exception:
             log.exception("wiki-page dedup pass failed; continuing run")
         finally:
-            # Issue #464: recorded even on the swallowed-exception path so the
+            # Issue athenaeum#464: recorded even on the swallowed-exception path so the
             # summary still reflects the wall-clock this phase actually spent.
             ctx.run_profile.append(
                 ("wiki-dedup", time.monotonic() - _wiki_dedup_start, {})
             )
 
-    # Issue #396: deadline boundary check after the #290 wiki-dedup pass. That
+    # Issue athenaeum#396: deadline boundary check after the athenaeum#290 wiki-dedup pass. That
     # pass swallows its own exceptions (diagnostic, non-load-bearing), so a
     # deadline raised inside it would be lost — the between-phase check here is
     # how the deadline "covers" wiki-dedup: if it ran long, the run stops now
     # rather than starting the (heavier) merge + entity phases past the cap.
-    ctx.tick_heartbeat()  # issue #526: progress past the #290 wiki-dedup phase
+    ctx.tick_heartbeat()  # issue athenaeum#526: progress past the athenaeum#290 wiki-dedup phase
     if ctx.deadline_exceeded():
-        return ctx.stop_on_deadline("post-compile (after #290 wiki-dedup)")
+        return ctx.stop_on_deadline("post-compile (after athenaeum#290 wiki-dedup)")
     return None
 
 
 def _run_merge_only_phase(ctx: RunContext) -> int:
     """The ``merge_only`` early-return path: C3 merge from a prior C2 cluster
-    JSONL, retire, reresolve, push, and summary emit. Issue #461 seam.
+    JSONL, retire, reresolve, push, and summary emit. Issue athenaeum#461 seam.
 
     Only called when ``ctx.merge_only`` is True; always returns (this phase
     IS the merge-only run and always ends the run with an int exit code).
     """
     # Resolved to concrete values by ``_resolve_run_config`` before any phase
-    # runs (#546: narrows the ``... | None`` fields — never fires for a valid
+    # runs (athenaeum#546: narrows the ``... | None`` fields — never fires for a valid
     # run).
     assert ctx.max_api_calls is not None
     assert ctx.push_after_run is not None
@@ -2483,9 +2483,9 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
             dry_run=ctx.dry_run,
             client=ctx.merge_client,
             usage=ctx.usage,
-            deadline=ctx.run_deadline,  # issue #396
-            max_api_calls=ctx.max_api_calls,  # issue #461
-            out_stats=_merge_only_stats,  # issue #464
+            deadline=ctx.run_deadline,  # issue athenaeum#396
+            max_api_calls=ctx.max_api_calls,  # issue athenaeum#461
+            out_stats=_merge_only_stats,  # issue athenaeum#464
         )
     except RunDeadlineExceeded as exc:
         return ctx.stop_on_deadline(exc.phase)
@@ -2504,10 +2504,10 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
             },
         )
     )
-    # Issue #261 (slice B of #259): move-then-retire. Non-contradictory
+    # Issue athenaeum#261 (slice B of athenaeum#259): move-then-retire. Non-contradictory
     # raw is moved into its wiki entry (origin-traced footnote) and git
     # rm'd; contradictory raw is held in the queue. No-op without .git.
-    # Skipped entirely when retire is disabled (#259 opt-out).
+    # Skipped entirely when retire is disabled (athenaeum#259 opt-out).
     if ctx.retire:
         _retire_start = time.monotonic()
         _retire_report = _run_retire(
@@ -2517,7 +2517,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
             dry_run=ctx.dry_run,
             projects_root=ctx.projects_root,
         )
-        # Issue #682: surface MEMORY.md pointer pruning in the run-summary.
+        # Issue athenaeum#682: surface MEMORY.md pointer pruning in the run-summary.
         ctx.run_profile.append(
             (
                 "retire",
@@ -2531,7 +2531,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
                 },
             )
         )
-    # Issue #188: self-heal proposal-less open questions (a prior
+    # Issue athenaeum#188: self-heal proposal-less open questions (a prior
     # budget-exhausted / offline run leaves raw blocks; re-resolve them
     # now that this run has budget). No-op on dry-run / offline.
     if not ctx.dry_run:
@@ -2564,9 +2564,9 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
 
 def _run_entity_tier_phase(ctx: RunContext) -> None:
     """The ENTITY phase (C1 raw discovery, tier1-4 routing, INCLUDING the
-    Batch API fan-out branch) — issue #461/#337/#396/#378/#236 seam.
+    Batch API fan-out branch) — issue athenaeum#461/#337/#396/#378/#236 seam.
 
-    Issue #461: this phase runs AHEAD of the auto-memory block (C2 cluster /
+    Issue athenaeum#461: this phase runs AHEAD of the auto-memory block (C2 cluster /
     C3 merge / C4 detect) so it gets first claim on the shared
     ``max_runtime`` deadline and ``max_api_calls`` budget. Skipped entirely
     for ``cluster_only`` (``merge_only`` already returned before this phase
@@ -2582,13 +2582,13 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
     caller's early-return both read.
     """
     # Resolved to concrete values by ``_resolve_run_config`` before this phase
-    # runs (#546: narrows the ``int | None`` budget fields — never fires for a
+    # runs (athenaeum#546: narrows the ``int | None`` budget fields — never fires for a
     # valid run).
     assert ctx.max_files is not None
     assert ctx.max_api_calls is not None
-    _entity_phase_start = time.monotonic()  # issue #464
-    _entity_phase_calls_before = ctx.usage.api_calls  # issue #464
-    # Issue #490 (slice A): snapshot output tokens too, so the entity segment
+    _entity_phase_start = time.monotonic()  # issue athenaeum#464
+    _entity_phase_calls_before = ctx.usage.api_calls  # issue athenaeum#464
+    # Issue athenaeum#490 (slice A): snapshot output tokens too, so the entity segment
     # can render output-tokens-per-call — the one figure that makes the silent
     # full-page-echo fallback (a ~10x output-cost degrade) visible in the run
     # summary without a by-hand token-ratio calculation next time.
@@ -2597,12 +2597,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         ctx.raw_files = discover_raw_files(ctx.raw_root)
         if not ctx.raw_files:
             # An empty entity intake is no longer a whole-run early return
-            # (issue #461): auto-memory compiles independently of raw
+            # (issue athenaeum#461): auto-memory compiles independently of raw
             # entity intake and must still run below. Only clear the stale
             # deferred-work manifest here and skip the per-file machinery;
             # the manifest-clear also happens again (harmlessly) after a
             # clean auto-memory pass, but doing it here too preserves the
-            # pre-#461 "empty intake is a clean run" contract even if the
+            # pre-athenaeum#461 "empty intake is a clean run" contract even if the
             # auto-memory block below is skipped for some reason.
             if not ctx.dry_run:
                 _clear_stale_deferred_manifest(ctx.wiki_root)
@@ -2639,7 +2639,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             if not ctx.dry_run:
                 git_snapshot(ctx.knowledge_root, "librarian: pre-processing snapshot")
 
-            # Issue #337: a wall-clock timeout (the pre-dawn sweep's
+            # Issue athenaeum#337: a wall-clock timeout (the pre-dawn sweep's
             # `timeout`, which SIGTERMs then, after a grace, KILLs) would
             # otherwise kill the run between the pre-processing snapshot
             # above and the terminal `processed N file(s)` commit below,
@@ -2658,7 +2658,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             def _commit_partial_and_exit(signum: int, _frame: Any) -> None:
                 log.warning(
                     "librarian: interrupted by signal %d after %d file(s) — "
-                    "committing partial progress (issue #337)",
+                    "committing partial progress (issue athenaeum#337)",
                     signum,
                     ctx.processed_count,
                 )
@@ -2666,7 +2666,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                 # recurse into this handler.
                 for _s, _prev in _prev_handlers:
                     signal.signal(_s, _prev)
-                # Issue #483: record whatever spend accrued before the
+                # Issue athenaeum#483: record whatever spend accrued before the
                 # interrupt. The terminal `record_spend` (end of a clean run)
                 # is skipped on this path, so without this an operator who
                 # kills a run that is spending too much — or a run the spend
@@ -2704,7 +2704,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     )
                     _prev_handlers = []
 
-            # Issue #337: the interrupt handler installed above stays active
+            # Issue athenaeum#337: the interrupt handler installed above stays active
             # through the terminal commit; the `finally` restores it on
             # EVERY exit path (normal, interrupt, or an exception from
             # `rebuild_index` / the terminal `git_snapshot`), so it can
@@ -2719,16 +2719,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     )
 
                 if ctx.batch_mode and not ctx.dry_run and client is not None:
-                    # Issue #236: phased fan-out via the Messages Batch API.
+                    # Issue athenaeum#236: phased fan-out via the Messages Batch API.
                     # The synchronous loop below is untouched when the flag
-                    # is off. Issue #337 note: `processed_count` is
+                    # is off. Issue athenaeum#337 note: `processed_count` is
                     # incremented only by the synchronous loop, so an
                     # interrupt during a BATCH run reports "0 file(s)" in
                     # the partial-commit message even though any pages
                     # already written are still committed by the handler's
                     # `git_snapshot` (git add -A) — the tree stays clean.
-                    # Accurate batch-interrupt accounting is #236-adjacent
-                    # and out of scope for #337 (batch mode is API-only and
+                    # Accurate batch-interrupt accounting is athenaeum#236-adjacent
+                    # and out of scope for athenaeum#337 (batch mode is API-only and
                     # off for the nightly run).
                     from athenaeum.batch import process_batch_run
 
@@ -2753,11 +2753,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.total_escalated = outcome.escalated
                     ctx.total_skipped = outcome.skipped
                     ctx.total_degraded = outcome.degraded
-                    ctx.total_truncated = outcome.truncated  # issue #476
+                    ctx.total_truncated = outcome.truncated  # issue athenaeum#476
                     ctx.failed_files = outcome.failed_refs
                     ctx.deferred_refs = outcome.deferred_refs
                 else:
-                    # Issue #663: the persistent stuck-file ledger for this
+                    # Issue athenaeum#663: the persistent stuck-file ledger for this
                     # phase. A raw file that has failed the same content on
                     # ``stuck_threshold`` consecutive runs is a permanent
                     # no-progress loop — it is skipped below (so it stops
@@ -2766,11 +2766,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     stuck_ledger = _load_stuck_ledger(ctx.wiki_root)
                     stuck_threshold = librarian_stuck_file_threshold(ctx.config)
                     for i, raw in enumerate(ctx.raw_files):
-                        # Issue #526 (H10): heartbeat at every per-file boundary
+                        # Issue athenaeum#526 (H10): heartbeat at every per-file boundary
                         # so a long healthy entity phase keeps the lock's
                         # heartbeat fresh and is never mistaken for wedged.
                         ctx.tick_heartbeat()
-                        # Issue #663: a file already over the stuck threshold (on
+                        # Issue athenaeum#663: a file already over the stuck threshold (on
                         # unchanged content) is a known permanent failure — skip
                         # it so it never consumes an LLM call again, and surface
                         # it LOUDLY. It stays on disk (a distinct category from
@@ -2793,7 +2793,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             )
                             log.warning(
                                 "%s: skipping %s — failed %d consecutive run(s) on "
-                                "action %s (%s); stuck, needs a human (issue #663)",
+                                "action %s (%s); stuck, needs a human (issue athenaeum#663)",
                                 STUCK_FILE_PREFIX,
                                 raw.ref,
                                 int(_stuck.get("failures", 0)),
@@ -2807,13 +2807,13 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 ctx.usage.api_calls,
                                 ctx.max_api_calls,
                             )
-                            # Issue #220: everything from here on is
+                            # Issue athenaeum#220: everything from here on is
                             # deferred to the next run — record it so the
                             # manifest + summary surface it.
                             ctx.deferred_refs = [r.ref for r in ctx.raw_files[i:]]
                             break
 
-                        # Issue #396: wall-clock deadline check at the
+                        # Issue athenaeum#396: wall-clock deadline check at the
                         # per-file boundary. Mirrors the budget-exhaustion
                         # path — defer the remaining intake and record it in
                         # the manifest — but marks the run as
@@ -2825,7 +2825,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             log.warning(
                                 "librarian: wall-clock deadline (%ds) exceeded after "
                                 "%d file(s) — deferring %d remaining file(s) and "
-                                "stopping (resumable, issue #396)",
+                                "stopping (resumable, issue athenaeum#396)",
                                 ctx.max_runtime,
                                 i,
                                 len(ctx.raw_files) - i,
@@ -2834,7 +2834,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             ctx.deadline_tripped = True
                             break
 
-                        # Issue #440: the entity phase's OWN share of the run
+                        # Issue athenaeum#440: the entity phase's OWN share of the run
                         # window is spent. Stop claiming new files and defer the
                         # rest, but do NOT set ``deadline_tripped`` -- the whole
                         # point of the reserve is that the run keeps going into
@@ -2847,7 +2847,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 "librarian: entity phase runtime share exhausted "
                                 "after %d file(s) - deferring %d remaining file(s) "
                                 "and yielding the rest of the window to the "
-                                "auto-memory / C4 phases (resumable, issue #440)",
+                                "auto-memory / C4 phases (resumable, issue athenaeum#440)",
                                 i,
                                 len(ctx.raw_files) - i,
                             )
@@ -2855,7 +2855,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             ctx.entity_budget_tripped = True
                             break
 
-                        # Issue #378: the spend ceiling is the actual
+                        # Issue athenaeum#378: the spend ceiling is the actual
                         # mitigation — a monitor reports after the fact,
                         # this STOPS the burn. Tokens bound the subscription
                         # path, dollars the API path. On breach we log
@@ -2888,7 +2888,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 config=ctx.config,
                             )
                         except TransientAPIError as exc:
-                            # Issue #193: the Anthropic API was overloaded
+                            # Issue athenaeum#193: the Anthropic API was overloaded
                             # (429/529) and the bounded retry was exhausted.
                             # Defer to the next run exactly like a
                             # malformed-file failure, but log it distinctly
@@ -2902,7 +2902,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 type(exc.last_error).__name__,
                             )
                             ctx.failed_files.append(raw.ref)
-                            # Issue #663: a genuinely transient overload will NOT
+                            # Issue athenaeum#663: a genuinely transient overload will NOT
                             # recur on the same file N nights running, so counting
                             # it toward "stuck" is safe — only a RELIABLY-failing
                             # file (e.g. a page large enough to time out every
@@ -2922,7 +2922,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         except Exception as exc:
                             log.exception("Failed to process %s", raw.ref)
                             ctx.failed_files.append(raw.ref)
-                            # Issue #663: same stuck-file accounting for a
+                            # Issue athenaeum#663: same stuck-file accounting for a
                             # non-transient processing failure (malformed file, a
                             # persistently-failing action). The failing action is
                             # named via the annotation tier3_write set on the
@@ -2944,42 +2944,42 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         ctx.total_updated += len(result.updated)
                         ctx.total_escalated += len(result.escalated)
                         ctx.total_skipped += len(result.skipped)
-                        # #472: ``process_one`` is a widely-stubbed test seam;
+                        # athenaeum#472: ``process_one`` is a widely-stubbed test seam;
                         # tolerate a double that predates the ``degraded`` field
                         # (the real ProcessingResult always carries it, default 0).
                         ctx.total_degraded += getattr(result, "degraded", 0)
-                        ctx.total_truncated += getattr(result, "truncated", 0)  # #476
+                        ctx.total_truncated += getattr(result, "truncated", 0)  # athenaeum#476
 
                         if not ctx.dry_run:
                             raw.path.unlink()
                             log.info("  Deleted: %s", raw.path)
                             ctx.processed_count += 1
-                            # Issue #663: this file made progress — drop any
+                            # Issue athenaeum#663: this file made progress — drop any
                             # failure history so a future failure starts a fresh
                             # consecutive count rather than inheriting a stale one.
                             stuck_ledger.pop(raw.ref, None)
 
-                    # Issue #663: persist the updated stuck-file ledger (or remove
+                    # Issue athenaeum#663: persist the updated stuck-file ledger (or remove
                     # it when empty). Durable cross-run state, committed with the
                     # run's git snapshot exactly like the deferred manifest.
                     if not ctx.dry_run:
                         _write_stuck_ledger(ctx.wiki_root, stuck_ledger)
 
-                # Issue #220: a budget-tripped run must be visibly DEGRADED,
+                # Issue athenaeum#220: a budget-tripped run must be visibly DEGRADED,
                 # not "Done". Exit code stays 0 (not a crash — the deferred
                 # files are picked up by the next run), but the summary line
                 # is machine-greppable and a manifest records exactly what
                 # was deferred. A clean run clears any stale manifest left
                 # by a previous tripped run.
                 if ctx.deferred_refs:
-                    # Issue #396: the entity loop defers remaining intake
+                    # Issue athenaeum#396: the entity loop defers remaining intake
                     # for either reason; label the manifest + summary with
                     # the actual trigger.
                     if ctx.deadline_tripped:
                         degraded_reason = "wall-clock deadline exceeded"
                         manifest_reason = "deadline"
                     elif ctx.entity_budget_tripped:
-                        # Issue #440: distinct from both siblings -- the run is
+                        # Issue athenaeum#440: distinct from both siblings -- the run is
                         # still healthy and still executing; only the entity
                         # phase stopped, on purpose, to leave C4 a window.
                         degraded_reason = "entity phase runtime share exhausted"
@@ -3019,11 +3019,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         ctx.total_skipped,
                         len(ctx.failed_files),
                     )
-                # Issue #461: the run-level "Token usage:" summary log and the
-                # #378 spend-ledger write are DELIBERATELY not here. The entity
+                # Issue athenaeum#461: the run-level "Token usage:" summary log and the
+                # athenaeum#378 spend-ledger write are DELIBERATELY not here. The entity
                 # phase now runs BEFORE the auto-memory (C2-C4) block, and the
                 # shared ``usage`` keeps accruing the C4 detector/resolver spend
-                # after this point — the exact spend the #460 epic exists to
+                # after this point — the exact spend the athenaeum#460 epic exists to
                 # observe. Recording here would drop all of it. Both moved to
                 # the finalize section below so they reflect the WHOLE run.
                 if not ctx.dry_run and (ctx.total_created > 0 or ctx.total_updated > 0):
@@ -3042,12 +3042,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     signal.signal(_s, _prev)
                 _prev_handlers = []
 
-        # Issue #464: recorded once for the WHOLE entity phase (not per-file)
+        # Issue athenaeum#464: recorded once for the WHOLE entity phase (not per-file)
         # — matches the profile's phase granularity. Skipped entirely when
         # ``cluster_only`` (the phase never ran, so it is absent from the
         # summary rather than a misleading zero).
         _entity_calls = ctx.usage.api_calls - _entity_phase_calls_before
-        # #490 (slice A): output tokens per entity call. A silent full-page-echo
+        # athenaeum#490 (slice A): output tokens per entity call. A silent full-page-echo
         # fallback re-emits a whole 16-23KB page, so this figure spikes when the
         # fallback fires often — the entity-cost regression the WARNINGs above
         # now name is visible here in one number. Integer division; 0 when the
@@ -3068,20 +3068,20 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     "escalated": ctx.total_escalated,
                     "files": ctx.processed_count,
                     "out_tok_per_call": _entity_out_tok_per_call,
-                    # #472: only render when non-zero so a clean run's summary
+                    # athenaeum#472: only render when non-zero so a clean run's summary
                     # line is unchanged, but an operator watching a drain sees
                     # "degraded=N" (files whose classification JSON dropped
                     # every entity) without grepping warnings.
                     **({"degraded": ctx.total_degraded} if ctx.total_degraded else {}),
-                    # #476: a truncation drop (max_tokens) is surfaced
+                    # athenaeum#476: a truncation drop (max_tokens) is surfaced
                     # separately from a parse ``degraded`` so the two are
                     # never conflated in the summary either.
                     **({"truncated": ctx.total_truncated} if ctx.total_truncated else {}),
-                    # #663: files skipped/surfaced as stuck this run. Only
+                    # athenaeum#663: files skipped/surfaced as stuck this run. Only
                     # rendered when non-zero, so a clean run's summary line is
                     # unchanged, but a permanent no-progress loop shows "stuck=N".
                     **({"stuck": len(ctx.stuck_files)} if ctx.stuck_files else {}),
-                    # #669: the entity phase yielded its window share (#440).
+                    # athenaeum#669: the entity phase yielded its window share (athenaeum#440).
                     # Rendered only when it happened, so a clean run's summary
                     # line is unchanged, but a consumer sees the yield alongside
                     # the existing degraded/truncated/stuck flags.
@@ -3097,8 +3097,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
 
 def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     """The auto-memory block: C1 discover + C2 cluster / C3 merge / C4
-    detect, the post-compile deadline check, retire, and #188 reresolve.
-    Issue #461/#463/#396/#261/#188 seam.
+    detect, the post-compile deadline check, retire, and athenaeum#188 reresolve.
+    Issue athenaeum#461/#463/#396/#261/#188 seam.
 
     Gated on ``not ctx.deadline_tripped`` by the caller — if the entity loop
     already tripped the wall-clock deadline, this phase must not run at all
@@ -3132,9 +3132,9 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 "  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count
             )
 
-    # Issue #463 (slice D of #460): the nightly run's own delta
+    # Issue athenaeum#463 (slice D of athenaeum#460): the nightly run's own delta
     # baseline. A caller that already threads an explicit
-    # ``changed_paths`` (ingest / session_end, issue #370 PR2) is left
+    # ``changed_paths`` (ingest / session_end, issue athenaeum#370 PR2) is left
     # untouched — this only computes a baseline when the run wasn't
     # already given one, so every existing caller's behaviour is
     # unaffected. ``full_compile_due`` gates the live-client delta
@@ -3179,16 +3179,16 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 )
                 full_compile_due = True
 
-    # C2 + C3 + C4: cluster, merge, and detect. Issue #370 PR2 threads the
+    # C2 + C3 + C4: cluster, merge, and detect. Issue athenaeum#370 PR2 threads the
     # optional ``changed_paths`` delta through this one call — see
     # :func:`_compile_auto_memory` for the delta-eligibility gate (issue
-    # #463 cadence contract), the cluster pass, the F6 slug-collision guard,
-    # and the merge. Issue #396: ``deadline`` is threaded into the merge
-    # pass's per-cluster loops (the #396 wedge site); a trip there raises
+    # athenaeum#463 cadence contract), the cluster pass, the F6 slug-collision guard,
+    # and the merge. Issue athenaeum#396: ``deadline`` is threaded into the merge
+    # pass's per-cluster loops (the athenaeum#396 wedge site); a trip there raises
     # RunDeadlineExceeded, caught here.
     _delta_taken_out: dict[str, bool] = {}
-    _merge_stats: dict = {}  # issue #464
-    _auto_memory_start = time.monotonic()  # issue #464
+    _merge_stats: dict = {}  # issue athenaeum#464
+    _auto_memory_start = time.monotonic()  # issue athenaeum#464
     try:
         ctx.merged_entries = _compile_auto_memory(
             auto_memory_files,
@@ -3199,13 +3199,13 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             usage=ctx.usage,
             changed_paths=run_changed_paths,
             deadline=ctx.run_deadline,
-            max_api_calls=ctx.max_api_calls,  # issue #461
-            full_compile_due=full_compile_due,  # issue #463
-            out_delta_taken=_delta_taken_out,  # issue #463
-            out_merge_stats=_merge_stats,  # issue #464
+            max_api_calls=ctx.max_api_calls,  # issue athenaeum#461
+            full_compile_due=full_compile_due,  # issue athenaeum#463
+            out_delta_taken=_delta_taken_out,  # issue athenaeum#463
+            out_merge_stats=_merge_stats,  # issue athenaeum#464
         )
     except RunDeadlineExceeded as exc:
-        # Issue #464: record the auto-memory phase's partial elapsed
+        # Issue athenaeum#464: record the auto-memory phase's partial elapsed
         # time (and whatever detector/resolver counts landed in
         # ``_merge_stats`` before the trip — usually none, since the
         # merge call raised, but this stays correct either way)
@@ -3244,7 +3244,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         )
     )
 
-    # Issue #463: on a successful (no deadline trip, not dry_run)
+    # Issue athenaeum#463: on a successful (no deadline trip, not dry_run)
     # auto-memory compile that computed its OWN delta baseline (i.e.
     # not an ingest/session_end call that threads its own
     # ``changed_paths``), refresh the auto-memory manifest stamp so
@@ -3282,21 +3282,21 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                     "full-compile stamp write failed (non-fatal): %s", exc
                 )
 
-    # Issue #396: deadline check at the post-compile phase boundary,
+    # Issue athenaeum#396: deadline check at the post-compile phase boundary,
     # before the retire + reresolve passes (both can commit / make
     # LLM calls).
-    ctx.tick_heartbeat()  # issue #526: progress into the retire/reresolve phase
+    ctx.tick_heartbeat()  # issue athenaeum#526: progress into the retire/reresolve phase
     if ctx.deadline_exceeded():
         return ctx.stop_on_deadline("post-compile (before retire/reresolve)")
 
-    # Issue #261 (slice B of #259): move-then-retire lifecycle. Runs
+    # Issue athenaeum#261 (slice B of athenaeum#259): move-then-retire lifecycle. Runs
     # after merge + C4 detection. Non-contradictory raw is moved
     # into its wiki entry (origin-traced footnote) and git rm'd;
     # contradictory raw is held for human confirmation. Skipped for
     # the cluster_only diagnostic mode, when retire is disabled
-    # (#259 opt-out), and a no-op without a git repo.
+    # (athenaeum#259 opt-out), and a no-op without a git repo.
     if ctx.retire and not ctx.cluster_only:
-        _retire_start = time.monotonic()  # issue #464
+        _retire_start = time.monotonic()  # issue athenaeum#464
         _retire_report = _run_retire(
             ctx.merged_entries,
             ctx.knowledge_root,
@@ -3308,7 +3308,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             (
                 "retire",
                 time.monotonic() - _retire_start,
-                # Issue #682: surface MEMORY.md pointer pruning in the
+                # Issue athenaeum#682: surface MEMORY.md pointer pruning in the
                 # run-summary so a pruning event is visible in the same
                 # greppable line as every other phase result.
                 {
@@ -3321,11 +3321,11 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             )
         )
 
-    # Issue #188: re-resolve open, proposal-less pending questions
+    # Issue athenaeum#188: re-resolve open, proposal-less pending questions
     # so a prior cap-hit / offline escalation self-heals on this
     # (budgeted) run.
     if not ctx.dry_run:
-        _reresolve_start = time.monotonic()  # issue #464
+        _reresolve_start = time.monotonic()  # issue athenaeum#464
         _reresolve_calls_before = ctx.usage.api_calls
         _run_reresolve_pass(
             ctx.knowledge_root, config=ctx.config, client=ctx.merge_client, usage=ctx.usage
@@ -3341,28 +3341,28 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
 
 
 def _run_finalize_phase(ctx: RunContext) -> int:
-    """Finalize: run-level spend summary + #378 ledger write, post-run push,
-    the #310 page-size guardrail, the #481 pending-merge revalidation
-    advisor, the summary emit, the #470 backlog-drain advisory, and the
-    terminal return-code selection. Issue #461/#378/#284/#310/#481/#464/
-    #470/#396/#227 seam.
+    """Finalize: run-level spend summary + athenaeum#378 ledger write, post-run push,
+    the athenaeum#310 page-size guardrail, the athenaeum#481 pending-merge revalidation
+    advisor, the summary emit, the athenaeum#470 backlog-drain advisory, and the
+    terminal return-code selection. Issue athenaeum#461/#378/#284/#310/#481/#464/
+    athenaeum#470/#396/#227 seam.
 
     This is the LAST phase; every remaining ``run()`` return code (124 for a
     deadline trip, 1 for failed files, 1 for ``strict_budget``, else 0) is
     decided here, in the same precedence order as the original inline code.
     """
     # Resolved to a concrete bool by ``_resolve_run_config`` before any phase
-    # runs (#546: narrows ``bool | None`` — never fires for a valid run).
+    # runs (athenaeum#546: narrows ``bool | None`` — never fires for a valid run).
     assert ctx.push_after_run is not None
-    # Issue #461: run-level spend summary + #378 ledger write, moved here from
+    # Issue athenaeum#461: run-level spend summary + athenaeum#378 ledger write, moved here from
     # the (now-earlier) entity phase so ``usage`` reflects BOTH phases — the
     # entity tiers AND the auto-memory C2-C4 detector/resolver spend that
     # accrues after the entity loop. Recording inside the entity phase (its
-    # pre-#461 home, when it ran LAST) would silently undercount every run by
-    # the entire C4 cost, defeating the observability the #460 epic needs.
+    # pre-athenaeum#461 home, when it ran LAST) would silently undercount every run by
+    # the entire C4 cost, defeating the observability the athenaeum#460 epic needs.
     # Kept after the merge_only/cluster_only early returns, matching the
-    # pre-#461 placement (those paths never recorded run spend). Best-effort
-    # (#378): never breaks the run; skipped on dry-run (counters are zero).
+    # pre-athenaeum#461 placement (those paths never recorded run spend). Best-effort
+    # (athenaeum#378): never breaks the run; skipped on dry-run (counters are zero).
     if ctx.usage.api_calls > 0:
         log.info(
             "Token usage: %d API calls, %d input + %d output = %d total"
@@ -3375,7 +3375,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
             ctx.usage.cache_read_input_tokens,
             ctx.usage.estimated_cost_usd,
         )
-    # Issue #470: files actually drained this run (removed from intake) — the
+    # Issue athenaeum#470: files actually drained this run (removed from intake) — the
     # in-window count minus what was deferred (budget/deadline/ceiling trip) and
     # what failed (not consumed). Recorded on the ledger so the backlog-drain
     # advisor can read observed files-per-run throughput across runs.
@@ -3383,10 +3383,10 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         0, len(ctx.raw_files) - len(ctx.deferred_refs) - len(ctx.failed_files)
     )
     if not ctx.dry_run:
-        # Issue #568 (H1): do NOT discard record_spend's return. When this run
+        # Issue athenaeum#568 (H1): do NOT discard record_spend's return. When this run
         # actually spent budget and the ledger is enabled, a False return means
         # the append FAILED (spend.record_spend logs the cause at WARNING) — the
-        # cumulative drain ceiling (drain.run_drain) and the #487 cross-repo
+        # cumulative drain ceiling (drain.run_drain) and the athenaeum#487 cross-repo
         # accounting contract both re-read this ledger, so an unrecorded run
         # makes them silently under-count. Surface it loudly at the run level.
         _ledger_written = spend.record_spend(
@@ -3402,8 +3402,8 @@ def _run_finalize_phase(ctx: RunContext) -> int:
                 log.warning(
                     "spend ledger did NOT record this librarian run despite "
                     "%d API call(s) / %d token(s) spent — cumulative spend "
-                    "ceilings and the #487 cross-repo accounting contract will "
-                    "under-count this run (issue #568)",
+                    "ceilings and the athenaeum#487 cross-repo accounting contract will "
+                    "under-count this run (issue athenaeum#568)",
                     ctx.usage.api_calls,
                     ctx.usage.total_tokens,
                 )
@@ -3416,11 +3416,11 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         head_at_start=ctx.head_at_start,
     )
 
-    # Issue #310: warn-only page-size guardrail. Log a WARNING for each wiki
+    # Issue athenaeum#310: warn-only page-size guardrail. Log a WARNING for each wiki
     # entity page over the flag threshold so a nightly run surfaces pages that
     # want splitting into linked sub-entities. Never fatal, never mutating —
     # any failure here degrades to a single non-fatal note. The split-proposal
-    # workflow is explicitly out of scope (issue #310, moscow:could).
+    # workflow is explicitly out of scope (issue athenaeum#310, moscow:could).
     try:
         from athenaeum.config import resolve_page_flag_bytes, resolve_page_warn_bytes
         from athenaeum.status import scan_page_sizes
@@ -3428,7 +3428,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         _pw_bytes = resolve_page_warn_bytes(ctx.config)
         _pf_bytes = resolve_page_flag_bytes(ctx.config)
         _, _pages_flag = scan_page_sizes(ctx.wiki_root, _pw_bytes, _pf_bytes)
-        # Issue #490 (slice A) / #310: aggregate into ONE health-signal count
+        # Issue athenaeum#490 (slice A) / athenaeum#310: aggregate into ONE health-signal count
         # line rather than one WARNING per page — a corpus with ~35 oversized
         # pages previously buried the rest of the nightly log under 35 near-
         # identical lines. The count leads (the greppable health signal); the
@@ -3450,9 +3450,9 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     except Exception as exc:  # noqa: BLE001 — guardrail must never break a run
         log.warning("page-size guardrail check failed (non-fatal): %s", exc)
 
-    # Issue #481: pending-merge revalidation advisor. #480 stopped NEW
+    # Issue athenaeum#481: pending-merge revalidation advisor. athenaeum#480 stopped NEW
     # degenerate over-cluster proposals from being written; this surfaces
-    # entries queued BEFORE the #400/#421 gate tightened that the pipeline
+    # entries queued BEFORE the athenaeum#400/#421 gate tightened that the pipeline
     # would never propose today. Runs in DRY-RUN here (never mutates the queue
     # unprompted) so a withdrawn-and-regrown queue's junk is visible from the
     # first night, and names the one-command ``athenaeum merges revalidate
@@ -3476,7 +3476,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         except Exception as exc:  # noqa: BLE001 — advisor must never break a run
             log.warning("pending-merge revalidation advisor failed (non-fatal): %s", exc)
 
-    # Issue #464: normal finalize path — every return below this point
+    # Issue athenaeum#464: normal finalize path — every return below this point
     # (the entity-loop deadline_tripped 124, the failed-files 1, the
     # strict-budget 1, and the clean 0) shares this one emit. `_emit_run_summary`
     # is idempotent (`_summary_emitted` guard), so this is safe even though
@@ -3485,9 +3485,9 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     # fires once per run.
     ctx.emit_run_summary()
 
-    # Issue #470: backlog-drain ETA advisor. At the end of any real run that
+    # Issue athenaeum#470: backlog-drain ETA advisor. At the end of any real run that
     # leaves raw intake undrained, project time-to-drain from OBSERVED
-    # throughput (the #378 ledger — including THIS run's record just written
+    # throughput (the athenaeum#378 ledger — including THIS run's record just written
     # above) and WARN when it exceeds ``librarian.drain_warn_days``, naming the
     # one-command ``athenaeum drain`` remedy. Uses the TRUE remaining backlog
     # (live intake count), so it also catches a run that cleanly processed its
@@ -3512,14 +3512,14 @@ def _run_finalize_phase(ctx: RunContext) -> int:
                 "backlog-drain advisor skipped (%s): %s", type(exc).__name__, exc
             )
 
-    # Issue #396: the entity loop hit the wall-clock deadline and deferred the
+    # Issue athenaeum#396: the entity loop hit the wall-clock deadline and deferred the
     # remaining intake. The partial progress is committed (terminal commit
     # above) and the deferred files are picked up by the next run — exit 124
-    # (matching coreutils `timeout` and the #337 interrupt path) so the trip is
+    # (matching coreutils `timeout` and the athenaeum#337 interrupt path) so the trip is
     # a distinct, resumable non-zero signal rather than a silent success. Takes
     # precedence over the failed-files / strict-budget codes below: a deadline
     # trip is the more actionable signal.
-    # Issue #530 (H2): export the final truncation/deferral figures before ANY
+    # Issue athenaeum#530 (H2): export the final truncation/deferral figures before ANY
     # of the entity-phase exit paths so a caller (ingest) can tell a fully
     # drained run from a partial one regardless of exit code.
     ctx.export_run_stats()
@@ -3535,7 +3535,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         log.warning("Failed files (will retry next run): %s", ", ".join(ctx.failed_files))
         return 1
 
-    # Issue #227: opt-in strict mode for exit-code-based alerting. The
+    # Issue athenaeum#227: opt-in strict mode for exit-code-based alerting. The
     # default stays 0 (a trip is not a crash — the next run picks the
     # deferred files up), but operators who alert on exit codes can ask
     # for a nonzero exit when the budget tripped.
@@ -3582,30 +3582,30 @@ def run(
     nor the entity tier pipeline runs. Useful for iterating on the merge
     output without re-embedding or re-clustering.
 
-    ``max_api_calls`` is the run-level API call budget (issue #220). When
+    ``max_api_calls`` is the run-level API call budget (issue athenaeum#220). When
     ``None`` (the default) it resolves via env ``ATHENAEUM_MAX_API_CALLS`` >
     yaml ``librarian.max_api_calls`` > :data:`DEFAULT_MAX_API_CALLS`. An
     explicit value (e.g. from the CLI flag) wins over all three.
 
     ``max_runtime`` is the run-level wall-clock deadline in seconds (issue
-    #396). When ``None`` (the default) it resolves via env
+    athenaeum#396). When ``None`` (the default) it resolves via env
     ``ATHENAEUM_MAX_RUNTIME`` > yaml ``librarian.max_runtime`` >
     :data:`DEFAULT_MAX_RUNTIME`; an explicit value (e.g. from the CLI
     ``--max-runtime`` flag) wins. It bounds the WHOLE run — the post-compile
-    phases (C4 contradiction detector, #290 wiki-dedup, C3 merge/resolver)
+    phases (C4 contradiction detector, athenaeum#290 wiki-dedup, C3 merge/resolver)
     AND the per-file entity loop — checked at file/cluster/phase boundaries.
     On trip the run commits partial progress, releases the lock (via the CLI
     caller's ``finally``), and exits ``124`` (matching coreutils ``timeout``
-    and the #337 interrupt-checkpoint path) — resumable: the deferred intake
+    and the athenaeum#337 interrupt-checkpoint path) — resumable: the deferred intake
     and any un-run phases are picked up by the next run. A resolved value of
     ``<= 0`` disables the deadline entirely (unbounded run, the escape hatch).
 
-    ``strict_budget`` (issue #227) makes a budget-tripped (DEGRADED) run
+    ``strict_budget`` (issue athenaeum#227) makes a budget-tripped (DEGRADED) run
     return 1 instead of the default 0, for exit-code-based alerting (e.g.
     the CLI ``--strict-budget`` flag). All other DEGRADED-path behavior —
     warning summary, deferred-work manifest, git snapshot — is unchanged.
 
-    ``batch_mode`` (issue #236) routes the entity-tier LLM calls through
+    ``batch_mode`` (issue athenaeum#236) routes the entity-tier LLM calls through
     the Anthropic Messages Batch API (50% token discount, latency-tolerant)
     instead of the synchronous per-file loop. When ``None`` (the default)
     it resolves via env ``ATHENAEUM_BATCH_MODE`` > yaml
@@ -3614,14 +3614,14 @@ def run(
     untouched; dry-run always uses the synchronous (call-free) path. See
     :mod:`athenaeum.batch` for phase layout and budget semantics.
 
-    ``retire`` (issue #261) opts out of the move-then-retire pass. DEFAULT
+    ``retire`` (issue athenaeum#261) opts out of the move-then-retire pass. DEFAULT
     ON (owner-confirmed): when ``None`` it resolves via yaml
     ``librarian.retire`` (default on); an explicit ``False`` (e.g. from the
     CLI ``--no-retire`` flag) wins. When off, the retire pass is skipped
     entirely — non-contradictory raw auto-memory is neither moved into the
     wiki nor ``git rm``'d, so the raw stays in the intake queue.
 
-    ``push_after_run`` (issue #284) opts INTO a post-run ``git push`` that
+    ``push_after_run`` (issue athenaeum#284) opts INTO a post-run ``git push`` that
     closes the move-then-retire recovery gap on multi-machine setups. DEFAULT
     OFF: when ``None`` it resolves via yaml ``librarian.push_after_run``
     (default off); an explicit ``True`` (e.g. from the CLI ``--push`` flag)
@@ -3633,7 +3633,7 @@ def run(
     (``git push`` is idempotent). Athenaeum performs no credential handling;
     the operator's ambient git auth (credential helper / SSH) is used.
 
-    ``pull_before_run`` (issue #399) opts INTO a pre-run ``git pull
+    ``pull_before_run`` (issue athenaeum#399) opts INTO a pre-run ``git pull
     --ff-only --autostash`` that starts the run from origin's latest instead
     of a possibly-stale local checkout. DEFAULT OFF: when ``None`` it
     resolves via yaml ``librarian.pull_before_run`` (default off); an
@@ -3649,7 +3649,7 @@ def run(
     starting state. Athenaeum performs no credential handling; the
     operator's ambient git auth is used.
 
-    ``full_compile`` (issue #463, slice D of #460, CLI ``--full-compile``)
+    ``full_compile`` (issue athenaeum#463, slice D of athenaeum#460, CLI ``--full-compile``)
     forces a whole-corpus auto-memory compile regardless of the delta gate or
     the ``librarian.full_compile_every_days`` cadence — the manual escape
     hatch for an operator who wants an immediate full reconciliation. DEFAULT
@@ -3659,13 +3659,13 @@ def run(
     ``FULL_COMPILE_STAMP_NAME`` cache-dir stamp and
     :func:`athenaeum.config.resolve_full_compile_every_days`, default 7 days).
 
-    ``now`` (issue #463) is an optional injected "run start" timestamp for
+    ``now`` (issue athenaeum#463) is an optional injected "run start" timestamp for
     the full-compile cadence check, mirroring
     :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``now=`` parameter.
     Defaults to ``datetime.now(timezone.utc)`` (frozen once here); tests pass
     a fixed value so no wall-clock leaks into cadence assertions.
     """
-    # Issue #540 (M25): stamp a fresh per-run correlation id so every log line
+    # Issue athenaeum#540 (M25): stamp a fresh per-run correlation id so every log line
     # this run emits carries the same id (via the logconf run-id filter) — even
     # in a long-lived process that performs several runs — making a run's lines
     # attributable and untangleable from an overlapping run's.
@@ -3673,9 +3673,9 @@ def run(
 
     new_run_id()
 
-    # Issue #546: run() is now the ORDERED SEQUENCE of named phase calls over
+    # Issue athenaeum#546: run() is now the ORDERED SEQUENCE of named phase calls over
     # one shared, mutable RunContext (see the class docstring above) — a
-    # future phase reorder (issue #461-style) is a code change here, not an
+    # future phase reorder (issue athenaeum#461-style) is a code change here, not an
     # inline comment. Every phase function mutates `ctx` in place; nothing is
     # snapshot-copied, so a later phase always observes an earlier phase's
     # mutations exactly as the original single-frame locals did.
@@ -3728,7 +3728,7 @@ def run(
     # above) and the tier loop (which it wraps) is load-bearing and MUST NOT
     # shift; see that function's docstring.
 
-    # Phase: #290 wiki-page dedup pass (independent of the C1-C4 auto-memory
+    # Phase: athenaeum#290 wiki-page dedup pass (independent of the C1-C4 auto-memory
     # pipeline; runs on every mode) + the deadline check right after it.
     _rc = _run_wiki_dedup_phase(ctx)
     if _rc is not None:
@@ -3738,7 +3738,7 @@ def run(
         # merge_only short-circuits the rest of the pipeline entirely.
         return _run_merge_only_phase(ctx)
 
-    # Issue #461: shared state hoisted above BOTH the entity phase and the
+    # Issue athenaeum#461: shared state hoisted above BOTH the entity phase and the
     # auto-memory block. Safe defaults so the finalize return-code logic
     # (deadline_tripped / failed_files / deferred_refs) is well-defined even
     # on cluster_only (which skips the entity phase entirely) and on an
@@ -3748,11 +3748,11 @@ def run(
 
     # Phase: the ENTITY tier loop (tier1-4 routing INCLUDING the Batch API
     # fan-out branch), ahead of auto-memory so it claims the shared deadline
-    # / budget first (issue #461).
+    # / budget first (issue athenaeum#461).
     _run_entity_tier_phase(ctx)
 
     # Phase: auto-memory block (C1 discover + C2 cluster / C3 merge / C4
-    # detect, retire, #188 reresolve) — skipped entirely if the entity loop
+    # detect, retire, athenaeum#188 reresolve) — skipped entirely if the entity loop
     # already tripped the wall-clock deadline.
     if not ctx.deadline_tripped:
         _rc = _run_auto_memory_phase(ctx)
@@ -3764,7 +3764,7 @@ def run(
         # cluster-only run must not preserve a stale deferred manifest.
         if not dry_run:
             _clear_stale_deferred_manifest(wiki_root)
-        # Resolved to a concrete bool by ``_resolve_run_config`` above (#546:
+        # Resolved to a concrete bool by ``_resolve_run_config`` above (athenaeum#546:
         # narrows ``bool | None`` — never fires for a valid run).
         assert ctx.push_after_run is not None
         _maybe_push_after_run(
@@ -3774,7 +3774,7 @@ def run(
             dry_run=dry_run,
             head_at_start=ctx.head_at_start,
         )
-        ctx.emit_run_summary()  # issue #464
+        ctx.emit_run_summary()  # issue athenaeum#464
         return 0
 
     # Phase: finalize (spend summary + ledger, post-run push, page-size
@@ -3784,14 +3784,14 @@ def run(
 
 
 # ---------------------------------------------------------------------------
-# On-demand ingest (issue #349) — manual/escape-hatch compile of new/changed
+# On-demand ingest (issue athenaeum#349) — manual/escape-hatch compile of new/changed
 # raw intake, with a content-hash stamp manifest so an incremental run is a
 # fast no-op when nothing has changed since the last successful ingest. The
-# SessionEnd path (issue #350) reuses `ingest()` directly.
+# SessionEnd path (issue athenaeum#350) reuses `ingest()` directly.
 # ---------------------------------------------------------------------------
 
 #: Stamp-manifest filename recording the raw-intake content hashes seen by the
-#: last successful ingest. Lives in the cache dir alongside the #348 index
+#: last successful ingest. Lives in the cache dir alongside the athenaeum#348 index
 #: manifests (kept out of the knowledge git repo). Shape mirrors the search
 #: manifests: ``{"version": 1, "hashes": {relpath: sha256}}``.
 INGEST_MANIFEST_NAME = "ingest-manifest.json"
@@ -3799,7 +3799,7 @@ INGEST_MANIFEST_NAME = "ingest-manifest.json"
 
 @dataclass
 class IngestResult:
-    """Summary of an :func:`ingest` invocation (issue #349).
+    """Summary of an :func:`ingest` invocation (issue athenaeum#349).
 
     ``new_or_changed`` is the count of raw files added/changed versus the
     last ingest stamp (scoped to ``session`` when given). ``compiled`` is the
@@ -3836,7 +3836,7 @@ class IngestResult:
 def _resolve_cache_dir(cache_dir: Path | None) -> Path:
     """Resolve the athenaeum cache dir (arg > env > ``~/.cache/athenaeum``).
 
-    Thin wrapper over :func:`athenaeum.config.resolve_cache_dir` (issue #521):
+    Thin wrapper over :func:`athenaeum.config.resolve_cache_dir` (issue athenaeum#521):
     the canonical resolver lives in ``config`` so every site agrees.
     """
     return _resolve_cache_dir_config(cache_dir)
@@ -3856,10 +3856,10 @@ def _raw_hash_snapshot(
     stable regardless of the absolute checkout location. ``.gitkeep`` and
     per-scope ``MEMORY.md`` index files are skipped — they are not intake.
     When *session* is given, only files whose frontmatter ``originSessionId``
-    matches are included (the per-session incremental gate #350 needs).
+    matches are included (the per-session incremental gate athenaeum#350 needs).
     Unreadable files are skipped.
 
-    Issue #370 stat pre-filter: ``prior_stats`` maps ``relpath ->
+    Issue athenaeum#370 stat pre-filter: ``prior_stats`` maps ``relpath ->
     (mtime_ns, size, hash)`` from the last ingest manifest. When a file's
     ``(mtime_ns, size)`` matches AND no ``session`` filter is active, the stored
     hash is reused without reading the body. A ``session`` filter still reads
@@ -3932,7 +3932,7 @@ def _load_ingest_manifest(path: Path) -> dict[str, str] | None:
 
 
 def _load_ingest_manifest_stats(path: Path) -> dict[str, tuple[int, int]]:
-    """Load the ingest stamp's ``relpath -> (mtime_ns, size)`` stat map (#370).
+    """Load the ingest stamp's ``relpath -> (mtime_ns, size)`` stat map (athenaeum#370).
 
     Absent (a v1 manifest with no ``stats``) or malformed => ``{}``, which
     forces a one-time full read+hash of every raw file and upgrades the manifest
@@ -3965,7 +3965,7 @@ def _write_ingest_manifest(
 ) -> None:
     """Atomically write the ingest stamp manifest (temp file + rename).
 
-    ``stats`` (issue #370) persists per-file ``(mtime_ns, size)`` so the next
+    ``stats`` (issue athenaeum#370) persists per-file ``(mtime_ns, size)`` so the next
     run's stat pre-filter can skip re-reading unchanged raw files. Bumped to
     ``version: 2`` when stats are written; ``hashes`` stays present for readers.
     """
@@ -3978,7 +3978,7 @@ def _write_ingest_manifest(
 
 
 # ---------------------------------------------------------------------------
-# Live-client delta cadence (issue #463, slice D of #460). Two more cache-dir
+# Live-client delta cadence (issue athenaeum#463, slice D of athenaeum#460). Two more cache-dir
 # stamps, siblings of ``ingest-manifest.json`` (same "outside the knowledge git
 # repo" rationale): a content-hash snapshot of the auto-memory intake (the
 # delta baseline for computing ``changed_paths`` on the nightly run, which —
@@ -4010,7 +4010,7 @@ def _auto_memory_hash_snapshot(
     Keys are POSIX paths relative to *knowledge_root*, mirroring
     :func:`_raw_hash_snapshot`'s shape so the two stamp families stay
     consistent. Takes the already-discovered/filtered
-    :class:`AutoMemoryFile` list (issue #278 ephemeral drop already applied)
+    :class:`AutoMemoryFile` list (issue athenaeum#278 ephemeral drop already applied)
     rather than re-walking the filesystem, so the hashed set is exactly what
     this run considers auto-memory intake. Unreadable files are skipped
     (best-effort, mirrors the ingest snapshot's tolerance).
@@ -4066,7 +4066,7 @@ def _auto_memory_changed_paths(
     knowledge_root: Path,
     manifest_path: Path,
 ) -> set[Path] | None:
-    """Compute the nightly run's auto-memory delta baseline (issue #463).
+    """Compute the nightly run's auto-memory delta baseline (issue athenaeum#463).
 
     Compares the current auto-memory intake hash snapshot against the loaded
     :data:`AUTO_MEMORY_MANIFEST_NAME` stamp. ``changed = added ∪
@@ -4098,7 +4098,7 @@ def _auto_memory_changed_paths(
 
 
 def _load_full_compile_stamp(path: Path) -> dict[str, Any] | None:
-    """Load the last-whole-corpus-compile stamp (issue #463).
+    """Load the last-whole-corpus-compile stamp (issue athenaeum#463).
 
     Returns ``None`` when absent/unreadable/malformed/missing ``at`` — treated
     by the caller as "never full-compiled" (a full compile is due). ``head``
@@ -4120,7 +4120,7 @@ def _load_full_compile_stamp(path: Path) -> dict[str, Any] | None:
 
 
 def _write_full_compile_stamp(path: Path, at: datetime, head: str | None) -> None:
-    """Atomically write the last-whole-corpus-compile stamp (issue #463).
+    """Atomically write the last-whole-corpus-compile stamp (issue athenaeum#463).
 
     ``at`` is stored as an ISO-8601 UTC timestamp (``%Y-%m-%dT%H:%M:%SZ``,
     matching the deferred-manifest convention at :func:`_write_deferred_manifest`
@@ -4147,18 +4147,18 @@ def ingest(
     dry_run: bool = False,
     **run_kwargs: Any,
 ) -> IngestResult:
-    """Compile new/changed raw intake into the wiki on demand (issue #349).
+    """Compile new/changed raw intake into the wiki on demand (issue athenaeum#349).
 
     The on-demand counterpart to the nightly :func:`run`: an agent (or the
     operator, via ``athenaeum ingest``) forces freshly-``remember``ed raw
     files through the librarian compile step so the knowledge becomes
-    recallable *now*, decoupled from the nightly cadence. Issue #350's
+    recallable *now*, decoupled from the nightly cadence. Issue athenaeum#350's
     SessionEnd hook reuses this exact function — it is the single reusable
     incremental-ingest engine; the CLI is a thin wrapper.
 
     ``incremental`` (default) diffs the current raw-intake set against a
     content-hash stamp manifest (``<cache_dir>/ingest-manifest.json``,
-    mirroring the #348 index manifest). When a prior stamp exists and nothing
+    mirroring the athenaeum#348 index manifest). When a prior stamp exists and nothing
     is new or changed, it returns a fast no-op WITHOUT invoking the heavy
     compile. ``incremental=False`` (``--full``) always recompiles. ``session``
     scopes the new/changed detection to one ``originSessionId``.
@@ -4180,7 +4180,7 @@ def ingest(
 
     stored = _load_ingest_manifest(manifest_path)
     stored_stats = _load_ingest_manifest_stats(manifest_path)
-    # Issue #370: reuse the stored hash for raw files whose (mtime_ns, size) are
+    # Issue athenaeum#370: reuse the stored hash for raw files whose (mtime_ns, size) are
     # unchanged since the last stamp, skipping the read+hash. Only names present
     # in BOTH the stat map and the hash map are eligible (a v1 manifest has no
     # stats → empty prior → every file is read once, then upgraded to v2).
@@ -4218,7 +4218,7 @@ def ingest(
     changed = [k for k, h in before.items() if k in baseline and baseline[k] != h]
     new_or_changed = len(added) + len(changed)
 
-    # Issue #370: a dry-run is a pure manifest-diff PREVIEW — report the delta
+    # Issue athenaeum#370: a dry-run is a pure manifest-diff PREVIEW — report the delta
     # counts WITHOUT invoking the heavy compile (no clustering, no merge, no
     # chromadb/ONNX). ``noop`` preserves its meaning (nothing new/changed) and a
     # dry-run never stamps. Returning here also keeps ``run()`` off the dry-run
@@ -4250,7 +4250,7 @@ def ingest(
             session=session,
         )
 
-    # Issue #370 PR2: thread the auto-memory delta into ``run`` so the cluster +
+    # Issue athenaeum#370 PR2: thread the auto-memory delta into ``run`` so the cluster +
     # merge passes scope to only the changed files' affected clusters. Map the
     # new/changed relpaths that live under an auto-memory intake root to absolute
     # paths; entity raw (``raw/<ts>-<uuid>.md``) is excluded, so an entity-only
@@ -4273,7 +4273,7 @@ def ingest(
             break
     run_kwargs.pop("changed_paths", None)
 
-    # Issue #530 (H2): capture whether the compile left any raw file
+    # Issue athenaeum#530 (H2): capture whether the compile left any raw file
     # uncompiled — files beyond the max_files window, or budget/deadline
     # deferrals — so the stamp below is not written for a partial run.
     run_stats: dict[str, Any] = {}
@@ -4296,7 +4296,7 @@ def ingest(
     # no-op. Files that appeared mid-run are absent here, so they correctly
     # surface as ``added`` next run.
     #
-    # Issue #530 (H2): a ``max_files``-truncated run still exits 0, but the
+    # Issue athenaeum#530 (H2): a ``max_files``-truncated run still exits 0, but the
     # pre-compile snapshot (``before_all``) includes the ``beyond_window``
     # remainder that was NEVER compiled. Stamping it would make the next ingest
     # take the no-op fast path and silently drop those notes forever. So gate
@@ -4314,7 +4314,7 @@ def ingest(
         log.info(
             "ingest: run left %d file(s) uncompiled (beyond_window=%d, "
             "deferred=%d) — leaving the stamp manifest untouched so the next "
-            "ingest retries the backlog instead of a false no-op (issue #530)",
+            "ingest retries the backlog instead of a false no-op (issue athenaeum#530)",
             beyond_window + len(run_deferred),
             beyond_window,
             len(run_deferred),
@@ -4343,9 +4343,9 @@ def reindex(
     """Rebuild the search index; return ``(backend_name, pages_indexed)``.
 
     The reusable core the ``reindex`` CLI and the SessionEnd composition
-    (:func:`session_end`, issue #350) share, so both apply the *same* backend
+    (:func:`session_end`, issue athenaeum#350) share, so both apply the *same* backend
     resolution, extra-intake roots, and index globs. ``incremental`` (default,
-    issue #348) applies only the add/change/delete hash-diff delta — a fast
+    issue athenaeum#348) applies only the add/change/delete hash-diff delta — a fast
     no-op when the wiki has not changed since the last build. A ``vector``
     backend that is not installed raises ``ImportError`` to the caller.
     """
@@ -4403,11 +4403,11 @@ def _reindex_would_change(
     config: dict[str, object],
     backend: str | None,
 ) -> int | None:
-    """Cheap dry-run preview of how many pages a reindex would touch (#370).
+    """Cheap dry-run preview of how many pages a reindex would touch (athenaeum#370).
 
     Diffs the current wiki against the vector/fts5 index manifest — the SAME
     ``added + changed + removed`` delta :func:`reindex` would apply — but WITHOUT
-    opening chromadb or loading any embedding model. The scan reuses the #370
+    opening chromadb or loading any embedding model. The scan reuses the athenaeum#370
     stat pre-filter, so it re-hashes only changed files. Returns the delta count,
     or ``None`` when it cannot be computed cheaply (no wiki dir).
     """
@@ -4450,7 +4450,7 @@ def _reindex_would_change(
 
 @dataclass
 class SessionEndResult:
-    """Summary of a :func:`session_end` invocation (issue #350).
+    """Summary of a :func:`session_end` invocation (issue athenaeum#350).
 
     Wraps the underlying :class:`IngestResult` and records whether the reindex
     step ran (it is change-gated on the compile actually having run) and how
@@ -4464,7 +4464,7 @@ class SessionEndResult:
     backend: str
     duration_ms: int
     session: str | None = None
-    # Issue #370: on a dry-run, a cheap manifest hash-diff of how many pages a
+    # Issue athenaeum#370: on a dry-run, a cheap manifest hash-diff of how many pages a
     # real reindex WOULD touch — computed WITHOUT opening chromadb or loading a
     # model. ``None`` on a non-dry-run, or when it could not be computed cheaply.
     dry_run: bool = False
@@ -4512,7 +4512,7 @@ def session_end(
     dry_run: bool = False,
     **run_kwargs: Any,
 ) -> SessionEndResult:
-    """Change-gated SessionEnd compile-then-index composition (issue #350).
+    """Change-gated SessionEnd compile-then-index composition (issue athenaeum#350).
 
     The single command the cwc SessionEnd hook and the nightly-after-librarian
     path invoke so a memory ``remember``ed by one agent becomes recallable by
@@ -4564,7 +4564,7 @@ def session_end(
         not ingest_result.noop and ingest_result.exit_code == 0 and not dry_run
     )
     if should_reindex:
-        # Issue #370: announce the planned work BEFORE the (potentially minutes-
+        # Issue athenaeum#370: announce the planned work BEFORE the (potentially minutes-
         # long) reindex so the run does not look like a silent hang.
         log.info(
             "session-end: %d new/changed raw (compiled %d); reindexing wiki "
@@ -4586,7 +4586,7 @@ def session_end(
         log.info("session-end: reindex complete — %d page(s) indexed", reindex_pages)
         reindexed = True
     elif dry_run:
-        # Issue #370: cheap dry-run preview — count how many pages a reindex
+        # Issue athenaeum#370: cheap dry-run preview — count how many pages a reindex
         # WOULD touch via a manifest hash-diff (the SAME delta reindex applies)
         # WITHOUT opening chromadb or loading any embedding model.
         reindex_would_change = _reindex_would_change(
@@ -4597,7 +4597,7 @@ def session_end(
             backend=backend,
         )
 
-    # Issue #711: reference determination — mark which of THIS session's
+    # Issue athenaeum#711: reference determination — mark which of THIS session's
     # pushed ids were actually referenced afterward, so precision
     # (referenced / pushed) accrues per session. Scoped to `session` (the
     # same originating-session id `session_end` already takes for its

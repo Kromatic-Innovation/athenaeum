@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Model rate-table + sampling-capability guards (issue #577, epic #516 B1).
+"""Model rate-table + sampling-capability guards (issue athenaeum#577, epic athenaeum#516 B1).
 
 ``_MODEL_RATES_USD_PER_MTOK`` is the single site pricing model tokens; a
 default that resolves to no prefix falls through to the blended fallback and
@@ -98,7 +98,7 @@ def test_longest_prefix_precedence_holds() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sampling-parameter capability (epic #515 deliverable 4; #573 reads this)
+# Sampling-parameter capability (epic athenaeum#515 deliverable 4; athenaeum#573 reads this)
 # ---------------------------------------------------------------------------
 
 

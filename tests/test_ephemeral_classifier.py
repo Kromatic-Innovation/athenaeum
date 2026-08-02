@@ -1,4 +1,4 @@
-"""Unit tests for the ephemeral/operational classifier (issue #278).
+"""Unit tests for the ephemeral/operational classifier (issue athenaeum#278).
 
 Covers :func:`athenaeum.ephemeral.classify_ephemeral` (raw intake),
 :func:`athenaeum.ephemeral.classify_ephemeral_page` (compiled wiki page),

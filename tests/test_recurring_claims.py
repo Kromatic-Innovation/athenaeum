@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the cross-entity recurring-claim detector (issue #272).
+"""Tests for the cross-entity recurring-claim detector (issue athenaeum#272).
 
-Slice 1 of the #258 SSoT epic. The detector is READ-ONLY: it groups the
+Slice 1 of the athenaeum#258 SSoT epic. The detector is READ-ONLY: it groups the
 SAME claim restated across DIFFERENT wiki entities (different files / UIDs)
 and emits a report. It mutates nothing under ``wiki/``.
 
@@ -35,7 +35,7 @@ def _find_recurring_claims(
     """Drive the SHIPPED recurring-claim path — the exact two-call composition
     ``cli.py``'s ``claims --find`` uses (``extract_claim_occurrences`` then
     ``group_recurring_claims``). Replaces the former ``recurring_claims.
-    find_recurring_claims`` src façade (issue #536, M35), which had 11 test
+    find_recurring_claims`` src façade (issue athenaeum#536, M35), which had 11 test
     refs and 0 src callers, so these tests now exercise the real dispatch path
     rather than a test-only wrapper.
     """
@@ -101,7 +101,7 @@ def wiki_root(tmp_path: Path) -> Path:
     root.mkdir()
 
     # Three DISTINCT entities (different uids/files) each restate the SAME
-    # venture claim as a footnote claim (slice C / #262 source claim).
+    # venture claim as a footnote claim (slice C / athenaeum#262 source claim).
     _write(
         root / "aaaa1111-tristan-profile.md",
         "---\n"

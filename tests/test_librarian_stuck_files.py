@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #663 — a reliably-failing file must not be a silent permanent no-progress loop.
+"""Issue athenaeum#663 — a reliably-failing file must not be a silent permanent no-progress loop.
 
 ``tier3_write`` defers a raw file's disk writes until *every* action for that
 file has succeeded (the all-or-nothing boundary, deliberately preserved here —
@@ -120,7 +120,7 @@ def test_tier3_write_mid_file_failure_applies_no_writes_and_names_action(
     partial/corrupt state is reachable. And the propagating exception must name
     the failing action so the caller can record which entity is stuck.
 
-    Fails against the pre-#663 code: it never set ``athenaeum_failing_action``.
+    Fails against the pre-athenaeum#663 code: it never set ``athenaeum_failing_action``.
     """
     wiki = tmp_path / "wiki"
     wiki.mkdir()
@@ -241,7 +241,7 @@ def test_reliably_failing_file_becomes_stuck_and_is_then_skipped(
 
     Threshold 2: run 1 fails (count 1, not yet stuck); run 2 fails (count 2 —
     crosses, surfaced); run 3 SKIPS the file entirely (process_one is never
-    called for it) and still surfaces it. Against the pre-#663 code
+    called for it) and still surfaces it. Against the pre-athenaeum#663 code
     ``out_run_stats`` had no ``stuck_files`` key and process_one was re-invoked
     forever — this test fails there.
     """

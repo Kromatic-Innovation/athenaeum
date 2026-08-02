@@ -221,7 +221,7 @@ class TestServe:
     def test_serve_honors_knowledge_path_env_vars(
         self, knowledge_with_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Issue #355: KNOWLEDGE_RAW_PATH / KNOWLEDGE_WIKI_PATH override the
+        """Issue athenaeum#355: KNOWLEDGE_RAW_PATH / KNOWLEDGE_WIKI_PATH override the
         raw/wiki roots individually so `athenaeum serve` is a drop-in
         replacement for the legacy standalone knowledge-mcp server, whose
         MCP config pins those env vars."""
@@ -370,7 +370,7 @@ class TestWarnIfBackendCacheMissing:
 class TestStopwords:
     """`athenaeum stopwords` is the canonical source of the stopword list —
     shell hooks read it instead of hard-coding their own copy. Regression
-    guard for issue #46: the two copies must stay in sync."""
+    guard for issue athenaeum#46: the two copies must stay in sync."""
 
     def test_prints_one_word_per_line_sorted(
         self, capsys: pytest.CaptureFixture[str]
@@ -415,7 +415,7 @@ class TestTestMcp:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """The smoke test passes ``sources``, so it must not trip the
-        issue-#90 "no `sources` supplied" warning the server logs for
+        issue-athenaeum#90 "no `sources` supplied" warning the server logs for
         provenance-less writes (v0.7.3 release-gate review)."""
         import logging
 
@@ -468,7 +468,7 @@ class TestTestMcp:
 
 
 class TestRecall:
-    """`athenaeum recall <query>` subcommand (issue #71). Shell-accessible
+    """`athenaeum recall <query>` subcommand (issue athenaeum#71). Shell-accessible
     wrapper around the MCP recall tool — used by validation harnesses and
     operator debugging. Output contract: one tab-separated hit per line,
     ``<score>\\t<filename>\\t<preview>``."""
@@ -592,7 +592,7 @@ class TestRecall:
 
 
 class TestIngestAnswers:
-    """`athenaeum ingest-answers` subcommand (issue #61)."""
+    """`athenaeum ingest-answers` subcommand (issue athenaeum#61)."""
 
     def test_missing_knowledge_dir_returns_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -616,7 +616,7 @@ class TestIngestAnswers:
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # Issue #540 (M14): a provider misconfiguration (a typo'd backend name)
+        # Issue athenaeum#540 (M14): a provider misconfiguration (a typo'd backend name)
         # must NOT be swallowed into the offline fallback + exit 0. It must
         # print the error and exit nonzero — the silent-backend-fallback the
         # provider module forbids in writing.
@@ -633,7 +633,7 @@ class TestIngestAnswers:
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # Issue #540 (M14): the same fail-loud guarantee on the sibling
+        # Issue athenaeum#540 (M14): the same fail-loud guarantee on the sibling
         # `reresolve-questions` write path.
         (tmp_path / "wiki").mkdir()
         (tmp_path / "raw").mkdir()
@@ -666,7 +666,7 @@ class TestIngestAnswers:
 
 
 class TestIngestMerges:
-    """`athenaeum ingest-merges` subcommand (issue #299).
+    """`athenaeum ingest-merges` subcommand (issue athenaeum#299).
 
     ``ingest_resolved_merges`` existed in ``pending_merges.py`` with zero
     callers and zero test coverage — nothing ever archived a resolved merge
@@ -942,7 +942,7 @@ class TestPeopleCommand:
 
 
 class TestRunMaxApiCallsFlag:
-    """Issue #220 fix round — CLI coverage for --max-api-calls."""
+    """Issue athenaeum#220 fix round — CLI coverage for --max-api-calls."""
 
     def test_default_passes_none_through(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1014,7 +1014,7 @@ def _capture_librarian_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]
 
 
 class TestRunPathAlias:
-    """Issue #227 — `run --path` aliases `--knowledge-root`."""
+    """Issue athenaeum#227 — `run --path` aliases `--knowledge-root`."""
 
     def test_path_alias_sets_knowledge_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1044,7 +1044,7 @@ class TestRunPathAlias:
 
 
 class TestRunStrictBudgetFlag:
-    """Issue #227 — `run --strict-budget` plumbs through to librarian.run."""
+    """Issue athenaeum#227 — `run --strict-budget` plumbs through to librarian.run."""
 
     def test_default_is_false(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1099,7 +1099,7 @@ def _deterministic_embed(texts: list[str]) -> list[list[float]]:
 
 class TestClaims:
     """`athenaeum claims --find` — cross-entity recurring-claim detector
-    (issue #272, slice 1 of #258). READ-ONLY YAML report over the wiki."""
+    (issue athenaeum#272, slice 1 of athenaeum#258). READ-ONLY YAML report over the wiki."""
 
     def test_find_groups_cross_entity_restatement(
         self,
@@ -1159,7 +1159,7 @@ class TestClaims:
 
 
 class TestRunPushFlag:
-    """Issue #284: ``athenaeum run --push`` must propagate to ``librarian.run``
+    """Issue athenaeum#284: ``athenaeum run --push`` must propagate to ``librarian.run``
     as ``push_after_run=True``, and absence of the flag must leave the value
     at ``None`` (which the resolver then defaults to off)."""
 
@@ -1203,7 +1203,7 @@ class TestRunPushFlag:
 
 
 class TestAsOfView:
-    """Issue #308 slice 3: the ``--as-of DATE`` temporal recall view.
+    """Issue athenaeum#308 slice 3: the ``--as-of DATE`` temporal recall view.
 
     A read-only rewind through the upper bound: a claim valid THEN but expired
     NOW is returned. The live index is never overwritten.
@@ -1302,12 +1302,12 @@ class TestAsOfView:
         assert rc == 0
         out = capsys.readouterr().out
         # mid + always are live on 2026-04-01; closed has expired. An as-of
-        # build is always full (issue #348 reconciliation).
+        # build is always full (issue athenaeum#348 reconciliation).
         assert "FTS5 index rebuilt as of 2026-04-01 (full): 2 pages" in out
 
 
 class TestEverySubparserHasFuncDefault:
-    """Guard the #553 dispatch invariant: every subcommand binds a ``func``.
+    """Guard the athenaeum#553 dispatch invariant: every subcommand binds a ``func``.
 
     ``main()`` dispatches with a single ``return args.func(args)`` and no
     per-command branching. A subparser registered without a

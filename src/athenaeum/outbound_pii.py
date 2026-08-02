@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Outbound-draft PII lint (emails/phones) — interim mitigation split from #428.
+"""Outbound-draft PII lint (emails/phones) — interim mitigation split from athenaeum#428.
 
 **Contract:** given text about to leave the system (email draft, Buffer post,
 public issue), return every email/phone-shaped finding (location + class), or
@@ -7,11 +7,11 @@ a redacted copy — a pure, offline, deterministic text lint. It never decides
 whether to actually block/send the outbound surface; that policy call is the
 caller's.
 
-**Factoring rule:** the cheap, mechanical half of #428's "no PII in outbound
+**Factoring rule:** the cheap, mechanical half of athenaeum#428's "no PII in outbound
 drafts" idea. This module owns DETECTION + optional REDACTION of the two named
 classes (email, phone) in already-composed text. It does NOT own egress
 *refusal* — an agent declining to reveal PII even when directly asked — which
-stays parked on #428 and is deliberately NOT attempted here: no policy
+stays parked on athenaeum#428 and is deliberately NOT attempted here: no policy
 judgment, no network, no live-store access, no LLM call.
 
 **Layering:** L3 service. Imports nothing but :mod:`athenaeum.pii` (a sibling
@@ -21,7 +21,7 @@ the detection patterns change in exactly one place. Consumed by
 :mod:`athenaeum.provider` (redacting a CLI error envelope before it reaches a
 log line) and the ``athenaeum outbound-lint`` CLI.
 
-Relationship to :mod:`athenaeum.pii` (the #427 corpus-hygiene slice): that
+Relationship to :mod:`athenaeum.pii` (the athenaeum#427 corpus-hygiene slice): that
 module lints *entity pages that stay in the corpus* for inline contact data.
 This module lints *outbound-destined text about to leave the system*. They are
 different surfaces with different lifecycles, so they are separate modules — but
@@ -31,7 +31,7 @@ reuses :mod:`athenaeum.pii`'s compiled ``_EMAIL_RE`` / ``_PHONE_RE`` patterns
 the detection patterns ever need to change, they change in one place.
 
 Allowlist / fail-safe (the "isn't already known to the recipient" qualifier in
-#428): a caller that can establish an address is already known to the recipient
+athenaeum#428): a caller that can establish an address is already known to the recipient
 passes it in the ``allowlist`` — such findings are dropped (not flagged, not
 redacted). Where the caller CANNOT establish that, the default is to flag: an
 empty/absent allowlist means every match is reported. Failing safe (flag) is the
@@ -51,7 +51,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-# Single source of truth for the detection patterns: reuse #427's compiled
+# Single source of truth for the detection patterns: reuse athenaeum#427's compiled
 # regexes and digit floor rather than defining a second copy that could drift.
 # These are module-private in athenaeum.pii, but sharing one definition of
 # "what an email/phone looks like" across the two lints is the explicit intent
@@ -64,7 +64,7 @@ from athenaeum.pii import (
     _is_excluded_phone_shape,
 )
 
-#: The two PII classes this lint recognizes (the two #428 names). Exposed as
+#: The two PII classes this lint recognizes (the two athenaeum#428 names). Exposed as
 #: constants so callers/tests match on a symbol rather than a bare string.
 PII_KIND_EMAIL = "email"
 PII_KIND_PHONE = "phone"
@@ -221,7 +221,7 @@ def scan_outbound_text(text: str, *, allowlist: Allowlist | object = None) -> li
             continue
         # Drop shapes that are provably not a phone (ISO dates, year ranges,
         # bare id fragments) — robust to a leading '+'/'(' the regex folds into
-        # its group. Shared with athenaeum.pii.find_inline_phones (issue #683)
+        # its group. Shared with athenaeum.pii.find_inline_phones (issue athenaeum#683)
         # so the egress lint no longer over-flags a parenthesized date/uid.
         if _is_excluded_phone_shape(token):
             continue

@@ -32,7 +32,7 @@ path, not this module).
 ``UserPromptSubmit`` hook, budgeted at ``timeout`` seconds — default 3s).
 Module scope imports only :mod:`athenaeum.config` — including the shared
 classify-model default (:data:`DEFAULT_CLASSIFY_MODEL`), a single model-id
-constant relocated to the ``config`` leaf in issue #640 (formerly reached up
+constant relocated to the ``config`` leaf in issue athenaeum#640 (formerly reached up
 into the L4 :mod:`athenaeum.tiers` hub). :mod:`athenaeum.provider`,
 :mod:`athenaeum.spend`, and
 :mod:`athenaeum.llm_schemas` are all deferred INSIDE :func:`extract_topics` so
@@ -50,15 +50,15 @@ from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
 
 log = logging.getLogger(__name__)
 
-# Single-sourced from ``config.DEFAULT_CLASSIFY_MODEL`` (issue #571, M19;
-# relocated from ``tiers`` to the ``config`` leaf in #640) rather than a fourth
+# Single-sourced from ``config.DEFAULT_CLASSIFY_MODEL`` (issue athenaeum#571, M19;
+# relocated from ``tiers`` to the ``config`` leaf in athenaeum#640) rather than a fourth
 # copy of the literal — a haiku-class bump now touches one file. The topic env
 # knob (``ATHENAEUM_TOPIC_MODEL``, in ``_get_topic_model``) is unchanged; only
 # the DEFAULT collapses. ``config`` is a low leaf already resident on the
 # recall-hook path, so this adds no load cost.
 DEFAULT_TOPIC_MODEL = DEFAULT_CLASSIFY_MODEL
 
-# Topic-extraction output budget (issue #575): a short JSON array of topic
+# Topic-extraction output budget (issue athenaeum#575): a short JSON array of topic
 # strings on the recall hot path. Formerly a bare ``256`` literal; named and
 # resolved through the seam. Value unchanged.
 _TOPIC_MAX_TOKENS = 256
@@ -80,7 +80,7 @@ _USER_TEMPLATE = (
 
 
 def _get_topic_model(config: dict[str, object] | None = None) -> str:
-    # env ATHENAEUM_TOPIC_MODEL > yaml models.topic > code default (#232).
+    # env ATHENAEUM_TOPIC_MODEL > yaml models.topic > code default (athenaeum#232).
     return resolve_model("topic", "ATHENAEUM_TOPIC_MODEL", DEFAULT_TOPIC_MODEL, config)
 
 
@@ -98,21 +98,21 @@ def extract_topics(
     Args:
         prompt: The raw user message.
         timeout: Seconds to wait for the API call before giving up.
-        config: Optional resolved athenaeum.yaml dict (issue #232) — routes
+        config: Optional resolved athenaeum.yaml dict (issue athenaeum#232) — routes
             ``models.topic`` to the call. ``None`` keeps env > code-default
             resolution.
     """
     if not prompt or len(prompt.strip()) < 4:
         return []
 
-    # Route through the provider seam (issue #380) instead of constructing an
+    # Route through the provider seam (issue athenaeum#380) instead of constructing an
     # anthropic.Anthropic client directly. With ``llm.provider: claude-cli`` this
     # runs the per-turn topic extraction on the subscription and makes ZERO
     # metered API calls; with ``provider: api`` and no key the factory returns
     # None and we fall back to the regex extractor exactly as before. The CLI
     # client mirrors ``client.messages.create(**params)`` so the call below is
     # unchanged. ``timeout`` / ``max_retries=0`` are preserved on both backends.
-    # ``provider`` is resolved here too so the spend ledger (below, #378) records
+    # ``provider`` is resolved here too so the spend ledger (below, athenaeum#378) records
     # the backend actually used — never a hardcoded ``api`` that would misreport
     # a subscription call as metered dollars.
     try:
@@ -145,7 +145,7 @@ def extract_topics(
             max_tokens=resolve_max_tokens(
                 "topic", "ATHENAEUM_TOPIC_MAX_TOKENS", _TOPIC_MAX_TOKENS, config
             ),
-            # Issue #578: this call runs on the recall HOT PATH under a
+            # Issue athenaeum#578: this call runs on the recall HOT PATH under a
             # ``timeout`` budget (default 3s) — adaptive thinking's added
             # latency is exactly what this path cannot afford, and a short
             # topic-extraction array does not need it. Disabled explicitly.
@@ -170,7 +170,7 @@ def extract_topics(
         )
         return []
 
-    # Usage logging (issue #230). Inline getattr (not the shared
+    # Usage logging (issue athenaeum#230). Inline getattr (not the shared
     # models.cache_usage_counts helper) — this module stays import-light
     # because it runs on the recall-hook path with a 3s budget.
     _usage = getattr(response, "usage", None)
@@ -181,8 +181,8 @@ def extract_topics(
         getattr(_usage, "cache_creation_input_tokens", 0),
         getattr(_usage, "cache_read_input_tokens", 0),
     )
-    # Issue #378: this is the highest-frequency LLM call in the system — the
-    # per-turn recall extractor, fired on EVERY prompt. Post-#380 it routes
+    # Issue athenaeum#378: this is the highest-frequency LLM call in the system — the
+    # per-turn recall extractor, fired on EVERY prompt. Post-athenaeum#380 it routes
     # through the provider seam, so it runs on the metered Anthropic SDK only
     # under ``provider: api``; under ``claude-cli`` it is subscription-covered.
     # Record the backend ACTUALLY used (``provider`` resolved above) so the
@@ -212,14 +212,14 @@ def extract_topics(
                 config=config,
             )
         except Exception:
-            # Issue #540 (L19): the swallow is correct (a ledger hiccup must not
+            # Issue athenaeum#540 (L19): the swallow is correct (a ledger hiccup must not
             # break the 3s recall path), but it must not be FULLY silent — a
             # debug line makes a recurring spend-recording failure diagnosable
             # on the highest-frequency path instead of vanishing without trace.
             log.debug("query-topics: ledger spend recording failed", exc_info=True)
 
     try:
-        # Issue #578: response_text skips any leading thinking block (this
+        # Issue athenaeum#578: response_text skips any leading thinking block (this
         # recall-hot-path stage runs disabled today; the helper is
         # text-block-equivalent for a text-only response and keeps the site
         # robust if the posture changes).
@@ -227,7 +227,7 @@ def extract_topics(
     except (AttributeError, IndexError, TypeError):
         return []
 
-    # M16 (#607): route the topic array through the shared balanced scanner
+    # M16 (athenaeum#607): route the topic array through the shared balanced scanner
     # instead of a greedy ``re.search(r"\[.*\]", DOTALL)`` + bare
     # ``json.loads``. The old regex spanned from the first ``[`` to the LAST
     # ``]`` anywhere in the response, so any trailing prose, second array, or
@@ -254,7 +254,7 @@ def extract_topics(
         )
         return []
 
-    # Observe-only schema validation (#570, M17 phase 1): log the delta between
+    # Observe-only schema validation (athenaeum#570, M17 phase 1): log the delta between
     # what the model returned and the accepted ``list[str]`` shape, WITHOUT
     # changing behavior. Imported lazily so pydantic never loads on this recall
     # hot-path's import graph. The existing normalization below is untouched.

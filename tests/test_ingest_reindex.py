@@ -1,7 +1,7 @@
-"""Tests for `athenaeum ingest` and `athenaeum reindex` (issue #349).
+"""Tests for `athenaeum ingest` and `athenaeum reindex` (issue athenaeum#349).
 
 Covers the reusable incremental-ingest engine in ``librarian.ingest`` (which
-the SessionEnd path #350 reuses) and the thin CLI wrappers: incremental
+the SessionEnd path athenaeum#350 reuses) and the thin CLI wrappers: incremental
 compiles only new/changed raw files and is a fast no-op when none, ``--full``
 recompiles, ``reindex --incremental`` is a no-op when nothing changed, the
 one-line JSON summary shape, exit codes, and single-flight via the runlock.
@@ -223,7 +223,7 @@ class TestIngestEngineTier0:
     def test_truncated_exit_zero_run_does_not_stamp(
         self, tmp_path: Path, mock_anthropic: MagicMock
     ) -> None:
-        # Issue #530 (H2): a max_files-truncated run still exits 0, but only
+        # Issue athenaeum#530 (H2): a max_files-truncated run still exits 0, but only
         # part of the intake was compiled. The OLD code stamped the pre-compile
         # snapshot of ALL discovered files, so the next ingest took the false
         # no-op fast path and the beyond-window remainder was silently never
@@ -465,7 +465,7 @@ class TestReindexCLI:
         assert main(args) == 0
         capsys.readouterr()
         # Second incremental pass with no file changes: still succeeds and is
-        # sub-second (the #348 hash-diff finds an empty delta).
+        # sub-second (the athenaeum#348 hash-diff finds an empty delta).
         assert main(args) == 0
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert payload["mode"] == "incremental"

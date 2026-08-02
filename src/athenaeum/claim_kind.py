@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Cheap intake-time claim-kind classifier (issue #327).
+"""Cheap intake-time claim-kind classifier (issue athenaeum#327).
 
 Classifies a raw memory's EPISTEMIC shape — one of
 :data:`athenaeum.models.CLAIM_KINDS` — in a single cheap LLM call, the same
@@ -17,7 +17,7 @@ resolver's ``attribute_both`` short-circuit keys on (see
 
 Fail-open throughout: no client, an API error, malformed JSON, or an
 out-of-vocabulary label all yield ``""`` (unclassified) — an unclassified
-claim behaves exactly as it did before #327. Tests stub the client; no live
+claim behaves exactly as it did before athenaeum#327. Tests stub the client; no live
 network in CI.
 
 Layering note: despite living alongside the L0 primitives, this module is NOT
@@ -63,12 +63,12 @@ log = logging.getLogger(__name__)
 _CLASSIFY_BODY_CHARS = 800
 
 
-# Claim-kind classify output budget (issue #575): a single one-word label plus
+# Claim-kind classify output budget (issue athenaeum#575): a single one-word label plus
 # a short reason — a tiny response. Formerly a bare ``64`` literal; named and
 # resolved through the seam. Value unchanged.
 _CLAIM_KIND_MAX_TOKENS = 64
 
-# The data-only clause comes from the shared prompt_safety helper (#687) rather
+# The data-only clause comes from the shared prompt_safety helper (athenaeum#687) rather
 # than a hand-rolled sentence, so a future hardening of the canonical clause
 # reaches this system prompt too instead of silently missing it.
 CLAIM_KIND_SYSTEM = (
@@ -106,7 +106,7 @@ Return STRICT JSON, no prose, no markdown fence:
 
 def _get_classify_model(config: dict[str, Any] | None = None) -> str:
     # Same knob as tier2_classify / the detector: env ATHENAEUM_CLASSIFY_MODEL
-    # > yaml models.classify > code default (issue #232).
+    # > yaml models.classify > code default (issue athenaeum#232).
     return resolve_model(
         "classify", "ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CLASSIFY_MODEL, config
     )
@@ -117,7 +117,7 @@ def _snippet(text: str) -> str:
     _, body = parse_frontmatter(text)
     body = (body or text).strip()
     # Defang any literal memory tags so an untrusted body cannot forge the
-    # <memory> boundary in the prompt. #564: shared prompt_safety.defang_tag
+    # <memory> boundary in the prompt. athenaeum#564: shared prompt_safety.defang_tag
     # helper (byte-identical to the former hand-rolled re.sub, which this and
     # contradictions._member_snippet each open-coded) — one defang for both.
     body = defang_tag(body, "memory")
@@ -153,7 +153,7 @@ def classify_claim_kind(
         return ""
 
     model = _get_classify_model(config)
-    # Fence the untrusted snippet via the shared prompt_safety helper (#687)
+    # Fence the untrusted snippet via the shared prompt_safety helper (athenaeum#687)
     # instead of a hand-rolled f-string, so this site tracks the canonical
     # fence. `_snippet` already truncated + defanged (its byte-identical
     # protection is preserved, not replaced — the two defences are complementary
@@ -162,7 +162,7 @@ def classify_claim_kind(
         snippet, tag="memory", max_chars=_CLASSIFY_BODY_CHARS
     )
     try:
-        # Issue #569 (H6): retry transient 429/529/connection blips with backoff
+        # Issue athenaeum#569 (H6): retry transient 429/529/connection blips with backoff
         # rather than failing straight to unclassified on the first one.
         response = with_retry(
             lambda: client.messages.create(
@@ -173,7 +173,7 @@ def classify_claim_kind(
                     _CLAIM_KIND_MAX_TOKENS,
                     config,
                 ),
-                # Issue #578: same ``classify``-model / Haiku posture as
+                # Issue athenaeum#578: same ``classify``-model / Haiku posture as
                 # tier2_classify — a single-label classification does not
                 # benefit from thinking. Disabled explicitly.
                 thinking=cast(
@@ -200,7 +200,7 @@ def classify_claim_kind(
         usage.add(input_toks, output_toks, cache_creation, cache_read, model=model)
 
     try:
-        # Issue #578: response_text skips any leading thinking block (this
+        # Issue athenaeum#578: response_text skips any leading thinking block (this
         # stage runs disabled today; the helper is text-block-equivalent for a
         # text-only response and keeps the site robust if the posture changes).
         raw_text = response_text(response)
@@ -212,7 +212,7 @@ def classify_claim_kind(
     if not isinstance(payload, dict):
         log.warning("claim_kind: no JSON object in classify response; unclassified")
         return ""
-    # Observe-only schema validation (#570, M17 phase 1): log any delta from the
+    # Observe-only schema validation (athenaeum#570, M17 phase 1): log any delta from the
     # accepted ``{"claim_kind": <CLAIM_KINDS>}`` shape without changing the
     # unclassified-fallback behavior below. Lazy import keeps pydantic off the
     # import graph until first use.
@@ -234,11 +234,11 @@ def stamp_claim_kind(
 ) -> str:
     """Classify + stamp ``claim_kind:`` into a raw file's frontmatter, once.
 
-    Idempotent and fail-open (issue #327):
+    Idempotent and fail-open (issue athenaeum#327):
 
     - If the file already carries a valid ``claim_kind`` → returns it, no call.
     - No client / classification failure / unreadable file → returns ``""``
-      and writes nothing (the member stays unclassified; pre-#327 behavior).
+      and writes nothing (the member stays unclassified; pre-athenaeum#327 behavior).
     - On a successful classification the label is written into the existing
       frontmatter (or a fresh block) and the value is returned.
 

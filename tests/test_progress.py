@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the progress-heartbeat helper (issue #398).
+"""Tests for the progress-heartbeat helper (issue athenaeum#398).
 
 Covers :class:`athenaeum.progress.PhaseHeartbeat` and
 :func:`athenaeum.config.resolve_heartbeat_interval`.

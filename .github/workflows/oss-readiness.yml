@@ -1,6 +1,6 @@
 name: OSS Readiness
 
-# Deterministic OSS-readiness gate (issue #390 / hestia#583). Composes existing
+# Deterministic OSS-readiness gate (issue athenaeum#390 / hestia#583). Composes existing
 # tools — nothing here is reimplemented:
 #   * community-files : presence of LICENSE + community health files
 #   * secrets-scan    : Gitleaks working-tree scan

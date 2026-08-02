@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Routing tests for ``_parse_response`` + action dispatch (issue #169, Lane 3).
+"""Routing tests for ``_parse_response`` + action dispatch (issue athenaeum#169, Lane 3).
 
 These tests pin the action-routing behavior of
 :func:`athenaeum.resolutions.propose_resolution` against a stubbed LLM
@@ -188,7 +188,8 @@ NOT_A_CONFLICT_CASES: list[ResolvedCase] = [
             ),
             (
                 "project_voltaire_ea_umbrella.md",
-                "Voltaire is now the autonomous inbox EA umbrella (cwc epic #340).",
+                "Voltaire is now the autonomous inbox EA umbrella "
+                "(cwc epic code-workspace-config#340).",
                 None,
             ),
         ],
@@ -493,7 +494,7 @@ def test_resolved_case_returns_not_a_conflict(
     ), f"{case.label}: confidence below contract floor ({proposal.confidence})"
 
 
-# Canonical correct/forget cases (#166 follow-up). These reuse the
+# Canonical correct/forget cases (athenaeum#166 follow-up). These reuse the
 # generic file-writer + detector-result helpers; only the stubbed JSON
 # payload changes, so they pin the parser routing for each new action.
 _CORRECT_CASE = ResolvedCase(

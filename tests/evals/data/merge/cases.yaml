@@ -1,4 +1,4 @@
-# Merge (Tier-3 WRITE/MERGE) golden set (issue #552)
+# Merge (Tier-3 WRITE/MERGE) golden set (issue athenaeum#552)
 #
 # Synthetic scenario: "Meridian Advisory", the same fictional 12-person
 # consultancy the detector/resolver/classify golden sets use. Every case is
@@ -8,7 +8,7 @@
 # tiers.tier3_merge(), using a real Anthropic call (default: the WRITE model,
 # ATHENAEUM_WRITE_MODEL / DEFAULT_WRITE_MODEL). tier3_merge tries the
 # anchored-ops patch path first and falls back to full-echo on any
-# unparseable/truncated/inapplicable response (issue #469) — this eval
+# unparseable/truncated/inapplicable response (issue athenaeum#469) — this eval
 # exercises the SAME live call sites tier3_merge itself uses, so either path
 # succeeding counts as a pass; we score the RESULT SHAPE, not which path was
 # taken.
@@ -19,7 +19,7 @@
 #                       escalation
 #   - reconfirmation   : the new observation merely restates existing
 #                       content -> expect no new near-duplicate bullet (the
-#                       #297 dedup policy); body may be unchanged or gain a
+#                       athenaeum#297 dedup policy); body may be unchanged or gain a
 #                       footnote, but must not duplicate the claim
 #   - factual_contradiction : a verifiable-fact conflict -> expect no
 #                       escalation (the merge prompt directs "keep the more

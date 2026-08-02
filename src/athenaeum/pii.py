@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""PII off-corpus — contacts surface, entity-page lint, observation log (#427).
+"""PII off-corpus — contacts surface, entity-page lint, observation log (athenaeum#427).
 
 **Contract:** keep PII OUT of the recall-visible corpus (or, if it must live
 inline, keep it flagged so every corpus consumer excludes it) — this module
@@ -8,9 +8,9 @@ reduction, NOT encryption (see the issue's threat model: recall injects pages
 into arbitrary agent prompts, so the retrieval-layer exclusion is the
 cheapest egress reduction — at-rest encryption is ~pointless when the
 librarian itself needs the keys). This module is the **code-only slice**:
-migrating live entity pages to durable-IDs-only is operator task #437 (out of
+migrating live entity pages to durable-IDs-only is operator task athenaeum#437 (out of
 scope); wiring "retracting an observation flags a dependent merge" is the
-retraction cascade, #435 (out of scope, blocked on #425's merge-provenance
+retraction cascade, athenaeum#435 (out of scope, blocked on athenaeum#425's merge-provenance
 model).
 
 **Relationship to :mod:`athenaeum.outbound_pii`** (read that module's
@@ -29,7 +29,7 @@ corpus-exclusion predicate) and by the merge-candidate discovery in
 Four pieces, in the order the issue settles them:
 
 1. **Contacts surface** (:func:`contacts_surface_root` / :func:`is_pii_class`)
-   — a thin convenience wrapper over :mod:`athenaeum.storage`'s #429 adapter
+   — a thin convenience wrapper over :mod:`athenaeum.storage`'s athenaeum#429 adapter
    layer. This module does NOT hardcode ``~/knowledge/contacts/`` in any
    corpus consumer: the path is an adapter-config choice (see
    ``athenaeum.yaml``'s ``storage.mapping: {pii: excluded}`` example), and
@@ -37,7 +37,7 @@ Four pieces, in the order the issue settles them:
    construction** because it lives outside ``wiki/`` + the configured
    ``recall.extra_intake_roots`` (the same by-construction property
    :mod:`tests.test_storage`'s ``TestByConstructionExclusion`` already proves
-   for #429's adapter layer in general). This module's ``contacts_surface_root``
+   for athenaeum#429's adapter layer in general). This module's ``contacts_surface_root``
    is just the writer-facing convenience that resolves to that same excluded
    root under the conventional ``pii`` entity class.
 
@@ -47,9 +47,9 @@ Four pieces, in the order the issue settles them:
    only durable identifiers (name, LinkedIn, record id, Google-Contact id);
    inline ``emails:`` / ``phones:`` frontmatter (or an email/phone-shaped
    string in the body) is flagged as a validation warning, mirroring the
-   #424 ``memory_class`` precedent (:mod:`athenaeum.schemas` / :mod:`athenaeum._lint`)
+   athenaeum#424 ``memory_class`` precedent (:mod:`athenaeum.schemas` / :mod:`athenaeum._lint`)
    — recoverable, not a hard failure, because migrating existing pages is
-   #437. ``pii: true`` is the belt-and-suspenders flag an operator can set on
+   athenaeum#437. ``pii: true`` is the belt-and-suspenders flag an operator can set on
    a page that legitimately carries PII inline in narrative; every corpus
    consumer additionally excludes a ``pii: true`` page even when it is NOT on
    the excluded surface (see point 3).
@@ -94,7 +94,7 @@ from athenaeum.storage import surface_root_for_class
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# 1. Contacts surface (thin convenience over the #429 adapter layer)
+# 1. Contacts surface (thin convenience over the athenaeum#429 adapter layer)
 # ---------------------------------------------------------------------------
 
 #: Conventional entity-class name this module's callers route through the
@@ -148,26 +148,26 @@ PII_FLAG = "pii"
 #: per the issue's entity-page rule: entity pages carry durable identifiers
 #: only (name, LinkedIn, record id, Google-Contact id); ``emails``/``phones``
 #: are the two contact-data fields that must not live inline going forward.
-#: Migrating pre-existing pages that already carry these is #437 (out of
+#: Migrating pre-existing pages that already carry these is athenaeum#437 (out of
 #: scope) — this module only flags, never rewrites, a page.
 CONTACT_FRONTMATTER_FIELDS: tuple[str, ...] = ("emails", "phones")
 
-#: Frontmatter fields whose values are DURABLE IDENTIFIERS (#427) and are
+#: Frontmatter fields whose values are DURABLE IDENTIFIERS (athenaeum#427) and are
 #: PRESERVED VERBATIM on an entity page even when a value is email/phone-shaped
-#: — they are identity, not archival contact data. The #479 migrator originally
-#: read only ``emails:`` / ``phones:``; #502 found the live residual lives
+#: — they are identity, not archival contact data. The athenaeum#479 migrator originally
+#: read only ``emails:`` / ``phones:``; athenaeum#502 found the live residual lives
 #: mostly in *other* keys (``aliases:``, ``former_emails:``, ``source:``, …),
 #: so the migrator now detector-scans EVERY frontmatter value — but must NOT
 #: rewrite these identity fields. Two distinct reasons:
 #:
 #: * ``uid`` / ``type`` / ``linkedin_url`` / ``google_contact*`` /
-#:   ``handles_verified`` are durable identifiers (#427). An email that has
-#:   landed in one of these (a data-quality anomaly — #502 saw one page each in
+#:   ``handles_verified`` are durable identifiers (athenaeum#427). An email that has
+#:   landed in one of these (a data-quality anomaly — athenaeum#502 saw one page each in
 #:   ``google_contact_kromatic`` / ``linkedin_connected_on``) is NOT auto-
 #:   migrated: rewriting an identity field is not mechanically safe, so it is
 #:   left for the corpus-wide lint to surface and an operator to hand-fix.
 #: * ``name`` / ``preferred_name`` are the ~80 pages NAMED after an email
-#:   address (#502, from the Streak email-only import). Renaming an entity page
+#:   address (athenaeum#502, from the Streak email-only import). Renaming an entity page
 #:   changes its slug and breaks inbound ``related:`` edges + alias resolution,
 #:   so the name-is-an-email population is EXCLUDED from this automatic path and
 #:   handled in its own slice. Preserving these here is exactly what keeps the
@@ -187,7 +187,7 @@ DURABLE_IDENTIFIER_FIELDS: frozenset[str] = frozenset(
 )
 
 #: The two frontmatter fields that hold an entity page's NAME. When one of
-#: these IS an email address the page is excluded from the #502 automatic
+#: these IS an email address the page is excluded from the athenaeum#502 automatic
 #: migration path (renaming is unsafe — see :data:`DURABLE_IDENTIFIER_FIELDS`);
 #: :func:`name_field_holds_pii` reports the population so the separate slice can
 #: pick it up.
@@ -209,7 +209,7 @@ _PHONE_RE = re.compile(r"(?<!\w)([+(]?\d[\d\-.\s()]{6,}\d)(?!\w)")
 # that are NOT phone numbers slip through: dates (in any ordering), year
 # ranges, bare analytics/uid id fragments, and — because the character class
 # admits spaces, parens and (via `\s`) newlines — a match that RUNS PAST its
-# number into an adjacent one across a separator (issue #720: `256-257-280`
+# number into an adjacent one across a separator (issue athenaeum#720: `256-257-280`
 # issue-number lists, `02-08-2018` non-ISO dates, `2026-04-27)\n\n1` dates
 # bleeding into the next line, `1778 (2026-08-01` version-and-date pairs). The
 # classifier below narrows the match by NORMALIZATION + STRUCTURAL
@@ -254,8 +254,8 @@ def _looks_like_date(candidate: str) -> bool:
     """True when *candidate* is a calendar date (any ordering) or a year range.
 
     Excludes the date shapes the phone regex matches in the live corpus —
-    ISO dates (`2015-12-03`, #500), non-ISO orderings (`02-08-2018`, #720),
-    dotted dates (`2018.08.02`, #720) and year ranges (`2019-2020` /
+    ISO dates (`2015-12-03`, athenaeum#500), non-ISO orderings (`02-08-2018`, athenaeum#720),
+    dotted dates (`2018.08.02`, athenaeum#720) and year ranges (`2019-2020` /
     `2020--2021`) — without excluding phone-shaped tokens that merely resemble
     them. Ordering-agnostic: of the three numeric components exactly one must
     be a 4-digit calendar year (at either end), and the other two a plausible
@@ -279,7 +279,7 @@ def _looks_like_date(candidate: str) -> bool:
 def _is_bare_id_fragment(candidate: str) -> bool:
     """True when *candidate* is a separator-free digit run too short to be a phone.
 
-    Page uid prefixes and analytics/property ids (issue #500's `00075741`,
+    Page uid prefixes and analytics/property ids (issue athenaeum#500's `00075741`,
     `387473359`) are bare digit runs below the E.164-plausible length band; a
     genuine bare-typed phone number (>= 10 digits) is kept. Any '+' or
     separator character means it is not a bare run, so real fixtures like
@@ -295,7 +295,7 @@ def _normalize_phone_token(token: str) -> str:
 
     ``_PHONE_RE`` captures its optional leading ``[+(]`` delimiter **inside** the
     capture group, so a parenthesized run like ``(2026-07-29)`` is captured as
-    ``(2026-07-29`` (issue #683). The date/id-fragment exclusion helpers below
+    ``(2026-07-29`` (issue athenaeum#683). The date/id-fragment exclusion helpers below
     test the raw token and are defeated by that leading punctuation —
     ``_DATE_RE`` is anchored on ``^\\d`` so the ``(`` never matches, and
     ``_is_bare_id_fragment`` short-circuits because ``'(2026-07-29'.isdigit()``
@@ -321,7 +321,7 @@ def _is_excluded_phone_shape(token: str) -> bool:
     "what is provably not a phone" rule has exactly one definition. The
     classification is structural — it segments the capture into digit groups
     and the separator runs between them and asks whether that structure can be
-    a phone at all — so a new separator style needs no new rule (issue #720):
+    a phone at all — so a new separator style needs no new rule (issue athenaeum#720):
 
     * **Line-spanning** (``\\n``/``\\r``/``\\t``) — the permissive character
       class lets a match run across whitespace into the next line's number
@@ -332,7 +332,7 @@ def _is_excluded_phone_shape(token: str) -> bool:
     * **Date / year range** in any ordering or separator style
       (:func:`_looks_like_date`) — ``02-08-2018``, ``2020--2021``.
     * **Bare id/analytics fragment** — a separator-free run outside the
-      E.164-plausible length band (:func:`_is_bare_id_fragment`, #500).
+      E.164-plausible length band (:func:`_is_bare_id_fragment`, athenaeum#500).
     * **Multi-character separator run** between digit groups (``--``, ``..``) —
       list or range punctuation, never phone grouping (``445--436--435--374``).
     * **Short unprefixed grouped run** — a separator-joined sequence with no
@@ -413,10 +413,10 @@ def find_inline_emails(text: str) -> list[str]:
 def find_inline_phones(text: str) -> list[str]:
     """Return every phone-shaped token found in *text*, in order, deduped.
 
-    Excludes the corpus false positives issue #500 documented — ISO dates,
+    Excludes the corpus false positives issue athenaeum#500 documented — ISO dates,
     year ranges, and bare id/analytics fragments — via
     :func:`_is_excluded_phone_shape`, which normalizes a leading ``+``/``(`` or
-    trailing ``)`` the regex folds into its group (issue #683) before applying
+    trailing ``)`` the regex folds into its group (issue athenaeum#683) before applying
     the checks; every genuine phone fixture (carrying a '+', parens, or
     separators) still matches and is returned verbatim.
     """
@@ -433,7 +433,7 @@ def find_inline_phones(text: str) -> list[str]:
 
 
 #: Domains whose addresses are ALWAYS service identifiers, regardless of
-#: localpart (issue #507). A ``…@group.calendar.google.com`` address is a Google
+#: localpart (issue athenaeum#507). A ``…@group.calendar.google.com`` address is a Google
 #: Calendar group id, not a person's contact address — migrating it off the page
 #: (redacting the leaf, archiving it as "contact data") would corrupt a calendar
 #: reference and lose no real PII. Matched by domain because the localpart is an
@@ -445,7 +445,7 @@ SERVICE_ADDRESS_DOMAINS: frozenset[str] = frozenset(
 )
 
 #: Exact ``localpart@domain`` pseudo-addresses that are service identifiers, not
-#: contact data (issue #507). ``git@github.com`` (and its GitLab/Bitbucket
+#: contact data (issue athenaeum#507). ``git@github.com`` (and its GitLab/Bitbucket
 #: siblings) is the SSH pseudo-user in a clone URL — email-*shaped* but a
 #: transport identifier. Redacting it out of an entity page would damage a repo
 #: reference; it is not a person's address, so nothing archival is lost by
@@ -468,7 +468,7 @@ def is_service_address(token: str) -> bool:
     pseudo-user (``git@github.com``) or a Google Calendar group id
     (``…@group.calendar.google.com``). Migrating one would damage the page (a
     broken clone URL / calendar ref) while archiving no real PII. This is the
-    EXPLICIT, auditable predicate the #507 recursive frontmatter sweep consults
+    EXPLICIT, auditable predicate the athenaeum#507 recursive frontmatter sweep consults
     before treating a detected address as migratable — the excluded set is the
     two named sources above, not a silent heuristic. Matching is
     case-insensitive on the whole address and on the domain.
@@ -483,7 +483,7 @@ def is_service_address(token: str) -> bool:
 def name_field_holds_pii(meta: dict[str, Any]) -> bool:
     """True when a ``name:`` / ``preferred_name:`` value is email/phone-shaped.
 
-    The #502 name-is-an-email population: ~80 live pages whose NAME is a raw
+    The athenaeum#502 name-is-an-email population: ~80 live pages whose NAME is a raw
     contact address (Streak email-only import). These are deliberately EXCLUDED
     from the automatic migration path — renaming a page changes its slug and
     breaks inbound edges (:data:`DURABLE_IDENTIFIER_FIELDS`) — and handled in a
@@ -505,14 +505,14 @@ def name_field_holds_pii(meta: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 2c. Name-is-an-email local-part -> display-name derivation (issue #505)
+# 2c. Name-is-an-email local-part -> display-name derivation (issue athenaeum#505)
 # ---------------------------------------------------------------------------
 #
-# #502 found ~80 live pages whose ``name:`` / ``preferred_name:`` IS an email
+# athenaeum#502 found ~80 live pages whose ``name:`` / ``preferred_name:`` IS an email
 # address (Streak email-only import) and deliberately left them unmigrated —
 # renaming a page changes its slug and breaks inbound ``related:``/alias
 # edges, so it needed its own slice (this one). The operator's decision
-# (#505, APPROACH 1): derive a human-readable display name from the
+# (athenaeum#505, APPROACH 1): derive a human-readable display name from the
 # local-part when possible (e.g. ``jane.doe@acme.com`` -> ``Jane Doe``), move
 # the address to the excluded contact record, and rewrite inbound edges — the
 # page stays in the corpus under a human-readable name. When a confident name
@@ -600,7 +600,7 @@ _MIN_NAME_PART_LEN = 3
 def derive_display_name_from_email(email: str) -> str | None:
     """Derive a human-readable display name from an email local-part, or ``None``.
 
-    Implements the #505 CONFIDENCE GATE for approach 1. Returns a title-cased
+    Implements the athenaeum#505 CONFIDENCE GATE for approach 1. Returns a title-cased
     display name (separators -> spaces) when the local-part looks like a
     dotted/underscored/hyphenated human name (``jane.doe`` -> ``"Jane Doe"``,
     ``jane_doe`` -> ``"Jane Doe"``). Returns ``None`` (DEFER — do not guess)
@@ -616,7 +616,7 @@ def derive_display_name_from_email(email: str) -> str | None:
     - a BARE (no ``.``/``_``/``-`` separator) local-part, e.g. ``jdoe``,
       ``mjs``, or even ``jane`` — with no separator there is no reliable,
       dictionary-free way to tell a genuine first name from an initials
-      blob (issue #505 names ``jdoe``/``mjs`` explicitly; a bare token is
+      blob (issue athenaeum#505 names ``jdoe``/``mjs`` explicitly; a bare token is
       conservatively deferred across the board rather than guessing which
       unseparated tokens happen to be real first names);
     - an initial-blob EVEN WITH separators (``j.doe``) — any part shorter
@@ -723,13 +723,13 @@ def lint_inline_contact_fields(
 
 
 # ---------------------------------------------------------------------------
-# 2b. Corpus-wide PII lint — any file under wiki/, not only entity pages (#495)
+# 2b. Corpus-wide PII lint — any file under wiki/, not only entity pages (athenaeum#495)
 # ---------------------------------------------------------------------------
 #
 # The entity-page lint above (:func:`lint_inline_contact_fields`) only ever
 # looks at entity pages — the pydantic boundary (:class:`athenaeum.schemas.PersonWiki`)
-# runs it per-page, and #479's migration walks the same ``wiki/*.md`` entity
-# set. #495 measured the gap that leaves: 790 pages carry an email in *body
+# runs it per-page, and athenaeum#479's migration walks the same ``wiki/*.md`` entity
+# set. athenaeum#495 measured the gap that leaves: 790 pages carry an email in *body
 # text with no ``emails:`` frontmatter*, and the sample is dominated by the
 # corpus's own ``_``-prefixed queue/index/archive files and a stale ``.bak`` —
 # none of which the entity-page lint or the entity-page migration ever open.
@@ -744,13 +744,13 @@ def lint_inline_contact_fields(
 # hard gate (the CLI exits non-zero on any finding — see
 # :mod:`athenaeum._cmd_storage`'s ``storage lint-pii``) so a body-text email
 # cannot silently regrow after the sweep. The excluded surface lives OUTSIDE
-# ``wiki/`` by construction (#427/#429), so migrated contact records are never
+# ``wiki/`` by construction (athenaeum#427/#429), so migrated contact records are never
 # scanned here — exactly the property that makes the exclusion worth its cost.
 
 
 @dataclass(frozen=True)
 class CorpusPiiFinding:
-    """Inline contact data found in one corpus file (issue #495).
+    """Inline contact data found in one corpus file (issue athenaeum#495).
 
     ``emails``/``phones`` are the deduped, order-preserving tokens
     :func:`find_inline_emails` / :func:`find_inline_phones` matched anywhere in
@@ -770,7 +770,7 @@ def iter_corpus_files(wiki_root: Path) -> list[Path]:
     Unlike the entity-page scans (:func:`athenaeum.storage_migrate.iter_entity_pages`,
     :func:`athenaeum.search._iter_wiki_entries`) this deliberately does NOT skip
     ``_``-prefixed files, does NOT restrict to ``*.md``, and DOES descend into
-    subdirectories — the whole point of #495 is that the excluded surface is
+    subdirectories — the whole point of athenaeum#495 is that the excluded surface is
     only worth as much as the completeness of the sweep, so ``_``-prefixed queue
     files, ``.bak`` backups and anything else living in the corpus are all in
     scope. Missing root yields ``[]`` (never raises).

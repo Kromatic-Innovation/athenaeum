@@ -22,7 +22,7 @@ reresolve-questions), ``_cmd_curate`` (dedupe/claims/auto-memory),
 ``_cmd_repair`` (repair), ``_cmd_questions``, ``_cmd_merges``,
 ``_cmd_decisions``, ``_cmd_authority``, ``_cmd_axiom``, ``_cmd_calibration``,
 ``_cmd_outbound``, ``_cmd_drain``, ``_cmd_storage``, ``_cmd_push_metrics``
-(push-metrics baseline/coverage-audit, issue #711).
+(push-metrics baseline/coverage-audit, issue athenaeum#711).
 
 FACTORING RULE: **every subcommand lives in its own ``_cmd_<name>.py`` module
 (or a small same-domain group module) with an ``add_<name>_subparser(subparsers)``
@@ -94,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    # Issue #553: each add_*_subparser both builds its subparser(s) AND calls
+    # Issue athenaeum#553: each add_*_subparser both builds its subparser(s) AND calls
     # set_defaults(func=<handler>) on them, so dispatch below is uniform.
     add_lifecycle_subparsers(subparsers)  # init, status, disable, enable, spend
     add_serve_subparser(subparsers)  # serve

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the retraction cascade (issue #435).
+"""Tests for the retraction cascade (issue athenaeum#435).
 
-Wires issue #425's merge-provenance ledger to issue #427's observation
+Wires issue athenaeum#425's merge-provenance ledger to issue athenaeum#427's observation
 supersession records: retracting a source that a completed merge relied on
 flags that merge for human review — it never auto-unmerges.
 
@@ -46,7 +46,7 @@ def _write_wiki_page(path: Path, *, name: str, body: str = "body\n") -> None:
 def _execute_merge(wiki: Path, *, target_name: str, sources: list[str]) -> str:
     """Run a real fold-into-existing merge, returning its merge id.
 
-    The merge records provenance (issue #425) listing ``sources`` as its
+    The merge records provenance (issue athenaeum#425) listing ``sources`` as its
     supporting ``source_paths`` — the exact fact the cascade keys on.
     """
     merges_path = wiki / "_pending_merges.md"
@@ -86,7 +86,7 @@ class TestEndToEndCascade:
         # A merge's provenance now lists str(src) as a supporting source.
         assert read_merge_provenance(wiki)[0]["source_paths"] == [str(src)]
 
-        # Retract that supporting source (issue #427 supersession).
+        # Retract that supporting source (issue athenaeum#427 supersession).
         append_supersession(
             contacts, retracts=str(src), reason="source was fabricated", at="2026-07-24T00:00:00Z"
         )

@@ -47,7 +47,7 @@ def add_pending_subparsers(subparsers: argparse._SubParsersAction) -> None:
     _add_lock_args(ingest_answers_parser)
     ingest_answers_parser.set_defaults(func=cmd_ingest_answers)
 
-    # ingest-merges command (issue #299) — move resolved (`[x]`) blocks out
+    # ingest-merges command (issue athenaeum#299) — move resolved (`[x]`) blocks out
     # of `wiki/_pending_merges.md` into `_pending_merges_archive.md`, mirroring
     # ingest-answers for the questions sidecar. Idempotent — safe to run from
     # a scheduler.
@@ -64,13 +64,13 @@ def add_pending_subparsers(subparsers: argparse._SubParsersAction) -> None:
     _add_lock_args(ingest_merges_parser)
     ingest_merges_parser.set_defaults(func=cmd_ingest_merges)
 
-    # reresolve-questions command (issue #188) — re-run the resolver on OPEN,
+    # reresolve-questions command (issue athenaeum#188) — re-run the resolver on OPEN,
     # PROPOSAL-LESS pending questions so a prior cap-hit / offline escalation
     # self-heals. Budget-aware + idempotent; offline (no key) is a no-op.
     reresolve_parser = subparsers.add_parser(
         "reresolve-questions",
         help="Re-resolve open proposal-less pending questions "
-        "(self-heal transient cap/offline escalations, issue #188)",
+        "(self-heal transient cap/offline escalations, issue athenaeum#188)",
     )
     reresolve_parser.add_argument(
         "--path",
@@ -87,9 +87,9 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
 
     See :func:`athenaeum.answers.ingest_answers` for the semantics.
 
-    Builds the LLM client via the provider seam (``build_llm_client``, #330)
+    Builds the LLM client via the provider seam (``build_llm_client``, athenaeum#330)
     and passes it to ``ingest_answers`` so free-text answers can use the
-    LLM-backed proposer (issue #210): a ``claude-cli`` subscription client, or
+    LLM-backed proposer (issue athenaeum#210): a ``claude-cli`` subscription client, or
     an Anthropic SDK client when ``provider: api`` and ``ANTHROPIC_API_KEY`` is
     set. When the key is absent (api backend) or construction fails, the
     annotation fallback is used instead.
@@ -112,7 +112,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
 
     cfg = load_config(target)
 
-    # Issue #210/#330: build the LLM client via the provider seam so free-text
+    # Issue athenaeum#210/#330: build the LLM client via the provider seam so free-text
     # answers trigger the LLM-backed source-edit proposer. Returns None for the
     # ``api`` backend with no ANTHROPIC_API_KEY (offline annotation fallback);
     # returns the subscription CLI client for ``claude-cli``. Fail gracefully
@@ -121,7 +121,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     try:
         anthropic_client = build_llm_client(cfg)
     except ProviderConfigError as exc:
-        # Issue #540 (M14): a provider MISCONFIGURATION (e.g. a typo in the
+        # Issue athenaeum#540 (M14): a provider MISCONFIGURATION (e.g. a typo in the
         # backend name) is raised loudly by build_llm_client precisely so it
         # never silently falls back to a different backend. Surface it and
         # exit nonzero rather than swallowing it into the offline fallback and
@@ -134,7 +134,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
         # (a misconfig) is fatal, handled above.
         pass
 
-    lock = _acquire_or_exit(target, args, cfg)  # issue #309
+    lock = _acquire_or_exit(target, args, cfg)  # issue athenaeum#309
     if isinstance(lock, int):
         return lock
     try:
@@ -155,7 +155,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
 
 
 def cmd_ingest_merges(args: argparse.Namespace) -> int:
-    """Archive resolved blocks from `wiki/_pending_merges.md` (issue #299).
+    """Archive resolved blocks from `wiki/_pending_merges.md` (issue athenaeum#299).
 
     See :func:`athenaeum.pending_merges.ingest_resolved_merges` for the
     semantics. Mirrors :func:`cmd_ingest_answers`'s CLI shape.
@@ -175,7 +175,7 @@ def cmd_ingest_merges(args: argparse.Namespace) -> int:
 
     from athenaeum.config import load_config
 
-    lock = _acquire_or_exit(target, args, load_config(target))  # issue #309
+    lock = _acquire_or_exit(target, args, load_config(target))  # issue athenaeum#309
     if isinstance(lock, int):
         return lock
     try:
@@ -194,10 +194,10 @@ def cmd_ingest_merges(args: argparse.Namespace) -> int:
 
 
 def cmd_reresolve_questions(args: argparse.Namespace) -> int:
-    """Re-resolve open, proposal-less pending questions (issue #188).
+    """Re-resolve open, proposal-less pending questions (issue athenaeum#188).
 
     Mirrors :func:`cmd_ingest_answers`: loads config, builds the LLM client
-    via the provider seam (``build_llm_client``, #330 — a subscription
+    via the provider seam (``build_llm_client``, athenaeum#330 — a subscription
     ``claude-cli`` client or an Anthropic SDK client per ``llm.provider``;
     ``None`` when the api backend has no key, where offline is a no-op), and
     delegates to :func:`athenaeum.tiers.reresolve_open_questions`.
@@ -214,14 +214,14 @@ def cmd_reresolve_questions(args: argparse.Namespace) -> int:
     pending_path = target / "wiki" / "_pending_questions.md"
     cfg = load_config(target)
 
-    # Issue #330: construct via the provider seam (api key -> SDK client;
+    # Issue athenaeum#330: construct via the provider seam (api key -> SDK client;
     # claude-cli -> subscription CLI client; None when the api backend has no
     # key, preserving the offline no-op below).
     anthropic_client = None
     try:
         anthropic_client = build_llm_client(cfg)
     except ProviderConfigError as exc:
-        # Issue #540 (M14): a provider MISCONFIGURATION (e.g. a typo in the
+        # Issue athenaeum#540 (M14): a provider MISCONFIGURATION (e.g. a typo in the
         # backend name) is raised loudly by build_llm_client precisely so it
         # never silently falls back to a different backend. Surface it and
         # exit nonzero rather than swallowing it into the offline fallback and
@@ -234,7 +234,7 @@ def cmd_reresolve_questions(args: argparse.Namespace) -> int:
         # (a misconfig) is fatal, handled above.
         pass
 
-    lock = _acquire_or_exit(target, args, cfg)  # issue #309
+    lock = _acquire_or_exit(target, args, cfg)  # issue athenaeum#309
     if isinstance(lock, int):
         return lock
     try:

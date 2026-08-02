@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The T1 reasoning-tier screen wired into the merge path (issue #518).
+"""The T1 reasoning-tier screen wired into the merge path (issue athenaeum#518).
 
 Before this, `reasoning_tiers.run_reasoning_pipeline` had no production caller
 (`DEFAULT_TIER_CHAIN = ()`). `merge.t1_screen_rejects_merge_proposal` is the
 wiring: at the merge-proposal seam, a confident T1 reject drops the proposal
 before it reaches the human queue, gated behind the opt-in
 `reasoning_tier_auditing_enabled` flag (default OFF), with the spend ceiling
-(#568) respected and the reject surfaced for the calibration audit loop (#438).
+(athenaeum#568) respected and the reject surfaced for the calibration audit loop (athenaeum#438).
 """
 
 from __future__ import annotations

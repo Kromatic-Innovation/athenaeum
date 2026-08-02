@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Guard tests for the single ``DEFAULT_KNOWLEDGE_ROOT`` constant (issue #537).
+"""Guard tests for the single ``DEFAULT_KNOWLEDGE_ROOT`` constant (issue athenaeum#537).
 
-Issue #537 collapsed 38 copies of the literal ``Path("~/knowledge")`` — argparse
+Issue athenaeum#537 collapsed 38 copies of the literal ``Path("~/knowledge")`` — argparse
 ``--path`` defaults and resolver fallbacks scattered across the ``_cmd_*``
 modules — into one constant in :mod:`athenaeum.config`. These tests are the
 change-amplification guard the issue's "Suggested verification" section asks
@@ -36,7 +36,7 @@ def test_tilde_literal_appears_in_exactly_one_module() -> None:
     hits = _modules_containing_literal()
     assert hits == ["config.py"], (
         "The default knowledge-root literal must live only in config.py "
-        f"(issue #537); found it in: {hits}"
+        f"(issue athenaeum#537); found it in: {hits}"
     )
 
 

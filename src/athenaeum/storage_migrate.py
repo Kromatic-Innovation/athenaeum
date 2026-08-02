@@ -1,24 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Migrate a live entity page's PII to the #427 excluded surface (issue #479).
+"""Migrate a live entity page's PII to the athenaeum#427 excluded surface (issue athenaeum#479).
 
-#427/#429 shipped the storage-adapter layer (:mod:`athenaeum.storage`) with a
+athenaeum#427/#429 shipped the storage-adapter layer (:mod:`athenaeum.storage`) with a
 built-in ``excluded`` surface (all corpus-policy flags false) that a
-``storage.mapping`` entry routes an entity class to. #426 shipped the analogous
+``storage.mapping`` entry routes an entity class to. athenaeum#426 shipped the analogous
 single-page migration CLI for a *different* shape (``authority convert``, a
-pointer-stub rewrite). This module is the missing operator tool #437's
+pointer-stub rewrite). This module is the missing operator tool athenaeum#437's
 migration step needs: read a live entity page, extract its archival contact
 data and write it to a page under the excluded surface, rewriting the original
 page down to durable identifiers only (name, LinkedIn, record id,
 Google-Contact id — everything *except* the archival contact data).
 
-Contact-data detection is DETECTOR-DRIVEN across the whole page (issue #502).
-#479 read only the ``emails:`` / ``phones:`` frontmatter keys; the live sweep
+Contact-data detection is DETECTOR-DRIVEN across the whole page (issue athenaeum#502).
+athenaeum#479 read only the ``emails:`` / ``phones:`` frontmatter keys; the live sweep
 then found the residual PII lives mostly *elsewhere* — ``aliases:`` (dominant),
 ``former_emails:`` / ``alt_emails:`` / ``source:`` provenance strings, and body
 prose. So the migrator now scans EVERY frontmatter value (and the body) with
 the email/phone detectors rather than an allow-list of keys — a newly-invented
 contact key cannot reopen the hole. The scan RECURSES into nested lists and
-dicts to arbitrary depth (issue #507): the #502 sweep walked only the top level
+dicts to arbitrary depth (issue athenaeum#507): the athenaeum#502 sweep walked only the top level
 of each value, so an address buried in a *list of dicts* — ``sources[].claim``
 provenance blocks (the compiler copies claim text verbatim into frontmatter) or
 ``apollo_employment_history[].title`` enrichment payloads — survived. The
@@ -42,7 +42,7 @@ mirroring the read / transform / write split ``authority.py`` /
 ``_cmd_authority.py`` use for ``authority convert``.
 
 Detection reuses :mod:`athenaeum.pii` verbatim (``find_inline_emails`` /
-``find_inline_phones`` / ``DURABLE_IDENTIFIER_FIELDS``) — the #455 outbound-lint
+``find_inline_phones`` / ``DURABLE_IDENTIFIER_FIELDS``) — the athenaeum#455 outbound-lint
 scanner's single source of truth for the patterns — rather than defining a
 second detector.
 
@@ -80,7 +80,7 @@ from athenaeum.storage import surface_root_for_class
 #: Marker left in the original page's body in place of an inline email/phone
 #: token. Redaction (rather than deletion of surrounding prose) is the safe,
 #: reversible default: it removes the raw contact datum from the corpus-visible
-#: page — so ``recall`` no longer surfaces it (#437's spot-check) — while
+#: page — so ``recall`` no longer surfaces it (athenaeum#437's spot-check) — while
 #: keeping the sentence structure intact and the change trivially reviewable in
 #: the dry-run diff. The archived value is preserved verbatim on the excluded
 #: contact record, so nothing is lost.
@@ -104,7 +104,7 @@ class PiiMigrationPlan:
     #: :attr:`changed` is False.
     excluded_page_text: str | None
     #: True when the page's ``name:`` / ``preferred_name:`` is itself an email
-    #: (or phone). Such pages are the #502 name-is-an-email population — EXCLUDED
+    #: (or phone). Such pages are the athenaeum#502 name-is-an-email population — EXCLUDED
     #: from this automatic path (renaming breaks slugs/edges) and handled in a
     #: separate slice. The migrator never rewrites the name field; this flag
     #: lets the bulk driver COUNT the excluded population so it is visible, not
@@ -143,7 +143,7 @@ def _migratable_emails(text: str) -> list[str]:
     """Email-shaped tokens in *text* that are genuine contact data.
 
     Filters out service identifiers (``git@github.com``, Google Calendar group
-    addresses, …) via :func:`~athenaeum.pii.is_service_address` (issue #507): a
+    addresses, …) via :func:`~athenaeum.pii.is_service_address` (issue athenaeum#507): a
     naïve sweep that migrated those would damage the page (a broken clone URL /
     calendar ref) while archiving no real PII. Order and dedup follow
     :func:`~athenaeum.pii.find_inline_emails`.
@@ -189,12 +189,12 @@ def _migrate_value(
 ) -> tuple[Any, list[str], list[str]]:
     """Recursively migrate one frontmatter value of arbitrary nesting depth.
 
-    The #502 sweep scanned only the TOP level of each frontmatter value: a
+    The athenaeum#502 sweep scanned only the TOP level of each frontmatter value: a
     string was detector-scanned and a list had its string entries scanned, but a
     value that was a *list of dicts* or a *nested dict* was copied through
     untouched — so contact data at ``sources[].claim`` or
     ``apollo_employment_history[].title`` was invisible to the migrator (issue
-    #507). This walks strings, lists AND dicts to arbitrary depth so every leaf
+    athenaeum#507). This walks strings, lists AND dicts to arbitrary depth so every leaf
     is reached, while every sibling leaf is preserved byte-identical (the
     rewrite targets the exact leaf — e.g. ``sources[].claim`` — rather than
     replacing a whole structure).
@@ -245,11 +245,11 @@ def _migrate_frontmatter(
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     """Rewrite frontmatter, extracting contact data from every non-durable field.
 
-    Detector-driven (issue #502): scans EVERY frontmatter value — not just
+    Detector-driven (issue athenaeum#502): scans EVERY frontmatter value — not just
     ``emails:`` / ``phones:`` — so contact data in ``aliases:``,
     ``former_emails:``, ``source:`` etc. is migrated, while a newly-invented
     contact key cannot reopen the hole. Recurses into nested lists AND dicts to
-    arbitrary depth (issue #507), so an address buried at ``sources[].claim`` or
+    arbitrary depth (issue athenaeum#507), so an address buried at ``sources[].claim`` or
     ``apollo_employment_history[].title`` is reached — targeting the exact leaf
     and leaving every sibling structure byte-identical.
     :data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS` (identity + the
@@ -306,7 +306,7 @@ def _render_excluded_record(
     origin = meta.get("name") or meta.get("uid") or "the entity page"
     body = (
         f"Archival contact data migrated off entity page {origin!r} to the "
-        "excluded surface (issues #427/#437). This record is outside the "
+        "excluded surface (issues athenaeum#427/#437). This record is outside the "
         "corpus: not embedded, recalled, or merge-eligible. The origin page "
         "retains durable identifiers only.\n"
     )
@@ -332,11 +332,11 @@ def plan_pii_migration(
     if not isinstance(meta, dict):
         meta = {}
 
-    # Detector-driven frontmatter scan (#502): pull contact tokens from EVERY
+    # Detector-driven frontmatter scan (athenaeum#502): pull contact tokens from EVERY
     # non-durable field, preserving durable identifiers and the name-is-an-email
     # carve-out. Then the body inline tokens.
     new_meta, fm_emails, fm_phones = _migrate_frontmatter(meta)
-    # Body: same service-identifier exclusion as the frontmatter path (#507) —
+    # Body: same service-identifier exclusion as the frontmatter path (athenaeum#507) —
     # a `git@github.com` in prose is left byte-identical, not redacted.
     inline_emails = _migratable_emails(body)
     inline_phones = find_inline_phones(body)
@@ -382,14 +382,14 @@ def plan_pii_migration(
 
 
 # ---------------------------------------------------------------------------
-# Name-is-an-email rename migration (issue #505 — the #502 carve-out's slice)
+# Name-is-an-email rename migration (issue athenaeum#505 — the athenaeum#502 carve-out's slice)
 # ---------------------------------------------------------------------------
 #
-# #502 preserves ``name:``/``preferred_name:`` verbatim even when it is an
+# athenaeum#502 preserves ``name:``/``preferred_name:`` verbatim even when it is an
 # email address (:data:`~athenaeum.pii.DURABLE_IDENTIFIER_FIELDS`) — renaming
 # a page changes its slug and breaks inbound ``[[wikilink]]``/``aliases:``
 # resolution, so that population was EXCLUDED from the automatic path and left
-# for this dedicated slice. APPROACH 1 (operator decision, #505): derive a
+# for this dedicated slice. APPROACH 1 (operator decision, athenaeum#505): derive a
 # display name from the local-part with a confidence gate
 # (:func:`~athenaeum.pii.derive_display_name_from_email`), rename the page to
 # that name (new slug/filename), move the address to the excluded contact
@@ -420,7 +420,7 @@ def plan_pii_migration(
 class NameEmailRenamePlan:
     """The would-be result of renaming one name-is-an-email entity page.
 
-    ``confident`` is False for the DEFERRED case (issue #505's REQUIRED
+    ``confident`` is False for the DEFERRED case (issue athenaeum#505's REQUIRED
     FALLBACK): an ambiguous local-part (role address, ``+tag``, initial-blob,
     opaque/numeric) is never guessed at — the page is left exactly as-is and
     this plan carries no rewrite, only the reason it was deferred.
@@ -495,7 +495,7 @@ def plan_name_email_rename(
     When the name is NOT confidently nameable (role address, ``+tag``,
     initial-blob, numeric/opaque local-part), returns a plan with
     ``confident=False`` and writes nothing — the REQUIRED FALLBACK (issue
-    #505): never guess a name.
+    athenaeum#505): never guess a name.
 
     Only the FIRST of ``name:``/``preferred_name:`` that is email-shaped is
     used as the rename source, matching :data:`~athenaeum.pii.NAME_FIELDS`
@@ -578,7 +578,7 @@ class NameEmailRenameReport:
     """Result of applying (or dry-running) the bulk name-is-an-email rename.
 
     ``residual`` is the REQUIRED count of pages deliberately deferred (issue
-    #505's fallback) — reported so the population never silently vanishes,
+    athenaeum#505's fallback) — reported so the population never silently vanishes,
     mirroring how :func:`plan_pii_migration`'s ``name_field_pii`` flag lets the
     bulk PII driver surface this same population today.
     """
@@ -651,7 +651,7 @@ def bulk_rename_name_email_pages(
     *,
     apply: bool = False,
 ) -> NameEmailRenameReport:
-    """Drive :func:`plan_name_email_rename` over every entity page (issue #505).
+    """Drive :func:`plan_name_email_rename` over every entity page (issue athenaeum#505).
 
     Idempotent/resumable the same way :func:`plan_pii_migration`'s bulk driver
     is: a renamed page's ``name:`` is no longer email-shaped, so
@@ -682,10 +682,10 @@ def bulk_rename_name_email_pages(
 
 
 # ---------------------------------------------------------------------------
-# Bulk target-set resolution (issue #495)
+# Bulk target-set resolution (issue athenaeum#495)
 # ---------------------------------------------------------------------------
 #
-# #479 shipped the single-page path (``--page``); the live corpus needs the
+# athenaeum#479 shipped the single-page path (``--page``); the live corpus needs the
 # same transform over ~11.5k entity pages. Bulk mode is a thin driver over
 # :func:`plan_pii_migration` — the transform stays per-page and pure, so the
 # whole-run properties the issue asks for fall out of the single-page

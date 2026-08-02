@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy-SHA stamp for athenaeum (issue #413).
+"""Deploy-SHA stamp for athenaeum (issue athenaeum#413).
 
 Mirrors voltaire's ``scripts/write-build-sha.mjs`` (cwc#1102) and hestia's
 deploy stamp (hestia#258): writes the running commit SHA to ``dist/.build-sha``

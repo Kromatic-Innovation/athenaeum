@@ -12,7 +12,7 @@ stale page, actually running a drain) belongs in the module that owns that
 mutation (``retire.py``, ``athenaeum.drain``), not here — this module may
 only advise, never act.
 
-SCC membership (L4 domain/pipeline). Issue #545 hoisted ``discover_raw_files``
+SCC membership (L4 domain/pipeline). Issue athenaeum#545 hoisted ``discover_raw_files``
 to the :mod:`athenaeum.intake` leaf, so ``status.py`` now imports it from
 ``intake`` (not ``librarian``) at TOP level, and its top-level
 ``athenaeum.tiers.schema_fragment_state`` import is a normal downward
@@ -20,11 +20,11 @@ dependency. ``status.py`` no longer imports ``librarian`` at all, so the former
 librarian<->status cycle is GONE: ``librarian.py``'s function-local
 ``scan_page_sizes`` import is now a one-way edge.
 
-``status.py`` formerly participated in a PRE-EXISTING residual SCC that #545 did
+``status.py`` formerly participated in a PRE-EXISTING residual SCC that athenaeum#545 did
 NOT target (out of its named scope): ``{librarian, drain, status}``, because it
 function-locally imported ``athenaeum.drain`` (backlog-drain advisor) while
 ``drain`` function-locally imports ``librarian`` and ``librarian`` function-
-locally imports ``status`` (``scan_page_sizes``). Issue #640 dissolved that
+locally imports ``status`` (``scan_page_sizes``). Issue athenaeum#640 dissolved that
 cycle by hoisting ``build_advisory`` DOWN to the :mod:`athenaeum.drain_advisor`
 leaf: ``status.py`` now function-locally imports it from ``drain_advisor`` (a
 low leaf that imports none of these three), so it no longer reaches up into the
@@ -65,19 +65,19 @@ class StatusInfo(TypedDict):
     last_commit_date: str
     last_commit_message: str
     pending_questions: int
-    # Issue #310: wiki entity pages over the soft size thresholds, each a
+    # Issue athenaeum#310: wiki entity pages over the soft size thresholds, each a
     # ``(filename, byte_size)`` tuple sorted largest-first. ``pages_warn`` and
     # ``pages_flag`` are disjoint — a page over the flag threshold appears in
     # ``pages_flag`` only.
     pages_warn: list[tuple[str, int]]
     pages_flag: list[tuple[str, int]]
-    # Issue #470: backlog-drain ETA advisory — a human sentence projecting
+    # Issue athenaeum#470: backlog-drain ETA advisory — a human sentence projecting
     # time-to-drain and naming the ``athenaeum drain`` remedy, or ``None`` when
     # the backlog is empty or its projected ETA is at/below
     # ``librarian.drain_warn_days``. Surfaces the same signal the end-of-run
     # WARNING emits, so status/MCP surfaces show it BETWEEN runs.
     drain_advisory: str | None
-    # Issue #567: live-vs-default state of each operator-tunable schema fragment,
+    # Issue athenaeum#567: live-vs-default state of each operator-tunable schema fragment,
     # as ``{filename: (sha256_hex, is_default)}`` from
     # :func:`athenaeum.tiers.schema_fragment_state`. Surfaces which fragment
     # bytes are in play between runs, the same attribution the run-summary line
@@ -90,7 +90,7 @@ def scan_page_sizes(
     warn_bytes: int,
     flag_bytes: int,
 ) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
-    """Bucket oversized wiki entity pages (issue #310).
+    """Bucket oversized wiki entity pages (issue athenaeum#310).
 
     Walks the same ``wiki/*.md`` set the entity count walks — skipping
     ``_``-prefixed files and non-entity pages (no frontmatter ``name``) — and
@@ -197,14 +197,14 @@ def status(knowledge_root: Path) -> StatusInfo:
         text = pq_path.read_text(encoding="utf-8")
         pending_questions = text.count("## [")
 
-    # Oversized wiki pages (issue #310). Thresholds come from config so an
+    # Oversized wiki pages (issue athenaeum#310). Thresholds come from config so an
     # operator can tune them; the scan is warn-only and never mutates anything.
     config = load_config(knowledge_root)
     warn_bytes = resolve_page_warn_bytes(config)
     flag_bytes = resolve_page_flag_bytes(config)
     pages_warn, pages_flag = scan_page_sizes(wiki_root, warn_bytes, flag_bytes)
 
-    # Backlog-drain ETA advisor (issue #470): surface the same projection the
+    # Backlog-drain ETA advisor (issue athenaeum#470): surface the same projection the
     # end-of-run WARNING emits, so status/MCP surfaces show it between runs.
     # Best-effort — a ledger/estimator hiccup must never break status.
     drain_advisory: str | None = None
@@ -228,7 +228,7 @@ def status(knowledge_root: Path) -> StatusInfo:
             exc,
         )
 
-    # Issue #567: schema-fragment divergence — which operator-tunable fragments
+    # Issue athenaeum#567: schema-fragment divergence — which operator-tunable fragments
     # differ from the bundled default. Observational (read-only); mirrors the
     # attribution the librarian run-summary line records.
     schema_fragments = schema_fragment_state(wiki_root)
@@ -260,14 +260,14 @@ def format_status(info: StatusInfo) -> str:
 
     lines.append(f"Pending questions:    {info['pending_questions']}")
 
-    # Issue #470: backlog-drain ETA advisory. Use ``.get`` so pre-#470 status
+    # Issue athenaeum#470: backlog-drain ETA advisory. Use ``.get`` so pre-athenaeum#470 status
     # dicts (missing the key) still format cleanly; shown only when set (a
     # non-empty backlog projected to exceed librarian.drain_warn_days).
     drain_advisory = info.get("drain_advisory")
     if drain_advisory:
         lines.append(f"Backlog drain:        {drain_advisory}")
 
-    # Issue #310: oversized-page summary. Use ``.get`` so pre-#310 status
+    # Issue athenaeum#310: oversized-page summary. Use ``.get`` so pre-athenaeum#310 status
     # dicts (missing these keys) still format cleanly.
     pages_warn = info.get("pages_warn", [])
     pages_flag = info.get("pages_flag", [])
@@ -277,9 +277,9 @@ def format_status(info: StatusInfo) -> str:
     for name, size in pages_warn:
         lines.append(f"  [warn] {name} ({size} bytes)")
 
-    # Issue #567: one divergence line per operator-tunable schema fragment —
+    # Issue athenaeum#567: one divergence line per operator-tunable schema fragment —
     # ``default`` when it matches the bundled copy, ``edited (sha8 …)`` when the
-    # live bytes differ. ``.get`` keeps pre-#567 status dicts formatting cleanly.
+    # live bytes differ. ``.get`` keeps pre-athenaeum#567 status dicts formatting cleanly.
     schema_fragments = info.get("schema_fragments") or {}
     if schema_fragments:
         lines.append("Schema fragments:")

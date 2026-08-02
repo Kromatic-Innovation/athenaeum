@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy-sync + SHA stamp for athenaeum (issue #413).
+# Deploy-sync + SHA stamp for athenaeum (issue athenaeum#413).
 #
 # WHAT: since cwc#1529 (2026-07-25), athenaeum DOES keep a separate
 # main-pinned deploy worktree at ~/local-deploys/athenaeum (like hestia/

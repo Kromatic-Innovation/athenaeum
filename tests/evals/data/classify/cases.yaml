@@ -1,4 +1,4 @@
-# Classify (Tier-2) golden set (issue #552)
+# Classify (Tier-2) golden set (issue athenaeum#552)
 #
 # Synthetic scenario: "Meridian Advisory", the same fictional 12-person
 # consultancy the detector/resolver golden sets use. Every case is invented —
@@ -85,7 +85,7 @@
 - id: purely_procedural_no_entities
   outcome_class: empty_procedural
   content: |
-    CI run #4821: lint passed, 312 tests passed, 0 failed, 4 skipped.
+    CI run athenaeum#4821: lint passed, 312 tests passed, 0 failed, 4 skipped.
     Deploy pipeline triggered automatically post-merge. No manual steps
     were required.
   matched_names: []

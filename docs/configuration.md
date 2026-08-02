@@ -11,7 +11,7 @@ Settings resolve in the order:
 
 > **CLI flag > environment variable > `athenaeum.yaml` > code default**
 
-(established in #220 for `--max-api-calls` and generalized in #232). Not every
+(established in athenaeum#220 for `--max-api-calls` and generalized in athenaeum#232). Not every
 knob has every layer — an em dash (—) in a table cell below means that layer
 does not exist for that knob. An env override always beats the yaml, so a
 one-off shell export changes a single run without editing config.
@@ -22,7 +22,7 @@ one-off shell export changes a single run without editing config.
 keys; the full set of knobs is the tables on this page. Keys you do not set
 fall through to the code defaults — the loader
 deliberately does not seed defaults for keys whose source of truth lives next
-to their consumer code (#231), so a future change to a code default takes
+to their consumer code (athenaeum#231), so a future change to a code default takes
 effect without a config migration.
 
 Every default figure on this page is verified against the code under
@@ -32,45 +32,45 @@ Every default figure on this page is verified against the code under
 
 | Knob | CLI flag | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|---|
-| Intake batch size | `--max-files` | `ATHENAEUM_MAX_FILES` | `librarian.max_files` | `50` | Stop after processing this many raw files per run (#232). Env `0` is valid (defer-everything window); the CLI flag rejects `0`. |
-| API call budget | `--max-api-calls` | `ATHENAEUM_MAX_API_CALLS` | `librarian.max_api_calls` | `800` | Run-level cap on estimated API calls (#220, raised from 200). A budget-tripped run is DEGRADED: it writes `wiki/_deferred_work.md` and defers remaining intake. Env `0` is valid (defers the entire intake); the CLI flag rejects `0`. |
-| Wall-clock deadline | `--max-runtime` | `ATHENAEUM_MAX_RUNTIME` | `librarian.max_runtime` | `3600` | Run-level wall-clock deadline in **seconds** (#396). Bounds the WHOLE run — the post-compile phases (C4 detector, #290 wiki-dedup, C3 merge/resolver) AND the per-file entity loop — checked at file/cluster/phase boundaries. On trip the run commits partial progress, releases the lock, writes `wiki/_deferred_work.md`, and exits `124` (matching coreutils `timeout` and the #337 interrupt path) — resumable. A value `<= 0` disables the deadline entirely (unbounded run). The default gives an un-wrapped manual run the same ~1h bound the nightly run gets from its external `timeout` wrapper. |
-| Entity-phase runtime share | — | `ATHENAEUM_ENTITY_RUNTIME_SHARE` | `librarian.entity_runtime_share` | `0.6` | Fraction of `max_runtime` the **entity phase** may spend claiming new raw files (#440). `max_runtime` is a single budget shared by every phase, and the entity loop otherwise stops only when the WHOLE budget is gone — measured on the live corpus, entity took 3690s of a 3944s window (93.6%) on 3 files and the C4 contradiction detector downstream of it got **0 seconds on 10+ consecutive nights**. This reserves the remainder for the auto-memory compile and C4: once the share is spent the entity phase stops taking new files, defers the rest to `wiki/_deferred_work.md` (resumable, like the #220 budget trip), and the run **continues** into C2-C4 rather than exiting `124`. Checked at the per-file boundary, so a file already in flight may overrun the share by its own duration — this bounds when the phase stops *taking* work, not when it stops working. Any value outside `0 < share < 1` disables the reserve (pre-#440 behaviour); inert when `max_runtime <= 0`. |
-| Stuck-file threshold | — | `ATHENAEUM_STUCK_FILE_THRESHOLD` | `librarian.stuck_file_threshold` | `3` | Consecutive-run failure count after which a raw file is treated as **stuck** (#663). `tier3_write` is all-or-nothing per raw file (a partial write cannot leave the wiki half-merged), so one reliably-failing LLM call — e.g. an entity page large enough to time out every night — otherwise discards the file's other successful merges and the file is retried WHOLE every run, forever, silently. A file that fails on the **same content** this many runs running is instead SKIPPED (it stops consuming an LLM call each night) and surfaced as machine-detectable run state: `out_run_stats["stuck_files"]` (ref, consecutive failures, failing `kind:name` action, last error) plus a greppable `librarian-stuck-file` WARNING and a `stuck=N` field on the run-summary line. State lives in `wiki/_stuck_files.json` (keyed by ref + content hash, so editing the file resets its count); a run that finally succeeds on the file clears its entry. Must be `>= 1` (below that would quarantine a file on its first transient failure); non-numeric / non-positive / bool values fall back to the default. |
-| Junk-match stopwords | — | — | `librarian.junk_match_stopwords` | *(extends the built-in default)* | Extra entity names to treat as **junk** so a Tier-1 match on them never issues a Tier-3 merge LLM call (#662). Tier-1 matches any indexed page name ≥ 3 chars, and the index accumulates junk pages (`here`, `get`, `main`, `reach`, `lane a`, …) — each became a ~16-23KB merge call, roughly **half** of the ~15-18 Tier-3 calls per file. A conservative built-in default (the measured junk plus common English function words) is always applied; entries here are **added** to it, case-insensitively on the whole name. Tune per corpus as the junk set changes. |
-| Junk-match allowlist | — | — | `librarian.junk_match_allowlist` | `[]` | Entity names that must **never** be treated as junk (#662) — the escape hatch for a real entity whose name collides with a default/stopword junk word (e.g. a company literally named "Reach"). Wins over both the built-in default and `junk_match_stopwords`, case-insensitively. |
-| Exclude code artifacts | — | — | `librarian.exclude_code_artifacts` | `true` | Whether a candidate whose name is a **filename or path** (`skill.md`, `project-registry.yaml`, `src/athenaeum/librarian.py`) is refused entity creation (#680). Code should not be remembered as memory: the repo is the source of truth for its own code, so a wiki page describing a file's *past* state is stale by construction and costs a session to disprove. A **write-side class** exclusion applied at creation — complementary to, and distinct from, the read-side `junk_match_*` stopword gate (#662). Set `false` to disable the gate entirely. |
-| Code-artifact extensions | — | — | `librarian.code_artifact_extensions` | *(extends the built-in default)* | Extra source/config file extensions that mark a name as a code artifact (#680). A conservative built-in default (`.md`, `.py`, `.yaml`, `.ts`, `.json`, `.sh`, …) is always applied; entries here are **added** to it (leading dot optional). A name is file-shaped when it contains a path separator, or is a single whitespace-free token ending in one of these extensions. |
-| Code-artifact allowlist | — | — | `librarian.code_artifact_allowlist` | `[]` | Entity names that must **never** be treated as code artifacts (#680) — the escape hatch for a deployment that legitimately tracks a document by filename. Wins over the file-shape check, case-insensitively (mirrors `junk_match_allowlist`). |
-| Strict budget exit | `--strict-budget` | — | — | off | Make a budget-tripped (DEGRADED) run exit nonzero instead of `0`, for exit-code-based alerting (#227). |
-| Batch API mode | `--batch-mode` / `--no-batch-mode` | `ATHENAEUM_BATCH_MODE` | `librarian.batch_mode` | off | Submit tier-2/tier-3 LLM calls via the [Anthropic Messages Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing) at a 50% token discount (#236). Latency-tolerant: most batches finish within an hour, 24h worst case — intended for the nightly run. Same-page tier-3 merges stay synchronous; the budget cap is enforced at batch-assembly time (re-checked per file at phase-2 assembly and before the synchronous merges). `--no-batch-mode` forces the synchronous path even when env/yaml turn batch mode on. |
-| Cluster threshold | — | — | `librarian.cluster_threshold` | `0.55` | Cosine cutoff for auto-memory near-duplicate clustering (C2, #196). Higher = tighter clusters. |
+| Intake batch size | `--max-files` | `ATHENAEUM_MAX_FILES` | `librarian.max_files` | `50` | Stop after processing this many raw files per run (athenaeum#232). Env `0` is valid (defer-everything window); the CLI flag rejects `0`. |
+| API call budget | `--max-api-calls` | `ATHENAEUM_MAX_API_CALLS` | `librarian.max_api_calls` | `800` | Run-level cap on estimated API calls (athenaeum#220, raised from 200). A budget-tripped run is DEGRADED: it writes `wiki/_deferred_work.md` and defers remaining intake. Env `0` is valid (defers the entire intake); the CLI flag rejects `0`. |
+| Wall-clock deadline | `--max-runtime` | `ATHENAEUM_MAX_RUNTIME` | `librarian.max_runtime` | `3600` | Run-level wall-clock deadline in **seconds** (athenaeum#396). Bounds the WHOLE run — the post-compile phases (C4 detector, athenaeum#290 wiki-dedup, C3 merge/resolver) AND the per-file entity loop — checked at file/cluster/phase boundaries. On trip the run commits partial progress, releases the lock, writes `wiki/_deferred_work.md`, and exits `124` (matching coreutils `timeout` and the athenaeum#337 interrupt path) — resumable. A value `<= 0` disables the deadline entirely (unbounded run). The default gives an un-wrapped manual run the same ~1h bound the nightly run gets from its external `timeout` wrapper. |
+| Entity-phase runtime share | — | `ATHENAEUM_ENTITY_RUNTIME_SHARE` | `librarian.entity_runtime_share` | `0.6` | Fraction of `max_runtime` the **entity phase** may spend claiming new raw files (athenaeum#440). `max_runtime` is a single budget shared by every phase, and the entity loop otherwise stops only when the WHOLE budget is gone — measured on the live corpus, entity took 3690s of a 3944s window (93.6%) on 3 files and the C4 contradiction detector downstream of it got **0 seconds on 10+ consecutive nights**. This reserves the remainder for the auto-memory compile and C4: once the share is spent the entity phase stops taking new files, defers the rest to `wiki/_deferred_work.md` (resumable, like the athenaeum#220 budget trip), and the run **continues** into C2-C4 rather than exiting `124`. Checked at the per-file boundary, so a file already in flight may overrun the share by its own duration — this bounds when the phase stops *taking* work, not when it stops working. Any value outside `0 < share < 1` disables the reserve (pre-athenaeum#440 behaviour); inert when `max_runtime <= 0`. |
+| Stuck-file threshold | — | `ATHENAEUM_STUCK_FILE_THRESHOLD` | `librarian.stuck_file_threshold` | `3` | Consecutive-run failure count after which a raw file is treated as **stuck** (athenaeum#663). `tier3_write` is all-or-nothing per raw file (a partial write cannot leave the wiki half-merged), so one reliably-failing LLM call — e.g. an entity page large enough to time out every night — otherwise discards the file's other successful merges and the file is retried WHOLE every run, forever, silently. A file that fails on the **same content** this many runs running is instead SKIPPED (it stops consuming an LLM call each night) and surfaced as machine-detectable run state: `out_run_stats["stuck_files"]` (ref, consecutive failures, failing `kind:name` action, last error) plus a greppable `librarian-stuck-file` WARNING and a `stuck=N` field on the run-summary line. State lives in `wiki/_stuck_files.json` (keyed by ref + content hash, so editing the file resets its count); a run that finally succeeds on the file clears its entry. Must be `>= 1` (below that would quarantine a file on its first transient failure); non-numeric / non-positive / bool values fall back to the default. |
+| Junk-match stopwords | — | — | `librarian.junk_match_stopwords` | *(extends the built-in default)* | Extra entity names to treat as **junk** so a Tier-1 match on them never issues a Tier-3 merge LLM call (athenaeum#662). Tier-1 matches any indexed page name ≥ 3 chars, and the index accumulates junk pages (`here`, `get`, `main`, `reach`, `lane a`, …) — each became a ~16-23KB merge call, roughly **half** of the ~15-18 Tier-3 calls per file. A conservative built-in default (the measured junk plus common English function words) is always applied; entries here are **added** to it, case-insensitively on the whole name. Tune per corpus as the junk set changes. |
+| Junk-match allowlist | — | — | `librarian.junk_match_allowlist` | `[]` | Entity names that must **never** be treated as junk (athenaeum#662) — the escape hatch for a real entity whose name collides with a default/stopword junk word (e.g. a company literally named "Reach"). Wins over both the built-in default and `junk_match_stopwords`, case-insensitively. |
+| Exclude code artifacts | — | — | `librarian.exclude_code_artifacts` | `true` | Whether a candidate whose name is a **filename or path** (`skill.md`, `project-registry.yaml`, `src/athenaeum/librarian.py`) is refused entity creation (athenaeum#680). Code should not be remembered as memory: the repo is the source of truth for its own code, so a wiki page describing a file's *past* state is stale by construction and costs a session to disprove. A **write-side class** exclusion applied at creation — complementary to, and distinct from, the read-side `junk_match_*` stopword gate (athenaeum#662). Set `false` to disable the gate entirely. |
+| Code-artifact extensions | — | — | `librarian.code_artifact_extensions` | *(extends the built-in default)* | Extra source/config file extensions that mark a name as a code artifact (athenaeum#680). A conservative built-in default (`.md`, `.py`, `.yaml`, `.ts`, `.json`, `.sh`, …) is always applied; entries here are **added** to it (leading dot optional). A name is file-shaped when it contains a path separator, or is a single whitespace-free token ending in one of these extensions. |
+| Code-artifact allowlist | — | — | `librarian.code_artifact_allowlist` | `[]` | Entity names that must **never** be treated as code artifacts (athenaeum#680) — the escape hatch for a deployment that legitimately tracks a document by filename. Wins over the file-shape check, case-insensitively (mirrors `junk_match_allowlist`). |
+| Strict budget exit | `--strict-budget` | — | — | off | Make a budget-tripped (DEGRADED) run exit nonzero instead of `0`, for exit-code-based alerting (athenaeum#227). |
+| Batch API mode | `--batch-mode` / `--no-batch-mode` | `ATHENAEUM_BATCH_MODE` | `librarian.batch_mode` | off | Submit tier-2/tier-3 LLM calls via the [Anthropic Messages Batch API](https://platform.claude.com/docs/en/build-with-claude/batch-processing) at a 50% token discount (athenaeum#236). Latency-tolerant: most batches finish within an hour, 24h worst case — intended for the nightly run. Same-page tier-3 merges stay synchronous; the budget cap is enforced at batch-assembly time (re-checked per file at phase-2 assembly and before the synchronous merges). `--no-batch-mode` forces the synchronous path even when env/yaml turn batch mode on. |
+| Cluster threshold | — | — | `librarian.cluster_threshold` | `0.55` | Cosine cutoff for auto-memory near-duplicate clustering (C2, athenaeum#196). Higher = tighter clusters. |
 | Cluster output | — | — | `librarian.cluster_output` | `raw/_librarian-clusters.jsonl` | Canonical cluster JSONL path, resolved relative to the knowledge root. Each run also writes a timestamped sibling. |
-| Rotation retention | — | `ATHENAEUM_ROTATION_RETENTION` | `librarian.rotation_retention` | `30` | Number of timestamped cluster-report rotations to keep; older ones are pruned after each run (#311). Rotations are debugging artifacts, not recovery-critical (recovery is git-based). `0` (or negative) disables pruning (keep all). A prune failure is a non-fatal warning. |
-| Ephemeral scopes | — | — | `librarian.ephemeral_scopes` | `[]` | Glob patterns (matched against the auto-memory scope) whose raw intake is classified ephemeral and dropped before clustering (#280), so operational/throwaway scopes never materialize a durable `wiki/auto-*.md` page. Default-empty (off). |
-| Operational markers | — | — | `librarian.operational_markers` | `[]` | Lower-cased content substrings that, when `>= 2` are present in a raw auto-memory file, classify it as ephemeral operational boilerplate (#280). Conservative multi-signal gate; default-empty so nothing fires until an operator opts in. Lower-precedence than an explicit `ephemeral: true` frontmatter flag or an `ephemeral_scopes` match. |
-| Cluster-cohesion floor | — | — | `librarian.min_cluster_cohesion` | `0.0` | Cohesion floor that suppresses low-cohesion cross-scope over-clusters (#281). A cluster is withheld only when its `cluster_centroid_score` is strictly below this value **AND** it spans `>= min_cluster_cohesion_scopes` distinct origin scopes. Default `0.0` = OFF (the cutoff is corpus-specific); `0.47` is recommended for the reference corpus. Suppressed clusters leave their raw members in place (not retired). |
-| Cohesion-floor scope count | — | — | `librarian.min_cluster_cohesion_scopes` | `4` | Minimum distinct `origin_scope` count a low-cohesion cluster must span before the `min_cluster_cohesion` floor suppresses it (#281). Legitimate pages span 1-3 scopes and over-clusters span 8-17, so `4` is the clean margin — a low-cohesion single-/few-scope cluster is never false-suppressed. Inert while `min_cluster_cohesion` is `0.0`. |
-| Merge-proposal source cap | — | `ATHENAEUM_MAX_MERGE_SOURCES` | `librarian.max_merge_sources` | `25` | Source-count cap on resolver merge proposals (#400). A `propose_merge` folding more than N sources is a degenerate over-cluster (the incident: 1,600+ sources at ~0.33 confidence, re-proposed every run), not a pairwise/small-group refinement — it is dropped before it reaches `wiki/_pending_merges.md` (neither proposed nor escalated as a pending question). Default `25` (active, anchored to the cross-scope cluster-size cap); set `0` to disable. The cohesion floor above already withholds low-cohesion over-clusters upstream — this catches the *high*-cohesion degenerates it doesn't. |
-| Merge-proposal confidence floor | — | `ATHENAEUM_MIN_MERGE_CONFIDENCE` | `librarian.min_merge_confidence` | `0.0` | Optional confidence floor on resolver merge proposals (#400): a proposal below this confidence is dropped before `wiki/_pending_merges.md`. Default `0.0` = OFF (the review bar is corpus-specific), opt-in via yaml. Complements `max_merge_sources` — the cap catches over-clusters by shape, this keeps low-confidence small merges out of the queue. A parsed env value is authoritative — `0` disables the floor even when yaml sets one (#524); a malformed value logs a WARNING and falls back (#528). |
-| Merge-proposal cohesion floor | — | `ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY` | `librarian.min_merge_mean_similarity` | `0.6` | Mean-pairwise-cosine floor on resolver merge proposals (#421): a proposal whose cluster mean pairwise cosine is strictly below this is suppressed before `wiki/_pending_merges.md`. Unlike the corpus-specific confidence floor above, this cohesion gate is **active by default**. `0` (or negative) disables it. A malformed env value logs a WARNING and falls back (#528). |
-| Page warn size | — | `ATHENAEUM_PAGE_WARN_BYTES` | `librarian.page_warn_bytes` | `8192` | Soft byte threshold above which a wiki entity page is reported as a **warn**-level oversized page in `athenaeum status` (#310). Warn-only: nothing is blocked or modified. A long page usually means poorly-factored knowledge that should be split into linked sub-entities. `bool` / non-int / `<= 0` values fall through to the default. |
-| Page flag size | — | `ATHENAEUM_PAGE_FLAG_BYTES` | `librarian.page_flag_bytes` | `16384` | Byte threshold above which a page is **flagged** for splitting — surfaced in `status` and logged as a non-fatal `WARNING` during `athenaeum run` (#310). Still warn-only (never blocks; the tier-3 merge body cap is separate and unchanged). A flagged page appears only in the flag bucket, not also in warn. Keep comfortably below the merge body cap. |
-| Backlog-drain warn threshold (days) | — | — | `librarian.drain_warn_days` | `3` | Backlog-drain ETA threshold in **days** (#470). At the end of any run that leaves raw intake undrained (and in `athenaeum status`), the advisor projects time-to-drain from **observed** throughput (the #378 spend ledger; falls back to this run's own rate) and emits a machine-greppable `backlog-drain-advisor:` `WARNING` — naming the copy-pastable `athenaeum drain` remedy — only when the projection **exceeds** this many days; below it the run stays silent. `bool` / non-int / `<= 0` values fall through to the default. |
-| Merge-read preview length | — | `ATHENAEUM_MERGE_BODY_PREVIEW_CHARS` | `librarian.merge_body_preview_chars` | `2000` | Read-path bound (#431) on the `list_pending_merges` MCP tool: `draft_merged_body` is truncated to this many characters by default (a single oversized pending merge — the withdrawn runaway that prompted this issue had a ~878 KB draft body — otherwise blows out the payload on every call). Each item also carries `draft_merged_body_truncated` and `draft_merged_body_full_length`; pass `full_body=True` to the tool to get the untruncated body on demand. Complements the write-path `max_merge_sources` cap above (#400), which suppresses the proposal entirely rather than bounding its rendering. `bool` / non-int / `<= 0` values fall through to the default. |
-| Decisions-view source cap | — | `ATHENAEUM_DECISIONS_MAX_SOURCES_PER_MERGE` | `librarian.decisions_max_sources_per_merge` | `20` | Read-path bound (#431) on the `decisions` view / `list_pending_decisions` MCP tool: a merge item renders at most this many sources, with the exact remainder in `payload["sources_omitted"]` (and an "… and N more" line in the plain-text CLI rendering). `bool` / non-int / `<= 0` values fall through to the default. |
-| T2-approval audit rate | — | `ATHENAEUM_AUDIT_SAMPLE_RATE_T2_APPROVALS` | `librarian.audit_sample_rate_t2_approvals` | `0.075` | Share of T2 (opus) approvals randomly sampled into the human decisions queue as `type: "audit"` calibration items (#438) — the false-approve half of the tier calibration loop. Deterministic per `(tier, proposal)`. Clamped to `[0.0, 1.0]` (`0.0` = OFF, `1.0` = audit everything); default `0.075` is the midpoint of the settled 5-10% band. `bool` / non-numeric values fall through to the default. |
-| T1-reject audit rate | — | `ATHENAEUM_AUDIT_SAMPLE_RATE_T1_REJECTS` | `librarian.audit_sample_rate_t1_rejects` | `0.075` | Share of T1 (haiku/sonnet) rejects randomly sampled into the human decisions queue as `type: "audit"` calibration items (#438) — the false-reject half of the tier calibration loop. Deterministic per `(tier, proposal)`. Clamped to `[0.0, 1.0]` (`0.0` = OFF, `1.0` = audit everything); default `0.075` is the midpoint of the settled 5-10% band. `bool` / non-numeric values fall through to the default. |
+| Rotation retention | — | `ATHENAEUM_ROTATION_RETENTION` | `librarian.rotation_retention` | `30` | Number of timestamped cluster-report rotations to keep; older ones are pruned after each run (athenaeum#311). Rotations are debugging artifacts, not recovery-critical (recovery is git-based). `0` (or negative) disables pruning (keep all). A prune failure is a non-fatal warning. |
+| Ephemeral scopes | — | — | `librarian.ephemeral_scopes` | `[]` | Glob patterns (matched against the auto-memory scope) whose raw intake is classified ephemeral and dropped before clustering (athenaeum#280), so operational/throwaway scopes never materialize a durable `wiki/auto-*.md` page. Default-empty (off). |
+| Operational markers | — | — | `librarian.operational_markers` | `[]` | Lower-cased content substrings that, when `>= 2` are present in a raw auto-memory file, classify it as ephemeral operational boilerplate (athenaeum#280). Conservative multi-signal gate; default-empty so nothing fires until an operator opts in. Lower-precedence than an explicit `ephemeral: true` frontmatter flag or an `ephemeral_scopes` match. |
+| Cluster-cohesion floor | — | — | `librarian.min_cluster_cohesion` | `0.0` | Cohesion floor that suppresses low-cohesion cross-scope over-clusters (athenaeum#281). A cluster is withheld only when its `cluster_centroid_score` is strictly below this value **AND** it spans `>= min_cluster_cohesion_scopes` distinct origin scopes. Default `0.0` = OFF (the cutoff is corpus-specific); `0.47` is recommended for the reference corpus. Suppressed clusters leave their raw members in place (not retired). |
+| Cohesion-floor scope count | — | — | `librarian.min_cluster_cohesion_scopes` | `4` | Minimum distinct `origin_scope` count a low-cohesion cluster must span before the `min_cluster_cohesion` floor suppresses it (athenaeum#281). Legitimate pages span 1-3 scopes and over-clusters span 8-17, so `4` is the clean margin — a low-cohesion single-/few-scope cluster is never false-suppressed. Inert while `min_cluster_cohesion` is `0.0`. |
+| Merge-proposal source cap | — | `ATHENAEUM_MAX_MERGE_SOURCES` | `librarian.max_merge_sources` | `25` | Source-count cap on resolver merge proposals (athenaeum#400). A `propose_merge` folding more than N sources is a degenerate over-cluster (the incident: 1,600+ sources at ~0.33 confidence, re-proposed every run), not a pairwise/small-group refinement — it is dropped before it reaches `wiki/_pending_merges.md` (neither proposed nor escalated as a pending question). Default `25` (active, anchored to the cross-scope cluster-size cap); set `0` to disable. The cohesion floor above already withholds low-cohesion over-clusters upstream — this catches the *high*-cohesion degenerates it doesn't. |
+| Merge-proposal confidence floor | — | `ATHENAEUM_MIN_MERGE_CONFIDENCE` | `librarian.min_merge_confidence` | `0.0` | Optional confidence floor on resolver merge proposals (athenaeum#400): a proposal below this confidence is dropped before `wiki/_pending_merges.md`. Default `0.0` = OFF (the review bar is corpus-specific), opt-in via yaml. Complements `max_merge_sources` — the cap catches over-clusters by shape, this keeps low-confidence small merges out of the queue. A parsed env value is authoritative — `0` disables the floor even when yaml sets one (athenaeum#524); a malformed value logs a WARNING and falls back (athenaeum#528). |
+| Merge-proposal cohesion floor | — | `ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY` | `librarian.min_merge_mean_similarity` | `0.6` | Mean-pairwise-cosine floor on resolver merge proposals (athenaeum#421): a proposal whose cluster mean pairwise cosine is strictly below this is suppressed before `wiki/_pending_merges.md`. Unlike the corpus-specific confidence floor above, this cohesion gate is **active by default**. `0` (or negative) disables it. A malformed env value logs a WARNING and falls back (athenaeum#528). |
+| Page warn size | — | `ATHENAEUM_PAGE_WARN_BYTES` | `librarian.page_warn_bytes` | `8192` | Soft byte threshold above which a wiki entity page is reported as a **warn**-level oversized page in `athenaeum status` (athenaeum#310). Warn-only: nothing is blocked or modified. A long page usually means poorly-factored knowledge that should be split into linked sub-entities. `bool` / non-int / `<= 0` values fall through to the default. |
+| Page flag size | — | `ATHENAEUM_PAGE_FLAG_BYTES` | `librarian.page_flag_bytes` | `16384` | Byte threshold above which a page is **flagged** for splitting — surfaced in `status` and logged as a non-fatal `WARNING` during `athenaeum run` (athenaeum#310). Still warn-only (never blocks; the tier-3 merge body cap is separate and unchanged). A flagged page appears only in the flag bucket, not also in warn. Keep comfortably below the merge body cap. |
+| Backlog-drain warn threshold (days) | — | — | `librarian.drain_warn_days` | `3` | Backlog-drain ETA threshold in **days** (athenaeum#470). At the end of any run that leaves raw intake undrained (and in `athenaeum status`), the advisor projects time-to-drain from **observed** throughput (the athenaeum#378 spend ledger; falls back to this run's own rate) and emits a machine-greppable `backlog-drain-advisor:` `WARNING` — naming the copy-pastable `athenaeum drain` remedy — only when the projection **exceeds** this many days; below it the run stays silent. `bool` / non-int / `<= 0` values fall through to the default. |
+| Merge-read preview length | — | `ATHENAEUM_MERGE_BODY_PREVIEW_CHARS` | `librarian.merge_body_preview_chars` | `2000` | Read-path bound (athenaeum#431) on the `list_pending_merges` MCP tool: `draft_merged_body` is truncated to this many characters by default (a single oversized pending merge — the withdrawn runaway that prompted this issue had a ~878 KB draft body — otherwise blows out the payload on every call). Each item also carries `draft_merged_body_truncated` and `draft_merged_body_full_length`; pass `full_body=True` to the tool to get the untruncated body on demand. Complements the write-path `max_merge_sources` cap above (athenaeum#400), which suppresses the proposal entirely rather than bounding its rendering. `bool` / non-int / `<= 0` values fall through to the default. |
+| Decisions-view source cap | — | `ATHENAEUM_DECISIONS_MAX_SOURCES_PER_MERGE` | `librarian.decisions_max_sources_per_merge` | `20` | Read-path bound (athenaeum#431) on the `decisions` view / `list_pending_decisions` MCP tool: a merge item renders at most this many sources, with the exact remainder in `payload["sources_omitted"]` (and an "… and N more" line in the plain-text CLI rendering). `bool` / non-int / `<= 0` values fall through to the default. |
+| T2-approval audit rate | — | `ATHENAEUM_AUDIT_SAMPLE_RATE_T2_APPROVALS` | `librarian.audit_sample_rate_t2_approvals` | `0.075` | Share of T2 (opus) approvals randomly sampled into the human decisions queue as `type: "audit"` calibration items (athenaeum#438) — the false-approve half of the tier calibration loop. Deterministic per `(tier, proposal)`. Clamped to `[0.0, 1.0]` (`0.0` = OFF, `1.0` = audit everything); default `0.075` is the midpoint of the settled 5-10% band. `bool` / non-numeric values fall through to the default. |
+| T1-reject audit rate | — | `ATHENAEUM_AUDIT_SAMPLE_RATE_T1_REJECTS` | `librarian.audit_sample_rate_t1_rejects` | `0.075` | Share of T1 (haiku/sonnet) rejects randomly sampled into the human decisions queue as `type: "audit"` calibration items (athenaeum#438) — the false-reject half of the tier calibration loop. Deterministic per `(tier, proposal)`. Clamped to `[0.0, 1.0]` (`0.0` = OFF, `1.0` = audit everything); default `0.075` is the midpoint of the settled 5-10% band. `bool` / non-numeric values fall through to the default. |
 | Embedding cache root | — | `ATHENAEUM_CACHE_DIR` | — | `~/.cache/athenaeum` | Cache root used by the librarian's cluster pass (chromadb lives at `<dir>/wiki-vectors/`). The `recall` / `rebuild-index` commands do **not** read this var — they take `--cache-dir` (same default). |
-| Post-run git push | `--push` | — | `librarian.push_after_run` | off | Push the knowledge repo to its remote after a successful run that produced at least one commit (#284). Closes the move-then-retire recovery gap on multi-machine setups: without it, scheduled nightly runs commit locally but origin silently drifts. Uses the operator's ambient git auth (credential helper / SSH); athenaeum handles no tokens or secrets. `--dry-run` never pushes; a run with no new commits never pushes; a push failure is a non-fatal warning (`athenaeum-push-failed:`) and the next run retries. Remote/branch come from `librarian.push_remote` (default `origin`) and `librarian.push_branch` (default: current branch's upstream). |
-| Run-lock wait | `--wait` | `ATHENAEUM_LOCK_TIMEOUT` | `librarian.lock_timeout` | `0` | Default seconds a mutating command blocks for the single-machine run lock before failing (#309). `0` = fail-fast (name the holder, exit non-zero). The `--wait` flag overrides per-invocation. See the run-lock note below. |
-| Run-lock auto-break age | — | `ATHENAEUM_LOCK_BREAK_STALE_AFTER` | `librarian.lock_break_stale_after` | `21600` (6h) | Seconds of holder-heartbeat age after which a contended acquire auto-breaks a wedged-but-alive holder's lock, without a human passing `--force` (#397). Comfortably above any healthy run; lower it once the librarian reliably refreshes the heartbeat. |
-| Run-lock stale warning age | — | `ATHENAEUM_LOCK_WARN_STALE_AFTER` | `librarian.lock_warn_stale_after` | `7200` (2h) | Seconds of holder-heartbeat age after which a contended acquire logs a prominent "likely wedged" warning naming the holder (#397) — typically lower than the auto-break age, so an operator gets an early heads-up before auto-break fires. |
-| Progress-heartbeat interval | — | `ATHENAEUM_HEARTBEAT_INTERVAL` | `librarian.heartbeat_interval` | `60` | Seconds between `librarian-heartbeat` progress ticks emitted by the dark-zone phases (T3 merge, C4 detection, #290 wiki-dedup, #188 re-resolve) so a stall is visible in the log and to a watchdog (#398). `<= 0` emits every tick. |
-| Delta-scoped compile | — | — | `librarian.delta.enabled` | `true` | Enable delta-scoped incremental compile on the deterministic (`client=None`) path — `session-end` / `ingest` tier0 (#370). When on, re-cluster and re-merge only the clusters a change actually touches instead of the whole auto-memory corpus; byte-equivalent to the whole-corpus path. Set `false` to always compile whole-corpus. The nightly LLM `run` always stays whole-corpus regardless of this flag. `bool` yaml values are honored; anything else falls through to the `true` default. |
-| Delta affected-cluster cap | — | — | `librarian.delta.max_affected_clusters` | `8` | If a change would touch more than this many clusters, fall back to a full whole-corpus compile rather than churning most of the corpus through the delta path (#370). `bool` / non-positive / non-int values fall through to the default. |
-| Delta affected-member cap | — | — | `librarian.delta.max_affected_members` | `200` | If the affected-cluster member pool exceeds this many files, fall back to a full compile (#370). Bounds worst-case re-cluster cost so a pathological closure never does more work than a full run. `bool` / non-positive / non-int values fall through to the default. |
-| Full-rehash backstop age (days) | — | — | `librarian.reindex.full_rehash_max_age_days` | `7` | Self-healing periodic full re-hash backstop (#373). The #370 stat pre-filter reuses a stored content hash whenever a file's `(mtime, size)` match the index manifest; when the manifest has not had a full re-hash within this window, the next incremental reindex re-hashes **every** file (catching a content edit that preserved both mtime and size) while still applying only the delta — seconds, not a full re-embed / FTS5 rebuild. `0` or negative = always re-hash; a very large value = effectively never. `bool` / non-numeric values fall through to the default. |
+| Post-run git push | `--push` | — | `librarian.push_after_run` | off | Push the knowledge repo to its remote after a successful run that produced at least one commit (athenaeum#284). Closes the move-then-retire recovery gap on multi-machine setups: without it, scheduled nightly runs commit locally but origin silently drifts. Uses the operator's ambient git auth (credential helper / SSH); athenaeum handles no tokens or secrets. `--dry-run` never pushes; a run with no new commits never pushes; a push failure is a non-fatal warning (`athenaeum-push-failed:`) and the next run retries. Remote/branch come from `librarian.push_remote` (default `origin`) and `librarian.push_branch` (default: current branch's upstream). |
+| Run-lock wait | `--wait` | `ATHENAEUM_LOCK_TIMEOUT` | `librarian.lock_timeout` | `0` | Default seconds a mutating command blocks for the single-machine run lock before failing (athenaeum#309). `0` = fail-fast (name the holder, exit non-zero). The `--wait` flag overrides per-invocation. See the run-lock note below. |
+| Run-lock auto-break age | — | `ATHENAEUM_LOCK_BREAK_STALE_AFTER` | `librarian.lock_break_stale_after` | `21600` (6h) | Seconds of holder-heartbeat age after which a contended acquire auto-breaks a wedged-but-alive holder's lock, without a human passing `--force` (athenaeum#397). Comfortably above any healthy run; lower it once the librarian reliably refreshes the heartbeat. |
+| Run-lock stale warning age | — | `ATHENAEUM_LOCK_WARN_STALE_AFTER` | `librarian.lock_warn_stale_after` | `7200` (2h) | Seconds of holder-heartbeat age after which a contended acquire logs a prominent "likely wedged" warning naming the holder (athenaeum#397) — typically lower than the auto-break age, so an operator gets an early heads-up before auto-break fires. |
+| Progress-heartbeat interval | — | `ATHENAEUM_HEARTBEAT_INTERVAL` | `librarian.heartbeat_interval` | `60` | Seconds between `librarian-heartbeat` progress ticks emitted by the dark-zone phases (T3 merge, C4 detection, athenaeum#290 wiki-dedup, athenaeum#188 re-resolve) so a stall is visible in the log and to a watchdog (athenaeum#398). `<= 0` emits every tick. |
+| Delta-scoped compile | — | — | `librarian.delta.enabled` | `true` | Enable delta-scoped incremental compile on the deterministic (`client=None`) path — `session-end` / `ingest` tier0 (athenaeum#370). When on, re-cluster and re-merge only the clusters a change actually touches instead of the whole auto-memory corpus; byte-equivalent to the whole-corpus path. Set `false` to always compile whole-corpus. The nightly LLM `run` always stays whole-corpus regardless of this flag. `bool` yaml values are honored; anything else falls through to the `true` default. |
+| Delta affected-cluster cap | — | — | `librarian.delta.max_affected_clusters` | `8` | If a change would touch more than this many clusters, fall back to a full whole-corpus compile rather than churning most of the corpus through the delta path (athenaeum#370). `bool` / non-positive / non-int values fall through to the default. |
+| Delta affected-member cap | — | — | `librarian.delta.max_affected_members` | `200` | If the affected-cluster member pool exceeds this many files, fall back to a full compile (athenaeum#370). Bounds worst-case re-cluster cost so a pathological closure never does more work than a full run. `bool` / non-positive / non-int values fall through to the default. |
+| Full-rehash backstop age (days) | — | — | `librarian.reindex.full_rehash_max_age_days` | `7` | Self-healing periodic full re-hash backstop (athenaeum#373). The athenaeum#370 stat pre-filter reuses a stored content hash whenever a file's `(mtime, size)` match the index manifest; when the manifest has not had a full re-hash within this window, the next incremental reindex re-hashes **every** file (catching a content edit that preserved both mtime and size) while still applying only the delta — seconds, not a full re-embed / FTS5 rebuild. `0` or negative = always re-hash; a very large value = effectively never. `bool` / non-numeric values fall through to the default. |
 | API key | — | `ANTHROPIC_API_KEY` | — | (required) | Required for Tier 2/3 LLM calls. Optional with `--dry-run`, `--cluster-only`, or `--merge-only`. |
 
 > **Design decision — CLI rejects `0`, env/yaml accept it.** The
@@ -78,11 +78,11 @@ Every default figure on this page is verified against the code under
 > typo guard at the interactive surface, while `ATHENAEUM_MAX_API_CALLS=0` /
 > `librarian.max_api_calls: 0` (and the `max_files` equivalents) are accepted
 > as deliberate defer-everything caps for scripted deployments. This
-> asymmetry is intentional, not an oversight (decided 2026-06-12; refs #235
-> and the #240 review). A run whose budget resolves to `0` logs a prominent
+> asymmetry is intentional, not an oversight (decided 2026-06-12; refs athenaeum#235
+> and the athenaeum#240 review). A run whose budget resolves to `0` logs a prominent
 > warning at start so an accidental zero is diagnosable immediately.
 
-> **Backstop guarantee (#373).** The #370 stat pre-filter reuses a stored
+> **Backstop guarantee (athenaeum#373).** The athenaeum#370 stat pre-filter reuses a stored
 > content hash when a file's `mtime` and `size` both match the manifest, so a
 > content edit that preserves BOTH would otherwise slip past an incremental
 > reindex indefinitely. `librarian.reindex.full_rehash_max_age_days` bounds that
@@ -90,11 +90,11 @@ Every default figure on this page is verified against the code under
 > `full_rehash_max_age_days` (default ≤ 7 days), even if nothing else triggers a
 > re-hash in the meantime.
 
-> **Monitoring contract — entity-phase share yield (#669, paired with `entity_runtime_share` above).**
-> When the entity phase yields its window share (#440) it stops claiming new raw
+> **Monitoring contract — entity-phase share yield (athenaeum#669, paired with `entity_runtime_share` above).**
+> When the entity phase yields its window share (athenaeum#440) it stops claiming new raw
 > files and defers the rest — a *deliberate, correct* stop, but one that ends the
 > run well **under** the duration-based cap heuristic (`LIBRARIAN_CAP_DEADLINE`,
-> cron-fleet#94), so a #440-shaped stall is no longer detectable by duration
+> cron-fleet#94), so a athenaeum#440-shaped stall is no longer detectable by duration
 > alone. The yield is therefore emitted as **machine-detectable run state** so a
 > consumer can tell "entity yielded on purpose" from "API budget exhausted"
 > without parsing WARNING text or the `wiki/_deferred_work.md` header. The
@@ -110,7 +110,7 @@ Every default figure on this page is verified against the code under
 >   growing; the claimed/deferred pair makes that judgeable (combine with the
 >   `beyond_window` count, also in `out_run_stats`, for the full backlog).
 >
-> This is purely additive observability — the yield **behavior** from #440 is
+> This is purely additive observability — the yield **behavior** from athenaeum#440 is
 > unchanged. The cross-repo consumer (cron-fleet gating on the new field) is a
 > separate `Kromatic-Innovation/cron-fleet` change, out of scope here.
 
@@ -119,7 +119,7 @@ Path and mode flags on `athenaeum run` (CLI-only): `--raw-root` and
 `--path` (default `~/knowledge`), `--dry-run`, `--cluster-only`,
 `--merge-only`, `--verbose`.
 
-### Run lock (single-machine concurrency guard, #309)
+### Run lock (single-machine concurrency guard, athenaeum#309)
 
 Every **mutating** command acquires an exclusive advisory
 [`fcntl.flock`](https://man7.org/linux/man-pages/man2/flock.2.html) on
@@ -155,7 +155,7 @@ coordination (use `librarian.push_after_run` + a single scheduler host for
 multi-machine setups). On non-POSIX platforms without `fcntl`, the lock
 degrades gracefully: a warning is logged and the command runs unlocked.
 
-## Backlog drain (`athenaeum drain`, #470)
+## Backlog drain (`athenaeum drain`, athenaeum#470)
 
 When the raw-intake backlog outgrows the nightly caps, `athenaeum run`'s
 DEGRADED summary reports **counts**, not time-to-drain, and the supervised
@@ -164,7 +164,7 @@ flags. Two capabilities close that gap.
 
 **ETA advisor.** At the end of any run that leaves raw intake undrained (and in
 `athenaeum status`), an advisor projects nights-to-drain from the **observed**
-throughput recorded in the #378 spend ledger (files consumed per run — now
+throughput recorded in the athenaeum#378 spend ledger (files consumed per run — now
 persisted as `files_processed`) — never a hardcoded guess; it falls back to this
 run's own rate when there is no history. When the projection exceeds
 `librarian.drain_warn_days` (default 3) it emits one machine-greppable
@@ -176,7 +176,7 @@ backlog-drain-advisor: 202 deferred file(s) ≈ 18 night(s) to drain at current 
 
 Below the threshold it stays silent. The estimate promises **cost plus "hours,
 not nights"**, never a wall-clock guarantee (same-page merges serialize on the
-batch path, the deliberate #236 grouping).
+batch path, the deliberate athenaeum#236 grouping).
 
 **`athenaeum drain` — one-command supervised drain.** A thin orchestration over
 the existing `run()` machinery (run-lock, git snapshots, deferred manifest, and
@@ -188,24 +188,24 @@ athenaeum drain --max-usd 50 --yes
 
 | Flag | Required | Default | What it does |
 |---|---|---|---|
-| `--max-usd N` | **yes** | — | Mandatory cost ceiling in USD applied **cumulatively across the whole drain** (not per window). Maps onto the #378 `spend.max_usd_per_run` ceiling for each window as the remaining budget. |
+| `--max-usd N` | **yes** | — | Mandatory cost ceiling in USD applied **cumulatively across the whole drain** (not per window). Maps onto the athenaeum#378 `spend.max_usd_per_run` ceiling for each window as the remaining budget. |
 | `--max-files N` | no | `librarian.max_files` / 50 | Intake window size — files compiled per window. The drain loops windows until the backlog empties or the cost ceiling trips. |
 | `--yes` | no | off | Proceed without the interactive cost confirmation (**required** to run non-interactively — the drain incurs real API spend). |
 | `--path` / `--knowledge-root` | no | `~/knowledge` | Knowledge directory (`--raw-root` / `--wiki-root` override the sub-roots). |
 
 Behavior and guards:
 
-- **Forces the API + Batch path** (`provider=api` + batch mode, the #236 path at a 50% token discount) and an **unbounded run** (`max_runtime=0`). Batch mode block-polls the Batch API; a finite deadline is the known cwc#615 failure mode, so the drain **refuses to start** when a finite `max_runtime` is in effect (via `ATHENAEUM_MAX_RUNTIME` / `librarian.max_runtime`).
-- **No credential handling** (#284/#330): requires `ANTHROPIC_API_KEY` in the environment and errors out naming that requirement if it is absent.
+- **Forces the API + Batch path** (`provider=api` + batch mode, the athenaeum#236 path at a 50% token discount) and an **unbounded run** (`max_runtime=0`). Batch mode block-polls the Batch API; a finite deadline is the known cwc#615 failure mode, so the drain **refuses to start** when a finite `max_runtime` is in effect (via `ATHENAEUM_MAX_RUNTIME` / `librarian.max_runtime`).
+- **No credential handling** (athenaeum#284/#330): requires `ANTHROPIC_API_KEY` in the environment and errors out naming that requirement if it is absent.
 - **Cost guard is mandatory:** prints an up-front cost **estimate** (backlog × observed avg tokens/file × current model prices, batch discount applied) and requires `--yes` to proceed non-interactively.
 - **Loops intake windows** until the raw backlog is empty, the cumulative `--max-usd` ceiling trips, or a window makes **zero progress** (stops loudly — never spins).
 
 ## Models
 
 All model values are free-form model-id strings passed to the Anthropic SDK.
-All four live under the `models:` yaml block (#232, #513) and share one
+All four live under the `models:` yaml block (athenaeum#232, athenaeum#513) and share one
 resolver helper (`config.resolve_model`). The resolver model additionally
-accepts the pre-#232 `resolve.model` key for backward compatibility.
+accepts the pre-athenaeum#232 `resolve.model` key for backward compatibility.
 
 | Knob | Env var | YAML key | Default | Used by |
 |---|---|---|---|---|
@@ -216,11 +216,11 @@ accepts the pre-#232 `resolve.model` key for backward compatibility.
 | Reasoning tier 1 | `ATHENAEUM_REASONING_T1_MODEL` | `models.reasoning_t1` | `claude-haiku-4-5-20251001` | First-pass model for the reasoning-tier chain.² |
 | Reasoning tier 2 | `ATHENAEUM_REASONING_T2_MODEL` | `models.reasoning_t2` | `claude-opus-4-1-20250805` | Escalation model for the reasoning-tier chain.² |
 
-> ¹ `resolve.model` is still read post-#512/#513 (`athenaeum.resolutions._get_model`), not yet removed. Precedence, highest first: `ATHENAEUM_RESOLVE_MODEL` env var, then `models.resolve` yaml, then `resolve.model` yaml (legacy), then the code default — so if both `models.resolve` and `resolve.model` are set, **`models.resolve` wins**. There is no scheduled removal; it is kept indefinitely so existing `athenaeum.yaml` files keep working unchanged. Prefer `models.resolve` for new configs, for consistency with the other model knobs.
+> ¹ `resolve.model` is still read post-athenaeum#512/#513 (`athenaeum.resolutions._get_model`), not yet removed. Precedence, highest first: `ATHENAEUM_RESOLVE_MODEL` env var, then `models.resolve` yaml, then `resolve.model` yaml (legacy), then the code default — so if both `models.resolve` and `resolve.model` are set, **`models.resolve` wins**. There is no scheduled removal; it is kept indefinitely so existing `athenaeum.yaml` files keep working unchanged. Prefer `models.resolve` for new configs, for consistency with the other model knobs.
 >
 > ² The reasoning-tier knobs are read by `athenaeum.reasoning_tiers`. That subsystem currently has no production caller (`DEFAULT_TIER_CHAIN` is empty), so setting these has no runtime effect today — they are documented here for completeness because `src/` reads them. If the subsystem is removed, these two rows go with it.
 
-### Per-stage token and thinking tuning (#688)
+### Per-stage token and thinking tuning (athenaeum#688)
 
 Each LLM stage resolves two knobs through the same seam the model knobs use
 (`provider.resolve_max_tokens` / `provider.resolve_thinking`, precedence: env var
@@ -230,7 +230,7 @@ Each LLM stage resolves two knobs through the same seam the model knobs use
   integer; raising it lifts a truncation ceiling at higher spend, lowering it
   caps cost at the risk of clipping long outputs.
 - **`…_THINKING`** — the stage's extended-thinking posture: `disabled` (no
-  thinking block) or `adaptive` (the model may think first; see #578). Stages on
+  thinking block) or `adaptive` (the model may think first; see athenaeum#578). Stages on
   a thinking-enabled posture emit a leading thinking block before their answer.
 
 These are the primary per-stage **spend levers** — they govern token ceilings
@@ -266,7 +266,7 @@ silently truncated `ATHENAEUM_REASONING_T1_MAX_TOKENS` to a fragment and
 undercounted. Deliberately-internal vars live in that script's allowlist with a
 one-line reason each.
 
-### Sampling parameters are absent by design (#579)
+### Sampling parameters are absent by design (athenaeum#579)
 
 Athenaeum sends **no sampling parameters** to any LLM call site, and that is
 **deliberate — not an oversight to be "fixed."** The three sampling knobs a
@@ -304,7 +304,7 @@ determinism request is therefore a per-stage config intent that the provider
 translates (or drops) for the resolved model; it is **not** a `temperature` key
 that individual stages set. The machine-readable counterpart is the model-level
 sampling-capability set colocated with the pricing table in
-`src/athenaeum/models.py` (see #577) — consult that prefix set programmatically
+`src/athenaeum/models.py` (see athenaeum#577) — consult that prefix set programmatically
 rather than hard-coding a family list at a call site.
 
 **Where this even matters.** The determinism concern is real **only** for the
@@ -326,13 +326,13 @@ catalog and the live runtime disagree, the live runtime wins.** The `temperature
 against the catalog directly.
 
 > This subsection is a guardrail, not an example. The audit finding **H5** (from
-> epic #516's precursor) recommended adding a sampling parameter *everywhere* —
+> epic athenaeum#516's precursor) recommended adding a sampling parameter *everywhere* —
 > that recommendation was **wrong**, and this note is its correction. A future
 > contributor reading H5 should stop here rather than re-open it. A lint or test
 > that *enforces* the absence is worth having, but it is a code change and
 > belongs in its own issue.
 
-## LLM provider selection (#330)
+## LLM provider selection (athenaeum#330)
 
 Athenaeum's librarian pipeline talks to Claude through a single **provider
 seam** (`athenaeum.provider.build_llm_client`). Two backends ship:
@@ -346,9 +346,9 @@ seam** (`athenaeum.provider.build_llm_client`). Two backends ship:
 ### `api` (default)
 
 Wraps `anthropic.Anthropic(...)` verbatim: every request parameter — including
-`cache_control` prompt-caching breakpoints (#230) and the Messages Batch API
-(#236) — passes through unchanged. Requires `ANTHROPIC_API_KEY` (see below).
-Behavior is byte-for-byte identical to pre-#330 releases.
+`cache_control` prompt-caching breakpoints (athenaeum#230) and the Messages Batch API
+(athenaeum#236) — passes through unchanged. Requires `ANTHROPIC_API_KEY` (see below).
+Behavior is byte-for-byte identical to pre-athenaeum#330 releases.
 
 ### `claude-cli` (subscription)
 
@@ -356,7 +356,7 @@ Drives your logged-in Claude Code via
 `claude -p --system-prompt <sys> --model <id> --output-format json`, billing
 the LLM work to your Claude **subscription** rather than a per-token API bill.
 Athenaeum performs **no credential handling** — it relies on your ambient
-`claude` login exactly as the post-run `git push` (#284) relies on your ambient
+`claude` login exactly as the post-run `git push` (athenaeum#284) relies on your ambient
 git auth. Enable it with:
 
 ```yaml
@@ -407,7 +407,7 @@ Constraints and semantics:
   the direct Anthropic SDK and gated on `ANTHROPIC_API_KEY`; it is unaffected
   by `ATHENAEUM_LLM_PROVIDER`.
 
-## Spend ledger and ceiling (#378)
+## Spend ledger and ceiling (athenaeum#378)
 
 Athenaeum spends on two cost models that must **never be blended**: the
 `claude-cli` **subscription** path (no invoice — consumes your Claude
@@ -464,7 +464,7 @@ spend:
   max_usd_per_day: 5.00           # cap real API dollars per day
 ```
 
-## Push-precision and coverage instrumentation (#711)
+## Push-precision and coverage instrumentation (athenaeum#711)
 
 The v6 memory-model epic's definition of done requires push precision
 ("fraction of pushed items actually referenced by the consuming session") to
@@ -512,26 +512,26 @@ the other model knobs (`resolve.model` is the legacy fallback — see
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
-| Cross-scope mode | `ATHENAEUM_CROSS_SCOPE_MODE` | `contradiction.cross_scope_mode` | `ancestor` | `off` / `ancestor` / `similarity` / `both` (#125). Invalid env values log a warning and fall back. |
+| Cross-scope mode | `ATHENAEUM_CROSS_SCOPE_MODE` | `contradiction.cross_scope_mode` | `ancestor` | `off` / `ancestor` / `similarity` / `both` (athenaeum#125). Invalid env values log a warning and fall back. |
 | Cluster size cap | — | `contradiction.cluster_size_cap` | `25` | Pooled-cluster size cap; oversized pools are split into newest-first chunks before detection. |
 | Similarity threshold | — | `contradiction.similarity_threshold` | `0.85` | Cosine cutoff for the cross-scope similarity sweep (`similarity` / `both` modes). |
-| Resolver cap per run | `ATHENAEUM_RESOLVE_MAX_PER_RUN` | `contradiction.resolve_max_per_run` | `250` | Per-ingest cap on resolver calls (raised from 50 in #187). Surplus detections escalate without a proposal. `0` disables the resolver entirely. |
-| Resolved-similarity threshold | `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD` | `contradiction.resolved_similarity_threshold` | `0.83` | Cosine threshold for matching a new detection against the decision log of previously resolved contradictions (#211). |
-| Not-a-conflict TTL (days) | `ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS` | `contradiction.not_a_conflict_ttl_days` | `0` | Read-time decay of stale **auto** `not_a_conflict` suppressions (#251). `0` disables decay (current behavior — a suppression never expires). When `> 0`, an auto suppression whose `resolved_at` is older than this many days is treated as absent from the confirmation-pass skip set, so the pair re-enters the Opus confirmation. Human verdicts and enacting auto verdicts (`keep_*`/`correct_*`/`forget_*`/`deprecate_both`) never decay; undated rows keep suppressing (fail-safe). The append-only cache is never mutated; re-validation flows through the existing `resolve_max_per_run` cap. |
-| Auto-apply | `ATHENAEUM_RESOLVE_AUTO_APPLY` | `resolve.auto_apply` | `true` | Apply high-confidence resolver proposals without human review (#156). Env accepts `true`/`false`, `1`/`0`, `yes`/`no` (case-insensitive). |
-| Auto-apply threshold (legacy scalar) | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | `resolve.auto_apply_threshold` | `0.90` | Confidence floor in `[0.0, 1.0]`; out-of-range values raise on read. Since #170 this scalar is honored only as a backward-compat fallback for `keep_a` / `keep_b`. |
-| Per-action thresholds | — | `resolve.auto_apply_threshold_per_action` | `not_a_conflict: 0.75`, `keep_a`/`keep_b`/`deprecate_both`: `0.90`, `correct_a`/`correct_b`/`forget_a`/`forget_b`: `0.95` | Per-action confidence floors (#170, #191). `propose_merge` **never** auto-applies regardless of confidence. |
-| Full-body token cap | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | `resolve.full_body_token_cap` | `1500` | Per-side body cap for the resolver's full-body context (#168), ~4 chars/token. Must be a positive integer; zero/negative raise — set a large value to effectively disable truncation. |
-| Tier-4 escalation dedup | `ATHENAEUM_TIER4_DEDUP` | — | `true` | Dedupe `_pending_questions.md` escalations by source-memory pair (#157). Set `false`/`0`/`no`/`off` to restore the legacy always-append behavior. |
+| Resolver cap per run | `ATHENAEUM_RESOLVE_MAX_PER_RUN` | `contradiction.resolve_max_per_run` | `250` | Per-ingest cap on resolver calls (raised from 50 in athenaeum#187). Surplus detections escalate without a proposal. `0` disables the resolver entirely. |
+| Resolved-similarity threshold | `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD` | `contradiction.resolved_similarity_threshold` | `0.83` | Cosine threshold for matching a new detection against the decision log of previously resolved contradictions (athenaeum#211). |
+| Not-a-conflict TTL (days) | `ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS` | `contradiction.not_a_conflict_ttl_days` | `0` | Read-time decay of stale **auto** `not_a_conflict` suppressions (athenaeum#251). `0` disables decay (current behavior — a suppression never expires). When `> 0`, an auto suppression whose `resolved_at` is older than this many days is treated as absent from the confirmation-pass skip set, so the pair re-enters the Opus confirmation. Human verdicts and enacting auto verdicts (`keep_*`/`correct_*`/`forget_*`/`deprecate_both`) never decay; undated rows keep suppressing (fail-safe). The append-only cache is never mutated; re-validation flows through the existing `resolve_max_per_run` cap. |
+| Auto-apply | `ATHENAEUM_RESOLVE_AUTO_APPLY` | `resolve.auto_apply` | `true` | Apply high-confidence resolver proposals without human review (athenaeum#156). Env accepts `true`/`false`, `1`/`0`, `yes`/`no` (case-insensitive). |
+| Auto-apply threshold (legacy scalar) | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | `resolve.auto_apply_threshold` | `0.90` | Confidence floor in `[0.0, 1.0]`; out-of-range values raise on read. Since athenaeum#170 this scalar is honored only as a backward-compat fallback for `keep_a` / `keep_b`. |
+| Per-action thresholds | — | `resolve.auto_apply_threshold_per_action` | `not_a_conflict: 0.75`, `keep_a`/`keep_b`/`deprecate_both`: `0.90`, `correct_a`/`correct_b`/`forget_a`/`forget_b`: `0.95` | Per-action confidence floors (athenaeum#170, athenaeum#191). `propose_merge` **never** auto-applies regardless of confidence. |
+| Full-body token cap | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | `resolve.full_body_token_cap` | `1500` | Per-side body cap for the resolver's full-body context (athenaeum#168), ~4 chars/token. Must be a positive integer; zero/negative raise — set a large value to effectively disable truncation. |
+| Tier-4 escalation dedup | `ATHENAEUM_TIER4_DEDUP` | — | `true` | Dedupe `_pending_questions.md` escalations by source-memory pair (athenaeum#157). Set `false`/`0`/`no`/`off` to restore the legacy always-append behavior. |
 
-### Scoped-claim tree (`scope:`, #329)
+### Scoped-claim tree (`scope:`, athenaeum#329)
 
-The org/locale scope dimensions (issue #329) read a small **versioned tree** of
+The org/locale scope dimensions (issue athenaeum#329) read a small **versioned tree** of
 the values a claim's `scope: {org, locale}` frontmatter may declare. A value NOT
 listed here normalizes to *unscoped* (adds no constraint) with a debug
 breadcrumb — authors may not mint scope values (the Cyc-microtheory lesson), and
 the fail-open direction is toward detection. There is **no default** (no
-`_DEFAULTS` seed, #231): a fresh install has empty trees, so scope frontmatter is
+`_DEFAULTS` seed, athenaeum#231): a fresh install has empty trees, so scope frontmatter is
 inert and single-user behavior is unchanged until the operator opts in.
 
 ```yaml
@@ -544,9 +544,9 @@ Nodes form a poset by path-prefix (`kromatic/platform ⊑ kromatic`;
 `en-US ⊑ en`). The three-way overlap verdict (DISJOINT / OVERRIDE / OVERLAP) and
 the `scope_a` / `scope_b` resolver actions are documented in
 `docs/conflict-resolution.md` §12 and `docs/provenance-shape.md` §9. The recall
-`serve --scope` caller-context filter is deferred design (#314).
+`serve --scope` caller-context filter is deferred design (athenaeum#314).
 
-## Intake screening (#320)
+## Intake screening (athenaeum#320)
 
 Optional content screening applied to raw intake before it is compiled. The
 medical classifier ships **off**; when enabled it routes/withholds medical
@@ -554,9 +554,9 @@ intake per the configured action and access.
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
-| Medical screening | `ATHENAEUM_SCREEN_MEDICAL` | `screening.medical.action` | `off` | Action for medical intake: `off` (default, no screening) or an enabled action per `docs/screening.md`. **Fails loudly** — a mis-set value raises `ScreeningConfigError` rather than serving with a silently inert classifier. This is one of the two deliberate exceptions to the WARN-and-fall-back malformed-env policy (#528). |
+| Medical screening | `ATHENAEUM_SCREEN_MEDICAL` | `screening.medical.action` | `off` | Action for medical intake: `off` (default, no screening) or an enabled action per `docs/screening.md`. **Fails loudly** — a mis-set value raises `ScreeningConfigError` rather than serving with a silently inert classifier. This is one of the two deliberate exceptions to the WARN-and-fall-back malformed-env policy (athenaeum#528). |
 
-## Authority manifest (#426)
+## Authority manifest (athenaeum#426)
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
@@ -571,9 +571,9 @@ intake per the configured action and access.
 | Extra intake roots | — | — | `recall.extra_intake_roots` | `["raw/auto-memory"]` | Additional directories (relative to the knowledge root) scanned recursively into the recall index. Set `[]` to restrict recall to the compiled wiki. |
 | Recall result count | `--top-k` (`recall`) | — | — | `5` | Hits returned by the shell `recall` command. |
 | Index cache dir | `--cache-dir` (`recall` / `rebuild-index`) | — | — | `~/.cache/athenaeum` | Where the FTS5 db / chromadb collection live. |
-| Read-scope audience (#312) | `--audience` (`serve` / `recall`) | `ATHENAEUM_AUDIENCE` | `serve.audience` | _(unset = owner, full access)_ | Pins the `serve`/`recall` process to a RESTRICTED read scope: comma-separated (or yaml-list) opaque role/group ids the operator maps onto an external RBAC (AD group, app role, routine name). A restricted caller receives a page only when it is `access: open` OR its `audience:` list grants one of these roles; untagged / `confidential` / `personal` pages are withheld (fail-closed). The audience is pinned by the operator here — it is NOT a `recall()` tool argument, so a restricted agent can't widen its own scope. Empty/unset = owner = every page. |
+| Read-scope audience (athenaeum#312) | `--audience` (`serve` / `recall`) | `ATHENAEUM_AUDIENCE` | `serve.audience` | _(unset = owner, full access)_ | Pins the `serve`/`recall` process to a RESTRICTED read scope: comma-separated (or yaml-list) opaque role/group ids the operator maps onto an external RBAC (AD group, app role, routine name). A restricted caller receives a page only when it is `access: open` OR its `audience:` list grants one of these roles; untagged / `confidential` / `personal` pages are withheld (fail-closed). The audience is pinned by the operator here — it is NOT a `recall()` tool argument, so a restricted agent can't widen its own scope. Empty/unset = owner = every page. |
 | Topic-extraction timeout | `--timeout` (`query-topics`) | — | — | `3.0` | Seconds before `query-topics` gives up and the hook falls back to the regex extractor. |
-| Topic-extraction config root | `--knowledge-root` / `--path` (`query-topics`) | — | — | `~/knowledge` | Knowledge root whose `athenaeum.yaml` supplies `models.topic` (#232). |
+| Topic-extraction config root | `--knowledge-root` / `--path` (`query-topics`) | — | — | `~/knowledge` | Knowledge root whose `athenaeum.yaml` supplies `models.topic` (athenaeum#232). |
 
 **Reserved keys (not yet read by code).** `vector.provider` (default
 `chromadb`) and `vector.collection` (default `wiki`) appear in the loader's
@@ -587,7 +587,7 @@ is session-keyed. It is an **ambient / host-provided** variable (Claude Code
 sets it), not an operator knob — you do not set it yourself; it is documented
 here only so a reader knows recall telemetry carries a session id.
 
-## Kill switch (`athenaeum disable` / `enable`, #379)
+## Kill switch (`athenaeum disable` / `enable`, athenaeum#379)
 
 One discoverable, reversible way to stop all athenaeum background work — no
 hand-editing of `~/.claude/settings.json` and no `pkill`. Every entry point
@@ -642,7 +642,7 @@ guide: [`examples/claude-code/README.md`](../examples/claude-code/README.md).
 | `ATHENAEUM_PQ_HOOK_DEBUG` | `0` | `1` logs `pending-questions-surface.sh` diagnostics to stderr |
 | `AUTO_RECALL` | from `athenaeum.yaml` (`true`) | Shell-env override for per-turn recall |
 | `SEARCH_BACKEND` | from `athenaeum.yaml` (`fts5`) | Shell-env override for the search backend |
-| `ATHENAEUM_DISABLED` | _(unset)_ | Kill switch (#379) — `all`/`1`/`true` no-ops every hook; `compile` stops only the compile pass. Beats the `disabled` state file. See [Kill switch](#kill-switch-athenaeum-disable--enable-379). |
+| `ATHENAEUM_DISABLED` | _(unset)_ | Kill switch (athenaeum#379) — `all`/`1`/`true` no-ops every hook; `compile` stops only the compile pass. Beats the `disabled` state file. See [Kill switch](#kill-switch-athenaeum-disable--enable-379). |
 | `ATHENAEUM_CACHE_DIR` | `~/.cache/athenaeum` | Cache dir the hooks look in for the kill-switch `disabled` state file. |
 
 ## Alternative model gateways (`ANTHROPIC_BASE_URL`)
@@ -671,43 +671,43 @@ recall:
     - raw/auto-memory
 
 push_metrics:
-  enabled: true    # on by default; passive push-precision/coverage measurement (#711)
+  enabled: true    # on by default; passive push-precision/coverage measurement (athenaeum#711)
 
 librarian:
   cluster_threshold: 0.55
   cluster_output: raw/_librarian-clusters.jsonl
-  rotation_retention: 30        # timestamped rotations to keep; 0 = keep all (#311)
+  rotation_retention: 30        # timestamped rotations to keep; 0 = keep all (athenaeum#311)
   max_files: 50
   max_api_calls: 800
-  max_runtime: 3600             # run-level wall-clock deadline in seconds; <= 0 disables (#396)
-  entity_runtime_share: 0.6     # entity phase's share of max_runtime; rest reserved for C4 (#440)
-  stuck_file_threshold: 3       # consecutive-failure count before a raw file is skipped as stuck (#663)
-  junk_match_stopwords: []      # extra entity names filtered before a tier-3 merge call (#662)
-  junk_match_allowlist: []      # entity names to never treat as junk — escape hatch (#662)
-  exclude_code_artifacts: true  # refuse entity creation from filename/path names (#680)
-  code_artifact_extensions: []  # extra source/config extensions counted as code artifacts (#680)
-  code_artifact_allowlist: []   # entity names to never treat as code artifacts — escape hatch (#680)
+  max_runtime: 3600             # run-level wall-clock deadline in seconds; <= 0 disables (athenaeum#396)
+  entity_runtime_share: 0.6     # entity phase's share of max_runtime; rest reserved for C4 (athenaeum#440)
+  stuck_file_threshold: 3       # consecutive-failure count before a raw file is skipped as stuck (athenaeum#663)
+  junk_match_stopwords: []      # extra entity names filtered before a tier-3 merge call (athenaeum#662)
+  junk_match_allowlist: []      # entity names to never treat as junk — escape hatch (athenaeum#662)
+  exclude_code_artifacts: true  # refuse entity creation from filename/path names (athenaeum#680)
+  code_artifact_extensions: []  # extra source/config extensions counted as code artifacts (athenaeum#680)
+  code_artifact_allowlist: []   # entity names to never treat as code artifacts — escape hatch (athenaeum#680)
   batch_mode: false
-  ephemeral_scopes: []          # scope globs dropped as ephemeral intake (#280)
-  operational_markers: []       # >=2 lower-cased substrings => ephemeral (#280)
-  min_cluster_cohesion: 0.0     # 0.0 = OFF; cohesion floor (#281)
-  min_cluster_cohesion_scopes: 4  # scope-span gate for the cohesion floor (#281)
-  max_merge_sources: 25         # cap on resolver merge-proposal sources; 0 = OFF (#400)
-  min_merge_confidence: 0.0     # 0.0 = OFF; merge-proposal confidence floor (#400)
-  lock_timeout: 0               # run-lock wait seconds; 0 = fail-fast (#309)
-  page_warn_bytes: 8192         # warn on wiki pages over this size (#310)
-  page_flag_bytes: 16384        # flag pages over this size for splitting (#310)
-  drain_warn_days: 3            # backlog-drain ETA WARNING threshold in days (#470)
-  merge_body_preview_chars: 2000            # list_pending_merges draft_merged_body preview cap (#431)
-  decisions_max_sources_per_merge: 20       # decisions-view per-merge source fan-out cap (#431)
-  audit_sample_rate_t2_approvals: 0.075     # share of T2 approvals sampled for human audit (#438)
-  audit_sample_rate_t1_rejects: 0.075       # share of T1 rejects sampled for human audit (#438)
+  ephemeral_scopes: []          # scope globs dropped as ephemeral intake (athenaeum#280)
+  operational_markers: []       # >=2 lower-cased substrings => ephemeral (athenaeum#280)
+  min_cluster_cohesion: 0.0     # 0.0 = OFF; cohesion floor (athenaeum#281)
+  min_cluster_cohesion_scopes: 4  # scope-span gate for the cohesion floor (athenaeum#281)
+  max_merge_sources: 25         # cap on resolver merge-proposal sources; 0 = OFF (athenaeum#400)
+  min_merge_confidence: 0.0     # 0.0 = OFF; merge-proposal confidence floor (athenaeum#400)
+  lock_timeout: 0               # run-lock wait seconds; 0 = fail-fast (athenaeum#309)
+  page_warn_bytes: 8192         # warn on wiki pages over this size (athenaeum#310)
+  page_flag_bytes: 16384        # flag pages over this size for splitting (athenaeum#310)
+  drain_warn_days: 3            # backlog-drain ETA WARNING threshold in days (athenaeum#470)
+  merge_body_preview_chars: 2000            # list_pending_merges draft_merged_body preview cap (athenaeum#431)
+  decisions_max_sources_per_merge: 20       # decisions-view per-merge source fan-out cap (athenaeum#431)
+  audit_sample_rate_t2_approvals: 0.075     # share of T2 approvals sampled for human audit (athenaeum#438)
+  audit_sample_rate_t1_rejects: 0.075       # share of T1 rejects sampled for human audit (athenaeum#438)
   delta:
-    enabled: true               # delta-scoped incremental compile on client=None path (#370)
-    max_affected_clusters: 8    # > this many clusters touched => full compile (#370)
-    max_affected_members: 200   # > this many pooled members => full compile (#370)
+    enabled: true               # delta-scoped incremental compile on client=None path (athenaeum#370)
+    max_affected_clusters: 8    # > this many clusters touched => full compile (athenaeum#370)
+    max_affected_members: 200   # > this many pooled members => full compile (athenaeum#370)
   reindex:
-    full_rehash_max_age_days: 7 # periodic full re-hash backstop; 0 = always re-hash (#373)
+    full_rehash_max_age_days: 7 # periodic full re-hash backstop; 0 = always re-hash (athenaeum#373)
 
 models:
   classify: claude-haiku-4-5-20251001
@@ -721,7 +721,7 @@ contradiction:
   similarity_threshold: 0.85
   resolve_max_per_run: 250
   resolved_similarity_threshold: 0.83
-  not_a_conflict_ttl_days: 0  # 0 = disabled; >0 decays stale auto not_a_conflict (#251)
+  not_a_conflict_ttl_days: 0  # 0 = disabled; >0 decays stale auto not_a_conflict (athenaeum#251)
 
 resolve:
   # model: claude-opus-4-7   # legacy — prefer models.resolve above

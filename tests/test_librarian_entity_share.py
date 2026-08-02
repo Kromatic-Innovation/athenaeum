@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #440 — the entity phase must not consume the whole run window.
+"""Issue athenaeum#440 — the entity phase must not consume the whole run window.
 
-`run_deadline` (#396) is a single budget shared by every phase, and the entity
+`run_deadline` (athenaeum#396) is a single budget shared by every phase, and the entity
 loop only stops when that WHOLE budget is gone. Measured on the live corpus:
 the entity phase took 3690s of a 3944s window (93.6%) on 3 files, and the C4
-contradiction detector — which runs after it (#461 reorder) — got 0 seconds on
+contradiction detector — which runs after it (athenaeum#461 reorder) — got 0 seconds on
 every one of 10+ consecutive nights. Contradictions were therefore never
 detected at all, not merely detected slowly.
 
 This suite covers the reserve that fixes it: the entity phase stops CLAIMING
 new files once its share of `max_runtime` is spent, defers the remainder
-(resumable, exactly like the #220 budget trip), and — the load-bearing part —
+(resumable, exactly like the athenaeum#220 budget trip), and — the load-bearing part —
 lets the run continue into the auto-memory / C4 block instead of exiting 124.
 
 All Anthropic calls are mocked; no live API, no network.
@@ -30,7 +30,7 @@ from athenaeum.librarian import (
 )
 
 # Reuse the deadline suite's fixtures verbatim — this reserve is a sibling of
-# the #396 deadline and must be exercised against the same run harness.
+# the athenaeum#396 deadline and must be exercised against the same run harness.
 from tests.test_librarian_deadline import (
     _FakeClock,
     _last_subject,
@@ -65,7 +65,7 @@ class TestResolveEntityRuntimeShare:
         self, value: float, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Outside 0 < share < 1 the reserve is off (entity may use the whole
-        # window) — the explicit opt-out restoring pre-#440 behaviour.
+        # window) — the explicit opt-out restoring pre-athenaeum#440 behaviour.
         monkeypatch.delenv("ATHENAEUM_ENTITY_RUNTIME_SHARE", raising=False)
         cfg = {"librarian": {"entity_runtime_share": value}}
         assert librarian_entity_runtime_share(cfg) == 0.0
@@ -93,7 +93,7 @@ def _auto_memory_spy(monkeypatch: pytest.MonkeyPatch) -> list[object]:
     """Make the auto-memory block reachable and record whether it ran.
 
     Returns the call-record list; a non-empty list means the C2-C4 block that
-    #440 exists to un-starve actually executed.
+    athenaeum#440 exists to un-starve actually executed.
     """
     calls: list[object] = []
     monkeypatch.setattr(
@@ -149,7 +149,7 @@ def test_entity_share_defers_intake_but_run_continues_into_automemory(
     assert rc == 0
     assert compile_calls, (
         "the auto-memory / C4 block must run after an entity-share yield — "
-        "un-starving it is the entire point of issue #440"
+        "un-starving it is the entire point of issue athenaeum#440"
     )
 
     # Entity intake was bounded: one file compiled, the other two deferred and
@@ -175,7 +175,7 @@ def test_run_deadline_trip_still_wins_over_entity_share(
 
     The share check sits after the run-deadline check, so when the clock is
     past both, the more severe condition is the one recorded — exit 124 and a
-    deadline-labelled manifest, exactly as before #440.
+    deadline-labelled manifest, exactly as before athenaeum#440.
     """
     root = _seed_knowledge_root(tmp_path, n_files=3)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -210,7 +210,7 @@ def test_run_deadline_trip_still_wins_over_entity_share(
 def test_share_disabled_lets_entity_use_the_whole_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The opt-out restores pre-#440 behaviour byte-for-byte.
+    """The opt-out restores pre-athenaeum#440 behaviour byte-for-byte.
 
     With the share disabled the entity phase is bounded only by the run
     deadline, so a clock past the old entity share compiles every file.
@@ -257,7 +257,7 @@ def test_upstream_phase_time_eats_the_entity_share_not_the_reserve(
     This is the assertion the other tests cannot make: they run the fake clock
     from 0 with no upstream cost, where "share of the run window" and "share
     measured from where the entity phase happens to begin" are numerically
-    identical. Here the #290 wiki-dedup pass burns 500s of a 1000s window
+    identical. Here the athenaeum#290 wiki-dedup pass burns 500s of a 1000s window
     first, leaving only 100s of the 600s entity share.
 
     The entity phase must therefore yield after ONE file — the upstream cost
@@ -315,7 +315,7 @@ def test_disabled_run_deadline_disables_the_share_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A share of a disabled window is meaningless — an unbounded run stays
-    unbounded (`max_runtime <= 0` is the documented #396 escape hatch)."""
+    unbounded (`max_runtime <= 0` is the documented athenaeum#396 escape hatch)."""
     root = _seed_knowledge_root(tmp_path, n_files=3)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #669 — the entity-share yield (#440) must be machine-detectable run state.
+"""Issue athenaeum#669 — the entity-share yield (athenaeum#440) must be a
+machine-detectable run state.
 
-PR #661/#440 let the entity phase YIELD its window share instead of consuming
+PR athenaeum#661/#440 let the entity phase YIELD its window share instead of consuming
 the whole run. That is deliberate and correct, but it silently disarmed the
 duration-based cap detector (cron-fleet#94): the run now ends well under the cap
-threshold, so a #440-shaped stall is no longer visible by duration. This suite
+threshold, so a athenaeum#440-shaped stall is no longer visible by duration. This suite
 pins the additive observability that fixes the blind spot — the yield is emitted
 in `out_run_stats` (and the run-summary line) so a consumer can distinguish
 "entity yielded on purpose" from "API budget exhausted" WITHOUT parsing log text
@@ -34,7 +35,7 @@ def test_entity_budget_tripped_emitted_after_a_share_yield(
 ) -> None:
     """After a share yield: the flag + claimed/deferred counts are emitted.
 
-    Fails against the pre-#669 code: `entity_budget_tripped` never reached
+    Fails against the pre-athenaeum#669 code: `entity_budget_tripped` never reached
     `out_run_stats` at all.
     """
     root = _seed_knowledge_root(tmp_path, n_files=3)
@@ -68,10 +69,10 @@ def test_entity_budget_tripped_emitted_after_a_share_yield(
         out_run_stats=stats,
     )
 
-    # Behavior unchanged (#440): healthy run, one file compiled, two deferred.
+    # Behavior unchanged (athenaeum#440): healthy run, one file compiled, two deferred.
     assert rc == 0
 
-    # The machine-detectable contract (#669).
+    # The machine-detectable contract (athenaeum#669).
     assert stats["entity_budget_tripped"] is True
     assert stats["entity_files_claimed"] == 1
     assert stats["entity_files_deferred"] == 2

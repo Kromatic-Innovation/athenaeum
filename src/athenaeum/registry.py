@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Source-handle registry builder (issue #453, epic #422).
+"""Source-handle registry builder (issue athenaeum#453, epic athenaeum#422).
 
 The fact-mining pipeline (``athenaeum-adapters``) needs a canonical mapping
 from a wiki entity to the corpus handles it resolves against — the domains,
@@ -16,8 +16,8 @@ the ``people`` and ``compile-as-of`` commands.
 
 **Tooling only — no data.** This builder ships in the public OSS repo and is
 tested with synthetic fixtures. Populating real client handles is a separate,
-operator-only, private-store operation (issue #454); the builder must emit a
-well-formed registry even when zero handles are populated, so #454 is never a
+operator-only, private-store operation (issue athenaeum#454); the builder must emit a
+well-formed registry even when zero handles are populated, so athenaeum#454 is never a
 precondition for it working.
 
 Layering: L1 (data model — reads the wiki tree via :mod:`athenaeum.models`,
@@ -126,7 +126,7 @@ def build_registry(wiki_root: Path) -> dict[str, Any]:
     The returned dict is deterministic — entities are sorted by uid and each
     handle set preserves canonical key order — so re-running on an unchanged
     wiki produces byte-identical output. When no entity has any populated
-    handle (the degenerate seed-not-landed-yet case, issue #453/#454), the
+    handle (the degenerate seed-not-landed-yet case, issue athenaeum#453/#454), the
     result is still well-formed: ``entities`` is an empty object and
     ``entity_count`` is ``0``.
     """

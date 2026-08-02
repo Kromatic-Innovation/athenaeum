@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum axiom {promote,demote,list}`` — axiom governance CLI (issue #434).
+"""``athenaeum axiom {promote,demote,list}`` — axiom governance CLI (issue athenaeum#434).
 
 Axiom assignment (``memory_class: axiom``) must be an explicit,
 human-approved act, never something the librarian/LLM write path mints
 silently. This CLI is the sanctioned authorization surface (see
 :mod:`athenaeum.axiom_governance`'s module docstring for why a direct CLI
-acknowledgement was chosen over routing through the #401 decisions-queue):
+acknowledgement was chosen over routing through the athenaeum#401 decisions-queue):
 
 - ``promote``  record a promotion: ``--slug``, ``--reason``, ``--by``,
                  optional ``--scope``. Appends to the append-only ledger
@@ -118,7 +118,7 @@ def add_axiom_subparser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "Axiom governance: explicit human-approved promotion/demotion "
             "of memory_class: axiom pages, plus the assignment audit "
-            "(issue #434)."
+            "(issue athenaeum#434)."
         ),
     )
     a_parser.set_defaults(func=cmd_axiom)
@@ -152,7 +152,7 @@ def add_axiom_subparser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help='Optional context scope (e.g. "applies to resume work"). '
         "Stored + surfaced; enforcement is a consumer's concern (out of "
-        "scope for #434).",
+        "scope for athenaeum#434).",
     )
 
     demote_p = a_sub.add_parser(

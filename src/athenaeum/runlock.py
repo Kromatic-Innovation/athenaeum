@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Single-machine run lock for mutating ``athenaeum`` commands (issue #309).
+"""Single-machine run lock for mutating ``athenaeum`` commands (issue athenaeum#309).
 
 Overlapping runs (a nightly cron plus a manual invocation, or two editor
 sessions) race the librarian's wiki writes, interleave block appends to the
@@ -40,7 +40,7 @@ line) purely for diagnostics; mutual exclusion comes from the kernel
 holding process dies, so a crashed run never wedges the lock permanently —
 the stale *content* only affects the diagnostic message.
 
-**ALIVE-but-wedged recovery (issue #397).** A crashed holder is already
+**ALIVE-but-wedged recovery (issue athenaeum#397).** A crashed holder is already
 handled — the kernel drops its ``flock`` the moment it dies. The gap is a
 holder that is still alive (so ``is_stale``/the kernel see it as healthy) but
 has hung and stopped making progress; it holds the ``flock`` indefinitely and
@@ -215,7 +215,7 @@ def _parse_iso_age_seconds(iso_ts: str | None) -> float | None:
 
 
 def heartbeat_age_seconds(lockfile: Path) -> float | None:
-    """Age in seconds of the holder's effective heartbeat (issue #397).
+    """Age in seconds of the holder's effective heartbeat (issue athenaeum#397).
 
     Prefers the ``heartbeat:`` line; falls back to ``timestamp:`` when
     ``heartbeat`` is absent (backward-compat with lockfiles written before
@@ -230,7 +230,7 @@ def heartbeat_age_seconds(lockfile: Path) -> float | None:
 
 
 def is_stale(lockfile: Path) -> bool:
-    """True if *lockfile* names a PID that is no longer alive (issue #309).
+    """True if *lockfile* names a PID that is no longer alive (issue athenaeum#309).
 
     A crashed run leaves its metadata behind even though the kernel has already
     released the ``flock``. This is a DIAGNOSTIC only — it does not gate
@@ -317,7 +317,7 @@ class RunLock:
         return True
 
     def _holds_current_inode(self, fd: int) -> bool:
-        """True if *fd* refers to the inode currently at the lock path (issue #526).
+        """True if *fd* refers to the inode currently at the lock path (issue athenaeum#526).
 
         After a break (``--force`` or auto-break) unlinks and re-creates the
         lockfile, a descriptor opened *before* the break refers to an orphan
@@ -392,7 +392,7 @@ class RunLock:
             deadline = time.monotonic() + self.wait
             while time.monotonic() < deadline:
                 time.sleep(_POLL_INTERVAL)
-                # Issue #526 (M6): the fd above was opened BEFORE contention
+                # Issue athenaeum#526 (M6): the fd above was opened BEFORE contention
                 # began. If the holder's lock is broken while we wait (--force
                 # or an auto-break from another waiter), the lockfile is
                 # unlinked and re-created, and THIS fd is left pointing at an
@@ -413,7 +413,7 @@ class RunLock:
 
         # Still contended. Determine the holder's heartbeat age once and reuse
         # it for both the auto-break and the loud-warning checks below
-        # (issue #397 — recovery for an ALIVE-but-wedged holder).
+        # (issue athenaeum#397 — recovery for an ALIVE-but-wedged holder).
         # Named distinctly from the `age` string above (`_age_str` return) —
         # this is the numeric seconds value, not a human-friendly string.
         heartbeat_age = heartbeat_age_seconds(self.lockfile)
@@ -491,7 +491,7 @@ class RunLock:
             log.warning("runlock: could not write lock metadata: %s", exc)
 
     def heartbeat(self) -> None:
-        """Refresh the lockfile's ``heartbeat`` line (issue #397).
+        """Refresh the lockfile's ``heartbeat`` line (issue athenaeum#397).
 
         Keeps the original ``pid``/``timestamp``/``host`` intact and rewrites
         only ``heartbeat`` to now. A long-running holder calls this

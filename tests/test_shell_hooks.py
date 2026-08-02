@@ -189,7 +189,7 @@ class TestUserPromptRecall:
         assert "hookSpecificOutput" in payload, (
             "Claude Code requires additionalContext to be nested under "
             "hookSpecificOutput with hookEventName; flat {'additionalContext': ...} "
-            "is silently ignored. See issue #39."
+            "is silently ignored. See issue athenaeum#39."
         )
         hook_output = payload["hookSpecificOutput"]
         assert hook_output.get("hookEventName") == "UserPromptSubmit"
@@ -537,7 +537,7 @@ class TestPendingQuestionsSurface:
 
 
 class TestKillSwitchHooks:
-    """The hooks honour the kill-switch state file / env (issue #379).
+    """The hooks honour the kill-switch state file / env (issue athenaeum#379).
 
     The Python side of the same contract is in ``test_kill_switch.py``; these
     assert the bash guards agree — ``all`` scope no-ops every hook, ``compile``

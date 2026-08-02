@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Push-precision + coverage instrumentation (issue #711, v6 MVP slice a).
+"""Push-precision + coverage instrumentation (issue athenaeum#711, v6 MVP slice a).
 
 The v6 memory-model epic's definition of done requires push precision to
 "improve over a baseline recorded BEFORE any of this ships." That baseline
@@ -73,7 +73,7 @@ log = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
 
 #: Filenames under the cache dir. Never under the wiki/raw corpus (issue
-#: #711 acceptance: "written to a durable, machine-readable location outside
+#: athenaeum#711 acceptance: "written to a durable, machine-readable location outside
 #: the wiki corpus, so they never become claims and never enter the embedded
 #: index") — same discipline as ``spend.jsonl`` / ``detection_incomplete.json``.
 PUSH_RECORDS_FILENAME = "_push_records.jsonl"
@@ -173,7 +173,7 @@ class PushedItem:
 class PushRecord:
     """One push event: everything ``recall`` rendered into one response.
 
-    Fields are exactly the issue #711 acceptance list: session id, timestamp,
+    Fields are exactly the issue athenaeum#711 acceptance list: session id, timestamp,
     the pushed claim/page ids, tier, matched scope, and token cost of the
     pushed block — plus a ``query`` HASH (never the raw query text, which can
     carry PII) so a later reproducibility check can correlate two pushes of
@@ -282,7 +282,7 @@ def record_push(
     no session id or no pushed items (nothing to measure). Every failure is
     swallowed and logged at warning level — a ledger write must NEVER break
     or slow the live recall path, but a silent failure here would produce the
-    same "reads as zero forever" hazard #568 fixed for the spend ledger.
+    same "reads as zero forever" hazard athenaeum#568 fixed for the spend ledger.
     """
     try:
         from athenaeum.config import resolve_push_metrics_enabled

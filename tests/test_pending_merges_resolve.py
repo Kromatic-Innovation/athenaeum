@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``resolve_merge`` (issue #169, Lane 3, Quine fixes).
+"""Tests for ``resolve_merge`` (issue athenaeum#169, Lane 3, Quine fixes).
 
-Covers the four bugs surfaced in the Quine review of PR #176:
+Covers the four bugs surfaced in the Quine review of PR athenaeum#176:
 
 1. resolved_block points at the rewritten target block (not block 0).
 2. reject with missing source A returns ok=True with a warning field.
@@ -190,7 +190,7 @@ def test_split_blocks_ignores_fenced_frontmatter_and_subheadings(
     """Draft bodies with embedded ``---`` frontmatter and ``## `` headings
     must round-trip intact — not get truncated by ``_split_blocks``
     mistaking their contents for real block/paragraph delimiters
-    (issue #289).
+    (issue athenaeum#289).
     """
     merges = tmp_path / "_pending_merges.md"
     src_a = tmp_path / "feedback_fence_a.md"
@@ -247,7 +247,7 @@ def test_split_blocks_fenced_draft_followed_by_second_block(tmp_path: Path) -> N
     ``\\n\\n---\\n\\n``). Both blocks must parse correctly and
     independently — the first block's fenced content must not bleed
     into the second, and the second must not be lost (Quine review of
-    PR #291, issue #289).
+    PR athenaeum#291, issue athenaeum#289).
     """
     merges = tmp_path / "_pending_merges.md"
     src_a1 = tmp_path / "feedback_first_a.md"
@@ -311,7 +311,7 @@ def test_split_blocks_recovers_from_unclosed_fence_before_next_block(
     """A malformed block whose ```markdown fence is never closed must not
     silently swallow the next well-formed block. Content of the
     malformed block can still be imperfect — the point is the second
-    block is not lost (Quine review of PR #291, issue #289).
+    block is not lost (Quine review of PR athenaeum#291, issue athenaeum#289).
     """
     merges = tmp_path / "_pending_merges.md"
     text = (
@@ -358,7 +358,7 @@ def test_split_blocks_recovers_from_unclosed_fence_before_next_block(
 
 
 def test_ingest_resolved_merges_archives_and_is_idempotent(tmp_path: Path) -> None:
-    """Issue #299: resolved blocks move to the archive on first run; a
+    """Issue athenaeum#299: resolved blocks move to the archive on first run; a
     second run with no new resolutions is a no-op (mirrors
     ``answers.ingest_answers``'s idempotency contract).
     """
@@ -492,7 +492,7 @@ def test_resolve_merge_then_ingest_end_to_end(tmp_path: Path) -> None:
 def test_scan_fence_state_transitions() -> None:
     """``_scan_fence_state`` is the single source of truth for fence
     open/close transitions, used identically by ``_split_blocks`` and
-    ``_parse_block`` (issue #292).
+    ``_parse_block`` (issue athenaeum#292).
     """
     from athenaeum.pending_merges import _scan_fence_state
 
@@ -512,9 +512,9 @@ def test_split_blocks_nested_fence_of_different_length_survives(
     """A Draft body that embeds its own fenced snippet (e.g. documenting
     a shell command) must not have that inner fence mistaken for the
     outer ```markdown fence's closer, as long as the inner fence uses a
-    different backtick-run length — the documented convention (#292).
+    different backtick-run length — the documented convention (athenaeum#292).
     This pins the convention's round-trip behavior post-refactor; the
-    #292 deliverable itself is the shared helper (previous test) that
+    athenaeum#292 deliverable itself is the shared helper (previous test) that
     keeps ``_split_blocks``/``_parse_block`` from re-diverging, not new
     nesting capability — exact-length closing already tolerated a
     different-length nested fence before this refactor.
@@ -563,14 +563,14 @@ def test_split_blocks_nested_fence_of_different_length_survives(
 
 
 # ---------------------------------------------------------------------------
-# issue #394 — _pending_merges.md regrew to 13MB + ~30K malformed-header
+# issue athenaeum#394 — _pending_merges.md regrew to 13MB + ~30K malformed-header
 # warnings/run because a merge draft copied a source body verbatim (via
 # athenaeum.merge.synthesize_body), and that body contained a bare three-
 # backtick code fence. Under the old three-backtick outer ```markdown fence
 # the inner fence closed the outer one prematurely, leaking the draft's
 # ``## From `<scope>/<file>` `` subsections out as bogus top-level blocks the
 # reader rejected as malformed and could never archive — so orphan fragments
-# accreted forever and flooded stderr. (Regression of the #299/#303 fix.)
+# accreted forever and flooded stderr. (Regression of the athenaeum#299/#303 fix.)
 # ---------------------------------------------------------------------------
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -579,7 +579,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 def test_render_block_outer_fence_outgrows_inner_code_fence() -> None:
     """The writer picks a ```markdown fence longer than any backtick run in
     the draft body, so a bare three-backtick code fence inside the body can
-    never close the outer fence (issue #394)."""
+    never close the outer fence (issue athenaeum#394)."""
     from athenaeum.pending_merges import render_block
 
     draft_body = "Intro paragraph.\n\n```\nnpm test\n```\n\nOutro paragraph."
@@ -599,7 +599,7 @@ def test_render_block_outer_fence_outgrows_inner_code_fence() -> None:
 def test_render_block_round_trips_draft_with_inner_code_fence() -> None:
     """A draft body containing a bare three-backtick fence must survive the
     write -> _split_blocks -> _parse_block round-trip byte-for-byte, and must
-    NOT leak its ``## From`` subsections as extra blocks (issue #394)."""
+    NOT leak its ``## From`` subsections as extra blocks (issue athenaeum#394)."""
     from athenaeum.merge import synthesize_body
     from athenaeum.pending_merges import (
         _parse_block,
@@ -644,7 +644,7 @@ def test_split_blocks_reabsorbs_leaked_from_subsections(caplog) -> None:
     """A legacy block written with the old three-backtick fence, whose draft
     leaked its ``## From`` subsections, must parse as ONE block with no
     "malformed header" warning — the leaked subsections are re-absorbed as
-    content, not sprayed as bogus blocks (issue #394)."""
+    content, not sprayed as bogus blocks (issue athenaeum#394)."""
     import logging
 
     from athenaeum.pending_merges import _split_blocks, parse_pending_merges
@@ -694,7 +694,7 @@ def test_ingest_resolved_merges_drains_orphan_fragments_from_fixture(
     """Running ``ingest-merges`` against the regressed live-sidecar fixture
     drains the accreted orphan ``## From`` fragments, keeps the still-valid
     unresolved merge proposals, is idempotent, and emits no malformed-header
-    flood (issue #394 acceptance criteria)."""
+    flood (issue athenaeum#394 acceptance criteria)."""
     import logging
 
     from athenaeum.pending_merges import (
@@ -736,7 +736,7 @@ def test_ingest_resolved_merges_drains_orphan_fragments_from_fixture(
 
 
 def test_write_kind_round_trips(tmp_path: Path) -> None:
-    """Issue #421: write_kind persists and round-trips through the parser."""
+    """Issue athenaeum#421: write_kind persists and round-trips through the parser."""
     from athenaeum.pending_merges import list_pending_merges, parse_pending_merges
 
     merges = tmp_path / "_pending_merges.md"
@@ -756,7 +756,7 @@ def test_write_kind_round_trips(tmp_path: Path) -> None:
 
 
 def test_write_kind_defaults_to_create_merged(tmp_path: Path) -> None:
-    """Issue #421: a proposal written without write_kind defaults to create-merged."""
+    """Issue athenaeum#421: a proposal written without write_kind defaults to create-merged."""
     from athenaeum.pending_merges import parse_pending_merges
 
     merges = tmp_path / "_pending_merges.md"
@@ -774,7 +774,7 @@ def test_write_kind_defaults_to_create_merged(tmp_path: Path) -> None:
 def test_pre_421_block_without_write_kind_parses_as_create_merged(
     tmp_path: Path,
 ) -> None:
-    """Issue #421: a legacy block missing the Write kind line defaults cleanly."""
+    """Issue athenaeum#421: a legacy block missing the Write kind line defaults cleanly."""
     from athenaeum.pending_merges import parse_pending_merges
 
     merges = tmp_path / "_pending_merges.md"

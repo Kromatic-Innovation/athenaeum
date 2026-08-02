@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for prompt_safety helpers and the anchor-safe merge fencing (issue #562).
+"""Tests for prompt_safety helpers and the anchor-safe merge fencing (issue athenaeum#562).
 
 The unit tests pin the helper surfaces (fence/defang/clause). The integration
 tests prove the load-bearing caveat: a merge whose existing body would break the

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Enactment lane (#166 follow-up): forget_*/correct_* actually mutate state.
+"""Enactment lane (athenaeum#166 follow-up): forget_*/correct_* actually mutate state.
 
 Until this lane the auto-apply path only RECORDED a verdict — it flipped the
 pending-question checkbox to ``[x]`` and stamped an ``**Auto-resolved**: true``
@@ -95,11 +95,11 @@ def _item(
 
 class TestEnactResolutionUnit:
     def test_enacting_actions_set(self) -> None:
-        # #191: keep_a/keep_b/deprecate_both joined the enacting set (marking,
+        # athenaeum#191: keep_a/keep_b/deprecate_both joined the enacting set (marking,
         # not deleting) alongside the original four delete actions.
-        # #329: scope_a/scope_b joined (non-destructive scope narrowing — both
+        # athenaeum#329: scope_a/scope_b joined (non-destructive scope narrowing — both
         # members stay active).
-        # #327: attribute_both joined (non-destructive opinion attribution —
+        # athenaeum#327: attribute_both joined (non-destructive opinion attribution —
         # both members stay active, each marked `attributed: true`).
         assert ENACTING_ACTIONS == frozenset(
             {
@@ -117,7 +117,7 @@ class TestEnactResolutionUnit:
         )
 
     def test_attribute_both_marks_both_members_active(self, tmp_path: Path) -> None:
-        # #327: attribute_both is non-destructive — stamps `attributed: true`
+        # athenaeum#327: attribute_both is non-destructive — stamps `attributed: true`
         # on BOTH members, deletes neither, and both survive on disk.
         from athenaeum.models import parse_frontmatter
 

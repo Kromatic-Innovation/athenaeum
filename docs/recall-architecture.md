@@ -81,12 +81,12 @@ Override path via `ATHENAEUM_OP_KEY_PATH`. The fetched key is cached in `~/.cach
 | LLM extraction returns `[]` every time | `set -a` / `set +a` missing around `source config.env` — var not exported to child process |
 | `athenaeum query-topics` hangs | 3s timeout should kick in; if not, check `ATHENAEUM_PYTHON` points to an env with the athenaeum CLI |
 
-## Recall hit header (provenance/context) — #325
+## Recall hit header (provenance/context) — athenaeum#325
 
 Each `recall` hit renders a compact metadata header so a consuming agent can
 judge a fact's **trust and currency without opening the page**. The header is
 built at render time from the hit's FRESH on-disk frontmatter (the same `fm`
-dict the #312 Layer-C audience re-check already reads — no index change, no
+dict the athenaeum#312 Layer-C audience re-check already reads — no index change, no
 reindex), and sits between the `**Tags:**` line and the snippet:
 
 ```
@@ -113,7 +113,7 @@ line. Header is capped at ~2 lines per hit.
 **Omit-at-default rule.** Every field is omitted at its default, so an
 uncontested, unscoped page adds at most one extra line (usually just
 `**Updated:**`). A page with NONE of source/updated/valid/status renders
-exactly the pre-#325 output — `**Tags:**`, blank line, snippet — with no blank
+exactly the pre-athenaeum#325 output — `**Tags:**`, blank line, snippet — with no blank
 metadata line. There is never an empty `**Source:**`/`**Valid:**` segment.
 
 **Why the `Status:` line is load-bearing.** Silently returning one side of a
@@ -131,7 +131,7 @@ Do not simplify any of these without reading this page and the related commit hi
 | FTS5 maintained even when vector is primary | Short proper-noun queries ("Return Path") embed closer to generic pages containing the common word than to the sparse entity page. | Queries like "Return Path" return `reference_local_paths.md` instead of the entity. The model still gets *an* injection, so the hook looks healthy — the wrong page just quietly crowds out the right one. |
 | `hookSpecificOutput.hookEventName` wrapper | Claude Code discards flat `{"additionalContext":...}` payloads without logging; the hook runs CI-green, `bash -n` is clean, stdout is valid JSON. | `additionalContext` never reaches the model. Zero recall signal. Only detectable by asking the model "did you receive a knowledge context block?" or by reading Claude Code source. |
 | Console API key vs `CLAUDE_CODE_OAUTH_TOKEN` | Messages API rejects OAuth tokens with `401 OAuth authentication is currently not supported`. The tokens look similar (both start `sk-ant-`). | `query-topics` returns empty on every call. Silent fallback to regex extractor. Detectable only by reading the 401 body, which the hook swallows to avoid noisy stderr. |
-| Audience filter applied INSIDE each backend query AND re-checked at render (#312) | The filter must gate ranking/top-k, not just titles. If moved to a post-hoc filter over already-selected hits, a forbidden page still consumes a BM25/kNN slot and starves a permitted page — and a title-only filter leaks the body. | A restricted routine silently receives fewer permitted pages (forbidden ones ate the slots) or a forbidden page's snippet/body. No error — recall "works", it just leaks or under-serves. Do NOT collapse the three layers (index-time audience column, in-query predicate, fresh-frontmatter re-check) into a single post-hoc title filter. |
+| Audience filter applied INSIDE each backend query AND re-checked at render (athenaeum#312) | The filter must gate ranking/top-k, not just titles. If moved to a post-hoc filter over already-selected hits, a forbidden page still consumes a BM25/kNN slot and starves a permitted page — and a title-only filter leaks the body. | A restricted routine silently receives fewer permitted pages (forbidden ones ate the slots) or a forbidden page's snippet/body. No error — recall "works", it just leaks or under-serves. Do NOT collapse the three layers (index-time audience column, in-query predicate, fresh-frontmatter re-check) into a single post-hoc title filter. |
 
 The shared failure mode — "ships CI-green, degrades silently" — is why
 each of these warrants a "what breaks" column rather than a one-line
@@ -143,4 +143,4 @@ invariant.
 ## References
 
 - Reference implementation: `examples/claude-code/user-prompt-recall.sh` — the recall-on-turn hook shipped with this repo.
-- Related PRs: athenaeum #40 (JSON shape), #42 (query-topics CLI)
+- Related PRs: athenaeum athenaeum#40 (JSON shape), athenaeum#42 (query-topics CLI)

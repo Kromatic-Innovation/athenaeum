@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #555 (M27) — a GENERIC parity test over every ``config.resolve_*``.
+"""Issue athenaeum#555 (M27) — a GENERIC parity test over every ``config.resolve_*``.
 
 ``tests/test_config_parity.py`` mirrors the resolver surface BY HAND: it
 hand-picks a handful of knobs and asserts their precedence. That means a new
 or CHANGED resolver that silently stops reading its documented yaml key (or
 env var) slips through unless someone remembers to add a matching hand test.
-This is not hypothetical — commit 4324f04 (#512/#513) fixed exactly this:
+This is not hypothetical — commit 4324f04 (athenaeum#512/#513) fixed exactly this:
 the contradiction-resolver model's ``_get_model`` (in ``resolutions.py``) had
 its own hand-rolled env/yaml chain that never consulted ``models.resolve``,
 and the hand-written parity suite did not catch it because nobody had
@@ -43,7 +43,7 @@ Strategy (see ``_literal_probe`` / ``_env_and_yaml_literals``):
    output relative to the ``config=None`` baseline. This sidesteps the
    ordering ambiguity while still proving the resolver actually reads
    *something* it claims to read — a resolver that silently stopped reading
-   its key would make EVERY candidate a no-op, exactly the #512 failure
+   its key would make EVERY candidate a no-op, exactly the athenaeum#512 failure
    shape.
 4. Independently, for each discovered ``ATHENAEUM_*`` literal, set that env
    var to a sentinel string (via ``monkeypatch``) and require the resolver's
@@ -131,7 +131,7 @@ def _call_site_string_literals(source: str) -> list[str]:
 
 
 def _called_private_helpers(source: str) -> list[str]:
-    """Names of any ``_resolve*``-prefixed helper functions called in *source*."""
+    """Names of any ``_resolve*``-prefixed helper functions invoked in *source*."""
     tree = ast.parse(source)
     names: list[str] = []
 
@@ -299,7 +299,7 @@ class TestGenericResolverParity:
     ) -> None:
         """The resolver's return value must CHANGE when its documented yaml
         key(s) are set, relative to an empty/None config. This is the exact
-        shape of the #512 bug: a resolver whose yaml key is dead reads the
+        shape of the athenaeum#512 bug: a resolver whose yaml key is dead reads the
         same value regardless of what's in athenaeum.yaml.
         """
         if name in _GENERIC_HELPER_SIGNATURE:
@@ -350,7 +350,7 @@ class TestGenericResolverParity:
             f"{len(candidates)} nesting/type combinations) never changed the "
             f"result away from the baseline {baseline!r} — this resolver may "
             "have silently stopped reading its documented yaml key (the "
-            f"#512 failure class). Attempts: {errors}"
+            f"athenaeum#512 failure class). Attempts: {errors}"
         )
 
     def test_env_var_is_actually_read(

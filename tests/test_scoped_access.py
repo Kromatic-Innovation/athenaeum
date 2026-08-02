@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Scoped read access — the fail-closed security boundary (issue #312).
+"""Scoped read access — the fail-closed security boundary (issue athenaeum#312).
 
 A secondary agent/routine is pinned at ``serve`` time to a restricted
 ``caller_audience`` and must be able to recall operational knowledge but

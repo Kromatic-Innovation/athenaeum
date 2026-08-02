@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""THE merge gate for issue #370 PR2 — delta-scoped incremental compile.
+"""THE merge gate for issue athenaeum#370 PR2 — delta-scoped incremental compile.
 
 Proves that the delta-scoped compile (cluster + merge only the changed files and
 their affected clusters) produces BYTE-IDENTICAL output to the whole-corpus
@@ -226,7 +226,7 @@ def _make_branch(golden_root: Path, dest: Path) -> Path:
 def _reindex(root: Path) -> None:
     from athenaeum.search import VectorBackend
 
-    # Incremental (#348): re-embeds only the added/changed/removed file(s).
+    # Incremental (athenaeum#348): re-embeds only the added/changed/removed file(s).
     VectorBackend().build_index(
         root / "wiki", root / ".cache", extra_roots=[root / "raw" / "auto-memory"]
     )
@@ -389,7 +389,7 @@ def test_no_changed_paths_is_byte_identical_to_full(
 # ---------------------------------------------------------------------------
 # Chain topology: A–B–C where B is the SOLE bridge linking A and C (probed
 # cosines: A~B=0.61, B~C=0.77, A~C=0.16). Under single-linkage this was ONE
-# cluster; under complete-linkage (#681) it is NOT — greedy complete linkage
+# cluster; under complete-linkage (athenaeum#681) it is NOT — greedy complete linkage
 # merges the strongest pair B~C=0.77 into a {B,C} clique and leaves A a
 # singleton (A~C=0.16 forbids the clique from spanning all three). Changing B
 # to drop the B~C link and strengthen A~B must repartition the affected
@@ -444,7 +444,7 @@ def test_chain_transitive_repartition(
     _build_index(golden)
     _compile(golden, changed=None, monkeypatch=monkeypatch)
 
-    # Sanity: under complete-linkage (#681) the chain is NOT one cluster — the
+    # Sanity: under complete-linkage (athenaeum#681) the chain is NOT one cluster — the
     # strongest pair (B~C=0.77) forms a {B,C} clique and A is a singleton
     # (A~C=0.16 forbids a clique spanning all three), plus the docker singleton.
     gmem = _cluster_membership(golden)

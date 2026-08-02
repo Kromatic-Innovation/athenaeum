@@ -1,4 +1,4 @@
-"""Tests for the deploy-SHA stamp (issue #413).
+"""Tests for the deploy-SHA stamp (issue athenaeum#413).
 
 ``scripts/write_build_sha.py`` writes the running commit SHA to
 ``dist/.build-sha`` so the cross-repo deploy-lag aggregator

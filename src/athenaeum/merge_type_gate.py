@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Merge-engine type integration (issue #433).
+"""Merge-engine type integration (issue athenaeum#433).
 
-The #424 taxonomy (``memory_class:`` — see :mod:`athenaeum.schemas` and
+The athenaeum#424 taxonomy (``memory_class:`` — see :mod:`athenaeum.schemas` and
 ``docs/memory-taxonomy.md`` §3) defined merge-vs-cite semantics but shipped
 no enforcement. This module is that enforcement, consumed by the mechanical
 merge/proposal engine (:mod:`athenaeum.merge`, :mod:`athenaeum.wiki_dedupe`)
-alongside the #421 guardrail chain (``_merge_proposal_suppression_reason``,
+alongside the athenaeum#421 guardrail chain (``_merge_proposal_suppression_reason``,
 ``_classify_merge_write_kind``):
 
 1. **Type-compatibility precheck** (:func:`cross_class_precheck`) — a merge
@@ -24,17 +24,17 @@ alongside the #421 guardrail chain (``_merge_proposal_suppression_reason``,
    concern (not wired into :func:`athenaeum.pending_merges.resolve_merge`'s
    create/fold dispatch) — see the module docstring note below.
 
-Untyped-page policy (conservative default, documented per #433's
+Untyped-page policy (conservative default, documented per athenaeum#433's
 constraint): a page with NO ``memory_class`` (legacy/untyped) is treated as
 compatible with any other class, INCLUDING other untyped pages and typed
 pages — i.e. the precheck only fires when it can see two members carrying
 *distinct, non-empty* ``memory_class`` values. This preserves every
-pre-#433 untyped-page merge byte-for-byte (a corpus with no typed pages
-never trips the new gate) while still catching the concrete case #433
+pre-athenaeum#433 untyped-page merge byte-for-byte (a corpus with no typed pages
+never trips the new gate) while still catching the concrete case athenaeum#433
 targets: an explicitly-typed ``fact`` page clustering with an explicitly-
 typed ``guideline`` page.
 
-Inference-block retraction (the third #433 deliverable) lives in
+Inference-block retraction (the third athenaeum#433 deliverable) lives in
 :mod:`athenaeum.inference_blocks` (:func:`retract_inference_block`)
 alongside the parser it retracts blocks parsed by, not here.
 
@@ -42,18 +42,18 @@ Enforcement contract, stated plainly: this module IS the gate — no cross-class
 merge may reach a write path without first calling
 :func:`cross_class_precheck` and honoring a non-``None`` rejection (routing to
 :func:`build_cite_proposal` instead of a fold). Bypassing this module for a
-merge decision would silently reintroduce the pre-#433 gap.
+merge decision would silently reintroduce the pre-athenaeum#433 gap.
 
 Layering: L0/L1-boundary primitive. Imports only :mod:`athenaeum.models` (the
 L1 hub, for :func:`~athenaeum.models.parse_frontmatter`) and the
 :mod:`athenaeum.config` leaf (for the ``librarian.*`` merge-guardrail knobs read
 by :func:`_merge_proposal_suppression_reason`) plus stdlib — no LLM client, no
 merge-engine imports. Factoring rule: this module owns ONLY merge GATING —
-classification (same-class? cross-class?), cite-vs-merge routing, and the #421
+classification (same-class? cross-class?), cite-vs-merge routing, and the athenaeum#421
 proposal-suppression guardrail — each of which merely RETURNS a decision; it
 must never itself perform a merge, fold, or file write — that stays in
 :mod:`athenaeum.merge` / :mod:`athenaeum.wiki_dedupe`, which import this module,
-never the reverse. Issue #640 moved :func:`_merge_proposal_suppression_reason`
+never the reverse. Issue athenaeum#640 moved :func:`_merge_proposal_suppression_reason`
 DOWN here from :mod:`athenaeum.merge` to break the ``pending_merges`` -> ``merge``
 deferred back-edge that pinned the ``{merge, pending_merges, calibration,
 reasoning_tiers}`` residual import SCC.
@@ -102,7 +102,7 @@ def read_memory_class(path: Path) -> str | None:
 
 @dataclass
 class CrossClassRejection:
-    """Machine-readable reason record for a precheck rejection (#433).
+    """Machine-readable reason record for a precheck rejection (athenaeum#433).
 
     Mirrors the field shape of
     :func:`athenaeum.provenance.build_merge_provenance_record` (a flat,
@@ -118,7 +118,7 @@ class CrossClassRejection:
     detail: str
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-serializable dict form (dict-of-primitives, like #433's other
+        """JSON-serializable dict form (dict-of-primitives, like athenaeum#433's other
         machine-readable records)."""
         return {
             "reason": self.reason,
@@ -134,7 +134,7 @@ CROSS_CLASS_REJECTED = "cross_class_incompatible"
 def cross_class_precheck(member_paths: Sequence[str | Path]) -> CrossClassRejection | None:
     """Return a rejection record when *member_paths* span >1 ``memory_class``.
 
-    Issue #433, part 1. Reads each member's ``memory_class:`` frontmatter
+    Issue athenaeum#433, part 1. Reads each member's ``memory_class:`` frontmatter
     (:func:`read_memory_class`). Members with NO (or unreadable/empty)
     ``memory_class`` are treated as compatible with everything (the
     conservative untyped policy — see module docstring) and do not
@@ -180,7 +180,7 @@ def cross_class_precheck(member_paths: Sequence[str | Path]) -> CrossClassReject
 
 @dataclass
 class CiteProposal:
-    """A merge-vs-cite consolidation proposal — NEVER destructive (#433).
+    """A merge-vs-cite consolidation proposal — NEVER destructive (athenaeum#433).
 
     Distinct proposal kind from :class:`athenaeum.resolutions.MergeProposal`
     / :class:`athenaeum.pending_merges.PendingMerge`: a cite proposal never
@@ -192,7 +192,7 @@ class CiteProposal:
     page(s) is proposed, and even that is not auto-applied by
     :func:`athenaeum.pending_merges.resolve_merge` — enacting a cite
     proposal is a distinct, later write path, deliberately not implemented
-    here (mirrors how the #421 ``write_kind`` precheck was classification-
+    here (mirrors how the athenaeum#421 ``write_kind`` precheck was classification-
     only, with the write path landing separately).
 
     Fields:
@@ -219,7 +219,7 @@ def build_cite_proposal(
     member_paths: Sequence[str | Path],
     rejection: CrossClassRejection,
 ) -> CiteProposal:
-    """Build the cite-proposal shape for a cross-class cluster (#433 part 2).
+    """Build the cite-proposal shape for a cross-class cluster (athenaeum#433 part 2).
 
     Routing rule: pages classed ``fact`` are always the CITED side (facts
     survive, never absorbed). Every other class present (``guideline``,
@@ -286,16 +286,16 @@ def _merge_proposal_suppression_reason(
 ) -> str | None:
     """Return a human-readable reason to SUPPRESS a resolver merge proposal, or None.
 
-    Issue #400 introduced the size cap + opt-in confidence floor here. Issue #421
+    Issue athenaeum#400 introduced the size cap + opt-in confidence floor here. Issue athenaeum#421
     tightens the mechanical guardrails so the resolver stops emitting garbage the
     reasoning/human tiers would only have to reject. Every gate is checked BEFORE
     the proposal is written, so a suppressed cluster never reaches
     ``wiki/_pending_merges.md`` and is not re-emitted on the next run:
 
-    * size cap — ``librarian.max_merge_sources`` (default **5**, active, #421):
+    * size cap — ``librarian.max_merge_sources`` (default **5**, active, athenaeum#421):
       a proposal folding more than N sources is not the pairwise/small-group
       refinement a merge proposal is for.
-    * complete-linkage — ``min_pairwise < cluster_threshold`` (#421): single-
+    * complete-linkage — ``min_pairwise < cluster_threshold`` (athenaeum#421): single-
       linkage only guarantees each member is transitively CONNECTED at the
       threshold, so one weak ``cosine >= threshold`` bridge can chain dissimilar
       members into a giant component (the 1,711-page incident). A genuine merge
@@ -304,7 +304,7 @@ def _merge_proposal_suppression_reason(
       is a chain, not a merge, and is suppressed. ``cluster_threshold <= 0``
       (the default when a caller does not supply it) disables this arm.
     * mean-similarity floor — ``librarian.min_merge_mean_similarity`` (default
-      **0.6**, ACTIVE, #421): a proposal whose cluster mean pairwise cosine is
+      **0.6**, ACTIVE, athenaeum#421): a proposal whose cluster mean pairwise cosine is
       below the floor is too incohesive to be worth a human's review.
     * confidence floor — ``librarian.min_merge_confidence`` (default 0.0, opt-in):
       a proposal below the resolver-confidence floor is not confident enough.

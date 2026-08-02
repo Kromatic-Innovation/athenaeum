@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Claim-level contradiction detection for auto-memory clusters (C4, #198).
+"""Claim-level contradiction detection for auto-memory clusters (C4, athenaeum#198).
 
-Replaces the centroid-score placeholder heuristic that C3 (#197) shipped
+Replaces the centroid-score placeholder heuristic that C3 (athenaeum#197) shipped
 (``CONTRADICTION_COHESION_THRESHOLD = 0.75`` on the cluster centroid) with
 a per-cluster LLM call that reads member bodies and decides whether they
 state or prescribe contradictory things.
 
-Scope (narrow — see issue #198):
+Scope (narrow — see issue athenaeum#198):
 
 - Input: one merged cluster, expressed as a list of
   :class:`athenaeum.models.AutoMemoryFile` records.
@@ -36,7 +36,7 @@ Out of scope (deliberate):
 (:mod:`athenaeum.provider`) normally. The shared classify-model default is read
 from the :mod:`athenaeum.config` leaf (``DEFAULT_CLASSIFY_MODEL``), single-
 sourcing the default so this detector's knob never drifts from tier2's. Issue
-#640 moved that constant down to ``config`` from ``tiers``; before that this
+athenaeum#640 moved that constant down to ``config`` from ``tiers``; before that this
 module reached UP into the L4 ``tiers`` hub for it, forming the
 ``contradictions`` <-> ``tiers`` back-edge of a residual import SCC. Consumed by
 :mod:`athenaeum.merge` (L4).
@@ -71,8 +71,8 @@ log = logging.getLogger(__name__)
 
 # Model override uses the SAME env var as tier2_classify. Keeping a single
 # knob avoids a C4-only dial that sessions would have to learn separately.
-# The default is single-sourced from config.DEFAULT_CLASSIFY_MODEL (issue #571,
-# M19; relocated from tiers to the config leaf in #640): the detector shares the
+# The default is single-sourced from config.DEFAULT_CLASSIFY_MODEL (issue athenaeum#571,
+# M19; relocated from tiers to the config leaf in athenaeum#640): the detector shares the
 # classify knob, so a divergent literal here only ever surfaced as an
 # inconsistent default on a model bump. This collapses the DEFAULT; the env knob
 # (ATHENAEUM_CLASSIFY_MODEL, below) is unchanged.
@@ -86,7 +86,7 @@ PER_MEMBER_BODY_CHARS = 800
 
 # Conflict taxonomy -- the categories the wiki/review queue consumers branch
 # on. ``factual`` vs ``prescriptive`` are the original two; ``stance`` (issue
-# #327) routes an EVALUATIVE (opinion) pair to the resolver's opinion-
+# athenaeum#327) routes an EVALUATIVE (opinion) pair to the resolver's opinion-
 # attribution short-circuit instead of a precedence winner. "Principled"
 # contradictions from Tier 3 stay in the tiers.py escalation path; this module
 # is auto-memory-specific.
@@ -102,7 +102,7 @@ class ContradictionResult:
     members_involved: list[str] = field(default_factory=list)
     conflicting_passages: list[str] = field(default_factory=list)
     rationale: str = ""
-    # Issue #569 (H6): True when this verdict is a fail-open degrade caused by
+    # Issue athenaeum#569 (H6): True when this verdict is a fail-open degrade caused by
     # the detector call giving up AFTER its transient-error retries (a 429/529/
     # connection blip that outlived `with_retry`), NOT a genuine "no
     # contradiction". merge.py marks such clusters detection-incomplete so the
@@ -111,7 +111,7 @@ class ContradictionResult:
     incomplete: bool = False
 
 
-# Contradiction-detect output budget (issue #575): a short JSON verdict.
+# Contradiction-detect output budget (issue athenaeum#575): a short JSON verdict.
 # Formerly a bare ``1024`` literal; named and resolved through the seam.
 # Value unchanged.
 _DETECT_MAX_TOKENS = 1024
@@ -183,9 +183,9 @@ def _member_snippet(am: AutoMemoryFile) -> str:
     body = body.strip()
     if not body:
         body = f"{am.name}\n{am.description}".strip()
-    # Issue #324 hardening: the untrusted body must not forge the <memory>
+    # Issue athenaeum#324 hardening: the untrusted body must not forge the <memory>
     # boundary and smuggle a trusted `scope:`/system line into the prompt.
-    # Defang any literal memory tags before the body is embedded. #564: this is
+    # Defang any literal memory tags before the body is embedded. athenaeum#564: this is
     # the shared prompt_safety.defang_tag helper (byte-identical to the former
     # hand-rolled `</?\s*memory\s*>` re.sub) — one defang, one source of truth.
     body = defang_tag(body, "memory")
@@ -199,7 +199,7 @@ def _member_ref(am: AutoMemoryFile) -> str:
 
 
 def _member_scope_header(am: AutoMemoryFile) -> str:
-    """Return a compact TRUSTED scope line for a member, or "" when empty (#324).
+    """Return a compact TRUSTED scope line for a member, or "" when empty (athenaeum#324).
 
     Rendered BESIDE (outside) the untrusted ``<memory>`` block so the detector
     may reason about temporal/provenance context without treating it as memory
@@ -228,7 +228,7 @@ def _member_scope_header(am: AutoMemoryFile) -> str:
     valid_until = validity_bound_str(meta, "valid_until")
     if valid_from or valid_until:
         segments.append(f"valid: {valid_from or 'open'} → {valid_until or 'open'}")
-    # Issue #329: org/locale scope dimensions. Surfaced as trusted context so
+    # Issue athenaeum#329: org/locale scope dimensions. Surfaced as trusted context so
     # the detector can reason about scope-separated claims (org-wide rule vs a
     # team's local exception). The authoritative DISJOINT/OVERRIDE short-circuit
     # runs upstream in resolutions._scope_verdict_proposal; this line is
@@ -264,21 +264,21 @@ def _build_user_message(members: list[AutoMemoryFile]) -> str:
         # "Member N" is a scratch label scoped to this one prompt/response
         # round-trip. If raw text containing it ever re-enters intake,
         # tiers._PLACEHOLDER_LABEL_RE is the safety net that stops it being
-        # classified as a real entity (#296) — keep that regex in sync if
+        # classified as a real entity (athenaeum#296) — keep that regex in sync if
         # this label format changes.
         lines.append(f"## Member {i}: {ref}")
-        # Issue #324: a TRUSTED scope line (validity window / source / updated)
+        # Issue athenaeum#324: a TRUSTED scope line (validity window / source / updated)
         # rendered OUTSIDE the <memory> block. The memory body stays untrusted
         # inside the tags; this header is trusted metadata the detector may use.
         scope = _member_scope_header(am)
         if scope:
             lines.append(f"scope: {scope}")
         # Fence the untrusted member body via the shared prompt_safety helper
-        # (#687) rather than hand-appending the <memory> tags, so this site
+        # (athenaeum#687) rather than hand-appending the <memory> tags, so this site
         # tracks the canonical fence. `_member_snippet` already truncated to
         # PER_MEMBER_BODY_CHARS and defanged, so defang=False preserves its
         # single-defang protection (complementary, not replaced); the metadata
-        # `scope:` line above stays OUTSIDE the fence as trusted context (#324).
+        # `scope:` line above stays OUTSIDE the fence as trusted context (athenaeum#324).
         lines.append(
             fence_untrusted(
                 snippet, tag="memory", max_chars=PER_MEMBER_BODY_CHARS, defang=False
@@ -294,7 +294,7 @@ def _build_user_message(members: list[AutoMemoryFile]) -> str:
 
 def _get_model(config: dict[str, object] | None = None) -> str:
     # Same knob as tier2_classify: env ATHENAEUM_CLASSIFY_MODEL > yaml
-    # models.classify > code default (issue #232).
+    # models.classify > code default (issue athenaeum#232).
     return resolve_model(
         "classify", "ATHENAEUM_CLASSIFY_MODEL", DEFAULT_CONTRADICTION_MODEL, config
     )
@@ -308,7 +308,7 @@ def _parse_response(
 
     Tolerant on:
     - markdown code fences and leading/trailing prose around the JSON
-      object (issue #219 — first balanced object via
+      object (issue athenaeum#219 — first balanced object via
       :func:`athenaeum.json_utils.extract_json_object`).
     - ``conflict_type`` values outside the allowed literal -- falls back to
       ``detected=False`` with a warning.
@@ -324,7 +324,7 @@ def _parse_response(
             rationale="detector-returned-no-json",
         )
 
-    # Observe-only schema validation (#570, M17 phase 1): log the delta from the
+    # Observe-only schema validation (athenaeum#570, M17 phase 1): log the delta from the
     # accepted detector-output shape without altering any of the tolerant reads
     # below. Lazy import keeps pydantic off the import graph until first use.
     from athenaeum.llm_schemas import observe_contradictions
@@ -396,10 +396,10 @@ def detect_contradictions(
         client: A live Anthropic client, or ``None`` when the key is unset.
             ``None`` short-circuits to the deterministic fallback so offline
             runs still produce a :class:`ContradictionResult`.
-        config: Optional resolved athenaeum.yaml dict (issue #232) — routes
+        config: Optional resolved athenaeum.yaml dict (issue athenaeum#232) — routes
             ``models.classify`` to the detector call. ``None`` keeps env >
             code-default resolution.
-        usage: Optional run-level :class:`TokenUsage` (#239). The response's
+        usage: Optional run-level :class:`TokenUsage` (athenaeum#239). The response's
             token + cache counts accumulate via
             :meth:`TokenUsage.add_tokens`; ``api_calls`` is NOT bumped here
             — the orchestrating call site (merge.py) counts attempts.
@@ -425,7 +425,7 @@ def detect_contradictions(
 
     detect_model = _get_model(config)
     try:
-        # Issue #569 (H6): wrap in with_retry so a transient 429/529/connection
+        # Issue athenaeum#569 (H6): wrap in with_retry so a transient 429/529/connection
         # blip is retried with backoff instead of immediately degrading to a
         # durable detected=False (which live-delta would not revisit for days).
         response = with_retry(
@@ -437,7 +437,7 @@ def detect_contradictions(
                     _DETECT_MAX_TOKENS,
                     config,
                 ),
-                # Issue #578: same ``classify``-model / Haiku posture as
+                # Issue athenaeum#578: same ``classify``-model / Haiku posture as
                 # tier2_classify — a short structured verdict does not
                 # benefit from thinking. Disabled explicitly.
                 thinking=cast(
@@ -458,7 +458,7 @@ def detect_contradictions(
         )
     except TransientAPIError as exc:
         # Retries exhausted on a transient error — fail open, but flag the
-        # verdict INCOMPLETE so the cluster is force-re-queued next run (#569).
+        # verdict INCOMPLETE so the cluster is force-re-queued next run (athenaeum#569).
         log.warning(
             "contradictions: detector gave up after transient-error retries "
             "(%s); returning detected=False, marked detection-incomplete",
@@ -491,7 +491,7 @@ def detect_contradictions(
     )
 
     try:
-        # Issue #578: response_text skips any leading thinking block (this
+        # Issue athenaeum#578: response_text skips any leading thinking block (this
         # stage runs disabled today; the helper is text-block-equivalent for a
         # text-only response and keeps the site robust if the posture changes).
         text = response_text(response)

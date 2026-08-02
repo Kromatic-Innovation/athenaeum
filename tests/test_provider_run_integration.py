@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #330 — provider wiring through ``librarian.run``.
+"""Issue athenaeum#330 — provider wiring through ``librarian.run``.
 
 Covers the two run-level guards the seam adds:
 - ``claude-cli`` + batch mode is a LOUD startup error (rc 1, no silent
@@ -99,7 +99,7 @@ class TestClaudeCliMissingBinaryPreflight:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        # Issue #330: a claude-cli run with no `claude` binary must fail loudly
+        # Issue athenaeum#330: a claude-cli run with no `claude` binary must fail loudly
         # (rc 1) at startup, not silently defer every file to an rc-0 no-op.
         root = _seed_root(tmp_path)
         monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")

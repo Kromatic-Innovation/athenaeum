@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared eval harness (issue #331).
+"""Shared eval harness (issue athenaeum#331).
 
 Two responsibilities:
 
@@ -46,7 +46,7 @@ LAYER_DETECTOR = "detector"
 LAYER_RESOLVER = "resolver"
 LAYER_RECALL = "recall"
 LAYER_BACKFILL = "backfill"
-# Issue #552: the two additional layers covering tiers.py's CLASSIFY and
+# Issue athenaeum#552: the two additional layers covering tiers.py's CLASSIFY and
 # WRITE/MERGE stages (see docs/evals-inventory.md for the inventory this
 # fills in).
 LAYER_CLASSIFY = "classify"
@@ -133,12 +133,12 @@ class RecordedResponse:
     """Serialised Anthropic response body + provenance.
 
     ``content_blocks`` records the ORDERED ``response.content`` block sequence
-    (issue #684): each entry is ``{"type": "thinking"|"text"|…}`` plus a
+    (issue athenaeum#684): each entry is ``{"type": "thinking"|"text"|…}`` plus a
     ``"text"`` key on blocks that carry one. It exists so the replay stub can
     reconstruct the exact block shape production received — a thinking-prefixed
     response has one or more leading ``type == "thinking"`` blocks with no
-    ``.text`` before the text block (issue #578). Recording only the extracted
-    ``response_text`` (the pre-#684 format) made the replay suite structurally
+    ``.text`` before the text block (issue athenaeum#578). Recording only the extracted
+    ``response_text`` (the pre-athenaeum#684 format) made the replay suite structurally
     incapable of producing that shape, so a regression in
     :func:`athenaeum.provider.response_text`'s block-walking was invisible to
     replay. ``response_text`` is retained as the extracted answer for
@@ -164,7 +164,7 @@ class RecordedResponse:
         if raw_blocks:
             content_blocks = [dict(block) for block in raw_blocks]
         else:
-            # Backward compatibility: a pre-#684 fixture carried only the
+            # Backward compatibility: a pre-athenaeum#684 fixture carried only the
             # extracted text. Synthesise a single text block so replay still
             # reconstructs a faithful (single-block) response.
             content_blocks = [{"type": "text", "text": response_text}]
@@ -228,7 +228,7 @@ def _blocks_of_response(response: Any) -> list[dict[str, Any]]:
     """Serialise ``response.content`` into an ordered ``[{type, text?}]`` list.
 
     Captures the block SEQUENCE so replay can reconstruct a thinking-prefixed
-    response faithfully (issue #684). A block's ``.type`` is recorded when it is
+    response faithfully (issue athenaeum#684). A block's ``.type`` is recorded when it is
     a string; its ``.text`` is recorded only when present (a ``ThinkingBlock``
     has none), mirroring the anthropic SDK shape the call sites parse.
     """
@@ -248,10 +248,10 @@ def _blocks_of_response(response: Any) -> list[dict[str, Any]]:
 class EmptyRecordingError(BaseException):
     """Raised when a ``record=true`` run captures a response with no usable text.
 
-    The pre-#684 recorder swallowed ``AttributeError``/``IndexError`` from a
+    The pre-athenaeum#684 recorder swallowed ``AttributeError``/``IndexError`` from a
     bare ``response.content[0].text`` and wrote ``response_text=""`` to disk — a
     silently-empty fixture that passed every check between the API response and
-    replay (6 of 8 resolver fixtures, issue #684). A recording that captured no
+    replay (6 of 8 resolver fixtures, issue athenaeum#684). A recording that captured no
     text is a FAILED recording: it must go red at record time, not surface weeks
     later at replay.
 
@@ -302,8 +302,8 @@ class _RecordingMessages:
             case_id = self._parent._pending_case
             layer = self._parent._layer
             # Extract via the ONE shared walker production uses — never a second
-            # copy of "where is the text in a response" (issue #684). It skips
-            # any leading thinking block (#578); a bare content[0].text would
+            # copy of "where is the text in a response" (issue athenaeum#684). It skips
+            # any leading thinking block (athenaeum#578); a bare content[0].text would
             # read the wrong block on a thinking-enabled stage (resolver).
             try:
                 text = provider_response_text(response)
@@ -316,7 +316,7 @@ class _RecordingMessages:
                 ) from exc
             # A recording that captured nothing is a FAILED recording — raise so
             # the eval run goes red now, rather than writing "" and surfacing at
-            # replay weeks later (the actual defect behind issue #684).
+            # replay weeks later (the actual defect behind issue athenaeum#684).
             if not text.strip():
                 raise EmptyRecordingError(
                     f"record run captured empty text for {layer}/{case_id} "
@@ -373,7 +373,7 @@ class _ReplayBlock:
     the anthropic ``ThinkingBlock`` production receives. This is what lets the
     replay suite exercise :func:`athenaeum.provider.response_text`'s
     skip-thinking block-walk instead of a synthetic single text block that
-    could never reproduce the shape (issue #684).
+    could never reproduce the shape (issue athenaeum#684).
     """
 
     def __init__(self, block: dict[str, Any]) -> None:
@@ -390,7 +390,7 @@ def replay_client(layer: str, case_id: str) -> Any:
     ``.content`` is the RECORDED block sequence (thinking blocks included, in
     order) and whose ``.usage`` mirrors the fixture, so the same
     :func:`athenaeum.provider.response_text` walk production uses is exercised
-    (issue #684).
+    (issue athenaeum#684).
     """
     rec = load_recorded(layer, case_id)
 
@@ -532,11 +532,11 @@ class EvalSession:
 
 
 def build_live_client() -> Any:
-    """Construct the LLM client for eval runs (issue #331 provider seam).
+    """Construct the LLM client for eval runs (issue athenaeum#331 provider seam).
 
     Routes through :func:`athenaeum.provider.build_llm_client` so the
     ``ATHENAEUM_LLM_PROVIDER=claude-cli`` env var makes a local eval run
-    subscription-covered ($0 metered) — the same seam #330 wired for the
+    subscription-covered ($0 metered) — the same seam athenaeum#330 wired for the
     production call sites. CI (``evals.yml``) runs on the ``api`` backend
     with ``ANTHROPIC_API_KEY`` sourced from 1Password.
     """

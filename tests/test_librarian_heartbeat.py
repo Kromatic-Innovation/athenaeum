@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Integration tests: dark-zone phases emit ``librarian-heartbeat`` lines (#398).
+"""Integration tests: dark-zone phases emit ``librarian-heartbeat`` lines (athenaeum#398).
 
-The T3 entity-merge pass (merge.py) and the post-compile phases (the #290
-wiki-dedup pass and the #188 re-resolve pass) previously produced NO per-unit
+The T3 entity-merge pass (merge.py) and the post-compile phases (the athenaeum#290
+wiki-dedup pass and the athenaeum#188 re-resolve pass) previously produced NO per-unit
 progress logging, so a stall in any of them was invisible in the log. These
 tests drive each phase directly (reusing the fixture/stub conventions from
 ``tests/test_librarian_merge.py`` and ``tests/test_wiki_dedupe.py``) and
@@ -172,7 +172,7 @@ class TestMergeHeartbeats:
 
 
 # ---------------------------------------------------------------------------
-# wiki-dedupe (#290)
+# wiki-dedupe (athenaeum#290)
 # ---------------------------------------------------------------------------
 
 _BODY_A = "Kromatic is Tristan's primary venture and main business focus."
@@ -241,7 +241,7 @@ class TestWikiDedupeHeartbeat:
 
 
 # ---------------------------------------------------------------------------
-# reresolve (#188)
+# reresolve (athenaeum#188)
 # ---------------------------------------------------------------------------
 
 

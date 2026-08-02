@@ -37,14 +37,14 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
     """Register ``reindex``/``rebuild-index``, ``compile``, ``registry``,
     ``ingest``, ``session-end``."""
 
-    # reindex command (issue #349) — rebuild the search index out-of-band.
-    # ``rebuild-index`` is kept as a back-compat alias for the #348 spelling;
+    # reindex command (issue athenaeum#349) — rebuild the search index out-of-band.
+    # ``rebuild-index`` is kept as a back-compat alias for the athenaeum#348 spelling;
     # both dispatch to the identical handler (no duplicated index engine).
     rebuild_parser = subparsers.add_parser(
         "reindex",
         aliases=["rebuild-index"],
         help="Rebuild the search index (FTS5 or vector, per config). "
-        "--incremental (default) applies only the #348 hash-diff delta; "
+        "--incremental (default) applies only the athenaeum#348 hash-diff delta; "
         "--full rebuilds from scratch.",
     )
     rebuild_parser.add_argument(
@@ -71,7 +71,7 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "Apply only the changed/added/deleted hash-diff delta (issue "
-            "#348). This is the DEFAULT; the flag makes it explicit."
+            "athenaeum#348). This is the DEFAULT; the flag makes it explicit."
         ),
     )
     reindex_mode.add_argument(
@@ -79,7 +79,7 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "Wipe and fully rebuild instead of applying only the "
-            "changed/added/deleted delta (issue #348). Use for seeding or "
+            "changed/added/deleted delta (issue athenaeum#348). Use for seeding or "
             "after an embedding-model change; default is incremental."
         ),
     )
@@ -89,7 +89,7 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         type=_iso_date,
         default=None,
         metavar="YYYY-MM-DD",
-        help="Issue #308: build an as-of index reflecting the wiki as it stood "
+        help="Issue athenaeum#308: build an as-of index reflecting the wiki as it stood "
         "on this date (pages outside their [valid_from, valid_until] window then "
         "are excluded). Always a full build; point --cache-dir at a scratch "
         "directory so the live index is not overwritten, then "
@@ -98,14 +98,14 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
     _add_lock_args(rebuild_parser)
     rebuild_parser.set_defaults(func=cmd_rebuild_index)
 
-    # compile command (issue #359) — compile-as-of. Recompiles a HISTORICAL
+    # compile command (issue athenaeum#359) — compile-as-of. Recompiles a HISTORICAL
     # wiki snapshot as it would have stood on --as-of, into a scratch --out
     # dir. Distinct from slice 3's read-time `recall/reindex --as-of` filter:
     # this RE-RUNS the deterministic C3 blend (resurrecting members expired
     # now but valid then), never touching the live wiki or raw tree.
     compile_parser = subparsers.add_parser(
         "compile",
-        help="Issue #359: recompile a historical wiki snapshot as-of a past "
+        help="Issue athenaeum#359: recompile a historical wiki snapshot as-of a past "
         "date into a scratch --out dir (compile-as-of). Distinct from the "
         "read-time `recall/reindex --as-of` filter — this re-runs the C3 "
         "blend so members expired now but valid then are re-included. "
@@ -141,14 +141,14 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
     )
     compile_parser.set_defaults(func=cmd_compile_as_of)
 
-    # registry command (issue #453) — compile the source-handle registry.
+    # registry command (issue athenaeum#453) — compile the source-handle registry.
     # A deterministic, LLM-free read of the wiki tree that emits registry.json
     # (entity uid → handle set) for the fact-mining adapters to consume. Emits
     # a well-formed (possibly empty) registry regardless of how many handles
-    # are populated, so the operator-only seed (#454) is never a precondition.
+    # are populated, so the operator-only seed (athenaeum#454) is never a precondition.
     registry_parser = subparsers.add_parser(
         "registry",
-        help="Issue #453: compile the source-handle registry.json (entity uid "
+        help="Issue athenaeum#453: compile the source-handle registry.json (entity uid "
         "→ handle set) from wiki entity frontmatter. Deterministic, no LLM; "
         "emits a well-formed registry even when no handles are populated yet.",
     )
@@ -176,13 +176,13 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
     )
     registry_parser.set_defaults(func=cmd_registry)
 
-    # ingest command (issue #349) — on-demand compile of new/changed raw
+    # ingest command (issue athenaeum#349) — on-demand compile of new/changed raw
     # intake into the wiki. The manual escape hatch that makes a just-
     # remembered fact recallable now, decoupled from the nightly `run`.
     ingest_parser = subparsers.add_parser(
         "ingest",
         help="Compile new/changed raw intake into the wiki on demand "
-        "(issue #349). --incremental (default) compiles only files new/"
+        "(issue athenaeum#349). --incremental (default) compiles only files new/"
         "changed since the last ingest; --full recompiles.",
     )
     ingest_parser.add_argument(
@@ -214,7 +214,7 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         type=str,
         default=None,
         help="Scope the new/changed detection to one originSessionId "
-        "(the SessionEnd use-case, issue #350).",
+        "(the SessionEnd use-case, issue athenaeum#350).",
     )
     ingest_parser.add_argument(
         "--cache-dir",
@@ -238,7 +238,7 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
     _add_lock_args(ingest_parser)
     ingest_parser.set_defaults(func=cmd_ingest)
 
-    # session-end command (issue #350) — the change-gated compile-then-index
+    # session-end command (issue athenaeum#350) — the change-gated compile-then-index
     # composition the cwc SessionEnd hook and the nightly-after-librarian path
     # invoke as ONE command: incremental `ingest` of this session's new raw,
     # then (only when the compile actually ran) an incremental `reindex` so the
@@ -246,7 +246,7 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
     # fast no-op with zero LLM cost and no reindex.
     session_end_parser = subparsers.add_parser(
         "session-end",
-        help="Change-gated ingest + reindex for SessionEnd (issue #350): "
+        help="Change-gated ingest + reindex for SessionEnd (issue athenaeum#350): "
         "compile this session's new raw intake, then refresh the index — a "
         "fast no-op (no LLM, no reindex) when nothing changed.",
     )
@@ -266,7 +266,7 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         default=None,
         help="Compile only raw new/changed since the last ingest and apply the "
-        "#348 index delta. This is the DEFAULT.",
+        "athenaeum#348 index delta. This is the DEFAULT.",
     )
     session_end_mode.add_argument(
         "--full",
@@ -320,7 +320,7 @@ def _reindex_summary(
     t0: float,
     exit_code: int,
 ) -> None:
-    """Print the one-line JSON reindex summary (issue #349, counts+duration)."""
+    """Print the one-line JSON reindex summary (issue athenaeum#349, counts+duration)."""
     import json
     import time
 
@@ -339,7 +339,7 @@ def _reindex_summary(
 
 
 def cmd_compile_as_of(args: argparse.Namespace) -> int:
-    """Issue #359: recompile a historical wiki snapshot as-of a past date.
+    """Issue athenaeum#359: recompile a historical wiki snapshot as-of a past date.
 
     Re-runs the deterministic C3 blend (no LLM) with ``--as-of`` threaded into
     the per-member active predicate, writing to ``--out``. Never mutates the
@@ -382,11 +382,11 @@ def cmd_compile_as_of(args: argparse.Namespace) -> int:
 
 
 def cmd_registry(args: argparse.Namespace) -> int:
-    """Issue #453: compile the source-handle registry.json.
+    """Issue athenaeum#453: compile the source-handle registry.json.
 
     Deterministic, LLM-free read of the wiki tree into an ``entity uid →
     handle set`` index. A missing wiki dir or zero populated handles is not
-    an error — it yields a well-formed empty registry (issue #453/#454: the
+    an error — it yields a well-formed empty registry (issue athenaeum#453/#454: the
     seed lands later and must not gate the builder).
     """
     from athenaeum.atomic_io import atomic_write_text
@@ -427,7 +427,7 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
     )
     from athenaeum.search import build_fts5_index, build_vector_index
 
-    # Issue #349: `reindex` is the canonical name; `rebuild-index` is a
+    # Issue athenaeum#349: `reindex` is the canonical name; `rebuild-index` is a
     # back-compat alias routed here. Report whichever the user invoked.
     command = getattr(args, "command", "reindex") or "reindex"
     t0 = time.monotonic()
@@ -454,7 +454,7 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
     )
     incremental = not getattr(args, "full", False)
 
-    # Issue #308: an as-of index reflects a past date's validity windows and is
+    # Issue athenaeum#308: an as-of index reflects a past date's validity windows and is
     # always a FULL build (a historical snapshot has no manifest to diff), so it
     # reports "full" regardless of the incremental default.
     as_of = getattr(args, "as_of", None)
@@ -464,7 +464,7 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Rebuilding the index always writes — acquire the run lock so it can't
-    # race a concurrent `run` rebuilding the same index (issue #309).
+    # race a concurrent `run` rebuilding the same index (issue athenaeum#309).
     lock = _acquire_or_exit(knowledge_root, args, cfg)
     if isinstance(lock, int):
         return lock
@@ -522,11 +522,11 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    """On-demand compile of new/changed raw intake (issue #349).
+    """On-demand compile of new/changed raw intake (issue athenaeum#349).
 
     Thin CLI wrapper over :func:`athenaeum.librarian.ingest` — the single
-    reusable incremental-ingest engine the SessionEnd path (#350) also calls.
-    Acquires the shared run lock (single-flight, #309) around the compile,
+    reusable incremental-ingest engine the SessionEnd path (athenaeum#350) also calls.
+    Acquires the shared run lock (single-flight, athenaeum#309) around the compile,
     prints a one-line JSON summary (counts + duration), and exits non-zero
     when the underlying compile fails.
     """
@@ -547,7 +547,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
     cfg = load_config(knowledge_root)
 
-    # Issue #309 single-flight: a real compile mutates wiki/ and shares the
+    # Issue athenaeum#309 single-flight: a real compile mutates wiki/ and shares the
     # nightly-run lock. A --dry-run reads only, so it does not take the lock.
     lock: RunLock | int | None = None
     if not args.dry_run:
@@ -586,11 +586,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def cmd_session_end(args: argparse.Namespace) -> int:
-    """Change-gated SessionEnd ingest + reindex (issue #350).
+    """Change-gated SessionEnd ingest + reindex (issue athenaeum#350).
 
     Thin CLI wrapper over :func:`athenaeum.librarian.session_end` — the single
     reusable composition the cwc SessionEnd hook and the nightly-after-librarian
-    path invoke. Acquires the shared run lock (single-flight, #309) ONCE around
+    path invoke. Acquires the shared run lock (single-flight, athenaeum#309) ONCE around
     both the compile and the reindex, prints a one-line JSON summary (nested
     ingest counts + reindex pages + duration), and exits non-zero when the
     underlying compile fails.
@@ -609,7 +609,7 @@ def cmd_session_end(args: argparse.Namespace) -> int:
     wiki_root = knowledge_root / "wiki"
     incremental = True if args.incremental is None else args.incremental
 
-    # Kill switch (#379): the compile/detect pass is the expensive, unattended
+    # Kill switch (athenaeum#379): the compile/detect pass is the expensive, unattended
     # ``claude -p`` fan-out — honour the disabled flag BEFORE the lock or any
     # work, so 'athenaeum disable' (or --compile) prevents the next pass with
     # no pkill needed. Emit a JSON no-op line so callers tailing the pipe see it.
@@ -633,7 +633,7 @@ def cmd_session_end(args: argparse.Namespace) -> int:
 
     cfg = load_config(knowledge_root)
 
-    # Issue #309 single-flight: the compile + reindex both mutate on-disk state
+    # Issue athenaeum#309 single-flight: the compile + reindex both mutate on-disk state
     # (wiki/ and the index) and share the nightly-run lock. A --dry-run reads
     # only, so it does not take the lock.
     lock: RunLock | int | None = None
@@ -670,7 +670,7 @@ def cmd_session_end(args: argparse.Namespace) -> int:
             lock.release()
 
     print(json.dumps(result.summary()))
-    # Issue #370: the summary line is the only stdout; flush both streams so a
+    # Issue athenaeum#370: the summary line is the only stdout; flush both streams so a
     # caller tailing the pipe sees the result immediately (the reindex can run
     # for minutes and the run otherwise looks like a silent hang).
     sys.stdout.flush()

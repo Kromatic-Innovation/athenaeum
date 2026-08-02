@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Injection-hardening adoption tests for issue #564 (audit H8 + M21).
+"""Injection-hardening adoption tests for issue athenaeum#564 (audit H8 + M21).
 
-#562 created ``prompt_safety`` (the fence/defang/data-only-clause helper); this
+athenaeum#562 created ``prompt_safety`` (the fence/defang/data-only-clause helper); this
 issue adopts it across the remaining untrusted-content call sites and collapses
 the two hand-rolled ``<memory>`` defangs onto it. The tests here prove:
 

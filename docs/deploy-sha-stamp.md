@@ -94,7 +94,7 @@ single-checkout path.
 
 ## Scope
 
-This issue (#413) covers only athenaeum's side — producing the stamp. Teaching
+This issue (athenaeum#413) covers only athenaeum's side — producing the stamp. Teaching
 the cwc aggregator to read athenaeum's stamp path is tracked separately in
 `code-workspace-config#1428`. The tag-triggered PyPI `release.yml` flow is a
 different concern (published-package version, not running-instance version) and

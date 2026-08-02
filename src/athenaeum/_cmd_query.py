@@ -208,7 +208,7 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "--audience",
         type=str,
         default=None,
-        help="Issue #312: run recall under a restricted read scope. "
+        help="Issue athenaeum#312: run recall under a restricted read scope. "
         "Comma-separated role/group ids; only pages tagged for one of these "
         "roles (or 'access: open') are returned. Unset = owner = full access. "
         "Exercises the identical filter path as `serve --audience`.",
@@ -219,7 +219,7 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         type=_iso_date,
         default=None,
         metavar="YYYY-MM-DD",
-        help="Issue #308: temporal 'as-of' view. Return the wiki as it stood on "
+        help="Issue athenaeum#308: temporal 'as-of' view. Return the wiki as it stood on "
         "this date — pages outside their [valid_from, valid_until] window then "
         "are excluded; a fact valid then but expired now is included. Builds a "
         "throwaway as-of index in a scratch cache dir (indexed backends) or "
@@ -265,9 +265,9 @@ def cmd_recall(args: argparse.Namespace) -> int:
     cache_dir = resolve_cache_dir(args.cache_dir).resolve()
     extra_roots = resolve_extra_intake_roots(knowledge_root, cfg)
 
-    # Issue #312: resolve the read-scope pin (CLI > env > yaml). None = owner.
+    # Issue athenaeum#312: resolve the read-scope pin (CLI > env > yaml). None = owner.
     caller_audience = resolve_audience(cfg, getattr(args, "audience", None))
-    # Issue #532: enforce the storage-adapter ``recallable`` policy at render
+    # Issue athenaeum#532: enforce the storage-adapter ``recallable`` policy at render
     # only when a non-default storage policy is configured (strict no-op else).
     enforce_recallable = storage_policy_configured(cfg)
 
@@ -277,7 +277,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    # Issue #308: an as-of view queries the wiki as it stood on a past date.
+    # Issue athenaeum#308: an as-of view queries the wiki as it stood on a past date.
     # Indexed backends (fts5/vector) filter at BUILD time, so we build a
     # THROWAWAY as-of index in a scratch cache dir and query that — the live
     # index at ``cache_dir`` is never touched. The keyword backend scans on
@@ -333,12 +333,12 @@ def cmd_recall(args: argparse.Namespace) -> int:
             not readable or not is_page_authorized(fm, caller_audience)
         ):
             continue
-        # Issue #308: temporal backstop — drop any hit outside its validity
+        # Issue athenaeum#308: temporal backstop — drop any hit outside its validity
         # window relative to ``as_of`` (default today), so the CLI output stays
         # consistent with the requested view regardless of backend build state.
         if readable and is_inactive_memory(fm, as_of):
             continue
-        # Issue #532 (H4): honor the storage-adapter ``recallable`` corpus
+        # Issue athenaeum#532 (H4): honor the storage-adapter ``recallable`` corpus
         # policy, matching the MCP ``recall`` tool. Only enforced when the
         # config defines a non-default storage policy — a strict no-op
         # otherwise. Fail-closed: an unreadable hit cannot have its class
@@ -526,7 +526,7 @@ def cmd_query_topics(args: argparse.Namespace) -> int:
     from athenaeum.config import load_config
     from athenaeum.query_topics import extract_topics
 
-    # Issue #232: load the operator's yaml so ``models.topic`` reaches the
+    # Issue athenaeum#232: load the operator's yaml so ``models.topic`` reaches the
     # call. --knowledge-root covers non-default roots; when omitted,
     # load_config falls back to ~/knowledge.
     knowledge_root = (
@@ -593,7 +593,7 @@ def cmd_test_mcp(args: argparse.Namespace) -> int:
             "Smoke test observation from `athenaeum test-mcp`.",
             source="test-mcp",
             # Declare per-claim provenance so the smoke test itself doesn't
-            # trip the issue-#90 "no `sources` supplied" warning.
+            # trip the issue-athenaeum#90 "no `sources` supplied" warning.
             sources="cli:athenaeum-test-mcp",
         )
         written = list((raw_root / "test-mcp").glob("*.md"))

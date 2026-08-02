@@ -21,20 +21,20 @@ Design:
   auto-memory, feedback, preference, user, …) and Lane A is not retyping
   them.
 
-Out of scope here (Lane B / #90, Lane G / #91):
+Out of scope here (Lane B / athenaeum#90, Lane G / athenaeum#91):
 - Per-claim ``source`` / ``field_sources`` provenance.
 - Conflict-resolution semantics on update.
 
-Memory taxonomy (issue #424):
+Memory taxonomy (issue athenaeum#424):
 - ``memory_class:`` is a THIRD, orthogonal, LAYERED axis alongside ``type:``
   (this module's ``KNOWN_TYPES``) and intake ``memory_type:``
   (``models.py``: feedback/project/reference/user/recall). It is NOT a
   replacement for either — a person page keeps ``type: person`` and may
   additionally gain ``memory_class: entity``. See
   ``docs/memory-taxonomy.md`` for the full axis-reconciliation writeup and
-  merge-vs-cite semantics (enforcement of those semantics is #433).
+  merge-vs-cite semantics (enforcement of those semantics is athenaeum#433).
 
-Axiom governance (issue #434):
+Axiom governance (issue athenaeum#434):
 - ``memory_class: axiom`` additionally requires an explicit, recorded,
   human-approved PROMOTION on file — a page carrying that value with no
   active promotion record is flagged (see
@@ -43,23 +43,23 @@ Axiom governance (issue #434):
   do (no filesystem access, no cross-page context) — see
   :mod:`athenaeum.axiom_governance`'s module docstring for the full design
   and why the check lives there instead of in ``_validate_memory_class``
-  below. This module's role in #434 is limited to the ``scope:`` field
+  below. This module's role in athenaeum#434 is limited to the ``scope:`` field
   (below) — the axiom-governance ledger, promotion/demotion, and audit
   listing all live in :mod:`athenaeum.axiom_governance`.
-- Mirrors the #93 ``KNOWN_TYPES`` shape exactly: a recognized value is
+- Mirrors the athenaeum#93 ``KNOWN_TYPES`` shape exactly: a recognized value is
   silent; an unrecognized non-empty value emits a :class:`UserWarning`
   (flagged, not silently accepted); an ABSENT ``memory_class`` is tolerated
   (legacy/untyped pages must not break) and is reported via
   :func:`is_untyped_memory_class` so a linter/report can surface it as
   "untyped" without that itself being a warning.
 
-PII off-corpus (issue #427):
+PII off-corpus (issue athenaeum#427):
 - Entity pages carry durable identifiers only (name, LinkedIn, record id,
   Google-Contact id); inline archival contact data (``emails:`` / ``phones:``
   frontmatter) does not belong on a page that stays in the embedded/recalled
   corpus. ``WikiBase`` flags this via a :class:`UserWarning` — mirroring the
-  #93 ``KNOWN_TYPES`` / #424 ``memory_class`` precedent exactly (recoverable,
-  not a hard failure, since migrating pre-existing pages is #437's operator
+  athenaeum#93 ``KNOWN_TYPES`` / athenaeum#424 ``memory_class`` precedent exactly (recoverable,
+  not a hard failure, since migrating pre-existing pages is athenaeum#437's operator
   task, not this validator's job). A page carrying a truthy ``pii:`` flag
   (:func:`athenaeum.pii.is_pii_flagged`) is EXEMPT from this particular
   warning — that flag is the explicit "yes, I know, and every corpus
@@ -91,7 +91,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from athenaeum.pii import CONTACT_FRONTMATTER_FIELDS, is_pii_flagged
 from athenaeum.provenance import validate_field_sources, validate_source_value
 
-#: The 7 recognized ``memory_class:`` values (issue #424). Deliberately does
+#: The 7 recognized ``memory_class:`` values (issue athenaeum#424). Deliberately does
 #: NOT include ``open-question`` / ``hypothesis`` — the settled taxonomy
 #: defers those rather than over-minting classes up front.
 MEMORY_CLASSES: frozenset[str] = frozenset(
@@ -113,7 +113,7 @@ class WikiBase(BaseModel):
     Required: uid, type, name. Everything else passes through via
     ``extra="allow"`` so custom-namespace fields survive round-trip.
 
-    Provenance (issue #90):
+    Provenance (issue athenaeum#90):
     - ``source`` is the wiki-level default source for any frontmatter
       field that does not have a ``field_sources`` override.
     - ``field_sources`` is a per-claim map ``{<field>: <source>}``.
@@ -127,28 +127,28 @@ class WikiBase(BaseModel):
     type: str
     name: str
 
-    # Per-claim provenance (issue #90). Stored as the on-disk shape
+    # Per-claim provenance (issue athenaeum#90). Stored as the on-disk shape
     # (str OR dict) — round-trip fidelity beats normalization here.
     source: str | dict | None = None
     # ``field_sources`` per-field value is one of:
     # - ``str``/``dict`` (legacy single source for the whole field), or
     # - ``list[dict]`` of ``{"value", "source"}`` records (per-value
-    #   attribution for list-typed fields, issue #102).
+    #   attribution for list-typed fields, issue athenaeum#102).
     field_sources: dict[str, str | dict | list] | None = None
 
-    # Issue #424: the memory-taxonomy axis, layered on top of ``type:``.
+    # Issue athenaeum#424: the memory-taxonomy axis, layered on top of ``type:``.
     # ``None`` (absent) is tolerated — legacy/untyped pages must not break —
     # see :func:`is_untyped_memory_class`. A non-``None`` value outside
     # :data:`MEMORY_CLASSES` is flagged via ``UserWarning`` in
     # ``_validate_memory_class`` below (NOT silently accepted) but does not
-    # raise, matching the #93 ``KNOWN_TYPES`` precedent this axis is layered
+    # raise, matching the athenaeum#93 ``KNOWN_TYPES`` precedent this axis is layered
     # beside.
     memory_class: str | None = None
 
-    # Issue #424 (staleness axis): standing-state facts carry ``observed_at``
+    # Issue athenaeum#424 (staleness axis): standing-state facts carry ``observed_at``
     # — the date the fact was TRUE-WHEN-OBSERVED, as distinct from
     # ``created``/``updated`` (write-time bookkeeping) and from
-    # ``valid_from``/``valid_until`` (the claim-validity window, #308).
+    # ``valid_from``/``valid_until`` (the claim-validity window, athenaeum#308).
     # Declared as an explicit field (rather than relying solely on
     # ``extra="allow"``) so it is a first-class, documented part of the
     # schema; stored as the on-disk scalar (str) for round-trip fidelity —
@@ -156,15 +156,15 @@ class WikiBase(BaseModel):
     # keep their on-disk shape rather than normalizing to a Python type.
     observed_at: str | None = None
 
-    # Issue #434 (context scoping): an axiom (or any memory_class value) may
+    # Issue athenaeum#434 (context scoping): an axiom (or any memory_class value) may
     # carry a SCOPE narrowing where it should be treated as authoritative —
     # e.g. "applies to resume work" is axiomatic there, noise elsewhere.
     # Stored as the on-disk scalar (str), same round-trip-fidelity discipline
     # as ``observed_at``/``source`` — no normalization, no enum. ENFORCEMENT
     # (a consumer deciding whether the current context matches the scope) is
-    # explicitly out of scope for #434; this field only stores and surfaces
+    # explicitly out of scope for athenaeum#434; this field only stores and surfaces
     # it. Not restricted to axioms at the schema level — a ``fact`` or
-    # ``guideline`` scoped to a context is equally legible — but #434's
+    # ``guideline`` scoped to a context is equally legible — but athenaeum#434's
     # governance (promotion/demotion/ledger) only concerns ``axiom``.
     scope: str | None = None
 
@@ -207,10 +207,10 @@ class WikiBase(BaseModel):
 
     @model_validator(mode="after")
     def _warn_inline_contact_fields(self) -> "WikiBase":
-        """Flag durable-identifier-only entity pages carrying inline PII (#427).
+        """Flag durable-identifier-only entity pages carrying inline PII (athenaeum#427).
 
-        Recoverable — a :class:`UserWarning`, not a raise — mirroring the #93
-        ``KNOWN_TYPES`` / #424 ``memory_class`` precedent. Skips the check
+        Recoverable — a :class:`UserWarning`, not a raise — mirroring the athenaeum#93
+        ``KNOWN_TYPES`` / athenaeum#424 ``memory_class`` precedent. Skips the check
         entirely when the page is ``pii: true``-flagged: that flag is the
         explicit acknowledgment every corpus consumer already keys off of
         (:func:`athenaeum.pii.is_pii_flagged`), so warning here too would be
@@ -226,7 +226,7 @@ class WikiBase(BaseModel):
         if present:
             warnings.warn(
                 f"inline contact data on entity page: frontmatter field(s) "
-                f"{sorted(present)!r} (durable identifiers only — see #427)",
+                f"{sorted(present)!r} (durable identifiers only — see athenaeum#427)",
                 UserWarning,
                 stacklevel=2,
             )
@@ -305,10 +305,10 @@ _BY_TYPE: dict[str, type[WikiBase]] = {
 }
 
 # Types that are not in ``_BY_TYPE`` but are present in the live wiki
-# tree as of 2026-05-09 (issue #93 audit). These fall through to
+# tree as of 2026-05-09 (issue athenaeum#93 audit). These fall through to
 # :class:`WikiBase` for validation; the allowlist exists so unknown
 # types (typos, drift) emit a warning instead of being silently
-# accepted. See issue #93.
+# accepted. See issue athenaeum#93.
 FALLBACK_TYPES: frozenset[str] = frozenset(
     {
         "auto-memory",
@@ -334,7 +334,7 @@ def validate_wiki_meta(meta: dict[str, Any]) -> WikiBase:
     :class:`WikiBase` (still enforces uid/type/name). Raises
     :class:`pydantic.ValidationError` on malformed input.
 
-    Issue #93: emits a :class:`UserWarning` (NOT an exception) when
+    Issue athenaeum#93: emits a :class:`UserWarning` (NOT an exception) when
     ``meta["type"]`` is outside :data:`KNOWN_TYPES`. Recoverable —
     strict mode is out of scope.
     """
@@ -352,7 +352,7 @@ def validate_wiki_meta(meta: dict[str, Any]) -> WikiBase:
 def is_untyped_memory_class(meta: dict[str, Any]) -> bool:
     """True when ``meta`` carries no (non-empty) ``memory_class:`` value.
 
-    Issue #424: an absent ``memory_class`` is TOLERATED by validation (a
+    Issue athenaeum#424: an absent ``memory_class`` is TOLERATED by validation (a
     legacy/untyped page must not fail to validate) but should still be
     SURFACED — e.g. by a lint/report pass counting untyped pages — rather
     than silently disappearing. This helper is the single predicate such a

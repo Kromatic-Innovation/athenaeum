@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the auto-memory cluster pass (C2, issue #196).
+"""Tests for the auto-memory cluster pass (C2, issue athenaeum#196).
 
 Covers :mod:`athenaeum.clusters` and its integration into
 :func:`athenaeum.librarian.run` via ``cluster_only=True``. These tests
@@ -211,7 +211,7 @@ def singleton_pair_root(tmp_path: Path) -> Path:
 
 
 class TestCosineHelpers:
-    """Issue #542: cosine moved to athenaeum.vecmath; see tests/test_vecmath.py
+    """Issue athenaeum#542: cosine moved to athenaeum.vecmath; see tests/test_vecmath.py
     for the full behavior suite. These stay here as a thin regression check
     that athenaeum.clusters still resolves similarity via the shared helper.
     """
@@ -251,7 +251,7 @@ class TestSingleLinkage:
 
 
 class TestCompleteLinkage:
-    """Issue #681: cluster formation refines single-linkage components into
+    """Issue athenaeum#681: cluster formation refines single-linkage components into
     complete-linkage cliques so a weak bridging edge can no longer chain a
     giant component that the merge-proposal gate would only rebuild and discard.
     """
@@ -393,7 +393,7 @@ class TestClusterVoltaireFixture:
 
 
 class TestClusterFormationIsCompleteLinkage:
-    """Issue #681 end-to-end: a single-linkage chain of pages must NOT be
+    """Issue athenaeum#681 end-to-end: a single-linkage chain of pages must NOT be
     formed into one giant cluster by ``cluster_auto_memory_files``. Uses
     injected embeddings (the ``embeddings=`` override) so the test is
     deterministic and needs no chromadb.
@@ -745,7 +745,7 @@ class TestClusterConfig:
 
 
 # ---------------------------------------------------------------------------
-# Rotation pruning / retention (issue #311)
+# Rotation pruning / retention (issue athenaeum#311)
 # ---------------------------------------------------------------------------
 
 
@@ -994,7 +994,7 @@ class TestRotationPruneNonFatal:
 
 
 class TestMinIntraSimilarity:
-    """Issue #421: the complete-linkage coherence metric (minimum pairwise)."""
+    """Issue athenaeum#421: the complete-linkage coherence metric (minimum pairwise)."""
 
     def test_singleton_is_one(self) -> None:
         from athenaeum.clusters import _min_intra_similarity

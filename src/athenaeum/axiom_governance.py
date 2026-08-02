@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Axiom promotion/demotion governance + assignment audit (issue #434).
+"""Axiom promotion/demotion governance + assignment audit (issue athenaeum#434).
 
-Issue #424 added ``memory_class: axiom`` as one of the 7 recognized
+Issue athenaeum#424 added ``memory_class: axiom`` as one of the 7 recognized
 taxonomy values (see :mod:`athenaeum.schemas`) — but that issue's validator
 only checks that the *value itself* is recognized; it says nothing about
 *who is allowed to mint one*. An axiom is meant to be untouchable ("treat
 this as bedrock"), so an LLM/librarian write path silently setting
-``memory_class: axiom`` on a page is exactly the failure mode #434 closes:
+``memory_class: axiom`` on a page is exactly the failure mode athenaeum#434 closes:
 axiom status must be an EXPLICIT, RECORDED, HUMAN-APPROVED act, with a
 symmetric way back out (demotion) — no dogma without an exit.
 
@@ -24,7 +24,7 @@ Design:
   function a caller invokes with the page's slug + the ledger, separate
   from the pydantic boundary.
 - **Authorization: CLI acknowledgement, not the decisions-queue.**
-  :mod:`athenaeum.decisions` (issue #401) unifies contradiction-detector
+  :mod:`athenaeum.decisions` (issue athenaeum#401) unifies contradiction-detector
   questions and resolver merge proposals — both are LLM/resolver-authored
   proposals a human triages asynchronously. A promotion is different: it
   is the human's OWN act ("I am declaring this axiomatic"), not something
@@ -42,13 +42,13 @@ Design:
   — but no MCP *tool* is registered by this issue beyond the read-only
   audit listing; see ``mcp_server.list_axiom_audit``.)
 - **Ledger shape mirrors** :mod:`athenaeum.provenance`'s merge-provenance
-  ledger (``_merge_provenance.jsonl``, issue #425): append-only JSONL,
+  ledger (``_merge_provenance.jsonl``, issue athenaeum#425): append-only JSONL,
   ``O_APPEND`` + fsync per line, a tolerant reader that skips a torn
   trailing line. Lives beside it under ``wiki/`` as
   ``_axiom_governance.jsonl`` — governance state is wiki state, not a
   cache artifact.
-- **Flagging is recoverable**, matching the #93 ``KNOWN_TYPES`` / #424
-  ``memory_class`` / #427 inline-PII precedent: a page carrying
+- **Flagging is recoverable**, matching the athenaeum#93 ``KNOWN_TYPES`` / athenaeum#424
+  ``memory_class`` / athenaeum#427 inline-PII precedent: a page carrying
   ``memory_class: axiom`` with no active promotion record is FLAGGED via
   :class:`UserWarning` when routed through this module's
   :func:`warn_if_unbacked_axiom`, not rejected outright — a hard crash here
@@ -56,7 +56,7 @@ Design:
   page, which the repo convention explicitly avoids for this class of
   problem (see :mod:`athenaeum.schemas` module docstring).
 
-Scope (issue #434 point 4): an axiom may carry a ``scope`` (e.g. "applies
+Scope (issue athenaeum#434 point 4): an axiom may carry a ``scope`` (e.g. "applies
 to resume work") narrowing where it is treated as axiomatic. ``scope`` is a
 frontmatter field (see :mod:`athenaeum.schemas`'s ``WikiBase.scope``) that
 round-trips through parse/serialize like ``observed_at`` — this module also
@@ -92,7 +92,7 @@ AXIOM_LEDGER_VERSION = 1
 AXIOM_LEDGER_FILENAME = "_axiom_governance.jsonl"
 
 #: The two recorded actions. Symmetric by design — promotion always has a
-#: demotion path back out (issue #434: "no dogma without an exit").
+#: demotion path back out (issue athenaeum#434: "no dogma without an exit").
 ACTION_PROMOTE = "promote"
 ACTION_DEMOTE = "demote"
 VALID_ACTIONS: frozenset[str] = frozenset({ACTION_PROMOTE, ACTION_DEMOTE})
@@ -114,12 +114,12 @@ def build_axiom_record(
 ) -> dict[str, Any]:
     """Build one promotion/demotion record.
 
-    Required fields (issue #434): ``slug`` (the wiki page's slug),
+    Required fields (issue athenaeum#434): ``slug`` (the wiki page's slug),
     ``action`` (``"promote"`` or ``"demote"``), ``reason`` (why — a human
     sentence, not optional; there is no dogma-by-default), ``by`` (who
     authorized it — a name/handle/identifier), ``at`` (stamped here from
     ``ts`` or now). ``scope`` is optional — the scope the human approved,
-    if any (issue #434 point 4); ``None`` means unscoped (applies
+    if any (issue athenaeum#434 point 4); ``None`` means unscoped (applies
     everywhere the page is consulted).
 
     Raises :class:`ValueError` if ``action`` is not one of
@@ -200,7 +200,7 @@ def record_promotion(
     :func:`athenaeum.provenance.record_merge_provenance`, this raises on
     failure rather than swallowing it: a promotion write silently failing
     would leave a human believing an axiom is on record when it is not,
-    which is the exact silent-mint failure mode #434 exists to close.
+    which is the exact silent-mint failure mode athenaeum#434 exists to close.
     """
     return _record_action(
         wiki_root,
@@ -311,8 +311,8 @@ def warn_if_unbacked_axiom(
     """Flag (via :class:`UserWarning`) a ``memory_class: axiom`` page with no
     active promotion record. Returns ``True`` when it flagged.
 
-    Recoverable, NOT a raise — mirrors the #93 ``KNOWN_TYPES`` / #424
-    ``memory_class`` / #427 inline-PII precedent (see module docstring):
+    Recoverable, NOT a raise — mirrors the athenaeum#93 ``KNOWN_TYPES`` / athenaeum#424
+    ``memory_class`` / athenaeum#427 inline-PII precedent (see module docstring):
     loading an already-existing page must not become a hard failure just
     because governance catches up with it later.
 
@@ -324,7 +324,7 @@ def warn_if_unbacked_axiom(
 
     A page whose ``memory_class`` is anything other than ``"axiom"`` is
     never flagged by this function (nothing to check) — the check is
-    additive to, not a replacement for, #424's ``_validate_memory_class``.
+    additive to, not a replacement for, athenaeum#424's ``_validate_memory_class``.
     """
     if meta.get("memory_class") != "axiom":
         return False
@@ -345,7 +345,7 @@ def warn_if_unbacked_axiom(
     warnings.warn(
         f"memory_class: axiom on {resolved_slug or '(unknown slug)'!r} with no active "
         f"promotion record — axiom assignment must be an explicit, recorded, "
-        f"human-approved act (see #434; use `athenaeum axiom promote`)",
+        f"human-approved act (see athenaeum#434; use `athenaeum axiom promote`)",
         UserWarning,
         stacklevel=2,
     )

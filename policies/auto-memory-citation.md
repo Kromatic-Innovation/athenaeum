@@ -1,6 +1,6 @@
 # Auto-memory citation policy
 
-Status: active (issue #260, slice A of #259)
+Status: active (issue athenaeum#260, slice A of athenaeum#259)
 
 This is the spec the worked example (`~/knowledge` commits `59e6070d1` →
 `9a921d820`, page `wiki/a545c038-tristan-kromer.md`) followed by hand. Slice A
@@ -8,7 +8,7 @@ makes the librarian carry it programmatically.
 
 ## Principle: cite the ultimate source, never the raw file
 
-`raw/auto-memory/` is an **expiring intake queue** (#259), not a permanent
+`raw/auto-memory/` is an **expiring intake queue** (athenaeum#259), not a permanent
 source. When a fact is compiled into the wiki it must cite where the fact
 *ultimately* came from — never the raw `auto-memory/<scope>/<prefix>_<slug>.md`
 filename, which is a transient view that retires on move.
@@ -69,7 +69,7 @@ appendix** for the whole compiled entry — the synthesized body carries no
 inline `[^src-N]` reference markers attached to individual facts. Per-fact
 inline attachment (a `[^name]` marker next to each claim, as in the
 hand-authored worked example) depends on the move-then-retire logic that
-tracks which fact came from which source, and lands in **slice B** (#259).
+tracks which fact came from which source, and lands in **slice B** (athenaeum#259).
 The appendix is the honest slice-A contract: every source is cited on the
 page, even though the per-claim wiring is deferred.
 

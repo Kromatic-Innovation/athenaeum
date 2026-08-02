@@ -1,4 +1,4 @@
-"""Tests for `athenaeum decisions {list,next,count}` (issue #401).
+"""Tests for `athenaeum decisions {list,next,count}` (issue athenaeum#401).
 
 The unified "human decisions needed" list: pending questions AND merges in
 one queue, each tagged by type, oldest first.

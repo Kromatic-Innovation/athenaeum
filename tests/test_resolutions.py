@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for :mod:`athenaeum.resolutions` (issue #126, #81-B).
+"""Tests for :mod:`athenaeum.resolutions` (issue athenaeum#126, athenaeum#81-B).
 
 Covers:
 
@@ -98,7 +98,7 @@ def _detected(
 
 
 # ---------------------------------------------------------------------------
-# Issue #327 — opinion attribution short-circuit
+# Issue athenaeum#327 — opinion attribution short-circuit
 # ---------------------------------------------------------------------------
 
 
@@ -144,7 +144,7 @@ def _write_opinion_member(
 
 
 class TestOpinionAttribution:
-    """The deterministic opinion-attribution short-circuit (#327)."""
+    """The deterministic opinion-attribution short-circuit (athenaeum#327)."""
 
     _ALICE = {"iss": "https://accounts.google.com", "sub": "alice-1", "name": "Alice"}
     _BOB = {"iss": "https://accounts.google.com", "sub": "bob-2", "name": "Bob"}
@@ -216,7 +216,7 @@ class TestOpinionAttribution:
 
     def test_unclassified_non_stance_does_not_fire(self, tmp_path: Path) -> None:
         # Fail-open: no claim_kind AND a plain factual detector verdict → the
-        # guard does not engage (pre-#327 behavior), falling to the fallback.
+        # guard does not engage (pre-athenaeum#327 behavior), falling to the fallback.
         scope = tmp_path / "s"
         a = _write_opinion_member(scope, "a.md", "x", claim_kind="")
         b = _write_opinion_member(scope, "b.md", "y", claim_kind="")
@@ -290,7 +290,7 @@ class TestWorkedExample:
     def test_resolver_call_carries_cache_control_breakpoint(
         self, tmp_path: Path
     ) -> None:
-        """Issue #230: the resolver system prompt is sent as a cacheable block.
+        """Issue athenaeum#230: the resolver system prompt is sent as a cacheable block.
 
         The system prompt is the only stable prefix the resolver has; it is
         marked with an ephemeral ``cache_control`` breakpoint so prompt
@@ -352,7 +352,7 @@ class TestPassThrough:
     def test_transient_giveup_flags_incomplete(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Issue #569 (H6): the resolver giving up after transient-error retries
+        # Issue athenaeum#569 (H6): the resolver giving up after transient-error retries
         # returns the resolver-unavailable fallback flagged ``incomplete`` so
         # merge re-queues the cluster for re-resolution next run.
         from athenaeum._retry import TransientAPIError
@@ -397,7 +397,7 @@ class TestJsonHardening:
         assert proposal.confidence == 0.0
 
     def test_fenced_json_parses(self, tmp_path: Path) -> None:
-        """Issue #219: fence-wrapped resolver output must not fall back.
+        """Issue athenaeum#219: fence-wrapped resolver output must not fall back.
 
         Same nightly-run shape as the detector: ```json fences plus
         trailing prose containing braces ("resolver returned no JSON
@@ -423,7 +423,7 @@ class TestJsonHardening:
         self,
         tmp_path: Path,
     ) -> None:
-        """Issue #219: prose around object + braces inside a string value."""
+        """Issue athenaeum#219: prose around object + braces inside a string value."""
         scope = tmp_path / "scope"
         a = _write_am(scope, "a.md", "x")
         b = _write_am(scope, "b.md", "y")
@@ -476,7 +476,7 @@ class TestJsonHardening:
 
 
 # ---------------------------------------------------------------------------
-# JSON-repair retry (issue #345, WS2)
+# JSON-repair retry (issue athenaeum#345, WS2)
 # ---------------------------------------------------------------------------
 
 
@@ -646,7 +646,7 @@ class TestPerRunCap:
     ) -> None:
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MAX_PER_RUN", raising=False)
         assert resolve_max_per_run(None) == DEFAULT_RESOLVE_MAX_PER_RUN
-        # Lock the concrete default (#187): raised 50 -> 250 so a full-KB
+        # Lock the concrete default (athenaeum#187): raised 50 -> 250 so a full-KB
         # ingest's contradiction volume fits under the resolver budget.
         assert DEFAULT_RESOLVE_MAX_PER_RUN == 250
 
@@ -733,7 +733,7 @@ class TestEnvVarHonored:
 
 class TestPendingQuestionsBackwardCompat:
     def test_parses_entry_without_proposal_block(self, tmp_path: Path) -> None:
-        """Pre-#126 escalation entries (no proposal block) still parse."""
+        """Pre-athenaeum#126 escalation entries (no proposal block) still parse."""
         path = tmp_path / "_pending_questions.md"
         items = [
             EscalationItem(
@@ -751,7 +751,7 @@ class TestPendingQuestionsBackwardCompat:
         assert "Plain description" in parsed[0].description
 
     def test_parses_entry_with_proposal_block(self, tmp_path: Path) -> None:
-        """Post-#126 entries with the proposal block also parse cleanly."""
+        """Post-athenaeum#126 entries with the proposal block also parse cleanly."""
         proposal = ResolutionProposal(
             recommended_winner="b",
             action="keep_b",
@@ -782,7 +782,7 @@ class TestPendingQuestionsBackwardCompat:
         assert parsed[0].conflict_type == "factual"
 
     def test_render_proposal_block_empty_for_fallback(self) -> None:
-        """The fallback proposal renders to "" — keeps non-#126 path stable."""
+        """The fallback proposal renders to "" — keeps non-athenaeum#126 path stable."""
         fallback = ResolutionProposal(
             recommended_winner="neither",
             action="retain_both_with_context",
@@ -793,7 +793,7 @@ class TestPendingQuestionsBackwardCompat:
 
 
 # ---------------------------------------------------------------------------
-# Confirmation-pass suppress verdict (issue #145)
+# Confirmation-pass suppress verdict (issue athenaeum#145)
 # ---------------------------------------------------------------------------
 
 
@@ -830,7 +830,7 @@ class TestSuppressVerdict:
 
 
 # ---------------------------------------------------------------------------
-# Run-level usage threading (issue #239)
+# Run-level usage threading (issue athenaeum#239)
 # ---------------------------------------------------------------------------
 
 

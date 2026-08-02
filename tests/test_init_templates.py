@@ -1,4 +1,4 @@
-"""Tests for `athenaeum init --with-templates` (issue #89)."""
+"""Tests for `athenaeum init --with-templates` (issue athenaeum#89)."""
 
 from __future__ import annotations
 

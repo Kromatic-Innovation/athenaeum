@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Owner-aware intake routing (issue #263, slice D of #259).
+"""Owner-aware intake routing (issue athenaeum#263, slice D of athenaeum#259).
 
 Centralises the rule for where an owner-namespace memory lands when the
 librarian compiles raw intake into the wiki. Person-bio facts fold into the

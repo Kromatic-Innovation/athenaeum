@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Origin-traced transcript verification (issue #260, slice A of #259).
+"""Origin-traced transcript verification (issue athenaeum#260, slice A of athenaeum#259).
 
 The librarian must cite the ULTIMATE source of a wiki fact — the user, an
 external URL, a permanent document, or (when nothing can be established) an
@@ -112,7 +112,7 @@ def _is_user_record(record: object) -> bool:
 def _iter_session_records(scope_dir: Path, session_id: str) -> list[object]:
     """Read the ORIGINATING session's ``{session_id}.jsonl`` into record dicts.
 
-    Issue #260 (Quine S1): the scan is restricted to the originating session's
+    Issue athenaeum#260 (Quine S1): the scan is restricted to the originating session's
     transcript, NOT every ``*.jsonl`` in the scope. Globbing the whole scope
     and then returning the caller-supplied ``session_id`` would let a claim
     that only appears in session B be falsely attributed to session A. One
@@ -207,9 +207,9 @@ def verify_user_stated(
 
 
 # ---------------------------------------------------------------------------
-# Backfill classification (issue #328)
+# Backfill classification (issue athenaeum#328)
 #
-# The #328 ``repair --backfill-sources`` pass re-examines memories whose source
+# The athenaeum#328 ``repair --backfill-sources`` pass re-examines memories whose source
 # was DEFAULTED to ``claude:inferred`` and re-classifies each against its origin
 # transcript. Unlike :func:`verify_user_stated` (which folds agent/tool text
 # into an ``external`` URL check), the backfill needs to tell three channels
@@ -348,10 +348,10 @@ def classify_backfill_claim(
     claim: str = "",
     projects_root: Path | None = None,
 ) -> BackfillClassification:
-    """Classify a defaulted-inferred claim against its origin transcript (#328).
+    """Classify a defaulted-inferred claim against its origin transcript (athenaeum#328).
 
     Reads ONLY the originating session's transcript (one session = one file,
-    per issue #260 Quine S1) and matches ``claim`` as a whitespace-normalized,
+    per issue athenaeum#260 Quine S1) and matches ``claim`` as a whitespace-normalized,
     case-insensitive substring. Precedence: a genuine user message wins over a
     tool-result block; if neither matches, the claim is confirmed ``inferred``.
     A missing transcript yields ``unavailable`` — the caller must SKIP, never

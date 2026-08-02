@@ -1,4 +1,4 @@
-"""Tests for the source-handle registry (issue #453).
+"""Tests for the source-handle registry (issue athenaeum#453).
 
 Covers the two shipped deliverables:
 
@@ -8,7 +8,7 @@ Covers the two shipped deliverables:
 2. **Index builder** — ``athenaeum.registry.build_registry`` /
    ``athenaeum registry`` compiles wiki entity frontmatter into a well-formed
    ``registry.json``, INCLUDING the degenerate zero-populated-handles case
-   (issue #453/#454: the seed lands later and must not gate the builder).
+   (issue athenaeum#453/#454: the seed lands later and must not gate the builder).
 
 All fixtures are synthetic — no client data lives in this public repo.
 """
@@ -129,12 +129,12 @@ def test_handles_roundtrip_through_tier0_passthrough(tmp_path: Path) -> None:
 
 # --------------------------------------------------------------------------
 # Structured seed onto an EXISTING entity survives compile as frontmatter
-# (issue #486 — a re-seed must not be flattened into prose by the LLM tiers)
+# (issue athenaeum#486 — a re-seed must not be flattened into prose by the LLM tiers)
 # --------------------------------------------------------------------------
 
 
 def _cbusa_seed_raw(raw_dir: Path) -> "RawFile":  # noqa: F821 (local import below)
-    """A raw-intake seed carrying #453's source-handle block for CBUSA.
+    """A raw-intake seed carrying athenaeum#453's source-handle block for CBUSA.
 
     Uses the CBUSA shape the live incident (2026-07-27) hit — note ``cbusa.us``,
     not ``.com`` — so this fixture pins the exact case that had to be hand-edited.
@@ -174,7 +174,7 @@ def _run_seed(wiki: Path, raw: "RawFile"):  # noqa: F821
     """Compile ``raw`` through ``process_one`` with a client that MUST NOT run.
 
     A structured source-handle seed onto a known entity is handled by the
-    deterministic Tier-0 upsert (#486); if any LLM call fires, the handles would
+    deterministic Tier-0 upsert (athenaeum#486); if any LLM call fires, the handles would
     be classified into prose — so the mock raises, turning that regression into a
     hard test failure rather than a silent quality loss.
     """
@@ -185,7 +185,7 @@ def _run_seed(wiki: Path, raw: "RawFile"):  # noqa: F821
 
     client = MagicMock()
     client.messages.create.side_effect = AssertionError(
-        "LLM tiers must not run for a structured source-handle seed (#486)"
+        "LLM tiers must not run for a structured source-handle seed (athenaeum#486)"
     )
     result = process_one(
         raw,
@@ -202,8 +202,8 @@ def _run_seed(wiki: Path, raw: "RawFile"):  # noqa: F821
 
 def test_seed_onto_existing_entity_lands_as_frontmatter_not_prose(tmp_path: Path) -> None:
     """A raw-intake source-handle seed for an entity that already exists compiles
-    onto the page's frontmatter (matching #453's schema) — never folded into the
-    body prose — and the registry resolves it end to end (issue #486 acceptance)."""
+    onto the page's frontmatter (matching athenaeum#453's schema) — never folded into the
+    body prose — and the registry resolves it end to end (issue athenaeum#486 acceptance)."""
     wiki = tmp_path / "wiki"
     page = _existing_cbusa_page(wiki)
     raw = _cbusa_seed_raw(tmp_path / "raw" / "contact-wiki")
@@ -228,7 +228,7 @@ def test_seed_onto_existing_entity_lands_as_frontmatter_not_prose(tmp_path: Path
     assert "A client account." in body
     assert "must not become the entity's prose" not in written
 
-    # registry.json resolves the seeded entity end to end (#453 index builder).
+    # registry.json resolves the seeded entity end to end (athenaeum#453 index builder).
     registry = build_registry(wiki)
     assert registry["entities"]["company-cbusa"]["handles"] == {
         "domains": ["cbusa.us"],
@@ -239,7 +239,7 @@ def test_seed_onto_existing_entity_lands_as_frontmatter_not_prose(tmp_path: Path
 
 
 def test_reseeding_the_same_handles_is_a_noop(tmp_path: Path) -> None:
-    """Idempotent re-seed (issue #486 AC #4): seeding the same handles twice must
+    """Idempotent re-seed (issue athenaeum#486 AC #4): seeding the same handles twice must
     not duplicate, re-flatten, or otherwise change the compiled page — the second
     pass is a byte-for-byte no-op and reports no update."""
     wiki = tmp_path / "wiki"
@@ -257,7 +257,7 @@ def test_reseeding_the_same_handles_is_a_noop(tmp_path: Path) -> None:
 
 def test_seed_updates_a_changed_handle_value(tmp_path: Path) -> None:
     """A seed that CHANGES a handle re-lands it as frontmatter (not a stale
-    no-op) while leaving untouched handle keys intact (issue #486)."""
+    no-op) while leaving untouched handle keys intact (issue athenaeum#486)."""
     wiki = tmp_path / "wiki"
     _existing_cbusa_page(wiki)
     _run_seed(wiki, _cbusa_seed_raw(tmp_path / "raw" / "contact-wiki"))
@@ -337,7 +337,7 @@ def test_missing_wiki_dir_is_not_an_error(tmp_path: Path) -> None:
 
 
 def test_unpopulated_entities_produce_empty_registry(tmp_path: Path) -> None:
-    """The #453/#454 degenerate case: entities exist, no handles populated."""
+    """The athenaeum#453/#454 degenerate case: entities exist, no handles populated."""
     wiki = tmp_path / "wiki"
     _write_entity(wiki, "a.md", uid="company-a", extra={"domains": [], "linkedin_url": ""})
     _write_entity(wiki, "b.md", uid="person-b", etype="person", extra={"alt_emails": []})

@@ -1,4 +1,4 @@
-# Recall sidecar golden set (issue #331)
+# Recall sidecar golden set (issue athenaeum#331)
 #
 # Each case:
 #  - ``prompt`` runs through ``query_topics.extract_topics`` (the live LLM
@@ -8,7 +8,7 @@
 #    in the recall output — for the "pass" cases, at least one; for the
 #    "escalate" case, at least three DISTINCT pages so multiple candidates
 #    surface rather than one confident wrong answer.
-#  - ``expected.contradiction_flag`` (bool) is checked against the #325
+#  - ``expected.contradiction_flag`` (bool) is checked against the athenaeum#325
 #    provenance header: when true, the recall output must contain
 #    ``**Status:** contradiction-flagged`` for the expected page.
 

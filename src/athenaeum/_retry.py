@@ -7,7 +7,7 @@ Anthropic API once per tier. When the API is busy it raises transient errors
 ``APIConnectionError``. Without retry, each affected file is logged
 ``Failed to process`` and deferred to the next run; because the same files land
 in the same late position every night, a transient overload window becomes a
-permanent, self-perpetuating backlog (issue #193).
+permanent, self-perpetuating backlog (issue athenaeum#193).
 
 This module wraps a single API call with bounded exponential backoff + jitter
 on exactly those transient classes. Non-transient errors (e.g. 400
@@ -16,7 +16,7 @@ malformed-file case stays fast-fail and distinguishable.
 
 On final give-up the wrapper raises :class:`TransientAPIError`, which callers
 can catch to log a transient-API give-up distinctly from a malformed-file
-failure (acceptance criterion of #193).
+failure (acceptance criterion of athenaeum#193).
 
 Layering: L0 primitive (leaf). May import only stdlib plus the ``anthropic``
 SDK (needed to name its transient exception classes) — no athenaeum-internal

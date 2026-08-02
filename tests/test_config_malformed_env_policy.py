@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #519/#528 (M3): one malformed-env-value policy across the resolvers.
+"""Issue athenaeum#519/#528 (M3): one malformed-env-value policy across the resolvers.
 
 The audit found four incompatible behaviours for a mistyped numeric env var —
 silent fall-through, silent return-default, a silent hard-zero, and a hard

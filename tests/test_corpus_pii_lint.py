@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Corpus-wide PII lint (issue #495).
+"""Corpus-wide PII lint (issue athenaeum#495).
 
-#427's entity-page lint only ever opens entity pages, so a body-text email in
+athenaeum#427's entity-page lint only ever opens entity pages, so a body-text email in
 a ``_``-prefixed queue/index/archive file — or a stray ``.bak`` — sits inside
-``wiki/`` (and is therefore recallable) forever without the lint noticing. #495
+``wiki/`` (and is therefore recallable) forever without the lint noticing. athenaeum#495
 measured 790 such pages, dominated by the corpus's own queue/archive files.
 These tests pin the corpus-wide gate that closes that: :func:`scan_corpus_pii`
 (the library) and ``athenaeum storage lint-pii`` (the CLI, non-zero exit on any
@@ -24,18 +24,18 @@ from athenaeum.pii import iter_corpus_files, scan_corpus_pii
 #: outbound-lint convention; a "found something" signal distinct from 1).
 EXIT_PII_FOUND = 2
 
-# The queue-file shape #495 calls out: full draft bodies embedded in a merge
+# The queue-file shape athenaeum#495 calls out: full draft bodies embedded in a merge
 # archive, every contact datum copied verbatim into a file that lives inside
 # ``wiki/`` with NO ``emails:`` frontmatter for the entity lint to catch.
 _QUEUE_FILE_FIXTURE = """\
 # _pending_merges_archive.md
 
-## Proposed merge #412: Bob Roberts -> Robert Roberts
+## Proposed merge athenaeum#412: Bob Roberts -> Robert Roberts
 
 Draft body (verbatim):
   Bob leads partnerships. Reach him at bob.roberts@example.com or +1-555-0142.
 
-## Proposed merge #418: Carol Vance -> Caroline Vance
+## Proposed merge athenaeum#418: Carol Vance -> Caroline Vance
 
 Draft body (verbatim):
   Carol runs the East region. Cell: (555) 010-9988.
@@ -96,7 +96,7 @@ class TestScanCorpusPii:
         (root / "wiki" / "jane.md").write_text(
             "---\nuid: '1'\nname: Jane\ntype: person\n"
             "linkedin_url: https://linkedin.com/in/jane\n---\n"
-            "Jane leads widgets. See issue #495 and the 2026 plan.\n",
+            "Jane leads widgets. See issue athenaeum#495 and the 2026 plan.\n",
             encoding="utf-8",
         )
         # Durable identifiers (LinkedIn URL, uid, issue/year numbers) must not

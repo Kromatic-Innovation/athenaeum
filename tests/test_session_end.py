@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for `athenaeum session-end` — the change-gated SessionEnd path (#350).
+"""Tests for `athenaeum session-end` — the change-gated SessionEnd path (athenaeum#350).
 
-`session_end` composes the incremental `ingest` engine (#349) with the
-incremental `reindex` (#348) as ONE change-gated command: the cwc SessionEnd
+`session_end` composes the incremental `ingest` engine (athenaeum#349) with the
+incremental `reindex` (athenaeum#348) as ONE change-gated command: the cwc SessionEnd
 hook and the nightly-after-librarian path both invoke it so a memory
 `remember`ed by one agent becomes recallable by every other agent after that
 session ends — closing the ~24h gap where a raw fact sat uncompiled until the
@@ -235,7 +235,7 @@ class TestSessionEndComposition:
     def test_dry_run_previews_without_compile_cluster_or_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A dry-run is a pure manifest-diff preview (#370): NO compile, NO
+        """A dry-run is a pure manifest-diff preview (athenaeum#370): NO compile, NO
         clustering, NO chromadb/ONNX — yet it still reports the deltas."""
         import athenaeum.librarian as lib
 
@@ -279,7 +279,7 @@ class TestSessionEndComposition:
     ) -> None:
         """The PRODUCTION path: ``backend="vector"`` dry-run must stay a pure
         manifest-diff preview — it must NOT construct a chromadb client OR build
-        any embedding function (the ONNX model). This pins the #370 claim on the
+        any embedding function (the ONNX model). This pins the athenaeum#370 claim on the
         configured backend, not just fts5.
         """
         pytest.importorskip("chromadb")
@@ -446,7 +446,7 @@ class TestSessionEndCLI:
 
 
 # ---------------------------------------------------------------------------
-# End-to-end cross-agent recall — the issue #350 acceptance criterion
+# End-to-end cross-agent recall — the issue athenaeum#350 acceptance criterion
 # ---------------------------------------------------------------------------
 
 
@@ -534,7 +534,7 @@ class TestCrossAgentRecall:
 
 
 # ---------------------------------------------------------------------------
-# Reference-determination wiring (issue #711)
+# Reference-determination wiring (issue athenaeum#711)
 # ---------------------------------------------------------------------------
 
 
