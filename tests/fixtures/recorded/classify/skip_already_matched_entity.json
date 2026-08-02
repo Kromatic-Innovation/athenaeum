@@ -1,0 +1,20 @@
+{
+  "case_id": "skip_already_matched_entity",
+  "content_blocks": [
+    {
+      "text": "```json\n[\n  {\n    \"name\": \"Meridian\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Retainer arrangement renewed for another year as confirmed by Priya Shah.\"\n  }\n]\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "classify",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:58a7d6c4287bf8047daea930ea824de67dc45bc6a2f32f8b78728009f124a284",
+  "recorded_at": "2026-08-02T18:05:00.169267+00:00",
+  "response_text": "```json\n[\n  {\n    \"name\": \"Meridian\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"client\"],\n    \"access\": \"internal\",\n    \"observations\": \"Retainer arrangement renewed for another year as confirmed by Priya Shah.\"\n  }\n]\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 623,
+    "output_tokens": 75
+  }
+}

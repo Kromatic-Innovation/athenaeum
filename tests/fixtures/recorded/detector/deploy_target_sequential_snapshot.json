@@ -1,0 +1,20 @@
+{
+  "case_id": "deploy_target_sequential_snapshot",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"detected\": false,\n  \"conflict_type\": null,\n  \"members_involved\": [],\n  \"conflicting_passages\": [],\n  \"rationale\": \"The two snippets describe sequential states with non-overlapping validity windows (March 1\u2013April 30 vs May 1 onwards). Member 1 documents the deployment target during Q1 2026, and Member 2 documents it during Q2 2026 onwards. This represents an intentional change over time, not a contradiction.\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "detector",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:b0b04c9310b3ba09af94758683f850bc8ba94ab4d4e131df82405993005fad8a",
+  "recorded_at": "2026-08-02T18:05:08.852068+00:00",
+  "response_text": "```json\n{\n  \"detected\": false,\n  \"conflict_type\": null,\n  \"members_involved\": [],\n  \"conflicting_passages\": [],\n  \"rationale\": \"The two snippets describe sequential states with non-overlapping validity windows (March 1\u2013April 30 vs May 1 onwards). Member 1 documents the deployment target during Q1 2026, and Member 2 documents it during Q2 2026 onwards. This represents an intentional change over time, not a contradiction.\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 840,
+    "output_tokens": 125
+  }
+}

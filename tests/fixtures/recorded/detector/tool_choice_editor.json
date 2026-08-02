@@ -1,0 +1,20 @@
+{
+  "case_id": "tool_choice_editor",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"scope-tool_choice_editor/feedback_editor_notion.md\", \"scope-tool_choice_editor/feedback_editor_gdocs.md\"],\n  \"conflicting_passages\": [\"The consulting team uses Notion for all client-facing project docs.\", \"All client-facing project docs live in Google Docs, not Notion.\"],\n  \"rationale\": \"The two snippets make directly incompatible claims about where client-facing project docs are stored: one states Notion is used, the other explicitly states Google Docs is used instead of Notion.\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "detector",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:ccadc3bc2b64a01c0f91d0a16235ad605549716eaf129a1e12cff623c66eef2c",
+  "recorded_at": "2026-08-02T18:05:13.940979+00:00",
+  "response_text": "```json\n{\n  \"detected\": true,\n  \"conflict_type\": \"factual\",\n  \"members_involved\": [\"scope-tool_choice_editor/feedback_editor_notion.md\", \"scope-tool_choice_editor/feedback_editor_gdocs.md\"],\n  \"conflicting_passages\": [\"The consulting team uses Notion for all client-facing project docs.\", \"All client-facing project docs live in Google Docs, not Notion.\"],\n  \"rationale\": \"The two snippets make directly incompatible claims about where client-facing project docs are stored: one states Notion is used, the other explicitly states Google Docs is used instead of Notion.\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 799,
+    "output_tokens": 160
+  }
+}

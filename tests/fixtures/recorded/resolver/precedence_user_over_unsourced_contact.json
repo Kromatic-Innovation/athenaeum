@@ -1,0 +1,23 @@
+{
+  "case_id": "precedence_user_over_unsourced_contact",
+  "content_blocks": [
+    {
+      "type": "thinking"
+    },
+    {
+      "text": "{\n  \"recommended_winner\": \"b\",\n  \"action\": \"correct_b\",\n  \"rationale\": \"FACT/identity conflict about a single attribute with no dated snapshots, but it IS confidently resolvable by precedence \u2014 a user-stated, directly-confirmed contact outranks an unsourced inferred name, so the unsourced claim is erroneous rather than valid-then-replaced history.\",\n  \"confidence\": 0.89,\n  \"source_precedence_used\": [\n    \"b:user:session-2026-05-12 > a:unsourced\"\n  ]\n}",
+      "type": "text"
+    }
+  ],
+  "layer": "resolver",
+  "model": "claude-opus-5",
+  "prompt_hash": "sha256:2d6249c014c8f3961036c81fee1519ef671a413b21f83fa950d380860ca7dfd4",
+  "recorded_at": "2026-08-02T18:06:01.350315+00:00",
+  "response_text": "{\n  \"recommended_winner\": \"b\",\n  \"action\": \"correct_b\",\n  \"rationale\": \"FACT/identity conflict about a single attribute with no dated snapshots, but it IS confidently resolvable by precedence \u2014 a user-stated, directly-confirmed contact outranks an unsourced inferred name, so the unsourced claim is erroneous rather than valid-then-replaced history.\",\n  \"confidence\": 0.89,\n  \"source_precedence_used\": [\n    \"b:user:session-2026-05-12 > a:unsourced\"\n  ]\n}",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 4390,
+    "input_tokens": 343,
+    "output_tokens": 740
+  }
+}

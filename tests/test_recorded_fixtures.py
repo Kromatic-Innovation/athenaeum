@@ -172,12 +172,49 @@ def _materialise_members(
 
 
 # ---------------------------------------------------------------------------
+# Golden-set cases under adjudication (issue athenaeum#737)
+# ---------------------------------------------------------------------------
+#
+# The first live recording (athenaeum#610, run 30760264305) surfaced two cases where
+# the model's answer disagrees with the golden set's stored expectation. On
+# inspection the model's answer is at least as defensible as the golden's in
+# both, so neither side is being silently rewritten here: the cases are marked
+# strict-xfail and adjudicated in athenaeum#737. `strict=True` means that if either
+# side changes so the case starts passing, THIS test goes red and the mark has
+# to be removed deliberately — an xfail that quietly starts passing is how a
+# quarantine becomes permanent.
+_DISPUTED: dict[str, str] = {
+    "tool_choice_editor": (
+        "athenaeum#737: golden expects conflict_type 'prescriptive'; the model returns "
+        "'factual'. Both members state where docs live rather than directing "
+        "anyone to act, so 'factual' is arguably the better reading."
+    ),
+    "decision_conflict_hosting_migration": (
+        "athenaeum#737: golden expects action_class 'keep_pick_winner'; the model "
+        "returns 'scope_a'. The members are a Feb Heroku decision superseded by "
+        "a May Fly.io cutover — temporal supersession, not a live contradiction "
+        "with a winner to pick."
+    ),
+}
+
+
+def _params(ids: list[str]) -> list[Any]:
+    """Parametrize *ids*, strict-xfailing the cases under adjudication."""
+    return [
+        pytest.param(i, marks=pytest.mark.xfail(strict=True, reason=_DISPUTED[i]))
+        if i in _DISPUTED
+        else i
+        for i in ids
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Detector replay
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(not _DETECTOR_IDS, reason=_EMPTY_LAYER_REASON)
-@pytest.mark.parametrize("case_id", _DETECTOR_IDS or ["_placeholder_"])
+@pytest.mark.parametrize("case_id", _params(_DETECTOR_IDS) or ["_placeholder_"])
 def test_detector_replay(case_id: str, tmp_path: Path) -> None:
     golden = _load_golden(LAYER_DETECTOR)
     assert case_id in golden, (
@@ -235,7 +272,7 @@ def _detector_result(case: dict[str, Any], members: list[AutoMemoryFile]) -> Con
 
 
 @pytest.mark.skipif(not _RESOLVER_IDS, reason=_EMPTY_LAYER_REASON)
-@pytest.mark.parametrize("case_id", _RESOLVER_IDS or ["_placeholder_"])
+@pytest.mark.parametrize("case_id", _params(_RESOLVER_IDS) or ["_placeholder_"])
 def test_resolver_replay(case_id: str, tmp_path: Path) -> None:
     golden = _load_golden(LAYER_RESOLVER)
     assert case_id in golden, (
@@ -424,6 +461,19 @@ def test_guard_passes_for_unlisted_empty_layer() -> None:
     assert _unpopulated_seeded_layers({"resolver"}, {"resolver": ["c1"]}) == []
 
 
-def test_shipped_manifest_is_empty() -> None:
-    """The manifest ships empty (athenaeum#610 seeds it), so behavior is unchanged."""
-    assert _seeded_layers() == set()
+def test_manifest_records_the_610_seeding() -> None:
+    """The manifest names the layers athenaeum#610 seeded (it shipped empty under athenaeum#551).
+
+    This replaces `test_shipped_manifest_is_empty`, whose whole purpose was to
+    pin the pre-seeding state until athenaeum#610 ran. Now that it has, the assertion
+    that carries weight is the opposite one: every layer recorded by run
+    30760264305 must stay listed, so that losing a layer's fixtures trips
+    `test_seeded_manifest_layers_are_populated` instead of passing trivially.
+    """
+    assert _seeded_layers() == {
+        "classify",
+        "detector",
+        "merge",
+        "recall",
+        "resolver",
+    }

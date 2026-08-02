@@ -1,0 +1,20 @@
+{
+  "case_id": "principled_tension_escalates",
+  "content_blocks": [
+    {
+      "text": "ESCALATE: A partner has proposed a policy change (sharing engagement details between joint-venture-partner clients) that directly conflicts with the firm's stated core value of never disclosing one client's engagement details to another client \"under any circumstances.\" This is a principled/values-level tension, not a factual discrepancy or contextual preference, and requires human review before the page is updated.",
+      "type": "text"
+    }
+  ],
+  "layer": "merge",
+  "model": "claude-sonnet-5",
+  "prompt_hash": "sha256:9bb2a852be88b559f8944c68f8df674131c24853ede2586b701aa980569ba948",
+  "recorded_at": "2026-08-02T18:05:28.132874+00:00",
+  "response_text": "ESCALATE: A partner has proposed a policy change (sharing engagement details between joint-venture-partner clients) that directly conflicts with the firm's stated core value of never disclosing one client's engagement details to another client \"under any circumstances.\" This is a principled/values-level tension, not a factual discrepancy or contextual preference, and requires human review before the page is updated.",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 1531,
+    "output_tokens": 120
+  }
+}

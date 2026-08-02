@@ -1,0 +1,20 @@
+{
+  "case_id": "pto_policy_restatement",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"detected\": false,\n  \"conflict_type\": null,\n  \"members_involved\": [],\n  \"conflicting_passages\": [],\n  \"rationale\": \"Both snippets state the same policy: 25 days of PTO annually plus bank holidays as additional days. They use different wording but convey identical information.\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "detector",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:5ffff4e1bd9cb901dd033a286cd1baa8eb68e016ef7ef93107c2d3e2eaada424",
+  "recorded_at": "2026-08-02T18:05:18.262143+00:00",
+  "response_text": "```json\n{\n  \"detected\": false,\n  \"conflict_type\": null,\n  \"members_involved\": [],\n  \"conflicting_passages\": [],\n  \"rationale\": \"Both snippets state the same policy: 25 days of PTO annually plus bank holidays as additional days. They use different wording but convey identical information.\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 811,
+    "output_tokens": 85
+  }
+}
