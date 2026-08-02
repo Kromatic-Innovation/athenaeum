@@ -591,13 +591,25 @@ def tier0_handle_upsert(
     onto a known entity lands as frontmatter, exactly like a first seed does
     through tier0 passthrough.
 
+    Entity resolution (issue #692): a seed rarely knows the wiki's internal
+    ``uid`` — an agent or #454 source-handle seed names the company but supplies
+    only ``type``/``name`` plus the handle keys. When the raw declares a ``uid``
+    it is used directly (the #486 path); when it does not, the EXISTING entity is
+    resolved deterministically by name/alias via the index, and the handles are
+    upserted onto that page. Before #692 the uid-less shape fell through to the
+    LLM tiers, which flattened the handle block into the page body as prose and
+    lost the #453 schema — the bug this closes.
+
     Eligibility (ALL required, else return ``None`` so the caller falls through
     to Tier 1/2/3 with today's behaviour intact): frontmatter parses;
-    ``uid``/``type``/``name`` are non-empty; ``type`` is in the allowlist; the
-    uid ALREADY exists in the index (the complement of ``tier0_passthrough``);
-    and the raw carries at least one *populated* source handle. A pre-structured
-    raw that carries no source handle (an ordinary note re-intake) is left to the
-    LLM tiers untouched.
+    ``type``/``name`` are non-empty; ``type`` is in the allowlist; the raw
+    carries at least one *populated* source handle; and the entity ALREADY
+    exists — resolved by ``uid`` when the raw declares one, otherwise by
+    name/alias (matching an entity-format page of the same ``type``). A
+    pre-structured raw that carries no source handle (an ordinary note re-intake)
+    is left to the LLM tiers untouched. A handle seed that resolves to no
+    existing entity (or a cross-type / non-entity page) is logged at WARNING and
+    declined — it fails loudly rather than silently degrading to body prose.
 
     Idempotent (AC #4 — "re-running the same seed is a no-op"): the write is
     gated on an actual source-handle delta. When the seed introduces no new or
@@ -612,14 +624,11 @@ def tier0_handle_upsert(
     uid = str(meta.get("uid", "") or "").strip()
     etype = str(meta.get("type", "") or "").strip()
     name = str(meta.get("name", "") or "").strip()
-    if not uid or not etype or not name:
+    # type + name are always required; uid is resolved by name below when the
+    # seed does not self-declare one (issue #692).
+    if not etype or not name:
         return None
     if etype not in valid_types:
-        return None
-
-    existing_path = index.get_by_uid(uid)
-    if existing_path is None or not existing_path.exists():
-        # New entity — tier0_passthrough owns it; nothing to upsert onto.
         return None
 
     incoming = collect_handles(meta)
@@ -627,8 +636,70 @@ def tier0_handle_upsert(
         # Not a handle seed — leave it to the LLM tiers unchanged.
         return None
 
+    if uid:
+        existing_path = index.get_by_uid(uid)
+        if existing_path is None or not existing_path.exists():
+            # New entity — tier0_passthrough owns it; nothing to upsert onto.
+            return None
+    else:
+        # #692: a source-handle seed that carries the handle frontmatter +
+        # ``type``/``name`` but NO internal ``uid`` (the normal shape — an agent
+        # or seed naming a company does not know its wiki uid). Before this, such
+        # a raw fell through to the LLM tiers and its handle block was flattened
+        # into the page BODY as prose, silently losing the #453 schema. Resolve
+        # the EXISTING entity deterministically by name/alias and upsert onto it,
+        # exactly as the uid-bearing path does.
+        resolved = index.lookup(name)
+        if resolved is None:
+            # Names no existing entity — this deterministic path only UPSERTS
+            # onto an existing page (creating a new entity is tier0_passthrough's
+            # job, which requires a uid). Fail LOUDLY rather than let the handle
+            # block degrade to prose downstream (the actual #692 defect).
+            log.warning(
+                "  T0 handle-upsert: seed for %r (%s) carries source handles "
+                "%s but names no existing entity and declares no uid — not "
+                "placed as frontmatter; fix the seed's name/uid",
+                name,
+                etype,
+                sorted(incoming),
+            )
+            return None
+        resolved_uid, existing_path = resolved
+        if (
+            not resolved_uid
+            or not existing_path.exists()
+            or not index.has_entity_format(existing_path)
+        ):
+            # Matched a name-only (non-entity-format) page — no uid to key on and
+            # not a source-handle target. Surface it, then leave it unchanged.
+            log.warning(
+                "  T0 handle-upsert: seed for %r (%s) matched a non-entity page "
+                "%s — source handles %s not placed; fix the seed's name/uid",
+                name,
+                etype,
+                existing_path.name,
+                sorted(incoming),
+            )
+            return None
+        uid = resolved_uid
+
     existing_meta, existing_body = parse_frontmatter(existing_path.read_text(encoding="utf-8"))
     if not existing_meta:
+        return None
+
+    # Guard against a cross-type upsert: a name can resolve to a same-named
+    # entity of a different type. Only upsert when the existing page's type
+    # matches the seed's declared type (a uid-bearing seed is trusted as before).
+    existing_type = str(existing_meta.get("type", "") or "").strip()
+    if existing_type and existing_type != etype:
+        log.warning(
+            "  T0 handle-upsert: seed for %r declares type %s but the matched "
+            "page %s is type %s — source handles not placed",
+            name,
+            etype,
+            existing_path.name,
+            existing_type,
+        )
         return None
 
     # Merge the seed's populated handle keys onto the existing frontmatter, in
