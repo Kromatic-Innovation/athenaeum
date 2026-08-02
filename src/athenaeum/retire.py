@@ -61,6 +61,7 @@ import logging
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import load_config, resolve_extra_intake_roots
@@ -374,6 +375,8 @@ def _resolve_members(entry: MergedWikiEntry, extra_roots: list[Path]) -> list[Pa
 
 def _plan_index_sweep(
     retiring: list[tuple[MergedWikiEntry, list[Path]]],
+    *,
+    require_absent: bool,
 ) -> dict[Path, tuple[str, list[str]]]:
     """Plan the ``MEMORY.md`` rewrite for each scope this pass is retiring (#388).
 
@@ -383,6 +386,24 @@ def _plan_index_sweep(
     from an earlier run is left for the ``prune-index`` backfill so a nightly
     retire commit stays scoped to its own deletions). Scopes with no index, an
     unreadable index, or nothing to drop are omitted.
+
+    Fail-closed on ``require_absent`` (issue #682). ``MEMORY.md`` is loaded into
+    **every** Claude Code session and is written in place (a scope's raw index
+    is hardlinked to the operator's live ``~/.claude/projects/<scope>/memory/
+    MEMORY.md``), so dropping a pointer whose target still exists silently
+    deletes a live memory. A name-only match (``retired_names.__contains__``)
+    proves *intent to retire*, not *absence*: a member can be in the retired set
+    while its file survives on disk (a hardlink git rm could not unlink, a member
+    restored between passes, or a name that resolved to a still-present sibling).
+    So on the real write path we require ``require_absent=True``: a pointer is
+    dropped ONLY when its target was retired this pass **and** the sibling file
+    is genuinely gone from disk. If the file is present — for any reason — the
+    pointer is kept. A false negative (a truly dangling pointer survives one
+    pass) is trivially recoverable by the ``prune-index`` backfill; a false
+    positive silently removes a memory. Callers MUST pass ``require_absent=True``
+    *after* the ``git rm`` so on-disk absence reflects the deletion. The dry-run
+    reporter passes ``require_absent=False`` to *predict* what a real run would
+    sweep (nothing is deleted on a dry run, so absence cannot yet be observed).
     """
     retired_by_scope: dict[Path, set[str]] = {}
     for _entry, members in retiring:
@@ -398,7 +419,16 @@ def _plan_index_sweep(
             text = index_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        new_text, dropped = rewrite_index(text, retired_names.__contains__)
+        should_drop: Callable[[str], bool]
+        if require_absent:
+            # Fail closed (#682): retired this pass AND now absent on disk. Both
+            # captured names are used immediately (passed to rewrite_index on the
+            # next line), so closing over the loop variables is safe.
+            def should_drop(target: str) -> bool:
+                return target in retired_names and not (scope_dir / target).exists()
+        else:
+            should_drop = retired_names.__contains__
+        new_text, dropped = rewrite_index(text, should_drop)
         if dropped:
             plan[index_path] = (new_text, dropped)
     return plan
@@ -523,8 +553,12 @@ def run_retire_pass(
     if dry_run:
         # Issue #388: report the index pointers a real run WOULD sweep, without
         # touching disk. Computed from the retired member set, so it needs no
-        # deletion to have happened.
-        for index_path, (_new_text, dropped) in _plan_index_sweep(retiring).items():
+        # deletion to have happened — ``require_absent=False`` predicts the
+        # sweep because a dry run deletes nothing, so on-disk absence (the real
+        # run's #682 fail-closed guard) cannot yet be observed.
+        for index_path, (_new_text, dropped) in _plan_index_sweep(
+            retiring, require_absent=False
+        ).items():
             report.index_pruned.extend(
                 f"{index_path.parent.name}/{t}" for t in dropped
             )
@@ -553,15 +587,28 @@ def run_retire_pass(
         _log_report(report)
         return report
 
-    # Commit A — provenance snapshot. Commits ONLY the raw intake about to be
+    # Commit A — provenance snapshot. Commits the raw intake about to be
     # retired (scoped add, Quine C2) so every file we are about to git rm is
-    # recoverable from history.
+    # recoverable from history. Issue #682: ALSO snapshot each affected scope's
+    # ``MEMORY.md`` BEFORE it is rewritten, so the pre-prune index bytes are a
+    # committed, git-recoverable backup taken strictly before any modification.
+    # This is a genuine "back up before write" for a file that — because the raw
+    # index is hardlinked to the operator's live ``~/.claude/projects/<scope>/
+    # memory/MEMORY.md`` — is a live Claude Code runtime file with no staging.
+    index_backup_rel: list[str] = []
+    for _e, members in retiring:
+        for m in members:
+            idx = m.parent / INDEX_FILENAME
+            if idx.is_file():
+                rel = str(idx.resolve().relative_to(kr))
+                if rel not in index_backup_rel:
+                    index_backup_rel.append(rel)
     snapshot_rel = [
         str(m.resolve().relative_to(kr)) for _e, members in retiring for m in members
     ]
     _commit_paths_if_staged(
         knowledge_root,
-        snapshot_rel,
+        snapshot_rel + index_backup_rel,
         "librarian: auto-memory raw intake provenance snapshot",
     )
 
@@ -574,27 +621,35 @@ def run_retire_pass(
         atomic_write_text(page, render_merged_entry(entry))
         wiki_rel.append(str(page.resolve().relative_to(kr)))
 
-    # Issue #388: rewrite each retired member's sibling ``MEMORY.md`` in the
-    # SAME commit as the deletion, so the always-on index never keeps a pointer
-    # to a file this pass removed. Conservative like the rest of the pass: only
-    # pointers to members retired THIS run are dropped.
-    index_rel: list[str] = []
-    for index_path, (new_text, dropped) in _plan_index_sweep(retiring).items():
-        atomic_write_text(index_path, new_text)
-        index_rel.append(str(index_path.resolve().relative_to(kr)))
-        report.index_pruned.extend(f"{index_path.parent.name}/{t}" for t in dropped)
-        log.info(
-            "retire: pruned %d dangling %s pointer(s) in %s",
-            len(dropped),
-            INDEX_FILENAME,
-            index_path.parent.name,
-        )
-
-    # Retire: git rm the moved raw files (staged deletion, recoverable).
+    # Retire: git rm the moved raw files (staged deletion, recoverable). Issue
+    # #682: this happens BEFORE the index sweep so the sweep's fail-closed
+    # absence check (below) observes the post-deletion disk state — a member
+    # whose file genuinely went away is pruned; one that survived is kept.
     del_rel = [
         str(m.resolve().relative_to(kr)) for _e, members in retiring for m in members
     ]
     _git(knowledge_root, "rm", "--quiet", "--", *del_rel)
+
+    # Issue #388/#682: rewrite each retired member's sibling ``MEMORY.md`` in the
+    # SAME commit as the deletion, so the always-on index never keeps a pointer
+    # to a file this pass removed. Fail closed (#682): a pointer is dropped ONLY
+    # when its target was retired this pass AND is now genuinely absent on disk
+    # — a present target (e.g. a hardlinked live memory git rm could not unlink)
+    # keeps its pointer, and every drop is logged BY NAME, not merely counted.
+    index_rel: list[str] = []
+    for index_path, (new_text, dropped) in _plan_index_sweep(
+        retiring, require_absent=True
+    ).items():
+        atomic_write_text(index_path, new_text)
+        index_rel.append(str(index_path.resolve().relative_to(kr)))
+        report.index_pruned.extend(f"{index_path.parent.name}/{t}" for t in dropped)
+        for target in dropped:
+            log.info(
+                "retire: pruned %s pointer %s/%s (target absent on disk)",
+                INDEX_FILENAME,
+                index_path.parent.name,
+                target,
+            )
 
     # Commit B — wiki updates + index rewrites + raw deletions TOGETHER (single
     # recoverable commit). Scoped staging (Quine C2): the deletions are already
