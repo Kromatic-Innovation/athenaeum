@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Push-precision + coverage baseline instrumentation (v6 memory-model MVP
+  (a), #711).** The v6 epic's definition of done requires push precision
+  ("referenced / pushed" per session) to improve over a baseline recorded
+  BEFORE any later slice changes what `recall` pushes — this is that
+  instrument, shipped first so the number starts accruing now. A **push
+  record** (session id, timestamp, pushed page/claim ids, tier, matched
+  scope, estimated token cost — no content, no personal data, person ids as
+  the opaque `uid`, never a name-derived filename slug) is written every time
+  the `recall` MCP tool renders a hit into a session
+  (`mcp_server._recall_via_backend`'s block-assembly loop), to a new
+  append-only `~/.cache/athenaeum/_push_records.jsonl` — durable, outside the
+  wiki corpus, so it can never become a claim or enter the embedded index.
+  At `session_end` (the SessionEnd-hook / nightly-after-librarian path), a
+  **reference-determination** pass scans the originating session's transcript
+  for each pushed id and records which were actually referenced afterward
+  (`~/.cache/athenaeum/_push_references.jsonl`), computing
+  `precision = referenced / pushed`. New CLI `athenaeum push-metrics
+  {baseline,coverage-audit}`: `baseline` computes precision + coverage over a
+  stated window and idempotently writes a dated snapshot into a new committed
+  `docs/memory-model-measurements.md` (`docs/memory-model.md`, the design
+  lock, is never touched); `coverage-audit` samples N sessions into a
+  worksheet **file** listing each session's pushed set plus candidate ids
+  that were NOT pushed, for a human reviewer to mark relevant-but-missed —
+  the coverage-floor baseline a human must supply, never fabricated.
+  Instrumentation is **on by default** (passive measurement) with a new
+  `push_metrics.enabled` / `ATHENAEUM_PUSH_METRICS_ENABLED` config key to
+  disable it; confirmed byte-identical recall output with instrumentation on
+  vs off.
+
 - **Prompt + schema-fragment byte attribution on the run summary and `status` (#567).**
   A classify/create regression could not be attributed to *which* bytes a run
   used — the operator's (possibly edited) schema fragments vs. the shipped
