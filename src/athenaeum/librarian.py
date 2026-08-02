@@ -2401,14 +2401,27 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
     # Skipped entirely when retire is disabled (#259 opt-out).
     if ctx.retire:
         _retire_start = time.monotonic()
-        _run_retire(
+        _retire_report = _run_retire(
             ctx.merged_entries,
             ctx.knowledge_root,
             config=ctx.config,
             dry_run=ctx.dry_run,
             projects_root=ctx.projects_root,
         )
-        ctx.run_profile.append(("retire", time.monotonic() - _retire_start, {}))
+        # Issue #682: surface MEMORY.md pointer pruning in the run-summary.
+        ctx.run_profile.append(
+            (
+                "retire",
+                time.monotonic() - _retire_start,
+                {
+                    "index_pruned": (
+                        len(_retire_report.index_pruned)
+                        if _retire_report is not None
+                        else 0
+                    )
+                },
+            )
+        )
     # Issue #188: self-heal proposal-less open questions (a prior
     # budget-exhausted / offline run leaves raw blocks; re-resolve them
     # now that this run has budget). No-op on dry-run / offline.
@@ -3175,7 +3188,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     # (#259 opt-out), and a no-op without a git repo.
     if ctx.retire and not ctx.cluster_only:
         _retire_start = time.monotonic()  # issue #464
-        _run_retire(
+        _retire_report = _run_retire(
             ctx.merged_entries,
             ctx.knowledge_root,
             config=ctx.config,
@@ -3183,7 +3196,20 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             projects_root=ctx.projects_root,
         )
         ctx.run_profile.append(
-            ("retire", time.monotonic() - _retire_start, {})
+            (
+                "retire",
+                time.monotonic() - _retire_start,
+                # Issue #682: surface MEMORY.md pointer pruning in the
+                # run-summary so a pruning event is visible in the same
+                # greppable line as every other phase result.
+                {
+                    "index_pruned": (
+                        len(_retire_report.index_pruned)
+                        if _retire_report is not None
+                        else 0
+                    )
+                },
+            )
         )
 
     # Issue #188: re-resolve open, proposal-less pending questions
