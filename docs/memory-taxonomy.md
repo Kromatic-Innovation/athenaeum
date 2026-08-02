@@ -1,4 +1,4 @@
-# Memory Taxonomy — Data Model (issue #424)
+# Memory Taxonomy — Data Model (issue athenaeum#424)
 
 > **Status:** data model + validation only. This document locks the shape;
 > enforcement of the merge-vs-cite semantics described in §3 is
@@ -51,14 +51,14 @@ them.
 - One of the 7 `MEMORY_CLASSES` values → accepted silently.
 - A non-empty value **outside** the 7 → **flagged**: `WikiBase`'s field
   validator emits a `UserWarning` (matching the existing `type:` /
-  `KNOWN_TYPES` precedent from issue #93) — recoverable, not a hard raise.
+  `KNOWN_TYPES` precedent from issue athenaeum#93) — recoverable, not a hard raise.
 - **Absent** `memory_class` → **tolerated**. Legacy/untyped pages must not
   fail to validate. `athenaeum.schemas.is_untyped_memory_class` and
   `athenaeum._lint.lint_untyped_memory_class` are the predicates a
   lint/report pass calls to surface these pages as "untyped" rather than
   letting them disappear silently.
 
-## 3. Merge-vs-cite semantics (documented here; enforcement shipped in #433)
+## 3. Merge-vs-cite semantics (documented here; enforcement shipped in athenaeum#433)
 
 The reason `memory_class` exists as a distinct axis is that different
 classes should be reconciled DIFFERENTLY when new, possibly-overlapping
@@ -83,15 +83,15 @@ memory arrives:
 This is a **should-merge-here / must-cite-there** rule pair, not a single
 merge algorithm — enforcing it (routing a resolver decision through the
 right one of the two paths depending on whether the pair being reconciled
-shares a `memory_class`) was explicitly out of scope for THIS issue (#424)
-and shipped separately as #433: `src/athenaeum/merge_type_gate.py`
+shares a `memory_class`) was explicitly out of scope for THIS issue (athenaeum#424)
+and shipped separately as athenaeum#433: `src/athenaeum/merge_type_gate.py`
 (`cross_class_precheck` rejects cross-class merge proposals at proposal
 time; `build_cite_proposal` builds the non-destructive cite path in their
 place), consumed by `athenaeum.merge` and `athenaeum.wiki_dedupe`. Nothing
-in the merge/recall/embed code paths changed as part of #424 itself — the
-routing logic landed in the follow-up #433 change.
+in the merge/recall/embed code paths changed as part of athenaeum#424 itself — the
+routing logic landed in the follow-up athenaeum#433 change.
 
-## 4. Inference blocks — schema + parser (retraction machinery shipped in #433)
+## 4. Inference blocks — schema + parser (retraction machinery shipped in athenaeum#433)
 
 A `memory_class: fact` page may derive some of its claims from OTHER fact
 pages rather than from direct observation. Such a derived claim is written
@@ -112,14 +112,14 @@ Each block parses to an addressable unit (`athenaeum.inference_blocks.InferenceB
 with a stable content-derived `id`, exposing its `basis` list and
 `confidence` value — "addressable" so a retraction pass can name a specific
 inference block and remove it when one of its `basis` facts is retracted.
-This issue (#424) ships only the schema + parser
+This issue (athenaeum#424) ships only the schema + parser
 (`athenaeum.inference_blocks.parse_inference_blocks`); the retraction
-primitive shipped in the follow-up #433:
+primitive shipped in the follow-up athenaeum#433:
 `athenaeum.inference_blocks.retract_inference_block` removes a targeted
 `## Inference` block by `id` as a pure text transform (byte-identical
 elsewhere, no basis re-evaluation, no cascading). Cross-record cascading —
 notifying dependent merges when a retraction removes a fact a merge relied
-on — is separately shipped in issue #435's `src/athenaeum/retraction_cascade.py`,
+on — is separately shipped in issue athenaeum#435's `src/athenaeum/retraction_cascade.py`,
 which emits a human-review item (never an auto-unmerge) naming the
 dependent merge, the retracted observation, and the retraction reason.
 
@@ -136,7 +136,7 @@ observed**, not necessarily **currently true** — headcount changes.
 
 - `created` / `updated` — write-time bookkeeping (when the PAGE was
   written/touched), and
-- `valid_from` / `valid_until` — the claim-VALIDITY window (issue #308;
+- `valid_from` / `valid_until` — the claim-VALIDITY window (issue athenaeum#308;
   when the resolver or a human has explicitly bounded how long a claim
   holds).
 
@@ -149,17 +149,17 @@ reads it back as a `date` (fail-open: absent/unparseable → `None`, mirroring
 
 No reader in this issue treats a stale `observed_at` as grounds to
 deactivate a fact — that policy decision, if wanted, belongs to a future
-consumer issue (most naturally #433), not this data-model issue.
+consumer issue (most naturally athenaeum#433), not this data-model issue.
 
-## 6. Explicitly out of scope for #424
+## 6. Explicitly out of scope for athenaeum#424
 
-- Any change to `recall`, `merge`, or `embed` behavior as PART OF #424 itself.
-- Enforcing merge-vs-cite semantics (§3) — out of scope for #424, shipped
-  separately in #433 (`src/athenaeum/merge_type_gate.py`).
-- Inference-block retraction machinery (§4) — out of scope for #424, shipped
-  separately in #433 (`athenaeum.inference_blocks.retract_inference_block`)
-  and #435 (`src/athenaeum/retraction_cascade.py`).
+- Any change to `recall`, `merge`, or `embed` behavior as PART OF athenaeum#424 itself.
+- Enforcing merge-vs-cite semantics (§3) — out of scope for athenaeum#424, shipped
+  separately in athenaeum#433 (`src/athenaeum/merge_type_gate.py`).
+- Inference-block retraction machinery (§4) — out of scope for athenaeum#424, shipped
+  separately in athenaeum#433 (`athenaeum.inference_blocks.retract_inference_block`)
+  and athenaeum#435 (`src/athenaeum/retraction_cascade.py`).
 - Axiom governance (elevated review/approval for the `axiom` class) — shipped
-  separately in #434 (`src/athenaeum/axiom_governance.py`; see that module's
+  separately in athenaeum#434 (`src/athenaeum/axiom_governance.py`; see that module's
   docstring for the promotion/demotion ledger + assignment-audit design).
-- Tier (compile pipeline) usage of `memory_class` — #423 / #432.
+- Tier (compile pipeline) usage of `memory_class` — athenaeum#423 / athenaeum#432.

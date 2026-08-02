@@ -1,4 +1,4 @@
-"""Tests for compile-as-of (issue #359, §8.5).
+"""Tests for compile-as-of (issue athenaeum#359, §8.5).
 
 compile-as-of RE-RUNS the deterministic C3 blend
 (:func:`athenaeum.merge.merge_clusters_to_wiki`) with an ``as_of`` date

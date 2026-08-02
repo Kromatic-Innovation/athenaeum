@@ -42,8 +42,8 @@ Two trees, one bridged by a symlink per scope:
 ```
 
 `<scope>` is whatever Claude Code calls the project — typically the
-flattened working-directory path (e.g. `-Users-alice-Code` for work started
-in `/Users/alice/Code`). You can have many scopes; symlink each
+flattened working-directory path (e.g. `-Users-you-Code` for work started
+in `/Users/<you>/Code`). You can have many scopes; symlink each
 independently.
 
 Athenaeum discovers auto-memory files under any `raw/auto-memory/<scope>/`

@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Merge (Tier-3 WRITE/MERGE) live-API eval (issue #552).
+"""Merge (Tier-3 WRITE/MERGE) live-API eval (issue athenaeum#552).
 
 Runs :func:`athenaeum.tiers.tier3_merge` against every case in
 ``tests/evals/data/merge/cases.yaml`` using a real Anthropic call (the same
 WRITE model tier3_merge uses in production, ``DEFAULT_WRITE_MODEL``).
 
-This covers the "WRITE / MERGE" gap named in issue #552's inventory:
+This covers the "WRITE / MERGE" gap named in issue athenaeum#552's inventory:
 tier3_merge's primary contract is a JSON list of ANCHORED EDIT OPERATIONS
 (``replace`` / ``insert_after`` / ``append_section``) applied deterministically
 to the existing page body, with a text-prefix ``ESCALATE:`` protocol for
 principled-tension conflicts, and a full-echo fallback for any unparseable /
-truncated / inapplicable patch response (issue #469/#496). Existing unit
+truncated / inapplicable patch response (issue athenaeum#469/#496). Existing unit
 tests (``tests/test_tiers.py``) prove the PARSER handles canned responses of
 each shape; they cannot show whether the live model still tends to (a) emit
 an appliable ops list for a genuinely new fact, (b) fold a re-confirming
-observation into an existing bullet instead of duplicating it (#297 dedup
+observation into an existing bullet instead of duplicating it (athenaeum#297 dedup
 policy), (c) avoid escalating a merely-factual contradiction, and (d) DOES
 escalate a genuinely principled one. That's exactly the "output shape / a
 scoring judgment a unit test can't pin" gap this eval fills.

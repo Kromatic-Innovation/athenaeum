@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Batch API execution for the librarian's tier-2/tier-3 phases (issue #236) — L4 domain/pipeline.
+"""Batch API execution for the librarian's tier-2/tier-3 phases (issue
+athenaeum#236) — L4 domain/pipeline.
 
 Contract: an alternate, opt-in EXECUTION STRATEGY for the same tier-2/
 tier-3 work ``librarian.py``'s synchronous loop performs — same tier
@@ -38,7 +39,7 @@ Known divergences from the synchronous loop (deliberate, documented):
 - Tier 0/1 run for the whole intake window up front, so an entity created
   from file A this run is not Tier-1-matchable by a later file B in the
   same run. The synchronous loop registers creations incrementally.
-- The run-level API budget (#220) is enforced with the same per-file
+- The run-level API budget (athenaeum#220) is enforced with the same per-file
   ``>=`` gate as the synchronous loop at every point that spends calls:
   phase-1 assembly, phase-2 assembly (re-checked per file, since phase-1
   spend plus earlier files' tier-3 requests may have exhausted the cap by
@@ -48,14 +49,14 @@ Known divergences from the synchronous loop (deliberate, documented):
   calls past the cap), each gate lets the FIRST file through even at the
   cap — so overshoot is bounded to one file's worth of calls per gate,
   never unbounded. Files deferred at phase 2 or finalize keep their raw
-  files on disk and land in the #220 deferred manifest; their tier-2 (and,
+  files on disk and land in the athenaeum#220 deferred manifest; their tier-2 (and,
   at finalize, batched tier-3) spend is wasted — acceptable, the next run
   redoes them.
 
 Polling interval and timeout are module constants — deliberately not a
 config surface; the nightly window is latency-tolerant.
 
-SCC membership (L4 domain/pipeline). Issue #545 hoisted ``tier0_passthrough``
+SCC membership (L4 domain/pipeline). Issue athenaeum#545 hoisted ``tier0_passthrough``
 to the :mod:`athenaeum.intake` leaf, so ``batch.py`` now imports it from
 ``intake`` at TOP level and the former deferred ``from athenaeum.librarian
 import tier0_passthrough`` back-edge (the librarian<->batch cycle) is GONE.
@@ -217,7 +218,7 @@ def execute_batch(
 
     results: dict[str, Any] = {r.custom_id: None for r in requests}
     # Map each request's custom_id to its serving model-id so batch token
-    # usage attributes per model (issue #247). The model lives in each
+    # usage attributes per model (issue athenaeum#247). The model lives in each
     # request's params (``messages.create`` payload).
     model_by_cid: dict[str, str | None] = {
         r.custom_id: r.params.get("model") for r in requests
@@ -271,7 +272,7 @@ class _FileState:
     t2_id: str | None = None
     create_ids: list[tuple[str, EntityAction]] = field(default_factory=list)
     # (custom_id, action, page_path, meta-parsed-at-assembly,
-    #  existing_body-read-at-assembly). Issue #469: existing_body is retained
+    #  existing_body-read-at-assembly). Issue athenaeum#469: existing_body is retained
     #  so the patch-mode ops can be applied deterministically at finalize.
     merge_ids: list[tuple[str, EntityAction, Path, dict, str]] = field(
         default_factory=list
@@ -281,7 +282,7 @@ class _FileState:
     failed: bool = False
     done: bool = False
     # Set when the budget re-check at phase-2 assembly or before the
-    # finalize-time sync merges defers this file (#220): raw stays on
+    # finalize-time sync merges defers this file (athenaeum#220): raw stays on
     # disk, ref goes to the deferred manifest, nothing is written.
     deferred: bool = False
 
@@ -295,17 +296,17 @@ class BatchRunResult:
     escalated: int = 0
     skipped: int = 0
     #: Files that dropped ALL entities on unparseable Tier-2 JSON, even after
-    #: the #472 control-character repair pass. (The batch transport cannot
+    #: the athenaeum#472 control-character repair pass. (The batch transport cannot
     #: retry a single request synchronously, so repair is its only recovery
     #: mechanism — the sync path additionally retries once.)
     degraded: int = 0
     #: Files that dropped ALL entities because the Tier-2 response was
     #: TRUNCATED at the output-token budget (``stop_reason == "max_tokens"``),
-    #: leaving an unterminated array (issue #476). Kept SEPARATE from
+    #: leaving an unterminated array (issue athenaeum#476). Kept SEPARATE from
     #: ``degraded`` (a genuine parse failure). The batch transport cannot retry
     #: a single request with a bigger budget synchronously, so a truncated
     #: file is preserved and retried on the next run — but the raised default
-    #: ``max_tokens`` (#476) makes a truncation far rarer to begin with.
+    #: ``max_tokens`` (athenaeum#476) makes a truncation far rarer to begin with.
     truncated: int = 0
     failed_refs: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
@@ -326,7 +327,7 @@ def process_batch_run(
     provider: str = "api",
     sleep: Callable[[float], None] = time.sleep,
 ) -> BatchRunResult:
-    """Process the intake window through the Batch API phases (issue #236).
+    """Process the intake window through the Batch API phases (issue athenaeum#236).
 
     Mirrors the per-file semantics of :func:`athenaeum.librarian.process_one`
     (tier 0/1 programmatic pass, per-file failure isolation, write-only-when-
@@ -335,7 +336,7 @@ def process_batch_run(
     submissions. See the module docstring for phase layout, budget
     semantics, and documented divergences from the synchronous loop.
 
-    Issue #483: the configured spend ceiling (#378) is enforced at each
+    Issue athenaeum#483: the configured spend ceiling (athenaeum#378) is enforced at each
     phase boundary — before the tier-2 submit and before the tier-3 submit
     — since a submitted batch runs to completion server-side and cannot be
     halted mid-flight. A breach defers every not-yet-written file rather
@@ -353,7 +354,7 @@ def process_batch_run(
     states: list[_FileState] = []
     t2_requests: list[BatchRequest] = []
 
-    # --- Tier 0/1 + phase-1 assembly (budget gate per file, #220) ---
+    # --- Tier 0/1 + phase-1 assembly (budget gate per file, athenaeum#220) ---
     for i, raw in enumerate(raw_files):
         if usage.api_calls >= max_api_calls:
             log.warning(
@@ -379,7 +380,7 @@ def process_batch_run(
                 st.done = True
                 continue
 
-            # Issue #662: filter junk-name matches before they cost a tier-3 call.
+            # Issue athenaeum#662: filter junk-name matches before they cost a tier-3 call.
             st.matched = tier1_programmatic_match(raw, index, config=config)
             for name, _uid, fpath in st.matched:
                 if index.has_entity_format(fpath):
@@ -388,8 +389,8 @@ def process_batch_run(
                     log.info("  T1 match (old format, skip): %s → %s", name, fpath.name)
                     st.skipped.append(name)
 
-            # Deterministic self-resolving-document guard (#300 follow-up,
-            # #304): flag embedded self-confirmation claims BEFORE the
+            # Deterministic self-resolving-document guard (athenaeum#300 follow-up,
+            # athenaeum#304): flag embedded self-confirmation claims BEFORE the
             # tier2 request is assembled, mirroring the sync path in
             # librarian.process_one (see the longer comment there for the
             # disk-vs-downstream-wiki persistence distinction). Mutates
@@ -401,7 +402,7 @@ def process_batch_run(
             if raw.content.strip():
                 st.t2_id = f"t2-{i}"
                 # Each batched request counts as one api_call attempt,
-                # recorded at assembly time (#220 budget semantics).
+                # recorded at assembly time (athenaeum#220 budget semantics).
                 usage.api_calls += 1
                 matched_names = [name for name, _, _ in st.matched]
                 t2_requests.append(
@@ -423,7 +424,7 @@ def process_batch_run(
             st.failed = True
 
     # --- Phase 1: tier-2 classification batch ---
-    # Issue #483: enforce the spend ceiling BEFORE submitting tier-2. Any
+    # Issue athenaeum#483: enforce the spend ceiling BEFORE submitting tier-2. Any
     # spend already accrued (the synchronous auto-memory merge/resolver phase
     # runs before the entity tiers) is reflected in ``usage`` by now; if it
     # has breached the ceiling we must not submit another batch that would run
@@ -435,7 +436,7 @@ def process_batch_run(
         pending = [st for st in states if not st.done and not st.failed]
         log.error(
             "Spend ceiling reached (%s) before the tier-2 batch — deferring "
-            "%d file(s), not submitting (issue #483)",
+            "%d file(s), not submitting (issue athenaeum#483)",
             t2_ceiling,
             len(pending),
         )
@@ -469,7 +470,7 @@ def process_batch_run(
                 st.failed = True
                 continue
             try:
-                # Issue #578: response_text skips any leading thinking block
+                # Issue athenaeum#578: response_text skips any leading thinking block
                 # (tier-2 classify runs disabled today; the helper is
                 # text-block-equivalent for a text-only response and keeps the
                 # batch site robust if the posture changes).
@@ -478,9 +479,9 @@ def process_batch_run(
                 log.exception("Failed to process %s", st.raw.ref)
                 st.failed = True
                 continue
-            # #472: repair bare control chars inside string values before
+            # athenaeum#472: repair bare control chars inside string values before
             # discarding a whole file's entities, and count any that still
-            # degrade so the run summary can surface it. #476: pass the
+            # degrade so the run summary can surface it. athenaeum#476: pass the
             # response's stop_reason so a max_tokens truncation is counted as
             # ``truncated`` (distinct from a genuine parse ``degraded``).
             t2_stats = Tier2ParseStats()
@@ -494,9 +495,9 @@ def process_batch_run(
                 stats=t2_stats,
                 stop_reason=getattr(msg, "stop_reason", None),
             )
-            # #476: a batch response TRUNCATED at max_tokens dropped every
+            # athenaeum#476: a batch response TRUNCATED at max_tokens dropped every
             # entity — retry ONCE synchronously with a LARGER budget (the same
-            # bigger-budget retry the sync path uses). This closes the gap #472
+            # bigger-budget retry the sync path uses). This closes the gap athenaeum#472
             # left, where the retry existed only on the sync path; the tier-3
             # full-echo fallback below is the established precedent for a live
             # call at batch finalize. A retry that recovers clears the
@@ -530,16 +531,16 @@ def process_batch_run(
             log.info(
                 "  T2 classified %d new entities (%s)", len(classified), st.raw.ref
             )
-        # Issue #680: never mint a wiki entity from a filename/path (a code
+        # Issue athenaeum#680: never mint a wiki entity from a filename/path (a code
         # artifact) — the repo is the source of truth for its own code, so a
         # memory of it is stale by construction. Dropped at creation, on the
-        # batch transport too (complementary to #662's read-side stopwords).
+        # batch transport too (complementary to athenaeum#662's read-side stopwords).
         classified, _dropped_code = partition_code_artifact_classifications(
             classified, config
         )
         for _name in _dropped_code:
             log.info(
-                "  T3 create skipped (issue #680, code artifact): %s (%s)",
+                "  T3 create skipped (issue athenaeum#680, code artifact): %s (%s)",
                 _name,
                 st.raw.ref,
             )
@@ -595,7 +596,7 @@ def process_batch_run(
     # the sync loop's guaranteed progress (an admitted file completes all
     # its calls), the FIRST file that spends phase-2 budget proceeds even
     # at the cap, so overshoot is bounded to one file's worth of requests.
-    # A deferred file keeps its raw on disk and lands in the #220 deferred
+    # A deferred file keeps its raw on disk and lands in the athenaeum#220 deferred
     # manifest; its tier-2 spend is wasted — acceptable, the next run
     # re-classifies it.
     phase2_spent = False
@@ -648,7 +649,7 @@ def process_batch_run(
                         continue
                     text = existing_path.read_text(encoding="utf-8")
                     meta, existing_body = parse_frontmatter(text)
-                    # Anchor safety (issue #562 / audit M20): a body that would
+                    # Anchor safety (issue athenaeum#562 / audit M20): a body that would
                     # break the <existing_page> fence can't use the batched patch
                     # path — hand it to the synchronous merge, which routes it to
                     # the anchor-free full-echo fallback.
@@ -680,7 +681,7 @@ def process_batch_run(
             st.failed = True
 
     # --- Phase 2: tier-3 batch ---
-    # Issue #483: re-check the spend ceiling before the tier-3 submit. The
+    # Issue athenaeum#483: re-check the spend ceiling before the tier-3 submit. The
     # tier-2 batch's cost is now in ``usage``, so a run that stayed under the
     # ceiling through tier-2 but would blow it on tier-3 stops here: the
     # assembled tier-3 requests are dropped (never submitted) and every file
@@ -701,7 +702,7 @@ def process_batch_run(
     if t3_ceiling is not None and t3_pending:
         log.error(
             "Spend ceiling reached (%s) before the tier-3 batch — deferring "
-            "%d file(s) with pending writes, not submitting (issue #483)",
+            "%d file(s) with pending writes, not submitting (issue athenaeum#483)",
             t3_ceiling,
             len(t3_pending),
         )
@@ -767,7 +768,7 @@ def process_batch_run(
                 if msg is None:
                     raise _BatchItemError(cid)
                 new_entities.append(
-                    # Issue #578: tier-3 create enables adaptive thinking —
+                    # Issue athenaeum#578: tier-3 create enables adaptive thinking —
                     # response_text skips any leading thinking block.
                     tier3_entity_from_text(action, response_text(msg), config=config)
                 )
@@ -776,11 +777,11 @@ def process_batch_run(
                 msg = t3_results.get(cid)
                 if msg is None:
                     raise _BatchItemError(cid)
-                # Issue #469: apply the batched patch-mode ops deterministically;
+                # Issue athenaeum#469: apply the batched patch-mode ops deterministically;
                 # a live full-echo fallback runs only when the patch response is
                 # unparseable, truncated, or fails to apply.
                 updated_body, esc, needs_fallback = parse_merge_ops_response(
-                    # Issue #578: patch merge enables adaptive thinking —
+                    # Issue athenaeum#578: patch merge enables adaptive thinking —
                     # response_text skips any leading thinking block.
                     response_text(msg),
                     action,

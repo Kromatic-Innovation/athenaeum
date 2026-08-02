@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Kill switch — one discoverable, reversible way to stop athenaeum (issue #379).
+"""Kill switch — one discoverable, reversible way to stop athenaeum (issue athenaeum#379).
 
 Athenaeum runs unattended background work: the ``session-end`` compile pass
 (which fans out ``claude -p`` contradiction detectors), the per-turn recall
 hooks, and the MCP capture/resolve tools. Before this module the only way to
 stop it was to hand-edit the three hook commands out of the operator's global
 ``~/.claude/settings.json`` and ``pkill`` the in-flight detectors — undiscoverable,
-error-prone, and reversible only by remembering exactly what was edited (#379).
+error-prone, and reversible only by remembering exactly what was edited (athenaeum#379).
 
 The kill switch replaces that with a single state file
 (``$ATHENAEUM_CACHE_DIR/disabled``, default ``~/.cache/athenaeum/disabled``) plus

@@ -199,7 +199,7 @@ class TestParsePendingQuestions:
     def test_fenced_answer_with_hr_and_heading_is_not_split(
         self, pending_path: Path
     ) -> None:
-        # Regression for #527 (audit M11): the #394 fence fix lived only in
+        # Regression for athenaeum#527 (audit M11): the athenaeum#394 fence fix lived only in
         # pending_merges, so answers._split_blocks split naively on bare
         # ``---`` / ``## ``. A human whose answer contains a fenced block that
         # itself holds a ``---`` divider and a ``## `` heading had the block
@@ -333,7 +333,7 @@ class TestIngestAnswers:
     def test_ingest_preserves_fenced_answer_through_the_ingest_path(
         self, pending_path: Path, raw_root: Path
     ) -> None:
-        # Regression for #527 (audit M11) THROUGH the answers ingest path.
+        # Regression for athenaeum#527 (audit M11) THROUGH the answers ingest path.
         # answers.py:732 applies a returned body by overwriting a source file,
         # so a truncation upstream of ingest is unrecoverable from the file. A
         # human answers with a fenced block containing a ``---`` divider and a
@@ -555,7 +555,7 @@ class TestResolveById:
 def test_tier4_render_round_trips_through_parser(tmp_path: Path) -> None:
     """End-to-end: tier4_escalate output is parseable by parse_pending_questions.
 
-    Highest-risk regression in issue #61 — mismatched regex between the
+    Highest-risk regression in issue athenaeum#61 — mismatched regex between the
     renderer in `tiers.py` and the parser here. This test fails loudly
     the moment either side drifts.
     """
@@ -599,7 +599,7 @@ def test_tier4_round_trip_hostile_inputs(
 ) -> None:
     """tier4_escalate output must round-trip through parse_pending_questions
     cleanly even when entity_name contains double quotes and raw_ref contains
-    parentheses. Guards the renderer/parser contract documented in #61.
+    parentheses. Guards the renderer/parser contract documented in athenaeum#61.
     """
     from athenaeum.models import EscalationItem
     from athenaeum.tiers import tier4_escalate
@@ -628,7 +628,7 @@ def test_tier4_round_trip_hostile_inputs(
 
 
 # ---------------------------------------------------------------------------
-# Issue #197: source write-back — ratified verdicts edit the SOURCE memory file
+# Issue athenaeum#197: source write-back — ratified verdicts edit the SOURCE memory file
 # ---------------------------------------------------------------------------
 
 
@@ -884,7 +884,7 @@ def _freetext_proposer_client(
 
 
 class TestIngestAnswersUsageAccounting:
-    """Issue #248: the ingest-answers free-text path is metered.
+    """Issue athenaeum#248: the ingest-answers free-text path is metered.
 
     The free-text proposer (the only LLM call on this path) accumulates its
     response's token + cache counts into a run-level ``TokenUsage`` and the
@@ -930,13 +930,13 @@ class TestIngestAnswersUsageAccounting:
         assert usage.output_tokens == 40
         assert usage.cache_creation_input_tokens == 15
         assert usage.cache_read_input_tokens == 7
-        # #239 convention: the callee never bumps api_calls (caller counts).
+        # athenaeum#239 convention: the callee never bumps api_calls (caller counts).
         assert usage.api_calls == 0
 
     def test_callee_does_not_bump_api_calls(
         self, pending_path: Path, raw_root: Path
     ) -> None:
-        """Mirror the #239 convention test: the proposer counts no attempt."""
+        """Mirror the athenaeum#239 convention test: the proposer counts no attempt."""
         from athenaeum.models import TokenUsage
         from athenaeum.resolutions import propose_freetext_source_edits
 
@@ -1042,7 +1042,7 @@ class TestIngestAnswersUsageAccounting:
 def test_corrected_source_no_longer_regenerates_conflict(
     pending_path: Path, raw_root: Path
 ) -> None:
-    """Regression / real acceptance (issue #197).
+    """Regression / real acceptance (issue athenaeum#197).
 
     Proves the fix changes the detector's verdict, not merely the cluster
     structure. A genuinely-conflicting 2-member cluster (a vs b) WOULD flag

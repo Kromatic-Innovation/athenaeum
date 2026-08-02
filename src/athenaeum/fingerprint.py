@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Resolved-contradiction fingerprint cache (issue #198).
+"""Resolved-contradiction fingerprint cache (issue athenaeum#198).
 
 The contradiction detector compares passage PAIRS per page, so an
 already-adjudicated claim re-escalates as a brand-new pending question on
@@ -13,7 +13,7 @@ Two pieces:
 - :func:`claim_pair_fingerprint` — an ORDER-INDEPENDENT, normalization-stable
   hash over the two conflicting claim texts plus the conflict type. It reuses
   the ``sha1`` notion from :func:`athenaeum.answers._make_id` and the
-  issue-#157 source-memory-pair grouping (sort-then-hash) rather than
+  issue-athenaeum#157 source-memory-pair grouping (sort-then-hash) rather than
   inventing an unrelated id scheme. A *cosmetic* edit (whitespace, case) does
   NOT change the fingerprint; a *material* edit to either claim DOES — which
   is exactly the desired re-escalation trigger.
@@ -21,7 +21,7 @@ Two pieces:
 - The JSONL cache helpers (:func:`record_resolution`, :func:`load_resolved`,
   :func:`is_resolved`) over ``raw/_resolved_contradictions.jsonl``. One JSON
   object per line, appended on every resolution (human OR auto). The
-  ``resolved_by`` field ("human" | "auto") is load-bearing for sibling #199
+  ``resolved_by`` field ("human" | "auto") is load-bearing for sibling athenaeum#199
   (only human verdicts auto-apply there) — record it accurately.
 
 The module deliberately has NO heavy imports so both the escalation path
@@ -69,16 +69,16 @@ def _normalize_claim(text: str) -> str:
     Trims, collapses internal whitespace runs to a single space, and
     casefolds. A cosmetic change (extra spaces, capitalization) maps to the
     same normalized string; a material wording change does not. Mirrors the
-    sort-then-hash normalization the #157 dedup key applies to passages.
+    sort-then-hash normalization the athenaeum#157 dedup key applies to passages.
     """
     return _WS_RE.sub(" ", (text or "").strip()).casefold()
 
 
 def normalize_side(text: str) -> str:
-    """Public alias for the per-side claim normalization (issue #199).
+    """Public alias for the per-side claim normalization (issue athenaeum#199).
 
     ``claim_pair_fingerprint`` applies :func:`_normalize_claim` to each side
-    before sorting+hashing. The #199 orientation-reconciliation path needs the
+    before sorting+hashing. The athenaeum#199 orientation-reconciliation path needs the
     SAME normalization to compare a new conflict's per-side text against the
     stored ``side_a_norm`` / ``side_b_norm`` anchors. Exposing one helper keeps
     record-time and match-time normalization identical by construction.
@@ -150,9 +150,9 @@ def record_resolution(
     Best-effort: a write failure is logged and swallowed — recording the
     fingerprint must never block the human-answer or auto-apply path. The
     ``resolved_by`` value MUST be ``"human"`` or ``"auto"`` (load-bearing for
-    sibling #199).
+    sibling athenaeum#199).
 
-    ``side_a_norm`` / ``side_b_norm`` (issue #199) persist the per-side
+    ``side_a_norm`` / ``side_b_norm`` (issue athenaeum#199) persist the per-side
     NORMALIZED claim text in the verdict's ORIGINAL a/b orientation. The
     fingerprint is order-independent, but enacting verdicts
     (``correct_a``/``correct_b``/``keep_a``/``keep_b``/``forget_a``/``forget_b``)
@@ -163,12 +163,12 @@ def record_resolution(
     normalization are identical. Omitted -> stored as ``None`` (orientation
     unknown; the consumer falls back to safe escalation).
 
-    ``member_key`` (issue #211) is the sorted-tuple member-pair joined with
+    ``member_key`` (issue athenaeum#211) is the sorted-tuple member-pair joined with
     ``"||"`` (see :func:`_member_key_str`).  When present, the decision-log
     matcher can suppress re-detected contradictions that share the same
     member pair even when the passage text drifted (different fingerprint).
 
-    ``pair_text`` (issue #211) is the canonical normalized pair-text string
+    ``pair_text`` (issue athenaeum#211) is the canonical normalized pair-text string
     (``"{norm_side0}\\n##\\n{norm_side1}"`` from :func:`_pair_text_from_passages`).
     Persisted so the embedding similarity path can embed it at match time
     without re-running the detector.  Old records lacking this field are
@@ -178,8 +178,8 @@ def record_resolution(
         return
     record = {
         "fingerprint": fingerprint,
-        # ``action`` is the single authoritative key (issue #207). Consumers
-        # (load_resolved_records / the #199 auto-apply path) read ``action``;
+        # ``action`` is the single authoritative key (issue athenaeum#207). Consumers
+        # (load_resolved_records / the athenaeum#199 auto-apply path) read ``action``;
         # the ``verdict`` parameter is the value, not a second stored key.
         "action": verdict,
         "resolved_by": resolved_by,
@@ -234,10 +234,10 @@ def load_resolved(knowledge_root: Path) -> set[str]:
 
 
 def load_resolved_records(knowledge_root: Path) -> dict[str, dict]:
-    """Return a ``fingerprint -> record`` map collapsed by precedence (#199).
+    """Return a ``fingerprint -> record`` map collapsed by precedence (athenaeum#199).
 
     Unlike :func:`load_resolved` (which only needs the set of resolved
-    fingerprints for #198 suppression), the auto-apply lane (#199) needs the
+    fingerprints for athenaeum#198 suppression), the auto-apply lane (athenaeum#199) needs the
     full record per fingerprint — ``resolved_by`` (only ``"human"`` verdicts
     auto-apply), ``action`` (the authoritative verdict to enact; a legacy or
     external ``verdict``-only record is tolerated as a read-time fallback),
@@ -297,7 +297,7 @@ def extract_passages(description: str) -> list[str]:
 
     Mirrors the passage extraction in
     :func:`athenaeum.tiers._pair_key_from_description` so the fingerprint is
-    computed over the SAME two texts the #157 dedup key groups on.
+    computed over the SAME two texts the athenaeum#157 dedup key groups on.
     """
     passages: list[str] = []
     for raw in (description or "").splitlines():
@@ -325,14 +325,14 @@ def fingerprint_from_description(
 
 
 # ---------------------------------------------------------------------------
-# Deprecated suppression knobs (issue #262, slice C of #259)
+# Deprecated suppression knobs (issue athenaeum#262, slice C of athenaeum#259)
 # ---------------------------------------------------------------------------
 #
-# ``resolved_similarity_threshold`` (#211) and ``not_a_conflict_ttl_days``
-# (#251) exist ONLY to babysit the permanent-raw design: they suppress
+# ``resolved_similarity_threshold`` (athenaeum#211) and ``not_a_conflict_ttl_days``
+# (athenaeum#251) exist ONLY to babysit the permanent-raw design: they suppress
 # re-detection of the same raw atoms (forever, or for a TTL window). With
-# retire-on-move (#261) the raw atom is gone after a fact lands in the wiki,
-# and with footnote-targeting (#262) re-detection compares NEW intake against
+# retire-on-move (athenaeum#261) the raw atom is gone after a fact lands in the wiki,
+# and with footnote-targeting (athenaeum#262) re-detection compares NEW intake against
 # the wiki footnote — not the raw corpus — so the same atom is never re-swept.
 # Both knobs are therefore largely moot. They are DEPRECATED, not removed: a
 # config that still sets them keeps working (tolerate), but emits a one-time
@@ -344,13 +344,13 @@ _DEPRECATED_CONFIG_WARNED: set[str] = set()
 
 
 def _warn_deprecated_suppression_knob(key: str, env_var: str) -> None:
-    """Emit a one-time deprecation warning for a moot suppression knob (#262)."""
+    """Emit a one-time deprecation warning for a moot suppression knob (athenaeum#262)."""
     if key in _DEPRECATED_CONFIG_WARNED:
         return
     _DEPRECATED_CONFIG_WARNED.add(key)
     log.warning(
-        "config: contradiction.%s (env %s) is DEPRECATED (issue #262). With "
-        "retire-on-move (#261) + footnote-targeted detection (#262) the raw "
+        "config: contradiction.%s (env %s) is DEPRECATED (issue athenaeum#262). With "
+        "retire-on-move (athenaeum#261) + footnote-targeted detection (athenaeum#262) the raw "
         "atom it suppressed no longer re-enters the nightly sweep, so the knob "
         "is moot. It is still honored for now; remove it from athenaeum.yaml "
         "to silence this warning.",
@@ -360,7 +360,7 @@ def _warn_deprecated_suppression_knob(key: str, env_var: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Resolved-similarity threshold (issue #211 — DEPRECATED by #262)
+# Resolved-similarity threshold (issue athenaeum#211 — DEPRECATED by athenaeum#262)
 # ---------------------------------------------------------------------------
 
 _ENV_RESOLVED_SIMILARITY_THRESHOLD = "ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD"
@@ -376,7 +376,7 @@ def resolve_resolved_similarity_threshold(
     ``contradiction.resolved_similarity_threshold`` in config > default
     (0.83).  Mirrors :func:`athenaeum.cross_scope.resolve_similarity_threshold`.
 
-    DEPRECATED (issue #262): see :func:`_warn_deprecated_suppression_knob`. An
+    DEPRECATED (issue athenaeum#262): see :func:`_warn_deprecated_suppression_knob`. An
     explicit env or config value still wins (tolerate) but logs a one-time
     deprecation warning; the default path stays silent.
     """
@@ -410,11 +410,11 @@ def resolve_resolved_similarity_threshold(
 
 # ---------------------------------------------------------------------------
 # Read-time decay of stale auto not_a_conflict suppressions
-# (issue #251 — DEPRECATED by #262)
+# (issue athenaeum#251 — DEPRECATED by athenaeum#262)
 # ---------------------------------------------------------------------------
 
 _ENV_NOT_A_CONFLICT_TTL_DAYS = "ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS"
-# Code default 0 == disabled (no decay; current behavior). Per the #231
+# Code default 0 == disabled (no decay; current behavior). Per the athenaeum#231
 # rule this is NOT seeded into config._DEFAULTS — it resolves through the
 # env > yaml > code-default chain below.
 _DEFAULT_NOT_A_CONFLICT_TTL_DAYS = 0
@@ -432,11 +432,11 @@ _RESOLVED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 def resolve_not_a_conflict_ttl_days(config: dict[str, Any] | None = None) -> int:
     """Resolve the auto-suppression TTL (days) from env > yaml > default.
 
-    Issue #251. Precedence mirrors
+    Issue athenaeum#251. Precedence mirrors
     :func:`athenaeum.resolutions.resolve_max_per_run`: the env var
     ``ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS`` wins over
     ``contradiction.not_a_conflict_ttl_days`` in the yaml, which wins over
-    the code default ``0`` (disabled). Per the #231 rule the key is NOT
+    the code default ``0`` (disabled). Per the athenaeum#231 rule the key is NOT
     seeded in ``config._DEFAULTS``. Negative, non-numeric, or boolean
     values fall back to the default. ``0`` disables decay entirely (current
     behavior — an auto suppression never expires).
@@ -474,7 +474,7 @@ def is_stale_auto_suppression(
 ) -> bool:
     """Return True when an AUTO ``not_a_conflict`` record has decayed.
 
-    Issue #251. A stale record is treated as ABSENT when building the
+    Issue athenaeum#251. A stale record is treated as ABSENT when building the
     confirmation-pass skip set, so the pair re-enters the Opus confirmation
     path — but the row itself is NEVER mutated (append-only contract).
 
@@ -517,7 +517,7 @@ def is_stale_auto_suppression(
 
 
 # ---------------------------------------------------------------------------
-# Semantic matching (issue #211)
+# Semantic matching (issue athenaeum#211)
 # ---------------------------------------------------------------------------
 
 

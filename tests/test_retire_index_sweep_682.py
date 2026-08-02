@@ -1,4 +1,4 @@
-"""Fail-closed MEMORY.md pointer pruning in the retire pass (issue #682).
+"""Fail-closed MEMORY.md pointer pruning in the retire pass (issue athenaeum#682).
 
 Regression cover for the silent memory-index deletion incident: the retire
 pass pruned 10 *valid* pointers from a live Claude Code ``MEMORY.md`` because
@@ -57,7 +57,7 @@ class TestPlanIndexSweepFailClosed:
         member.write_text("---\nname: g\n---\nkeep me\n", encoding="utf-8")
         (scope / "reference_live.md").write_text("live", encoding="utf-8")
 
-        # Faithful to the observed layout (#682): the same memory exists in the
+        # Faithful to the observed layout (athenaeum#682): the same memory exists in the
         # operator's live Claude memory dir too, HARDLINKED to the raw copy (a
         # write to one is a write to the other). The sweep decides on the raw
         # sibling the MEMORY.md lives beside.

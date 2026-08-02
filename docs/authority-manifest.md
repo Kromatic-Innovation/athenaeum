@@ -1,13 +1,13 @@
-# Authority manifest + pointer-stub converter (issue #426)
+# Authority manifest + pointer-stub converter (issue athenaeum#426)
 
 > **Status:** standalone, unit-testable slice, shipped and complete (this
 > issue's own scope — the manifest schema, `athenaeum.authority`'s
 > lookup/detector/converter, and the `authority lint`/`authority convert` CLI —
 > is fully implemented; see the sections below). Reasoning-tier consultation of
 > the manifest (rejecting/converting live-source duplicates automatically)
-> belongs to the consumers — #423's T1 duplicate bin and #432's T2 rejection,
+> belongs to the consumers — athenaeum#423's T1 duplicate bin and athenaeum#432's T2 rejection,
 > both implemented in `src/athenaeum/reasoning_tiers.py` (~1,375 lines). As of
-> issue #518, those tiers have one gated production caller:
+> issue athenaeum#518, those tiers have one gated production caller:
 > `athenaeum.merge.t1_screen_rejects_merge_proposal`
 > (`src/athenaeum/merge.py:1209`, invoked at `src/athenaeum/merge.py:1765`),
 > which screens merge proposals through T1 — including this manifest, loaded
@@ -17,7 +17,7 @@
 > **defaults OFF** (`resolve_reasoning_tier_auditing_enabled`,
 > `src/athenaeum/config.py:706`), so production merge behavior is unchanged
 > until an operator sets `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED`. Running
-> the converter against the live corpus remains operator task #437. Neither is
+> the converter against the live corpus remains operator task athenaeum#437. Neither is
 > in scope here.
 
 ## Why
@@ -138,12 +138,12 @@ Converts **one** page (given explicitly via `--page`) into a pointer stub for
 the named manifest source. Default is dry-run (prints the converted text to
 stdout without writing); `--apply` writes it. This command never walks the
 corpus — running the converter against the whole live corpus is operator task
-#437, out of scope here.
+athenaeum#437, out of scope here.
 
 ## Out of scope here
 
-- Reasoning-tier consultation of the manifest (T1/T2, #423/#432).
-- Running the detector/converter against the live `~/knowledge` corpus (#437).
+- Reasoning-tier consultation of the manifest (T1/T2, athenaeum#423/#432).
+- Running the detector/converter against the live `~/knowledge` corpus (athenaeum#437).
 - Syncing skill files across teammates via athenaeum (explicitly deferred;
   see `docs/storage-adapter-contract.md`'s note on the deferred skill-file-sync
   surface).

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for re-resolving OPEN, PROPOSAL-LESS pending questions (issue #188).
+"""Tests for re-resolving OPEN, PROPOSAL-LESS pending questions (issue athenaeum#188).
 
 Mirrors the live finding: a question first escalated WITHOUT a proposal
 (resolver budget exhausted or offline that run) stays raw ``[ ]`` forever
@@ -285,14 +285,14 @@ def test_unreconstructable_block_left_open(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# run-level budget accounting (issue #220) — resolver calls hit TokenUsage
+# run-level budget accounting (issue athenaeum#220) — resolver calls hit TokenUsage
 # ---------------------------------------------------------------------------
 
 
 def test_reresolve_counts_resolver_calls_against_usage(tmp_path: Path) -> None:
     """N resolver calls in the heal pass increment usage.api_calls by N.
 
-    Symmetric to test_merge_counts_detector_and_resolver_calls (issue #220):
+    Symmetric to test_merge_counts_detector_and_resolver_calls (issue athenaeum#220):
     the threaded run-level TokenUsage must see every propose_resolution call
     made by reresolve_open_questions so the run budget can trip on it.
     """
@@ -329,7 +329,7 @@ def test_reresolve_counts_resolver_calls_against_usage(tmp_path: Path) -> None:
 
     # keep_a at 0.80 (below gate) → annotate-only; both blocks get a call.
     client = _fake_client(_payload("keep_a", confidence=0.80))
-    # #239: the resolver responses must also feed token + cache counters
+    # athenaeum#239: the resolver responses must also feed token + cache counters
     # into the threaded usage so the run summary's cache line moves.
     client.messages.create.return_value.usage = MagicMock(
         input_tokens=100,

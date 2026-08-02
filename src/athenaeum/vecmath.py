@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared pure-Python vector math (issue #542).
+"""Shared pure-Python vector math (issue athenaeum#542).
 
 :func:`cosine` was previously duplicated verbatim as a ``_cosine`` private
 helper in both :mod:`athenaeum.clusters` and :mod:`athenaeum.cross_scope`,
@@ -29,7 +29,7 @@ def cosine(a: Sequence[float], b: Sequence[float]) -> float:
     """Cosine similarity between two equal-length vectors. Zero on 0-norm.
 
     Returns ``0.0`` (rather than raising) when the vectors have mismatched
-    lengths or either has zero norm, matching the pre-#542 ``_cosine``
+    lengths or either has zero norm, matching the pre-athenaeum#542 ``_cosine``
     behavior in both :mod:`athenaeum.clusters` and
     :mod:`athenaeum.cross_scope` (the two copies were identical).
     """

@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Classify (Tier-2) live-API eval (issue #552).
+"""Classify (Tier-2) live-API eval (issue athenaeum#552).
 
 Runs :func:`athenaeum.tiers.tier2_classify` against every case in
 ``tests/evals/data/classify/cases.yaml`` using a real Anthropic Haiku call
 (the same model tier2_classify uses in production, ``DEFAULT_CLASSIFY_MODEL``).
 
-Unlike the detector/resolver/recall evals (issue #331), which each classify a
+Unlike the detector/resolver/recall evals (issue athenaeum#331), which each classify a
 RELATIONSHIP between two already-structured snippets, this eval covers
 tier2_classify's job of extracting STRUCTURE (which entities are worth a wiki
 page, and their name/type/tags/access) from ONE piece of unstructured raw
-text — the "CLASSIFY" gap named in issue #552's inventory. A stubbed-response
+text — the "CLASSIFY" gap named in issue athenaeum#552's inventory. A stubbed-response
 unit test (``tests/test_tiers.py``) proves the parser handles a canned
 response; only a live call can show whether the classifier still extracts a
 sensible entity SET from novel prose.

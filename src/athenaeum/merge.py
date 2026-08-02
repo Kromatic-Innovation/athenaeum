@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Auto-memory merge pass (issue #197, C3) — L4 domain/pipeline.
+"""Auto-memory merge pass (issue athenaeum#197, C3) — L4 domain/pipeline.
 
 Consumes the JSONL cluster report produced by C2
 (:mod:`athenaeum.clusters`) and emits ONE canonical wiki entry per
@@ -7,9 +7,9 @@ cluster at ``wiki/auto-<topic-slug>.md``. Every member's content is
 concatenated into a synthesized body; every member's ``sources[]`` is
 unioned into a single deduped cited list. It also owns the tiered
 reasoning-pass screen at the merge-proposal seam: T1
-(:func:`t1_screen_rejects_merge_proposal`, issue #518) drops a confident
+(:func:`t1_screen_rejects_merge_proposal`, issue athenaeum#518) drops a confident
 reject before the human queue, and T2 (:func:`t2_screen_merge_proposal`,
-issue #602) consults a T1 pass-up and AUTO-FINALIZES a safe-class
+issue athenaeum#602) consults a T1 pass-up and AUTO-FINALIZES a safe-class
 ``approve`` — bypassing ``_pending_merges.md`` entirely via
 :func:`athenaeum.pending_merges.resolve_merge`'s existing approve-time
 fold, marked ``auto_applied`` in provenance. See each function's own
@@ -19,7 +19,7 @@ wiring detail (both tiers share ONE opt-in flag,
 
 SCC membership (L4 domain/pipeline). ``merge.py`` is imported at TOP level by
 ``librarian.py``, ``retire.py``, and ``wiki_dedupe.py`` (normal downward
-dependencies from their side). Issue #545 hoisted ``discover_auto_memory_files``
+dependencies from their side). Issue athenaeum#545 hoisted ``discover_auto_memory_files``
 to the :mod:`athenaeum.intake` leaf, so this module now imports it from
 ``intake`` at TOP level and the former deferred ``from athenaeum.librarian
 import discover_auto_memory_files`` back-edge (the librarian<->merge cycle) is
@@ -30,18 +30,18 @@ import DEFAULT_CACHE_DIR`` — is unrelated to any cycle: :mod:`athenaeum.cluste
 is an L3 service module that does not import this module back; deferred for
 cost/ordering, not cycle-breaking.)
 
-``merge.py`` was formerly in a PRE-EXISTING residual SCC that #545 did NOT
+``merge.py`` was formerly in a PRE-EXISTING residual SCC that athenaeum#545 did NOT
 target (out of its named scope): ``{merge, pending_merges, calibration,
 reasoning_tiers}``. ``pending_merges.revalidate_pending_merges`` function-
 locally imported ``_merge_proposal_suppression_reason`` FROM this module while
 this module imports ``write_pending_merge`` FROM ``pending_merges`` at top level
-— a ``pending_merges`` <-> ``merge`` back-edge. Issue #640 dissolved that cycle
+— a ``pending_merges`` <-> ``merge`` back-edge. Issue athenaeum#640 dissolved that cycle
 by hoisting ``_merge_proposal_suppression_reason`` DOWN to the
 :mod:`athenaeum.merge_type_gate` gate leaf (which both this module and
 ``pending_merges`` already sit above), so ``pending_merges`` no longer reaches
 up into this hub.
 
-Scope for this module (kept narrow on purpose — see issue #197):
+Scope for this module (kept narrow on purpose — see issue athenaeum#197):
 
 - Input: canonical cluster JSONL path + knowledge root.
 - Output: ``wiki/auto-<topic-slug>.md`` per cluster.
@@ -55,7 +55,7 @@ Scope for this module (kept narrow on purpose — see issue #197):
   surface.
 - Contradiction heuristic: the PR flags ``contradictions_detected: true``
   in frontmatter when the cluster's ``centroid_score`` falls below
-  :data:`CONTRADICTION_COHESION_THRESHOLD` (0.75). C4 (#198) replaces
+  :data:`CONTRADICTION_COHESION_THRESHOLD` (0.75). C4 (athenaeum#198) replaces
   this with real contradiction detection — this module is only the
   cheap proxy so the human-review queue has a seed.
 
@@ -64,7 +64,7 @@ Out of scope (deliberate — later lanes):
 - LLM-based body synthesis. C3's strategy is deterministic:
   concatenate member bodies, drop identical paragraphs, prefix each
   block with a scope/filename header. Rich paraphrase is a follow-up.
-- Real contradiction detection (C4, #198).
+- Real contradiction detection (C4, athenaeum#198).
 - Rewrites to ``raw/auto-memory/*`` — raw is append-only; the wiki is
   the compiled view.
 - A cross-scope ``wiki/MEMORY.md`` — Phase B explicitly removed it and
@@ -176,12 +176,12 @@ log = logging.getLogger(__name__)
 class RunDeadlineExceeded(Exception):
     """Raised inside the merge pass when the run-level wall-clock deadline trips.
 
-    Issue #396. The merge/detect loops are the post-compile phase where the
-    #396 incident wedged (a hung ``claude -p`` merge subprocess). When
+    Issue athenaeum#396. The merge/detect loops are the post-compile phase where the
+    athenaeum#396 incident wedged (a hung ``claude -p`` merge subprocess). When
     :func:`merge_clusters_to_wiki` is armed with a ``deadline`` (an absolute
     :func:`time.monotonic` value) it checks it at each cluster/chunk boundary
     and raises this so the caller (:func:`athenaeum.librarian.run`) can commit
-    the partial progress and exit non-zero (resumable), mirroring the #337
+    the partial progress and exit non-zero (resumable), mirroring the athenaeum#337
     interrupt-checkpoint path. ``phase`` names where the trip occurred for the
     commit message and the run log.
     """
@@ -209,7 +209,7 @@ CONTRADICTION_STATUS_FLAGGED = "contradiction-flagged"
 def _declared_relationship(a: "AutoMemoryFile", b: "AutoMemoryFile") -> str | None:
     """Return a rationale slug when ``a`` and ``b`` declare each other.
 
-    Lane 1 / #167. Matches by ``AutoMemoryFile.name`` (the documented
+    Lane 1 / athenaeum#167. Matches by ``AutoMemoryFile.name`` (the documented
     frontmatter slug). A declaration on EITHER side suppresses the pair.
 
     Returns:
@@ -224,7 +224,7 @@ def _declared_relationship(a: "AutoMemoryFile", b: "AutoMemoryFile") -> str | No
     b_name = (b.name or "").strip()
     if not a_name or not b_name:
         return None
-    # Quine review #171 / SHOULD #4: compare via slugify so a case- or
+    # Quine review athenaeum#171 / SHOULD #4: compare via slugify so a case- or
     # punctuation-mismatched declaration still matches.
     a_slug = slugify(a_name)
     b_slug = slugify(b_name)
@@ -256,7 +256,7 @@ def _filter_declared_pairs(
 ) -> tuple[list["AutoMemoryFile"], str | None]:
     """Prune declared pairs from a chunk before the detector sees it.
 
-    Issue #172: previously this was all-or-nothing — one undeclared pair
+    Issue athenaeum#172: previously this was all-or-nothing — one undeclared pair
     sent the WHOLE chunk (including already-declared pairs) to Haiku.
     Now we prune: drop any member whose every partner in the chunk has
     a declaration. The remaining members still form ≥1 undeclared pair
@@ -308,7 +308,7 @@ def _filter_declared_pairs(
 
 
 def _am_validity_meta(am: "AutoMemoryFile") -> dict[str, str]:
-    """Return an :class:`AutoMemoryFile`'s validity bounds as a meta dict (#324).
+    """Return an :class:`AutoMemoryFile`'s validity bounds as a meta dict (athenaeum#324).
 
     Mirrors :meth:`AutoMemoryFile.is_inactive`, which feeds the stored raw
     ``valid_until`` string back through the dict predicate — so the disjoint
@@ -319,7 +319,7 @@ def _am_validity_meta(am: "AutoMemoryFile") -> dict[str, str]:
 
 
 def _all_pairs_disjoint(members: list["AutoMemoryFile"]) -> bool:
-    """True when EVERY pair among ``members`` has disjoint validity windows (#324).
+    """True when EVERY pair among ``members`` has disjoint validity windows (athenaeum#324).
 
     Two claims whose validity windows never overlap are sequential states of the
     world (A valid through March, B valid from April) and cannot contradict.
@@ -372,7 +372,7 @@ def _detected_pair_disjoint(
     result: ContradictionResult,
     members: list["AutoMemoryFile"],
 ) -> bool:
-    """True when the detector's two flagged members have disjoint windows (#324).
+    """True when the detector's two flagged members have disjoint windows (athenaeum#324).
 
     Post-detection guard for the overlapping-cluster case: the pre-filter
     (:func:`_all_pairs_disjoint`) only fires when the WHOLE cluster is
@@ -400,7 +400,7 @@ def _order_member_paths(
     The resolver labels the two flagged snippets ``a`` and ``b`` in the
     order they appear in ``result.members_involved`` — the SAME order
     :func:`athenaeum.resolutions._build_user_message` presents them to the
-    model. The enactment lane (#166 follow-up) keys ``forget_*`` /
+    model. The enactment lane (athenaeum#166 follow-up) keys ``forget_*`` /
     ``correct_*`` on those labels, so it needs the member PATHS in exactly
     that order, not the (arbitrary) cluster/chunk order.
 
@@ -428,7 +428,7 @@ def _order_member_paths(
 
 
 def _result_claim_fingerprint(result: ContradictionResult) -> str | None:
-    """Claim-pair fingerprint for a detector result (issue #249).
+    """Claim-pair fingerprint for a detector result (issue athenaeum#249).
 
     Returns ``None`` when fewer than two conflicting passages are present —
     no stable pair to fingerprint, so the caller must NOT cache or skip.
@@ -483,9 +483,9 @@ class MergedWikiEntry:
     cluster_id: str
     cluster_centroid_score: float
     contradictions_detected: bool
-    # Issue #421: minimum pairwise cosine among cluster members (complete-
+    # Issue athenaeum#421: minimum pairwise cosine among cluster members (complete-
     # linkage coherence). Carried from the cluster JSONL row; 1.0 for
-    # singletons and pre-#421 rows without the field. The merge-proposal gate
+    # singletons and pre-athenaeum#421 rows without the field. The merge-proposal gate
     # suppresses a proposal whose min pairwise falls below the cluster
     # threshold (a single-linkage chain, not a complete-linkage clique).
     min_pairwise_score: float = 1.0
@@ -494,12 +494,12 @@ class MergedWikiEntry:
     body: str = ""
     member_paths: list[str] = field(default_factory=list)
     contradiction: ContradictionResult | None = None
-    # Issue #261 (slice B of #259): set by the move-then-retire pass when the
+    # Issue athenaeum#261 (slice B of athenaeum#259): set by the move-then-retire pass when the
     # cluster's raw intake has been MOVED into this wiki entry (long-term
     # memory) and the raw files retired (git rm). Rendered as ``retired: true``
     # in frontmatter so a reader can tell the fact now lives here permanently
     # rather than in the expiring intake queue. Default False keeps every
-    # non-retire write byte-identical to the pre-#261 output.
+    # non-retire write byte-identical to the pre-athenaeum#261 output.
     retired: bool = False
     # Resolved :class:`AutoMemoryFile` records backing this cluster. Populated
     # by :func:`merge_cluster_row` so the outer orchestrator does not need to
@@ -646,7 +646,7 @@ def derive_topic_slug(
 def _default_source_ref(entry: dict[str, Any]) -> str:
     """Best-effort ``source_ref`` from session+turn — NEVER the raw filename.
 
-    Issue #260: when a source carries no explicit ``source_ref``, we
+    Issue athenaeum#260: when a source carries no explicit ``source_ref``, we
     synthesize one from ``session`` (+ ``turn`` when present) so the
     citation always points at the originating session, never at the raw
     ``auto-memory/...`` file. Returns ``""`` only when there is no session
@@ -668,7 +668,7 @@ def _parse_one_source(raw: Any, fallback_scope: str) -> dict[str, Any] | None:
     ``policies/auto-memory-citation.md``) or raw string (legacy bare
     session UUID). Returns ``None`` for unparseable input.
 
-    Issue #260 (slice A of #259): every parsed source carries an
+    Issue athenaeum#260 (slice A of athenaeum#259): every parsed source carries an
     origin-traced ``source_type`` (one of :data:`SOURCE_TYPES`, default
     ``inferred``) and a ``source_ref`` — the ULTIMATE reference
     (session-id+turn / URL / document path), back-filled from session+turn
@@ -701,7 +701,7 @@ def _parse_one_source(raw: Any, fallback_scope: str) -> dict[str, Any] | None:
         entry["source_ref"] = safe_source_ref(
             raw.get("source_ref"), _default_source_ref(entry)
         )
-        # Issue #262 (slice C of #259): carry the granular diff target. When a
+        # Issue athenaeum#262 (slice C of athenaeum#259): carry the granular diff target. When a
         # fact is moved into a wiki entry, ``retire.py`` stamps the atomic
         # ``claim`` text (and a resolved ``verdict``/disposition when one
         # exists) onto the source so a future memory has a footnote-level
@@ -713,7 +713,7 @@ def _parse_one_source(raw: Any, fallback_scope: str) -> dict[str, Any] | None:
         verdict = raw.get("verdict")
         if verdict is not None and str(verdict).strip():
             entry["verdict"] = str(verdict)
-        # Issue #308 (slice 4): carry per-claim temporal validity through the
+        # Issue athenaeum#308 (slice 4): carry per-claim temporal validity through the
         # compiled source record so a claim's window round-trips byte-for-byte
         # through a render + reparse (same contract as claim/verdict above).
         # Bounds are normalized to ``YYYY-MM-DD`` via ``validity_bound_str``;
@@ -754,7 +754,7 @@ def _am_as_implicit_source(am: AutoMemoryFile) -> dict[str, Any] | None:
     }
     if am.origin_turn is not None:
         entry["turn"] = int(am.origin_turn)
-    # Issue #260: carry origin-traced provenance. An implicit source recovered
+    # Issue athenaeum#260: carry origin-traced provenance. An implicit source recovered
     # from originSessionId/turn is unverified at this layer, so honor the
     # file's own declared source_type (default ``inferred``) and back-fill a
     # session+turn ref — never the raw filename. The guard also rejects a
@@ -765,7 +765,7 @@ def _am_as_implicit_source(am: AutoMemoryFile) -> dict[str, Any] | None:
 
 
 def _stamp_member_validity(src: dict[str, Any], am: AutoMemoryFile) -> None:
-    """Stamp a member's temporal validity window onto its compiled source (#308 slice 4).
+    """Stamp a member's temporal validity window onto its compiled source (athenaeum#308 slice 4).
 
     Per-claim (vs per-page) compiled validity: each raw member IS one claim,
     and its ``valid_from`` / ``valid_until`` window travels WITH the claim into
@@ -787,7 +787,7 @@ def _stamp_member_validity(src: dict[str, Any], am: AutoMemoryFile) -> None:
 
 
 def _validity_window_phrase(src: dict[str, Any]) -> str:
-    """Human-readable validity window for a compiled source, or ``""`` (#308 slice 4).
+    """Human-readable validity window for a compiled source, or ``""`` (athenaeum#308 slice 4).
 
     Renders the per-claim window carried on the source dict:
 
@@ -816,13 +816,13 @@ def dedupe_sources(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     Entries missing a turn fall back to ``(session, None)`` and only
     collapse among themselves.
 
-    Provenance note (#260): the dedupe key is ``(session, turn)`` ONLY — it
+    Provenance note (athenaeum#260): the dedupe key is ``(session, turn)`` ONLY — it
     ignores ``source_type`` / ``source_ref``. So two entries citing the same
     (session, turn) with *different* provenance collapse to the FIRST one
     (input order). Callers that want the verified provenance to win must
     order the verified entry first before deduping.
 
-    This first-wins rule extends to the #308-slice-4 ``valid_from`` /
+    This first-wins rule extends to the athenaeum#308-slice-4 ``valid_from`` /
     ``valid_until`` window: two citations of the same (session, turn) keep the
     first entry's window. In practice both come from the same raw member and
     carry the same window, so the collapse is loss-free.
@@ -916,7 +916,7 @@ def merge_cluster_row(
     been removed between runs, and we prefer to skip such rows with a
     log line rather than crash the whole merge pass.
 
-    ``as_of`` (issue #359, compile-as-of) rewinds the per-member active
+    ``as_of`` (issue athenaeum#359, compile-as-of) rewinds the per-member active
     predicate: a member is excluded when ``is_inactive(as_of)`` — its
     ``valid_until`` had already passed on ``as_of`` OR it carries a
     tombstone. Left ``None`` (the default) the predicate keys on today,
@@ -924,7 +924,7 @@ def merge_cluster_row(
     a member ingested after ``as_of`` but whose validity window covers
     ``as_of`` is still blended (see :func:`compile_as_of`).
 
-    C4 (#198): contradiction detection is NOT performed here — the caller
+    C4 (athenaeum#198): contradiction detection is NOT performed here — the caller
     (:func:`merge_clusters_to_wiki`) runs it against the resolved member
     list and sets ``contradictions_detected`` + ``contradiction`` on the
     return value before rendering. This keeps ``merge_cluster_row`` a pure
@@ -937,7 +937,7 @@ def merge_cluster_row(
         centroid_score = float(centroid_score_raw)
     except (TypeError, ValueError):
         centroid_score = 1.0
-    # Issue #421: complete-linkage coherence metric. Pre-#421 rows lack the
+    # Issue athenaeum#421: complete-linkage coherence metric. Pre-athenaeum#421 rows lack the
     # field; default 1.0 (treated as a clique — nothing to suppress).
     min_pairwise_raw = row.get("min_pairwise_score", 1.0)
     try:
@@ -999,7 +999,7 @@ def merge_cluster_row(
                 )
                 shim_refines = []
                 shim_supersedes = []
-            # Issue #181: same self-reference lint as discover_auto_memory_files.
+            # Issue athenaeum#181: same self-reference lint as discover_auto_memory_files.
             shim_name = str(meta.get("name", "")) if meta else ""
             shim_refines, shim_supersedes = _strip_self_reference(
                 shim_name, shim_refines, shim_supersedes, resolved
@@ -1017,14 +1017,14 @@ def merge_cluster_row(
                 sources=sources,
                 refines=shim_refines,
                 supersedes=shim_supersedes,
-                # Issue #191: non-destructive inactive markers.
+                # Issue athenaeum#191: non-destructive inactive markers.
                 superseded_by=parse_superseded_by(meta if meta else None),
                 deprecated=parse_deprecated(meta if meta else None),
-                # Issue #308: claim-level temporal validity bounds.
+                # Issue athenaeum#308: claim-level temporal validity bounds.
                 valid_from=validity_bound_str(meta if meta else None, "valid_from"),
                 valid_until=validity_bound_str(meta if meta else None, "valid_until"),
             )
-        # Issue #278: secondary ephemeral guard. discover_auto_memory_files
+        # Issue athenaeum#278: secondary ephemeral guard. discover_auto_memory_files
         # already drops ephemeral intake, so the only way one reaches here is
         # a STALE cluster JSONL row referencing a file C1 no longer discovers
         # (the shim path above). Re-classify every resolved member so such a
@@ -1053,10 +1053,10 @@ def merge_cluster_row(
                     eph_reason,
                 )
                 continue
-        # Issue #191: skip members marked inactive (superseded_by / deprecated)
+        # Issue athenaeum#191: skip members marked inactive (superseded_by / deprecated)
         # so their bodies are never composed into the wiki entry and they do
         # not contribute sources. Inactive files stay on disk for audit.
-        # Issue #359: ``as_of`` rewinds this member predicate for compile-as-of.
+        # Issue athenaeum#359: ``as_of`` rewinds this member predicate for compile-as-of.
         if am.is_inactive(as_of):
             log.info(
                 "cluster %s: member %s is inactive (superseded/deprecated); excluding from compile",
@@ -1069,7 +1069,7 @@ def merge_cluster_row(
 
     if not members:
         # Either no members resolved, or every resolved member is inactive
-        # (#191) — skip the row entirely; there is no live claim to compile.
+        # (athenaeum#191) — skip the row entirely; there is no live claim to compile.
         log.info("cluster %s: no active members; skipping row", cluster_id)
         return None
 
@@ -1094,7 +1094,7 @@ def merge_cluster_row(
             for s in sources_raw:
                 parsed = _parse_one_source(s, am.origin_scope)
                 if parsed is not None:
-                    # Issue #308 (slice 4): the member's temporal validity window
+                    # Issue athenaeum#308 (slice 4): the member's temporal validity window
                     # travels with each claim it cites into the compiled entry.
                     _stamp_member_validity(parsed, am)
                     raw_sources.append(parsed)
@@ -1143,7 +1143,7 @@ def _is_low_cohesion_cross_scope(
 ) -> bool:
     """True when *entry* matches the low-cohesion cross-scope over-cluster signature.
 
-    Issue #278. The cross-scope ``similarity`` clustering path over-clusters:
+    Issue athenaeum#278. The cross-scope ``similarity`` clustering path over-clusters:
     single-linkage chains a coherent source doc with vaguely-similar
     operational notes from many scopes into one low-cohesion blend page. The
     gate fires only when ALL hold:
@@ -1168,14 +1168,14 @@ def _is_low_cohesion_cross_scope(
 
 
 def _classify_merge_write_kind(merge_target_name: str, wiki_root: Path) -> str:
-    """Classify a merge proposal by whether its target slug already exists (#421).
+    """Classify a merge proposal by whether its target slug already exists (athenaeum#421).
 
     Returns ``"fold-into-existing"`` when a wiki page already owns the derived
     target slug, else ``"create-merged"``. The existence check mirrors
     :func:`athenaeum.pending_merges.resolve_merge`'s approve-time target path
     EXACTLY (``wiki_root / f"{slugify(name)}.md"``) so a ``create-merged``
     proposal can never later fail ``target_exists`` at approve. Only the
-    CLASSIFICATION lives here; the fold WRITE path is #425.
+    CLASSIFICATION lives here; the fold WRITE path is athenaeum#425.
     """
     target_slug = slugify(merge_target_name)
     if (wiki_root / f"{target_slug}.md").exists():
@@ -1197,12 +1197,12 @@ def t1_screen_rejects_merge_proposal(
     enabled: bool,
     dry_run: bool,
 ) -> bool:
-    """Run the T1 reasoning tier over one merge proposal (issue #518).
+    """Run the T1 reasoning tier over one merge proposal (issue athenaeum#518).
 
     Returns ``True`` when the proposal should be DROPPED before the human queue
     — i.e. the tier returned a confident ``reject``. Returns ``False`` (write
     the proposal to ``_pending_merges.md`` as usual) in every other case:
-    disabled, dry-run, no client, no members, a tripped spend ceiling (#568 —
+    disabled, dry-run, no client, no members, a tripped spend ceiling (athenaeum#568 —
     degrade to an unscreened write rather than block the queue), or a pass-up.
 
     On a reject it also surfaces the decision for the human-audit calibration
@@ -1215,7 +1215,7 @@ def t1_screen_rejects_merge_proposal(
     if not (enabled and client is not None and not dry_run and member_paths):
         return False
 
-    # Issue #568: the reasoning screen adds LLM calls to the merge phase, so it
+    # Issue athenaeum#568: the reasoning screen adds LLM calls to the merge phase, so it
     # participates in the spend ceiling. A tripped budget degrades to today's
     # unscreened write — it must never block the merge queue.
     if usage is not None:
@@ -1289,7 +1289,7 @@ def t2_screen_merge_proposal(
     dry_run: bool,
 ) -> bool:
     """Run the T2 reasoning tier over a T1 pass-up and auto-finalize a safe-class
-    approval (issue #602).
+    approval (issue athenaeum#602).
 
     Returns ``True`` when the proposal has ALREADY been fully handled — either
     auto-finalized (written to ``_pending_merges.md`` AND immediately resolved
@@ -1300,7 +1300,7 @@ def t2_screen_merge_proposal(
     spend ceiling, an escalate/amend/draft verdict, or an ``approve`` that
     fails the safe-class gate.
 
-    FAIL-SAFE DIRECTION (issue #602, absolute): every degradation path here
+    FAIL-SAFE DIRECTION (issue athenaeum#602, absolute): every degradation path here
     returns ``False`` — ceiling tripped, unparseable/unexpected model output,
     tier disabled, or a safe-class violation all fall through to the SAME
     unscreened ``write_pending_merge`` the caller already uses when T2 is
@@ -1317,7 +1317,7 @@ def t2_screen_merge_proposal(
     human approval uses: :func:`athenaeum.pending_merges.write_pending_merge`
     followed by :func:`athenaeum.pending_merges.resolve_merge` (``decision=
     "approve"``, ``auto_applied=True``) — the fold/create ``write_kind``
-    mechanics (issue #421/#425) are untouched, no second write path is added.
+    mechanics (issue athenaeum#421/#425) are untouched, no second write path is added.
     ``auto_applied=True`` durably marks the resolved block and the provenance
     ledger record so a human can always tell this write was never reviewed.
 
@@ -1332,7 +1332,7 @@ def t2_screen_merge_proposal(
     if not (enabled and client is not None and not dry_run and member_paths):
         return False
 
-    # Same spend-ceiling participation as T1 (#568): T2 is an Opus call, so a
+    # Same spend-ceiling participation as T1 (athenaeum#568): T2 is an Opus call, so a
     # tripped ceiling must degrade to the human queue, never to an unreviewed
     # write. Checked BEFORE any T2 call is attempted.
     if usage is not None:
@@ -1405,7 +1405,7 @@ def t2_screen_merge_proposal(
     )
     if not result.get("ok"):
         # Defense in depth: a resolve_merge failure (e.g. target_exists —
-        # a slug collision that snuck past the #421 precheck between
+        # a slug collision that snuck past the athenaeum#421 precheck between
         # classification and this call) must NOT be silently swallowed as
         # a successful auto-apply. Fall through to the human queue: the
         # block written above is already there, unresolved, exactly as an
@@ -1441,7 +1441,7 @@ def t2_screen_merge_proposal(
 
 
 def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
-    """Render ``[^name]: **Source:** ...`` footnotes for a source list (#260).
+    """Render ``[^name]: **Source:** ...`` footnotes for a source list (athenaeum#260).
 
     Each origin-traced source becomes one Markdown footnote definition
     carrying its ``source_type`` + ``source_ref``, matching the worked
@@ -1454,7 +1454,7 @@ def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
     from session+turn when absent — never the raw ``auto-memory/...``
     filename. Returns ``""`` for an empty source list.
 
-    Issue #262 (slice C of #259): when a source carries the granular
+    Issue athenaeum#262 (slice C of athenaeum#259): when a source carries the granular
     ``claim`` text moved into this entry (and a resolved ``verdict`` /
     disposition, when one exists), they are appended to the footnote so the
     wiki fact keeps a footnote-level diff target for future intake — the
@@ -1462,7 +1462,7 @@ def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
     retired raw atom. Both are optional; pre-slice-C sources render exactly
     as before.
 
-    Issue #308 (slice 4): when a source carries a per-claim temporal validity
+    Issue athenaeum#308 (slice 4): when a source carries a per-claim temporal validity
     window (``valid_from`` / ``valid_until``, stamped from the contributing
     member), a ``— **Valid:** <window>`` clause is appended. Optional — a
     source with no window (open interval) renders exactly as before.
@@ -1486,7 +1486,7 @@ def render_source_footnotes(sources: list[dict[str, Any]]) -> str:
         verdict = src.get("verdict")
         if verdict is not None and str(verdict).strip():
             text += f" — **Verdict:** {str(verdict).strip()}"
-        # Issue #308 (slice 4): per-claim compiled validity window. Optional —
+        # Issue athenaeum#308 (slice 4): per-claim compiled validity window. Optional —
         # a source with no window (open interval) renders exactly as before.
         window = _validity_window_phrase(src)
         if window:
@@ -1521,10 +1521,10 @@ def render_merged_entry(entry: MergedWikiEntry) -> str:
         meta["status"] = CONTRADICTION_STATUS_FLAGGED
         if entry.contradiction is not None and entry.contradiction.conflict_type:
             meta["contradiction_type"] = entry.contradiction.conflict_type
-    # Issue #261: mark the entry as a retired-on-move long-term memory.
+    # Issue athenaeum#261: mark the entry as a retired-on-move long-term memory.
     if entry.retired:
         meta["retired"] = True
-    # Issue #260: append origin-traced source footnotes to the BODY (sources
+    # Issue athenaeum#260: append origin-traced source footnotes to the BODY (sources
     # already render to frontmatter above; the footnotes give the human-
     # readable, ultimate-source citation the worked example used).
     body = entry.body
@@ -1569,20 +1569,20 @@ def merge_clusters_to_wiki(
             unset), the detector is skipped with a deterministic
             ``detected=False`` fallback — see
             :func:`athenaeum.contradictions.detect_contradictions`.
-        usage: Optional run-level :class:`TokenUsage` (issue #220). When
+        usage: Optional run-level :class:`TokenUsage` (issue athenaeum#220). When
             provided AND a live client is present, every detector (Haiku)
             and resolver (Opus) call increments ``usage.api_calls`` so the
             librarian's run-level budget sees this phase's spend. Each
             response's token + cache counts are accumulated by the callee
-            (#239), so the run summary's cache line also reflects this
+            (athenaeum#239), so the run summary's cache line also reflects this
             phase's traffic.
-        now: Optional run-start timestamp (issue #251). Injected for
+        now: Optional run-start timestamp (issue athenaeum#251). Injected for
             deterministic read-time decay of stale auto ``not_a_conflict``
             suppressions — a single frozen ``now`` is compared against each
             cached row's ``resolved_at``. Defaults to ``datetime.now(UTC)``
             (frozen once here so all clusters in the run share one clock).
             Tests pass a fixed value so no wall-clock leaks into assertions.
-        as_of: Issue #359 (compile-as-of). Rewinds the per-member active
+        as_of: Issue athenaeum#359 (compile-as-of). Rewinds the per-member active
             predicate (``is_inactive(as_of)``) so the deterministic C3 blend
             re-derives each entry from only the members valid on ``as_of`` —
             a member expired now but valid then is RE-INCLUDED. ``None`` (the
@@ -1590,12 +1590,12 @@ def merge_clusters_to_wiki(
             slice 3's read-time ``--as-of`` filter, which only hides
             already-compiled pages and cannot resurrect a dropped member's
             content. See :func:`compile_as_of`.
-        out_wiki_root: Issue #359. Redirect the wiki write target (and the
+        out_wiki_root: Issue athenaeum#359. Redirect the wiki write target (and the
             ``_pending_*`` sidecars) to this directory instead of
             ``knowledge_root / "wiki"``. Used by compile-as-of to write a
             recompiled snapshot into a scratch dir WITHOUT mutating the live
             wiki. ``None`` (the default) writes to the live wiki.
-        only_cluster_ids: Issue #370 PR2 (delta compile). When set, ONLY the
+        only_cluster_ids: Issue athenaeum#370 PR2 (delta compile). When set, ONLY the
             cluster rows whose ``cluster_id`` is in this set are merged and
             written — every unaffected ``wiki/auto-*.md`` is left untouched. The
             caller (:func:`athenaeum.librarian.run` on the deterministic
@@ -1604,7 +1604,7 @@ def merge_clusters_to_wiki(
             similarity sweep is skipped (it is whole-corpus by nature and only
             runs on the full path). ``None`` (the default) merges every cluster
             — today's whole-corpus behaviour, byte-for-byte.
-        max_api_calls: Issue #461. Optional run-level API call ceiling. When
+        max_api_calls: Issue athenaeum#461. Optional run-level API call ceiling. When
             set AND not a dry-run AND ``usage`` is provided, the C4 detector
             call sites (primary per-cluster pass and the cross-scope
             similarity sweep) are skipped once ``usage.api_calls`` has already
@@ -1613,27 +1613,27 @@ def merge_clusters_to_wiki(
             "budget-exhausted"``), so a run whose entity phase already spent
             the shared budget does not let C4 burn further past it. ``None``
             (the default) preserves today's unbounded behaviour byte-for-byte.
-        out_stats: Issue #464 (slice E of #460). Optional mutable out-param
+        out_stats: Issue athenaeum#464 (slice E of athenaeum#460). Optional mutable out-param
             (mirrors :func:`athenaeum.librarian._compile_auto_memory`'s
             ``out_delta_taken`` convention). When given, populated immediately
             before EITHER return site with the detector/resolver call-count
             breakdown this call accumulated — ``haiku_calls``,
             ``resolve_calls``, ``chunks_run``, ``pairs_added_via_similarity``,
             ``entries_merged`` (``len(entries)``), and ``escalations_written``
-            (``len(escalations)``) — so the run-level profile summary (#464)
+            (``len(escalations)``) — so the run-level profile summary (athenaeum#464)
             can thread these counters up without recomputing them. Purely
-            additive; ``None`` (every pre-#464 caller) is byte-identical.
+            additive; ``None`` (every pre-athenaeum#464 caller) is byte-identical.
 
     Returns:
         The list of :class:`MergedWikiEntry` records in cluster-file order.
     """
     resolved_config = config if config is not None else load_config(knowledge_root)
-    # Issue #568 (H7): the active provider, resolved once so both C4 loop heads
+    # Issue athenaeum#568 (H7): the active provider, resolved once so both C4 loop heads
     # below can consult ``spend.ceiling_tripped`` (the ceiling's UNIT — tokens
     # for the subscription path, dollars for the metered API path — is keyed on
     # it). Mirrors ``librarian.run``'s single ``resolve_provider(config)`` read.
     resolved_provider = resolve_provider(resolved_config)
-    # Issue #518: the reasoning-tier screen, resolved once. DEFAULT OFF —
+    # Issue athenaeum#518: the reasoning-tier screen, resolved once. DEFAULT OFF —
     # production merge behavior is byte-identical to today until an operator
     # opts in. When on, T1 screens each merge proposal before it reaches the
     # human queue (a confident reject drops it; a pass-up flows through
@@ -1645,7 +1645,7 @@ def merge_clusters_to_wiki(
         if reasoning_tier_enabled
         else None
     )
-    # Issue #398: resolved once and threaded into every dark-zone
+    # Issue athenaeum#398: resolved once and threaded into every dark-zone
     # PhaseHeartbeat below (merge-detect, merge-write) so an operator can
     # tune the tick cadence via ATHENAEUM_HEARTBEAT_INTERVAL / yaml without
     # touching call sites.
@@ -1656,7 +1656,7 @@ def merge_clusters_to_wiki(
         log.info("merge pass: no clusters at %s — nothing to merge", cluster_path)
         return []
 
-    # Issue #370 PR2: delta-scoped merge. Filter to the affected cluster rows
+    # Issue athenaeum#370 PR2: delta-scoped merge. Filter to the affected cluster rows
     # BEFORE building any entry so unaffected entries are neither rebuilt nor
     # rewritten (proving the "untouched entries stay byte + mtime identical"
     # equivalence property). Order among the surviving rows is preserved.
@@ -1678,13 +1678,13 @@ def merge_clusters_to_wiki(
 
     am_by_path = _collect_am_by_path(auto_memory_files)
 
-    # Issue #278: resolve the secondary ephemeral guard inputs once.
+    # Issue athenaeum#278: resolve the secondary ephemeral guard inputs once.
     ephemeral_scopes = resolve_ephemeral_scopes(resolved_config)
     operational_markers = resolve_operational_markers(resolved_config)
 
     entries: list[MergedWikiEntry] = []
     for row in rows:
-        # Issue #396: wall-clock deadline check at the C3 cluster-merge
+        # Issue athenaeum#396: wall-clock deadline check at the C3 cluster-merge
         # boundary. Cheap (a monotonic read) and only active when the run
         # armed a deadline; keeps a stalled/slow merge pass from running past
         # the run-level cap. Raised so run() commits partial + exits 124.
@@ -1702,7 +1702,7 @@ def merge_clusters_to_wiki(
             continue
         entries.append(entry)
 
-    # Issue #278: cluster-cohesion floor. Refuse to materialize a low-cohesion
+    # Issue athenaeum#278: cluster-cohesion floor. Refuse to materialize a low-cohesion
     # cross-scope OVER-CLUSTER -- a single-linkage chain that blends a coherent
     # source doc with vaguely-similar operational notes from many scopes -- into
     # a durable wiki page. Suppressed entries are dropped from ``entries`` here,
@@ -1718,7 +1718,7 @@ def merge_clusters_to_wiki(
     # no-op pass-through.
     cohesion_floor = resolve_min_cluster_cohesion(resolved_config)
     cohesion_min_scopes = resolve_min_cluster_cohesion_scopes(resolved_config)
-    # Issue #421: the clustering threshold the merge-proposal complete-linkage
+    # Issue athenaeum#421: the clustering threshold the merge-proposal complete-linkage
     # gate compares each cluster's minimum pairwise cosine against. Resolved
     # once (same value the C2 cluster pass used) and closed over by
     # ``_emit_escalation`` below.
@@ -1760,9 +1760,9 @@ def merge_clusters_to_wiki(
         else:
             slug_counts[base] = 1
 
-    # C4 (#198 + #125): claim-level contradiction detection.
+    # C4 (athenaeum#198 + athenaeum#125): claim-level contradiction detection.
     #
-    # Mode toggle (issue #125, ATHENAEUM_CROSS_SCOPE_MODE):
+    # Mode toggle (issue athenaeum#125, ATHENAEUM_CROSS_SCOPE_MODE):
     # - off: per-cluster only (legacy behavior).
     # - ancestor (default): pool each cluster with ancestor-scope members
     #   then chunk by cap before running the detector.
@@ -1782,7 +1782,7 @@ def merge_clusters_to_wiki(
     # detector call so the similarity sweep can skip them.
     covered_pair_keys: set[tuple[str, str]] = set()
 
-    # Issue #146: dedup escalations by the SET OF FLAGGED SOURCE MEMBER FILES
+    # Issue athenaeum#146: dedup escalations by the SET OF FLAGGED SOURCE MEMBER FILES
     # across the whole run. The same source-file pair is pulled into many
     # overlapping clusters; detection runs per cluster, so without this set
     # one real conflict escalates once per cluster (28 questions → 9 distinct
@@ -1793,7 +1793,7 @@ def merge_clusters_to_wiki(
     # there dedupes both passes.
     escalated_member_keys: set[tuple[str, ...]] = set()
 
-    # Issue #249: fingerprints already settled as not_a_conflict (auto OR human)
+    # Issue athenaeum#249: fingerprints already settled as not_a_conflict (auto OR human)
     # BEFORE this run started. Skipping ONLY this verdict is safe: other verdicts
     # (keep_a, correct_*, ...) must still flow to tier4_escalate so a prior HUMAN
     # verdict gets auto-enacted on the new page. load_resolved_records applies
@@ -1803,12 +1803,12 @@ def merge_clusters_to_wiki(
     # This is the SKIP gate and is frozen at run start on purpose: a pair the
     # resolver suppresses mid-run must NOT begin short-circuiting later clusters
     # in the SAME run, or it would silently drop a later cluster that the
-    # resolver would genuinely re-detect (#145/#146 contract — see
+    # resolver would genuinely re-detect (athenaeum#145/#146 contract — see
     # ``test_suppressed_pair_does_not_block_later_genuine_detection``). Only a
     # FUTURE run, reloading the cache fresh, treats this run's clearances as
     # settled.
     #
-    # Issue #251: read-time decay. With a positive
+    # Issue athenaeum#251: read-time decay. With a positive
     # ``contradiction.not_a_conflict_ttl_days``, an AUTO suppression older
     # than the ttl is DROPPED from this skip set (treated as absent) so the
     # pair re-enters the Opus confirmation path. ``now`` is frozen once here
@@ -1825,7 +1825,7 @@ def merge_clusters_to_wiki(
         if (rec.get("action") or rec.get("verdict")) == SUPPRESS_ACTION
         and not is_stale_auto_suppression(rec, ttl_days, decay_now)
     }
-    # Write-dedup set (issue #249, open-question #2): fingerprints written to the
+    # Write-dedup set (issue athenaeum#249, open-question #2): fingerprints written to the
     # cache during THIS run. Bounds file growth without feeding the skip gate
     # above — a mid-run clearance is recorded once but does not suppress later
     # re-detection of the same pair within the run.
@@ -1845,7 +1845,7 @@ def merge_clusters_to_wiki(
     ) -> None:
         if not result.detected:
             return
-        # Lane 3 / issue #169: resolver proposes the two snippets should
+        # Lane 3 / issue athenaeum#169: resolver proposes the two snippets should
         # merge into a single canonical memory. Route the proposal to
         # ``wiki/_pending_merges.md`` for human approval (NOT auto-applied)
         # and DROP the would-be pending-question escalation — the same
@@ -1853,7 +1853,7 @@ def merge_clusters_to_wiki(
         if proposal is not None and proposal.action == PROPOSE_MERGE_ACTION:
             assert isinstance(proposal, MergeProposal)
             member_paths = [str(m.path) for m in (members or [])]
-            # Issue #400: suppress degenerate over-cluster merge proposals
+            # Issue athenaeum#400: suppress degenerate over-cluster merge proposals
             # (huge source count / low confidence) BEFORE they reach the human
             # queue. Dropping entirely — neither a merge proposal nor a
             # fallback pending-question escalation — is deliberate: a 1,700-
@@ -1875,7 +1875,7 @@ def merge_clusters_to_wiki(
                     _suppress,
                 )
                 return
-            # Issue #433: type-compatibility precheck. A cluster spanning >1
+            # Issue athenaeum#433: type-compatibility precheck. A cluster spanning >1
             # distinct memory_class values (docs/memory-taxonomy.md #3) may
             # not be mechanically merged — same-class only. Untyped members
             # (the overwhelming majority of raw auto-memory intake, which
@@ -1898,7 +1898,7 @@ def merge_clusters_to_wiki(
                     len(cite.cited),
                 )
                 return
-            # Issue #518: T1 reasoning-tier screen (opt-in, default OFF). A
+            # Issue athenaeum#518: T1 reasoning-tier screen (opt-in, default OFF). A
             # confident reject drops the proposal before the human queue —
             # mirroring the _suppress / cross_class_precheck drops above —
             # rather than spending human review on a merge the tier is certain
@@ -1918,15 +1918,15 @@ def merge_clusters_to_wiki(
                 dry_run=dry_run,
             ):
                 return
-            # Issue #421: slug-collision precheck. Classify the proposal by
+            # Issue athenaeum#421: slug-collision precheck. Classify the proposal by
             # whether its derived target slug already exists in wiki/ so a
             # ``create-merged`` proposal can never fail ``target_exists`` at
             # approve. Only the CLASSIFICATION lives here; the fold WRITE path
-            # is #425.
+            # is athenaeum#425.
             write_kind = _classify_merge_write_kind(
                 proposal.merge_target_name, wiki_root
             )
-            # Issue #602: T2 reasoning-tier screen — a second, more expensive
+            # Issue athenaeum#602: T2 reasoning-tier screen — a second, more expensive
             # tier consulted ONLY on a T1 pass-up (a T1 reject already
             # returned above, so an already-rejected proposal never reaches
             # this Opus call). Gated behind the SAME
@@ -1984,7 +1984,7 @@ def merge_clusters_to_wiki(
                 )
             else:
                 return
-        # Confirmation pass (issue #145): the stronger resolver model
+        # Confirmation pass (issue athenaeum#145): the stronger resolver model
         # gets a second opinion on every detected=True cluster. When it
         # returns the suppress verdict, the cheap detector over-fired —
         # this is a refinement / restatement / supersession /
@@ -1995,7 +1995,7 @@ def merge_clusters_to_wiki(
         # and escalate as before, so cost stays bounded and an offline
         # run still escalates.
         if proposal is not None and proposal.action == SUPPRESS_ACTION:
-            # Issue #249: record this clearance so future nights skip the Opus
+            # Issue athenaeum#249: record this clearance so future nights skip the Opus
             # confirmation for this settled pair. Dedup against the in-memory
             # set bounds file growth (open-question #2). Best-effort — the
             # writer swallows OSError and must never block the drop below.
@@ -2019,7 +2019,7 @@ def merge_clusters_to_wiki(
                     fingerprint=fp,
                     verdict=SUPPRESS_ACTION,
                     resolved_by="auto",
-                    # Issue #251: stamp the run-start ``now`` so the decay
+                    # Issue athenaeum#251: stamp the run-start ``now`` so the decay
                     # clock is single-sourced — a re-cleared expired pair's
                     # fresh row resets the clock against the SAME instant the
                     # skip gate decayed against (deterministic refresh).
@@ -2036,7 +2036,7 @@ def merge_clusters_to_wiki(
                 entry.cluster_id,
             )
             return
-        # Opinion-attribution verdict (#327): BOTH sides are evaluative
+        # Opinion-attribution verdict (athenaeum#327): BOTH sides are evaluative
         # opinions kept-both-with-attribution. Like the suppress/refines
         # short-circuit, this is NOT a human-facing conflict — both stay
         # active, each attributed to its asserter — so ENACT the non-
@@ -2055,7 +2055,7 @@ def merge_clusters_to_wiki(
                 entry.cluster_id,
             )
             return
-        # Mutating single-side verdicts (#166 follow-up): correct_a /
+        # Mutating single-side verdicts (athenaeum#166 follow-up): correct_a /
         # correct_b (the losing side was WRONG — remove its claim) and
         # forget_a / forget_b (one side is transient — delete it cleanly).
         # These are genuine contradictions, NOT suppressions and NOT
@@ -2065,7 +2065,7 @@ def merge_clusters_to_wiki(
         # decides whether the resolution is applied in-place or left for
         # the human — no special routing is needed here. Noted explicitly
         # so a future reader greps the contract and does not add a branch.
-        # Issue #146: run-scoped dedup by the flagged source-file set. The
+        # Issue athenaeum#146: run-scoped dedup by the flagged source-file set. The
         # check sits AFTER the suppress-verdict return on purpose: a
         # suppressed cluster never reaches here, so it does not consume a
         # member key — a later, genuinely-detected cluster covering the same
@@ -2100,10 +2100,10 @@ def merge_clusters_to_wiki(
         description = "\n".join(description_parts) or (
             f"Cluster {entry.cluster_id} flagged by contradiction detector."
         )
-        # Append the OPTIONAL Opus-resolver proposal block (issue #126).
+        # Append the OPTIONAL Opus-resolver proposal block (issue athenaeum#126).
         # render_proposal_block returns "" for the deterministic fallback,
         # so entries without a real proposal stay byte-identical to the
-        # pre-#126 escalation format.
+        # pre-athenaeum#126 escalation format.
         if proposal is not None and isinstance(proposal, ResolutionProposal):
             block = render_proposal_block(proposal)
             if block:
@@ -2117,12 +2117,12 @@ def merge_clusters_to_wiki(
                 proposal=proposal,
                 # Flagged member paths in resolver a/b order so the
                 # enactment lane can delete the target on a high-confidence
-                # forget_*/correct_* auto-apply (#166 follow-up).
+                # forget_*/correct_* auto-apply (athenaeum#166 follow-up).
                 members=_order_member_paths(result, members),
             )
         )
 
-    # Issue #191: drop inactive members (superseded_by / deprecated) from the
+    # Issue athenaeum#191: drop inactive members (superseded_by / deprecated) from the
     # detector pool so a superseded/deprecated claim cannot generate fresh
     # contradiction escalations. ``am_by_path`` (the row-builder body lookup)
     # is left intact — the row-level skip in ``merge_cluster_row`` handles
@@ -2130,13 +2130,13 @@ def merge_clusters_to_wiki(
     auto_memory_list = [am for am in auto_memory_files if not am.is_inactive(as_of)]
     use_ancestor = mode in ("ancestor", "both")
 
-    # Issue #126: Opus-backed resolver budget. The resolver is opt-in
+    # Issue athenaeum#126: Opus-backed resolver budget. The resolver is opt-in
     # via ANTHROPIC_API_KEY (no client → fallback path); the per-run cap
     # caps Opus calls even when a key is present, so a noisy detector
     # cannot run away with cost. When the budget is exhausted, the
     # remaining contradictions are escalated WITHOUT a proposal —
     # `render_proposal_block` is a no-op on the fallback proposal so the
-    # block stays byte-identical to the pre-#126 format.
+    # block stays byte-identical to the pre-athenaeum#126 format.
     resolve_budget = resolve_max_per_run(resolved_config)
     resolve_calls = 0
     resolve_budget_exhausted_logged = False
@@ -2148,7 +2148,7 @@ def merge_clusters_to_wiki(
         nonlocal resolve_calls, resolve_budget_exhausted_logged
         if not result.detected:
             return None
-        # Issue #249: a pair already settled as not_a_conflict (auto or human)
+        # Issue athenaeum#249: a pair already settled as not_a_conflict (auto or human)
         # skips the expensive Opus confirmation entirely. Synthesize the
         # SUPPRESS proposal so existing code drops the escalation (the loop
         # sets ``suppressed`` and ``_emit_escalation`` returns) WITHOUT
@@ -2157,13 +2157,13 @@ def merge_clusters_to_wiki(
         if fp and fp in cleared_not_a_conflict_fps:
             log.info(
                 "contradictions: claim-pair already settled as not_a_conflict "
-                "(fingerprint=%s); skipping Opus confirmation (issue #249)",
+                "(fingerprint=%s); skipping Opus confirmation (issue athenaeum#249)",
                 fp,
             )
             return ResolutionProposal(
                 recommended_winner="neither",
                 action=SUPPRESS_ACTION,
-                rationale="cached not_a_conflict (issue #249)",
+                rationale="cached not_a_conflict (issue athenaeum#249)",
                 confidence=1.0,
             )
         if resolve_calls >= resolve_budget:
@@ -2184,10 +2184,10 @@ def merge_clusters_to_wiki(
             usage.api_calls += 1
         return propose_resolution(result, members, client, usage=usage)
 
-    # Issue #462: FIRST WRITE — persist the deterministic C3 merge output to
+    # Issue athenaeum#462: FIRST WRITE — persist the deterministic C3 merge output to
     # disk BEFORE C4 detection runs. Until this change the page write loop sat
     # AFTER the deadline-checked C4 detector/resolver loop, so a C4 deadline
-    # trip (10+ consecutive nights per #440) raised before any page was
+    # trip (10+ consecutive nights per athenaeum#440) raised before any page was
     # written and threw away the ENTIRE C3 build — every night re-paid C3 and
     # banked nothing. Writing here means a later C4 trip keeps the compiled
     # pages on disk (``_stop_on_deadline`` commits them); C4 then re-writes
@@ -2197,7 +2197,7 @@ def merge_clusters_to_wiki(
     # resolution all complete before this pass, so no page is written mid-build
     # with a not-yet-final slug. Every page is written UNFLAGGED here
     # (``contradiction`` defaults to ``detected=False``), byte-identical to
-    # what a deterministic ``client=None`` compile already writes — the #145
+    # what a deterministic ``client=None`` compile already writes — the athenaeum#145
     # contract ("no contradiction-flagged status without a pending question")
     # holds because the flag is only rendered after detection + escalation.
     # A page flagged by a PRIOR run whose cluster now clears is overwritten
@@ -2221,7 +2221,7 @@ def merge_clusters_to_wiki(
             atomic_write_text(page_path, text)
             log.info(
                 "merge: wrote %s (cluster %s, %d source(s), contradictions=%s) "
-                "[pre-C4 first write, #462]",
+                "[pre-C4 first write, athenaeum#462]",
                 page_path,
                 entry.cluster_id,
                 len(entry.sources),
@@ -2230,7 +2230,7 @@ def merge_clusters_to_wiki(
             write_heartbeat.tick(entry.cluster_id or entry.topic_slug, compiled=1)
         write_heartbeat.done()
 
-    # Issue #398: the C4 contradiction-detection loop is the region that went
+    # Issue athenaeum#398: the C4 contradiction-detection loop is the region that went
     # dark for 3.5h in the 2026-07-19 incident (per-cluster `claude -p`
     # detector/resolver subprocess calls with no progress logging). Emit a
     # heartbeat per cluster processed so a wedge here is visible in the log.
@@ -2238,7 +2238,7 @@ def merge_clusters_to_wiki(
         "merge-detect", total=len(entries), interval_s=heartbeat_interval
     )
     detect_heartbeat.start()
-    # Issue #569 (H6): resolved once for the per-cluster detection-incomplete
+    # Issue athenaeum#569 (H6): resolved once for the per-cluster detection-incomplete
     # marker writes/clears below (same cache-dir resolution the cluster pass
     # reads with, so writes here and reads in _run_cluster_pass agree).
     _incomplete_cache_dir = detection_state.resolve_cache_dir()
@@ -2260,20 +2260,20 @@ def merge_clusters_to_wiki(
         # Set when the confirmation pass cleared a detected cluster — the
         # entry must NOT be flagged even though the detector fired.
         suppressed = False
-        # Issue #569 (H6): set when the detector OR resolver gave up after its
+        # Issue athenaeum#569 (H6): set when the detector OR resolver gave up after its
         # transient-error retries for this cluster. Drives the per-cluster
         # detection-incomplete marker below so a cluster that hit one transient
         # error is force-re-queued into the next run's delta set.
         entry_incomplete = False
         for chunk in chunks:
-            # Issue #396: wall-clock deadline check at the C4 detector/resolver
-            # chunk boundary — the EXACT site the #396 incident wedged in
+            # Issue athenaeum#396: wall-clock deadline check at the C4 detector/resolver
+            # chunk boundary — the EXACT site the athenaeum#396 incident wedged in
             # (cycling `claude -p` merge subprocesses for ~3.5h). Bounds a
             # stalled detector/resolver loop to the run-level deadline.
             if deadline is not None and time.monotonic() >= deadline:
                 raise RunDeadlineExceeded("C4 contradiction detector / resolver")
             chunks_run += 1
-            # Lane 1 / #167: short-circuit when every pair in the chunk
+            # Lane 1 / athenaeum#167: short-circuit when every pair in the chunk
             # declares the other via refines/supersedes. Saves a Haiku
             # call and prevents the over-fire path from flagging
             # already-resolved pairs.
@@ -2283,7 +2283,7 @@ def merge_clusters_to_wiki(
                 _record_pair_keys(chunk)
                 result = ContradictionResult(detected=False, rationale=declared)
                 continue
-            # Issue #172: partial prune — Haiku only sees members that
+            # Issue athenaeum#172: partial prune — Haiku only sees members that
             # have at least one undeclared partner. _record_pair_keys
             # still uses the original chunk so declared pairs are
             # marked covered for the similarity sweep.
@@ -2294,7 +2294,7 @@ def merge_clusters_to_wiki(
                     rationale="declared-pruned-to-singleton",
                 )
                 continue
-            # Issue #324: skip the detector when EVERY undeclared pair is
+            # Issue athenaeum#324: skip the detector when EVERY undeclared pair is
             # validity-disjoint — sequential states of the world cannot
             # conflict. Mirrors the declared-pair short-circuit above: no
             # Haiku call, no escalation, already-settled pairs stay settled.
@@ -2309,7 +2309,7 @@ def merge_clusters_to_wiki(
                     detected=False, rationale="disjoint-validity"
                 )
                 continue
-            # Issue #461: run-level budget guard. The entity phase now claims
+            # Issue athenaeum#461: run-level budget guard. The entity phase now claims
             # the shared ``max_api_calls`` ceiling FIRST (it runs before this
             # whole-corpus C4 pass — see the librarian.run() reorder), so a
             # spent budget must stop the detector here too, rather than
@@ -2327,7 +2327,7 @@ def merge_clusters_to_wiki(
                     detected=False, rationale="budget-exhausted"
                 )
                 continue
-            # Issue #568 (H7): the shared ``max_api_calls`` count is not the
+            # Issue athenaeum#568 (H7): the shared ``max_api_calls`` count is not the
             # only bound — an operator's spend ceiling (tokens or dollars) must
             # STOP this phase too. The C4 pass runs the Haiku detector AND the
             # Opus resolver, the most expensive phase, yet historically checked
@@ -2354,12 +2354,12 @@ def merge_clusters_to_wiki(
             result = detect_contradictions(
                 filtered, client, config=resolved_config, usage=usage
             )
-            # Issue #569 (H6): capture the detector's transient give-up BEFORE
+            # Issue athenaeum#569 (H6): capture the detector's transient give-up BEFORE
             # any downgrade reassigns `result`, so a cluster whose detection was
             # cut short by an overload window is re-queued next run.
             if result.incomplete:
                 entry_incomplete = True
-            # Issue #324: post-detection guard — an otherwise-overlapping
+            # Issue athenaeum#324: post-detection guard — an otherwise-overlapping
             # cluster can still have the detector flag a SPECIFIC disjoint
             # pair. Downgrade to not-detected BEFORE the escalation/pending-
             # question write so the settled pair is never re-queued.
@@ -2374,7 +2374,7 @@ def merge_clusters_to_wiki(
             _record_pair_keys(chunk)
             if result.detected and aggregate is None:
                 proposal = _maybe_propose(result, filtered)
-                # Issue #569 (H6): a resolver that gave up after its retries
+                # Issue athenaeum#569 (H6): a resolver that gave up after its retries
                 # leaves the contradiction un-resolved — re-queue the cluster.
                 if getattr(proposal, "incomplete", False):
                     entry_incomplete = True
@@ -2383,7 +2383,7 @@ def merge_clusters_to_wiki(
                 # wiki entry frontmatter is NOT tagged
                 # contradiction-flagged. Otherwise a suppressed cluster
                 # would carry a "contradiction-flagged" status with no
-                # pending question to point at (issue #145).
+                # pending question to point at (issue athenaeum#145).
                 # `_emit_escalation` independently drops the escalation
                 # for the suppress verdict.
                 if proposal is not None and proposal.action == SUPPRESS_ACTION:
@@ -2392,7 +2392,7 @@ def merge_clusters_to_wiki(
                     # Lane 3: routed to _pending_merges.md, not a contradiction.
                     suppressed = True
                 elif proposal is not None and proposal.action == ATTRIBUTE_BOTH_ACTION:
-                    # Issue #327: an opinion pair kept-both-with-attribution is
+                    # Issue athenaeum#327: an opinion pair kept-both-with-attribution is
                     # not a live contradiction — leave `aggregate` unset so the
                     # wiki entry is not tagged contradiction-flagged (the
                     # escalation is dropped in _emit_escalation).
@@ -2404,7 +2404,7 @@ def merge_clusters_to_wiki(
             if suppressed:
                 # Detector fired but the confirmation pass cleared it —
                 # record a clean not-detected verdict so the wiki entry
-                # frontmatter is coherent (issue #145).
+                # frontmatter is coherent (issue athenaeum#145).
                 aggregate = ContradictionResult(
                     detected=False,
                     rationale="confirmation-pass-cleared",
@@ -2415,7 +2415,7 @@ def merge_clusters_to_wiki(
                 aggregate = result if chunks else ContradictionResult(detected=False)
         entry.contradiction = aggregate
         entry.contradictions_detected = bool(aggregate.detected)
-        # Issue #569 (H6): record or clear the per-cluster detection-incomplete
+        # Issue athenaeum#569 (H6): record or clear the per-cluster detection-incomplete
         # marker. Only when detection was actually ATTEMPTED (a live client) and
         # this is not a dry run — otherwise we neither examined the cluster nor
         # should churn the marker. A cluster whose detector/resolver gave up
@@ -2433,7 +2433,7 @@ def merge_clusters_to_wiki(
                 detection_state.clear_incomplete(
                     _incomplete_cache_dir, entry.cluster_id
                 )
-        # Issue #462: re-write this page IMMEDIATELY if C4 changed its rendered
+        # Issue athenaeum#462: re-write this page IMMEDIATELY if C4 changed its rendered
         # bytes (contradiction flag added, or a stale flag cleared) relative to
         # the pre-C4 first write. Doing it per-entry inside the loop — rather
         # than in a trailing batch — means a C4 deadline trip at a LATER chunk
@@ -2448,7 +2448,7 @@ def merge_clusters_to_wiki(
                 first_write_render[entry.filename] = new_text
                 log.info(
                     "merge: re-wrote %s after C4 (cluster %s, contradictions=%s) "
-                    "[#462]",
+                    "[athenaeum#462]",
                     entry.filename,
                     entry.cluster_id,
                     entry.contradictions_detected,
@@ -2456,7 +2456,7 @@ def merge_clusters_to_wiki(
     detect_heartbeat.done()
 
     # Similarity sweep (mode in {similarity, both}).
-    # Issue #370 PR2: the sweep is whole-corpus by nature (it scans ALL raw
+    # Issue athenaeum#370 PR2: the sweep is whole-corpus by nature (it scans ALL raw
     # intake and wiki entries for cross-pair contradictions), so it is skipped
     # on the delta path — that path is the deterministic ``client=None`` compile
     # where the detector returns ``detected=False`` regardless and the sweep can
@@ -2475,7 +2475,7 @@ def merge_clusters_to_wiki(
             cache_dir=DEFAULT_CACHE_DIR,
             threshold=similarity_threshold,
             excluded_pair_keys=covered_pair_keys,
-            # Issue #262: only compare NEW raw intake against the matching
+            # Issue athenaeum#262: only compare NEW raw intake against the matching
             # wiki entry. Wiki-vs-wiki pairs are dropped, so an unchanged
             # corpus with zero new intake costs ~0 detector calls instead of
             # one per wiki-pair (O(new intake + open) not O(corpus²)).
@@ -2483,17 +2483,17 @@ def merge_clusters_to_wiki(
         )
         for cand in candidates:
             pair = candidate_to_auto_memory_files(cand)
-            # Lane 1 / #167: skip similarity-sweep pairs that declare
+            # Lane 1 / athenaeum#167: skip similarity-sweep pairs that declare
             # each other. Mirrors the primary-pass short-circuit so a
             # declared-supersession pair never reaches the detector.
             _filtered, declared = _filter_declared_pairs(list(pair))
             if declared is not None and not _filtered:
                 continue
-            # Issue #324: skip validity-disjoint similarity pairs too — a
+            # Issue athenaeum#324: skip validity-disjoint similarity pairs too — a
             # 2-member disjoint pair is settled and must not reach Haiku.
             if _all_pairs_disjoint(list(pair)):
                 continue
-            # Issue #461: same run-level budget guard as the primary detector
+            # Issue athenaeum#461: same run-level budget guard as the primary detector
             # call site above — a spent shared budget skips the similarity
             # sweep's detector call too (degrades to a no-op: no escalation,
             # since a "budget-exhausted" verdict is never `.detected`).
@@ -2504,7 +2504,7 @@ def merge_clusters_to_wiki(
                 and usage.api_calls >= max_api_calls
             ):
                 continue
-            # Issue #568 (H7): same spend-ceiling guard as the primary detector
+            # Issue athenaeum#568 (H7): same spend-ceiling guard as the primary detector
             # call site above — a breached ceiling skips the similarity sweep's
             # detector call too (a no-op degrade: no escalation is written when
             # the detector never runs). Mirrors ``librarian.py``'s early-exit.
@@ -2570,7 +2570,7 @@ def merge_clusters_to_wiki(
             )
         return entries
 
-    # Issue #462: every page is already on disk — written unflagged before C4
+    # Issue athenaeum#462: every page is already on disk — written unflagged before C4
     # (first write) and re-written per-entry as C4 changed its flag. The
     # trailing write loop that used to live here (AFTER the deadline-checked C4
     # loop) is gone: it was the sole reason a C4 trip discarded the compile.
@@ -2578,8 +2578,8 @@ def merge_clusters_to_wiki(
     #
     # Escalations stay a single end-of-pass ``tier4_escalate`` batch (unchanged
     # semantics). A C4 deadline trip therefore loses only THIS run's pending
-    # escalation batch, never the compiled pages — and the #157 open-block
-    # dedup + #249 resolved-records cache make a re-detection next run
+    # escalation batch, never the compiled pages — and the athenaeum#157 open-block
+    # dedup + athenaeum#249 resolved-records cache make a re-detection next run
     # idempotent, so a dropped batch re-escalates cleanly rather than
     # duplicating.
     if escalations:
@@ -2613,7 +2613,7 @@ def compile_as_of(
 ) -> list[MergedWikiEntry]:
     """Recompile a historical wiki snapshot as it would have stood on ``as_of``.
 
-    Issue #359 (§8.7). This is the COMPILE-as-of capability, distinct from
+    Issue athenaeum#359 (§8.7). This is the COMPILE-as-of capability, distinct from
     slice 3's read-time ``--as-of`` filter:
 
     - **Slice 3** (``recall --as-of`` / ``reindex --as-of``) filters the

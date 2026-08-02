@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Retire existing wiki entities minted from filenames / paths (issue #680).
+"""Retire existing wiki entities minted from filenames / paths (issue athenaeum#680).
 
 The write-side gate in :func:`athenaeum.tiers.is_code_artifact_name` stops NEW
 code-artifact entities (``skill.md``, ``project-registry.yaml``,
@@ -9,7 +9,7 @@ its frontmatter ``name``, and kills the page when that name is a code artifact
 by the SAME predicate the creation gate uses — never a looser re-derivation.
 
 Mirrors :mod:`athenaeum.auto_memory_prune` exactly (the "existing retire path"
-issue #680 asks for): dry-run is the DEFAULT (prints the kill-list with
+issue athenaeum#680 asks for): dry-run is the DEFAULT (prints the kill-list with
 per-page reasons and writes nothing); ``--apply`` ``git rm``\\s only the listed
 files in one labeled, git-recoverable commit and refuses to act without a
 writable git repo.
@@ -39,7 +39,7 @@ class FilenameEntityCandidate:
 
     ``rule`` is the matched-rule label from
     :func:`athenaeum.tiers.classify_code_artifact_name` (currently always
-    ``"extension"`` — a bare path separator no longer kills, #721) so a dry run
+    ``"extension"`` — a bare path separator no longer kills, athenaeum#721) so a dry run
     can print, per entry, WHICH rule marked the page and an operator can audit
     the kill-list by class rather than by eyeball."""
 
@@ -109,11 +109,11 @@ def build_filename_entity_report(
 
 
 def kill_rule_counts(report: FilenameEntityReport) -> dict[str, int]:
-    """Count kill-list entries per matched rule (issue #721).
+    """Count kill-list entries per matched rule (issue athenaeum#721).
 
     The extension/non-extension split an operator confirms on the live dry run:
     a ``{"extension": N}`` breakdown of what ``prune-code-entities`` proposes to
-    retire, by the rule that marked each page. Since #721 removed the bare
+    retire, by the rule that marked each page. Since athenaeum#721 removed the bare
     path-separator signal, ``extension`` is the only rule that ever fires — a
     non-``extension`` key appearing here would itself flag a regression."""
     counts: dict[str, int] = {}
@@ -131,7 +131,7 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def apply_filename_entity_prune(
     knowledge_root: Path, report: FilenameEntityReport
 ) -> FilenameEntityReport:
-    """``git rm`` the kill-list in one labeled commit (issue #680).
+    """``git rm`` the kill-list in one labeled commit (issue athenaeum#680).
 
     Removal is git-only (recoverable) and refuses to act without a writable git
     repo — the same safety contract as :func:`athenaeum.auto_memory_prune.
@@ -170,7 +170,7 @@ def apply_filename_entity_prune(
             "commit",
             "-m",
             f"chore(wiki): retire {len(rel_paths)} filename-derived entity "
-            f"page(s) (#680)",
+            f"page(s) (athenaeum#680)",
             "--",
             *rel_paths,
         )

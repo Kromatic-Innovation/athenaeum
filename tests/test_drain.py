@@ -1,7 +1,7 @@
-"""Tests for the backlog-drain ETA advisor + `athenaeum drain` (issue #470).
+"""Tests for the backlog-drain ETA advisor + `athenaeum drain` (issue athenaeum#470).
 
 Covers the pure estimators (rate from ledger, fallback path, tokens/file, the
-price table with the #236 batch discount), the advisor threshold logic, the
+price table with the athenaeum#236 batch discount), the advisor threshold logic, the
 drain pre-flight guards (missing API key, batch+finite-deadline, missing --yes),
 the cumulative-cost drain loop (empty backlog / drains-to-empty / ceiling stop /
 zero-progress stop), the ledger `files_processed` roundtrip, the
@@ -94,7 +94,7 @@ class TestEstimateFilesPerNight:
         records = [
             _ledger_record(files_processed=10),
             _ledger_record(files_processed=99, run_type="answers"),  # wrong type
-            _ledger_record(input_tokens=5),  # no files_processed (pre-#470)
+            _ledger_record(input_tokens=5),  # no files_processed (pre-athenaeum#470)
             _ledger_record(files_processed=0),  # zero — not usable
         ]
         rate, source = drain_advisor.estimate_files_per_night(records)
@@ -188,7 +188,7 @@ class TestEstimateDrainCostUsd:
 
 
 class TestEstimateModelResolution:
-    """Issue #571 (M18): the drain estimate prices at the resolved ``models.write``
+    """Issue athenaeum#571 (M18): the drain estimate prices at the resolved ``models.write``
     model, not a hardcoded literal — env > yaml > ``DEFAULT_WRITE_MODEL``."""
 
     def test_default_is_the_write_model(
@@ -438,7 +438,7 @@ class TestRunDrainLoop:
     def test_aborts_when_ledger_unwritable(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        # Issue #568 (H1): the cumulative dollar ceiling is only trustworthy if
+        # Issue athenaeum#568 (H1): the cumulative dollar ceiling is only trustworthy if
         # the ledger it re-reads can be written. An unwritable ledger must abort
         # the drain (return 1, run zero windows) rather than spend blind — a
         # blind drain spends up to max_usd PER WINDOW with no cumulative bound.

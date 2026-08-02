@@ -21,7 +21,7 @@ DIFFERENT, later pipeline (merge-proposal screening, T1/T2 reasoning
 tiers) with its own unrelated tier numbering scheme.
 
 SCC membership (L4 domain/pipeline). ``tiers.py`` does not import
-``librarian`` at all. Issue #545 hoisted ``discover_auto_memory_files`` to the
+``librarian`` at all. Issue athenaeum#545 hoisted ``discover_auto_memory_files`` to the
 :mod:`athenaeum.intake` leaf, so ``reresolve_open_questions`` now imports it
 from ``intake`` at TOP level and the former deferred ``from
 athenaeum.librarian import discover_auto_memory_files`` back-edge (the
@@ -31,11 +31,11 @@ one-way edge (no cycle).
 
 Imported at module top level by ``status.py`` (``schema_fragment_state``) and
 ``batch.py``, neither of which imports this module back. This module was
-formerly in a PRE-EXISTING residual SCC that #545 did NOT target (out of its
+formerly in a PRE-EXISTING residual SCC that athenaeum#545 did NOT target (out of its
 named scope): ``{tiers, contradictions, resolutions, answers}`` —
 ``contradictions`` imported ``tiers.DEFAULT_CLASSIFY_MODEL`` at top level while
 ``reresolve_open_questions`` function-locally imports ``contradictions`` /
-``resolutions`` / ``answers`` back. Issue #640 dissolved that cycle by hoisting
+``resolutions`` / ``answers`` back. Issue athenaeum#640 dissolved that cycle by hoisting
 ``DEFAULT_CLASSIFY_MODEL`` DOWN to the :mod:`athenaeum.config` leaf, so
 ``contradictions`` no longer reaches up into this hub; the deferred
 ``tiers`` -> ``resolutions``/``answers``/``contradictions`` edges remain as a
@@ -119,8 +119,8 @@ from athenaeum.search import embed_texts
 log = logging.getLogger(__name__)
 
 # Model defaults — override via env var or the yaml `models:` section
-# (env > yaml > default; issue #232). ``DEFAULT_CLASSIFY_MODEL`` moved DOWN to
-# :mod:`athenaeum.config` (issue #640) to break the ``contradictions`` -> ``tiers``
+# (env > yaml > default; issue athenaeum#232). ``DEFAULT_CLASSIFY_MODEL`` moved DOWN to
+# :mod:`athenaeum.config` (issue athenaeum#640) to break the ``contradictions`` -> ``tiers``
 # top-level back-edge; it is imported from there above and stays reachable as
 # ``athenaeum.tiers.DEFAULT_CLASSIFY_MODEL`` for backwards compatibility.
 DEFAULT_WRITE_MODEL = "claude-sonnet-5"
@@ -141,7 +141,7 @@ def _record_usage(
 ) -> None:
     """Record token usage from an API response if tracking is enabled.
 
-    *model* (issue #247) tags the serving model-id so
+    *model* (issue athenaeum#247) tags the serving model-id so
     ``TokenUsage.estimated_cost_usd`` can attribute cost per model;
     untagged calls fall back to the blended rate.
     """
@@ -157,7 +157,7 @@ def _record_usage(
 
 
 # Cap on operator-tunable schema fragments read from the live wiki at runtime
-# (issue #563). Both shipped defaults are well under 2KB; the cap degrades a
+# (issue athenaeum#563). Both shipped defaults are well under 2KB; the cap degrades a
 # too-long or accidentally-appended fragment (truncate, do not drop) so it
 # cannot silently inflate every classify/create call.
 _SCHEMA_FRAGMENT_MAX_CHARS = 8192
@@ -165,19 +165,19 @@ _SCHEMA_FRAGMENT_MAX_CHARS = 8192
 # The operator-tunable schema fragments that tiers.py interpolates into prompt
 # *instruction position* (adjacent to the fenced <user_document> block). These
 # are the subset of init._SCHEMA_FILES whose live-vs-default divergence the
-# attribution child (#567) surfaces via :func:`schema_fragment_state`.
+# attribution child (athenaeum#567) surfaces via :func:`schema_fragment_state`.
 _ATTRIBUTED_SCHEMA_FRAGMENTS = ("observation-filter.md", "_entity-template.md")
 
 
 def _load_schema_text(wiki_root: Path, filename: str) -> str:
     """Load an operator-tunable schema fragment from the live wiki.
 
-    This is the designed operator tuning knob (issue #17): the package ships
+    This is the designed operator tuning knob (issue athenaeum#17): the package ships
     defaults under ``athenaeum.schema`` that ``init`` copies write-once into
     ``wiki/_schema/``, and this reads the (possibly edited) copy back at runtime.
     Returns ``''`` if the fragment is absent or unreadable.
 
-    Hardened per issue #563, because the two callers interpolate the result into
+    Hardened per issue athenaeum#563, because the two callers interpolate the result into
     prompt *instruction position* next to the fenced ``<user_document>`` block:
 
     - **Bounded** to :data:`_SCHEMA_FRAGMENT_MAX_CHARS` — a too-long fragment is
@@ -198,7 +198,7 @@ def _load_schema_text(wiki_root: Path, filename: str) -> str:
         return ""
     if len(text) > _SCHEMA_FRAGMENT_MAX_CHARS:
         log.warning(
-            "schema fragment %s is %d chars; truncating to %d (issue #563)",
+            "schema fragment %s is %d chars; truncating to %d (issue athenaeum#563)",
             filename,
             len(text),
             _SCHEMA_FRAGMENT_MAX_CHARS,
@@ -217,7 +217,7 @@ def schema_fragment_state(wiki_root: Path) -> dict[str, tuple[str, bool]]:
     default. An absent fragment reports a stable hash and ``is_default=False`` —
     it diverges from the non-empty shipped default.
 
-    This is the input to the attribution child (#567): it is deliberately
+    This is the input to the attribution child (athenaeum#567): it is deliberately
     importable and callable without a wiki write or an API client — the bundled
     defaults are read via ``importlib.resources.files('athenaeum.schema')``, the
     same source ``init`` copies out from.
@@ -245,11 +245,11 @@ def schema_fragment_state(wiki_root: Path) -> dict[str, tuple[str, bool]]:
 # ---------------------------------------------------------------------------
 
 
-# Issue #662: default set of low-signal entity names that must NOT produce a
+# Issue athenaeum#662: default set of low-signal entity names that must NOT produce a
 # tier-3 merge LLM call. ``tier1_programmatic_match`` matches any indexed page
 # name >= 3 chars; the wiki index accumulates junk pages named ``here`` /
 # ``get`` / ``main`` / ``reach`` / ``lane a`` (measured on the live host during
-# the #440 diagnosis, 2026-08-01). Every one of those becomes a match, and
+# the athenaeum#440 diagnosis, 2026-08-01). Every one of those becomes a match, and
 # every match becomes a tier-3 merge call against a 16-23KB page — ~half of the
 # ~15-18 calls/file were worthless. The cost is the LLM CALL, not the match, so
 # the filter is applied HERE (the single tier-1 chokepoint, before the tier-3
@@ -262,7 +262,7 @@ def schema_fragment_state(wiki_root: Path) -> dict[str, tuple[str, bool]]:
 # "Reach"). All comparisons are case-insensitive on the whole name.
 DEFAULT_JUNK_MATCH_STOPWORDS: frozenset[str] = frozenset(
     {
-        # Measured junk pages (live host, 2026-08-01 — #440 diagnosis / #662).
+        # Measured junk pages (live host, 2026-08-01 — athenaeum#440 diagnosis / athenaeum#662).
         "here",
         "get",
         "main",
@@ -304,7 +304,7 @@ DEFAULT_JUNK_MATCH_STOPWORDS: frozenset[str] = frozenset(
 
 
 def _config_str_list(config: dict[str, Any] | None, key: str) -> list[str]:
-    """Read ``librarian.<key>`` from config as a list of strings (issue #662).
+    """Read ``librarian.<key>`` from config as a list of strings (issue athenaeum#662).
 
     Tolerant of every malformed shape (missing key, non-list, non-string
     members) — a bad config value degrades to "no extra entries", never raises."""
@@ -318,7 +318,7 @@ def _config_str_list(config: dict[str, Any] | None, key: str) -> list[str]:
 
 
 def resolve_junk_match_names(config: dict[str, Any] | None = None) -> set[str]:
-    """Resolve the effective junk-match name set (issue #662).
+    """Resolve the effective junk-match name set (issue athenaeum#662).
 
     ``(DEFAULT_JUNK_MATCH_STOPWORDS ∪ librarian.junk_match_stopwords) −
     librarian.junk_match_allowlist``, all lower-cased. The allowlist wins, so an
@@ -339,7 +339,7 @@ def tier1_programmatic_match(
 
     Returns list of (name, uid_or_name, path) for entities found in index.
 
-    Issue #662: a match whose name is in the resolved junk set
+    Issue athenaeum#662: a match whose name is in the resolved junk set
     (:func:`resolve_junk_match_names`) is dropped HERE, before it can become a
     tier-3 merge LLM call — junk matches (``here`` / ``get`` / ``main`` /
     ``reach`` / ``lane a`` and common function words) were ~half of the tier-3
@@ -355,9 +355,9 @@ def tier1_programmatic_match(
         # Only match names that are at least 3 chars to avoid false positives
         if len(name_key) < 3:
             continue
-        # Issue #662: drop low-signal junk names before they cost a tier-3 call.
+        # Issue athenaeum#662: drop low-signal junk names before they cost a tier-3 call.
         if name_key.strip().lower() in junk_names:
-            log.debug("  T1 junk match skipped (issue #662): %s", name_key)
+            log.debug("  T1 junk match skipped (issue athenaeum#662): %s", name_key)
             continue
         if name_key in content_lower:
             # Verify it's a word boundary match (not a substring)
@@ -369,7 +369,7 @@ def tier1_programmatic_match(
 
 
 # ---------------------------------------------------------------------------
-# Issue #680: code artifacts must NOT become wiki entities
+# Issue athenaeum#680: code artifacts must NOT become wiki entities
 # ---------------------------------------------------------------------------
 #
 # The librarian was minting durable wiki entities from source-code artifacts:
@@ -379,9 +379,9 @@ def tier1_programmatic_match(
 # against the working tree (the repo is the source of truth for its own code and
 # is always current; a memory of it is stale by construction). This is a WRITE-
 # side CLASS exclusion, not a read-side blacklist: filenames are an unbounded
-# set that a stopword list (#662) cannot enumerate, so the gate is applied at
+# set that a stopword list (athenaeum#662) cannot enumerate, so the gate is applied at
 # entity CREATION. It is deliberately complementary to and does NOT change
-# #662's ``junk_match_stopwords`` mechanism.
+# athenaeum#662's ``junk_match_stopwords`` mechanism.
 #
 # Default source/config extension set. A candidate whose name is a single token
 # ending in one of these (or that contains a path separator) is file-shaped and
@@ -403,7 +403,7 @@ DEFAULT_CODE_ARTIFACT_EXTENSIONS: frozenset[str] = frozenset(
 
 
 def resolve_exclude_code_artifacts(config: dict[str, Any] | None = None) -> bool:
-    """Whether the #680 code-artifact entity gate is ON (default True).
+    """Whether the athenaeum#680 code-artifact entity gate is ON (default True).
 
     Operators disable the whole gate with ``librarian.exclude_code_artifacts:
     false``; any non-bool / missing value keeps the safe default (ON)."""
@@ -417,7 +417,7 @@ def resolve_exclude_code_artifacts(config: dict[str, Any] | None = None) -> bool
 
 
 def resolve_code_artifact_extensions(config: dict[str, Any] | None = None) -> set[str]:
-    """Resolve the effective code-artifact extension set (issue #680).
+    """Resolve the effective code-artifact extension set (issue athenaeum#680).
 
     ``DEFAULT_CODE_ARTIFACT_EXTENSIONS ∪ librarian.code_artifact_extensions``,
     lower-cased and stripped of any leading dot, so both ``"rs"`` and ``".rs"``
@@ -431,21 +431,21 @@ def resolve_code_artifact_extensions(config: dict[str, Any] | None = None) -> se
 
 
 def resolve_code_artifact_allowlist(config: dict[str, Any] | None = None) -> set[str]:
-    """Resolve the operator allowlist of names to KEEP as entities (issue #680).
+    """Resolve the operator allowlist of names to KEEP as entities (issue athenaeum#680).
 
     A name here is never treated as a code artifact even if it is file-shaped —
     the escape hatch for a deployment that legitimately tracks a document by
-    filename. The allowlist WINS (mirrors #662's ``junk_match_allowlist``)."""
+    filename. The allowlist WINS (mirrors athenaeum#662's ``junk_match_allowlist``)."""
     return {n.strip().lower() for n in _config_str_list(config, "code_artifact_allowlist")}
 
 
 def classify_code_artifact_name(
     name: str, config: dict[str, Any] | None = None
 ) -> str | None:
-    """The rule by which *name* is a code artifact, or ``None`` if it is not (#721).
+    """The rule by which *name* is a code artifact, or ``None`` if it is not (athenaeum#721).
 
-    Returns the matched-rule label so a caller (the #680 retire sweep's dry run,
-    #721) can print WHICH rule killed each page and audit the kill-list by class:
+    Returns the matched-rule label so a caller (the athenaeum#680 retire sweep's dry run,
+    athenaeum#721) can print WHICH rule killed each page and audit the kill-list by class:
 
     * ``"extension"`` — a single whitespace-free token ending in a known
       source/config extension (``skill.md``, ``project-registry.yaml``,
@@ -454,7 +454,7 @@ def classify_code_artifact_name(
       here, not by a separate path rule.
     * ``None`` — not a code artifact: retained.
 
-    **A bare path separator is NOT a signal (issue #721).** #680 additionally
+    **A bare path separator is NOT a signal (issue athenaeum#721).** athenaeum#680 additionally
     treated *any* ``/``/``\\`` in a name as file-shaped. In a corpus where
     slashes are ordinary punctuation in human and organization names, pronouns
     (``Suzie Prince (she/her)``), npm packages (``@tanstack/react-query``),
@@ -484,7 +484,7 @@ def classify_code_artifact_name(
         return None
     # Filename-shaped: a single token (no whitespace) ending in a code/config
     # extension. Multi-word names carry whitespace and are never file-shaped.
-    # A bare path separator is deliberately NOT a signal (#721).
+    # A bare path separator is deliberately NOT a signal (athenaeum#721).
     if any(ch.isspace() for ch in key):
         return None
     m = re.search(r"\.([A-Za-z0-9]+)$", key)
@@ -494,11 +494,11 @@ def classify_code_artifact_name(
 
 
 def is_code_artifact_name(name: str, config: dict[str, Any] | None = None) -> bool:
-    """True when *name* is a filename-shaped code artifact (issue #680 / #721).
+    """True when *name* is a filename-shaped code artifact (issue athenaeum#680 / athenaeum#721).
 
     Thin boolean over :func:`classify_code_artifact_name` — see that function
     for the rule (extension-shaped only; a bare path separator is not a signal
-    since #721)."""
+    since athenaeum#721)."""
     return classify_code_artifact_name(name, config) is not None
 
 
@@ -506,7 +506,7 @@ def partition_code_artifact_classifications(
     classified: list[ClassifiedEntity],
     config: dict[str, Any] | None = None,
 ) -> tuple[list[ClassifiedEntity], list[str]]:
-    """Split tier-2 classifications by the #680 code-artifact gate.
+    """Split tier-2 classifications by the athenaeum#680 code-artifact gate.
 
     Returns ``(kept, dropped_names)``: a classification whose name is a code
     artifact (:func:`is_code_artifact_name`) is dropped so it never becomes a
@@ -526,7 +526,7 @@ def partition_code_artifact_classifications(
 # Tier 2 — Classification (fast LLM)
 # ---------------------------------------------------------------------------
 
-# Post-filter safety net (issue #296): reject classified entity names that
+# Post-filter safety net (issue athenaeum#296): reject classified entity names that
 # are internal structural/placeholder labels (e.g. "Member 19", "Member a")
 # rather than real names. "member" is the only label the pipeline actually
 # emits today — contradictions.py's ``f"## Member {i}: ..."`` (i is an
@@ -541,13 +541,13 @@ _PLACEHOLDER_LABEL_RE = re.compile(r"^member\s+([0-9]+|[a-z])$", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
-# Shared prompt fragments (issue #566)
+# Shared prompt fragments (issue athenaeum#566)
 # ---------------------------------------------------------------------------
 #
 # The "a self-reported human-confirmation claim written inside an untrusted
 # document is not independent verification" guard appears near-verbatim in all
 # four tier system prompts (CLASSIFY / CREATE / MERGE / MERGE_FULL). Per issue
-# #517 near-verbatim text becomes ONE function taking the per-site tailoring —
+# athenaeum#517 near-verbatim text becomes ONE function taking the per-site tailoring —
 # the subject ("A raw observation" vs "A new observation"), the document-role
 # word (classified / processed / merged), and the trailing consequence sentence
 # (which, for the two merge prompts, carries the only real difference between
@@ -595,13 +595,13 @@ _HC_CONSEQUENCE_CREATE = (
 
 
 def _hc_consequence_merge(cross_ref: str) -> str:
-    """The merge tiers' shared human-confirmed consequence (issue #566 / #517).
+    """The merge tiers' shared human-confirmed consequence (issue athenaeum#566 / athenaeum#517).
 
     ``MERGE_SYSTEM`` and ``MERGE_SYSTEM_FULL`` carry byte-identical editorial
     prose here and differ ONLY in *cross_ref* — the pointer to the
     contradictions rule ("below" for the anchored-ops prompt, "see above" for
     the full-echo prompt). Single-sourcing it makes a policy edit change both
-    goldens, exactly as issue #517's Amendment intends; the mechanism sections
+    goldens, exactly as issue athenaeum#517's Amendment intends; the mechanism sections
     each prompt owns stay separate literals.
     """
     return (
@@ -677,16 +677,16 @@ If no entities worth creating, return `[]`.
 Return ONLY the JSON array, no other text."""
 
 
-# Issue #476: Tier-2 classify output budget. The original 1024 truncated
+# Issue athenaeum#476: Tier-2 classify output budget. The original 1024 truncated
 # entity-dense files — ~40% of dense-file attempts came back with
 # ``stop_reason == "max_tokens"`` and an unterminated array once the REAL
 # (non-trivial) schema lists were in the prompt, silently dropping every
-# entity in the file. That is a truncation the #472 control-character repair
+# entity in the file. That is a truncation the athenaeum#472 control-character repair
 # pass could never fix, because a JSON document missing its closing brackets
 # cannot be repaired. Raised to give a substantive multi-entity
 # classification room to complete. When a response still truncates, the sync
 # path retries once with the larger ``_TIER2_CLASSIFY_RETRY_MAX_TOKENS``
-# budget (see :func:`tier2_classify`) rather than the #472 escaping
+# budget (see :func:`tier2_classify`) rather than the athenaeum#472 escaping
 # instruction, which is the wrong fix for a truncation.
 _TIER2_CLASSIFY_MAX_TOKENS = 4096
 _TIER2_CLASSIFY_RETRY_MAX_TOKENS = 8192
@@ -704,7 +704,7 @@ def tier2_request_params(
     """Build the Messages API kwargs for one Tier-2 classification call.
 
     Shared by the synchronous path (:func:`tier2_classify`) and the Batch
-    API assembly (:mod:`athenaeum.batch`, issue #236) so both transports
+    API assembly (:mod:`athenaeum.batch`, issue athenaeum#236) so both transports
     produce byte-identical prompts.
     """
     obs_filter = ""
@@ -726,7 +726,7 @@ def tier2_request_params(
         "max_tokens": resolve_max_tokens(
             "classify", "ATHENAEUM_CLASSIFY_MAX_TOKENS", _TIER2_CLASSIFY_MAX_TOKENS, config
         ),
-        # Issue #578: tier-2 classify stays on Haiku (fast, cheap, high-volume
+        # Issue athenaeum#578: tier-2 classify stays on Haiku (fast, cheap, high-volume
         # entity extraction) — thinking would only add latency/cost with no
         # quality benefit for this bounded-schema JSON-array task. Disabled
         # explicitly (not omitted) so this stage never inherits a
@@ -740,7 +740,7 @@ def tier2_request_params(
 
 
 def _capabilities(config: dict[str, Any] | None) -> ProviderCapabilities:
-    """The active backend's declared capabilities (issues #573/#574).
+    """The active backend's declared capabilities (issues athenaeum#573/#574).
 
     Resolved from the run config the same way :func:`build_llm_client` resolves
     the backend, so the tier call sites gate on what the SERVING backend can
@@ -767,17 +767,17 @@ def tier2_classify(
     Returns list of ClassifiedEntity with is_new=True (Tier 2 only finds new
     entities).
 
-    #472: when the first response cannot be parsed even after the
+    athenaeum#472: when the first response cannot be parsed even after the
     control-character repair pass (``stats.degraded`` was incremented), the
     call is retried EXACTLY ONCE with an explicit instruction to escape
     newlines inside string values, rather than silently discarding every
     entity in the file.
 
-    #476: when the first response instead dropped every entity because it was
+    athenaeum#476: when the first response instead dropped every entity because it was
     TRUNCATED at the output-token budget (``stop_reason == "max_tokens"`` →
     ``stats.truncated`` incremented), the call is retried EXACTLY ONCE with a
     LARGER ``max_tokens`` budget — the correct fix for a truncation, where the
-    #472 escaping instruction would do nothing (a JSON document missing its
+    athenaeum#472 escaping instruction would do nothing (a JSON document missing its
     closing brackets cannot be repaired by escaping). The two failure modes
     are mutually exclusive per response and are never conflated: a truncation
     takes the bigger-budget retry, a bare-control-char parse failure takes the
@@ -810,11 +810,11 @@ def tier2_classify(
     from athenaeum.config import resolve_owner
 
     owner = resolve_owner(config)
-    # Issue #578: response_text skips any leading thinking block. This stage
+    # Issue athenaeum#578: response_text skips any leading thinking block. This stage
     # runs disabled today, but the helper is text-block-equivalent for a
     # text-only response and keeps the site robust if the posture ever changes.
     first_text = response_text(response)
-    # #574: a backend that cannot reliably report stop_reason (claude-cli)
+    # athenaeum#574: a backend that cannot reliably report stop_reason (claude-cli)
     # yields None here, so a dropped-all response is classed as a generic
     # degrade rather than a truncation — which avoids the futile bigger-budget
     # retry the CLI backend cannot honor (it drops max_tokens).
@@ -838,9 +838,9 @@ def tier2_classify(
     first_truncated = stats.truncated > truncated_before
     first_degraded = stats.degraded > degraded_before
 
-    # #476: the first response was TRUNCATED at max_tokens and dropped every
+    # athenaeum#476: the first response was TRUNCATED at max_tokens and dropped every
     # entity — the array is missing its closing brackets, which no escaping or
-    # repair can fix. Retry ONCE with a LARGER output budget (NOT the #472
+    # repair can fix. Retry ONCE with a LARGER output budget (NOT the athenaeum#472
     # escaping instruction, which is the wrong fix for a truncation). Bounded
     # to a single extra call per file; a retry that still truncates leaves the
     # truncation recorded and the file preserved on disk for the next run.
@@ -869,7 +869,7 @@ def tier2_classify(
             stats.repaired += retry_stats.repaired
             entities = retry_entities
 
-    # #472 step 2: a NON-truncation parse failure (a bare control character
+    # athenaeum#472 step 2: a NON-truncation parse failure (a bare control character
     # inside a string value) dropped everything — retry once, telling the
     # model exactly what went wrong. Bounded to a single extra call per
     # degraded file. (The batch transport cannot retry synchronously; there
@@ -924,10 +924,10 @@ def tier2_classify(
 
 #: Stable, greppable marker logged (WARNING) whenever a Tier-2 classification
 #: response drops ALL of a file's entities because no parseable JSON array
-#: could be recovered — even after the #472 control-character repair pass. A
+#: could be recovered — even after the athenaeum#472 control-character repair pass. A
 #: watchdog / log-scraper can grep this out of a busy drain without parsing
 #: prose; the per-run count is also surfaced in ``librarian-run-summary``
-#: (``degraded=N``, issue #464/#472).
+#: (``degraded=N``, issue athenaeum#464/#472).
 TIER2_DEGRADED_MARKER = "tier2-classify-degraded"
 
 #: Stable, greppable marker logged (WARNING) whenever a Tier-2 classification
@@ -935,16 +935,16 @@ TIER2_DEGRADED_MARKER = "tier2-classify-degraded"
 #: output-token budget (``stop_reason == "max_tokens"``), leaving an
 #: unterminated JSON array. Kept DISTINCT from :data:`TIER2_DEGRADED_MARKER`
 #: (a genuine parse failure) because the two have different causes and
-#: different fixes — a bigger output budget vs. escaping — and #472
+#: different fixes — a bigger output budget vs. escaping — and athenaeum#472
 #: misdiagnosed exactly this truncation as malformed escaping. The per-run
 #: count is surfaced in ``librarian-run-summary`` (``truncated=N``, issue
-#: #476).
+#: athenaeum#476).
 TIER2_TRUNCATED_MARKER = "tier2-classify-truncated"
 
 
 @dataclass
 class Tier2ParseStats:
-    """Out-param visibility counters for :func:`parse_tier2_entities` (#472).
+    """Out-param visibility counters for :func:`parse_tier2_entities` (athenaeum#472).
 
     Optional: pass an instance to have the parser record how a response fared,
     without changing its ``list[ClassifiedEntity]`` return type. Both counters
@@ -955,14 +955,14 @@ class Tier2ParseStats:
     salvaged by the control-character repair pass (data recovered, no loss).
 
     ``degraded`` — responses that dropped ALL entities because no parseable
-    JSON array could be recovered (genuine, silent file loss — the bug #472
+    JSON array could be recovered (genuine, silent file loss — the bug athenaeum#472
     exists to make visible).
 
     ``truncated`` — responses that dropped ALL entities because they were cut
     off at the output-token budget (``stop_reason == "max_tokens"``), leaving
-    an unterminated array (issue #476). Kept SEPARATE from ``degraded`` so a
+    an unterminated array (issue athenaeum#476). Kept SEPARATE from ``degraded`` so a
     truncation (fixed by a bigger budget) is never conflated with a genuine
-    parse failure (the #472 mistake). Mutually exclusive with ``degraded`` for
+    parse failure (the athenaeum#472 mistake). Mutually exclusive with ``degraded`` for
     any single response.
     """
 
@@ -985,7 +985,7 @@ def parse_tier2_entities(
 
     Shared by the synchronous and batch transports. Missing JSON (no array at
     all) still degrades to an empty list with a warning; invalid JSON is first
-    run through the #472 control-character repair pass (bare newlines/tabs
+    run through the athenaeum#472 control-character repair pass (bare newlines/tabs
     inside string values) before giving up, since that is the one observed
     failure mode that was silently discarding ~10% of files in production.
 
@@ -995,29 +995,29 @@ def parse_tier2_entities(
     greppable WARNING marker:
 
     - :data:`TIER2_TRUNCATED_MARKER` when *stop_reason* is ``"max_tokens"`` —
-      the response was cut off mid-array (issue #476); the array is missing
+      the response was cut off mid-array (issue athenaeum#476); the array is missing
       its closing brackets, which no escaping/repair can fix. Recorded in
       ``truncated``, NOT ``degraded``.
     - :data:`TIER2_DEGRADED_MARKER` otherwise — a genuine unparseable
-      response (issue #472). Recorded in ``degraded``.
+      response (issue athenaeum#472). Recorded in ``degraded``.
 
     *stop_reason* is the API response's ``stop_reason`` (``None`` when the
     caller cannot supply it — e.g. legacy callers/fixtures — in which case a
-    drop is always classed as ``degraded``, preserving pre-#476 behavior).
+    drop is always classed as ``degraded``, preserving pre-athenaeum#476 behavior).
 
-    When *owner* is configured (issue #263), an owner-namespace operational
+    When *owner* is configured (issue athenaeum#263), an owner-namespace operational
     memory (e.g. ``user_*_family_relationships``) is routed to a standalone
     ``reference`` page rather than being classified as person-bio. Inert when
     *owner* is ``None``.
     """
     text = text.strip()
 
-    # #476: a response truncated at the output-token budget dropped every
+    # athenaeum#476: a response truncated at the output-token budget dropped every
     # entity for a DIFFERENT reason than a genuine parse failure (a bigger
     # budget is the fix, not escaping). Route such a drop to the distinct
-    # truncated marker/counter so the two are never conflated (the #472
+    # truncated marker/counter so the two are never conflated (the athenaeum#472
     # misdiagnosis). ``stop_reason is None`` (legacy callers) always classes a
-    # drop as degraded, preserving pre-#476 behavior.
+    # drop as degraded, preserving pre-athenaeum#476 behavior.
     _truncated = stop_reason == "max_tokens"
 
     def _record_drop(reason: str) -> None:
@@ -1051,7 +1051,7 @@ def parse_tier2_entities(
     try:
         items = json.loads(raw_json)
     except json.JSONDecodeError:
-        # #472: the model emitted a bare (unescaped) control character —
+        # athenaeum#472: the model emitted a bare (unescaped) control character —
         # typically a newline inside the free-text ``observations`` value —
         # which is illegal per spec and rejects the WHOLE array. Attempt a
         # scoped repair (escape control chars inside string literals) before
@@ -1059,7 +1059,7 @@ def parse_tier2_entities(
         try:
             items = loads_lenient(raw_json)
         except json.JSONDecodeError:
-            # #476: an unterminated array from a max_tokens truncation lands
+            # athenaeum#476: an unterminated array from a max_tokens truncation lands
             # here too (repair cannot add the missing brackets) — _record_drop
             # routes it to the truncated marker when stop_reason says so.
             _record_drop("invalid-json (repair pass failed)")
@@ -1073,9 +1073,9 @@ def parse_tier2_entities(
             if stats is not None:
                 stats.repaired += 1
 
-    # Observe-only schema validation (#570, M17 phase 1): log the delta from the
+    # Observe-only schema validation (athenaeum#570, M17 phase 1): log the delta from the
     # accepted Tier-2 entity-array shape without changing the per-item
-    # default/coerce/skip handling below. Runs after the #472 repair pass so the
+    # default/coerce/skip handling below. Runs after the athenaeum#472 repair pass so the
     # log reflects genuine model drift. Shared by the sync AND batch transports,
     # so a single response is observed exactly once (no double-counting). Lazy
     # import keeps pydantic off ``import tiers`` (the recall hot-path graph).
@@ -1099,7 +1099,7 @@ def parse_tier2_entities(
         if entity_type not in valid_types:
             entity_type = "reference"
         # Owner operational/exclusion memories route to a standalone
-        # reference page, never folded into the owner person bio (#263).
+        # reference page, never folded into the owner person bio (athenaeum#263).
         if owner and "reference" in valid_types:
             from athenaeum.owner import route_owner_memory
 
@@ -1140,11 +1140,11 @@ def tier2_reclassify_larger_budget(
     config: dict[str, Any] | None = None,
     owner: dict[str, Any] | None = None,
 ) -> tuple[list[ClassifiedEntity], Tier2ParseStats]:
-    """Re-run one Tier-2 classify with the LARGER retry budget (issue #476).
+    """Re-run one Tier-2 classify with the LARGER retry budget (issue athenaeum#476).
 
     A single bigger-``max_tokens`` call for a file whose first classify was
     TRUNCATED at the output-token budget — the correct fix for a truncation,
-    where the #472 escaping instruction would do nothing. Returns the parsed
+    where the athenaeum#472 escaping instruction would do nothing. Returns the parsed
     entities and the retry's own :class:`Tier2ParseStats` (so the caller can
     tell whether the truncation recovered: a clean ``degraded == truncated ==
     0`` means it did).
@@ -1153,11 +1153,11 @@ def tier2_reclassify_larger_budget(
     finalize fallback (:mod:`athenaeum.batch`), mirroring how
     :func:`tier3_merge_full` backs the tier-3 batch fallback — so the batch
     path gets a real bigger-budget retry too, not just the sync path (the
-    exact gap #472 left).
+    exact gap athenaeum#472 left).
     """
     caps = _capabilities(config)
     if not caps.honors_max_tokens:
-        # #574 (M15): the ONLY thing this retry changes is raising max_tokens,
+        # athenaeum#574 (M15): the ONLY thing this retry changes is raising max_tokens,
         # which this backend drops (claude-cli has no CLI equivalent) — so the
         # retry would re-send a BYTE-IDENTICAL request that cannot change the
         # outcome. Short-circuit with a warning instead of burning the call.
@@ -1243,7 +1243,7 @@ Use footnotes citing the source as: [^1]: {source_ref}
     + UNTRUSTED_DATA_CLAUSE
 )
 
-# Issue #469: the tier-3 merge now returns a small list of ANCHORED EDIT
+# Issue athenaeum#469: the tier-3 merge now returns a small list of ANCHORED EDIT
 # OPERATIONS instead of echoing the whole page back. The librarian applies
 # them deterministically to the existing body it already holds, cutting
 # output ~80–90% (a typical merge adds a sentence + a footnote) — which
@@ -1305,7 +1305,7 @@ Contradictions and escalation:
   by a `---` separator and the full merged body)."""
 )
 
-# The pre-#469 full-echo contract, retained as the deterministic fallback
+# The pre-athenaeum#469 full-echo contract, retained as the deterministic fallback
 # (:func:`tier3_merge_full`). Quality can never be worse than this baseline.
 MERGE_SYSTEM_FULL = (
     """You are a knowledge librarian. You merge new observations into
@@ -1332,18 +1332,18 @@ Rules:
 - Do NOT modify YAML frontmatter — return body content only"""
 )
 
-# Issue #302: the merge LLM can only dedupe a re-confirming observation
+# Issue athenaeum#302: the merge LLM can only dedupe a re-confirming observation
 # against existing content it actually receives. This must be generous
-# enough to cover an already-bloated page (the #297 incident page grew to
+# enough to cover an already-bloated page (the athenaeum#297 incident page grew to
 # 5-10KB) — the OLD 4000-char cap silently went blind on exactly that
-# scenario, the one the #297 dedup guard was meant to protect. This remains
-# the INPUT window in BOTH the patch and full-echo contracts (issue #469):
-# the model still sees the whole existing body, so #297 dedup semantics
+# scenario, the one the athenaeum#297 dedup guard was meant to protect. This remains
+# the INPUT window in BOTH the patch and full-echo contracts (issue athenaeum#469):
+# the model still sees the whole existing body, so athenaeum#297 dedup semantics
 # (an empty ops list is a valid no-op) are preserved.
 _MAX_EXISTING_BODY_CHARS = 20_000
 
 # Fence tag wrapping the untrusted existing page body in the merge prompts
-# (issue #562 / audit M20). The current wiki page is itself LLM output derived
+# (issue athenaeum#562 / audit M20). The current wiki page is itself LLM output derived
 # from untrusted notes; without a fence an injection that survives one create is
 # re-fed unfenced on every subsequent merge of that page, and merge output is
 # applied to real files.
@@ -1352,11 +1352,11 @@ _EXISTING_PAGE_TAG = "existing_page"
 # Full-echo fallback output budget: ~20K chars of existing body (~5K tokens)
 # + new content + footnotes, with headroom — must stay >=
 # _MAX_EXISTING_BODY_CHARS's token-equivalent. Only used by the full-echo
-# fallback path now (issue #469); an output-truncated fallback is caught by
+# fallback path now (issue athenaeum#469); an output-truncated fallback is caught by
 # the stop_reason guard in parse_tier3_merge.
 #
-# Issue #578 re-baseline: this stage runs on the ``write`` model, which will
-# move to Sonnet 5 under issue #580. Sonnet 5's tokenizer counts ~30% MORE
+# Issue athenaeum#578 re-baseline: this stage runs on the ``write`` model, which will
+# move to Sonnet 5 under issue athenaeum#580. Sonnet 5's tokenizer counts ~30% MORE
 # tokens for the same text (8192 * 1.3 ~= 10650), and this stage now enables
 # ADAPTIVE thinking (see ``tier3_merge_full_params``) — ``max_tokens`` caps
 # thinking + response TOGETHER, so the budget needs headroom for thinking on
@@ -1364,26 +1364,26 @@ _EXISTING_PAGE_TAG = "existing_page"
 # (8192 * 1.5) to cover both without guessing a precise split.
 _MERGE_MAX_TOKENS = 12288
 
-# Patch-mode output budget (issue #469): a patch response is a short JSON
+# Patch-mode output budget (issue athenaeum#469): a patch response is a short JSON
 # ops list (a few edits + footnote text), independent of page size, so this
 # is small. A max_tokens truncation of the ops list is caught in
 # parse_merge_ops_response and routed to the full-echo fallback rather than
 # half-applied.
 #
-# Issue #578 re-baseline: same ``write``-model / Sonnet-5-bound reasoning as
+# Issue athenaeum#578 re-baseline: same ``write``-model / Sonnet-5-bound reasoning as
 # ``_MERGE_MAX_TOKENS`` above. The pre-bump budget (2048) was already TIGHT
-# (flagged "high risk" in issue #578) — a bare 1.3x tokenizer adjustment would
+# (flagged "high risk" in issue athenaeum#578) — a bare 1.3x tokenizer adjustment would
 # leave almost no room for adaptive thinking before the ops-list output even
 # starts. Raised to 6144 (2048 * 3) so a stage that now thinks before emitting
 # a short JSON payload has real headroom, not just enough for the larger
 # tokenizer.
 _MERGE_PATCH_MAX_TOKENS = 6144
 
-# Tier-3 CREATE output budget (issue #575): a fresh entity page from one
+# Tier-3 CREATE output budget (issue athenaeum#575): a fresh entity page from one
 # observation. Formerly a bare ``2048`` literal in tier3_create_params; named
 # and resolved through the seam like the merge budgets.
 #
-# Issue #578 re-baseline: same ``write``-model / Sonnet-5-bound reasoning,
+# Issue athenaeum#578 re-baseline: same ``write``-model / Sonnet-5-bound reasoning,
 # also flagged "high risk" pre-bump. Raised to 6144 (2048 * 3), matching
 # ``_MERGE_PATCH_MAX_TOKENS``'s headroom rationale — a full entity page is
 # more output-heavy than a short ops list, so the same multiplier keeps
@@ -1431,7 +1431,7 @@ def tier3_create_params(
     """Build the Messages API kwargs for one Tier-3 create call.
 
     Shared by the synchronous path (:func:`tier3_create`) and the Batch
-    API assembly (issue #236).
+    API assembly (issue athenaeum#236).
     """
     tmpl_section = ""
     if wiki_root:
@@ -1456,7 +1456,7 @@ def tier3_create_params(
             _TIER3_CREATE_MAX_TOKENS,
             config,
         ),
-        # Issue #578: the ``write`` model is bound for Sonnet 5 (issue #580).
+        # Issue athenaeum#578: the ``write`` model is bound for Sonnet 5 (issue athenaeum#580).
         # Adaptive thinking benefits this stage — composing a fresh entity
         # page from one observation is a genuine drafting task, not a
         # mechanical transform — so it is enabled explicitly rather than
@@ -1486,7 +1486,7 @@ def tier3_create(
     )
     _record_usage(response, usage, model=params["model"])
 
-    # Issue #578: tier3_create enables adaptive thinking — response_text skips
+    # Issue athenaeum#578: tier3_create enables adaptive thinking — response_text skips
     # any leading thinking block and returns the created page body.
     return tier3_entity_from_text(action, response_text(response), config=config)
 
@@ -1504,10 +1504,10 @@ def tier3_entity_from_text(
     body = text.strip()
     today = date.today().isoformat()
 
-    # Issue #95: stamp authoritative provenance at construction time.
+    # Issue athenaeum#95: stamp authoritative provenance at construction time.
     # Format: ``claude:tier3-create:<model>:<YYYY-MM-DD>``. The model
     # name is resolved live from the same config chain used for the API
-    # call (env > yaml ``models.write`` > default, issue #232) so the
+    # call (env > yaml ``models.write`` > default, issue athenaeum#232) so the
     # source matches the model that actually wrote.
     model = _get_write_model(config) or "unknown"
     source = f"claude:tier3-create:{model}:{today}"
@@ -1552,14 +1552,14 @@ def tier3_merge_params(
 ) -> dict[str, Any]:
     """Build the Messages API kwargs for one patch-mode Tier-3 merge call.
 
-    Issue #469: the primary merge contract returns a small list of anchored
+    Issue athenaeum#469: the primary merge contract returns a small list of anchored
     edit operations (see :data:`MERGE_SYSTEM`) rather than the full page, so
     the output budget is a small fixed constant independent of page size.
     Shared by the synchronous path (:func:`tier3_merge`) and the Batch API
-    assembly (issue #236).
+    assembly (issue athenaeum#236).
     """
     user_msg = MERGE_TEMPLATE.format(
-        # Anchor-safe fence (issue #562 / audit M20): wrap-only (defang=False).
+        # Anchor-safe fence (issue athenaeum#562 / audit M20): wrap-only (defang=False).
         # tier3_merge and the batch assembler route a body that would break the
         # <existing_page> fence to the anchor-free full-echo fallback (see
         # existing_body_needs_full_echo), so no byte the model copies an anchor
@@ -1581,7 +1581,7 @@ def tier3_merge_params(
             _MERGE_PATCH_MAX_TOKENS,
             config,
         ),
-        # Issue #578: the ``write`` model is bound for Sonnet 5 (issue #580).
+        # Issue athenaeum#578: the ``write`` model is bound for Sonnet 5 (issue athenaeum#580).
         # Adaptive thinking benefits this stage — deciding where anchored
         # edit ops go and whether a contradiction should escalate instead
         # takes real reasoning — so it is enabled explicitly rather than
@@ -1602,7 +1602,7 @@ def tier3_merge_full_params(
 ) -> dict[str, Any]:
     """Build the Messages API kwargs for the full-echo fallback merge call.
 
-    Issue #469: used only when a patch-mode response is unparseable,
+    Issue athenaeum#469: used only when a patch-mode response is unparseable,
     truncated, or fails to apply — the pre-patch contract that reproduces
     the whole merged page, so quality can never be worse than the status
     quo.
@@ -1620,7 +1620,7 @@ def tier3_merge_full_params(
         "max_tokens": resolve_max_tokens(
             "merge_full", "ATHENAEUM_MERGE_FULL_MAX_TOKENS", _MERGE_MAX_TOKENS, config
         ),
-        # Issue #578: same ``write``-model / Sonnet-5-bound reasoning as
+        # Issue athenaeum#578: same ``write``-model / Sonnet-5-bound reasoning as
         # ``tier3_merge_params`` above — this is the fallback path for the
         # same stage, so it gets the same posture.
         "thinking": resolve_thinking(
@@ -1632,7 +1632,7 @@ def tier3_merge_full_params(
 
 
 class MergeOpsError(Exception):
-    """A patch-mode merge could not be applied deterministically (issue #469).
+    """A patch-mode merge could not be applied deterministically (issue athenaeum#469).
 
     Raised by :func:`apply_merge_ops` on any failure — unknown op kind,
     missing field, an anchor that matches zero or more than one location, or
@@ -1644,12 +1644,12 @@ class MergeOpsError(Exception):
 def apply_merge_ops(existing_body: str, ops: list[dict[str, Any]]) -> str:
     """Apply anchored edit operations to ``existing_body`` deterministically.
 
-    Issue #469. Each op is validated against the ORIGINAL body — anchors
+    Issue athenaeum#469. Each op is validated against the ORIGINAL body — anchors
     must match EXACTLY ONCE — and converted to a ``(start, end, replacement)``
     span; all spans are applied in a single non-overlapping pass. Application
     is all-or-nothing: any failure raises :class:`MergeOpsError`.
 
-    An empty ``ops`` list is a valid no-op (issue #297 dedup): the body is
+    An empty ``ops`` list is a valid no-op (issue athenaeum#297 dedup): the body is
     returned unchanged.
     """
     if not isinstance(ops, list):
@@ -1714,19 +1714,19 @@ def apply_merge_ops(existing_body: str, ops: list[dict[str, Any]]) -> str:
 
 
 #: Stable, greppable prefix for the WARNING each patch-mode → full-echo
-#: fallback emits (issue #490, slice A). The full-page-echo fallback is a
+#: fallback emits (issue athenaeum#490, slice A). The full-page-echo fallback is a
 #: ~10x output-token cost multiplier that until now degraded silently; every
 #: fallback now names the page, the source ref, and a machine-parseable
 #: ``cause=`` (``max_tokens`` | ``parse-fail`` | ``anchor-miss``) so a nightly
 #: log can be grepped for which trigger dominates on the real corpus — the
-#: observation #496 (slice B) consumes to pick the targeted reduction fix.
+#: observation athenaeum#496 (slice B) consumes to pick the targeted reduction fix.
 MERGE_FALLBACK_LOG_PREFIX = "tier3-merge-fallback"
 
-#: The single ``cause=parse-fail`` branch (issue #490) collapsed three distinct
-#: sub-causes with different fixes. Issue #496 splits it into these discriminated,
+#: The single ``cause=parse-fail`` branch (issue athenaeum#490) collapsed three distinct
+#: sub-causes with different fixes. Issue athenaeum#496 splits it into these discriminated,
 #: greppable ``cause=`` values so a nightly log names WHICH residual remains after
 #: the (a)/(b) recovery below — mirroring the Tier-2 ``degraded``/``truncated``
-#: split (#472/#476). Each keeps the ``parse-fail`` stem, so a broad
+#: split (athenaeum#472/#476). Each keeps the ``parse-fail`` stem, so a broad
 #: ``grep 'cause=parse-fail'`` still matches every sub-cause.
 #:
 #: - ``parse-fail-ambiguous`` — multiple balanced top-level objects and no single
@@ -1746,7 +1746,7 @@ MERGE_RESP_PREFIX_CHARS = 200
 
 
 def _coerce_merge_ops(obj: dict[str, Any]) -> list[Any] | None:
-    """Normalize a parsed merge object's ops field to a list, or ``None`` (#496).
+    """Normalize a parsed merge object's ops field to a list, or ``None`` (athenaeum#496).
 
     Fix (b): a patch-mode object sometimes parses cleanly but carries ``ops`` in
     a shape the strict ``isinstance(obj.get("ops"), list)`` check rejected —
@@ -1776,7 +1776,7 @@ def parse_merge_ops_response(
 ) -> tuple[str | None, EscalationItem | None, bool]:
     """Parse a patch-mode merge response and apply it to ``existing_body``.
 
-    Issue #469. Returns ``(updated_body, escalation_item, needs_fallback)``.
+    Issue athenaeum#469. Returns ``(updated_body, escalation_item, needs_fallback)``.
 
     ``needs_fallback`` is True when the response cannot be applied
     deterministically and the caller should retry once via the full-echo
@@ -1786,7 +1786,7 @@ def parse_merge_ops_response(
     - unparseable JSON, or a missing / non-normalizable ``ops`` field;
     - any op that fails to apply (anchor miss, ambiguous anchor, overlap).
 
-    Issue #496 hardens the JSON path before declaring a parse failure and, when
+    Issue athenaeum#496 hardens the JSON path before declaring a parse failure and, when
     one still occurs, splits the former single ``cause=parse-fail`` WARNING into
     discriminated, greppable sub-causes (see :data:`MERGE_PARSE_FAIL_AMBIGUOUS`
     / :data:`MERGE_PARSE_FAIL_SHAPE` / :data:`MERGE_PARSE_FAIL_NO_JSON`), each
@@ -1833,7 +1833,7 @@ def parse_merge_ops_response(
 
     obj = extract_json_object(stripped)
 
-    # Fix (a), issue #496: extract_json_object refuses (returns None) when a
+    # Fix (a), issue athenaeum#496: extract_json_object refuses (returns None) when a
     # whole-text scan finds MULTIPLE balanced top-level objects — its clause-4
     # ambiguity rule, shared by other callers and deliberately left intact. But
     # a patch-mode response legitimately carries exactly one ops-bearing object,
@@ -1857,7 +1857,7 @@ def parse_merge_ops_response(
         # `operations` key) before declaring failure.
         ops = _coerce_merge_ops(obj)
         if ops is not None:
-            # Observe-only schema validation (#570, M17 phase 1): log op-shape
+            # Observe-only schema validation (athenaeum#570, M17 phase 1): log op-shape
             # drift after the container normalization above, without changing
             # the apply/fallback behavior. Shared by the sync AND batch
             # transports, so a single response is observed once. Lazy import
@@ -1910,13 +1910,13 @@ def tier3_merge(
 ) -> tuple[str | None, EscalationItem | None]:
     """Use a capable LLM to merge observations into an existing entity page.
 
-    Issue #469: makes a patch-mode call first (anchored edit ops); on any
+    Issue athenaeum#469: makes a patch-mode call first (anchored edit ops); on any
     unparseable / truncated / unapplicable response, retries ONCE via the
     full-echo fallback so the result is never worse than the status quo.
 
     Returns (updated_body, escalation_item).
     """
-    # Anchor safety (issue #562 / audit M20): a body that would break the
+    # Anchor safety (issue athenaeum#562 / audit M20): a body that would break the
     # <existing_page> fence cannot use the patch path — go straight to the
     # anchor-free full-echo fallback instead.
     if existing_body_needs_full_echo(existing_body):
@@ -1933,13 +1933,13 @@ def tier3_merge(
     _record_usage(response, usage, model=params["model"])
 
     body, escalation, needs_fallback = parse_merge_ops_response(
-        # Issue #578: patch merge enables adaptive thinking — skip any leading
+        # Issue athenaeum#578: patch merge enables adaptive thinking — skip any leading
         # thinking block and read the anchored-ops JSON answer.
         response_text(response),
         action,
         source_ref,
         existing_body,
-        # #574: None on a backend that cannot report stop_reason (claude-cli),
+        # athenaeum#574: None on a backend that cannot report stop_reason (claude-cli),
         # so the "truncated -> fall back to full echo" branch never fires on a
         # spurious value — the fallback would itself be a no-op there.
         stop_reason=reported_stop_reason(response, _capabilities(config)),
@@ -1958,7 +1958,7 @@ def tier3_merge_full(
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
-    """Full-echo merge fallback (issue #469).
+    """Full-echo merge fallback (issue athenaeum#469).
 
     The pre-patch contract that reproduces the whole merged page. Used when a
     patch-mode response is unparseable, truncated, or any op fails to apply,
@@ -1974,12 +1974,12 @@ def tier3_merge_full(
     _record_usage(response, usage, model=params["model"])
 
     return parse_tier3_merge(
-        # Issue #578: full-echo merge enables adaptive thinking — skip any
+        # Issue athenaeum#578: full-echo merge enables adaptive thinking — skip any
         # leading thinking block and read the merged-body answer.
         response_text(response),
         action,
         source_ref,
-        # #574: None on a backend that cannot report stop_reason (claude-cli),
+        # athenaeum#574: None on a backend that cannot report stop_reason (claude-cli),
         # so the truncation-refusal escalation does not fire on a spurious
         # value; a genuinely short body still degrades through the normal path.
         stop_reason=reported_stop_reason(response, _capabilities(config)),
@@ -1995,12 +1995,12 @@ def parse_tier3_merge(
 ) -> tuple[str | None, EscalationItem | None]:
     """Parse a full-echo Tier-3 merge response into (updated_body, escalation).
 
-    Issue #469: this is the FULL-ECHO parser, used by the fallback path
+    Issue athenaeum#469: this is the FULL-ECHO parser, used by the fallback path
     (:func:`tier3_merge_full`). The primary patch-mode responses are handled
     by :func:`parse_merge_ops_response`. Handles the ``ESCALATE:`` protocol
-    identically to the pre-#236 inline parsing.
+    identically to the pre-athenaeum#236 inline parsing.
 
-    Issue #302: MERGE_SYSTEM_FULL requires reproducing the ENTIRE existing
+    Issue athenaeum#302: MERGE_SYSTEM_FULL requires reproducing the ENTIRE existing
     page body in the response ("Preserve all existing content"), so a response
     cut off by the output token budget (``stop_reason == "max_tokens"``)
     is a truncated body, not a complete one — writing it back would
@@ -2046,13 +2046,13 @@ def stamp_merge_provenance(
 ) -> None:
     """Stamp ``updated`` + merge provenance onto a page's frontmatter dict.
 
-    Issue #95: per-claim provenance on merge. The incoming source wins for
+    Issue athenaeum#95: per-claim provenance on merge. The incoming source wins for
     fields the merge actually overwrote (Wikipedia rule: incoming wins for
     that field, so its source wins for that field). Preserve canonical's
     existing field_sources for non-touched fields. tier3_merge currently
     overwrites only ``body`` and ``updated`` from the LLM call; attribute
     both to the merge source. Shared by the synchronous and batch
-    transports (#236).
+    transports (athenaeum#236).
     """
     today_iso = date.today().isoformat()
     meta["updated"] = today_iso
@@ -2080,7 +2080,7 @@ def tier3_write(
     All LLM calls are made first; disk writes are deferred until all
     actions succeed, preventing partial writes on mid-processing failure.
 
-    Invariant (issue #663): this all-or-nothing boundary is DELIBERATE and is
+    Invariant (issue athenaeum#663): this all-or-nothing boundary is DELIBERATE and is
     preserved. A raw file's action set is re-derived from scratch on every run
     by the non-deterministic LLM tiers (Tier 2 classification), and a failed
     file is retried WHOLE (never unlinked on the failure path — see
@@ -2109,7 +2109,7 @@ def tier3_write(
     escalations: list[EscalationItem] = []
 
     for action in actions:
-        # Issue #663: name the failing action on the propagating exception so
+        # Issue athenaeum#663: name the failing action on the propagating exception so
         # the entity loop's stuck-file ledger and the run summary can identify
         # WHICH entity/kind failed (e.g. a large page that times out every
         # night), instead of only knowing the raw ref. This does NOT change the
@@ -2203,7 +2203,7 @@ _DISAMBIG_LETTERS = "abcdefghijklmnopqrstuvwxyz"
 
 
 def _disambiguation_question(options: list[str]) -> str | None:
-    """Render an enumerated disambiguation question line (#166 follow-up).
+    """Render an enumerated disambiguation question line (athenaeum#166 follow-up).
 
     When the resolver returns a FACT/identity conflict it could not
     confidently resolve, it populates ``ResolutionProposal.disambiguation_options``
@@ -2235,7 +2235,7 @@ def _disambiguation_question(options: list[str]) -> str | None:
 
 
 def _pair_key_from_description(description: str) -> tuple[str, ...] | None:
-    """Compute the dedup key for an escalation description (issue #157).
+    """Compute the dedup key for an escalation description (issue athenaeum#157).
 
     Primary key: sorted tuple of members from a ``Members involved:`` line
     (works for ``contradictions`` runs over sourced auto-memory passages).
@@ -2343,7 +2343,7 @@ def tier4_escalate(
     """Append escalation items to ``_pending_questions.md``.
 
     Returns the number of candidate escalations SUPPRESSED because their
-    claim-pair fingerprint was already resolved (issue #198). A settled
+    claim-pair fingerprint was already resolved (issue athenaeum#198). A settled
     claim-pair stops re-surfacing as a fresh pending question on every new
     page that carries it.
 
@@ -2352,27 +2352,27 @@ def tier4_escalate(
     ``[ ]`` -> ``[x]`` to mark an answer; ``athenaeum ingest-answers`` then
     converts the block to a raw intake file. See ``athenaeum.answers``.
 
-    Issue #156 — auto-apply lane: when ``config`` enables auto-apply and
+    Issue athenaeum#156 — auto-apply lane: when ``config`` enables auto-apply and
     an item carries a :class:`~athenaeum.resolutions.ResolutionProposal`
     whose confidence meets the threshold, the rendered block is flipped
     to ``- [x]`` with an answer paragraph attributing the resolver. The
     deterministic-fallback proposal has ``confidence == 0.0`` so the
     threshold gate naturally excludes it — no extra guard needed.
     Callers that pass ``config=None`` (test fixtures, legacy callers)
-    get the pre-#156 behavior: every block is written as ``- [ ]``.
+    get the pre-athenaeum#156 behavior: every block is written as ``- [ ]``.
     """
     if not items:
         return 0
 
-    # Issue #198/#211: resolved-contradiction suppression. Derive the knowledge
+    # Issue athenaeum#198/#211: resolved-contradiction suppression. Derive the knowledge
     # root from the pending-questions path (``<root>/wiki/_pending_questions.md``).
-    # Issue #211 replaces the bare set-membership gate with find_resolved_record
+    # Issue athenaeum#211 replaces the bare set-membership gate with find_resolved_record
     # (3 strategies: exact fingerprint, member-pair key, embedding cosine), so
     # load_resolved / load_resolved_records are no longer called directly here.
     knowledge_root = knowledge_root_from_pending(pending_path)
     suppressed_count = 0
 
-    # Issue #211: threshold and embedder resolved once per call (not per item).
+    # Issue athenaeum#211: threshold and embedder resolved once per call (not per item).
     # The embedder is embed_texts from athenaeum.search; it memoizes the EF
     # internally and returns None when chromadb is absent (graceful degradation).
     _similarity_threshold = resolve_resolved_similarity_threshold(config)
@@ -2392,7 +2392,7 @@ def tier4_escalate(
     )
     from athenaeum.resolutions import _get_model as _resolver_model
 
-    # Enactment lane (#166 follow-up): when a high-confidence forget_*/
+    # Enactment lane (athenaeum#166 follow-up): when a high-confidence forget_*/
     # correct_* verdict auto-applies, the recorded `[x]` is not enough —
     # the target member file must actually be deleted. We enact at most
     # once per source-pair key per call, guarded so an idempotent
@@ -2412,10 +2412,10 @@ def tier4_escalate(
         enacted_keys.add(guard)
         enact_resolution(prop, members)
 
-    # Issue #198: record an auto-applied resolution to the fingerprint cache
+    # Issue athenaeum#198: record an auto-applied resolution to the fingerprint cache
     # so a settled pair stops re-escalating. Keyed by source-pair key →
     # fingerprint (computed at loop top). resolved_by="auto" is load-bearing
-    # for sibling #199. Once-only per key via ``recorded_auto_keys``.
+    # for sibling athenaeum#199. Once-only per key via ``recorded_auto_keys``.
     recorded_auto_keys: set[Any] = set()
 
     def _record_auto(prop: Any, key: Any) -> None:
@@ -2425,13 +2425,13 @@ def tier4_escalate(
         if not fp:
             return
         recorded_auto_keys.add(key)
-        # Issue #199: persist per-side anchors (original a/b orientation) so a
+        # Issue athenaeum#199: persist per-side anchors (original a/b orientation) so a
         # later swapped re-surfacing can be orientation-reconciled. None when
         # the key had fewer than two recoverable passages.
         norms = key_side_norms.get(key)
         side_a_norm = norms[0] if norms else None
         side_b_norm = norms[1] if norms else None
-        # Issue #211: persist member_key and pair_text alongside fingerprint so
+        # Issue athenaeum#211: persist member_key and pair_text alongside fingerprint so
         # future lookups can match via member-pair key or embedding similarity.
         # key is a real member tuple when it does NOT start with "__passage_hash__".
         mk: str | None = None
@@ -2454,10 +2454,10 @@ def tier4_escalate(
     resolver_model_id = _resolver_model(config) if config is not None else None
 
     def _threshold_for(action: str) -> float | None:
-        """Per-action threshold gate (issue #170). ``None`` = never auto-apply.
+        """Per-action threshold gate (issue athenaeum#170). ``None`` = never auto-apply.
 
         When ``config is None`` (legacy / test callers) we also return ``None``
-        to preserve the pre-#170 "no config → no auto-apply" behavior.
+        to preserve the pre-athenaeum#170 "no config → no auto-apply" behavior.
         """
         if config is None:
             return None
@@ -2482,7 +2482,7 @@ def tier4_escalate(
             return (False, None)
         return (getattr(prop, "confidence", 0.0) >= thr, thr)
 
-    # Issue #157: dedup escalations by source-memory pair (Members involved
+    # Issue athenaeum#157: dedup escalations by source-memory pair (Members involved
     # tuple, or sha1(passages) fallback). Default ON; escape hatch via the
     # ATHENAEUM_TIER4_DEDUP env var so a downstream user can force the
     # legacy always-append behavior.
@@ -2506,7 +2506,7 @@ def tier4_escalate(
             key = _pair_key_from_description(pq.description)
             if key is not None and key not in open_index:
                 # First-seen wins — if the file already has duplicates from a
-                # pre-#157 run, only the first is merged into.
+                # pre-athenaeum#157 run, only the first is merged into.
                 open_index[key] = pq.raw_block
 
     today = date.today().isoformat()
@@ -2544,23 +2544,23 @@ def tier4_escalate(
         ):
             best_proposal[k] = prop
 
-    # Issue #198: per-source-pair-key fingerprint, so the auto-apply record
+    # Issue athenaeum#198: per-source-pair-key fingerprint, so the auto-apply record
     # sites (which key off the dedup key) can recover the fingerprint to
     # persist on resolution.
     key_fingerprints: dict[tuple[str, ...], str] = {}
-    # Issue #199: per-source-pair-key normalized side anchors (a, b), recovered
+    # Issue athenaeum#199: per-source-pair-key normalized side anchors (a, b), recovered
     # off the same two passages the fingerprint is built from. Persisted on
     # auto-apply so a future swapped re-surfacing can be orientation-reconciled.
     key_side_norms: dict[tuple[str, ...], tuple[str, str]] = {}
 
     for item in items:
-        # Issue #198: suppress candidates whose claim-pair was already
+        # Issue athenaeum#198: suppress candidates whose claim-pair was already
         # adjudicated (human or auto). Computed from the two passages +
         # conflict_type — page-independent, so a settled pair never re-fires
         # regardless of which page surfaced it.
         item_fingerprint = fingerprint_from_description(item.description, item.conflict_type)
 
-        # Issue #211: per-item member_key and pair_text for fuzzy matching.
+        # Issue athenaeum#211: per-item member_key and pair_text for fuzzy matching.
         # member_key is derived from _pair_key_from_description — only use it
         # when the key is a REAL member tuple (not a __passage_hash__ fallback).
         _item_raw_key = _pair_key_from_description(item.description)
@@ -2578,7 +2578,7 @@ def tier4_escalate(
             else None
         )
 
-        # Issue #211: use find_resolved_record (3 strategies: exact fingerprint,
+        # Issue athenaeum#211: use find_resolved_record (3 strategies: exact fingerprint,
         # member-pair key, embedding cosine) instead of the bare set-membership
         # gate. Old records that lack member_key/pair_text still match via the
         # exact-fingerprint strategy (back-compat).
@@ -2591,20 +2591,20 @@ def tier4_escalate(
             embedder=_embedder,
         )
         if record is not None:
-            # Issue #199 refines #198's blanket suppression into three
+            # Issue athenaeum#199 refines athenaeum#198's blanket suppression into three
             # outcomes on a cache hit:
             #   1. HUMAN-ratified verdict -> AUTO-APPLY it to THIS new
-            #      conflict's source files (reuse #197's enact_resolution
+            #      conflict's source files (reuse athenaeum#197's enact_resolution
             #      write-back), no new block, log the source verdict id.
             #   2. Auto-only verdict -> ESCALATE normally. Never auto-apply a
             #      prior AUTO resolution (would compound an automated mistake);
-            #      let a human ratify it. This CHANGES #198's auto-suppression
+            #      let a human ratify it. This CHANGES athenaeum#198's auto-suppression
             #      for the auto-only case.
             #   3. find_resolved_record returns None -> no cache hit (below).
             if record.get("resolved_by") == "human":
                 # "action" is authoritative (enact_resolution branches on
                 # proposal.action); fall back to a legacy/external
-                # "verdict"-only record defensively (issue #207).
+                # "verdict"-only record defensively (issue athenaeum#207).
                 action = record.get("action") or record.get("verdict") or ""
                 source_verdict_id = record.get("source_verdict_id")
                 members = list(getattr(item, "members", None) or [])
@@ -2613,7 +2613,7 @@ def tier4_escalate(
                     # Orientation-AGNOSTIC / non-enacting human verdict
                     # (not_a_conflict, retain_both_with_context, free-text,
                     # ...). Nothing to enact and orientation is irrelevant —
-                    # suppress the re-ask as #198 did, no block.
+                    # suppress the re-ask as athenaeum#198 did, no block.
                     log.info(
                         "auto-applied prior human verdict %s to entity=%s "
                         "(fingerprint=%s action=%s, non-enacting)",
@@ -2692,7 +2692,7 @@ def tier4_escalate(
                     # oriented to that order.
                     enacted = enact_resolution(verdict_proposal, members)
                     if enacted is None:
-                        # #203: enact_resolution returns None on a failed file
+                        # athenaeum#203: enact_resolution returns None on a failed file
                         # op (OSError on unlink/write) or a no-op — the source
                         # member was NOT corrected. FAIL SAFE: do NOT log
                         # "auto-applied", do NOT suppress; fall through to
@@ -2747,7 +2747,7 @@ def tier4_escalate(
             continue
 
         # Path C: brand new — render and append.
-        # Disambiguation mode (#166 follow-up): when the resolver attached
+        # Disambiguation mode (athenaeum#166 follow-up): when the resolver attached
         # candidate values, render an enumerated question instead of the
         # free-text first-line-of-description question. Falls back to the
         # free-text question when no (or too few) options are present.
@@ -2761,7 +2761,7 @@ def tier4_escalate(
                 item.description, item.entity_name, item.conflict_type
             )
         escaped_entity = item.entity_name.replace("\\", "\\\\").replace('"', '\\"')
-        # Issue #198: embed the claim-pair fingerprint so the resolution
+        # Issue athenaeum#198: embed the claim-pair fingerprint so the resolution
         # path (human ingest / auto-apply) can recover it and persist the
         # adjudication to the cache.
         fingerprint_line = f"**Fingerprint**: {item_fingerprint}\n" if item_fingerprint else ""
@@ -2890,7 +2890,7 @@ def tier4_escalate(
         sum(len(v) for v in file_merges.values()),
     )
 
-    # Issue #198: surface suppression once per pass (observable, not silent).
+    # Issue athenaeum#198: surface suppression once per pass (observable, not silent).
     if suppressed_count:
         log.info("suppressed %d already-adjudicated conflicts", suppressed_count)
 
@@ -2898,7 +2898,7 @@ def tier4_escalate(
 
 
 # ---------------------------------------------------------------------------
-# Issue #188 — re-resolve OPEN, PROPOSAL-LESS pending questions
+# Issue athenaeum#188 — re-resolve OPEN, PROPOSAL-LESS pending questions
 # ---------------------------------------------------------------------------
 #
 # A question first escalated WITHOUT a proposal (resolver budget exhausted that
@@ -2987,7 +2987,7 @@ def reresolve_open_questions(
     config: dict[str, Any] | None = None,
     usage: TokenUsage | None = None,
 ) -> int:
-    """Re-resolve OPEN, PROPOSAL-LESS pending questions (issue #188).
+    """Re-resolve OPEN, PROPOSAL-LESS pending questions (issue athenaeum#188).
 
     Parses ``_pending_questions.md`` for open ``[ ]`` blocks that carry NO
     resolver verdict (no ``**Proposed resolution**:`` and no
@@ -3047,7 +3047,7 @@ def reresolve_open_questions(
     # Fast exit: nothing proposal-less and open → no work, no discovery cost.
     targets = [pq for pq in questions if not pq.answered and not _block_has_proposal(pq.raw_block)]
     if not targets:
-        # Issue #398: still emit start/done so a watchdog sees the phase ran
+        # Issue athenaeum#398: still emit start/done so a watchdog sees the phase ran
         # even when there was nothing to re-resolve.
         empty_heartbeat = PhaseHeartbeat("reresolve", total=0, interval_s=0.0)
         empty_heartbeat.start()
@@ -3099,7 +3099,7 @@ def reresolve_open_questions(
     rewrites: dict[str, str] = {}  # block -> replacement text (annotated)
     drops: set[str] = set()  # blocks to remove from primary + archive
 
-    # Issue #398: the resolver's per-question loop is a post-compile dark
+    # Issue athenaeum#398: the resolver's per-question loop is a post-compile dark
     # zone — a hung ``claude -p`` resolver call previously produced zero
     # log output. Emit a heartbeat per pending question re-resolved.
     heartbeat_interval = resolve_heartbeat_interval(resolved_config)
@@ -3138,9 +3138,9 @@ def reresolve_open_questions(
         )
 
         calls += 1
-        # Issue #220: count the resolver call against the run-level budget.
+        # Issue athenaeum#220: count the resolver call against the run-level budget.
         # Token + cache counts from the response accumulate inside
-        # propose_resolution via the threaded ``usage`` (#239).
+        # propose_resolution via the threaded ``usage`` (athenaeum#239).
         if usage is not None and client is not None:
             usage.api_calls += 1
         proposal = propose_resolution(result, members, client, usage=usage)
@@ -3251,7 +3251,7 @@ def _append_dropped_to_archive(pending_path: Path, blocks: list[str]) -> None:
             continue
         rendered.append(
             f"{raw_block.rstrip()}\n\n"
-            f"**Auto-dropped**: {today} (re-resolved as not_a_conflict, issue #188)\n"
+            f"**Auto-dropped**: {today} (re-resolved as not_a_conflict, issue athenaeum#188)\n"
         )
     if not rendered:
         return

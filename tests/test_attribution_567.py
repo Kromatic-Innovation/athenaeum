@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #567 — attribute prompt + schema-fragment bytes.
+"""Issue athenaeum#567 — attribute prompt + schema-fragment bytes.
 
 The librarian's one-line ``librarian-run-summary`` and ``athenaeum status`` gain
 byte-attribution so a classify/create regression can be pinned to *which* bytes a
 run used — the operator's (possibly edited) schema fragments and the shipped
 prompt set — from the log/status alone. Source of truth for the fragment state is
-``tiers.schema_fragment_state`` (#563) and for the prompt bytes is
-``prompt_registry.prompt_manifest`` (#561); this issue only *surfaces* them, it
+``tiers.schema_fragment_state`` (athenaeum#563) and for the prompt bytes is
+``prompt_registry.prompt_manifest`` (athenaeum#561); this issue only *surfaces* them, it
 re-implements no hashing.
 
 Covers:
@@ -14,7 +14,7 @@ Covers:
 1. ``_render_schema_fragment_attribution`` / ``_render_run_summary`` — the head
    segment carries ``schema_fragments=`` (``default`` vs ``<sha8>`` per fragment)
    and one aggregate ``prompt_manifest=`` key; both omitted when their arg is
-   ``None`` (byte-unchanged pre-#567 head).
+   ``None`` (byte-unchanged pre-athenaeum#567 head).
 2. ``prompt_registry.prompt_manifest_hash`` — one short aggregate digest, stable
    across dict order, sensitive to any prompt-byte change.
 3. End-to-end: a run over untouched default fragments and a run over an edited
@@ -129,7 +129,7 @@ class TestRenderAttribution:
         assert "entity secs=4.200 calls=6" in line
 
     def test_attribution_omitted_when_args_none(self) -> None:
-        # Pure-formatting default (every pre-#567 caller): head byte-unchanged.
+        # Pure-formatting default (every pre-athenaeum#567 caller): head byte-unchanged.
         line = _render_run_summary([("entity", 1.0, {})])
         assert line == "librarian-run-summary total_secs=1.000 | entity secs=1.000"
         assert "schema_fragments=" not in line
@@ -268,7 +268,7 @@ class TestStatusDivergenceLine:
         assert "edited (sha8" not in text
 
     def test_format_status_backward_compatible_without_key(self) -> None:
-        # A pre-#567 status dict (no ``schema_fragments`` key) still formats.
+        # A pre-athenaeum#567 status dict (no ``schema_fragments`` key) still formats.
         legacy = {
             "raw_pending": 0,
             "entity_count": 0,

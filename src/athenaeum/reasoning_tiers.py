@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tiered reasoning-pass pipeline for merge proposals (issues #423, #432).
+"""Tiered reasoning-pass pipeline for merge proposals (issues athenaeum#423, athenaeum#432).
 
 NOT to be confused with :mod:`athenaeum.tiers` — that module is the T0-T4
 *entity-compilation* pipeline (raw intake -> wiki entity pages). This module
@@ -17,11 +17,11 @@ Governing rule (settled product decision, do not re-litigate): **write
 authority increases with tier; cheap tiers only reject and route, never
 approve.** Concretely:
 
-- **T1** (issue #423): haiku/sonnet-class model, bounded input (titles +
+- **T1** (issue athenaeum#423): haiku/sonnet-class model, bounded input (titles +
   frontmatter + first ~100 words per source — NEVER full bodies). Can only
   REJECT (with a logged reason) or PASS UP. Approval is structurally
   unrepresentable in its output type — see :class:`ReasoningTierVerdict`.
-- **T2** (issue #432): opus-class model, FULL bodies, T1 survivors (pass-ups)
+- **T2** (issue athenaeum#432): opus-class model, FULL bodies, T1 survivors (pass-ups)
   only. Unlike T1, T2 DOES gain a form of write authority — but only inside
   a narrow, structurally-enforced SAFE CLASS (same ``memory_class``, <=3
   pages, no ``pii`` flag, no ``axiom`` member — see
@@ -56,12 +56,12 @@ record-shape builder) — only the ``tier`` tag and the set of legal
 
 Out of scope here (see the issue body for the re-scope rationale):
 
-- The calibration sampler that watches T1/T2 accuracy over time (#438).
+- The calibration sampler that watches T1/T2 accuracy over time (athenaeum#438).
 - Wiring ANY tier into ``wiki_dedupe.py``'s call sites — those still write
   straight to ``_pending_merges.md`` unscreened. (T2 IS wired into
-  ``merge.py``'s merge path as of #602 — see below.)
+  ``merge.py``'s merge path as of athenaeum#602 — see below.)
 
-Production status (current, do not let this go stale again — #525
+Production status (current, do not let this go stale again — athenaeum#525
 corrected a prior overclaim in the docs, this restates it against the
 code): :data:`DEFAULT_TIER_CHAIN` is genuinely the empty tuple — nothing
 calls :func:`run_reasoning_pipeline` with tiers configured by default.
@@ -71,12 +71,12 @@ BUT this module IS reached in production, through exactly TWO callers in
 which defaults OFF, so an unconfigured install still sees every proposal
 pass straight to the human queue exactly as if this module did not exist:
 
-- ``t1_screen_rejects_merge_proposal`` (#518) builds an explicit
+- ``t1_screen_rejects_merge_proposal`` (athenaeum#518) builds an explicit
   ``tier_chain=(functools.partial(run_t1_tier, ...),)`` and calls
   :func:`run_reasoning_pipeline` with it directly — bypassing the empty
   default. A confident T1 reject drops the proposal before T2 is ever
   consulted (no Opus spend on an already-rejected proposal).
-- ``t2_screen_merge_proposal`` (#602) calls :func:`run_t2_tier` directly
+- ``t2_screen_merge_proposal`` (athenaeum#602) calls :func:`run_t2_tier` directly
   (NOT through :func:`run_reasoning_pipeline` — T2's decision type,
   :class:`ReasoningTierT2Decision`, is a different shape than the
   reject/pass_up-only :class:`ReasoningTierDecision` the pipeline skeleton
@@ -86,7 +86,7 @@ pass straight to the human queue exactly as if this module did not exist:
   safe-class-violation downgrade — falls through to the human queue.
 
 Do not describe this module as having "no production caller" (stale as of
-#518) and do not describe T2 as "unwired" (stale as of #602) — both tiers
+athenaeum#518) and do not describe T2 as "unwired" (stale as of athenaeum#602) — both tiers
 are wired, both opt-in behind the one flag, both defaulting to the
 identical unscreened behavior when it is off.
 """
@@ -117,15 +117,15 @@ from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_te
 
 log = logging.getLogger(__name__)
 
-# Reasoning-tier output budgets (issue #575): formerly bare literals in the
+# Reasoning-tier output budgets (issue athenaeum#575): formerly bare literals in the
 # request-param dicts below; named and resolved through the provider seam so
 # each is a config-overridable knob. Values unchanged.
 _T1_MAX_TOKENS = 256
 _T2_MAX_TOKENS = 4096
 
 # ---------------------------------------------------------------------------
-# Model selection (issue #423) — resolves via the existing provider-aware
-# config chain (env > yaml `models.<knob>` > code default, issue #232),
+# Model selection (issue athenaeum#423) — resolves via the existing provider-aware
+# config chain (env > yaml `models.<knob>` > code default, issue athenaeum#232),
 # exactly like every other tier/classifier in the codebase. NEVER hardcode
 # a model id at a call site — see athenaeum.config.resolve_model.
 # ---------------------------------------------------------------------------
@@ -133,14 +133,14 @@ _T2_MAX_TOKENS = 4096
 #: T1 is the cheap reject-and-route tier — haiku-class by default. Overridable
 #: via ``ATHENAEUM_REASONING_T1_MODEL`` env or ``models.reasoning_t1`` yaml.
 #: The DEFAULT is single-sourced from ``config.DEFAULT_CLASSIFY_MODEL`` (issue
-#: #571, M19; relocated from ``tiers`` to the ``config`` leaf in #640) so a
+#: athenaeum#571, M19; relocated from ``tiers`` to the ``config`` leaf in athenaeum#640) so a
 #: haiku-class bump touches one file, not four; the T1 env knob above is
 #: unchanged.
 DEFAULT_T1_MODEL = DEFAULT_CLASSIFY_MODEL
 
 
 def get_t1_model(config: dict[str, Any] | None = None) -> str:
-    """Resolve the T1 tier's model id (env > yaml > default, issue #232)."""
+    """Resolve the T1 tier's model id (env > yaml > default, issue athenaeum#232)."""
     return resolve_model(
         "reasoning_t1", "ATHENAEUM_REASONING_T1_MODEL", DEFAULT_T1_MODEL, config
     )
@@ -265,7 +265,7 @@ ReasoningTierVerdict = Literal["reject", "pass_up"]
 
 REASONING_TIER_VERDICTS: frozenset[str] = frozenset({"reject", "pass_up"})
 
-#: T1's reject bins (issue #423). A rejection's ``reason_code`` is one of
+#: T1's reject bins (issue athenaeum#423). A rejection's ``reason_code`` is one of
 #: these three, or ``"other"`` for a bin-less structured rejection (kept
 #: open so a future tier can add reasons without a schema break).
 REJECT_REASON_DIFFERENT_ENTITIES = "different_entities"
@@ -537,7 +537,7 @@ def build_t1_request_params(
         "max_tokens": resolve_max_tokens(
             "reasoning_t1", "ATHENAEUM_REASONING_T1_MAX_TOKENS", _T1_MAX_TOKENS, config
         ),
-        # Issue #578: T1 is a cheap Haiku pre-screen (reject or pass_up) —
+        # Issue athenaeum#578: T1 is a cheap Haiku pre-screen (reject or pass_up) —
         # same posture as tier2_classify. Disabled explicitly.
         "thinking": resolve_thinking(
             "reasoning_t1", "ATHENAEUM_REASONING_T1_THINKING", "disabled", config
@@ -585,7 +585,7 @@ def _duplicate_check_reason(
     """Return a rejection reason if any source duplicates a live authority source.
 
     Deterministic LOOKUP via :func:`athenaeum.authority.find_duplicate_source`
-    — issue #426's detector — over each source's bounded frontmatter view.
+    — issue athenaeum#426's detector — over each source's bounded frontmatter view.
     Never semantic similarity, matching that module's own contract.
     """
     for view in views:
@@ -602,7 +602,7 @@ def _cross_memory_class_reason(views: Sequence[BoundedSourceView]) -> str | None
     """Return a rejection reason if sources carry incompatible ``memory_class``.
 
     Two sources with a present, differing, non-empty ``memory_class`` are
-    an incompatible pairing (issue #424 taxonomy) — clustering a ``fact``
+    an incompatible pairing (issue athenaeum#424 taxonomy) — clustering a ``fact``
     with an ``axiom``, for instance, is never a valid merge target. A
     source with an ABSENT ``memory_class`` is not itself disqualifying
     (legacy/untyped memories are tolerated by the taxonomy) — only an
@@ -641,9 +641,9 @@ def run_t1_tier(
     Cheap deterministic checks run BEFORE any model call (never spend a
     token on a rejection a lookup can already make with certainty):
 
-    1. **Cross-`memory_class` pairing** (#424 taxonomy) —
+    1. **Cross-`memory_class` pairing** (athenaeum#424 taxonomy) —
        :func:`_cross_memory_class_reason`.
-    2. **Live-source duplicate** (#426 detector) —
+    2. **Live-source duplicate** (athenaeum#426 detector) —
        :func:`_duplicate_check_reason`, only when *authority_manifest* is
        supplied (an absent/empty manifest never rejects — an unconfigured
        knowledge base has no authoritative sources registered, matching
@@ -709,7 +709,7 @@ def run_t1_tier(
             input_toks, output_toks, cache_creation, cache_read, model=params["model"]
         )
 
-    # Issue #578: response_text skips any leading thinking block (T1 runs
+    # Issue athenaeum#578: response_text skips any leading thinking block (T1 runs
     # disabled today; the helper is text-block-equivalent for a text-only
     # response and keeps the site robust if the posture changes).
     verdict, reason = _parse_t1_response(response_text(response))
@@ -727,7 +727,7 @@ def run_t1_tier(
 
 
 # ---------------------------------------------------------------------------
-# T2 tier (issue #432) — opus-class model, FULL bodies, T1 survivors only.
+# T2 tier (issue athenaeum#432) — opus-class model, FULL bodies, T1 survivors only.
 #
 # Governing rule still applies (write authority increases with tier), but
 # T2's decision space is DELIBERATELY BROADER than T1's reject/pass_up —
@@ -763,12 +763,12 @@ T2_TIER_NAME = "T2"
 
 #: T2 is the opus-class deep-reasoning tier. Overridable via
 #: ``ATHENAEUM_REASONING_T2_MODEL`` env or ``models.reasoning_t2`` yaml —
-#: same env/yaml/default precedence as :func:`get_t1_model` (issue #232).
-DEFAULT_T2_MODEL = "claude-opus-4-8"  # Opus 4.8 (was 4.1, retiring; #633)
+#: same env/yaml/default precedence as :func:`get_t1_model` (issue athenaeum#232).
+DEFAULT_T2_MODEL = "claude-opus-4-8"  # Opus 4.8 (was 4.1, retiring; athenaeum#633)
 
 
 def get_t2_model(config: dict[str, Any] | None = None) -> str:
-    """Resolve the T2 tier's model id (env > yaml > default, issue #232)."""
+    """Resolve the T2 tier's model id (env > yaml > default, issue athenaeum#232)."""
     return resolve_model(
         "reasoning_t2", "ATHENAEUM_REASONING_T2_MODEL", DEFAULT_T2_MODEL, config
     )
@@ -794,12 +794,12 @@ SAFE_CLASS_VIOLATION_AXIOM_MEMBER = "axiom_member"
 #: Live-source duplicate is a T1 reject bin, but a T1 pass-up does not
 #: guarantee T1 even ran a manifest check (an absent authority_manifest is
 #: tolerated at T1) — T2 re-checks with its OWN (possibly supplied)
-#: manifest, per the issue's "T2 consults the #426 authority manifest"
+#: manifest, per the issue's "T2 consults the athenaeum#426 authority manifest"
 #: instruction, and treats a hit as a safe-class violation (never approve a
 #: duplicate of a live source, no matter how small/homogeneous the cluster).
 SAFE_CLASS_VIOLATION_LIVE_SOURCE_DUPLICATE = "live_source_duplicate"
 
-#: Maximum number of source pages a T2 approval may span (issue #432).
+#: Maximum number of source pages a T2 approval may span (issue athenaeum#432).
 SAFE_CLASS_MAX_PAGES = 3
 
 
@@ -810,7 +810,7 @@ def safe_class_violation(
 ) -> str | None:
     """Return the violated safe-class reason code, or ``None`` if all pass.
 
-    The SAFE CLASS (issue #432) is ALL of: same ``memory_class`` across
+    The SAFE CLASS (issue athenaeum#432) is ALL of: same ``memory_class`` across
     every source, at most :data:`SAFE_CLASS_MAX_PAGES` pages, no source
     carrying a truthy ``pii`` flag (:func:`athenaeum.pii.is_pii_flagged`),
     and no source with ``memory_class: axiom``. This function is the
@@ -1016,14 +1016,14 @@ def build_t2_request_params(
         "max_tokens": resolve_max_tokens(
             "reasoning_t2", "ATHENAEUM_REASONING_T2_MAX_TOKENS", _T2_MAX_TOKENS, config
         ),
-        # Issue #578: T2 already defaults to Opus 4.8 (deep reasoning over
+        # Issue athenaeum#578: T2 already defaults to Opus 4.8 (deep reasoning over
         # full source bodies — approve/amend/draft/escalate) and adaptive
         # thinking benefits it now, not just after a future model bump.
         # Enabled explicitly. NOTE: this stage's max_tokens (4096) was not in
-        # issue #578's named re-baseline table (only the resolver and
+        # issue athenaeum#578's named re-baseline table (only the resolver and
         # merge-patch stages were flagged there) — left unchanged here; a
         # future re-baseline for this stage is deferred, same as the spend-
-        # ceiling re-baseline called out in issue #578's out-of-scope list.
+        # ceiling re-baseline called out in issue athenaeum#578's out-of-scope list.
         "thinking": resolve_thinking(
             "reasoning_t2", "ATHENAEUM_REASONING_T2_THINKING", "adaptive", config
         ),
@@ -1243,7 +1243,7 @@ def run_t2_tier(
             input_toks, output_toks, cache_creation, cache_read, model=params["model"]
         )
 
-    # Issue #578: T2 enables adaptive thinking — response_text skips any
+    # Issue athenaeum#578: T2 enables adaptive thinking — response_text skips any
     # leading thinking block and returns the verdict JSON answer.
     verdict, reason, amended_sources, drafted_body = _parse_t2_response(
         response_text(response)
@@ -1265,11 +1265,11 @@ def run_t2_tier(
 
 #: A tier handler takes a proposal and returns its decision. Any callable
 #: matching this shape can be slotted into a chain passed to
-#: :func:`run_reasoning_pipeline` — #432's T2 handler needs only to match
+#: :func:`run_reasoning_pipeline` — athenaeum#432's T2 handler needs only to match
 #: this signature, no rework of the skeleton required.
 TierHandler = Callable[[ReasoningProposal], ReasoningTierDecision]
 
-#: The default tier chain: T1 only, until #432 adds a T2 handler here (or a
+#: The default tier chain: T1 only, until athenaeum#432 adds a T2 handler here (or a
 #: caller passes an explicit chain). An empty/absent T2 is not a special
 #: case the skeleton has to know about — it is simply a chain of length 1.
 DEFAULT_TIER_CHAIN: tuple[TierHandler, ...] = ()
@@ -1283,7 +1283,7 @@ class ReasoningPipelineResult:
     in that case ``rejecting_decision`` names which one and why, and the
     proposal must NOT reach the human queue. When no tier rejects,
     ``rejected`` is false and the proposal is a pass-up: with T2 absent
-    (the default, until #432 lands) it should be handed to the existing
+    (the default, until athenaeum#432 lands) it should be handed to the existing
     human queue unchanged, exactly as if this pipeline did not run at all.
     """
 
@@ -1314,7 +1314,7 @@ def run_reasoning_pipeline(
     the trivial empty-chain case — see below), the proposal is a pass-up.
 
     **Tolerates an absent T2 by construction, not by a special case**: until
-    issue #432 adds a T2 handler, callers either pass ``tier_chain=()`` (no
+    issue athenaeum#432 adds a T2 handler, callers either pass ``tier_chain=()`` (no
     tiers configured at all) or a chain containing only a T1 handler (e.g.
     ``tier_chain=(functools.partial(run_t1_tier, client=..., ...),)``).
     Either way, when the chain is exhausted without a reject, this function

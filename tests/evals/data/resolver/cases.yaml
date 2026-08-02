@@ -1,4 +1,4 @@
-# Resolver golden set (issue #331)
+# Resolver golden set (issue athenaeum#331)
 #
 # Same synthetic Meridian Advisory scenario as the detector set — invented
 # consultancy, no live-knowledge content.
@@ -20,7 +20,7 @@
 # The body text is where sequential-snapshot / supersession signal must
 # live so the resolver has to reason about it.
 
-# TAXONOMY DECISION (issue #345, WS1 ground-truth audit): a general
+# TAXONOMY DECISION (issue athenaeum#345, WS1 ground-truth audit): a general
 # PREFERENCE rule + a narrower explicit exception is a canonical
 # `propose_merge` pair, NOT `not_a_conflict`. The resolver system prompt's
 # propose_merge section names the near-identical "subl for code, Numbers for
@@ -92,7 +92,7 @@
 # portal; the newer member records a migration DECISION but does NOT say
 # "Heroku is retired/superseded/cancelled" — so the resolver must PICK the
 # winner by recency/decision precedence (→ keep_b) rather than reading a
-# resolution already declared in the text. Authoring rule (issue #345): a
+# resolution already declared in the text. Authoring rule (issue athenaeum#345): a
 # body that says "X is retired" fires the not_a_conflict "supersession
 # declared in the text" rule, and "as of <date>, X" framing fires the
 # sequential-snapshot FACT rule — both defensibly yield not_a_conflict.
@@ -177,7 +177,7 @@
         type: reference
         source_type: inferred
 
-# --- Cases added in issue #345 (WS3) to give the floor >= 2-case slack ---
+# --- Cases added in issue athenaeum#345 (WS3) to give the floor >= 2-case slack ---
 # Enlarges the set from 5 -> 8 so no single hard case sinks the whole layer.
 # Two cases per action class (not_a_conflict, keep_pick_winner,
 # disambiguation, propose_merge). Still 100% synthetic Meridian Advisory.

@@ -71,7 +71,7 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
         type=int,
         default=None,
         help=(
-            "Run-level wall-clock deadline in seconds (issue #396). On trip "
+            "Run-level wall-clock deadline in seconds (issue athenaeum#396). On trip "
             "the run commits partial progress, releases the lock, and exits "
             "124 (resumable) — bounding the WHOLE run incl. the post-compile "
             "phases, not just the per-file loop. Default: ATHENAEUM_MAX_RUNTIME "
@@ -92,7 +92,7 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Submit tier-2/tier-3 LLM calls via the Anthropic Messages "
-        "Batch API at a 50%% token discount (issue #236). Latency-tolerant: "
+        "Batch API at a 50%% token discount (issue athenaeum#236). Latency-tolerant: "
         "most batches finish within an hour, 24h worst case — intended for "
         "the nightly run. --no-batch-mode forces the synchronous path even "
         "when the env/yaml default is on. Default: ATHENAEUM_BATCH_MODE "
@@ -103,7 +103,7 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
         dest="retire",
         action="store_false",
         default=None,
-        help="Skip the move-then-retire pass (issue #261): raw auto-memory "
+        help="Skip the move-then-retire pass (issue athenaeum#261): raw auto-memory "
         "is neither moved into the wiki nor git-removed. Overrides the "
         "athenaeum.yaml librarian.retire toggle (default on). See the "
         "README 'Data lifecycle & upgrade impact' section.",
@@ -114,7 +114,7 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         default=None,
         help="After a successful run that produced at least one commit, "
-        "invoke `git push` on the knowledge repo (issue #284) using the "
+        "invoke `git push` on the knowledge repo (issue athenaeum#284) using the "
         "operator's ambient git credentials. Overrides the athenaeum.yaml "
         "librarian.push_after_run toggle (default off). No-op on --dry-run "
         "or when the run produced no commits. A push failure is reported "
@@ -127,7 +127,7 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         default=None,
         help="Before the run starts, invoke `git pull --ff-only --autostash` "
-        "on the knowledge repo (issue #399) using the operator's ambient "
+        "on the knowledge repo (issue athenaeum#399) using the operator's ambient "
         "git credentials, so the run compiles against origin's latest. "
         "Overrides the athenaeum.yaml librarian.pull_before_run toggle "
         "(default off). No-op on --dry-run. A pull failure (e.g. diverged "
@@ -139,7 +139,7 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Force a whole-corpus auto-memory compile this run, bypassing "
         "both the delta gate and the librarian.full_compile_every_days "
-        "cadence (issue #463). Use for an immediate full reconciliation "
+        "cadence (issue athenaeum#463). Use for an immediate full reconciliation "
         "(e.g. after suspecting delta drift) without waiting for the "
         "periodic backstop.",
     )
@@ -176,7 +176,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     raw_root = args.raw_root or (knowledge_root / "raw")
     wiki_root = args.wiki_root or (knowledge_root / "wiki")
 
-    # Issue #309: a --dry-run reads nothing mutating, so it does NOT take the
+    # Issue athenaeum#309: a --dry-run reads nothing mutating, so it does NOT take the
     # single-machine run lock. A real run acquires it so overlapping runs
     # (nightly cron + manual) don't race wiki writes or the API-call budget.
     if args.dry_run:
@@ -221,7 +221,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             pull_before_run=getattr(args, "pull_before_run", None),
             install_signal_handlers=True,
             full_compile=getattr(args, "full_compile", False),
-            # Issue #526 (H10): thread the run lock's heartbeat into the
+            # Issue athenaeum#526 (H10): thread the run lock's heartbeat into the
             # librarian so its per-phase/per-file loop refreshes the lockfile's
             # heartbeat — making heartbeat_age_seconds report progress age, not
             # acquire age, so a healthy long run is never auto-broken.

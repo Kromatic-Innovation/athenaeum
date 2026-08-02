@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``athenaeum storage migrate-pii`` (issue #479).
+"""Tests for ``athenaeum storage migrate-pii`` (issue athenaeum#479).
 
 Covers the pure transform (:mod:`athenaeum.storage_migrate`) and the CLI
 (:mod:`athenaeum._cmd_storage`), mirroring:
@@ -168,10 +168,10 @@ class TestPlanPiiMigration:
         assert plan.excluded_page_text is None
 
     def test_crm_timeline_dates_are_not_phone_migrations(self, tmp_path: Path) -> None:
-        # Issue #500: migrate-pii's phone detector matched CRM-timeline ISO
+        # Issue athenaeum#500: migrate-pii's phone detector matched CRM-timeline ISO
         # dates and the page's own uid, so a dry-run "found phones" and --apply
         # would strip real dates into the excluded surface as if they were
-        # contact PII. Reproduces the two live pages named in #500
+        # contact PII. Reproduces the two live pages named in athenaeum#500
         # (`00075741-blekinge-business-incubator-2016.md`, `000a36e4-dawn-b.md`):
         # a page whose only digit runs are timeline dates + an id prefix must
         # report ZERO phone hits and be a no-op migration.
@@ -285,13 +285,13 @@ class TestStorageMigratePiiCLI:
         rc = main(["storage"])
         assert rc == 2
         assert "migrate-pii" in capsys.readouterr().err
-        # lint-pii is now advertised in the usage line too (issue #495).
+        # lint-pii is now advertised in the usage line too (issue athenaeum#495).
         rc = main(["storage"])
         assert "lint-pii" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
-# Bulk migration target-set resolution (issue #495)
+# Bulk migration target-set resolution (issue athenaeum#495)
 # ---------------------------------------------------------------------------
 
 
@@ -328,7 +328,7 @@ class TestBulkTargetSet:
 
 
 # ---------------------------------------------------------------------------
-# Bulk migration CLI — athenaeum storage migrate-pii --all / --glob (issue #495)
+# Bulk migration CLI — athenaeum storage migrate-pii --all / --glob (issue athenaeum#495)
 # ---------------------------------------------------------------------------
 
 
@@ -479,14 +479,14 @@ class TestBulkMigrateCLI:
 
 
 # ---------------------------------------------------------------------------
-# Detector-driven key coverage — the #502 residual key shapes
+# Detector-driven key coverage — the athenaeum#502 residual key shapes
 # ---------------------------------------------------------------------------
 #
-# #479 read only ``emails:`` / ``phones:``; the live sweep left 690 pages whose
+# athenaeum#479 read only ``emails:`` / ``phones:``; the live sweep left 690 pages whose
 # PII lives in OTHER frontmatter keys (``aliases:`` dominant, then ``source:``,
 # ``former_emails:``, ``alt_emails:``) and in body prose. The migrator now
 # detector-scans every non-durable frontmatter value; these pin each residual
-# shape #502 measured, plus the durable-identifier preservation contract (#427)
+# shape athenaeum#502 measured, plus the durable-identifier preservation contract (athenaeum#427)
 # and the name-is-an-email carve-out.
 
 
@@ -579,7 +579,7 @@ class TestDetectorDrivenKeyCoverage:
     def test_preserves_durable_identifiers_even_when_email_shaped(
         self, tmp_path: Path
     ) -> None:
-        # #427: durable identifiers (linkedin_url, handles_verified, record IDs,
+        # athenaeum#427: durable identifiers (linkedin_url, handles_verified, record IDs,
         # google_contact*) are PRESERVED verbatim even if a value is email-
         # shaped, and are never pulled onto the excluded contact record.
         root = tmp_path / "knowledge"
@@ -682,9 +682,9 @@ class TestDetectorDrivenKeyCoverage:
 
 
 class TestNestedFrontmatterCoverage:
-    """Issue #507 — recurse into nested lists/dicts, targeting the exact leaf.
+    """Issue athenaeum#507 — recurse into nested lists/dicts, targeting the exact leaf.
 
-    The #502 sweep scanned only the top level of each frontmatter value, so PII
+    The athenaeum#502 sweep scanned only the top level of each frontmatter value, so PII
     inside a *list of dicts* (``sources[].claim`` provenance blocks,
     ``apollo_employment_history[].title`` enrichment payloads) was invisible to
     the migrator. These pin the recursive walk, the leaf-precise rewrite, and
@@ -848,7 +848,7 @@ class TestNestedFrontmatterCoverage:
 
 
 class TestServiceAddressPredicate:
-    """Issue #507 — the explicit, named service-address carve-out."""
+    """Issue athenaeum#507 — the explicit, named service-address carve-out."""
 
     def test_git_ssh_pseudo_user_is_a_service_address(self) -> None:
         assert is_service_address("git@github.com") is True
@@ -889,7 +889,7 @@ class TestBulkSurfacesNameIsEmailPopulation:
 
 
 # ---------------------------------------------------------------------------
-# Search-index invalidation after --apply (issue #502 comment scope addition)
+# Search-index invalidation after --apply (issue athenaeum#502 comment scope addition)
 # ---------------------------------------------------------------------------
 #
 # --apply rewrites the markdown but does NOT itself touch the search index, so
@@ -963,7 +963,7 @@ class TestMigratePiiSearchIndex:
 
 
 # ---------------------------------------------------------------------------
-# Name-is-an-email rename migration (issue #505 — the #502 carve-out's slice)
+# Name-is-an-email rename migration (issue athenaeum#505 — the athenaeum#502 carve-out's slice)
 # ---------------------------------------------------------------------------
 #
 # APPROACH 1 (operator decision): derive a display name from the local-part

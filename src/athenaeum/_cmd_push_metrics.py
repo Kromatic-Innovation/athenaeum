@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum push-metrics {baseline,coverage-audit}`` — v6 MVP (a), issue #711.
+"""``athenaeum push-metrics {baseline,coverage-audit}`` — v6 MVP (a), issue athenaeum#711.
 
 Two subcommands over :mod:`athenaeum.push_metrics`:
 
@@ -109,7 +109,7 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "Push-precision + coverage baseline: compute/record the "
             "precision snapshot, and sample sessions for a human-reviewed "
-            "coverage-audit worksheet (issue #711)."
+            "coverage-audit worksheet (issue athenaeum#711)."
         ),
     )
     p_parser.set_defaults(func=cmd_push_metrics)

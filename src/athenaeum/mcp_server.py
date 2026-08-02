@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """MCP memory server — read/write gate for an Athenaeum knowledge base.
 
-Registers 11 tools (issue #538 — the count was previously under-reported as 2):
+Registers 11 tools (issue athenaeum#538 — the count was previously under-reported as 2):
 
   Reads:  recall, list_pending_questions, list_pending_merges,
           list_pending_decisions, list_axiom_audit, scan_retraction_cascade,
           calibration_summary
   Writes: remember, resolve_question, resolve_merge, review_audit_item
 
-Audience scoping (issue #312, #538). ``caller_audience`` is pinned ONCE at
+Audience scoping (issue athenaeum#312, athenaeum#538). ``caller_audience`` is pinned ONCE at
 ``create_server`` time (never a per-tool argument, so a restricted agent cannot
 widen its own scope) and governs the whole process:
 
@@ -23,7 +23,7 @@ widen its own scope) and governs the whole process:
     (non-owner) caller — adjudicating the operator's contradiction/merge queue
     is an owner-only action.
   - ``remember`` is intentionally NOT audience-scoped: intake is write-only and
-    compiles through the normal read-time screening path (issue #320). See
+    compiles through the normal read-time screening path (issue athenaeum#320). See
     ``docs/security-posture.md``.
 
 Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
@@ -51,7 +51,7 @@ from athenaeum.search import score_keyword_page, tokenize_keyword_query
 from athenaeum.storage import is_recallable, storage_policy_configured, write_raw_intake
 
 if TYPE_CHECKING:
-    # Issue #550: resolves the forward reference on ``create_server``'s return
+    # Issue athenaeum#550: resolves the forward reference on ``create_server``'s return
     # annotation for mypy WITHOUT importing fastmcp at runtime — the real
     # import stays lazy (inside create_server) so athenaeum works without the
     # optional ``mcp`` extra installed.
@@ -59,11 +59,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Kill switch (issue #379): message + dict returned by the mutating MCP tools
+# Kill switch (issue athenaeum#379): message + dict returned by the mutating MCP tools
 # when athenaeum is disabled at the ``all`` scope. Capture/resolve are the
 # "capture" aspect — a ``--compile`` scope leaves them on.
 _KILL_SWITCH_MSG = (
-    "athenaeum is disabled (kill switch, issue #379): knowledge writes are off. "
+    "athenaeum is disabled (kill switch, issue athenaeum#379): knowledge writes are off. "
     "Run 'athenaeum enable' to restore."
 )
 
@@ -81,14 +81,14 @@ def _kill_switch_result() -> dict:
     }
 
 
-# Audience write-guard (issue #538): the three human-decision-queue mutators
+# Audience write-guard (issue athenaeum#538): the three human-decision-queue mutators
 # (resolve_question / resolve_merge / review_audit_item) adjudicate the
 # operator's contradiction/merge queue and are OWNER-ONLY. A restricted
 # (non-None caller_audience) process is refused fail-closed. ``remember`` is
 # deliberately NOT guarded here — intake is write-only and screened downstream.
 _FORBIDDEN_MSG = (
     "athenaeum: this decision-queue action is owner-only and is not available "
-    "to a restricted caller_audience (issue #538)."
+    "to a restricted caller_audience (issue athenaeum#538)."
 )
 
 
@@ -175,12 +175,12 @@ def recall_search(
             at build time (e.g. ``raw/auto-memory``). Used here to resolve
             hit filenames of the form ``<root_name>/<relpath>`` back to
             on-disk paths when rendering snippets.
-        caller_audience: Read-scope pin for a restricted caller (issue #312).
+        caller_audience: Read-scope pin for a restricted caller (issue athenaeum#312).
             ``None`` is the owner / default caller (no filtering). A non-None
             set restricts results to pages the caller is authorized for; the
             predicate is applied inside the backend query (Layer B) AND
             re-checked against fresh on-disk frontmatter at render (Layer C).
-        config: Resolved ``athenaeum.yaml`` config (issue #532). Used to honor
+        config: Resolved ``athenaeum.yaml`` config (issue athenaeum#532). Used to honor
             the storage-adapter ``recallable`` corpus policy: a hit whose entity
             class routes to a surface with ``recallable: false`` is dropped at
             the render layer (Layer C), the same fresh-frontmatter re-check the
@@ -268,7 +268,7 @@ def _date_part(value: object) -> str:
 
 
 def _recall_metadata_lines(fm: dict[str, object]) -> list[str]:
-    """Build the compact provenance/context header for one recall hit (#325).
+    """Build the compact provenance/context header for one recall hit (athenaeum#325).
 
     Returns 0-2 markdown lines inserted between the ``**Tags:**`` line and the
     snippet so a consuming agent can judge trust/currency WITHOUT opening the
@@ -286,7 +286,7 @@ def _recall_metadata_lines(fm: dict[str, object]) -> list[str]:
       this header prevents.
 
     When none of source/updated/valid/status apply the list is empty and the
-    caller renders exactly the pre-#325 output (no blank metadata line).
+    caller renders exactly the pre-athenaeum#325 output (no blank metadata line).
     """
     segments: list[str] = []
 
@@ -361,7 +361,7 @@ def _recall_via_backend(
     except NotImplementedError as exc:
         return str(exc)
     except DegradedIndexError as exc:
-        # #489: a degraded/unavailable index must surface as an explicit,
+        # athenaeum#489: a degraded/unavailable index must surface as an explicit,
         # actionable error — never as silently-wrong flat-scored hits.
         return (
             f"recall index unavailable: {exc} "
@@ -373,18 +373,18 @@ def _recall_via_backend(
 
     tokens = tokenize_keyword_query(query)
 
-    # Issue #532: only enforce the ``recallable`` policy when the config
+    # Issue athenaeum#532: only enforce the ``recallable`` policy when the config
     # actually defines a non-default storage policy — a strict no-op (including
     # for unreadable/stale hits) for any base with no ``storage:`` config.
     enforce_recallable = storage_policy_configured(config)
 
-    # Render each hit, applying Layer C (issue #312): re-check the FRESH
+    # Render each hit, applying Layer C (issue athenaeum#312): re-check the FRESH
     # on-disk frontmatter for a restricted caller so a stale index (a page
     # whose audience changed since the last rebuild) cannot leak a forbidden
     # page's title, tags, snippet, OR body. Rendered blocks are collected
     # first so the "Found N" header counts only the authorized hits.
     blocks: list[str] = []
-    # Issue #711: parallel accumulator of exactly the hits that make it into
+    # Issue athenaeum#711: parallel accumulator of exactly the hits that make it into
     # `blocks` — i.e. what this call ACTUALLY pushes into the session, post
     # every filter below (Layer C authorization, the `recallable` policy, and
     # unreadable-file drops). This is the single point recall assembles a
@@ -420,7 +420,7 @@ def _recall_via_backend(
             if not readable or not is_page_authorized(fm, caller_audience):
                 continue
 
-        # Issue #532 (H4): honor the storage-adapter ``recallable`` corpus
+        # Issue athenaeum#532 (H4): honor the storage-adapter ``recallable`` corpus
         # policy at the same render layer. A hit whose entity class routes to a
         # surface with ``recallable: false`` is dropped even if it slipped into
         # the index — the ``recallable`` capability the storage contract
@@ -439,7 +439,7 @@ def _recall_via_backend(
         if isinstance(tags, list):
             tags = ", ".join(tags)
         snip = _snippet(body, tokens) if body else ""
-        # Issue #325: compact provenance/context header from the FRESH
+        # Issue athenaeum#325: compact provenance/context header from the FRESH
         # on-disk frontmatter (same ``fm`` the Layer-C re-read populated).
         # Each field omits at its default, so an uncontested/unscoped page
         # stays nearly as terse as before; a contradiction-flagged page
@@ -462,7 +462,7 @@ def _recall_via_backend(
     for rank, block in enumerate(blocks, 1):
         parts.append(f"### {rank}. {block}")
 
-    # Issue #711: record the push AFTER blocks are finalized (never before —
+    # Issue athenaeum#711: record the push AFTER blocks are finalized (never before —
     # instrumentation must observe exactly what was pushed, never influence
     # it) and wrapped so any failure here can never surface as a recall
     # failure. Best-effort no-op when instrumentation is disabled (see
@@ -507,7 +507,7 @@ def remember_write(
             the ``raw/<session>/`` subdirectory the file lands in.
             **Not** the per-claim provenance source — see ``sources``.
         wiki_root: Optional wiki root for path-traversal guards.
-        sources: Per-claim provenance (issue #90, design-lock §4 in
+        sources: Per-claim provenance (issue athenaeum#90, design-lock §4 in
             ``docs/provenance-shape.md``). Three accepted shapes:
 
             1. Scalar ``str`` of form ``"<type>:<ref>"`` (e.g.
@@ -527,7 +527,7 @@ def remember_write(
                    {"_field_sources": {"current_title": "api:apollo:2026-05-09",
                                        "linkedin_url":  "linkedin:alice"}}
 
-            4. Channel-split extras (issue #326) — the dict form may
+            4. Channel-split extras (issue athenaeum#326) — the dict form may
                include any of these wrapper keys alongside ``_source`` /
                ``_field_sources``, and each is stamped as the matching
                frontmatter key on the raw file:
@@ -559,7 +559,7 @@ def remember_write(
             ``None`` (default) — stamps ``source: claude:inferred`` and
             emits a server-side warning.
 
-            BREAKING (issue #96): the previous bare-dict heuristic that
+            BREAKING (issue athenaeum#96): the previous bare-dict heuristic that
             inspected ``{type, ref}`` keys is REMOVED. Bare dicts without
             the ``_source`` / ``_field_sources`` wrapper raise
             ``ValueError``. The pathological case (fields literally named
@@ -588,7 +588,7 @@ def remember_write(
             log.warning(
                 "remember(): no `sources` supplied; defaulting "
                 "wiki-level source to %r. Caller should declare a "
-                "source on every write (issue #90).",
+                "source on every write (issue athenaeum#90).",
                 _DEFAULT_INFERRED_SOURCE,
             )
         else:
@@ -621,8 +621,8 @@ def remember_write(
         ):
             return "Error: writes to wiki/ are not allowed."
 
-    # Intake screening (issue #320): classify sensitive content and resolve the
-    # read-time `access:` label (#312) to stamp BEFORE the single append-only
+    # Intake screening (issue athenaeum#320): classify sensitive content and resolve the
+    # read-time `access:` label (athenaeum#312) to stamp BEFORE the single append-only
     # write below. The screener only inspects `content`; the body bytes are
     # never mutated (label-first, consistent with the write-once raw/ contract).
     try:
@@ -653,7 +653,7 @@ def _inject_provenance_frontmatter(
     not, a new frontmatter block is prepended. Either way, the keys land
     at the END of the block so existing key ordering is preserved.
 
-    ``extras`` (issue #326) is the channel-split payload keyed for
+    ``extras`` (issue athenaeum#326) is the channel-split payload keyed for
     frontmatter injection (``source_type`` / ``source_ref`` / ``model``
     / ``on_behalf_of`` / ``asserter``) — the on-disk names the read-side
     parsers (``models.parse_asserter`` etc.) look for.
@@ -680,9 +680,9 @@ def _inject_provenance_frontmatter(
         for k, v in extras.items():
             meta[k] = v
     if screened_access:
-        # Stamp the screener's read-time access label (issue #320). Never
+        # Stamp the screener's read-time access label (issue athenaeum#320). Never
         # downgrade an access the caller already set on the content — take the
-        # more restrictive of the two (issue #312 rank).
+        # more restrictive of the two (issue athenaeum#312 rank).
         from athenaeum.screening import more_restrictive
 
         existing_access = meta.get("access")
@@ -723,8 +723,8 @@ def create_server(
         extra_roots: Additional intake roots that were indexed alongside
             the wiki. Passed through to :func:`recall_search` so raw
             intake hits resolve to their on-disk path.
-        caller_audience: Read-scope pin for this server process (issue #312,
-            extended to every tool in #538). ``None`` (the default) is the
+        caller_audience: Read-scope pin for this server process (issue athenaeum#312,
+            extended to every tool in athenaeum#538). ``None`` (the default) is the
             owner: every tool behaves as it always has, preserving single-user
             behavior. A non-None role set is a RESTRICTED caller and governs the
             whole process, not just ``recall``:
@@ -737,19 +737,19 @@ def create_server(
             - Writes: the three human-decision-queue mutators
               (``resolve_question`` / ``resolve_merge`` / ``review_audit_item``)
               fail closed — adjudicating the operator's queue is owner-only.
-              ``remember`` stays open (intake is screened downstream, #320).
+              ``remember`` stays open (intake is screened downstream, athenaeum#320).
 
             Pinned HERE by the operator's ``athenaeum serve`` invocation — it is
             deliberately NOT a per-tool argument, so a restricted agent cannot
             widen its own scope by passing a different audience.
-        screening: Resolved intake-screening config (issue #320) from
+        screening: Resolved intake-screening config (issue athenaeum#320) from
             :func:`athenaeum.config.resolve_screening`. ``None`` (default) =
             no screening — every ``remember`` write is unclassified, preserving
             existing behavior. When set, sensitive intake is auto-labeled with
             a read-time ``access:`` level before the append-only write. Pinned
             HERE (not a ``remember()`` tool argument) so a caller cannot
             disable its own screening.
-        config: Resolved ``athenaeum.yaml`` config (issue #532), threaded to
+        config: Resolved ``athenaeum.yaml`` config (issue athenaeum#532), threaded to
             ``recall`` so the storage-adapter ``recallable`` corpus policy is
             honored at query time — a class routed to a ``recallable: false``
             surface is never returned by ``recall``. ``None`` (default) is a
@@ -774,9 +774,9 @@ def create_server(
             "Use `list_pending_questions` / `resolve_question` to triage "
             "detector-flagged contradictions, and "
             "`list_pending_merges` / `resolve_merge` to triage resolver-proposed "
-            "memory merges (issue #169). "
+            "memory merges (issue athenaeum#169). "
             "Use `list_pending_decisions` for the unified 'human decisions "
-            "needed' queue (questions + merges in one call, issue #401)."
+            "needed' queue (questions + merges in one call, issue athenaeum#401)."
         ),
     )
 
@@ -829,7 +829,7 @@ def create_server(
                 subdirectory the file lands in. Examples:
                 ``"claude-session"``, ``"manual"``. **Not** a per-claim
                 provenance source — pass ``sources`` for that.
-            sources: Per-claim provenance (issue #90, design-lock §4 in
+            sources: Per-claim provenance (issue athenaeum#90, design-lock §4 in
                 ``docs/provenance-shape.md``). Three accepted shapes:
 
                 - scalar ``"<type>:<ref>"`` (e.g.
@@ -843,7 +843,7 @@ def create_server(
                 Omitting ``sources`` defaults to ``source: claude:inferred``
                 and logs a server-side warning. Always declare a source.
 
-                BREAKING (issue #96): bare dicts without the wrapper keys
+                BREAKING (issue athenaeum#96): bare dicts without the wrapper keys
                 are rejected — see ``remember_write`` for the rationale.
 
         Returns:
@@ -915,7 +915,7 @@ def create_server(
             (= ``message`` on failure). New callers should prefer
             ``error_code`` + ``message`` + ``resolved_block``.
         """
-        # Issue #538: adjudicating the human-decision queue is owner-only.
+        # Issue athenaeum#538: adjudicating the human-decision queue is owner-only.
         if caller_audience is not None:
             return _forbidden_result()
         if is_disabled("capture", cache_dir=cache_dir):
@@ -942,7 +942,7 @@ def create_server(
 
     @mcp.tool()
     def list_pending_merges(full_body: bool = False) -> list[dict]:
-        """List unresolved merge proposals (issue #169).
+        """List unresolved merge proposals (issue athenaeum#169).
 
         Returns the unresolved blocks from ``wiki/_pending_merges.md`` —
         resolver-proposed memory merges awaiting human approval. Each
@@ -950,7 +950,7 @@ def create_server(
         source memories), ``rationale``, ``draft_merged_body``,
         ``confidence``, and ``created_at``.
 
-        Read-path bound (issue #431, complementing the #400 write-path
+        Read-path bound (issue athenaeum#431, complementing the athenaeum#400 write-path
         ``max_merge_sources`` suppression): by default ``draft_merged_body``
         is truncated to a bounded preview (env
         ``ATHENAEUM_MERGE_BODY_PREVIEW_CHARS`` > yaml
@@ -989,7 +989,7 @@ def create_server(
 
     @mcp.tool()
     def list_pending_decisions() -> list[dict]:
-        """List ALL pending human decisions — questions AND merges (issue #401).
+        """List ALL pending human decisions — questions AND merges (issue athenaeum#401).
 
         The unified queue behind ``athenaeum decisions list``. Combines the
         unanswered blocks of ``wiki/_pending_questions.md`` with the
@@ -1007,7 +1007,7 @@ def create_server(
         files. Resolve items with the existing ``resolve_question`` /
         ``resolve_merge`` tools, dispatching on ``type``.
 
-        Read-path bound (issue #431): a merge item's ``payload["sources"]``
+        Read-path bound (issue athenaeum#431): a merge item's ``payload["sources"]``
         is capped (env ``ATHENAEUM_DECISIONS_MAX_SOURCES_PER_MERGE`` > yaml
         ``librarian.decisions_max_sources_per_merge`` > 20 entries), with the
         accurate remainder count in ``payload["sources_omitted"]`` — so a
@@ -1027,7 +1027,7 @@ def create_server(
 
     @mcp.tool()
     def list_axiom_audit() -> list[dict]:
-        """Axiom assignment audit — every slug's status + promote/demote history (#434).
+        """Axiom assignment audit — every slug's status + promote/demote history (athenaeum#434).
 
         ``memory_class: axiom`` must never be minted silently — see
         ``athenaeum axiom promote`` / ``athenaeum axiom demote`` (the
@@ -1052,10 +1052,10 @@ def create_server(
 
     @mcp.tool()
     def scan_retraction_cascade() -> dict:
-        """Flag completed merges that relied on a now-retracted source (#435).
+        """Flag completed merges that relied on a now-retracted source (athenaeum#435).
 
-        Walks the observation supersession log (issue #427) against the
-        merge-provenance ledger (issue #425): when a retracted observation is
+        Walks the observation supersession log (issue athenaeum#427) against the
+        merge-provenance ledger (issue athenaeum#425): when a retracted observation is
         listed among a merge's supporting ``source_paths``, a ``retraction``
         review item is added to the human decisions queue (surfaced by
         ``list_pending_decisions``) naming the dependent merge, the retracted
@@ -1080,7 +1080,7 @@ def create_server(
 
     @mcp.tool()
     def calibration_summary() -> dict:
-        """Per-tier tier-audit calibration counts (issue #438).
+        """Per-tier tier-audit calibration counts (issue athenaeum#438).
 
         The calibration loop for the tiered reasoning pass: a random audit
         share of T1 rejects and T2 approvals is surfaced (as ``type:
@@ -1090,7 +1090,7 @@ def create_server(
         (``{"T1": {...}, "T2": {...}}``). Reviewing an audit item never
         re-executes the merge; an overturn is a calibration signal only.
         """
-        # Issue #518: gate behind the reasoning-tier opt-in. When off, return
+        # Issue athenaeum#518: gate behind the reasoning-tier opt-in. When off, return
         # an explicit not-enabled state instead of a permanent 0/0/0 all-clear
         # that reads as "the tiers ran and are well calibrated".
         from athenaeum.config import (
@@ -1114,7 +1114,7 @@ def create_server(
 
     @mcp.tool()
     def review_audit_item(id: str, human_verdict: str, note: str = "") -> dict:
-        """Record a human's confirm/overturn of a sampled audit item (#438).
+        """Record a human's confirm/overturn of a sampled audit item (athenaeum#438).
 
         Args:
             id: The audit item id (from ``list_pending_decisions``, ``type:
@@ -1128,11 +1128,11 @@ def create_server(
         Returns the review record (including ``overturned``). Errors if the id
         is unknown or already reviewed.
         """
-        # Issue #538: adjudicating the human-decision queue is owner-only.
+        # Issue athenaeum#538: adjudicating the human-decision queue is owner-only.
         if caller_audience is not None:
             return {"ok": False, "error_code": "forbidden", "error": _FORBIDDEN_MSG}
 
-        # Issue #518: reviewing tier audits is meaningless when the tiers are
+        # Issue athenaeum#518: reviewing tier audits is meaningless when the tiers are
         # disabled — gate behind the same opt-in as the summary surface.
         from athenaeum.config import (
             load_config,
@@ -1157,12 +1157,12 @@ def create_server(
 
     @mcp.tool()
     def resolve_merge(id: str, decision: str, note: str = "") -> dict:
-        """Approve or reject a pending merge proposal (issue #169, #425).
+        """Approve or reject a pending merge proposal (issue athenaeum#169, athenaeum#425).
 
         Args:
             id: The id returned by ``list_pending_merges``.
             decision: ``"approve"`` dispatches on the proposal's write kind
-                (issue #421 classification). A ``create-merged`` proposal
+                (issue athenaeum#421 classification). A ``create-merged`` proposal
                 writes the draft merged body to a fresh ``wiki/<target-
                 slug>.md``. A ``fold-into-existing`` proposal writes the
                 draft body to the ALREADY-EXISTING canonical page, rewrites
@@ -1190,7 +1190,7 @@ def create_server(
             New callers should prefer ``error_code`` + ``message`` +
             ``resolved_block``.
         """
-        # Issue #538: adjudicating the human-decision queue is owner-only.
+        # Issue athenaeum#538: adjudicating the human-decision queue is owner-only.
         if caller_audience is not None:
             return _forbidden_result()
         if is_disabled("capture", cache_dir=cache_dir):
@@ -1228,7 +1228,7 @@ def create_server(
             "block": result.get("resolved_block"),
             "error": (result.get("message", "") if not result.get("ok") else None),
         }
-        # Issue #425: present only on a fold-into-existing approve.
+        # Issue athenaeum#425: present only on a fold-into-existing approve.
         for key in ("folded_sources", "aliases_added", "links_rewritten"):
             if key in result:
                 response[key] = result[key]

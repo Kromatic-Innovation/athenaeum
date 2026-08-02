@@ -79,14 +79,14 @@ def add_curate_subparsers(subparsers: argparse._SubParsersAction) -> None:
     dedupe_persons.set_defaults(func=cmd_dedupe)
 
     # dedupe wiki-pages — cluster compiled concept/reference/principle
-    # wiki pages against EACH OTHER (issue #290) and propose merges via
+    # wiki pages against EACH OTHER (issue athenaeum#290) and propose merges via
     # the shared wiki/_pending_merges.md sidecar for human approval.
     # Unlike `dedupe persons`, there is no --apply step here: the only
     # side effect is an idempotent proposal append, never a direct merge.
     dedupe_wiki_pages = dedupe_sub.add_parser(
         "wiki-pages",
         help="Cluster concept/reference/principle wiki pages and propose "
-        "merges for near-duplicate topics (issue #290). Writes idempotent "
+        "merges for near-duplicate topics (issue athenaeum#290). Writes idempotent "
         "proposals to wiki/_pending_merges.md; --dry-run previews without "
         "writing.",
     )
@@ -112,8 +112,8 @@ def add_curate_subparsers(subparsers: argparse._SubParsersAction) -> None:
     _add_lock_args(dedupe_wiki_pages)
     dedupe_wiki_pages.set_defaults(func=cmd_dedupe)
 
-    # claims command — cross-entity recurring-claim detector (issue #272,
-    # slice 1 of #258). READ-ONLY: scans the wiki, embeds claim texts via the
+    # claims command — cross-entity recurring-claim detector (issue athenaeum#272,
+    # slice 1 of athenaeum#258). READ-ONLY: scans the wiki, embeds claim texts via the
     # recall-index provider, and prints a YAML report of claims restated across
     # distinct entities. Mutates nothing under wiki/.
     claims_parser = subparsers.add_parser(
@@ -141,13 +141,13 @@ def add_curate_subparsers(subparsers: argparse._SubParsersAction) -> None:
     claims_parser.set_defaults(func=cmd_claims)
 
     # auto-memory command — operate on compiled wiki/auto-*.md pages.
-    # `prune` (issue #278) builds a kill-list of operational/ephemeral
+    # `prune` (issue athenaeum#278) builds a kill-list of operational/ephemeral
     # auto-memory pages via the same classifier the intake gate uses and,
     # on --apply, git rm's them in one labeled commit + rebuilds the recall
     # index. Default is dry-run (prints kill + retained lists).
     auto_memory_parser = subparsers.add_parser(
         "auto-memory",
-        help="Operate on compiled wiki/auto-*.md pages (issue #278).",
+        help="Operate on compiled wiki/auto-*.md pages (issue athenaeum#278).",
     )
     auto_memory_parser.set_defaults(func=cmd_auto_memory)
     auto_memory_sub = auto_memory_parser.add_subparsers(dest="auto_memory_target")
@@ -186,14 +186,14 @@ def add_curate_subparsers(subparsers: argparse._SubParsersAction) -> None:
     _add_lock_args(prune_parser)
     prune_parser.set_defaults(func=cmd_auto_memory)
 
-    # prune-index (issue #388): one-shot backfill that drops dangling
-    # <scope>/MEMORY.md pointers left by pre-#388 move-then-retire runs. The
+    # prune-index (issue athenaeum#388): one-shot backfill that drops dangling
+    # <scope>/MEMORY.md pointers left by pre-athenaeum#388 move-then-retire runs. The
     # inline fix in retire.py prevents NEW dangling pointers; this sweeps the
     # ones already on disk. Default is dry-run; --apply rewrites + commits.
     prune_index_parser = auto_memory_sub.add_parser(
         "prune-index",
         help="Prune dangling pointers from <scope>/MEMORY.md indexes (issue "
-        "#388). A pointer is dangling when its target .md no longer exists on "
+        "athenaeum#388). A pointer is dangling when its target .md no longer exists on "
         "disk. Default is dry-run; --apply rewrites the indexes in one commit.",
     )
     prune_index_parser.add_argument(
@@ -211,14 +211,14 @@ def add_curate_subparsers(subparsers: argparse._SubParsersAction) -> None:
     _add_lock_args(prune_index_parser)
     prune_index_parser.set_defaults(func=cmd_auto_memory)
 
-    # prune-code-entities (issue #680): retire wiki entity pages that were minted
+    # prune-code-entities (issue athenaeum#680): retire wiki entity pages that were minted
     # from filenames / paths (``skill.md``, ``project-registry.yaml``). The
     # write-side gate stops NEW ones; this sweeps the ones already on disk, using
     # the SAME code-artifact predicate. Default is dry-run; --apply git rm's them.
     prune_code_parser = auto_memory_sub.add_parser(
         "prune-code-entities",
         help="Retire wiki entity pages minted from filenames/paths (issue "
-        "#680) — a page whose entity name is a code artifact (has a source/"
+        "athenaeum#680) — a page whose entity name is a code artifact (has a source/"
         "config extension or a path separator). Default is dry-run; --apply "
         "git rm's the kill-list in one commit.",
     )
@@ -286,7 +286,7 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
             sys.stdout.write(report)
         return 0
 
-    # --apply (mutating): acquire the single-machine run lock (issue #309).
+    # --apply (mutating): acquire the single-machine run lock (issue athenaeum#309).
     if args.from_path:
         text = args.from_path.read_text(encoding="utf-8")
     else:
@@ -319,7 +319,7 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
 
 
 def _cmd_dedupe_wiki_pages(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum dedupe wiki-pages`` (issue #290).
+    """Dispatch ``athenaeum dedupe wiki-pages`` (issue athenaeum#290).
 
     Clusters concept/reference/principle wiki pages and proposes merges
     for near-duplicate topics via the shared
@@ -335,7 +335,7 @@ def _cmd_dedupe_wiki_pages(args: argparse.Namespace) -> int:
         print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
         return 1
 
-    # Issue #309: --dry-run writes nothing, so it does NOT take the lock. The
+    # Issue athenaeum#309: --dry-run writes nothing, so it does NOT take the lock. The
     # proposal-append path (default) mutates wiki/_pending_merges.md → locked.
     lock: RunLock | int | None = None
     if not args.dry_run:
@@ -364,7 +364,7 @@ def _cmd_dedupe_wiki_pages(args: argparse.Namespace) -> int:
 
 
 def cmd_claims(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum claims --find`` (issue #272). READ-ONLY.
+    """Dispatch ``athenaeum claims --find`` (issue athenaeum#272). READ-ONLY.
 
     Scans the configured wiki, embeds claim texts via the recall-index
     embedding provider, and prints a YAML report of claims restated across
@@ -404,7 +404,7 @@ def cmd_claims(args: argparse.Namespace) -> int:
 
 
 def cmd_auto_memory(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum auto-memory {prune,prune-index}`` (issues #278/#388)."""
+    """Dispatch ``athenaeum auto-memory {prune,prune-index}`` (issues athenaeum#278/#388)."""
     target = getattr(args, "auto_memory_target", None)
     if target == "prune":
         return _cmd_auto_memory_prune(args)
@@ -421,7 +421,7 @@ def cmd_auto_memory(args: argparse.Namespace) -> int:
 
 
 def _cmd_auto_memory_prune(args: argparse.Namespace) -> int:
-    """Prune operational/ephemeral ``wiki/auto-*.md`` pages (issue #278).
+    """Prune operational/ephemeral ``wiki/auto-*.md`` pages (issue athenaeum#278).
 
     Exit codes (mirroring ``repair``):
         0 - clean run (nothing to prune, OR ``--apply`` succeeded with no
@@ -474,7 +474,7 @@ def _cmd_auto_memory_prune(args: argparse.Namespace) -> int:
             return 1
         return 2 if report.kill else 0
 
-    # --apply (mutating): acquire the single-machine run lock (issue #309).
+    # --apply (mutating): acquire the single-machine run lock (issue athenaeum#309).
     # The dry-run path above returns before here and never takes the lock.
     lock = _acquire_or_exit(knowledge_root, args, cfg)
     if isinstance(lock, int):
@@ -497,7 +497,7 @@ def _cmd_auto_memory_prune(args: argparse.Namespace) -> int:
 
 
 def _cmd_auto_memory_prune_index(args: argparse.Namespace) -> int:
-    """Backfill: prune dangling ``<scope>/MEMORY.md`` pointers (issue #388).
+    """Backfill: prune dangling ``<scope>/MEMORY.md`` pointers (issue athenaeum#388).
 
     Move-then-retire ``git rm``\\s a raw member but only rewrites the sibling
     index for members it retires going forward; this one-shot sweep removes the
@@ -544,7 +544,7 @@ def _cmd_auto_memory_prune_index(args: argparse.Namespace) -> int:
             return 1
         return 2 if report.scopes else 0
 
-    # --apply (mutating): acquire the single-machine run lock (issue #309).
+    # --apply (mutating): acquire the single-machine run lock (issue athenaeum#309).
     lock = _acquire_or_exit(knowledge_root, args, cfg)
     if isinstance(lock, int):
         return lock
@@ -567,7 +567,7 @@ def _cmd_auto_memory_prune_index(args: argparse.Namespace) -> int:
 
 
 def _cmd_auto_memory_prune_code_entities(args: argparse.Namespace) -> int:
-    """Retire wiki entity pages minted from filenames / paths (issue #680).
+    """Retire wiki entity pages minted from filenames / paths (issue athenaeum#680).
 
     The creation gate (:func:`athenaeum.tiers.is_code_artifact_name`) stops NEW
     code-artifact entities; this one-shot sweep retires the ones already on disk
@@ -603,7 +603,7 @@ def _cmd_auto_memory_prune_code_entities(args: argparse.Namespace) -> int:
 
     if report.kill:
         # Per-rule split so an operator can audit the kill-list by class rather
-        # than by eyeball (#721). A bare path separator no longer kills, so this
+        # than by eyeball (athenaeum#721). A bare path separator no longer kills, so this
         # is expected to be all-``extension``; any other rule flags a regression.
         counts = kill_rule_counts(report)
         split = ", ".join(f"{rule}={n}" for rule, n in sorted(counts.items()))
@@ -619,7 +619,7 @@ def _cmd_auto_memory_prune_code_entities(args: argparse.Namespace) -> int:
             return 1
         return 2 if report.kill else 0
 
-    # --apply (mutating): acquire the single-machine run lock (issue #309).
+    # --apply (mutating): acquire the single-machine run lock (issue athenaeum#309).
     lock = _acquire_or_exit(knowledge_root, args, cfg)
     if isinstance(lock, int):
         return lock
@@ -644,7 +644,7 @@ def _rebuild_recall_index(
     cfg: dict[str, Any],
     args: argparse.Namespace,
 ) -> None:
-    """Rebuild the recall index after a prune apply (issue #278).
+    """Rebuild the recall index after a prune apply (issue athenaeum#278).
 
     Mirrors the ``reindex`` subcommand's backend resolution so the index
     reflects the removed pages. A rebuild failure is reported but never

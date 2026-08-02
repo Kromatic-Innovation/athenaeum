@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Live-LLM regression for the resolver prompt (issue #169, Lane 3).
+"""Live-LLM regression for the resolver prompt (issue athenaeum#169, Lane 3).
 
 Opt-in. Skipped in CI by default. Set ``ATHENAEUM_LIVE_TESTS=1`` and have a
 working ``ANTHROPIC_API_KEY`` in the environment to run:

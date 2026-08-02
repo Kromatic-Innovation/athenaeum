@@ -1,4 +1,4 @@
-"""Tests for claim-level temporal validity (issue #308, slice 1).
+"""Tests for claim-level temporal validity (issue athenaeum#308, slice 1).
 
 Covers the ``valid_from:`` / ``valid_until:`` frontmatter fields and the
 shared upper-bound predicate wired into BOTH inactive-memory checks:
@@ -134,7 +134,7 @@ class TestIsInactiveMemoryDict:
         assert not is_inactive_memory({"valid_from": PAST.isoformat()}, as_of=ANCHOR)
 
     def test_superseded_still_inactive_regardless_of_dates(self) -> None:
-        # The #191 disjuncts are unchanged and independent of #308.
+        # The athenaeum#191 disjuncts are unchanged and independent of athenaeum#308.
         assert is_inactive_memory(
             {"superseded_by": "winner", "valid_until": FUTURE.isoformat()},
             as_of=ANCHOR,
@@ -411,14 +411,14 @@ class TestRealRecallPath:
 
 
 # ---------------------------------------------------------------------------
-# Slice 3 — the lower bound (valid_from) stays UNGATED (regression pin for #324)
+# Slice 3 — the lower bound (valid_from) stays UNGATED (regression pin for athenaeum#324)
 # ---------------------------------------------------------------------------
 
 
 class TestLowerBoundUngated:
     """``valid_from`` must NOT gate the active predicate at any ``as_of``.
 
-    Gating it would hide a future-dated claim and break #324's disjoint-validity
+    Gating it would hide a future-dated claim and break athenaeum#324's disjoint-validity
     detector short-circuit, which relies on a member whose window starts after
     today staying active. See ``is_inactive_memory``'s docstring / §8.3.
     """
@@ -466,14 +466,14 @@ class TestIntervalVsTombstone:
 
     def test_interval_close_is_time_sensitive(self) -> None:
         # A pure interval close (valid_until, no tombstone) flips with as_of:
-        # live before the close date, inactive after — the whole point of #308.
+        # live before the close date, inactive after — the whole point of athenaeum#308.
         meta = {"valid_until": "2026-03-01"}
         assert not is_inactive_memory(meta, as_of=date(2026, 2, 1))  # before -> live
         assert is_inactive_memory(meta, as_of=date(2026, 4, 1))  # after -> inactive
 
 
 # ---------------------------------------------------------------------------
-# Slice 3 — interval overlap / adjacency (validity_windows_disjoint, #324)
+# Slice 3 — interval overlap / adjacency (validity_windows_disjoint, athenaeum#324)
 # ---------------------------------------------------------------------------
 
 
@@ -660,7 +660,7 @@ def _write_member(
 
 
 class TestPerClaimCompiledValiditySlice4:
-    """Issue #308 slice 4 — a claim's validity window travels into the compiled entry."""
+    """Issue athenaeum#308 slice 4 — a claim's validity window travels into the compiled entry."""
 
     # -- _stamp_member_validity: only-fill-never-override -------------------
 

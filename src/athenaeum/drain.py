@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""One-command supervised API+batch drain of the raw-intake backlog (issue #470).
+"""One-command supervised API+batch drain of the raw-intake backlog (issue athenaeum#470).
 
 When the raw-intake backlog outgrows the nightly caps, the operator used to find
 out only by reading logs, and the API+batch remedy lived as tribal knowledge
@@ -7,20 +7,20 @@ spread across env vars and flags. This module is the supervised remedy:
 
 * **Drain orchestrator** — :func:`run_drain`, a thin loop over the existing
   :func:`athenaeum.librarian.run` machinery. It forces the API+batch path (the
-  #236 50%-token-discount transport) and an UNBOUNDED run (batch block-polls; a
+  athenaeum#236 50%-token-discount transport) and an UNBOUNDED run (batch block-polls; a
   finite deadline is the known cwc#615 failure mode), and guards a MANDATORY
   cumulative dollar ceiling across every intake window.
 
-The companion **ETA advisor** — the pure estimators over the #378 spend ledger
+The companion **ETA advisor** — the pure estimators over the athenaeum#378 spend ledger
 and :func:`~athenaeum.drain_advisor.build_advisory` — moved to the
-:mod:`athenaeum.drain_advisor` leaf in issue #640. It formerly lived here, but
+:mod:`athenaeum.drain_advisor` leaf in issue athenaeum#640. It formerly lived here, but
 because :mod:`athenaeum.librarian` and :mod:`athenaeum.status` both need
 ``build_advisory`` while sitting BELOW this orchestrator (``run_drain`` calls
 ``librarian.run``), they reached back UP into this module for it — the
 ``librarian`` <-> ``drain`` / ``status`` -> ``drain`` back-edges of a residual
 import SCC. Hoisting the advisor down to a leaf dissolved that cycle.
 
-Athenaeum performs no credential handling (issue #284/#330): the drain requires
+Athenaeum performs no credential handling (issue athenaeum#284/#330): the drain requires
 ``ANTHROPIC_API_KEY`` in the environment and errors out naming that requirement
 if it is absent — it never mints, guesses, or hardcodes a credential.
 
@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Drain orchestrator + pre-flight guards (the ETA advisor moved to
-# :mod:`athenaeum.drain_advisor` in issue #640 to break the librarian/status
+# :mod:`athenaeum.drain_advisor` in issue athenaeum#640 to break the librarian/status
 # import back-edges into this L4 orchestrator)
 # ---------------------------------------------------------------------------
 
@@ -59,8 +59,8 @@ def check_api_key(env: dict[str, str] | None = None) -> str | None:
     if not environ.get("ANTHROPIC_API_KEY"):
         return (
             "athenaeum drain requires ANTHROPIC_API_KEY in the environment: the "
-            "drain runs the metered API + Batch path (issue #236) and athenaeum "
-            "performs no credential handling (issue #284/#330). Set "
+            "drain runs the metered API + Batch path (issue athenaeum#236) and athenaeum "
+            "performs no credential handling (issue athenaeum#284/#330). Set "
             "ANTHROPIC_API_KEY and retry."
         )
     return None
@@ -118,7 +118,7 @@ def resolve_drain_runtime(
 def _ledger_writable(ledger_path: Path) -> bool:
     """Return True if the spend ledger at *ledger_path* can be appended to.
 
-    Issue #568 (H1): :func:`run_drain`'s MANDATORY cumulative dollar ceiling is
+    Issue athenaeum#568 (H1): :func:`run_drain`'s MANDATORY cumulative dollar ceiling is
     computed by re-reading this ledger every window (:func:`drain_spend_usd`).
     If ledger writes fail silently — bad ``ATHENAEUM_SPEND_LEDGER`` path, wrong
     permissions, a full disk — ``drain_spend_usd`` returns ``0.0`` forever and
@@ -139,7 +139,7 @@ def _ledger_writable(ledger_path: Path) -> bool:
             "athenaeum drain: spend ledger %s is NOT writable (%s) — the "
             "cumulative dollar ceiling re-reads this ledger every window, so "
             "proceeding would spend up to $max_usd PER WINDOW with no "
-            "cumulative bound. Aborting (issue #568). Fix ATHENAEUM_SPEND_LEDGER "
+            "cumulative bound. Aborting (issue athenaeum#568). Fix ATHENAEUM_SPEND_LEDGER "
             "/ permissions / free disk space and retry.",
             ledger_path,
             exc,
@@ -150,7 +150,7 @@ def _ledger_writable(ledger_path: Path) -> bool:
 def drain_spend_usd(ledger_path: Path, *, since: datetime) -> float:
     """Sum metered API dollars recorded in the ledger since *since*.
 
-    The drain-session cumulative-spend accounting: reads the #378 ledger
+    The drain-session cumulative-spend accounting: reads the athenaeum#378 ledger
     (tolerating torn lines) and sums ``estimated_cost_usd`` across every
     non-subscription record written since the drain started. Subscription
     (``claude-cli``) rows are always $0 and skipped.
@@ -196,7 +196,7 @@ def run_drain(
     backlog_fn = backlog_fn or (lambda root: len(discover_raw_files(root)))
     ledger_path = ledger_path or spend.resolve_ledger_path(config)
 
-    # Issue #568 (H1): the cumulative dollar ceiling below is only as trustworthy
+    # Issue athenaeum#568 (H1): the cumulative dollar ceiling below is only as trustworthy
     # as the ledger it reads. Verify the ledger is writable BEFORE spending a
     # cent — abort rather than run a blind drain whose per-window ceiling would
     # never sum to a cumulative bound (see :func:`_ledger_writable`).
@@ -205,7 +205,7 @@ def run_drain(
 
     drain_start = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
 
-    # Force the API path: batch mode is Anthropic-endpoint-only (issue #330), so
+    # Force the API path: batch mode is Anthropic-endpoint-only (issue athenaeum#330), so
     # a claude-cli-configured repo must be overridden for the drain. Loud, not
     # silent — the operator asked for a batch drain.
     if os.environ.get("ATHENAEUM_LLM_PROVIDER") != "api":
@@ -236,7 +236,7 @@ def run_drain(
             return 0
 
         # Map the drain's REMAINING budget onto the per-run dollar ceiling for
-        # THIS window (env wins over yaml inside run(), issue #378). The
+        # THIS window (env wins over yaml inside run(), issue athenaeum#378). The
         # cumulative guard is the loop re-reading spend from the ledger each pass.
         os.environ["ATHENAEUM_SPEND_MAX_USD_PER_RUN"] = f"{remaining:.6f}"
         log.info(

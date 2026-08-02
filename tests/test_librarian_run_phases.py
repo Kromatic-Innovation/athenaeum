@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the ``librarian.run()`` phase split (issue #546).
+"""Unit tests for the ``librarian.run()`` phase split (issue athenaeum#546).
 
 ``run()`` used to be a ~1,300-line god-function interleaving git
 preconditions, config resolution, signal handling, deadline arming, spend
 accounting, wiki-dedup, the tier loop, and auto-memory compile — all only
-reachable end-to-end via a real (mocked-LLM) run. #546 extracted each
+reachable end-to-end via a real (mocked-LLM) run. athenaeum#546 extracted each
 ``# ---`` section into a named phase function taking a shared
 :class:`~athenaeum.librarian.RunContext`, so each phase is now importable
 and testable in isolation.
@@ -144,9 +144,10 @@ class TestRunContext:
             "beyond_window": 3,
             "deferred_refs": ["a.md", "b.md"],
             "failed_files": ["c.md"],
-            # Issue #663: stuck files exported as machine-detectable run state.
+            # Issue athenaeum#663: stuck files exported as machine-detectable run state.
             "stuck_files": [{"ref": "d.md", "failures": 3, "action": "update:X", "error": "E"}],
-            # Issue #669: the entity-share yield (#440) as machine-detectable state.
+            # Issue athenaeum#669: the entity-share yield (athenaeum#440) as
+            # machine-detectable state.
             "entity_budget_tripped": True,
             "entity_files_claimed": 5,
             "entity_files_deferred": 2,

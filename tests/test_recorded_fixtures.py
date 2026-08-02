@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Recorded-fixture replay tests (issue #331 Layer 2).
+"""Recorded-fixture replay tests (issue athenaeum#331 Layer 2).
 
 Runs on every PR — zero network, zero cost — by replaying the recorded
 live-API responses under ``tests/fixtures/recorded/`` through the same
 parsers the live eval exercises. Same tests, real-shaped payloads.
 
-The staleness contract (issue #331): the replay client re-computes the
+The staleness contract (issue athenaeum#331): the replay client re-computes the
 prompt hash the parser is about to send and compares it to the fixture's
 stored hash. On mismatch it raises
 :class:`tests.evals.harness.FixtureStaleError` with the exact
 "fixture stale — re-run evals with --record" message documented in the
 issue, so an operator sees the guidance directly in the failure.
 
-**Empty-fixture policy (issue #551).** Whether an empty layer directory
+**Empty-fixture policy (issue athenaeum#551).** Whether an empty layer directory
 is tolerated is decided by the committed seeded-layers manifest at
 ``tests/fixtures/recorded/seeded-layers.yml``, not by the run:
 
@@ -26,7 +26,7 @@ is tolerated is decided by the committed seeded-layers manifest at
   pointing at the record command, so a dropped fixture cannot pass
   unnoticed.
 
-The manifest ships empty, so until #610 seeds the first layer the behavior
+The manifest ships empty, so until athenaeum#610 seeds the first layer the behavior
 is byte-identical to before: every layer is unlisted, every directory is
 empty, and all replay tests pass trivially — zero-key ``develop`` CI stays
 green. Once a layer is seeded, any edit to the module's prompt fails the
@@ -90,10 +90,10 @@ _EMPTY_LAYER_REASON = (
 )
 
 # ---------------------------------------------------------------------------
-# Seeded-layers manifest (issue #551) — the durable "has this layer ever been
+# Seeded-layers manifest (issue athenaeum#551) — the durable "has this layer ever been
 # recorded" fact that an empty directory alone cannot express. A layer listed
 # here must keep a non-empty fixtures directory; an unlisted layer is free to
-# be empty (never-seeded). Ships empty, so behavior is unchanged until #610.
+# be empty (never-seeded). Ships empty, so behavior is unchanged until athenaeum#610.
 # ---------------------------------------------------------------------------
 
 SEEDED_MANIFEST_PATH = RECORDED_ROOT / "seeded-layers.yml"
@@ -369,7 +369,7 @@ def test_staleness_contract(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Seeded-layers guard (issue #551) — the H13 finding. Runs on every PR with
+# Seeded-layers guard (issue athenaeum#551) — the H13 finding. Runs on every PR with
 # zero network. With the shipped empty manifest it passes trivially; it turns
 # a *seeded-then-lost* layer into a hard failure so a dropped fixture cannot
 # silently downgrade to "empty, passes trivially".
@@ -425,5 +425,5 @@ def test_guard_passes_for_unlisted_empty_layer() -> None:
 
 
 def test_shipped_manifest_is_empty() -> None:
-    """The manifest ships empty (#610 seeds it), so behavior is unchanged."""
+    """The manifest ships empty (athenaeum#610 seeds it), so behavior is unchanged."""
     assert _seeded_layers() == set()

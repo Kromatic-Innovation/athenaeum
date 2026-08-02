@@ -2,7 +2,7 @@
 """Tests for ``athenaeum.dedupe`` — HIGH-confidence person dedupe + merge.
 
 Covers the four cwc-script signals (apollo_id / linkedin / name_exact),
-the per-claim ``field_sources`` preservation contract from #90, and
+the per-claim ``field_sources`` preservation contract from athenaeum#90, and
 idempotency of repeated ``--apply`` runs.
 """
 
@@ -26,7 +26,7 @@ from athenaeum.dedupe import (
 )
 from athenaeum.models import parse_frontmatter
 
-# Worked-example owner config (issue #263). These values are the operator's
+# Worked-example owner config (issue athenaeum#263). These values are the operator's
 # instance config used here only as a test fixture — never shipped in source.
 OWNER = {
     "uid": "a545c038",
@@ -134,7 +134,7 @@ class TestFindDuplicatePersons:
 
     def test_google_contact_join_key(self, wiki_root: Path) -> None:
         # Two person pages sharing a google_contact are duplicates even
-        # with different names and no apollo/linkedin (#263). No owner needed.
+        # with different names and no apollo/linkedin (athenaeum#263). No owner needed.
         _write_person(
             wiki_root,
             uid="gggg1111",
@@ -163,7 +163,7 @@ class TestFindDuplicatePersons:
 
 
 class TestOwnerSingleton:
-    """Owner auto-bind invariant (issue #263, slice D of #259)."""
+    """Owner auto-bind invariant (issue athenaeum#263, slice D of athenaeum#259)."""
 
     def _owner_page(self, wiki_root: Path, **kw: object) -> Path:
         return _write_person(
@@ -369,7 +369,7 @@ class TestMergePreservesFieldSources:
         # Union of emails preserved
         assert "alice@canonical.com" in meta["emails"]
         assert "alice@absorbed.com" in meta["emails"]
-        # Per-value attribution (#102): emails is a list field, so the
+        # Per-value attribution (athenaeum#102): emails is a list field, so the
         # writer emits the new per-value list-of-records shape.
         # Canonical-wins-per-value: alice@canonical.com → google,
         # alice@absorbed.com → linkedin (carried over from absorbed).
@@ -407,7 +407,7 @@ class TestMergePreservesFieldSources:
         merge_duplicate_persons([pair], apply=True)
         meta, _ = parse_frontmatter(cpath.read_text(encoding="utf-8"))
         # Absorbed-only emails attribution carried forward in the
-        # per-value list shape (#102). Canonical's emails value
+        # per-value list shape (athenaeum#102). Canonical's emails value
         # (bob@canonical.com) has no source on either side, so it's
         # omitted; absorbed's value carries its source forward.
         emails_fs = meta["field_sources"]["emails"]
@@ -423,7 +423,7 @@ class TestMergePreservesFieldSources:
 
 
 class TestPerValueFieldSourcesMerge:
-    """Per-value ``field_sources`` for list fields — issue #102."""
+    """Per-value ``field_sources`` for list fields — issue athenaeum#102."""
 
     @staticmethod
     def _write_person_with_per_value(
@@ -579,7 +579,7 @@ class TestPerValueFieldSourcesMerge:
 
 
 class TestSocialUrlCoalesce:
-    """Regression for #106 — twitter_url / github_url were silently dropped."""
+    """Regression for athenaeum#106 — twitter_url / github_url were silently dropped."""
 
     def test_absorbed_only_social_urls_carry_forward(self, wiki_root: Path) -> None:
         cpath = _write_person(
@@ -956,7 +956,7 @@ class TestDryRun:
 
 
 class TestRewriteReferences:
-    """Cross-uid reference rewrites on persons --apply (#103).
+    """Cross-uid reference rewrites on persons --apply (athenaeum#103).
 
     Restores parity with the cwc-side merge_duplicate_persons.py
     rewrite_references helper.
@@ -1098,7 +1098,7 @@ class TestRewriteReferences:
 
 
 class TestConfigDrivenGoogleContactKeys:
-    """Issue #269: extra Google-contact namespace join keys are config-driven.
+    """Issue athenaeum#269: extra Google-contact namespace join keys are config-driven.
 
     The two operator-specific variant field-names that used to be hardcoded
     in ``dedupe._GOOGLE_KEYS`` (``google_contact_kromatic`` /

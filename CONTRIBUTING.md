@@ -24,6 +24,7 @@ automatically; MCP server tests need `fastmcp` (already included in `[dev]`).
 - Follow the existing code style (enforced by ruff)
 - Keep mechanical reformat commits separate from behavior changes — a reviewer (or release gate) should never have to dig a logic change out of a formatting diff
 - Sign off every commit under the DCO (see the next section)
+- **Write tracker citations as `athenaeum#NNN`, never bare `#NNN`.** Athenaeum is periodically re-exported to a public tree, where a bare `#NNN` (in a CHANGELOG entry, a doc, or a code comment) ties public text back to a private issue tracker with no context. The required `public-safe-lint` check (folded into `CI Required`) flags a bare `#NNN` as `bare-issue-ref`, so qualifying it keeps your first commit green. A reference to another repo's tracker uses that repo's qualifier instead (e.g. `hestia#123`); an already-qualified GitHub link `[#123](https://github.com/owner/repo/issues/123)` is fine as-is.
 
 ## Developer Certificate of Origin (DCO)
 

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Ephemeral / operational auto-memory classifier (issue #278).
+"""Ephemeral / operational auto-memory classifier (issue athenaeum#278).
 
 A content-aware gate that keeps inherently-throwaway operational session
 notes (staging / worktree / deploy / CI / install-token boilerplate, plus
-throwaway temp-dir scopes) out of the durable wiki. Before #278 the
+throwaway temp-dir scopes) out of the durable wiki. Before athenaeum#278 the
 auto-memory compile pipeline was content-agnostic: every file under
 ``raw/auto-memory/<scope>/`` matching the auto-memory naming convention was
 clustered and materialized into a permanent ``type: auto-memory``
@@ -46,7 +46,7 @@ from typing import Any
 _TRUTHY: frozenset[str] = frozenset({"true", "1", "yes", "on"})
 
 # Minimum distinct operational markers that must co-occur before the
-# marker signal alone classifies an intake as ephemeral (issue #278).
+# marker signal alone classifies an intake as ephemeral (issue athenaeum#278).
 # Kept conservative: a single incidental word must never drop a real note.
 _MIN_MARKER_SIGNALS = 2
 
@@ -99,7 +99,7 @@ def classify_ephemeral(
     ephemeral_scopes: list[str],
     operational_markers: list[str],
 ) -> str | None:
-    """Classify a single RAW auto-memory intake file (issue #278).
+    """Classify a single RAW auto-memory intake file (issue athenaeum#278).
 
     Args:
         scope: the auto-memory scope DIRECTORY NAME (e.g.
@@ -132,7 +132,7 @@ def classify_ephemeral_page(
     ephemeral_scopes: list[str],
     operational_markers: list[str],
 ) -> str | None:
-    """Classify a COMPILED ``wiki/auto-*.md`` page (issue #278, prune driver).
+    """Classify a COMPILED ``wiki/auto-*.md`` page (issue athenaeum#278, prune driver).
 
     Same precision order as :func:`classify_ephemeral`, but the scope signal
     reads the page's ``origin_scopes`` LIST: the page is classified ephemeral

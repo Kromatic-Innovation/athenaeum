@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for :mod:`athenaeum.json_utils` (issue #219).
+"""Tests for :mod:`athenaeum.json_utils` (issue athenaeum#219).
 
 The 2026-06-11 nightly run silently dropped 38 clusters because the
 detector wrapped its JSON in markdown code fences and the greedy
@@ -55,7 +55,7 @@ def test_plain_strict_json() -> None:
     assert extract_json_object('{"detected": true}') == {"detected": True}
 
 
-# --- scan_json_objects: the multi-candidate view used by #496 --------------
+# --- scan_json_objects: the multi-candidate view used by athenaeum#496 --------------
 
 
 def test_scan_returns_all_balanced_objects() -> None:
@@ -260,7 +260,7 @@ def test_malformed_json_logs_debug(caplog) -> None:  # type: ignore[no-untyped-d
 
 
 def test_inline_backtick_run_before_real_fence() -> None:
-    """Issue #222 fence-pairing probe: a stray inline ``` run in prose
+    """Issue athenaeum#222 fence-pairing probe: a stray inline ``` run in prose
     must not pair with the real fence opener — only line-leading ```
     delimits a fence. The fenced object must still be extracted."""
     text = (
@@ -271,7 +271,7 @@ def test_inline_backtick_run_before_real_fence() -> None:
 
 
 def test_fences_without_object_log_debug(caplog) -> None:  # type: ignore[no-untyped-def]
-    """Issue #222 observability: fences present but yielding no balanced
+    """Issue athenaeum#222 observability: fences present but yielding no balanced
     object (no decode error occurs — there is no ``{`` at all) must emit
     the fences-branch debug message. Pinned on a substring unique to the
     fences-present branch (F5) — not "no JSON object", which both debug
@@ -307,7 +307,7 @@ def test_real_object_then_example_object_unfenced_is_ambiguous() -> None:
 
 
 def test_malformed_fenced_answer_falls_back_to_unfenced_object() -> None:
-    """N1 — accepted clause-2 contract (issue #222 triage): a malformed
+    """N1 — accepted clause-2 contract (issue athenaeum#222 triage): a malformed
     fenced ANSWER (here a trailing comma) yields no balanced fenced
     object, so the whole-text fallback fires and extracts the only
     well-formed object — the unfenced EXAMPLE. This wrong-object risk is
@@ -325,7 +325,7 @@ def test_two_objects_within_single_fence_first_wins() -> None:
     """N2 — a single fenced block containing TWO top-level objects
     returns the FIRST: the exactly-one ambiguity rule (clauses 3-4)
     applies only to whole-text scans, never within a fence (pinned
-    asymmetry, issue #222 triage)."""
+    asymmetry, issue athenaeum#222 triage)."""
     text = '```json\n{"first": 1}\n{"second": 2}\n```'
     assert extract_json_object(text) == {"first": 1}
 
@@ -338,7 +338,7 @@ def test_multi_object_top_level_array_is_ambiguous() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Issue #472 — control-character repair (bare newline inside a string value)
+# Issue athenaeum#472 — control-character repair (bare newline inside a string value)
 #
 # Tier-2 classify silently dropped ALL entities for ~10% of files in the
 # 2026-07-25 production drain because the model emitted a literal, unescaped
@@ -407,7 +407,7 @@ class TestRepairJsonControlChars:
 
 # ---------------------------------------------------------------------------
 # extract_json_array — the balanced-array analogue of extract_json_object
-# (issue #607, M16). The recall-hot-path topic extractor routes through this.
+# (issue athenaeum#607, M16). The recall-hot-path topic extractor routes through this.
 # ---------------------------------------------------------------------------
 
 

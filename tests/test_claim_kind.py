@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the intake-time claim-kind classifier (issue #327).
+"""Tests for the intake-time claim-kind classifier (issue athenaeum#327).
 
 Covers:
 - ``classify_claim_kind`` with a stubbed LLM returns a valid kind.
@@ -73,7 +73,7 @@ class TestClassifyClaimKind:
         assert classify_claim_kind("something", client) == ""
 
     def test_transient_giveup_fails_open(self, monkeypatch) -> None:
-        # Issue #569 (H6): classify_claim_kind is now wrapped in with_retry; a
+        # Issue athenaeum#569 (H6): classify_claim_kind is now wrapped in with_retry; a
         # transient give-up still fails open to "" (unclassified) — the retry
         # only buys resilience, it does not change the fail-open contract.
         from athenaeum._retry import TransientAPIError

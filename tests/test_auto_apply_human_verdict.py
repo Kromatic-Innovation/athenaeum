@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Auto-apply prior HUMAN-ratified verdicts to matching new conflicts (#199).
+"""Auto-apply prior HUMAN-ratified verdicts to matching new conflicts (athenaeum#199).
 
-Refines #198's blanket fingerprint suppression into outcomes inside
+Refines athenaeum#198's blanket fingerprint suppression into outcomes inside
 ``tier4_escalate``:
 
 1. Cache hit with a HUMAN-ratified ORIENTATION-AGNOSTIC or correctly-oriented
    enacting verdict -> AUTO-APPLY that verdict to the NEW conflict's source
-   files (via #197's ``enact_resolution`` write-back), no new pending block,
+   files (via athenaeum#197's ``enact_resolution`` write-back), no new pending block,
    log ``"auto-applied prior human verdict <id>"``.
 2. Cache hit with a SWAPPED orientation -> FLIP the action (correct_a<->correct_b,
    keep_a<->keep_b, forget_a<->forget_b) so the correct member is hit. The
@@ -78,7 +78,7 @@ def _record_human(
     """Record a HUMAN verdict with per-side anchors (verdict a/b orientation).
 
     side_a / side_b are the ORIGINAL-orientation claim texts; passing None
-    omits the anchor (simulates a pre-#199 record).
+    omits the anchor (simulates a pre-athenaeum#199 record).
     """
     fp = claim_pair_fingerprint(CLAIM_A, CLAIM_B, conflict_type)
     record_resolution(
@@ -177,7 +177,7 @@ class TestAutoApplyHumanVerdict:
         ), [r.message for r in caplog.records]
 
     def test_anchorless_enacting_verdict_escalates(self, tmp_path: Path) -> None:
-        """Fail-safe #4: a pre-#199 record (no anchors) for an enacting verdict
+        """Fail-safe #4: a pre-athenaeum#199 record (no anchors) for an enacting verdict
         cannot have its orientation resolved -> escalate, never auto-delete."""
         root = _knowledge_root(tmp_path)
         pending = root / "wiki" / "_pending_questions.md"
@@ -334,7 +334,7 @@ class TestAutoApplyHumanVerdict:
     def test_failed_enact_escalates_no_autoapply_log(
         self, tmp_path: Path, caplog, monkeypatch
     ) -> None:
-        """#203: enact_resolution returns None (file op failed / no-op) on an
+        """athenaeum#203: enact_resolution returns None (file op failed / no-op) on an
         otherwise auto-appliable HUMAN verdict -> must ESCALATE (block created),
         emit NO "auto-applied" log, and NOT increment suppressed_count.
 

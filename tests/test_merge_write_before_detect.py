@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #462 (slice B of #460) — persist the C3 merge output BEFORE C4.
+"""Issue athenaeum#462 (slice B of athenaeum#460) — persist the C3 merge output BEFORE C4.
 
 Until this change ``merge_clusters_to_wiki`` built every entry (C3,
 deterministic), ran the deadline-checked C4 detector/resolver loop, and only
 THEN wrote the pages. A C4 deadline trip — which happened on 10+ consecutive
-nights (#440) — raised before the write loop, so the ENTIRE C3 build was
+nights (athenaeum#440) — raised before the write loop, so the ENTIRE C3 build was
 discarded and every night re-paid C3 and banked nothing.
 
 The fix writes the merged pages immediately after the C3 build (unflagged,
@@ -16,7 +16,7 @@ in the four properties that matter:
 2. The page is on disk (unflagged) at detection time (first-write precedes C4),
    and is re-written flagged once C4 detects (the re-write path).
 3. A page flagged by a prior run whose cluster now clears is re-written
-   unflagged (the #145 flag-clear lifecycle survives the reorder).
+   unflagged (the athenaeum#145 flag-clear lifecycle survives the reorder).
 4. Dry-run still writes nothing, even when detection would flag.
 
 All Anthropic calls are stubbed; no live API, no network.
@@ -130,7 +130,7 @@ def test_c4_deadline_trip_keeps_all_c3_pages(
     # Raised from the C4 loop, NOT the C3 loop — proving C3 finished first.
     assert excinfo.value.phase == "C4 contradiction detector / resolver"
 
-    # Every C3 page is on disk despite the trip (the whole point of #462).
+    # Every C3 page is on disk despite the trip (the whole point of athenaeum#462).
     pages = sorted((root / "wiki").glob("auto-*.md"))
     assert len(pages) == 2, "both C3 pages must survive the C4 deadline trip"
     # And each is the clean deterministic C3 output — unflagged, since C4 never
@@ -178,7 +178,7 @@ def test_first_write_precedes_detection_and_c4_rewrites_flag(
 
 
 # ---------------------------------------------------------------------------
-# 3. Flag-clear lifecycle survives the reorder (#145).
+# 3. Flag-clear lifecycle survives the reorder (athenaeum#145).
 # ---------------------------------------------------------------------------
 
 
@@ -240,7 +240,7 @@ def test_dry_run_writes_nothing_even_when_detection_flags(
 
 
 # ---------------------------------------------------------------------------
-# 5. The reorder preserves out_wiki_root (#359) and only_cluster_ids (#370).
+# 5. The reorder preserves out_wiki_root (athenaeum#359) and only_cluster_ids (athenaeum#370).
 # ---------------------------------------------------------------------------
 
 
@@ -259,7 +259,7 @@ def test_out_wiki_root_redirect_still_honored_by_first_write(tmp_path: Path) -> 
 
 
 def test_only_cluster_ids_scopes_the_first_write(tmp_path: Path) -> None:
-    """Delta scope (#370) must still write ONLY the affected cluster's page —
+    """Delta scope (athenaeum#370) must still write ONLY the affected cluster's page —
     the first write iterates the already-delta-filtered ``entries``, so an
     unaffected cluster is never written (or rewritten)."""
     root = _seed_root(tmp_path, n_clusters=2)

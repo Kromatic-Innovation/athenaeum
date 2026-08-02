@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Observe-only schema validation of LLM response payloads (issue #570, M17 phase 1).
+"""Observe-only schema validation of LLM response payloads (issue athenaeum#570, M17 phase 1).
 
 Every JSON-shaped prompt contract in this codebase is parsed today by a
 hand-rolled, individually-tuned check at its call site (coerce ``entity_type``
@@ -18,9 +18,9 @@ load-bearing constraint:
     a response.** :func:`observe` validates, emits one structured WARNING per
     mismatch, and returns ``None``. It never raises, never mutates the payload,
     never signals the caller to reject/drop/coerce/re-request. The reject-vs-
-    degrade decision is deliberately deferred to #608, which consumes the
+    degrade decision is deliberately deferred to athenaeum#608, which consumes the
     per-contract mismatch rate this module produces; the T1/T2 authority
-    contracts in ``reasoning_tiers.py`` are deferred to #609 and are NOT modeled
+    contracts in ``reasoning_tiers.py`` are deferred to athenaeum#609 and are NOT modeled
     here (touching them is out of scope).
 
 Convention for adding a contract (so other sites can follow this one):
@@ -50,14 +50,14 @@ test (``test_llm_schemas``) asserts each equals its live source set, so an
 upstream vocabulary change fails CI here instead of silently desyncing.
 
 Logging routes through the standard module logger, so the per-run correlation
-id established by #540 (``[run:<id>]`` in the shared format) is stamped onto
+id established by athenaeum#540 (``[run:<id>]`` in the shared format) is stamped onto
 every mismatch line automatically. The WARNING marker is greppable:
 
     llm-schema-mismatch contract=<name> call_site=<label> error_class=<cls> \
         errors=[<field.path: msg>, …] extra_keys=[<key>, …]
 
 Aggregating those by ``contract=`` yields the per-contract mismatch count that
-is #608's input.
+is athenaeum#608's input.
 
 **Contract:** :func:`observe` (and its per-contract ``observe_<name>``
 wrappers) validates an already-parsed LLM response payload against a Pydantic
@@ -69,7 +69,7 @@ gate.
 **Factoring rule:** this module owns the response SHAPE models and the
 observe-and-log entry point only. It does not own parsing/coercion (each call
 site's existing hand-rolled logic runs first, unchanged) and does not own the
-reject-vs-degrade decision (deferred to #608).
+reject-vs-degrade decision (deferred to athenaeum#608).
 
 **Layering:** L3 service. Module scope imports only ``pydantic`` — no
 athenaeum imports at all, including :mod:`athenaeum.models` (the two

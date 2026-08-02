@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A bare ``/`` in an entity name must not mark a page filename-derived (#721).
+"""A bare ``/`` in an entity name must not mark a page filename-derived (athenaeum#721).
 
-#680's ``prune-code-entities`` sweep keyed on the entity name being file-shaped
+athenaeum#680's ``prune-code-entities`` sweep keyed on the entity name being file-shaped
 by *extension OR path separator*. The extension half works; the path-separator
 half has no discriminating power in a corpus where slashes are ordinary
 punctuation in human and organization names. On the live store it put **140 real
@@ -9,7 +9,7 @@ people, companies and concepts on a ``git rm`` kill-list** — 44% of the 315
 pages the dry run proposed to delete.
 
 This pins the fix: a slash no longer contributes to the classification at all
-(``classify_code_artifact_name`` is extension-only), so every entry in #721's
+(``classify_code_artifact_name`` is extension-only), so every entry in athenaeum#721's
 table is retained, while the genuine extension-matched artifacts are still
 killed. The AC4 no-extension path case (``src/athenaeum``) is decided
 explicitly: retained — see :class:`TestExtensionlessPathDecision`.
@@ -34,12 +34,12 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 # ---------------------------------------------------------------------------
-# AC1 + AC2 — every entry in #721's kill-list table is retained
+# AC1 + AC2 — every entry in athenaeum#721's kill-list table is retained
 # ---------------------------------------------------------------------------
 
-#: The 140-entry class, taken verbatim from #721's table — real people,
+#: The 140-entry class, taken verbatim from athenaeum#721's table — real people,
 #: companies, concepts, packages, skill/label/branch names, and slash-commands
-#: that #680 wrongly killed solely because the name contains a ``/``. Each MUST
+#: that athenaeum#680 wrongly killed solely because the name contains a ``/``. Each MUST
 #: be retained (``classify_code_artifact_name`` returns ``None``).
 RETAINED_SLASH_NAMES = (
     "Suzie Prince (she/her)",  # a real person — matched on pronouns' slash
@@ -77,7 +77,7 @@ class TestBareSlashNoLongerKills:
         assert not is_code_artifact_name("Innovation Lab (Norway/Dubai)")
 
     def test_the_narrower_slash_signal_would_have_been_wrong(self) -> None:
-        # #721 warns: "confirm against the real 140 rather than guess". The
+        # athenaeum#721 warns: "confirm against the real 140 rather than guess". The
         # suggested narrow signal (slash-separated, no spaces, no @, no capital)
         # would still delete these legitimate skill/label/branch/command names —
         # which is exactly why a slash contributes nothing at all now.
@@ -119,7 +119,7 @@ class TestExtensionMatchedStillKilled:
 
 class TestExtensionlessPathDecision:
     def test_extensionless_paths_are_retained(self) -> None:
-        # DECISION (#721 AC4): a path-shaped name with no extension is RETAINED.
+        # DECISION (athenaeum#721 AC4): a path-shaped name with no extension is RETAINED.
         # No mechanical slash signal separates `src/athenaeum` from the pinned
         # skill/label/branch/command names above, and retention is the safe,
         # reversible direction (deletion is the destructive one). Such a page is
@@ -164,7 +164,7 @@ class TestReportRetainsRealEntities:
         assert all(c.rule == "extension" for c in report.kill)
 
     def test_a_person_page_with_a_slash_name_is_not_git_rmed(self, tmp_path: Path) -> None:
-        # The severity #721 names: --apply git-rms the kill-list. A person page
+        # The severity athenaeum#721 names: --apply git-rms the kill-list. A person page
         # must never reach it. Build a real git repo, confirm the empty kill-list
         # is a no-op that leaves the page on disk.
         kr = tmp_path / "knowledge"

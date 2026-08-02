@@ -68,4 +68,4 @@ Bob mentors the backend guild.
 
 Wholly orphaned fragment left behind after an earlier merge was archived; it
 carries no checkbox and can never resolve, so it accreted forever and flooded
-one "malformed header" WARNING per run (issue #394 / #299 / #303 regression).
+one "malformed header" WARNING per run (issue athenaeum#394 / athenaeum#299 / athenaeum#303 regression).

@@ -1,4 +1,4 @@
-"""Integration tests for the ephemeral-intake gate (issue #278, Part 1).
+"""Integration tests for the ephemeral-intake gate (issue athenaeum#278, Part 1).
 
 Acceptance:
   (i)  an ephemeral-scope OR ``ephemeral: true``-flagged intake produces NO

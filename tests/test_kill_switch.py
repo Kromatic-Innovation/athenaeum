@@ -1,4 +1,4 @@
-"""Tests for the kill switch — state file, env override, scopes, CLI (issue #379).
+"""Tests for the kill switch — state file, env override, scopes, CLI (issue athenaeum#379).
 
 The kill switch is the single reversible way to stop athenaeum's background
 work. These tests pin the contract every entry point relies on: the resolved
@@ -259,7 +259,7 @@ class TestCli:
 
 
 # ---------------------------------------------------------------------------
-# session-end honours the compile aspect (the expensive pass, issue #379)
+# session-end honours the compile aspect (the expensive pass, issue athenaeum#379)
 # ---------------------------------------------------------------------------
 
 

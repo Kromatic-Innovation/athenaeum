@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for merge-engine type integration (issue #433).
+"""Tests for merge-engine type integration (issue athenaeum#433).
 
-Covers the three #433 deliverables:
+Covers the three athenaeum#433 deliverables:
 
 1. Type-compatibility precheck (:mod:`athenaeum.merge_type_gate`) — a
    cross-class cluster is rejected at proposal time with a machine-readable
-   reason; a same-class cluster is unaffected (no regression on #421's
+   reason; a same-class cluster is unaffected (no regression on athenaeum#421's
    mechanical guardrails).
 2. Merge-vs-cite routing — a rejected cross-class cluster produces a cite
    proposal instead (never a destructive merge), exercised end to end
@@ -122,7 +122,7 @@ class TestCrossClassPrecheck:
 
 
 # ---------------------------------------------------------------------------
-# AC: same-class cluster passes the precheck unchanged (no #421 regression)
+# AC: same-class cluster passes the precheck unchanged (no athenaeum#421 regression)
 # ---------------------------------------------------------------------------
 
 
@@ -267,7 +267,7 @@ class TestProposeWikiPageMergesCrossClassRouting:
     def test_same_class_cluster_produces_normal_merge_proposal(
         self, tmp_path: Path
     ) -> None:
-        """Regression guard: #421's gates + normal merge behavior unaffected."""
+        """Regression guard: athenaeum#421's gates + normal merge behavior unaffected."""
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
         wiki_root = tmp_path / "wiki"
@@ -293,7 +293,7 @@ class TestProposeWikiPageMergesCrossClassRouting:
 
     def test_untyped_cluster_still_merges_no_regression(self, tmp_path: Path) -> None:
         """Legacy/untyped pages (no memory_class at all) must keep merging
-        exactly as before #433 — the conservative untyped policy."""
+        exactly as before athenaeum#433 — the conservative untyped policy."""
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
 
         wiki_root = tmp_path / "wiki"
@@ -483,7 +483,7 @@ The only inference on this page.
 
 # ---------------------------------------------------------------------------
 # merge.py resolver-path wiring: cross-class precheck sits in _emit_escalation
-# alongside the #421 suppression gate. Import-level sanity so a refactor that
+# alongside the athenaeum#421 suppression gate. Import-level sanity so a refactor that
 # removes the wiring is caught, without needing the full Opus-resolver
 # machinery in this file (that path is exercised in test_librarian_merge.py).
 # ---------------------------------------------------------------------------

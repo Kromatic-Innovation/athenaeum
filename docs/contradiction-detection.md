@@ -1,8 +1,8 @@
 # Contradiction Detection — Pipeline, Modes, Precedence, and Configuration
 
 This document describes the full contradiction-detection-and-resolution pipeline
-that landed via PRs #125 (cross-scope toggle), #126 (Opus resolver and
-provenance precedence), and #128 (pending-questions sidecar surface).
+that landed via PRs athenaeum#125 (cross-scope toggle), athenaeum#126 (Opus resolver and
+provenance precedence), and athenaeum#128 (pending-questions sidecar surface).
 
 It is the operator reference for: which stage runs when, what each stage
 costs, what knobs change behavior, and what the resulting block in
@@ -29,7 +29,7 @@ raw/auto-memory/<scope>/
      ▼
 clusters (per-scope by default — clusters.py)
      │
-     │  cross-scope mode toggle  (#125)
+     │  cross-scope mode toggle  (athenaeum#125)
      ▼
 pooled clusters / similarity pairs
      │
@@ -38,7 +38,7 @@ pooled clusters / similarity pairs
      ▼
 ContradictionResult (detected? type? members? passages? rationale?)
      │
-     │  Opus resolve (per-detected, capped)  (#126)
+     │  Opus resolve (per-detected, capped)  (athenaeum#126)
      │  resolutions.py:propose_resolution
      ▼
 ResolutionProposal (winner? action? rationale? confidence? precedence?)
@@ -47,7 +47,7 @@ ResolutionProposal (winner? action? rationale? confidence? precedence?)
      ▼
 ~/knowledge/wiki/_pending_questions.md
      │
-     │  athenaeum questions  /  SessionStart hook  (#128)
+     │  athenaeum questions  /  SessionStart hook  (athenaeum#128)
      ▼
 user accepts / overrides / defers
      │
@@ -72,7 +72,7 @@ Each stage degrades gracefully when its successor is unavailable. No
 `ANTHROPIC_API_KEY` → detector returns `detected=False` with rationale
 `llm-unavailable`; resolver returns the deterministic fallback
 (`action=retain_both_with_context, confidence=0.0`) which renders to NO
-trailing block, so the entry shape stays byte-identical to the pre-#126
+trailing block, so the entry shape stays byte-identical to the pre-athenaeum#126
 escalation format. The pipeline never blocks ingest on contradiction work.
 
 ---
@@ -86,7 +86,7 @@ escalation format. The pipeline never blocks ingest on contradiction work.
 
 ### `off`
 
-Per-scope clusters only. Equivalent to the pre-#125 behavior. Use when:
+Per-scope clusters only. Equivalent to the pre-athenaeum#125 behavior. Use when:
 
 - You're paying explicit attention to detector cost on a noisy ingest.
 - You've accepted that two raw entries living in different
@@ -126,7 +126,7 @@ This catches:
   ancestor relationship), e.g. `-Users-tristankromer-Code-foo` and
   `-Users-tristankromer-Code-bar`.
 
-**Known limitation (issue #262):** wiki-vs-wiki pairs are NOT compared.
+**Known limitation (issue athenaeum#262):** wiki-vs-wiki pairs are NOT compared.
 `cross_scope_similarity_pairs`'s `require_raw_side` defaults `True` and is
 passed `True` at its only call site (`merge.py`), so any candidate pair
 where BOTH sides are wiki entries is dropped — this removes the
@@ -156,7 +156,7 @@ multi-project structure under one user.
 |------|------|
 | Lowest cost; accept gap | `off` |
 | Catch general-rule-vs-project-override | `ancestor` (default) |
-| Catch cross-tree-branch (siblings); wiki-vs-wiki NOT covered (#262) | `similarity` |
+| Catch cross-tree-branch (siblings); wiki-vs-wiki NOT covered (athenaeum#262) | `similarity` |
 | Maximal coverage | `both` |
 
 ---
@@ -271,7 +271,7 @@ tool both require explicit user confirmation before applying.
 ## 4. Configuration reference
 
 Detection keys live under `contradiction:` in `athenaeum.yaml`; the detector
-model under the top-level `models:` block (`models.classify`, #232); the
+model under the top-level `models:` block (`models.classify`, athenaeum#232); the
 resolver knobs under the top-level `resolve:` block. Env vars override the
 yaml; the yaml overrides built-in defaults. The canonical knob table — every
 env var, yaml key, and code default for this pipeline (`models.classify`,
@@ -308,11 +308,11 @@ contradiction:
 
 ---
 
-## 5. Pending-questions integration (#128)
+## 5. Pending-questions integration (athenaeum#128)
 
 Once the librarian writes a block to `~/knowledge/wiki/_pending_questions.md`,
 the question is durable but invisible until the user opens that file.
-The #128 surface closes that gap.
+The athenaeum#128 surface closes that gap.
 
 ### CLI
 
@@ -489,7 +489,7 @@ model when the cost tradeoff is unacceptable.
 ### Why the per-run cap defaults to 250
 
 A guard against runaway cost on a noisy ingest. The cap was raised from
-50 to 250 in issue #187 so a full-knowledge-base ingest no longer
+50 to 250 in issue athenaeum#187 so a full-knowledge-base ingest no longer
 exhausts the confirmation pass partway through. 250 × ~$0.10 = ~$25 of
 worst-case Opus spend per run; high enough that real workloads rarely
 hit the cap, low enough that a buggy detector returning `detected=true`

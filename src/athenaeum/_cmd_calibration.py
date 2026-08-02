@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum calibration {summary,review}`` — tier-audit calibration CLI (issue #438).
+"""``athenaeum calibration {summary,review}`` — tier-audit calibration CLI (issue athenaeum#438).
 
 The calibration loop for the tiered reasoning pass: a random audit share of
 T1 rejects and T2 approvals is surfaced (as ``type: "audit"`` items in the
@@ -38,7 +38,7 @@ from athenaeum.config import (
     resolve_reasoning_tier_auditing_enabled,
 )
 
-# Issue #518: the message shown when the reasoning-tier subsystem is not
+# Issue athenaeum#518: the message shown when the reasoning-tier subsystem is not
 # enabled — an explicit state so an operator never mistakes a permanent
 # 0/0/0 all-clear for "the tiers ran and are well calibrated".
 _NOT_ENABLED_MSG = (
@@ -65,7 +65,7 @@ def cmd_calibration(args: argparse.Namespace) -> int:
 
     wiki_root = _resolve_wiki_root(args)
 
-    # Issue #518: gate the calibration surface behind the explicit opt-in.
+    # Issue athenaeum#518: gate the calibration surface behind the explicit opt-in.
     # When off, report the not-enabled state rather than an empty-but-"green"
     # summary that lies about a subsystem that never ran.
     if not resolve_reasoning_tier_auditing_enabled(load_config(wiki_root.parent)):
@@ -89,7 +89,7 @@ def cmd_calibration(args: argparse.Namespace) -> int:
             )
             if counts.get("applied"):
                 line += f", applied {counts['applied']}"
-            # Issue #602: surface an overturn of an ALREADY-APPLIED (auto-
+            # Issue athenaeum#602: surface an overturn of an ALREADY-APPLIED (auto-
             # finalized, live-in-the-wiki) merge prominently — this is the
             # one number that means "a human caught a bad write that
             # already happened", never buried inside the plain
@@ -139,7 +139,7 @@ def add_calibration_subparser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "Tier-audit calibration: per-tier sampled/reviewed/overturned "
             "summary, and record a human confirm/overturn of an audit item "
-            "(issue #438)."
+            "(issue athenaeum#438)."
         ),
     )
     c_parser.set_defaults(func=cmd_calibration)

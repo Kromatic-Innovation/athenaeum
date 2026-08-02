@@ -1,4 +1,4 @@
-"""Tests for athenaeum.vecmath -- shared pure-Python cosine similarity (#542)."""
+"""Tests for athenaeum.vecmath -- shared pure-Python cosine similarity (athenaeum#542)."""
 
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CI gate + unit tests for the env-var documentation check (issue #688).
+"""CI gate + unit tests for the env-var documentation check (issue athenaeum#688).
 
 `test_no_undocumented_env_vars` is the enforcement gate — it fails the suite if
 any `ATHENAEUM_*` name read by `src/` is missing from `docs/configuration.md`.

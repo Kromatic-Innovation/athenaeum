@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""FTS5 index schema-version stamping and rebuild-on-mismatch (issue #530, M7).
+"""FTS5 index schema-version stamping and rebuild-on-mismatch (issue athenaeum#530, M7).
 
 Before this fix the FTS5 index carried no ``PRAGMA user_version`` stamp, so a
 DB built by an older athenaeum (a pre-``audience`` shape) survived an
@@ -18,7 +18,7 @@ from pathlib import Path
 
 from athenaeum.search import _DB_NAME, _FTS5_MANIFEST, FTS5Backend
 
-# The pre-#312 FTS5 shape: no ``audience`` column, no user_version stamp.
+# The pre-athenaeum#312 FTS5 shape: no ``audience`` column, no user_version stamp.
 _LEGACY_CREATE_SQL = (
     "CREATE VIRTUAL TABLE wiki USING fts5"
     '(filename, name, tags, aliases, description, tokenize="porter unicode61")'

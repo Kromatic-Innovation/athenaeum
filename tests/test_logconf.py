@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Central logging config + per-run correlation id (issue #540, M25)."""
+"""Central logging config + per-run correlation id (issue athenaeum#540, M25)."""
 
 from __future__ import annotations
 

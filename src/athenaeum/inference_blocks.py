@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Inference-block schema + parser (issue #424, data model only).
+"""Inference-block schema + parser (issue athenaeum#424, data model only).
 
 A page with ``memory_class: fact`` may contain one or more ``## Inference``
 sections in its body — a fact derived FROM other facts rather than observed
@@ -22,7 +22,7 @@ Each parsed block is an ADDRESSABLE unit (:class:`InferenceBlock`) with a
 stable ``id`` derived from its content, exposing its ``basis`` list and
 ``confidence`` value plus enough of the raw block to be located again later.
 
-Retraction (issue #433): :func:`retract_inference_block` treats a parsed
+Retraction (issue athenaeum#433): :func:`retract_inference_block` treats a parsed
 ``## Inference`` block as a RETRACTABLE UNIT — superseding an interpretation
 retracts just that block (by its stable ``id``) and leaves the rest of the
 page, including its fact core, byte-intact. The fact core (the page's
@@ -217,13 +217,13 @@ def parse_inference_blocks(text: str) -> list[InferenceBlock]:
 def retract_inference_block(text: str, block_id: str) -> str:
     """Remove the ``## Inference`` block with id ``block_id`` from ``text``.
 
-    Issue #433: the retraction primitive for the addressable units
+    Issue athenaeum#433: the retraction primitive for the addressable units
     :func:`parse_inference_blocks` returns. Superseding an interpretation
     retracts ONLY the targeted inference block — the fact core (everything
     else: frontmatter, other body text, other ``## `` sections including
     other ``## Inference`` blocks) is preserved BYTE-IDENTICAL. This is a
     pure text transform (no basis re-evaluation, no cascading — see the
-    module docstring's out-of-scope note carried over from #424) so a
+    module docstring's out-of-scope note carried over from athenaeum#424) so a
     caller can round-trip ``parse -> retract -> parse`` and see every other
     block unchanged.
 

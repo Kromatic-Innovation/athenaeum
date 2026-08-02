@@ -4,7 +4,7 @@ When the librarian's cheap detector flags two memory snippets as
 contradictory, an Opus-backed resolver weighs them under a source-precedence
 taxonomy and writes a proposal block onto `wiki/_pending_questions.md`.
 Historically every proposal — even at 0.99 confidence — sat in the queue
-until a human flipped the checkbox. The auto-resolve lane (issue #156)
+until a human flipped the checkbox. The auto-resolve lane (issue athenaeum#156)
 closes that loop: when the resolver is confident enough, the librarian
 marks the block as answered itself, leaving a clean audit trail.
 
@@ -50,7 +50,7 @@ Env-var boolean values accept `true`/`false`, `1`/`0`, `yes`/`no` (case-insensit
 
 Threshold values outside `[0.0, 1.0]` raise on read so a typo (e.g. `9.0` meant as `0.9`) surfaces immediately instead of silently turning auto-apply off for the rest of the run.
 
-The `full_body_token_cap` gates the resolver's per-side full-body context (issue #168). Tokens are measured with a simple character-count heuristic — roughly 4 characters per token for English markdown — so the practical character ceiling is `cap * 4`. Each member's `<member>` block always opens with a `passage:` line containing the detector's exact conflicting region; when the body also fits the cap, a `body:` block follows. When the body exceeds the cap, the body is omitted and a `[truncated — body exceeded {cap}-token budget; passage above is the conflict region]` note is appended below the passage. Asymmetric truncation is expected: a small + large member pair is a normal case, and the small side still gets the full body.
+The `full_body_token_cap` gates the resolver's per-side full-body context (issue athenaeum#168). Tokens are measured with a simple character-count heuristic — roughly 4 characters per token for English markdown — so the practical character ceiling is `cap * 4`. Each member's `<member>` block always opens with a `passage:` line containing the detector's exact conflicting region; when the body also fits the cap, a `body:` block follows. When the body exceeds the cap, the body is omitted and a `[truncated — body exceeded {cap}-token budget; passage above is the conflict region]` note is appended below the passage. Asymmetric truncation is expected: a small + large member pair is a normal case, and the small side still gets the full body.
 
 `full_body_token_cap` must be a positive integer. Zero and negative values raise `ValueError` on read — to effectively disable truncation, set a large value (e.g. `1000000`) rather than `0`.
 
@@ -72,7 +72,7 @@ Pick whichever scope matches the intent:
 - **Persistent:** set `resolve.auto_apply: false` in `<knowledge_root>/athenaeum.yaml`.
 
 With auto-apply off, every flagged contradiction lands as an unchecked
-`[ ]` block exactly as in the pre-#156 era.
+`[ ]` block exactly as in the pre-athenaeum#156 era.
 
 ## Lowering or raising the threshold
 
@@ -94,7 +94,7 @@ resolve:
 Anything below the threshold continues to land as an unchecked block for
 human review.
 
-## Per-action thresholds (issue #170)
+## Per-action thresholds (issue athenaeum#170)
 
 The single scalar `auto_apply_threshold` treats every resolver action the
 same, but the cost of an incorrect auto-apply is not symmetric:
@@ -151,7 +151,7 @@ resolve:
 
 ### Backward compatibility
 
-Pre-#170 configs that set only the legacy scalar continue to work:
+Pre-athenaeum#170 configs that set only the legacy scalar continue to work:
 
 ```yaml
 resolve:
@@ -196,7 +196,7 @@ when the proposal auto-applies, the librarian deletes the target raw
 auto-memory member file outright (no history).
 
 **Non-destructive (mark)** — `keep_*` / `deprecate_both` at the **0.90** bar
-(issue #191): the librarian *marks* the member's frontmatter instead of
+(issue athenaeum#191): the librarian *marks* the member's frontmatter instead of
 deleting it. `keep_a` / `keep_b` set `superseded_by: <winner name>` on the
 **losing** member (a DECISION's loser was valid-then-replaced, not wrong —
 history matters); `deprecate_both` sets `deprecated: true` on **both**

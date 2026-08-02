@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pluggable storage-surface layer — entity class → surface + corpus policy (issue #429).
+"""Pluggable storage-surface layer — entity class → surface + corpus policy (issue athenaeum#429).
 
-This module generalizes the "PII lives on an excluded path" idea (#427) into a
+This module generalizes the "PII lives on an excluded path" idea (athenaeum#427) into a
 **config-swappable storage-adapter layer**. Each *entity class* (the wiki
 frontmatter ``type:`` — ``person``, ``concept``, ``reference``, a future
 ``pii`` class, …) resolves to a **storage surface**: a ``backing_store`` plus a
@@ -22,17 +22,17 @@ Two adapters ship built in:
 ``excluded``
     A surface OUTSIDE ``wiki/`` (default ``excluded/``) whose corpus policy is
     all-false: nothing on it is embedded, recalled, or merged. This is what
-    #427's PII / archival-contact surface consumes — routed through this
+    athenaeum#427's PII / archival-contact surface consumes — routed through this
     adapter, **not a hardcoded exclusion path**. Because an excluded surface's
     root lives outside the corpus scanners' search set (``wiki/`` + configured
     ``recall.extra_intake_roots``), its pages are excluded from embed / recall /
-    merge **by construction** — the fail-closed property #427 requires.
+    merge **by construction** — the fail-closed property athenaeum#427 requires.
 
 Adding a new surface (a new store or a new corpus policy) is **config + an
 adapter registration, no core change**: define it under ``storage.adapters`` in
 ``athenaeum.yaml`` (or call :func:`register_adapter` from code) and map an
 entity class to it under ``storage.mapping``. The deferred skill-file-sync
-surface (#426's out-of-scope idea) is a future consumer of exactly this seam.
+surface (athenaeum#426's out-of-scope idea) is a future consumer of exactly this seam.
 
 Naming note — this is a STORAGE-surface adapter, a different concept from the
 source → raw-intake *adapter* documented in ``docs/adapter-contract.md`` and
@@ -107,7 +107,7 @@ class CorpusPolicy:
 
     @classmethod
     def none(cls) -> "CorpusPolicy":
-        """No corpus participation — the excluded surface (#427)."""
+        """No corpus participation — the excluded surface (athenaeum#427)."""
         return cls(embedded=False, recallable=False, merge_eligible=False)
 
     @property
@@ -155,7 +155,7 @@ WIKI_MARKDOWN_EMBEDDED = StorageAdapter(
     corpus_policy=CorpusPolicy.all(),
 )
 
-#: The built-in excluded surface #427's PII / archival-contact pages consume.
+#: The built-in excluded surface athenaeum#427's PII / archival-contact pages consume.
 #: Lives OUTSIDE ``wiki/`` (so it is excluded by construction) with no corpus
 #: participation.
 EXCLUDED = StorageAdapter(
@@ -180,7 +180,7 @@ def register_adapter(adapter: StorageAdapter, *, replace: bool = False) -> None:
     """Register a custom storage adapter in-process (the code extension point).
 
     The complement to the ``storage.adapters`` YAML block: a consumer that
-    ships an adapter in code (e.g. #426's skill-file-sync surface) registers it
+    ships an adapter in code (e.g. athenaeum#426's skill-file-sync surface) registers it
     here so it becomes resolvable by name in ``storage.mapping`` — no change to
     the embed / recall / merge core required.
 
@@ -315,14 +315,14 @@ def resolve_adapter_for_class(
 
 
 def storage_policy_configured(config: dict[str, Any] | None) -> bool:
-    """Whether this config defines any non-default storage policy (issue #532).
+    """Whether this config defines any non-default storage policy (issue athenaeum#532).
 
     ``True`` only when ``storage.mapping`` or ``storage.adapters`` is present and
     non-empty — i.e. when some entity class could resolve to a surface other than
     the all-true default ``wiki-markdown-embedded``. When ``False``, every class
     is guaranteed full corpus participation, so the ``embedded`` / ``recallable``
     enforcement gates (index-build scan, recall render) can short-circuit to
-    their pre-#532 behavior as a strict no-op. Consulted at the recall render
+    their pre-athenaeum#532 behavior as a strict no-op. Consulted at the recall render
     layer so a base with no ``storage:`` config pays nothing and behaves exactly
     as before — including for edge cases like an unreadable (stale-index) hit.
     """
@@ -366,7 +366,7 @@ def surface_root_for_class(
 ) -> Path:
     """Absolute on-disk root where pages of *entity_class* are persisted.
 
-    The writer-facing entry point #427's PII surface consumes: instead of
+    The writer-facing entry point athenaeum#427's PII surface consumes: instead of
     hardcoding ``knowledge_root / "contacts"``, a writer asks the layer where a
     class lives and gets the surface root its adapter resolves to (``wiki/`` for
     the default, the configured excluded root for an excluded class).
@@ -378,7 +378,7 @@ _RAW_INTAKE_FILENAME_RETRIES = 5
 
 
 def write_raw_intake(target_dir: Path, content: str) -> Path:
-    """Persist one raw-intake file atomically under *target_dir* (issue #534, M13).
+    """Persist one raw-intake file atomically under *target_dir* (issue athenaeum#534, M13).
 
     Mints a UTC-timestamp + short-id ``.md`` filename, creates the directory,
     and writes via :func:`athenaeum.atomic_io.atomic_write_text` so an

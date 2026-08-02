@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""T2 wired into the merge path, auto-finalizing safe-class approvals (#602).
+"""T2 wired into the merge path, auto-finalizing safe-class approvals (athenaeum#602).
 
 Mirrors ``test_merge_reasoning_wiring.py`` (T1's own wiring test), but for
 ``merge.t2_screen_merge_proposal``: a T1 pass-up is consulted by T2, and a

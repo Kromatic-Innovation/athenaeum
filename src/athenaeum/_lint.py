@@ -1,6 +1,6 @@
 """Lint helpers for auto-memory file construction.
 
-Issue #183: extracted from ``librarian.py`` so the three
+Issue athenaeum#183: extracted from ``librarian.py`` so the three
 :class:`AutoMemoryFile` construction sites (discovery, cross-scope
 similarity sweep, merge-time cluster shim) can share the helper without
 :mod:`athenaeum.cross_scope` and :mod:`athenaeum.merge` having to do
@@ -13,7 +13,7 @@ Layering: L0 primitive (leaf). May import only stdlib. Factoring rule: this
 module holds ONLY the shared lint-and-strip / lint-and-report helpers reused
 across multiple ``AutoMemoryFile`` construction sites — it must never import
 :mod:`athenaeum.librarian`, :mod:`athenaeum.cross_scope`, or
-:mod:`athenaeum.merge` (that would recreate the import cycle #183 extracted
+:mod:`athenaeum.merge` (that would recreate the import cycle athenaeum#183 extracted
 this module to avoid). Higher layers import this module, never the reverse.
 """
 
@@ -34,13 +34,13 @@ def _strip_self_reference(
 ) -> tuple[list[str], list[dict[str, str]]]:
     """Drop self-references from ``refines`` / ``supersedes`` with a WARN.
 
-    Issue #173: a memory must never claim to refine or supersede itself —
+    Issue athenaeum#173: a memory must never claim to refine or supersede itself —
     that is a YAML authoring mistake (most often the file's own ``name``
     accidentally pasted into its own ``refines:`` block). Silently dropping
     them keeps the resolver / merge planner from ever seeing the loop, and
     the WARNING line gives the operator a single grep target.
 
-    Issue #181: the original lint lived inline in
+    Issue athenaeum#181: the original lint lived inline in
     :func:`discover_auto_memory_files`. Extracted so the two other
     ``AutoMemoryFile`` construction sites (cross-scope similarity sweep,
     merge-time cluster shim) get the same lint+strip behavior.
@@ -67,12 +67,12 @@ def _strip_self_reference(
     return refines, supersedes
 
 
-# --- Memory-taxonomy lint (issue #424) ---
+# --- Memory-taxonomy lint (issue athenaeum#424) ---
 #
 # ``memory_class:`` validity (unknown non-empty value -> flagged) is
 # enforced at the pydantic boundary: schemas.py's ``WikiBase`` field
 # validator emits a ``UserWarning`` via ``validate_wiki_meta``, mirroring
-# the #93 ``KNOWN_TYPES`` precedent — that stays the single source of truth
+# the athenaeum#93 ``KNOWN_TYPES`` precedent — that stays the single source of truth
 # for "is this value one of the 7 recognized classes" so this module does
 # not need to import/duplicate ``MEMORY_CLASSES``.
 #

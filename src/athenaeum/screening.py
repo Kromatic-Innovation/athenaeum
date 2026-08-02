@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Intake-side sensitive-content screening at ``remember()`` time (issue #320).
+"""Intake-side sensitive-content screening at ``remember()`` time (issue athenaeum#320).
 
-This is the *write-time classifier* complement to #312's read-time scoping.
+This is the *write-time classifier* complement to athenaeum#312's read-time scoping.
 ``remember`` (raw intake) persists anything it is given verbatim and
-append-only; #312 only protects a page *after* it exists and *only if it was
+append-only; athenaeum#312 only protects a page *after* it exists and *only if it was
 labeled*. This module classifies sensitive raw intake BEFORE the append-only
-write and stamps the read-time ``access:`` label (#312) so recall never
+write and stamps the read-time ``access:`` label (athenaeum#312) so recall never
 surfaces regulated content to an unauthorized caller.
 
-Scope of this first slice (design pass on #320): **medical only**, action
+Scope of this first slice (design pass on athenaeum#320): **medical only**, action
 ``label_restrict`` — medical intake is stored but auto-labeled
 ``access: personal`` (never revealed by a restricted recall), never dropped.
 The other categories the issue sketches (protected characteristics, financial
@@ -64,7 +64,7 @@ from __future__ import annotations
 
 import re
 
-# Access levels ordered least → most restrictive (issue #312). Only ``open``
+# Access levels ordered least → most restrictive (issue athenaeum#312). Only ``open``
 # is world-readable; ``internal``/``confidential``/``personal`` are all
 # owner-only for a restricted caller, so the ordering is used purely to
 # guarantee the screener never *downgrades* an already-restrictive label.
@@ -83,7 +83,7 @@ class ScreeningConfigError(ValueError):
 
 
 def more_restrictive(a: str, b: str) -> str:
-    """Return whichever access level is more restrictive (higher #312 rank).
+    """Return whichever access level is more restrictive (higher athenaeum#312 rank).
 
     Unknown/empty levels rank below ``open`` so a real level always wins; used
     to make a screener-set label *sticky* (never downgraded, never dropped).

@@ -234,7 +234,7 @@ by a wall-clock timeout (the nightly sweep bounds it), the librarian commits
 what it finished as a `partial run` commit before exiting rather than leaving
 it uncommitted for the next run to absorb — so the knowledge tree is always
 clean between runs and every run's work is attributed to its own commit
-(issue #337).
+(issue athenaeum#337).
 
 - **Tier 1 — programmatic.** Normalization, dedup, formatting.
 - **Tier 2 — fast LLM.** Classification. Is this about a known entity, or a new one? Routes the observation.

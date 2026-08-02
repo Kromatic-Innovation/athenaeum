@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the merge-vs-fold write paths (issue #425).
+"""Tests for the merge-vs-fold write paths (issue athenaeum#425).
 
 Covers:
 

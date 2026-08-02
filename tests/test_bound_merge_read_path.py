@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for bounding the merge read path (issue #431).
+"""Tests for bounding the merge read path (issue athenaeum#431).
 
-Complements the #400 write-path suppression (``resolve_max_merge_sources`` /
+Complements the athenaeum#400 write-path suppression (``resolve_max_merge_sources`` /
 ``resolve_min_merge_mean_similarity`` keep a degenerate over-cluster from ever
 reaching ``_pending_merges.md``). This closes two READ-path gaps:
 

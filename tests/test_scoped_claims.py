@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Scoped-claim poset + three-way verdict + scope-edit resolver actions (#329).
+"""Scoped-claim poset + three-way verdict + scope-edit resolver actions (athenaeum#329).
 
-Covers the buildable subset of #329's design pass:
+Covers the buildable subset of athenaeum#329's design pass:
 
 1. Dimension posets — org/locale trees (normalize/leq/meet) and time intervals.
 2. ``ScopeTree`` config loading + coordinate parsing.
@@ -68,7 +68,7 @@ class TestTreeDimension:
         assert self._org().normalize("Kromatic/Platform") == "kromatic/platform"
 
     def test_normalize_unknown_value_is_unscoped(self) -> None:
-        # Authors may not mint scope values not in the tree (#329) — fail open
+        # Authors may not mint scope values not in the tree (athenaeum#329) — fail open
         # to unscoped so a typo adds no constraint rather than a phantom scope.
         assert self._org().normalize("acme/widgets") is None
 
@@ -245,7 +245,7 @@ class TestScopeComparison:
     def test_time_nesting_alone_does_not_override(self) -> None:
         # Deferred design: a sub-interval does NOT trigger OVERRIDE — same
         # org/locale (unscoped) + nested time → OVERLAP (reaches the resolver,
-        # preserving #324's shipped semantics).
+        # preserving athenaeum#324's shipped semantics).
         r = self._cmp(
             ScopeCoordinate(valid_from=date(2026, 4, 1), valid_until=date(2026, 6, 30)),
             ScopeCoordinate(),
@@ -262,7 +262,7 @@ class TestScopeComparison:
 
 
 # ---------------------------------------------------------------------------
-# Detector trusted scope header (#329 segment)
+# Detector trusted scope header (athenaeum#329 segment)
 # ---------------------------------------------------------------------------
 
 

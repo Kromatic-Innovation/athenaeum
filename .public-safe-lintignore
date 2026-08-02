@@ -1,0 +1,32 @@
+# public-safe-lint suppressions (athenaeum#693).
+#
+# Format (see public-safe-lint.sh header): "<rule-name> <path-glob>" per line;
+# '#'-prefixed and blank lines ignored. Path + rule ONLY — never content, org
+# name, or company term. Suppressed hits are still REPORTED by the scanner
+# (as SUPPRESSED lines + a coverage note), never silently dropped, and the
+# genuine personal-path leak rules (local-absolute-path-users,
+# local-absolute-path-home) and the bare-issue-ref, plus-alias, and
+# personal-attribution rules stay FULLY ENFORCED everywhere not listed below.
+#
+# --- tilde-rooted-path: athenaeum's own config/storage surface ---
+# athenaeum is a tool whose config and knowledge store LIVE under the operator's
+# home directory (the .cache/athenaeum spend ledger, the .claude hooks
+# integration, the knowledge corpus). Documenting those paths is the product's
+# core surface, not a machine-specific leak, and they appear in prose across
+# docs, README, source docstrings, examples and tests (258 occurrences). The
+# rule therefore has no discriminating signal in THIS repo — exactly the
+# CHANGELOG/README case the scanner's own header names as a legitimate per-repo
+# exemption. The two rules that catch a genuine absolute personal path
+# (local-absolute-path-users, local-absolute-path-home) are deliberately NOT
+# suppressed, so a real /Users/<name> or /home/<name> leak still fails the gate.
+tilde-rooted-path **
+
+# --- plus-alias-email: PII / leak-detector test fixtures ---
+# These two suites exist to TEST athenaeum's own inline-PII detectors, so they
+# deliberately contain +alias@ email shapes as fixture input and pin them in
+# assertions (the scanner header names "a leak-detector's test fixtures that
+# deliberately contain the shapes" as the canonical use of this mechanism).
+# Scoped to the two PII test files only — a +alias email anywhere else still
+# fails the gate.
+plus-alias-email tests/test_pii_off_corpus.py
+plus-alias-email tests/test_storage_migrate_pii.py

@@ -1,4 +1,4 @@
-# Conflict Resolution — Audit and Lock (issue #91)
+# Conflict Resolution — Audit and Lock (issue athenaeum#91)
 
 This document is the LOCK for athenaeum's conflict-resolution behavior as of
 merge SHA `b0ee25c` on `develop` (post-Lane-E). It catalogs every code path
@@ -11,7 +11,7 @@ documented rule. **Any future PR that changes a documented rule MUST update
 this document AND the corresponding test in the same change.** Schema-tightening
 PRs that surface new conflict surfaces MUST add a new section here.
 
-The audit is read-only — no behavior changes shipped with #91. Bug findings are
+The audit is read-only — no behavior changes shipped with athenaeum#91. Bug findings are
 filed as separate `moscow:could` (or `moscow:should` when correctness-critical)
 issues; see the PR body for the live list.
 
@@ -33,7 +33,7 @@ GitHub permalinks below all anchor on `b0ee25c`.
   - `type` is not in the schema's allowlist,
   - the uid already exists in the index (idempotent re-run guard),
   - a file with the target filename already exists on disk.
-- **Provenance behavior (post-#90):** Passes raw frontmatter through byte-for-byte.
+- **Provenance behavior (post-athenaeum#90):** Passes raw frontmatter through byte-for-byte.
   If the raw carries `field_sources`, it survives intact. If it does not, no
   attribution is synthesized — no Apollo call runs in this path.
 - **Known edge cases:**
@@ -52,7 +52,7 @@ GitHub permalinks below all anchor on `b0ee25c`.
   runs only after Tier 1 (programmatic match) AND Tier 2 (LLM dedupe via the
   "skip these" allowlist) have agreed the entity is new. The only failure mode
   is API-level — `messages.create` exceptions propagate to the caller.
-- **Provenance behavior (post-#90):** Sets `created` and `updated` to today.
+- **Provenance behavior (post-athenaeum#90):** Sets `created` and `updated` to today.
   Does not write `field_sources` — `field_sources` is an Apollo-namespace
   contract, not a schema-wide one.
 - **Known edge cases:**
@@ -75,7 +75,7 @@ GitHub permalinks below all anchor on `b0ee25c`.
   - **Principled tension** (values, axioms): the LLM emits `ESCALATE: <description>`
     optionally followed by `---\n<merged body>`. `tier3_merge` returns
     `(body_or_None, EscalationItem(conflict_type="principled"))`.
-- **Provenance behavior (post-#90):** Stamps `meta["updated"]` with today's date
+- **Provenance behavior (post-athenaeum#90):** Stamps `meta["updated"]` with today's date
   inside `tier3_write` (line 446). Does not touch `field_sources`. Existing
   body is passed in plain; the merged body is written verbatim from the LLM.
 - **Known edge cases:**
@@ -96,7 +96,7 @@ GitHub permalinks below all anchor on `b0ee25c`.
   all-or-nothing semantic per raw file but does NOT coordinate concurrent writers.
   Two pipelines processing different raw files that target the same wiki entity
   will race on the filesystem.
-- **Provenance behavior (post-#90):** `meta["updated"]` is set to today before
+- **Provenance behavior (post-athenaeum#90):** `meta["updated"]` is set to today before
   rendering. `field_sources` is preserved if it exists on the existing page;
   it is neither added to nor pruned.
 - **Known edge cases:**
@@ -130,7 +130,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
     (`synthesize_body` line 333). **Exact-match string compare on whitespace-trimmed
     paragraphs**; variant phrasings are kept.
   - `cluster_centroid_score`: comes from the JSONL row, not merged.
-- **Provenance behavior (post-#90):** `sources[]` carries `origin_scope` per
+- **Provenance behavior (post-athenaeum#90):** `sources[]` carries `origin_scope` per
   entry. The new entity-schema `field_sources` map is irrelevant here —
   auto-memory entries do not use it.
 - **Known edge cases:**
@@ -150,7 +150,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
     still rendered with `contradictions_detected: true` + `status:
     contradiction-flagged` in frontmatter. An `EscalationItem` is queued to
     `_pending_questions.md` for human review.
-- **Provenance behavior (post-#90):** N/A — same as 5a.
+- **Provenance behavior (post-athenaeum#90):** N/A — same as 5a.
 
 ## 6. `contradictions.py:detect_contradictions`
 
@@ -163,10 +163,10 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   escalation. The cluster's body is unchanged regardless of detector output.
 - **Resolution boundary:** Three contradiction types are distinguished — `factual`
   (incompatible facts about the same thing), `prescriptive` (opposing guidance),
-  and `stance` (opinion attribution — see §13; issue #327). Tier 3's `principled`
+  and `stance` (opinion attribution — see §13; issue athenaeum#327). Tier 3's `principled`
   class is intentionally separate: it lives in the entity-wiki path, not the
   auto-memory path.
-- **Provenance behavior (post-#90):** N/A — operates over auto-memory bodies.
+- **Provenance behavior (post-athenaeum#90):** N/A — operates over auto-memory bodies.
 - **Known edge cases:**
   - Singleton clusters return `detected=False` without a network call.
   - No client (`ANTHROPIC_API_KEY` unset) returns
@@ -203,8 +203,8 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
     per-value attribution for list fields whose values originated on absorbed.
   - Any `field_sources` entry whose key is no longer present in the merged
     frontmatter is pruned (no dangling attributions).
-- **Provenance behavior (post-#90):** This is the reference implementation
-  for #90 provenance carry-forward. The `_merge_field_sources` helper is the
+- **Provenance behavior (post-athenaeum#90):** This is the reference implementation
+  for athenaeum#90 provenance carry-forward. The `_merge_field_sources` helper is the
   contract.
 - **Known edge cases:**
   - When BOTH wikis have a non-empty `google_contact` and they differ, both
@@ -222,13 +222,13 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 > `enrich --persons` write path. Both were extracted from the OSS package
 > in athenaeum#112 and now live in a separate private toolkit.
 
-## 9. Disjoint temporal validity — sequential states are not conflicts (issue #324)
+## 9. Disjoint temporal validity — sequential states are not conflicts (issue athenaeum#324)
 
 - **Files:** `src/athenaeum/models.py` (`validity_windows_disjoint`),
   `src/athenaeum/merge.py` (`_all_pairs_disjoint`, `_detected_pair_disjoint`),
   `src/athenaeum/resolutions.py` (`_disjoint_validity_verdict`),
   `src/athenaeum/contradictions.py` (`_member_scope_header`).
-- **Trigger:** Two claims carry `valid_from` / `valid_until` frontmatter (#308
+- **Trigger:** Two claims carry `valid_from` / `valid_until` frontmatter (athenaeum#308
   slice 1) whose windows do not overlap in time — e.g. A is true through
   2026-03-31 and B is true from 2026-04-01. These are *sequential states of the
   world*, not a contradiction, but the cheap C4 detector (which strips
@@ -250,7 +250,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
      cluster records `ContradictionResult(detected=False,
      rationale="disjoint-validity")`. The similarity-sweep path applies the same
      skip per 2-member pair. Mirrors the declared-relationship short-circuit
-     (§ #167).
+     (§ athenaeum#167).
   2. **Post-detection guard (`merge.py`).** When the cluster is only partially
      disjoint the detector still runs, and may flag a specific disjoint pair.
      `_detected_pair_disjoint(result, filtered)` re-checks the two flagged
@@ -281,7 +281,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 
 ---
 
-## 10. Resolver interval-close on temporal supersession (issue #308 slice 2)
+## 10. Resolver interval-close on temporal supersession (issue athenaeum#308 slice 2)
 
 - **Files:** `src/athenaeum/resolutions.py` (`enact_resolution` and the
   `_close_interval` / `_sequential_snapshot_close` / `_member_ingestion_date`
@@ -295,7 +295,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 - **Which verdicts close an interval:**
   - `keep_a` / `keep_b` — close the loser at the **winner's `valid_from`** when
     known, else the **resolution date** (`date.today()`). Enacted via the
-    existing #191 marking branch, now augmented with the close.
+    existing athenaeum#191 marking branch, now augmented with the close.
   - Sequential-snapshot `not_a_conflict` — two dated snapshots (older → newer);
     the **older** member closes at the newer's lower bound. Ordering: `valid_from`,
     else ingestion date (`created_at` → `updated_at`); **no reliable ordering
@@ -307,7 +307,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 - **Only-close-never-widen:** if the loser already carries an EARLIER
   `valid_until`, it is preserved; a resolution must not EXTEND validity. The
   stored value is the inclusive last-valid date (`YYYY-MM-DD`).
-- **Boundary reconciliation with §9 / #324:** `validity_windows_disjoint` uses a
+- **Boundary reconciliation with §9 / athenaeum#324:** `validity_windows_disjoint` uses a
   STRICT `<` on the inclusive `valid_until`, so `loser.valid_until =
   winner.valid_from` leaves the pair **non-disjoint at the boundary day by
   design** (they share that day). Safe because the loser is also `superseded_by`
@@ -316,13 +316,13 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 - **Provenance behavior:** best-effort frontmatter write via
   `_mark_member_frontmatter`; a read/write error is logged and swallowed
   (enactment must never crash the merge pass). Winner file is never mutated.
-- **Follow-up (#329):** generalized this interval-close to non-time scopes
+- **Follow-up (athenaeum#329):** generalized this interval-close to non-time scopes
   (org/locale) via the three-way scope verdict + `scope_*` resolver actions —
   see Section 12.
 
 ---
 
-## 11. Resolver source-precedence taxonomy — channel split (issue #326)
+## 11. Resolver source-precedence taxonomy — channel split (issue athenaeum#326)
 
 - **File:** [`src/athenaeum/resolutions.py`](https://github.com/Kromatic-Innovation/athenaeum/blob/develop/src/athenaeum/resolutions.py)
   — the `_RESOLVE_SYSTEM` prompt's `SOURCE-PRECEDENCE TAXONOMY` block.
@@ -334,19 +334,19 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   are the SourceRef `<type>:<ref>` shorthand's type component (`user:`,
   `linkedin:`, `api:`, `wikipedia:`, `agent-observed:`, `claude:`,
   `script:`, `model-prior:`, `unsourced`).
-- **Change (#326):** issue #326 introduced a NEW tier `model-prior:<model-id>`
+- **Change (athenaeum#326):** issue athenaeum#326 introduced a NEW tier `model-prior:<model-id>`
   ranked BELOW `script:<slug>`. Rationale is locked in
   `docs/provenance-shape.md` §10.1 — a training prior is unverifiable and
   silently stale past the model cutoff, while a pipeline slug at least names
   a repeatable in-tree process.
-- **Change (#328):** issue #328 inserts a NEW tier
+- **Change (athenaeum#328):** issue athenaeum#328 inserts a NEW tier
   `agent-observed:<model>:<session-ref>` at **rank 5** — BELOW
   `wikipedia:<page>` (it is not a curated authority) and ABOVE
   `claude:tier3`/inferred (it is grounded in a real in-session artifact the
   agent READ — file contents or tool output — verifiable against the
   transcript, not an unsupported leap). This shifts `claude:`→6, `script:`→7,
   `model-prior:`→8, `unsourced`→9. The tier is written by the
-  `repair --backfill-sources` pass (issue #328) when it re-classifies a
+  `repair --backfill-sources` pass (issue athenaeum#328) when it re-classifies a
   memory whose source was DEFAULTED to `claude:inferred` and finds the claim
   in a tool-result block. This is a §10.1 LOCK-DISCIPLINE change — the
   taxonomy in `resolutions.py` (`_RESOLVE_SYSTEM`), the
@@ -364,7 +364,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 
 ---
 
-## 12. Scoped claims — three-way overlap verdict + scope-edit actions (issue #329)
+## 12. Scoped claims — three-way overlap verdict + scope-edit actions (issue athenaeum#329)
 
 - **Files:** `src/athenaeum/scoped_claims.py` (poset model + verdict);
   `src/athenaeum/resolutions.py` (`_scope_verdict_proposal` short-circuit,
@@ -373,7 +373,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 - **Companion tests:** `tests/test_scoped_claims.py` (poset, verdict, resolver
   short-circuit, enactment) plus the `ENACTING_ACTIONS` lock in
   `tests/test_enact_resolution.py`.
-- **Model.** #308 gave claims a TIME dimension; #329 generalizes to a small
+- **Model.** athenaeum#308 gave claims a TIME dimension; athenaeum#329 generalizes to a small
   **product poset** over `{org, locale, time}`. Each dimension has TOP =
   *unscoped*; org/locale are **trees** (`kromatic/platform ⊑ kromatic`;
   `en-US ⊑ en`), time is **intervals under inclusion**. The org/locale tree is a
@@ -395,7 +395,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
     returns `None` and the pair falls through to the declared / LLM resolver as a
     genuine contradiction.
 - **Wiring.** `propose_resolution` calls `_scope_verdict_proposal` right after the
-  #324 disjoint-time check and before the declared-relationship + LLM paths. On a
+  athenaeum#324 disjoint-time check and before the declared-relationship + LLM paths. On a
   fresh install with **no `scope:` config** the org/locale coordinates normalize
   to unscoped, so the verdict reduces to time-only and returns `None` for anything
   Section 9 did not already catch — **no default-behavior change**.
@@ -408,7 +408,7 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   disjoint, minus-one-day so both stay live — contrast Section 10's boundary-day
   share, which relies on `superseded_by` for inactivity). Only-close-never-widen.
   Added to `ENACTING_ACTIONS` + `flip_action`; auto-apply threshold 0.90.
-- **Deliberately deferred (design-only, to the #329 ADR):**
+- **Deliberately deferred (design-only, to the athenaeum#329 ADR):**
   - **Time-interval NESTING does not trigger OVERRIDE** — only org/locale
     tree-specificity does. Section 9/#308 shipped a semantic where nested-but-
     overlapping time windows still reach the resolver; auto-promoting a
@@ -418,11 +418,11 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
     caller-context write path; when the pair has no time boundary, `scope_*`
     no-ops (escalates to the human) rather than guessing a coordinate.
   - **Recall `serve --scope` caller-context filter/ranking** and the broader
-    team/multi-tenant scope-IDENTITY system (#314) are out of scope.
+    team/multi-tenant scope-IDENTITY system (athenaeum#314) are out of scope.
 
 ---
 
-## 13. Opinion attribution — evaluative claims are never resolved by precedence (issue #327)
+## 13. Opinion attribution — evaluative claims are never resolved by precedence (issue athenaeum#327)
 
 - **Files:** `src/athenaeum/models.py` (`CLAIM_KINDS`, `parse_claim_kind`,
   `compare_asserters`, `AutoMemoryFile.claim_kind`); `src/athenaeum/claim_kind.py`
@@ -443,13 +443,13 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   routed through the `models.classify` knob), stored in frontmatter, and
   round-tripped byte-for-byte by tier0 passthrough. **Absent → unclassified
   (`""`), fail-open** — the stance short-circuit does not fire and the pair
-  resolves exactly as pre-#327.
+  resolves exactly as pre-athenaeum#327.
 - **Asserter comparison.** `compare_asserters(a, b)` reuses the OIDC-durable
   `asserter_identity_key` (§10 of `provenance-shape.md`) and returns
   **`same` / `different` / `unknown`**. `unknown` when EITHER side has no
   durable identity — the common case, since a Claude session carries no OIDC
   identity. Identity is CAPTURED when a caller/`remember()` supplies an
-  `_asserter` block (issue #326); it is NEVER fabricated from a transcript.
+  `_asserter` block (issue athenaeum#326); it is NEVER fabricated from a transcript.
 - **`_stance_attribution_verdict` short-circuit** (deterministic, **no Opus
   call**). Engages when BOTH sides carry `claim_kind: opinion`, OR the detector
   routed the pair as `conflict_type: stance` AND neither side is EXPLICITLY a

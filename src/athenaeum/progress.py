@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-phase progress heartbeat (issue #398).
+"""Per-phase progress heartbeat (issue athenaeum#398).
 
 The librarian's T3 entity-merge phase and its post-compile phases (C4
-contradiction detection, the #290 wiki-dedup pass, and the #188 re-resolve
+contradiction detection, the athenaeum#290 wiki-dedup pass, and the athenaeum#188 re-resolve
 pass) previously emitted NO per-unit progress logging. When a run wedges in
 one of these phases — e.g. a hung ``claude -p`` detector/resolver subprocess
 — it produces zero log output for hours, so a stall is invisible in the log

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Cross-entity recurring-claim detector (issue #272, slice 1 of #258).
+"""Cross-entity recurring-claim detector (issue athenaeum#272, slice 1 of athenaeum#258).
 
 READ-ONLY. The detector surfaces the SAME claim restated across DIFFERENT
 wiki entities (different files / uids) and emits a report. It mutates
 nothing under ``wiki/``.
 
-Claim unit (issue #262): when an entity carries source ``claim:`` footnotes
+Claim unit (issue athenaeum#262): when an entity carries source ``claim:`` footnotes
 (stamped by ``retire.py`` on move), each footnote claim is one occurrence at
 ``footnote`` granularity. Otherwise the body is split into sentences and each
 sentence is one occurrence at ``sentence`` granularity (a coarse fallback so
@@ -113,7 +113,7 @@ class Group:
 
 
 def _footnote_claims(meta: dict[str, object]) -> list[str]:
-    """Return the source ``claim:`` texts on an entity (issue #262)."""
+    """Return the source ``claim:`` texts on an entity (issue athenaeum#262)."""
     sources = meta.get("sources")
     if not isinstance(sources, list):
         return []
@@ -211,7 +211,7 @@ def extract_claim_occurrences(wiki_root: Path) -> list[Occurrence]:
 
 
 def _group_key(occurrences: list[Occurrence]) -> str:
-    """Stable, order-independent key for a grouped claim set (issue #272).
+    """Stable, order-independent key for a grouped claim set (issue athenaeum#272).
 
     Hashes the SORTED set of normalized claim texts (same normalization as
     :func:`athenaeum.fingerprint.claim_pair_fingerprint`), so a repeated run
