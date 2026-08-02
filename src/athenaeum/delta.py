@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Delta-scoped incremental compile (issue #370 PR2).
+"""Delta-scoped incremental compile (issue athenaeum#370 PR2).
 
 Computes the SUBSET of the auto-memory corpus that a set of changed files can
 affect, so the deterministic ``client=None`` compile path (session_end / ingest
@@ -19,7 +19,7 @@ actually change between the prior report and a full re-cluster — no ANN recall
 gap can silently drop an affected cluster. The by-vector ANN primitive
 :meth:`athenaeum.search.VectorBackend.query_neighbors` is provided for a future
 memory-bounded closure on very large corpora; this exact closure is used by
-default because #370 PR2's mandate is correctness > speed and fetching the
+default because athenaeum#370 PR2's mandate is correctness > speed and fetching the
 stored vectors is cheap (a pure read — never re-embeds).
 
 Fallback triggers (each returns ``None`` from :func:`compute_affected_clusters`

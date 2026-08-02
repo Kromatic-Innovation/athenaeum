@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-cluster "detection incomplete" marker (issue #569, audit finding H6).
+"""Per-cluster "detection incomplete" marker (issue athenaeum#569, audit finding H6).
 
 When a contradiction DETECTOR (:mod:`athenaeum.contradictions`) or RESOLVER
 (:mod:`athenaeum.resolutions`) call gives up after its transient-error retries

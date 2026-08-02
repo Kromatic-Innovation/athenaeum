@@ -398,7 +398,7 @@ def test_default_reconcile_cmd_is_hard_reset_to_origin_ref() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Metadata-drift reconcile (issue #685) — an in-sync HEAD with a stale editable
+# Metadata-drift reconcile (issue athenaeum#685) — an in-sync HEAD with a stale editable
 # install's .dist-info version must be refreshed, or fail loudly.
 # ---------------------------------------------------------------------------
 

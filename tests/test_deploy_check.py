@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the installed-metadata vs pyproject version-drift check (#685)."""
+"""Tests for the installed-metadata vs pyproject version-drift check (athenaeum#685)."""
 
 from __future__ import annotations
 

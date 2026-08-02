@@ -231,7 +231,7 @@ def _quote_subst(m: re.Match) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 3. Legacy bare-slug ``source:`` migration  (issue #97 / design-lock §5)
+# 3. Legacy bare-slug ``source:`` migration  (issue athenaeum#97 / design-lock §5)
 
 # Fixed mapping from the live-tree inventory in
 # ``docs/provenance-shape.md`` §5.1. Both observed bare-slug values are
@@ -395,7 +395,7 @@ def migrate_legacy_source_slugs(
 
 
 # ---------------------------------------------------------------------------
-# 4. Source backfill — re-classify DEFAULTED ``claude:inferred`` (issue #328)
+# 4. Source backfill — re-classify DEFAULTED ``claude:inferred`` (issue athenaeum#328)
 
 # The scalar that :func:`athenaeum.mcp_server.remember` stamps when a caller
 # supplies no ``sources`` (mirrors ``mcp_server._DEFAULT_INFERRED_SOURCE``).
@@ -403,7 +403,7 @@ def migrate_legacy_source_slugs(
 # caller-declared source is never second-guessed.
 _DEFAULTED_INFERRED_SOURCE = "claude:inferred"
 
-# Idempotency marker written on the confirm-inferred path (§3 of the #328
+# Idempotency marker written on the confirm-inferred path (§3 of the athenaeum#328
 # lock). A boolean; presence means "already re-examined, no support found" so
 # the pass skips the memory on every subsequent run WITHOUT changing precedence.
 _INFERRED_VERIFIED_KEY = "inferred_verified"
@@ -411,7 +411,7 @@ _INFERRED_VERIFIED_KEY = "inferred_verified"
 
 @dataclass
 class BackfillReport:
-    """Result of a ``repair --backfill-sources`` scan/apply pass (issue #328).
+    """Result of a ``repair --backfill-sources`` scan/apply pass (issue athenaeum#328).
 
     Attributes:
         files_scanned: total ``*.md`` intake files inspected.
@@ -493,7 +493,7 @@ def _set_frontmatter_scalar(fm: str, key: str, value_literal: str) -> str:
 def _extract_claim(meta: dict, body: str) -> str:
     """Return the claim text to match: ``name``/``title``, else first body line.
 
-    The #328 lock fixes THE CLAIM = title/name, falling back to the first
+    The athenaeum#328 lock fixes THE CLAIM = title/name, falling back to the first
     non-frontmatter line when neither frontmatter key is present.
     """
     for key in ("name", "title"):

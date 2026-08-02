@@ -2,7 +2,7 @@
 """``athenaeum decisions {list,next,count}`` — the one "human decisions needed" list.
 
 Unifies pending **questions** (contradiction detector) and pending **merges**
-(resolver proposals) into a single queue (issue #401). Each item is tagged
+(resolver proposals) into a single queue (issue athenaeum#401). Each item is tagged
 ``type: "question" | "merge"`` and shares the common fields ``id``,
 ``created_at``, ``summary`` (a one-line, answerable question) and
 ``confidence`` (present for merges, ``null`` for questions), plus a
@@ -107,7 +107,7 @@ def _counts(decisions: list[dict]) -> tuple[int, int, int, int, int, str | None]
 
 
 def _cmd_scan_retractions(args: argparse.Namespace) -> int:
-    """Run the retraction cascade (issue #435): flag dependent merges for review.
+    """Run the retraction cascade (issue athenaeum#435): flag dependent merges for review.
 
     Reads the merge-provenance ledger (under ``wiki/``) and the observation
     supersession log (under the contacts/excluded surface) and appends a
@@ -256,7 +256,7 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
                 action="store_true",
                 help=(
                     "Include the (optional) `**Proposed resolution**` block "
-                    "on question items (#126)."
+                    "on question items (athenaeum#126)."
                 ),
             )
 
@@ -284,7 +284,7 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
         "scan-retractions",
         help=(
             "Flag any completed merge that relied on a now-retracted source "
-            "for human review (issue #435). Idempotent; never unmerges."
+            "for human review (issue athenaeum#435). Idempotent; never unmerges."
         ),
     )
     _add_common(scan_p, with_proposal=False)

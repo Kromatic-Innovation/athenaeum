@@ -162,7 +162,7 @@ class TestRecall:
 
 
 # ---------------------------------------------------------------------------
-# Recall provenance/context header (issue #325)
+# Recall provenance/context header (issue athenaeum#325)
 # ---------------------------------------------------------------------------
 
 
@@ -241,7 +241,7 @@ class TestRecallMetadataLines:
 
 
 class TestRecallHeaderRendering:
-    """Integration tests exercising the rendered recall output (#325)."""
+    """Integration tests exercising the rendered recall output (athenaeum#325)."""
 
     def _wiki(self, tmp_path: Path) -> Path:
         wiki = tmp_path / "wiki"
@@ -323,7 +323,7 @@ class TestRecallHeaderRendering:
         assert "**Tags:** plain\n\n" in result
 
     def test_withheld_contested_page_leaks_no_status(self, tmp_path: Path) -> None:
-        # Safety lock (#325 raison d'etre): a restricted caller must not see a
+        # Safety lock (athenaeum#325 raison d'etre): a restricted caller must not see a
         # withheld page's Status line. The Layer-C fail-closed `continue` runs
         # BEFORE the metadata header is built; this pins that ordering so a
         # future refactor moving the header build above the withhold cannot
@@ -359,7 +359,7 @@ class TestRemember:
         assert result.startswith("Saved to")
         # Verify file exists and has content. With no `sources` kwarg
         # the server stamps a default-inferred-source frontmatter
-        # block (issue #90) and the original body lands underneath.
+        # block (issue athenaeum#90) and the original body lands underneath.
         files = list((raw / "claude-session").glob("*.md"))
         assert len(files) == 1
         text = files[0].read_text()
@@ -435,7 +435,7 @@ class TestRemember:
 
 
 class TestRememberSources:
-    """Per-claim provenance (issue #90) on ``remember_write``."""
+    """Per-claim provenance (issue athenaeum#90) on ``remember_write``."""
 
     def test_default_inferred_source_warns(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -503,7 +503,7 @@ class TestRememberSources:
 
     def test_pathological_type_ref_fields(self, tmp_path: Path) -> None:
         # The locked pathological case: a wiki with frontmatter fields
-        # literally named ``type`` and ``ref``. Pre-#96 this was
+        # literally named ``type`` and ``ref``. Pre-athenaeum#96 this was
         # misclassified as a structured single-source dict; now it must
         # be passed via ``_field_sources`` and round-trip intact.
         raw = tmp_path / "raw"
@@ -608,7 +608,7 @@ class TestCreateServer:
 
 
 # ---------------------------------------------------------------------------
-# Pending-questions tools (issue #61)
+# Pending-questions tools (issue athenaeum#61)
 # ---------------------------------------------------------------------------
 
 
@@ -631,7 +631,7 @@ def _seed_pending_wiki(tmp_path: Path, *, answered: bool = False) -> Path:
 
 
 class TestPendingQuestionMCPTools:
-    """The two tools registered in `create_server` for issue #61.
+    """The two tools registered in `create_server` for issue athenaeum#61.
 
     We exercise the underlying module helpers (same semantics as the tools)
     and verify the tools themselves are registered on the FastMCP server.
@@ -705,7 +705,7 @@ class TestPendingQuestionMCPTools:
         assert rq is not None
 
     def test_list_pending_decisions_tool(self, tmp_path: Path) -> None:
-        """`list_pending_decisions` unifies questions + merges (issue #401)."""
+        """`list_pending_decisions` unifies questions + merges (issue athenaeum#401)."""
         pytest.importorskip("fastmcp")
         import asyncio
 
@@ -796,7 +796,7 @@ class TestRecallSearchExtraRoots:
 
 
 # ---------------------------------------------------------------------------
-# Push-metrics instrumentation on the recall path (issue #711)
+# Push-metrics instrumentation on the recall path (issue athenaeum#711)
 # ---------------------------------------------------------------------------
 
 
@@ -902,7 +902,7 @@ class TestCLIServe:
 
 
 # ---------------------------------------------------------------------------
-# M22 (issue #554): every registered MCP tool WRAPPER is invoked via tool.fn().
+# M22 (issue athenaeum#554): every registered MCP tool WRAPPER is invoked via tool.fn().
 # Before this, only 2 of the 11 registered tool bodies were ever exercised; the
 # 9 untested wrappers included every write path (remember, resolve_question,
 # resolve_merge, review_audit_item). Argument marshalling and error-to-string
@@ -979,7 +979,7 @@ class TestAllMcpToolWrappers:
         server = self._server(tmp_path)
         registered = set(self._registered_names(server))
         assert registered == set(self._INVOKE), (
-            "MCP tool set drifted from the invocation map (issue #554 M22): "
+            "MCP tool set drifted from the invocation map (issue athenaeum#554 M22): "
             f"registered-only={registered - set(self._INVOKE)}, "
             f"map-only={set(self._INVOKE) - registered}"
         )

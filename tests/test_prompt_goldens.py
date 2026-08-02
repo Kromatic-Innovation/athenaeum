@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Parametrized golden-snapshot pin over every registered LLM prompt (issue #561).
+"""Parametrized golden-snapshot pin over every registered LLM prompt (issue athenaeum#561).
 
 This subsumes the old single ``_RESOLVE_SYSTEM`` snapshot pin
 (``tests/test_resolve_system_snapshot.py`` / ``tests/data/resolve_system.txt``,

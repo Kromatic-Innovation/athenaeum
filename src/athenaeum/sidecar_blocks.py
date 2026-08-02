@@ -1,4 +1,4 @@
-"""Shared fence-aware splitter for markdown-sidecar files (#527).
+"""Shared fence-aware splitter for markdown-sidecar files (athenaeum#527).
 
 Both :mod:`athenaeum.pending_merges` (``_pending_merges.md``) and
 :mod:`athenaeum.answers` (``_pending_questions.md``) store one record per
@@ -8,12 +8,12 @@ lines must NOT be treated as block boundaries.
 
 Historically each module carried its OWN copy of this splitter, and they
 diverged: ``pending_merges`` gained full fence tracking plus unclosed-fence
-recovery to fix #394, while ``answers`` still split naively on
+recovery to fix athenaeum#394, while ``answers`` still split naively on
 ``startswith("## ")`` and bare ``---``. A ``---`` or ``## `` inside a fenced
 answer body therefore split an ``answers`` block and silently dropped the tail —
-taking a human's answer with it (audit M11 / #527). This module is now the
+taking a human's answer with it (audit M11 / athenaeum#527). This module is now the
 single implementation of that split so the two callers cannot diverge again; the
-#394 fence-tracking fix and its unclosed-fence recovery live here once.
+athenaeum#394 fence-tracking fix and its unclosed-fence recovery live here once.
 
 Callers parameterize the things that genuinely differ between the sidecars:
 
@@ -37,7 +37,7 @@ Callers parameterize the things that genuinely differ between the sidecars:
   ``block_header_re`` when the two coincide (pending merges).
 
 The FENCE tracking and its unclosed-fence recovery — the logic that actually
-diverged and caused the #394/#527 data loss — is shared and identical for both.
+diverged and caused the athenaeum#394/#527 data loss — is shared and identical for both.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def scan_fence_state(line: str, fence_len: int, *, fence_open_re: re.Pattern[str
 
     This is the single fence state machine used by both sidecar splitters and by
     ``pending_merges._parse_block`` so a Draft/answer body's fence boundaries are
-    recognized the same way everywhere (#292/#527).
+    recognized the same way everywhere (athenaeum#292/#527).
     """
     stripped = line.strip()
     if fence_len:
@@ -95,7 +95,7 @@ def split_blocks(
     recovery_header_re: re.Pattern[str] | None = None,
     context: str = "sidecar",
 ) -> list[str]:
-    """Split ``text`` into per-record markdown blocks, fence-aware (#394/#527).
+    """Split ``text`` into per-record markdown blocks, fence-aware (athenaeum#394/#527).
 
     Only a line matching ``block_header_re`` starts a new top-level block. A bare
     ``---`` OUTSIDE a fence ends the current block. While a fence is open (opened

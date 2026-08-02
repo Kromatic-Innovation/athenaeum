@@ -1,0 +1,62 @@
+# public-safe-lint.template.yml — a portable, org-agnostic CI lint template.
+#
+# This template is designed to be copied, as-is, into any open-source
+# repository's own `.github/workflows/` directory, alongside its companion
+# scanner script (copied in unmodified too). It contains no organization-
+# specific data of any kind, by design: it checks only shapes that indicate
+# an accidental personal or local-machine leak, not any particular vendor,
+# company, product, or org name. That is what makes it safe to run
+# unmodified on pull requests from outside contributors, where CI secrets
+# are never available -- a check that depended on an injected list of
+# private terms would be silently inert on exactly those pull requests,
+# which is the population most likely to introduce this kind of leak by
+# accident.
+#
+# What it checks (see the companion scanner script for the exact patterns):
+#   - local absolute filesystem paths (a personal username or home directory
+#     leaking into a public file)
+#   - home-directory-relative paths
+#   - bare numeric issue references with no repository qualifier (ties
+#     public text back to a private issue tracker with no context)
+#   - plus-addressed email aliases (personal test-account leakage)
+#   - personal-attribution phrases
+#
+# Adopt by copying this file and its companion scanner script into a repo's
+# own workflow directory, unmodified.
+#
+# Suppressing a false positive: the scanner supports an optional
+# `.public-safe-lintignore` file, committed at the root of the adopting
+# repo's own tree (never in this template or the scanner script), that
+# exempts specific paths from specific named rules -- see the scanner's
+# header comment for the format. Deciding what to exempt (for example,
+# exempting a repo's own CHANGELOG.md/README.md from `bare-issue-ref`
+# because it cites that repo's own already-public issue history) is a
+# per-repo maintainer policy decision, not a template default -- this
+# template and scanner ship the mechanism only, with no exemptions of their
+# own applied anywhere.
+
+name: Public-Safe Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  public-safe-lint:
+    name: org-agnostic public-safety shapes (local paths, bare issue refs, +alias emails)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # No secrets, no org-specific config, no checkout beyond this repo's
+      # own tree. This step runs identically on a fork PR.
+      - name: Run public-safe-lint scan
+        run: bash public-safe-lint.sh .

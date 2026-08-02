@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Wiki-page dedup pass (issue #290) — L4 domain/pipeline.
+"""Wiki-page dedup pass (issue athenaeum#290) — L4 domain/pipeline.
 
 Contract: clusters already-COMPILED wiki pages (not raw intake) against
 each other and appends a merge proposal to ``wiki/_pending_merges.md``
@@ -57,7 +57,7 @@ Design (see PR body for the full rationale):
   id exists (resolved or not) in ``wiki/_pending_merges.md`` — this
   module does not re-derive that stability logic.
 
-Out of scope (deliberate — see issue #290):
+Out of scope (deliberate — see issue athenaeum#290):
 
 - LLM-based draft synthesis / rich merge rationale.
 - Real contradiction detection beyond the existing cohesion threshold.
@@ -65,7 +65,7 @@ Out of scope (deliberate — see issue #290):
 
 Layering (L4 domain/pipeline). ``wiki_dedupe.py`` imports ``athenaeum.merge``
 and ``athenaeum.pending_merges`` at module TOP level — normal downward
-dependencies; neither imports this module back. After issue #545 dissolved
+dependencies; neither imports this module back. After issue athenaeum#545 dissolved
 the librarian-centered named-8 coupling, ``wiki_dedupe.py`` is NOT part of any
 import SCC. ``librarian.py`` calls into this module only via its own deferred
 import (a one-way edge). The one function-local ``from athenaeum.pending_merges
@@ -109,7 +109,7 @@ log = logging.getLogger(__name__)
 
 # The page types this pass considers. Person wikis, ``wiki/auto-*.md``
 # cluster outputs (already covered by C1-C4), and any other entity type
-# are out of scope for the MVP (issue #290 acceptance criteria).
+# are out of scope for the MVP (issue athenaeum#290 acceptance criteria).
 DEDUPE_CANDIDATE_TYPES: frozenset[str] = frozenset(
     {"concept", "reference", "principle"}
 )
@@ -135,20 +135,20 @@ def discover_wiki_dedupe_candidates(
     :data:`DEDUPE_CANDIDATE_TYPES`. Excludes pages tagged ``archived`` or
     carrying a truthy ``superseded_by`` key — those are already-resolved
     and must not be re-flagged. Also excludes pages carrying a truthy
-    ``pointer_stub`` flag (issue #426) — a stub already points at its
+    ``pointer_stub`` flag (issue athenaeum#426) — a stub already points at its
     authoritative live source and is not merge-eligible (stub hygiene). Also
-    excludes pages carrying a truthy ``pii`` flag (issue #427) —
+    excludes pages carrying a truthy ``pii`` flag (issue athenaeum#427) —
     belt-and-suspenders: a page an operator has hand-flagged as carrying PII
     inline is never proposed as a merge source, even when it is not (yet)
     routed to the excluded storage surface.
 
-    When *config* is provided, the storage-adapter layer (#429) is also
+    When *config* is provided, the storage-adapter layer (athenaeum#429) is also
     consulted: a page whose entity class resolves to a surface with
     ``merge_eligible=False`` is dropped even if it sits in ``wiki/`` and its
     ``type`` is a dedup-candidate type — fail-closed defense-in-depth so a
     class an operator routed to an excluded surface can never be proposed for a
     merge. ``config=None`` (the default) skips this consult entirely, so
-    behavior is byte-identical to the pre-#429 pass for any caller that does not
+    behavior is byte-identical to the pre-athenaeum#429 pass for any caller that does not
     thread config through.
 
     Returns records sorted by filename for deterministic ordering.
@@ -172,12 +172,12 @@ def discover_wiki_dedupe_candidates(
         page_type = str(meta.get("type") or "")
         if page_type not in DEDUPE_CANDIDATE_TYPES:
             continue
-        # #429: honor the storage-adapter corpus policy — a class routed to a
+        # athenaeum#429: honor the storage-adapter corpus policy — a class routed to a
         # non-merge-eligible surface is dropped (fail-closed). No-op by default
         # (every class maps to the wiki surface, merge_eligible=True).
         if config is not None and not is_merge_eligible(page_type, config):
             continue
-        # #427: belt-and-suspenders — a hand-flagged ``pii: true`` page is
+        # athenaeum#427: belt-and-suspenders — a hand-flagged ``pii: true`` page is
         # never a merge source, independent of the storage-adapter policy.
         if is_pii_flagged(meta):
             continue
@@ -188,7 +188,7 @@ def discover_wiki_dedupe_candidates(
             continue
         if meta.get("superseded_by"):
             continue
-        # Issue #426: a pointer stub already points at ITS authoritative live
+        # Issue athenaeum#426: a pointer stub already points at ITS authoritative live
         # source and contributes nothing beyond that one line — it must never
         # be proposed as a merge source (stub hygiene).
         if is_pointer_stub(meta):
@@ -203,7 +203,7 @@ def discover_wiki_dedupe_candidates(
                 memory_type=page_type,
                 name=name,
                 description=description,
-                # Issue #308: populate temporal bounds for consistency with the
+                # Issue athenaeum#308: populate temporal bounds for consistency with the
                 # other AutoMemoryFile construction sites and to close a latent
                 # lockstep gap should this record ever reach is_inactive().
                 valid_from=validity_bound_str(meta, "valid_from"),
@@ -255,7 +255,7 @@ def find_wiki_page_clusters(
     no signal a caller needs.
 
     *config* is threaded through to :func:`discover_wiki_dedupe_candidates` so
-    the storage-adapter merge-eligibility policy (#429) is honored; ``None``
+    the storage-adapter merge-eligibility policy (athenaeum#429) is honored; ``None``
     keeps behavior byte-identical.
     """
     files = discover_wiki_dedupe_candidates(wiki_root, config=config)
@@ -350,7 +350,7 @@ def propose_wiki_page_merges(
         config=resolved_config,
     )
 
-    # Issue #398: this pass (#290) is one of the post-compile dark zones —
+    # Issue athenaeum#398: this pass (athenaeum#290) is one of the post-compile dark zones —
     # a wedge examining a candidate cluster previously produced zero log
     # output. Emit start/done even with zero candidate clusters so a
     # watchdog can see the phase ran.
@@ -382,7 +382,7 @@ def propose_wiki_page_merges(
         # key inside write_pending_merge.
         sources = [str(am.path.resolve()) for am in members]
 
-        # Issue #478: the #400/#421 degenerate-over-cluster suppression gate
+        # Issue athenaeum#478: the athenaeum#400/#421 degenerate-over-cluster suppression gate
         # must run on THIS write path too, not just merge.py's resolver path.
         # ``find_wiki_page_clusters`` uses the SAME single-linkage clusterer
         # (``cluster_auto_memory_files``) that merge.py's own docstring blames
@@ -414,7 +414,7 @@ def propose_wiki_page_merges(
             )
             continue
 
-        # Issue #433: type-compatibility precheck. A cluster spanning >1
+        # Issue athenaeum#433: type-compatibility precheck. A cluster spanning >1
         # distinct memory_class values may not be merged — same-class only
         # (docs/memory-taxonomy.md #3). Rejected BEFORE the merge-target
         # slug/draft body are even computed: a cross-class cluster never
@@ -451,7 +451,7 @@ def propose_wiki_page_merges(
         # Check idempotency BEFORE branching on dry_run — otherwise a
         # dry-run preview reports proposals a real run would silently
         # skip as already-present, which contradicts dry-run's own
-        # "what would a real run do" framing (Quine review of #293).
+        # "what would a real run do" framing (Quine review of athenaeum#293).
         from athenaeum.pending_merges import _make_id, parse_pending_merges
 
         existing_ids = {pm.id for pm in parse_pending_merges(merges_path)}

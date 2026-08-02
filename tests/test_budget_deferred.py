@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #220 — run-level budget exhaustion must leave a paper trail.
+"""Issue athenaeum#220 — run-level budget exhaustion must leave a paper trail.
 
 Covers:
 - Budget trip mid-run → ``wiki/_deferred_work.md`` manifest written listing
@@ -218,10 +218,10 @@ class TestDeferredManifest:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Issue #461, AC4: an empty entity/raw intake must NOT return early
+        """Issue athenaeum#461, AC4: an empty entity/raw intake must NOT return early
         anymore — the auto-memory block (independent of raw entity intake)
-        still runs. Regression guard for the pre-#461 `if not raw_files:
-        ... return 0` early return, which the #461 reorder removed in favor
+        still runs. Regression guard for the pre-athenaeum#461 `if not raw_files:
+        ... return 0` early return, which the athenaeum#461 reorder removed in favor
         of falling through to the (now second) auto-memory block.
         """
         root = _seed_knowledge_root(tmp_path, n_files=0)
@@ -523,7 +523,7 @@ class TestMaxApiCallsPrecedence:
 
 
 # ---------------------------------------------------------------------------
-# Zero-budget startup warning (#235)
+# Zero-budget startup warning (athenaeum#235)
 # ---------------------------------------------------------------------------
 
 
@@ -531,7 +531,7 @@ class TestZeroBudgetStartupWarning:
     """A resolved budget of 0 must be flagged loudly at run start.
 
     Env/yaml ``0`` is a valid defer-everything cap, but it is also the most
-    common accidental misconfiguration — issue #235 requires a prominent
+    common accidental misconfiguration — issue athenaeum#235 requires a prominent
     WARNING at run start so an unintended 0 is diagnosable immediately
     rather than from the DEGRADED summary.
     """
@@ -653,7 +653,7 @@ class TestZeroBudgetStartupWarning:
 
 
 # ---------------------------------------------------------------------------
-# Run-level budget threading (#220 fix round, finding 3)
+# Run-level budget threading (athenaeum#220 fix round, finding 3)
 # ---------------------------------------------------------------------------
 
 
@@ -666,9 +666,9 @@ class TestRunLevelBudgetThreading:
     ) -> None:
         """API calls burned by the entity phase count against max_api_calls.
 
-        Issue #461: the entity phase now runs BEFORE the auto-memory block
+        Issue athenaeum#461: the entity phase now runs BEFORE the auto-memory block
         and gets first claim on the shared run-level budget (inverted from
-        the pre-#461 ordering, where the merge pass ran first and could
+        the pre-athenaeum#461 ordering, where the merge pass ran first and could
         starve the entity loop). The entity stand-in burns the whole budget
         via the threaded run-level TokenUsage; the merge pass must then see
         an already-exhausted budget when it runs afterward.
@@ -682,7 +682,7 @@ class TestRunLevelBudgetThreading:
             "athenaeum.librarian.discover_auto_memory_files",
             lambda *a, **k: [fake_am],
         )
-        # #370 PR2: _run_cluster_pass now returns None (whole-corpus) or the
+        # athenaeum#370 PR2: _run_cluster_pass now returns None (whole-corpus) or the
         # delta affected-id set — not the old int cluster count.
         monkeypatch.setattr(
             "athenaeum.librarian._run_cluster_pass", lambda *a, **k: None
@@ -718,7 +718,7 @@ class TestRunLevelBudgetThreading:
         assert rc == 0
         # The merge pass ran AFTER the entity phase and observed its spend
         # via the shared TokenUsage — proving budget threading survives the
-        # #461 reorder: the entity phase's 6 calls are visible to merge.
+        # athenaeum#461 reorder: the entity phase's 6 calls are visible to merge.
         assert merge_calls == [6]
 
     def test_merge_counts_detector_and_resolver_calls(
@@ -813,7 +813,7 @@ class TestRunLevelBudgetThreading:
         self,
         tmp_path: Path,
     ) -> None:
-        """#239: detector + resolver responses feed token/cache counters
+        """athenaeum#239: detector + resolver responses feed token/cache counters
         into the threaded run-level TokenUsage (not just api_calls), so
         the librarian run summary's cache line reflects this phase."""
         import json
@@ -894,7 +894,7 @@ class TestRunLevelBudgetThreading:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """#239 acceptance: the rendered run-summary cache line shows nonzero
+        """athenaeum#239 acceptance: the rendered run-summary cache line shows nonzero
         cache counters from merge-phase (detector + resolver) traffic alone.
 
         The entity tiers are stubbed to burn ZERO api_calls, so the
@@ -902,12 +902,12 @@ class TestRunLevelBudgetThreading:
         satisfied by the merge phase's attempt counting — pinning that
         resolver-only runs still surface their cache spend in the summary.
 
-        Issue #461: this invariant is preserved by the reorder. The entity
+        Issue athenaeum#461: this invariant is preserved by the reorder. The entity
         phase now runs BEFORE the auto-memory/merge block, but the run-level
-        "Token usage:" line and the #378 spend-ledger write were moved to the
+        "Token usage:" line and the athenaeum#378 spend-ledger write were moved to the
         finalize section (AFTER both phases) precisely so the shared
         ``usage`` still reflects the WHOLE run — including merge-phase
-        detector/resolver traffic — exactly as it did pre-#461.
+        detector/resolver traffic — exactly as it did pre-athenaeum#461.
         """
         import json
         from unittest.mock import MagicMock
@@ -983,12 +983,12 @@ class TestRunLevelBudgetThreading:
 
         # Skip the embedding-backed cluster pass; merge reads the seeded
         # JSONL directly. Entity tiers burn zero API calls.
-        # #370 PR2: _run_cluster_pass now returns None (whole-corpus) or the
+        # athenaeum#370 PR2: _run_cluster_pass now returns None (whole-corpus) or the
         # delta affected-id set — not the old int cluster count.
         monkeypatch.setattr(
             "athenaeum.librarian._run_cluster_pass", lambda *a, **k: None
         )
-        # Issue #461: the entity phase makes zero API calls here; the
+        # Issue athenaeum#461: the entity phase makes zero API calls here; the
         # "Token usage:" gate (``usage.api_calls > 0``) is satisfied by the
         # merge phase's detector+resolver traffic, which is now folded in
         # because the log line moved to finalize (after the merge block).
@@ -1012,8 +1012,8 @@ class TestRunLevelBudgetThreading:
         line = token_lines[0]
         # Gate satisfied purely by merge-phase attempt counts (1 detector
         # + 1 resolver); cache counters rendered nonzero in the summary. The
-        # #461 reorder moved this log line to finalize (after merge), so the
-        # merge-phase spend is still folded in — the #239 guarantee holds.
+        # athenaeum#461 reorder moved this log line to finalize (after merge), so the
+        # merge-phase spend is still folded in — the athenaeum#239 guarantee holds.
         assert "2 API calls" in line, line
         assert "(cache: 1200 written, 2400 read)" in line, line
 
@@ -1103,7 +1103,7 @@ class TestEarlyReturnPathsClearStaleManifest:
 
 
 # ---------------------------------------------------------------------------
-# --strict-budget: opt-in nonzero exit on a budget-tripped run (issue #227)
+# --strict-budget: opt-in nonzero exit on a budget-tripped run (issue athenaeum#227)
 # ---------------------------------------------------------------------------
 
 

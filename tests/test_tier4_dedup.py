@@ -1,4 +1,4 @@
-"""Tests for tier4 source-memory-pair dedup (issue #157).
+"""Tests for tier4 source-memory-pair dedup (issue athenaeum#157).
 
 `tier4_escalate` collapses escalations that share a source-memory pair
 (``Members involved:`` tuple or, when absent, a passage-hash fallback)
@@ -230,13 +230,13 @@ class TestTier4Dedup:
         assert "**Also affects**: Beta" in content
 
     def test_resolved_pair_is_suppressed_not_resurrected(self, tmp_path: Path) -> None:
-        """Issue #198 supersedes the pre-#198 #157 'resurrection' rule.
+        """Issue athenaeum#198 supersedes the pre-athenaeum#198 athenaeum#157 'resurrection' rule.
 
         Previously (``test_resurrection_creates_new_block``) an archived [x]
         block that re-fired produced a brand-new block. With the resolved-
         contradiction fingerprint cache, ``ingest_answers`` records the human
         verdict's fingerprint, so the SAME claim-pair re-firing is SUPPRESSED
-        instead of resurrected — which is the whole point of #198 (a settled
+        instead of resurrected — which is the whole point of athenaeum#198 (a settled
         claim-pair stops re-surfacing as a fresh pending question).
         """
         pending = tmp_path / "_pending_questions.md"
@@ -253,7 +253,7 @@ class TestTier4Dedup:
         # Open file should now be just the header.
         assert "## [" not in pending.read_text()
 
-        # Same pair re-fires — #198 suppresses it (no new block).
+        # Same pair re-fires — athenaeum#198 suppresses it (no new block).
         suppressed = tier4_escalate(
             [_item("Alpha", _desc_with_members("a.md", "b.md"))], pending
         )
@@ -314,7 +314,7 @@ class TestTier4Dedup:
 
 
 # ---------------------------------------------------------------------------
-# Auto-apply (#156) interaction
+# Auto-apply (athenaeum#156) interaction
 # ---------------------------------------------------------------------------
 
 

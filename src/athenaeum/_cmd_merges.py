@@ -2,7 +2,7 @@
 """``athenaeum merges {list,next,count,provenance}`` — pending + executed merges.
 
 The mirror of ``athenaeum questions`` for the resolver's merge-proposal
-sidecar (``wiki/_pending_merges.md``). Before issue #401 merges had **no CLI
+sidecar (``wiki/_pending_merges.md``). Before issue athenaeum#401 merges had **no CLI
 at all** — they were reachable only through the ``list_pending_merges`` MCP
 tool, so a real backlog (34 proposals aged 1–4 weeks, found 2026-07-20) could
 sit unseen because no briefing path could read it.
@@ -18,11 +18,11 @@ Five modes:
 - ``next``        the OLDEST unresolved merge (one block)
 - ``count``       ``N unresolved (oldest: <iso-date>)`` summary
 - ``provenance``  EXECUTED merges from ``wiki/_merge_provenance.jsonl``
-                   (issue #425) — which source pages a merge relied on,
+                   (issue athenaeum#425) — which source pages a merge relied on,
                    queryable by ``--canonical-slug`` / ``--merge-id``.
 - ``revalidate``  re-validate existing unresolved proposals against the
                    CURRENT suppression gate and archive stale ones (issue
-                   #481). Dry-run by default; ``--apply`` writes.
+                   athenaeum#481). Dry-run by default; ``--apply`` writes.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — this
@@ -89,7 +89,7 @@ def _format_provenance_record(record: dict) -> str:
 
 
 def _cmd_revalidate(args: argparse.Namespace) -> int:
-    """``athenaeum merges revalidate [--apply]`` — issue #481.
+    """``athenaeum merges revalidate [--apply]`` — issue athenaeum#481.
 
     Re-validate existing unresolved ``_pending_merges.md`` blocks against the
     CURRENT suppression gate and archive stale ones. Dry-run by default,
@@ -284,7 +284,7 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         "revalidate",
         help=(
             "Re-validate existing unresolved merge proposals against the "
-            "CURRENT suppression gate and archive stale ones (issue #481). "
+            "CURRENT suppression gate and archive stale ones (issue athenaeum#481). "
             "Dry-run by default; pass --apply to write."
         ),
     )
@@ -302,7 +302,7 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         "provenance",
         help=(
             "List EXECUTED merges from `wiki/_merge_provenance.jsonl` "
-            "(issue #425) — which source pages each merge relied on."
+            "(issue athenaeum#425) — which source pages each merge relied on."
         ),
     )
     _add_common(provenance_p)

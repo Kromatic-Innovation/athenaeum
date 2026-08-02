@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the pluggable storage-surface layer (issue #429)."""
+"""Tests for the pluggable storage-surface layer (issue athenaeum#429)."""
 
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ class TestDefaultResolution:
 
 
 # ---------------------------------------------------------------------------
-# Config-driven mapping to the built-in excluded adapter (#427's consumer)
+# Config-driven mapping to the built-in excluded adapter (athenaeum#427's consumer)
 # ---------------------------------------------------------------------------
 
 
@@ -361,14 +361,14 @@ class TestConfigResolvers:
         assert set(resolve_storage_adapters(config)) == {"ok"}
 
     def test_storage_not_seeded_in_defaults(self) -> None:
-        # Issue #231: the code default (empty) must stay reachable — no seed.
+        # Issue athenaeum#231: the code default (empty) must stay reachable — no seed.
         from athenaeum.config import _DEFAULTS
 
         assert "storage" not in _DEFAULTS
 
 
 # ---------------------------------------------------------------------------
-# Functional integration: merge-eligibility gate honors the policy (#429)
+# Functional integration: merge-eligibility gate honors the policy (athenaeum#429)
 # ---------------------------------------------------------------------------
 
 
@@ -419,7 +419,7 @@ class TestMergeGateIntegration:
 
 # ---------------------------------------------------------------------------
 # By-construction exclusion: an excluded surface root is not scanned for
-# embed/recall — the fail-closed mechanism #427 relies on (no core change).
+# embed/recall — the fail-closed mechanism athenaeum#427 relies on (no core change).
 # ---------------------------------------------------------------------------
 
 
@@ -432,7 +432,7 @@ class TestByConstructionExclusion:
         wiki_root = knowledge_root / "wiki"
         _write_page(wiki_root, "public.md", page_type="concept", body="public")
 
-        # An excluded-surface page written OUTSIDE wiki/ (where #427's PII lands).
+        # An excluded-surface page written OUTSIDE wiki/ (where athenaeum#427's PII lands).
         config = {"storage": {"mapping": {"pii": "excluded"}}}
         excluded_root = surface_root_for_class("pii", config, knowledge_root)
         excluded_root.mkdir(parents=True, exist_ok=True)

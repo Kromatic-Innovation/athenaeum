@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-# ── Kill switch (issue #379) ───────────────────────────────────────────────
+# ── Kill switch (issue athenaeum#379) ───────────────────────────────────────────────
 # Honour ~/.cache/athenaeum/disabled (+ ATHENAEUM_DISABLED). Mirrors
 # athenaeum.killswitch.is_disabled("recall"): the "all" scope suppresses the
 # save nudge; the "compile" scope leaves it on. Costs no Python startup.

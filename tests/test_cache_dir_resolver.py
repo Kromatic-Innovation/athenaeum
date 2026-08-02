@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #519/#521 (H9 + L3): a single cache-dir constant + resolver.
+"""Issue athenaeum#519/#521 (H9 + L3): a single cache-dir constant + resolver.
 
 ``athenaeum serve`` used to hardcode ``~/.cache/athenaeum`` and ignore
 ``ATHENAEUM_CACHE_DIR`` — so the compiler could write the index to one place

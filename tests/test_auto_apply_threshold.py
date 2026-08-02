@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for issue #170 — asymmetric auto-apply threshold by action.
+"""Tests for issue athenaeum#170 — asymmetric auto-apply threshold by action.
 
-Lane 4 of the #166 librarian-reasoner improvements epic. The single-scalar
+Lane 4 of the athenaeum#166 librarian-reasoner improvements epic. The single-scalar
 ``resolve.auto_apply_threshold`` is replaced (additively, with backward-compat)
 by a per-action map:
 
@@ -51,7 +51,7 @@ class TestPerActionDefaults:
         assert resolve_auto_apply_threshold_for({}, "propose_merge") is None
 
     def test_correct_a_default_is_0_95(self) -> None:
-        # #166 follow-up: correct ENACTS a deletion on auto-apply — a higher
+        # athenaeum#166 follow-up: correct ENACTS a deletion on auto-apply — a higher
         # destructive bar than the record-only keep_* (0.90).
         assert resolve_auto_apply_threshold_for({}, "correct_a") == 0.95
 
@@ -80,7 +80,7 @@ class TestPerActionDefaults:
         assert resolve_auto_apply_threshold_for({}, "retain_both_with_context") is None
 
     def test_deprecate_both_default_threshold(self) -> None:
-        # Issue #191: deprecate_both is now a known marking action with a
+        # Issue athenaeum#191: deprecate_both is now a known marking action with a
         # 0.90 default (was None / unknown before).
         assert resolve_auto_apply_threshold_for({}, "deprecate_both") == 0.90
 
@@ -104,7 +104,7 @@ class TestLegacyScalarBackwardCompat:
     def test_legacy_scalar_does_not_override_not_a_conflict_default(self) -> None:
         # The legacy scalar was a keep_a/keep_b knob. It does NOT push the
         # not_a_conflict default up to 0.85 — that would defeat the whole
-        # point of #170 (cheaper threshold for false-suppress).
+        # point of athenaeum#170 (cheaper threshold for false-suppress).
         cfg = {"resolve": {"auto_apply_threshold": 0.85}}
         assert resolve_auto_apply_threshold_for(cfg, "not_a_conflict") == 0.75
 
@@ -113,7 +113,7 @@ class TestLegacyScalarBackwardCompat:
         assert resolve_auto_apply_threshold_for(cfg, "propose_merge") is None
 
     def test_legacy_scalar_does_not_apply_to_correct_or_forget(self) -> None:
-        # correct/forget are NEW actions — no pre-#170 config references
+        # correct/forget are NEW actions — no pre-athenaeum#170 config references
         # them, so the legacy scalar must NOT pull their threshold down to
         # 0.85. They keep the per-action default (0.95 — the destructive bar).
         cfg = {"resolve": {"auto_apply_threshold": 0.85}}
@@ -125,7 +125,7 @@ class TestLegacyScalarBackwardCompat:
 
 class TestLegacyEnvVarBackwardCompat:
     """The legacy ``ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD`` env var must
-    still gate ``keep_a`` / ``keep_b`` post-#170. Pre-#170 the env-only path
+    still gate ``keep_a`` / ``keep_b`` post-athenaeum#170. Pre-athenaeum#170 the env-only path
     Just Worked; silently dropping it would be a regression for operators
     who set the override at the shell without touching the yaml."""
 
@@ -215,7 +215,7 @@ class TestPerActionOverride:
 
     def test_non_numeric_error_wording_not_out_of_range(self) -> None:
         """A non-numeric value should say "not a numeric value", not
-        "out of range" — the latter implies a numeric typo (issue #179).
+        "out of range" — the latter implies a numeric typo (issue athenaeum#179).
         """
         cfg = {
             "resolve": {
@@ -228,7 +228,7 @@ class TestPerActionOverride:
     def test_per_action_override_isolates_from_invalid_legacy_scalar(self) -> None:
         """Per-action override should win without consulting the legacy
         scalar. An invalid legacy scalar must NOT raise when a per-action
-        override is set for the queried action (issue #179, Quine).
+        override is set for the queried action (issue athenaeum#179, Quine).
         """
         cfg = {
             "resolve": {
@@ -375,7 +375,7 @@ class TestTier4PerActionGate:
     def test_keep_a_at_legacy_scalar_threshold_still_works(
         self, tmp_path: Path
     ) -> None:
-        """Pre-#170 configs keep working: legacy scalar gates keep_a."""
+        """Pre-athenaeum#170 configs keep working: legacy scalar gates keep_a."""
         pending = tmp_path / "_pending_questions.md"
         cfg = {"resolve": {"auto_apply": True, "auto_apply_threshold": 0.85}}
         item = _escalation("LegacyEntity", _proposal("keep_a", 0.86))
@@ -391,7 +391,7 @@ class TestTier4PerActionGate:
     def test_correct_forget_auto_apply_above_threshold(
         self, action: str, tmp_path: Path
     ) -> None:
-        """#166 follow-up: correct/forget auto-apply at confidence >= 0.95."""
+        """athenaeum#166 follow-up: correct/forget auto-apply at confidence >= 0.95."""
         pending = tmp_path / "_pending_questions.md"
         cfg = {"resolve": {"auto_apply": True}}  # defaults — 0.95 floor.
         item = _escalation(f"{action}Entity", _proposal(action, 0.96))
@@ -500,22 +500,22 @@ class TestModuleConstants:
             "not_a_conflict": 0.75,
             "keep_a": 0.90,
             "keep_b": 0.90,
-            # Issue #191: deprecate_both MARKS both members (non-destructive)
+            # Issue athenaeum#191: deprecate_both MARKS both members (non-destructive)
             # at the 0.90 record-aligned bar, below the 0.95 destructive bar.
             "deprecate_both": 0.90,
-            # #166 follow-up: correct/forget ENACT a deletion on auto-apply,
+            # athenaeum#166 follow-up: correct/forget ENACT a deletion on auto-apply,
             # so they carry a higher destructive bar (0.95) than the
             # record-only keep_a/keep_b (0.90).
             "correct_a": 0.95,
             "correct_b": 0.95,
             "forget_a": 0.95,
             "forget_b": 0.95,
-            # Issue #329: scope_a/scope_b NARROW the named side's scope
+            # Issue athenaeum#329: scope_a/scope_b NARROW the named side's scope
             # (non-destructive — both members stay active), aligned with the
             # 0.90 record/mark bar, below the 0.95 destructive-delete bar.
             "scope_a": 0.90,
             "scope_b": 0.90,
-            # Issue #327: attribute_both keeps BOTH opinion members active with
+            # Issue athenaeum#327: attribute_both keeps BOTH opinion members active with
             # explicit attribution (non-destructive), aligned with the 0.90
             # record/mark bar.
             "attribute_both": 0.90,

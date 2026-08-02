@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum outbound-lint`` — outbound-draft PII lint CLI (issue #455).
+"""``athenaeum outbound-lint`` — outbound-draft PII lint CLI (issue athenaeum#455).
 
 Mirrors ``athenaeum authority`` / ``athenaeum merges`` in shape: a thin CLI
 dispatcher over the library functions in :mod:`athenaeum.outbound_pii`, with no
@@ -108,12 +108,12 @@ def cmd_outbound(args: argparse.Namespace) -> int:
 
 
 def add_outbound_subparser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``athenaeum outbound-lint`` on ``subparsers`` (issue #455)."""
+    """Register ``athenaeum outbound-lint`` on ``subparsers`` (issue athenaeum#455)."""
     parser = subparsers.add_parser(
         "outbound-lint",
         help="Scan outbound-destined text for PII (emails/phones) before it "
         "ships; flag findings (default) or --redact them. Offline, "
-        "deterministic (issue #455).",
+        "deterministic (issue athenaeum#455).",
     )
 
     src = parser.add_mutually_exclusive_group()

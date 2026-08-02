@@ -1,4 +1,4 @@
-"""Tests for the auto-memory prune driver (issue #278, Part 2).
+"""Tests for the auto-memory prune driver (issue athenaeum#278, Part 2).
 
 Acceptance:
   - dry-run (``build_prune_report``) emits a precise kill-list + retained-list
@@ -367,7 +367,7 @@ def _knowledge_with_dangling_index(tmp_path: Path) -> Path:
 
 
 class TestPruneIndexCli:
-    """Issue #388: ``auto-memory prune-index`` backfill CLI."""
+    """Issue athenaeum#388: ``auto-memory prune-index`` backfill CLI."""
 
     def test_dry_run_lists_dangling_exit_2(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

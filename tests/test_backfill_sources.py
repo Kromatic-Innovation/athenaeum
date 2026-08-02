@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the #328 source-backfill pass (``repair --backfill-sources``).
+"""Tests for the athenaeum#328 source-backfill pass (``repair --backfill-sources``).
 
 Covers :func:`athenaeum.transcript_verify.classify_backfill_claim` and
 :func:`athenaeum.repair.backfill_sources`. Every test injects a synthetic
@@ -484,7 +484,7 @@ class TestAsserterPopulation:
             session_id="b200",
             turn=1,
         )
-        # No asserter supplied — on_behalf_of must stay absent (the #327 fallback).
+        # No asserter supplied — on_behalf_of must stay absent (the athenaeum#327 fallback).
         backfill_sources(am, projects_root=pr, apply=True, asserter=None)
         assert "on_behalf_of" not in _meta(path)
 

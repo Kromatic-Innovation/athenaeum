@@ -84,7 +84,7 @@ class TestDiscoverRawFiles:
         assert ".gitkeep" not in names
 
     def test_skips_answers_source(self, tmp_path: Path) -> None:
-        """Issue #414: raw/answers/*.md are resolution OUTPUT, not intake.
+        """Issue athenaeum#414: raw/answers/*.md are resolution OUTPUT, not intake.
 
         Re-discovering them re-feeds already-settled rulings through tier1-2
         classification and tier4 contradiction escalation, so the same ruling
@@ -369,7 +369,7 @@ class TestTier0Passthrough:
         assert "  current_title: linkedin:sourced-sam-1234" in out
 
     def test_per_value_field_sources_round_trip(self, tmp_path: Path) -> None:
-        """Per-value field_sources list shape (#102) must round-trip
+        """Per-value field_sources list shape (athenaeum#102) must round-trip
         byte-for-byte through tier0_passthrough — the shape contract in
         docs/provenance-shape.md §3."""
         from athenaeum.librarian import tier0_passthrough
@@ -425,7 +425,7 @@ class TestTier0Passthrough:
 
 
 class TestTier0HandleUpsert:
-    """Deterministic source-handle seed onto an EXISTING entity (issue #486).
+    """Deterministic source-handle seed onto an EXISTING entity (issue athenaeum#486).
 
     The end-to-end round-trip (raw intake → compile → frontmatter → registry)
     and idempotency are covered in ``tests/test_registry.py``; these lock the
@@ -551,7 +551,7 @@ class TestTier0HandleUpsert:
         )
         assert tier0_handle_upsert(raw_bad, index, wiki, ["company"]) is None
 
-    # --- #692: a seed with source handles + type/name but NO uid must resolve
+    # --- athenaeum#692: a seed with source handles + type/name but NO uid must resolve
     # the existing entity by name and land as frontmatter, not degrade to prose.
 
     def test_uid_less_seed_resolves_by_name_and_merges(self, tmp_path: Path) -> None:
@@ -616,7 +616,7 @@ class TestTier0HandleUpsert:
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A handle seed that resolves to no existing entity fails LOUDLY (WARNING)
-        rather than silently degrading to prose — the #692 defect."""
+        rather than silently degrading to prose — the athenaeum#692 defect."""
         import logging
 
         from athenaeum.librarian import tier0_handle_upsert
@@ -837,7 +837,7 @@ class TestRunIntegration:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Issue #300 follow-up (#304): a raw file embedding its own
+        """Issue athenaeum#300 follow-up (athenaeum#304): a raw file embedding its own
         self-confirmation claim must reach Tier 2 classify with the
         deterministic warning prepended -- not the bare unflagged claim.
         """
@@ -1004,7 +1004,7 @@ class TestRunIntegration:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Issue #310 / #490 (slice A): run() surfaces a flagged page in the
+        """Issue athenaeum#310 / athenaeum#490 (slice A): run() surfaces a flagged page in the
         single aggregated oversized-pages WARNING (non-fatal). With one page
         over the flag, exactly one such WARNING names it."""
         import logging
@@ -1048,7 +1048,7 @@ class TestRunIntegration:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Issue #490 (slice A) / #310: with several pages over the flag,
+        """Issue athenaeum#490 (slice A) / athenaeum#310: with several pages over the flag,
         run() emits exactly ONE aggregated WARNING carrying the count and
         every page name — not one line per page (which buried a ~35-page
         corpus's log)."""
@@ -1098,7 +1098,7 @@ class TestRunIntegration:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Issue #481: a run surfaces stale pending-merge proposals the current
+        """Issue athenaeum#481: a run surfaces stale pending-merge proposals the current
         gate would retire with a WARNING naming the remedy — WITHOUT mutating
         the queue (the nightly advisor runs dry-run)."""
         import logging
@@ -1154,7 +1154,7 @@ class TestRunIntegration:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Issue #310: a scan failure must never break a run (non-fatal degrade)."""
+        """Issue athenaeum#310: a scan failure must never break a run (non-fatal degrade)."""
         import logging
 
         import anthropic as anthropic_mod
@@ -1193,12 +1193,12 @@ class TestRunIntegration:
 
 
 # ---------------------------------------------------------------------------
-# Module docstring model defaults reference the constants, not literals (#686)
+# Module docstring model defaults reference the constants, not literals (athenaeum#686)
 # ---------------------------------------------------------------------------
 
 
 def test_module_docstring_references_model_constants_not_literals() -> None:
-    """#686: the librarian env-var docstring documents the Tier-2/Tier-3 model
+    """athenaeum#686: the librarian env-var docstring documents the Tier-2/Tier-3 model
     defaults by pointing at the DEFAULT_*_MODEL constants (the authority) rather
     than restating their values, so it cannot silently drift again — which is
     how it came to document `claude-sonnet-4-6` while `tiers.DEFAULT_WRITE_MODEL`

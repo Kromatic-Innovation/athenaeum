@@ -15,7 +15,7 @@ import pytest
 from athenaeum import query_topics
 from tests.conftest import FakeLLMClient, make_llm_response, make_llm_usage
 
-# Issue #554 (L11): _mock_response kept as a thin alias of the shared
+# Issue athenaeum#554 (L11): _mock_response kept as a thin alias of the shared
 # make_llm_response helper — every call site below still reads
 # `_mock_response(text)`.
 _mock_response = make_llm_response
@@ -78,7 +78,7 @@ def test_returns_empty_when_api_raises(
 def test_ledger_failure_logs_debug_not_fully_silent(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Issue #540 (L19): a spend-ledger failure on the recall hot path must not
+    # Issue athenaeum#540 (L19): a spend-ledger failure on the recall hot path must not
     # be FULLY silent. The swallow is correct (a ledger hiccup must not break
     # the 3s recall path), but it must emit at least a DEBUG line so a recurring
     # failure is diagnosable instead of vanishing without a trace.
@@ -164,7 +164,7 @@ def test_respects_topic_model_env_override(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 # ---------------------------------------------------------------------------
-# Provider seam routing (issue #380) — query_topics must go through the
+# Provider seam routing (issue athenaeum#380) — query_topics must go through the
 # factory so ``llm.provider: claude-cli`` moves it to the subscription and no
 # call site can bypass ``build_llm_client`` again.
 # ---------------------------------------------------------------------------
@@ -210,7 +210,7 @@ def test_api_backend_preserves_timeout_and_no_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """On the api backend the factory must preserve the 3s hook timeout and
-    max_retries=0 — a per-turn hook must never gain retries (issue #380)."""
+    max_retries=0 — a per-turn hook must never gain retries (issue athenaeum#380)."""
     monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
@@ -232,14 +232,14 @@ def test_returns_empty_when_factory_returns_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """api backend with no key -> build_llm_client returns None -> [] (the
-    regex-extractor fallback), byte-for-byte the pre-#380 behaviour."""
+    regex-extractor fallback), byte-for-byte the pre-athenaeum#380 behaviour."""
     monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert query_topics.extract_topics("Tell me about Return Path") == []
 
 
 def test_no_direct_anthropic_construction_outside_provider() -> None:
-    """Durable guard (issue #380): the ONLY place an ``anthropic.Anthropic``
+    """Durable guard (issue athenaeum#380): the ONLY place an ``anthropic.Anthropic``
     SDK client may be constructed is ``provider.build_llm_client``. Every other
     call site must route through the factory, so a metered-API bypass can never
     be reintroduced invisibly. This is the real fix — not the one call site."""
@@ -269,7 +269,7 @@ def test_no_direct_anthropic_construction_outside_provider() -> None:
 
 
 # ---------------------------------------------------------------------------
-# M16 (#607): the greedy-regex parse is replaced by json_utils.extract_json_array.
+# M16 (athenaeum#607): the greedy-regex parse is replaced by json_utils.extract_json_array.
 # A genuine parse miss now emits a WARNING (a malformed topic-model regime must
 # be visible); a legitimately-empty [] answer stays quiet.
 # ---------------------------------------------------------------------------

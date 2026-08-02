@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Fail if any ``ATHENAEUM_*`` env var read by ``src/`` is undocumented (issue #688).
+"""Fail if any ``ATHENAEUM_*`` env var read by ``src/`` is undocumented (issue athenaeum#688).
 
 ~19 per-stage LLM tuning env vars were read by the code and documented nowhere,
 because prose ("document new env vars") does not enforce itself. This check does:
@@ -39,12 +39,12 @@ SRC_DIR = REPO_ROOT / "src"
 CONFIG_DOC = REPO_ROOT / "docs" / "configuration.md"
 
 #: Digit-aware — the reasoning-tier vars carry a numeric tier (`T1`/`T2`), which a
-#: `[A-Z_]+` scan silently truncates (issue #688).
+#: `[A-Z_]+` scan silently truncates (issue athenaeum#688).
 _ENV_RE = re.compile(r"ATHENAEUM_[A-Z0-9_]+")
 
 #: Deliberately-internal / not-operator-facing vars that are intentionally NOT in
 #: docs/configuration.md. Each MUST carry a one-line reason — never a silent
-#: exclusion (issue #688). Empty today: every ATHENAEUM_* read by src/ is
+#: exclusion (issue athenaeum#688). Empty today: every ATHENAEUM_* read by src/ is
 #: operator-facing and documented.
 ALLOWLIST: dict[str, str] = {}
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Cross-scope contradiction detection helpers (issue #125, #81-A).
+"""Cross-scope contradiction detection helpers (issue athenaeum#125, athenaeum#81-A).
 
 The base C4 detector (:mod:`athenaeum.contradictions`) operates on one
 cluster at a time. Each cluster is scoped to a single ``raw/auto-memory/``
@@ -13,7 +13,7 @@ two manifestations the merge pipeline still has to catch:
    them, so the detector never sees them.
 2. **New-intake-vs-wiki post-merge** — a new raw entry can contradict a
    fact already moved into a ``wiki/auto-*.md`` entry. After retire-on-move
-   (#261) the raw original of the wiki fact is gone, so the comparison has
+   (athenaeum#261) the raw original of the wiki fact is gone, so the comparison has
    to reach the wiki side directly.
 
 This module adds two cooperative passes the merge orchestrator can
@@ -33,7 +33,7 @@ toggle in via ``ATHENAEUM_CROSS_SCOPE_MODE``:
   pseudo-cluster. Embeddings come from the recall index — we do NOT
   open a second chromadb collection.
 
-  Issue #262 (slice C of #259): the sweep no longer cross-products
+  Issue athenaeum#262 (slice C of athenaeum#259): the sweep no longer cross-products
   ``wiki/**`` against itself. The wiki is settled long-term memory; with
   move-then-retire the granular claim a future memory must diff against
   now lives on the wiki fact's FOOTNOTE, so re-detection only needs to
@@ -50,13 +50,13 @@ toggle in via ``ATHENAEUM_CROSS_SCOPE_MODE``:
 
   See ``require_raw_side``.
 
-Known limitations (accepted trade-offs for this slice, per #259):
+Known limitations (accepted trade-offs for this slice, per athenaeum#259):
 
 - **Wiki-vs-wiki drift (#2).** Two facts that live only in the wiki (their
   raw originals retired) and never attract a new topically-similar raw
   intake are no longer compared against each other, so a contradiction that
   emerges purely between two settled wiki facts will not be re-detected.
-  Accepted: re-detection is intake-driven by design (#259).
+  Accepted: re-detection is intake-driven by design (athenaeum#259).
 - **Page-level retrieval granularity (#6).** Candidate retrieval embeds the
   whole wiki PAGE, not each footnote. A new claim that contradicts a single
   footnote buried in a large multi-fact page may not clear the page-level
@@ -117,7 +117,7 @@ DEFAULT_SIMILARITY_THRESHOLD = 0.85
 
 # Sentinel ``origin_scope`` stamped on wiki entries inside the similarity
 # sweep. A candidate pair where BOTH sides carry this scope is a
-# wiki-vs-wiki pair — dropped by default under issue #262 (see the
+# wiki-vs-wiki pair — dropped by default under issue athenaeum#262 (see the
 # ``require_raw_side`` argument of :func:`cross_scope_similarity_pairs`).
 WIKI_SCOPE = "<wiki>"
 
@@ -377,7 +377,7 @@ def cross_scope_similarity_pairs(
         wiki_files: Optional list of compiled ``wiki/auto-*.md`` paths to
             include in the sweep so a NEW raw intake claim can be diffed
             against the matching (topically-similar) wiki entry after the
-            wiki fact's raw original was retired on move (#261).
+            wiki fact's raw original was retired on move (athenaeum#261).
         wiki_root: Wiki root directory (used to compute recall-index ids
             for ``wiki_files``). Required if ``wiki_files`` is non-empty.
         extra_roots: Same list passed to :mod:`athenaeum.clusters` —
@@ -388,7 +388,7 @@ def cross_scope_similarity_pairs(
             pairs already contained in a single cluster — these are
             filtered out so the per-scope pass's coverage isn't repeated.
             Order-insensitive (we sort the key).
-        require_raw_side: Issue #262 — when True (default), a candidate pair
+        require_raw_side: Issue athenaeum#262 — when True (default), a candidate pair
             where BOTH sides are wiki entries (:data:`WIKI_SCOPE`) is
             dropped. The wiki is settled long-term memory whose granular
             diff target now lives on the fact's footnote, so re-detection
@@ -420,7 +420,7 @@ def cross_scope_similarity_pairs(
         if idx is None:
             continue
         id_to_entry[idx] = (am.path, am.origin_scope)
-    # Issue #262: with ``require_raw_side`` every candidate pair must have a raw
+    # Issue athenaeum#262: with ``require_raw_side`` every candidate pair must have a raw
     # side. When there is NO raw intake at all, no pair can qualify — so
     # short-circuit BEFORE adding wiki entries, fetching their embeddings, and
     # running the O(N²) cosine cross-product. This makes a zero-intake night do
@@ -479,7 +479,7 @@ def cross_scope_similarity_pairs(
             sim = cosine(vec_i, vec_j)
             if sim < threshold:
                 continue
-            # Issue #262: drop wiki-vs-wiki pairs. Re-detection targets new
+            # Issue athenaeum#262: drop wiki-vs-wiki pairs. Re-detection targets new
             # raw intake against the matching wiki footnote, not a full
             # wiki×wiki cross-product, so a pair with no raw side carries no
             # new claim to adjudicate — skipping it is the O(corpus²)→
@@ -528,7 +528,7 @@ def candidate_to_auto_memory_files(
             name = str(meta.get("name", "") or "")
             description = str(meta.get("description", "") or "")
             memory_type = str(meta.get("type", "unknown") or "unknown")
-        # Lane 1 / #167: thread declared refines/supersedes so the
+        # Lane 1 / athenaeum#167: thread declared refines/supersedes so the
         # similarity sweep honors declarations identically to the
         # primary cluster pass.
         try:
@@ -542,9 +542,9 @@ def candidate_to_auto_memory_files(
             )
             refines = []
             supersedes = []
-        # Issue #181: same self-reference lint as discover_auto_memory_files.
+        # Issue athenaeum#181: same self-reference lint as discover_auto_memory_files.
         refines, supersedes = _strip_self_reference(name, refines, supersedes, path)
-        # Issue #191: non-destructive inactive markers (keep_*/deprecate_both).
+        # Issue athenaeum#191: non-destructive inactive markers (keep_*/deprecate_both).
         meta_for_markers = meta if isinstance(meta, dict) else None
         out.append(
             AutoMemoryFile(
@@ -557,7 +557,7 @@ def candidate_to_auto_memory_files(
                 supersedes=supersedes,
                 superseded_by=parse_superseded_by(meta_for_markers),
                 deprecated=parse_deprecated(meta_for_markers),
-                # Issue #308: claim-level temporal validity bounds.
+                # Issue athenaeum#308: claim-level temporal validity bounds.
                 valid_from=validity_bound_str(meta_for_markers, "valid_from"),
                 valid_until=validity_bound_str(meta_for_markers, "valid_until"),
             )

@@ -1,6 +1,6 @@
-"""Tests for the opt-in pre-run ``git pull`` hook (issue #399).
+"""Tests for the opt-in pre-run ``git pull`` hook (issue athenaeum#399).
 
-Symmetric to the post-run push (issue #284, ``tests/test_librarian_push.py``):
+Symmetric to the post-run push (issue athenaeum#284, ``tests/test_librarian_push.py``):
 the knowledge repo should be git-synced around every librarian run — pulled
 BEFORE so the run starts from origin's latest, pushed AFTER so raw intake +
 compiled outcomes land on GitHub. This file covers the pull half only.
@@ -8,7 +8,7 @@ compiled outcomes land on GitHub. This file covers the pull half only.
 Covers each acceptance criterion:
 
 - Default OFF (regression test): a normal run behaves byte-identically to
-  pre-#399 (no pull).
+  pre-athenaeum#399 (no pull).
 - Enabled + real run → pull invoked (subprocess mocked) before head capture.
 - ``--dry-run`` → no pull even when enabled.
 - No ``.git`` → no pull, warning logged.
@@ -328,7 +328,7 @@ class TestRunPullIntegration:
     def test_default_off_no_pull(
         self, pull_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Regression test: byte-identical to pre-#399 when unset.
+        # Regression test: byte-identical to pre-athenaeum#399 when unset.
         from athenaeum.librarian import run
 
         calls = _patch_git_pull(monkeypatch)

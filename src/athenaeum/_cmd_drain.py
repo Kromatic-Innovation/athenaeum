@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum drain`` — one-command supervised API+batch backlog drain (issue #470).
+"""``athenaeum drain`` — one-command supervised API+batch backlog drain (issue athenaeum#470).
 
 A thin CLI wrapper over :func:`athenaeum.drain.run_drain`: it runs the pre-flight
 guards (API key present, no finite deadline, cost confirmation), prints an
@@ -37,14 +37,14 @@ def _positive_float(value: str) -> float:
 
 
 def add_drain_subparser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``athenaeum drain`` and its flags on *subparsers* (issue #470)."""
+    """Register ``athenaeum drain`` and its flags on *subparsers* (issue athenaeum#470)."""
     from athenaeum._cli_shared import _add_lock_args, _positive_int
 
     parser = subparsers.add_parser(
         "drain",
         help="Supervised API+batch drain of the raw-intake backlog (cost-guarded)",
         description=(
-            "Loop intake windows through the API + Batch path (issue #236, 50% "
+            "Loop intake windows through the API + Batch path (issue athenaeum#236, 50% "
             "token discount) until the raw backlog empties or the cumulative "
             "--max-usd ceiling trips. Forces provider=api, batch mode, and an "
             "unbounded run (batch block-polls; a finite deadline is the cwc#615 "
@@ -58,7 +58,7 @@ def add_drain_subparser(subparsers: argparse._SubParsersAction) -> None:
         required=True,
         metavar="N",
         help="Mandatory cost ceiling in USD applied CUMULATIVELY across the whole "
-        "drain (not per window). Maps onto the #378 spend.max_usd_per_run ceiling "
+        "drain (not per window). Maps onto the athenaeum#378 spend.max_usd_per_run ceiling "
         "for each window as the remaining budget.",
     )
     parser.add_argument(
@@ -101,7 +101,7 @@ def add_drain_subparser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def cmd_drain(args: argparse.Namespace) -> int:
-    """Handle ``athenaeum drain`` (issue #470). Returns a process exit code."""
+    """Handle ``athenaeum drain`` (issue athenaeum#470). Returns a process exit code."""
     from athenaeum import drain, drain_advisor, spend
     from athenaeum._cli_shared import _acquire_or_exit
     from athenaeum.config import load_config

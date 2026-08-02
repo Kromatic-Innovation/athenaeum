@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for `athenaeum push-metrics {baseline,coverage-audit}` (issue #711)."""
+"""Tests for `athenaeum push-metrics {baseline,coverage-audit}` (issue athenaeum#711)."""
 
 from __future__ import annotations
 
@@ -141,7 +141,7 @@ def test_no_subcommand_prints_usage(tmp_path: Path) -> None:
 
 
 def test_parser_tree_binds_func_for_push_metrics_subcommands() -> None:
-    """Guards the #553 dispatch invariant for the new subcommand tree.
+    """Guards the athenaeum#553 dispatch invariant for the new subcommand tree.
 
     The generic parser-tree walk in ``test_cli.py`` already asserts this for
     every registered subcommand; this test additionally pins the two leaves

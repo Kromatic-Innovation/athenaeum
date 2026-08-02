@@ -1,4 +1,4 @@
-"""Tests for per-scope MEMORY.md index maintenance (issue #388).
+"""Tests for per-scope MEMORY.md index maintenance (issue athenaeum#388).
 
 Covers the two layers:
   - the pure parsing primitives (:func:`index_line_target`,
@@ -193,7 +193,7 @@ class TestApplyPruneIndex:
         # One labeled commit touching only the two rewritten indexes.
         show = _git(kr, "show", "--stat", "--format=%s", "HEAD")
         assert "prune 3 dangling MEMORY.md pointer(s)" in show.stdout
-        assert "#388" in show.stdout
+        assert "athenaeum#388" in show.stdout
         assert _git(kr, "status", "--porcelain").stdout.strip() == ""
 
     def test_dangling_line_is_git_recoverable(self, knowledge_with_dangling: Path) -> None:

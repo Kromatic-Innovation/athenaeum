@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the push-precision + coverage baseline instrument (issue #711).
+"""Tests for the push-precision + coverage baseline instrument (issue athenaeum#711).
 
 Covers: push-record shape and redaction (no content, no personal data, opaque
 uid never a name-derived slug), precision computation, the coverage worksheet,

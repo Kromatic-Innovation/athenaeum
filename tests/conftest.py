@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 import pytest
 
-# Issue #554 (L11) — re-export RecordingClient so the record/replay eval
+# Issue athenaeum#554 (L11) — re-export RecordingClient so the record/replay eval
 # double is importable from a single, discoverable location alongside the
 # canned-response unit double below (``from tests.conftest import
 # RecordingClient``). RecordingClient wraps a REAL anthropic client and
@@ -47,7 +47,7 @@ def make_llm_usage(
 
 
 class FakeLLMClient:
-    """Canonical anthropic-shaped test double (issue #554, L11).
+    """Canonical anthropic-shaped test double (issue athenaeum#554, L11).
 
     One shared implementation of the ``client.messages.create(**params)``
     slice the athenaeum call sites use, so the ~13 ad-hoc ``_FakeClient``
@@ -71,7 +71,7 @@ class FakeLLMClient:
     ``create`` invocation, in order) and ``self.client_kwargs`` (the kwargs
     the fake was constructed with, e.g. ``api_key``/``max_retries``/
     ``timeout``, for tests asserting client-construction args like
-    ``captured["__client_kwargs__"]["api_key"]`` in the pre-#554 doubles).
+    ``captured["__client_kwargs__"]["api_key"]`` in the pre-athenaeum#554 doubles).
     """
 
     def __init__(

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Conflict-resolution lock suite (issue #91).
+"""Conflict-resolution lock suite (issue athenaeum#91).
 
 Pins the CURRENT behavior of every conflict-resolving code path under
 ``src/athenaeum/`` as documented in ``docs/conflict-resolution.md``. These
@@ -7,7 +7,7 @@ tests are intentionally behavioral — when an audit found surprising or
 buggy behavior, the test still asserts what the code DOES today, and the
 surprise is filed as a separate issue (linked in the PR body).
 
-Coverage targets the seven in-tree resolvers listed in #91:
+Coverage targets the seven in-tree resolvers listed in athenaeum#91:
 
 1. ``librarian.tier0_passthrough`` — skip-on-conflict eligibility gate.
 2. ``tiers.tier3_create`` — no-conflict-by-construction.
@@ -182,7 +182,7 @@ class TestTier0PassthroughSkipOnConflict:
         assert entity is not None
         out = (wiki / "newuid01-alice.md").read_text(encoding="utf-8")
         meta, body = parse_frontmatter(out)
-        # Custom-namespace fields preserved byte-for-byte (post-#90 contract)
+        # Custom-namespace fields preserved byte-for-byte (post-athenaeum#90 contract)
         assert meta["linkedin_url"] == "https://linkedin.com/in/alice"
         assert meta["field_sources"] == {"linkedin_url": "api:apollo:2025-01-01"}
         # updated stamped to today; this is the documented one mutation
@@ -319,7 +319,7 @@ class TestTier3WriteAtomicity:
                 observations="new info B",
             ),
         ]
-        # Issue #469: merge responses are anchored edit ops (a replace on the
+        # Issue athenaeum#469: merge responses are anchored edit ops (a replace on the
         # original body line), applied deterministically — no full-echo call.
         client = MagicMock()
         client.messages.create.side_effect = [
@@ -754,7 +754,7 @@ class TestDedupePerformMerge:
         # Apollo namespace + current_title: canonical wins (both truthy).
         assert meta["apollo_id"] == "apollo-123"
         assert meta["current_title"] == "VP"
-        # twitter_url is now in _SOCIAL_KEYS coalesce set (#106) — absorbed-only
+        # twitter_url is now in _SOCIAL_KEYS coalesce set (athenaeum#106) — absorbed-only
         # value carries forward to the canonical merged wiki.
         assert meta["twitter_url"] == "https://twitter.com/alice"
 
@@ -828,13 +828,13 @@ class TestDedupePerformMerge:
 
 
 # ---------------------------------------------------------------------------
-# 9. Disjoint temporal validity — sequential states are not conflicts (#324)
+# 9. Disjoint temporal validity — sequential states are not conflicts (athenaeum#324)
 # ---------------------------------------------------------------------------
 #
 # Doc: docs/conflict-resolution.md § 9. Two claims whose validity windows do
 # not overlap describe sequential states of the world and cannot contradict.
 # Windows use FUTURE dates so neither member is filtered as expired-inactive
-# (#308) — the disjointness itself, not staleness, is what these assert.
+# (athenaeum#308) — the disjointness itself, not staleness, is what these assert.
 
 
 def _write_validity_am(
@@ -973,7 +973,7 @@ def _three_member_validity_root(tmp_path: Path) -> Path:
 
 
 class TestValidityWindowsDisjointPredicate:
-    """Part 0: the shared ``validity_windows_disjoint`` predicate (#324)."""
+    """Part 0: the shared ``validity_windows_disjoint`` predicate (athenaeum#324)."""
 
     def test_closed_upper_before_open_lower_is_disjoint(self) -> None:
         a = {"valid_until": "2026-03-31"}
@@ -1010,7 +1010,7 @@ class TestValidityWindowsDisjointPredicate:
 
 
 class TestDisjointValidityDetectorShortCircuit:
-    """Parts 1 & 2: merge.py pre-filter and post-guard (#324)."""
+    """Parts 1 & 2: merge.py pre-filter and post-guard (athenaeum#324)."""
 
     def test_disjoint_two_member_cluster_skips_detector(
         self,
@@ -1141,7 +1141,7 @@ class TestDisjointValidityDetectorShortCircuit:
 
 
 class TestDisjointValidityResolverSynthetic:
-    """Part 3: resolutions._disjoint_validity_verdict (#324)."""
+    """Part 3: resolutions._disjoint_validity_verdict (athenaeum#324)."""
 
     def _am(
         self,
@@ -1215,7 +1215,7 @@ class TestDisjointValidityResolverSynthetic:
 
 
 class TestScopeHeaderRendering:
-    """Part 4: contradictions._member_scope_header / _build_user_message (#324)."""
+    """Part 4: contradictions._member_scope_header / _build_user_message (athenaeum#324)."""
 
     def _am_on_disk(
         self,
@@ -1292,7 +1292,7 @@ class TestScopeHeaderRendering:
 
 
 # ---------------------------------------------------------------------------
-# #308 slice 2 — resolver interval-close on temporal supersession
+# athenaeum#308 slice 2 — resolver interval-close on temporal supersession
 # ---------------------------------------------------------------------------
 #
 # `enact_resolution` stamps the LOSER's `valid_until` in ADDITION to the
@@ -1468,12 +1468,12 @@ class TestIntervalCloseSlice2:
 
 
 # ---------------------------------------------------------------------------
-# Section 11 — resolver source-precedence taxonomy (issue #326)
+# Section 11 — resolver source-precedence taxonomy (issue athenaeum#326)
 # ---------------------------------------------------------------------------
 #
 # `docs/conflict-resolution.md` §11 (and `docs/provenance-shape.md` §10.1)
 # lock the taxonomy the resolver LLM applies when a keep_a/keep_b decision
-# names a winner. Issue #326 added `model-prior:<model-id>` BELOW
+# names a winner. Issue athenaeum#326 added `model-prior:<model-id>` BELOW
 # `script:<slug>` — a training prior is unverifiable and silently stale, a
 # pipeline slug at least names a repeatable in-tree process. These tests pin
 # both the ordering AND the presence of the new tier in the prompt so a
@@ -1491,7 +1491,7 @@ class TestSourcePrecedenceTaxonomyChannelSplit:
         # The taxonomy block is delimited by the section title.
         assert "SOURCE-PRECEDENCE TAXONOMY" in prompt
 
-        # Issue #328 inserted agent-observed at rank 5, shifting the AI/pipeline
+        # Issue athenaeum#328 inserted agent-observed at rank 5, shifting the AI/pipeline
         # tiers down by one: script 6→7, model-prior 7→8, unsourced 8→9.
         script_pos = prompt.find("7. script:")
         model_prior_pos = prompt.find("8. model-prior:")
@@ -1500,15 +1500,15 @@ class TestSourcePrecedenceTaxonomyChannelSplit:
         assert script_pos != -1, "tier 7 script:<slug> missing"
         assert (
             model_prior_pos != -1
-        ), "tier 8 model-prior:<model-id> missing (issue #326)"
-        assert unsourced_pos != -1, "tier 9 unsourced moved unexpectedly (issue #328)"
+        ), "tier 8 model-prior:<model-id> missing (issue athenaeum#326)"
+        assert unsourced_pos != -1, "tier 9 unsourced moved unexpectedly (issue athenaeum#328)"
 
         # Ordering is highest-to-lowest, so script comes BEFORE model-prior
         # which comes BEFORE unsourced.
         assert script_pos < model_prior_pos < unsourced_pos
 
     def test_agent_observed_ranks_below_wikipedia_above_claude_tier3(self) -> None:
-        # Issue #328 lock: agent-observed sits BELOW external/consensus sources
+        # Issue athenaeum#328 lock: agent-observed sits BELOW external/consensus sources
         # (wikipedia) and ABOVE claude:tier3/inferred. A tool-result-grounded
         # claim outranks an unsupported LLM leap but never a curated authority.
         from athenaeum.resolutions import _RESOLVE_SYSTEM
@@ -1521,8 +1521,8 @@ class TestSourcePrecedenceTaxonomyChannelSplit:
         assert wikipedia_pos != -1, "tier 4 wikipedia:<page> missing"
         assert (
             agent_observed_pos != -1
-        ), "tier 5 agent-observed:<model>:<session-ref> missing (issue #328)"
-        assert claude_pos != -1, "tier 6 claude:tier3 missing after #328 shift"
+        ), "tier 5 agent-observed:<model>:<session-ref> missing (issue athenaeum#328)"
+        assert claude_pos != -1, "tier 6 claude:tier3 missing after athenaeum#328 shift"
 
         assert wikipedia_pos < agent_observed_pos < claude_pos
 
@@ -1537,7 +1537,7 @@ class TestSourcePrecedenceTaxonomyChannelSplit:
 
     def test_source_types_includes_new_channels(self) -> None:
         # The coarse source_type vocabulary MUST carry the two new values
-        # from #326 alongside the pre-existing four (#260). Locked here so
+        # from athenaeum#326 alongside the pre-existing four (athenaeum#260). Locked here so
         # a future revert would fail the lock test in addition to the
         # dedicated models test — belt-and-braces for the design-lock.
         from athenaeum.models import SOURCE_TYPES
@@ -1550,7 +1550,7 @@ class TestSourcePrecedenceTaxonomyChannelSplit:
         assert "document" in SOURCE_TYPES
 
     def test_model_prior_source_type_round_trips_tier0(self, tmp_path: Path) -> None:
-        # Acceptance criterion 1 (issue #326): a claim written with
+        # Acceptance criterion 1 (issue athenaeum#326): a claim written with
         # `source_type: model-prior` + `model:` round-trips tier0
         # byte-for-byte. tier0_passthrough is a schema-eligibility gate;
         # anything that passes is rendered verbatim except for
@@ -1590,7 +1590,7 @@ class TestSourcePrecedenceTaxonomyChannelSplit:
 
 
 # ---------------------------------------------------------------------------
-# 13. Opinion attribution — evaluative pairs never resolved by precedence (#327)
+# 13. Opinion attribution — evaluative pairs never resolved by precedence (athenaeum#327)
 # ---------------------------------------------------------------------------
 #
 # Locks the deterministic opinion-attribution short-circuit: an evaluative

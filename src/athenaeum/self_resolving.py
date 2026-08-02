@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Deterministic self-resolving-document guard (issue #300 follow-up, #304).
+"""Deterministic self-resolving-document guard (issue athenaeum#300 follow-up, athenaeum#304).
 
 Raw intake can embed its own claim of human confirmation/ratification
 (e.g. ``"Human-confirmed (Name, date)"``) or spoof the resolver's own
 output vocabulary (``**Proposed resolution**:``, ``resolved_at:``). The
-contradiction/resolution path and the Tier 2/3 prompts (#296-#300) both
+contradiction/resolution path and the Tier 2/3 prompts (athenaeum#296-athenaeum#300) both
 carry a soft LLM instruction not to trust such claims as independent
 verification — but that instruction is judgment-level and re-implemented
 independently per prompt, so it can drift or simply be ignored.

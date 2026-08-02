@@ -98,7 +98,7 @@ class TestResolvePageFlagBytes:
 
 
 class TestResolveAudience:
-    """Serve-time read-scope resolution, CLI > env > yaml > None (issue #312)."""
+    """Serve-time read-scope resolution, CLI > env > yaml > None (issue athenaeum#312)."""
 
     def test_default_is_none_owner(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ATHENAEUM_AUDIENCE", raising=False)
@@ -458,21 +458,21 @@ class TestLoadConfig:
 
 
 class TestDefaultsDoNotShadowCodeDefaults:
-    """Regression tests for issue #231.
+    """Regression tests for issue athenaeum#231.
 
     ``_DEFAULTS`` used to seed concrete values for keys whose real
     defaults live next to their consumer code (``contradiction.*``,
     ``librarian.cluster_threshold`` / ``cluster_output``). Because
     ``load_config()`` always merged those seeds in, every resolver saw
     them as "user-set" and its own code default became unreachable —
-    which is how the #187 resolver-cap raise (50 -> 250) was silently
+    which is how the athenaeum#187 resolver-cap raise (50 -> 250) was silently
     reverted to 50 through the config path.
     """
 
     def test_resolver_cap_default_reaches_187_value(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """THE #231 bug: a plain load_config() must yield the #187 cap."""
+        """THE athenaeum#231 bug: a plain load_config() must yield the athenaeum#187 cap."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MAX_PER_RUN", raising=False)
         from athenaeum.resolutions import (
             DEFAULT_RESOLVE_MAX_PER_RUN,
@@ -760,7 +760,7 @@ class TestWriteDefaultConfig:
 
 
 class TestMinMergeConfidenceEnvAuthoritative:
-    """Issue #524 (M1): a parsed env value is authoritative over yaml.
+    """Issue athenaeum#524 (M1): a parsed env value is authoritative over yaml.
 
     ``ATHENAEUM_MIN_MERGE_CONFIDENCE=0`` disables the floor even when yaml sets
     a non-zero one — previously the ``> 0.0`` guard dropped the env override and
@@ -797,7 +797,7 @@ class TestMinMergeConfidenceEnvAuthoritative:
 
 
 class TestMalformedNumericEnvWarns:
-    """Issue #524 (M2): a malformed numeric env value logs a WARNING naming the
+    """Issue athenaeum#524 (M2): a malformed numeric env value logs a WARNING naming the
     variable and falls back to yaml/default — instead of silently swallowing
     the typo. Exercises the shared :func:`_env_number` policy across several
     numeric knobs (float, int, disable-semantics, and byte-guardrail)."""

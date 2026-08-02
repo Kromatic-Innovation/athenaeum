@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #337 — a timeout-killed librarian run must not strand its output.
+"""Issue athenaeum#337 — a timeout-killed librarian run must not strand its output.
 
 A wall-clock timeout (the pre-dawn sweep's ``timeout``, which SIGTERMs then,
 after a grace, KILLs) can land between the start-of-run ``pre-processing
@@ -139,7 +139,7 @@ def test_interrupt_commits_partial_progress_and_exits_124(
     # SIGTERM/SIGINT would otherwise terminate/abort it).
     def _sentinel(signum: int, frame: object) -> None:
         raise AssertionError(
-            f"run() did not install a signal {signum} handler (issue #337 regression)"
+            f"run() did not install a signal {signum} handler (issue athenaeum#337 regression)"
         )
 
     prev = signal.signal(sig, _sentinel)
@@ -159,7 +159,7 @@ def test_interrupt_commits_partial_progress_and_exits_124(
     # records timed_out=true.
     assert excinfo.value.code == 124
 
-    # The interrupt left NOTHING uncommitted — the whole point of #337.
+    # The interrupt left NOTHING uncommitted — the whole point of athenaeum#337.
     assert _porcelain(root) == "", "working tree must be clean after a partial commit"
 
     # The partial commit is present, distinct, and greppable. File 1 was
@@ -192,7 +192,7 @@ def test_normal_completion_is_unchanged(
     )
 
     # A normal opt-in run must also RESTORE the process-wide handlers it
-    # installed (issue #337) — not just install them. Capturing before/after
+    # installed (issue athenaeum#337) — not just install them. Capturing before/after
     # proves the terminal-commit restore path fires, so the handler never
     # outlives the run.
     term_before = signal.getsignal(signal.SIGTERM)
@@ -219,10 +219,10 @@ def test_normal_completion_is_unchanged(
 def test_interrupt_records_partial_spend_to_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Issue #483: an interrupted run still writes a spend-ledger record.
+    """Issue athenaeum#483: an interrupted run still writes a spend-ledger record.
 
     The terminal ``record_spend`` (end of a clean run) never runs on the
-    SIGTERM/SIGINT path, so before #483 a killed run — or one the spend
+    SIGTERM/SIGINT path, so before athenaeum#483 a killed run — or one the spend
     ceiling itself tripped — left NO ledger entry and ``athenaeum spend``
     reported $0 for it forever. The interrupt handler now records whatever
     spend accrued before exiting 124.
@@ -255,7 +255,7 @@ def test_interrupt_records_partial_spend_to_ledger(
     monkeypatch.setattr("athenaeum.librarian.process_one", fake_process_one)
 
     def _sentinel(signum: int, frame: object) -> None:
-        raise AssertionError("run() did not install a SIGTERM handler (#337 regression)")
+        raise AssertionError("run() did not install a SIGTERM handler (athenaeum#337 regression)")
 
     prev = signal.signal(signal.SIGTERM, _sentinel)
     try:
@@ -271,7 +271,7 @@ def test_interrupt_records_partial_spend_to_ledger(
         signal.signal(signal.SIGTERM, prev)
 
     assert excinfo.value.code == 124
-    # The whole point of #483: a killed run leaves a ledger record rather
+    # The whole point of athenaeum#483: a killed run leaves a ledger record rather
     # than silently reporting $0 for spend it actually incurred.
     assert ledger.exists(), "interrupt must write a spend-ledger record"
     records = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]

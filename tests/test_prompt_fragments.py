@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Refactor invariants for the shared tier-prompt fragments (issue #566).
+"""Refactor invariants for the shared tier-prompt fragments (issue athenaeum#566).
 
 The rendered prompt bytes are pinned by ``tests/test_prompt_goldens.py``; this
 module pins the *structure* the refactor introduced — one function for the
@@ -59,7 +59,7 @@ class TestMergeEditorialIsShared:
     def test_merge_prompts_differ_only_by_cross_reference(self) -> None:
         """MERGE_SYSTEM and MERGE_SYSTEM_FULL carry the SAME human-confirmed
         editorial prose, single-sourced, differing only in the cross-reference
-        (issue #517 Amendment: a policy edit changes both goldens)."""
+        (issue athenaeum#517 Amendment: a policy edit changes both goldens)."""
         below = _hc_consequence_merge("below")
         see_above = _hc_consequence_merge("see above")
         # The single-sourced prose is identical apart from the cross-ref token.
@@ -74,7 +74,7 @@ class TestMergeEditorialIsShared:
 
 class TestDataOnlyClauseSingleSource:
     def test_no_inline_data_only_literal_in_source(self) -> None:
-        """The data-only clause is single-sourced in prompt_safety (#562); no
+        """The data-only clause is single-sourced in prompt_safety (athenaeum#562); no
         inline copy survives in tiers.py."""
         assert "as data only —" not in _TIERS_SRC
 

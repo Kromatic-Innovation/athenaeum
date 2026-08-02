@@ -29,23 +29,23 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 | Direct network access | Via consumers' use | When wrapping the Anthropic API, requests go from the consumer's process. |
 | Local file/SQLite operations | Yes (chromadb optional extra) | SQLite schema migrations have happened in chromadb minors — hence the hold list. |
 | Build-time secret handling | At release time only | Trusted-publishing identity uses GitHub OIDC; no long-lived PyPI token. |
-| Read-scoping of recall (#312) | Yes (opt-in) | `athenaeum serve --audience <role,…>` (also `ATHENAEUM_AUDIENCE` / `serve.audience`) pins a server process to a restricted read scope so a secondary agent/routine recalls only `access: open` pages and pages whose `audience:` list grants one of its roles; untagged / `confidential` / `personal` pages fail closed (withheld). The audience is pinned by the operator at serve time, not chosen by the `recall` caller, so a restricted agent can't widen its own scope. Enforced inside each backend query (ranking/top-k) and re-checked against fresh on-disk frontmatter at render. Unset = owner = full access. This is NOT a full multi-user auth/ACL system — it is a single-owner read filter for the owner's own secondary agents. |
-| Intake-side secret/PII screening (#320) | **Shipped** | `remember()`'s write path calls `athenaeum.screening.screen_intake` (`src/athenaeum/mcp_server.py:553`, screener defined at `src/athenaeum/screening.py:212`) to classify sensitive content and resolve the read-time `access:` label BEFORE the single append-only write. Opt-in via a `screening` config resolved by `athenaeum.config.resolve_screening`; `None` (default) preserves prior unscreened behavior. |
+| Read-scoping of recall (athenaeum#312) | Yes (opt-in) | `athenaeum serve --audience <role,…>` (also `ATHENAEUM_AUDIENCE` / `serve.audience`) pins a server process to a restricted read scope so a secondary agent/routine recalls only `access: open` pages and pages whose `audience:` list grants one of its roles; untagged / `confidential` / `personal` pages fail closed (withheld). The audience is pinned by the operator at serve time, not chosen by the `recall` caller, so a restricted agent can't widen its own scope. Enforced inside each backend query (ranking/top-k) and re-checked against fresh on-disk frontmatter at render. Unset = owner = full access. This is NOT a full multi-user auth/ACL system — it is a single-owner read filter for the owner's own secondary agents. |
+| Intake-side secret/PII screening (athenaeum#320) | **Shipped** | `remember()`'s write path calls `athenaeum.screening.screen_intake` (`src/athenaeum/mcp_server.py:553`, screener defined at `src/athenaeum/screening.py:212`) to classify sensitive content and resolve the read-time `access:` label BEFORE the single append-only write. Opt-in via a `screening` config resolved by `athenaeum.config.resolve_screening`; `None` (default) preserves prior unscreened behavior. |
 
-### 2.1 MCP tool audience scoping (#312 → #538)
+### 2.1 MCP tool audience scoping (athenaeum#312 → athenaeum#538)
 
 `caller_audience` (§2, row "Read-scoping of recall") is pinned **once** by the
 operator at `athenaeum serve` time and governs the **whole** MCP process, not
-just `recall`. Issue #538 closed the gap where `recall` was the only one of the
+just `recall`. Issue athenaeum#538 closed the gap where `recall` was the only one of the
 11 registered tools that applied it — a restricted caller could read the same
 bytes from a different tool, or mutate the operator's decision queue unchecked.
-The decided model (this is the "write it down" outcome #538 asked for):
+The decided model (this is the "write it down" outcome athenaeum#538 asked for):
 
 | Tool group | Tools | Restricted (`caller_audience != None`) behavior |
 |---|---|---|
 | Scoped reads | `recall`, `list_pending_questions`, `list_pending_merges`, `list_pending_decisions` | Fail-closed by the SAME predicate `recall` uses (`is_page_authorized`): an item is withheld unless the caller is authorized for **every** source page behind it. A restricted caller can never obtain page content `recall` would refuse. |
 | Owner-only writes | `resolve_question`, `resolve_merge`, `review_audit_item` | **Fail closed** — adjudicating the operator's contradiction/merge/calibration queue is an owner action. `list_pending_decisions` likewise withholds the `retraction`/`audit` calibration items (no readable source-page path to authorize against). |
-| Intentionally open | `remember` | **Not** audience-scoped. Intake is write-only and compiles through the read-time screening path (#320); a restricted secondary agent contributing raw memories is the intended use. It cannot read anything back it isn't authorized for. |
+| Intentionally open | `remember` | **Not** audience-scoped. Intake is write-only and compiles through the read-time screening path (athenaeum#320); a restricted secondary agent contributing raw memories is the intended use. It cannot read anything back it isn't authorized for. |
 | Metadata reads | `list_axiom_audit`, `scan_retraction_cascade`, `calibration_summary` | Not page-content bearing (governance history, provenance flags, tier counts). Left unscoped; revisit if any starts echoing page bodies. |
 
 Rationale for the write split: the three decision-queue mutators change
@@ -56,7 +56,7 @@ one write a secondary agent legitimately makes without adding any read
 protection. As with the read scope, this is a single-owner filter, **not** a
 multi-user ACL system.
 
-### 2.2 Outbound LLM path — prompt hygiene and PII posture (#543)
+### 2.2 Outbound LLM path — prompt hygiene and PII posture (athenaeum#543)
 
 Athenaeum sends prompts to a model on two backends: the Anthropic SDK (`api`)
 and a local `claude -p` subprocess (`claude-cli`). Audit findings **L4/L5/L6**
@@ -82,7 +82,7 @@ covered what leaves the process on that path and what comes back.
   boundary.** The genuinely hard half — egress *refusal* (an agent declining to
   reveal PII even when asked), and any conditional/consented redaction that is
   narrower than "redact everything" — is a policy decision that stays parked on
-  **#428** (see `outbound_pii.py` module docstring, lines 8-10), which owns the
+  **athenaeum#428** (see `outbound_pii.py` module docstring, lines 8-10), which owns the
   enforcement design if the posture ever changes. This section is the "write it
   down" half of L6: the redaction module is called by nothing on the egress path
   **on purpose**, not by oversight.
@@ -136,11 +136,11 @@ Test suite is pytest with pytest-cov. Coverage was not measured in this session 
 
 The 3-Python-version test matrix is itself meaningful coverage — many dep regressions show up version-specifically.
 
-## 6. Branch protection posture (issue #557)
+## 6. Branch protection posture (issue athenaeum#557)
 
 Last reviewed: 2026-08-01 (owner ruling).
 
-Two branch-protection settings were evaluated for `develop` and `main` and **both were declined** by the repo owner on 2026-08-01, in a comment on issue #557. Recording the decision here so a future audit does not re-file it as a gap.
+Two branch-protection settings were evaluated for `develop` and `main` and **both were declined** by the repo owner on 2026-08-01, in a comment on issue athenaeum#557. Recording the decision here so a future audit does not re-file it as a gap.
 
 ### 6.1 The two declined settings
 

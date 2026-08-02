@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the single-machine run lock and atomic sidecar appends (#309)."""
+"""Tests for the single-machine run lock and atomic sidecar appends (athenaeum#309)."""
 
 from __future__ import annotations
 
@@ -209,7 +209,7 @@ class TestHeartbeatAgeSeconds:
 
 
 class TestRunLockAutoBreakStaleHeartbeat:
-    """Recovery for an ALIVE-but-wedged holder (issue #397)."""
+    """Recovery for an ALIVE-but-wedged holder (issue athenaeum#397)."""
 
     def test_auto_break_acquires_wedged_lock(
         self,
@@ -247,7 +247,7 @@ class TestRunLockAutoBreakStaleHeartbeat:
     def test_auto_break_does_not_fire_for_fresh_heartbeat(
         self, tmp_path: Path
     ) -> None:
-        # Issue #526 (H10): NON-VACUOUS. The old version monkeypatched
+        # Issue athenaeum#526 (H10): NON-VACUOUS. The old version monkeypatched
         # ``heartbeat_age_seconds`` to 0.1 — a value production could never
         # produce, because ``heartbeat()`` was never called in production. It
         # asserted the guard works under an input the system cannot generate.
@@ -359,7 +359,7 @@ class TestRunLockAutoBreakStaleHeartbeat:
 
 
 class TestWaiterStaleFdReopen:
-    """Finding M6 (issue #526): the wait loop must never acquire an orphan inode.
+    """Finding M6 (issue athenaeum#526): the wait loop must never acquire an orphan inode.
 
     A descriptor opened before contention refers to an orphan inode once a break
     (--force / auto-break) unlinks and re-creates the lockfile. Re-flocking that
@@ -451,7 +451,7 @@ class TestWaiterStaleFdReopen:
 
 
 class TestRunHeartbeatWiring:
-    """H10 (issue #526): librarian.run refreshes the lock heartbeat per phase."""
+    """H10 (issue athenaeum#526): librarian.run refreshes the lock heartbeat per phase."""
 
     def _seed_root(self, tmp_path: Path) -> Path:
         import subprocess

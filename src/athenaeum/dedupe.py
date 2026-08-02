@@ -8,7 +8,7 @@ fuzzy-name matching is intentionally dropped from the public API surface
 because it requires human triage and the CSV worksheet round-trip — that
 workflow stays in the cwc scripts.
 
-Per-claim provenance preservation (issue #90):
+Per-claim provenance preservation (issue athenaeum#90):
 
 - Scalar fields: canonical wins; canonical's ``field_sources.<field>``
   is preserved verbatim.
@@ -91,7 +91,7 @@ _LINKEDIN_KEYS = {
 # (``dedupe.google_contact_keys``, see
 # :func:`athenaeum.config.resolve_google_contact_keys`) and threaded into the
 # merge, so no personal contact-namespace literal ships in the wheel
-# (issue #269). Default (no config) = base key only.
+# (issue athenaeum#269). Default (no config) = base key only.
 _GOOGLE_CONTACT_KEY = "google_contact"
 _SOCIAL_KEYS = {
     "twitter_url",
@@ -102,7 +102,7 @@ _SOCIAL_KEYS = {
 _LIST_UNION_KEYS = {"emails", "tags", "aliases"}
 
 # Frontmatter fields that carry an owner's *process-context* authorship
-# (issue #263): a person fragment minted from a commit author or a
+# (issue athenaeum#263): a person fragment minted from a commit author or a
 # ruling/confirmation footnote. When one of these resolves to a configured
 # owner alias, the fragment auto-binds to the canonical owner instead of
 # persisting standalone. A fragment whose author is NOT an owner alias is
@@ -190,7 +190,7 @@ def _canonical_linkedin(url: str) -> str:
     return u
 
 
-# --- Owner identity (issue #263) ---
+# --- Owner identity (issue athenaeum#263) ---
 
 
 def _owner_alias_sets(owner: dict[str, Any]) -> tuple[set[str], set[str]]:
@@ -204,7 +204,7 @@ def _owner_alias_sets(owner: dict[str, Any]) -> tuple[set[str], set[str]]:
     The normalized-name set holds only FULL names (>=2 tokens). A
     single-token alias (e.g. ``"Ada"``) is deliberately excluded from
     name matching so it cannot auto-bind every stranger who happens to share
-    that one name to the owner (misconfiguration hardening, #263). Such an
+    that one name to the owner (misconfiguration hardening, athenaeum#263). Such an
     alias still lives in the raw-handle set, where it only matches an
     explicit handle/process-author field — never a person's display name.
     """
@@ -225,7 +225,7 @@ def _owner_alias_sets(owner: dict[str, Any]) -> tuple[set[str], set[str]]:
 def owner_signal(meta: dict[str, Any], owner: dict[str, Any] | None) -> str | None:
     """Return the confident owner-identity signal for *meta*, else ``None``.
 
-    Conservative by design (issue #263): a fragment binds to the owner only on
+    Conservative by design (issue athenaeum#263): a fragment binds to the owner only on
     a CONFIDENT signal — a configured uid / google_contact match, a name or
     handle that matches a configured alias (the ``user_*`` namespace always
     counts as an owner alias), or an owner-authored process-context field
@@ -353,7 +353,7 @@ def find_duplicate_persons(
 
     - shared ``apollo_id``
     - shared canonicalized ``linkedin_url``
-    - shared ``google_contact`` (issue #263)
+    - shared ``google_contact`` (issue athenaeum#263)
     - exact-match normalized ``name`` (group size 2 or 3 — name buckets
       with 4+ wikis are dropped here as common-name false-positives,
       matching the script's MEDIUM downgrade)
@@ -362,7 +362,7 @@ def find_duplicate_persons(
     and the canonical owner page (``uid == owner["uid"]``) is present, any
     page that yields an :func:`owner_signal` auto-binds to that canonical
     owner — the owner stays a singleton instead of fragmenting across
-    process-context fragments and ``user_*`` aliases (issue #263). The owner
+    process-context fragments and ``user_*`` aliases (issue athenaeum#263). The owner
     pass runs first and forces the configured owner as canonical, so a
     coincidental apollo/name signal cannot make a fragment win the merge.
     When *owner* is ``None`` this is fully inert.
@@ -399,7 +399,7 @@ def find_duplicate_persons(
             absorbed_path=str(absorbed["path"]),
         )
 
-    # Owner auto-bind (issue #263) — runs FIRST so the configured owner is
+    # Owner auto-bind (issue athenaeum#263) — runs FIRST so the configured owner is
     # forced as canonical before any apollo/name signal can claim the pair.
     if owner and owner.get("uid"):
         canonical_owner = next((p for p in persons if p["uid"] == owner["uid"]), None)
@@ -558,12 +558,12 @@ def _merge_field_sources(
 ) -> dict[str, Any] | None:
     """Build the merged ``field_sources`` map.
 
-    Rules (per #90 + #102):
+    Rules (per athenaeum#90 + athenaeum#102):
 
     - For SCALAR fields: canonical's ``field_sources.<key>`` wins;
       absorbed-only entries carry forward.
     - For LIST fields: emit the per-value list-of-records shape (issue
-      #102 design lock §2). Canonical wins per value; absorbed-only
+      athenaeum#102 design lock §2). Canonical wins per value; absorbed-only
       values bring their own attribution. Legacy single-source entries
       on either side broadcast across that side's underlying values
       before merging.
@@ -585,7 +585,7 @@ def _merge_field_sources(
             continue  # prune dangling
         merged_val = merged_meta[k]
         if isinstance(merged_val, list):
-            # Per-value shape for list fields (#102).
+            # Per-value shape for list fields (athenaeum#102).
             per_value = _build_per_value_field_sources(
                 merged_val,
                 cfs.get(k),
@@ -621,7 +621,7 @@ def _merge_meta(
         out["aliases"] = _union_list(out.get("aliases"), [absorbed["name"]])
 
     # Google fields -- the generic ``google_contact`` join key plus any
-    # operator-configured namespace variants (issue #269). Variant field
+    # operator-configured namespace variants (issue athenaeum#269). Variant field
     # names come from config, never hardcoded, so no personal contact
     # namespace literal ships in source. Default (empty extras) coalesces
     # only the base key.
@@ -751,7 +751,7 @@ def rewrite_references(
     - Files whose name starts with ``_`` (archives, indexes).
 
     Ports the cwc-side ``merge_duplicate_persons.py::rewrite_references``
-    behavior (issue #103). Returns the count of files rewritten; with
+    behavior (issue athenaeum#103). Returns the count of files rewritten; with
     ``dry_run=True``, returns the count that *would* be rewritten.
     """
     n = 0
@@ -799,7 +799,7 @@ def merge_duplicate_persons(
 
     ``google_contact_keys`` lists extra operator-configured Google-contact
     namespace field-names to coalesce alongside the generic ``google_contact``
-    key (issue #269); resolve it via
+    key (issue athenaeum#269); resolve it via
     :func:`athenaeum.config.resolve_google_contact_keys`. Empty (the default)
     merges on the generic key only.
     """

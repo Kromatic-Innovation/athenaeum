@@ -12,7 +12,7 @@ a body assertion) should be traceable to a SOURCE. This module defines:
   :class:`athenaeum.schemas.WikiBase` to gate the ``source`` and
   ``field_sources`` frontmatter keys.
 
-Format contract (issue #90):
+Format contract (issue athenaeum#90):
 
 - Scalar: ``"<type>:<ref>"``. ``type`` is ``[a-z][a-z0-9_-]*``, ``ref`` is
   any non-empty string with no embedded newlines. Examples:
@@ -27,7 +27,7 @@ present in ``field_sources``. ``field_sources`` is a dict
 ``{<field_name>: <scalar-or-structured>}`` of per-claim overrides.
 
 Conflict resolution behavior (which source wins on update) is NOT defined
-here — that is Lane G / #91. This module only parses, validates, and
+here — that is Lane G / athenaeum#91. This module only parses, validates, and
 round-trips.
 
 Layering: L1 (data model). No athenaeum-internal imports — only stdlib +
@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 _SCALAR_RE = re.compile(r"^([a-z][a-z0-9_-]*):([^\n]+)\Z")
 
 # Note: the legacy single-token (bare-slug) ``source:`` form was retired
-# after issue #97 migrated 15,403 live-tree wikis from `<slug>` to
+# after issue athenaeum#97 migrated 15,403 live-tree wikis from `<slug>` to
 # `script:<slug>` on 2026-05-09 via
 # ``athenaeum repair --legacy-source-slugs --apply``. New wikis MUST use
 # the typed ``<type>:<ref>`` form. The migration tool itself
@@ -147,13 +147,13 @@ def parse_source(value: Any) -> SourceRef | None:
                     f"source ref must not have leading/trailing whitespace, got {value!r}"
                 )
             return SourceRef(type=m.group(1), ref=ref_part)
-        # Legacy bare-slug form retired post-#97 migration. Callers that
+        # Legacy bare-slug form retired post-athenaeum#97 migration. Callers that
         # still emit `source: <slug>` must switch to the typed
         # `<type>:<ref>` form (e.g. `script:<slug>`).
         raise ValueError(
             f"source scalar must be typed '<type>:<ref>' (e.g. "
             f"'script:extended-tier-build'); legacy bare-slug form retired "
-            f"in #97, got {value!r}"
+            f"in athenaeum#97, got {value!r}"
         )
     if isinstance(value, dict):
         return SourceRef.model_validate(value)
@@ -220,7 +220,7 @@ def validate_field_sources(value: Any) -> Any:
     - ``str`` or ``dict`` → legacy single-source-for-the-whole-field,
       validated via :func:`parse_source`.
     - ``list`` of ``{"value", "source"}`` records → per-value
-      attribution (issue #102), validated via
+      attribution (issue athenaeum#102), validated via
       :func:`parse_per_value_field_sources`.
 
     Returns the original shape unchanged on success.
@@ -241,7 +241,7 @@ def validate_field_sources(value: Any) -> Any:
 
 # Wrapper keys accepted by :func:`resolve_remember_sources` /
 # :func:`resolve_remember_extras`. The originals (`_source`, `_field_sources`)
-# hit the SourceRef surface; the extras (issue #326) inject frontmatter
+# hit the SourceRef surface; the extras (issue athenaeum#326) inject frontmatter
 # keys on the raw file that carry channel/model/asserter provenance beside
 # the SourceRef.
 _REMEMBER_WIKI_SOURCE_KEYS = frozenset({"_source", "_field_sources"})
@@ -297,9 +297,9 @@ def resolve_remember_sources(
       * ``_source`` — wiki-level scalar/structured SourceRef.
       * ``_field_sources`` — per-field ``{<field>: <source>}`` map.
       * ``_source_type`` / ``_source_ref`` — origin-traced provenance
-        (issue #260 channel classification + ultimate reference).
+        (issue athenaeum#260 channel classification + ultimate reference).
       * ``_model`` / ``_on_behalf_of`` / ``_asserter`` — channel-split
-        extras (issue #326; see :func:`resolve_remember_extras`).
+        extras (issue athenaeum#326; see :func:`resolve_remember_extras`).
 
     Any bare dict (no wrapper keys) or unknown key raises
     :class:`ValueError`. Any other type raises :class:`TypeError`.
@@ -311,7 +311,7 @@ def resolve_remember_sources(
 
     Note: the channel-split extras validated here are NOT returned in
     this tuple — callers wanting them use :func:`resolve_remember_extras`
-    on the same input. Split from this function to preserve the pre-#326
+    on the same input. Split from this function to preserve the pre-athenaeum#326
     two-tuple return.
     """
     if sources is None:
@@ -367,7 +367,7 @@ def _validate_remember_extras(sources: dict[str, Any]) -> None:
 
 
 def resolve_remember_extras(sources: Any) -> dict[str, Any]:
-    """Return the channel-split extras to inject as frontmatter (issue #326).
+    """Return the channel-split extras to inject as frontmatter (issue athenaeum#326).
 
     Extracts the ``_source_type`` / ``_source_ref`` / ``_model`` /
     ``_on_behalf_of`` / ``_asserter`` wrapper keys from a
@@ -403,13 +403,13 @@ def resolve_remember_extras(sources: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Merge provenance ledger (issue #425)
+# Merge provenance ledger (issue athenaeum#425)
 # ---------------------------------------------------------------------------
 #
 # Every executed merge (either write path — ``create-merged`` or
 # ``fold-into-existing``, see :func:`athenaeum.pending_merges.resolve_merge`)
 # records which source pages it relied on, in a queryable append-only JSONL
-# sidecar. This is the recording + read side only; issue #435's retraction
+# sidecar. This is the recording + read side only; issue athenaeum#435's retraction
 # cascade (walking the ledger backwards from a retracted source to every
 # merge that consumed it) is a future consumer, not built here.
 #
@@ -448,13 +448,13 @@ def build_merge_provenance_record(
     paths the merge relied on, recorded verbatim (whatever path shape
     :class:`athenaeum.pending_merges.PendingMerge.sources` carried).
 
-    ``auto_applied`` (issue #602): ``True`` iff this merge was finalized by
+    ``auto_applied`` (issue athenaeum#602): ``True`` iff this merge was finalized by
     the T2 reasoning tier's auto-finalize path
     (:func:`athenaeum.pending_merges.resolve_merge` called with
     ``auto_applied=True``) rather than by a human clicking approve. This is
     the SINGLE durable marker distinguishing an unreviewed, machine-approved
     write from a human-approved one — always present (default ``False``) so
-    every pre-#602 and human-approved record reads unambiguously as "a human
+    every pre-athenaeum#602 and human-approved record reads unambiguously as "a human
     approved this" and every T2 auto-finalize reads unambiguously as "nobody
     reviewed this write". See ``athenaeum merges provenance`` (:mod:`athenaeum
     ._cmd_merges`) for the human-facing surface that renders this field.
@@ -510,7 +510,7 @@ def record_merge_provenance(
     swallowed, mirroring the spend ledger's crash-safety discipline.
     Returns ``True`` when a record was written.
 
-    ``auto_applied`` (issue #602): forwarded verbatim to
+    ``auto_applied`` (issue athenaeum#602): forwarded verbatim to
     :func:`build_merge_provenance_record` — see that function's docstring.
     """
     try:

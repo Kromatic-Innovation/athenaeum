@@ -77,7 +77,7 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
     )
     status_parser.set_defaults(func=cmd_status)
 
-    # disable / enable commands — the kill switch (issue #379)
+    # disable / enable commands — the kill switch (issue athenaeum#379)
     disable_parser = subparsers.add_parser(
         "disable",
         help="Turn athenaeum's background work off (compile, detectors, "
@@ -118,7 +118,7 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
     )
     enable_parser.set_defaults(func=cmd_enable)
 
-    # spend command — report the durable LLM-spend ledger (issue #378)
+    # spend command — report the durable LLM-spend ledger (issue athenaeum#378)
     spend_parser = subparsers.add_parser(
         "spend",
         help="Report LLM spend from the durable ledger ($ for API, tokens for "
@@ -193,7 +193,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     from athenaeum.killswitch import format_status_line
     from athenaeum.status import format_status, status
 
-    # Kill-switch state (issue #379) is process/cache state, independent of the
+    # Kill-switch state (issue athenaeum#379) is process/cache state, independent of the
     # knowledge base — report it first so 'athenaeum status' always answers
     # "is it on?" even when the knowledge directory is missing.
     print(format_status_line(getattr(args, "cache_dir", None)))
@@ -210,7 +210,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_disable(args: argparse.Namespace) -> int:
-    """Kill switch (#379): stop athenaeum background work, reversibly."""
+    """Kill switch (athenaeum#379): stop athenaeum background work, reversibly."""
     from athenaeum import killswitch
 
     scope = killswitch.SCOPE_COMPILE if args.compile else killswitch.SCOPE_ALL
@@ -241,7 +241,7 @@ def cmd_disable(args: argparse.Namespace) -> int:
 
 
 def cmd_enable(args: argparse.Namespace) -> int:
-    """Kill switch (#379): undo 'athenaeum disable'."""
+    """Kill switch (athenaeum#379): undo 'athenaeum disable'."""
     from athenaeum import killswitch
 
     removed = killswitch.enable(cache_dir=getattr(args, "cache_dir", None))
@@ -263,7 +263,7 @@ def cmd_enable(args: argparse.Namespace) -> int:
 
 
 def cmd_spend(args: argparse.Namespace) -> int:
-    """Report LLM spend from the durable ledger (issue #378).
+    """Report LLM spend from the durable ledger (issue athenaeum#378).
 
     Separates real API DOLLARS from subscription TOKENS — never a blended
     figure. ``--json`` emits the machine-readable shape ``/good-morning``

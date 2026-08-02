@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #464 (slice E of #460) — permanent per-phase run summary.
+"""Issue athenaeum#464 (slice E of athenaeum#460) — permanent per-phase run summary.
 
 Pure observability: `run()` emits ONE machine-greppable `librarian-run-summary`
 line at the end of every exit path (the clean finalize AND every `_stop_on_deadline`
@@ -172,7 +172,7 @@ class TestRenderRunSummary:
         assert "total_secs=3.500" in line
 
     def test_degraded_count_surfaced_when_present(self) -> None:
-        # Issue #472: when Tier-2 classification dropped all entities for some
+        # Issue athenaeum#472: when Tier-2 classification dropped all entities for some
         # files (unparseable JSON, even after repair + retry), the count rides
         # the entity phase so an operator sees it in the summary line instead
         # of grepping warnings.
@@ -190,7 +190,7 @@ class TestRenderRunSummary:
         assert "degraded" not in line
 
     def test_out_tok_per_call_rendered_in_entity_segment(self) -> None:
-        # Issue #490 (slice A): output-tokens-per-call rides the entity
+        # Issue athenaeum#490 (slice A): output-tokens-per-call rides the entity
         # segment so the silent full-page-echo fallback's ~10x output-cost
         # spike is visible in the one-line summary without a by-hand ratio
         # calc. The value is a known figure derived for this call set.
@@ -317,8 +317,8 @@ class TestDeadlineExitSummary:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Reuses the #396 wiki-dedup-phase-boundary trip: the deadline blows
-        immediately after the #290 wiki-dedup pass, so the summary must
+        """Reuses the athenaeum#396 wiki-dedup-phase-boundary trip: the deadline blows
+        immediately after the athenaeum#290 wiki-dedup pass, so the summary must
         contain `wiki-dedup` but NOT `entity` or `auto-memory` (they never
         ran)."""
         root = _seed_knowledge_root(tmp_path, n_files=1)
@@ -349,7 +349,7 @@ class TestDeadlineExitSummary:
         assert len(lines) == 1, "exactly one summary line must be emitted on a 124 exit"
         line = lines[0]
         assert "wiki-dedup secs=" in line
-        # Assert on the phase SEGMENT, not a bare "entity" substring: issue #567
+        # Assert on the phase SEGMENT, not a bare "entity" substring: issue athenaeum#567
         # adds a `schema_fragments=…,_entity-template:…` attribution token to the
         # head, so "entity" now legitimately appears there. The intent here is
         # that the entity PHASE never ran — i.e. no `entity secs=` segment.
@@ -362,7 +362,7 @@ class TestDeadlineExitSummary:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """The entity loop itself trips the deadline (AC2 of #461's suite):
+        """The entity loop itself trips the deadline (AC2 of athenaeum#461's suite):
         the summary must include `entity` (it ran, partially) but the
         auto-memory block never got a turn."""
         root = _seed_knowledge_root(tmp_path, n_files=3)
@@ -510,7 +510,7 @@ class TestMergeOutStatsThreading:
     ) -> None:
         """A detector-positive + resolver-confirmed-not-a-conflict pair
         drives haiku_calls=1, resolve_calls=1 — and out_stats must report
-        exactly that (the merge.py unit-test analog of the #464 wiring)."""
+        exactly that (the merge.py unit-test analog of the athenaeum#464 wiring)."""
         knowledge_root = tmp_path / "knowledge"
         scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
         _write_am_file(
@@ -590,7 +590,7 @@ class TestMergeOutStatsThreading:
     def test_default_out_stats_none_is_backward_compatible(
         self, tmp_path: Path
     ) -> None:
-        """Every pre-#464 caller omits out_stats — must stay byte-identical
+        """Every pre-athenaeum#464 caller omits out_stats — must stay byte-identical
         (no error, no extra side effect)."""
         knowledge_root = tmp_path / "knowledge"
         scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristan-Code-proj"
@@ -679,7 +679,7 @@ class TestNoBehaviorChange:
             max_api_calls=2,
         )
 
-        # Unchanged pre-#464 behavior: budget message still fires, exit 0.
+        # Unchanged pre-athenaeum#464 behavior: budget message still fires, exit 0.
         assert rc == 0
         assert any(
             "budget exhausted" in rec.message.lower()
@@ -691,7 +691,7 @@ class TestNoBehaviorChange:
 
 
 # ---------------------------------------------------------------------------
-# 5. Output-tokens-per-call (issue #490, slice A)
+# 5. Output-tokens-per-call (issue athenaeum#490, slice A)
 # ---------------------------------------------------------------------------
 
 

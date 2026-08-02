@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pending-merge proposal sidecar (issue #169, Lane 3) — L4 domain/pipeline.
+"""Pending-merge proposal sidecar (issue athenaeum#169, Lane 3) — L4 domain/pipeline.
 
 Contract: owns the ``wiki/_pending_merges.md`` sidecar file end to end —
 its block format, parsing, writing (with idempotent id-based dedup),
@@ -20,16 +20,16 @@ gate set it re-checks).
 SCC membership (L4 domain/pipeline). This module is imported at top level by
 ``merge.py`` (``write_pending_merge``), ``wiki_dedupe.py``, and ``librarian.py``
 (all normal downward dependencies from their side). The librarian-centered
-named-8 coupling was dissolved in issue #545; this module's OWN cycle with
+named-8 coupling was dissolved in issue athenaeum#545; this module's OWN cycle with
 ``merge`` (it hinged on ``_merge_proposal_suppression_reason``, not one of
-#545's three hoisted primitives) survived as a PRE-EXISTING residual SCC
+athenaeum#545's three hoisted primitives) survived as a PRE-EXISTING residual SCC
 ``{merge, pending_merges, calibration, reasoning_tiers}`` and was dissolved in
-issue #640:
+issue athenaeum#640:
 
 - ``revalidate_pending_merges`` formerly took a deferred ``from athenaeum.merge
   import _merge_proposal_suppression_reason`` because ``merge.py`` imports
   ``write_pending_merge`` FROM this module at top level, so a module-level import
-  of ``merge`` would have been circular. Issue #640 hoisted that guardrail DOWN
+  of ``merge`` would have been circular. Issue athenaeum#640 hoisted that guardrail DOWN
   to the :mod:`athenaeum.merge_type_gate` leaf, so this module now imports it at
   top level like any other downward dependency and the cycle is gone.
 
@@ -56,7 +56,7 @@ The human approves by:
 2. Calling :func:`resolve_merge` ("reject") with a note. Rejection
    writes a ``refines:`` declaration into one source file so the
    detector's declared-relationship short-circuit stops re-flagging
-   the pair (see :mod:`athenaeum.merge` Lane 1 / #167).
+   the pair (see :mod:`athenaeum.merge` Lane 1 / athenaeum#167).
 
 On the next ``athenaeum ingest-answers`` run (or a dedicated
 ``ingest-merges`` invocation), approved/rejected blocks are moved to
@@ -70,7 +70,7 @@ bare ```` ``` ```` closer (three backticks). If the draft content itself
 needs a fenced snippet (e.g. documenting a shell command), that inner
 fence MUST use a different backtick-run length than three — four
 backticks (` ```` `) by convention — so it cannot be mistaken for the
-outer fence's closer. See :func:`_scan_fence_state` (#292).
+outer fence's closer. See :func:`_scan_fence_state` (athenaeum#292).
 """
 
 from __future__ import annotations
@@ -131,7 +131,7 @@ def _scan_fence_state(line: str, fence_len: int) -> int:
     convention.
 
     Delegates to the shared :func:`athenaeum.sidecar_blocks.scan_fence_state`
-    (#527) with the pending-merges ```markdown fence-opener so the fence state
+    (athenaeum#527) with the pending-merges ```markdown fence-opener so the fence state
     machine has exactly one implementation across both sidecars.
     """
     return scan_fence_state(line, fence_len, fence_open_re=MARKDOWN_FENCE_OPEN_RE)
@@ -153,12 +153,12 @@ class PendingMerge:
     decision: Literal["approve", "reject", ""] = ""
     note: str = ""
     also_affects: list[str] = field(default_factory=list)
-    # Issue #421: mechanical slug-collision classification recorded at proposal
+    # Issue athenaeum#421: mechanical slug-collision classification recorded at proposal
     # time. ``create-merged`` (slug free) or ``fold-into-existing`` (slug taken
-    # by an existing wiki page). Pre-#421 blocks lack the line and default to
+    # by an existing wiki page). Pre-athenaeum#421 blocks lack the line and default to
     # ``create-merged``.
     write_kind: str = "create-merged"
-    # Issue #602: True iff this block was approved by the T2 auto-finalize
+    # Issue athenaeum#602: True iff this block was approved by the T2 auto-finalize
     # path (:func:`resolve_merge` called with ``auto_applied=True``) rather
     # than by a human. Only ever set on an already-resolved (``approve``)
     # block — see ``_rewrite_block_resolved``'s ``**Auto-applied**:`` line,
@@ -189,7 +189,7 @@ def _outer_draft_fence(draft_body: str) -> str:
     outer fence used the same three backticks, that inner fence would close it
     prematurely — leaking the draft's ``## From `<scope>/<file>` `` subsections
     out as bogus top-level blocks that the reader then rejects as "malformed
-    headers" and can never archive (issue #394, the #299/#303 regression).
+    headers" and can never archive (issue athenaeum#394, the athenaeum#299/#303 regression).
 
     Choosing an outer fence one backtick longer than the longest run inside the
     body makes the nested-fence convention documented in the module docstring
@@ -232,10 +232,10 @@ def render_block(
 ) -> str:
     """Render one pending-merge block as markdown.
 
-    Issue #421: ``write_kind`` records the mechanical slug-collision
+    Issue athenaeum#421: ``write_kind`` records the mechanical slug-collision
     classification decided at proposal time — ``create-merged`` (the target
     slug is free) or ``fold-into-existing`` (a wiki page already owns the
-    slug). It is CLASSIFICATION only; the fold WRITE path is #425.
+    slug). It is CLASSIFICATION only; the fold WRITE path is athenaeum#425.
     """
     today = created_at or date.today().isoformat()
     target_escaped = _escape_quotes(merge_target_name)
@@ -268,7 +268,7 @@ def _split_blocks(text: str) -> list[str]:
     (see the module docstring). While inside that fence, lines are never
     treated as block/paragraph delimiters — they are always appended as
     content. Fence tracking is shared with :func:`_parse_block` via
-    :func:`_scan_fence_state` so the two can't diverge (#292).
+    :func:`_scan_fence_state` so the two can't diverge (athenaeum#292).
 
     Only a CANONICAL merge header (``## [DATE] Merge: "name"`` — the
     :data:`_HEADER_RE` shape) starts a new top-level block. A bare ``## ``
@@ -277,7 +277,7 @@ def _split_blocks(text: str) -> list[str]:
     :func:`athenaeum.merge.synthesize_body` writes into a draft body — is
     NOT a block boundary: it is appended to the current block when one is
     open, or dropped as inter-block preamble when none is. This is what
-    lets a draft whose fence was broken by an inner code fence (issue #394)
+    lets a draft whose fence was broken by an inner code fence (issue athenaeum#394)
     re-absorb its leaked ``## From`` subsections into the parent block
     instead of spraying thousands of "malformed header" warnings, and lets
     orphan ``## From`` fragments left behind by an already-archived merge
@@ -285,7 +285,7 @@ def _split_blocks(text: str) -> list[str]:
     forever.
 
     Delegates to the shared
-    :func:`athenaeum.sidecar_blocks.split_blocks` (#527) with the canonical
+    :func:`athenaeum.sidecar_blocks.split_blocks` (athenaeum#527) with the canonical
     merge header and the ```markdown fence-opener, so the pending-merges and
     pending-questions splitters share one implementation and cannot diverge
     again.
@@ -453,7 +453,7 @@ def write_pending_merge(
     if a block with the same id already exists in the file (resolved or
     not), nothing is appended.
 
-    Issue #421: ``write_kind`` carries the proposal-time slug-collision
+    Issue athenaeum#421: ``write_kind`` carries the proposal-time slug-collision
     classification (``create-merged`` | ``fold-into-existing``).
     """
     block = render_block(
@@ -486,7 +486,7 @@ def _preview_draft_body(draft_merged_body: str, preview_chars: int) -> tuple[str
 
     Returns ``(text, truncated)``. When the body already fits, ``text`` is
     returned byte-identical (no truncation marker appended) so a normal-sized
-    merge's payload is unchanged from before this cap existed (issue #431).
+    merge's payload is unchanged from before this cap existed (issue athenaeum#431).
     ``preview_chars <= 0`` disables truncation (the resolver already coerces
     non-positive config values back to the default, so this is a defensive
     fallback, not a normal path).
@@ -506,7 +506,7 @@ def list_pending_merges(
 ) -> list[dict]:
     """Return unresolved merges as MCP-friendly dicts.
 
-    Issue #431 (read-path defense-in-depth, complementing the #400 write-path
+    Issue athenaeum#431 (read-path defense-in-depth, complementing the athenaeum#400 write-path
     ``max_merge_sources`` suppression): a single oversized pending merge — the
     withdrawn runaway that prompted this issue had a ~878 KB draft body — blew
     out the payload of every ``list_pending_merges`` call because
@@ -529,7 +529,7 @@ def list_pending_merges(
             (e.g. immediately before approving a merge).
 
     A body already at or under the cap is returned byte-identical to the
-    pre-#431 behavior (no truncation marker fields added beyond the two
+    pre-athenaeum#431 behavior (no truncation marker fields added beyond the two
     always-present booleans/lengths), so normal-sized merges are unaffected.
     """
     from athenaeum.config import resolve_merge_body_preview_chars
@@ -540,7 +540,7 @@ def list_pending_merges(
     for pm in parse_pending_merges(merges_path):
         if pm.resolved:
             continue
-        # Issue #538: a restricted caller sees a merge only if authorized for
+        # Issue athenaeum#538: a restricted caller sees a merge only if authorized for
         # EVERY source page — the same fail-closed predicate ``recall`` applies,
         # so ``draft_merged_body`` never leaks content ``recall`` would withhold.
         if not all_sources_authorized(
@@ -578,12 +578,12 @@ def _rewrite_block_resolved(
 ) -> str:
     """Flip the checkbox and tag the block with decision + note.
 
-    ``auto_applied`` (issue #602): when ``True``, an additional
+    ``auto_applied`` (issue athenaeum#602): when ``True``, an additional
     ``**Auto-applied**: true`` line is written — the human-readable marker
     that this ``approve`` was finalized by the T2 reasoning tier's
     auto-finalize path, not by a human reviewing the block. Never written
     on a ``reject`` (auto-finalize never rejects) or on an ordinary
-    human approve (the default, ``False``, adds nothing — a pre-#602
+    human approve (the default, ``False``, adds nothing — a pre-athenaeum#602
     resolved block and an ordinary human approve are byte-identical to
     before this existed).
     """
@@ -747,7 +747,7 @@ def _add_aliases_to_frontmatter(meta: dict, new_aliases: list[str]) -> dict:
 def resolve_alias_slug(wiki_root: Path, slug: str) -> str:
     """Resolve ``slug`` to its canonical slug via wiki ``aliases:`` frontmatter.
 
-    Link-time resolution for issue #425: a ``[[old-slug]]`` wikilink in a
+    Link-time resolution for issue athenaeum#425: a ``[[old-slug]]`` wikilink in a
     not-yet-processed ``raw/`` memory (or any body prose) should resolve to
     the canonical page once ``old-slug`` has been folded away and recorded
     in the canonical page's ``aliases:`` list. Scans every ``*.md`` directly
@@ -757,8 +757,8 @@ def resolve_alias_slug(wiki_root: Path, slug: str) -> str:
     or already canonical). First match wins on a (should-not-happen)
     multi-hit; unreadable/malformed files are skipped.
 
-    Intentional, retained helper (issue #539 settling of §4.4). It is the
-    READ-side of #425 (resolving a ``[[old-slug]]`` link to its canonical page
+    Intentional, retained helper (issue athenaeum#539 settling of §4.4). It is the
+    READ-side of athenaeum#425 (resolving a ``[[old-slug]]`` link to its canonical page
     via ``aliases:``), the complement to — NOT superseded by — the WRITE-side
     :func:`_apply_fold_into_existing` (which folds a page away and records the
     alias). It has no in-repo caller today because the recall/link-rewrite
@@ -799,7 +799,7 @@ def _purge_vector_ids(
     search_backend: str | None,
     embedding_model: str | None,
 ) -> int:
-    """Best-effort vector-store purge for deleted wiki slugs (issue #425).
+    """Best-effort vector-store purge for deleted wiki slugs (issue athenaeum#425).
 
     A no-op (returns 0) when ``cache_dir`` is not supplied, the configured
     backend is not ``"vector"``, or chromadb is unavailable — vector purge
@@ -834,7 +834,7 @@ def _apply_fold_into_existing(
     search_backend: str | None,
     embedding_model: str | None,
 ) -> dict:
-    """Execute the ``fold-into-existing`` write path (issue #425).
+    """Execute the ``fold-into-existing`` write path (issue athenaeum#425).
 
     The target IS the canonical existing page. Steps, in order:
 
@@ -853,7 +853,7 @@ def _apply_fold_into_existing(
     Returns ``{"ok": True, "folded_sources", "aliases_added",
     "links_rewritten"}`` on success. ``target_exists`` is unreachable from
     here by construction — the caller only takes this path for
-    ``write_kind == "fold-into-existing"``, and #421's proposal-time
+    ``write_kind == "fold-into-existing"``, and athenaeum#421's proposal-time
     classification only assigns that write_kind when the slug already
     exists; this function does not re-check.
     """
@@ -953,7 +953,7 @@ def resolve_merge(
     Args:
         merges_path: Path to ``_pending_merges.md``.
         merge_id: Id returned by :func:`list_pending_merges`.
-        auto_applied: Issue #602. When ``True``, this ``"approve"`` is being
+        auto_applied: Issue athenaeum#602. When ``True``, this ``"approve"`` is being
             finalized by the T2 reasoning tier's auto-finalize path, NOT by
             a human — the caller (:func:`athenaeum.merge.t2_screen_merge_proposal`)
             is the ONLY production caller that ever passes ``True``. This
@@ -968,7 +968,7 @@ def resolve_merge(
             caller (the human MCP/CLI approve path) is byte-identical to
             before this parameter existed.
         decision: ``"approve"`` dispatches on the proposal's ``write_kind``
-            (issue #421 classification, issue #425 write paths):
+            (issue athenaeum#421 classification, issue athenaeum#425 write paths):
 
             - ``"create-merged"`` (unchanged behavior): writes
               ``wiki/<target-slug>.md`` (or under ``wiki_root`` when
@@ -1008,7 +1008,7 @@ def resolve_merge(
         cache_dir: Optional search-index cache dir. When supplied together
             with ``search_backend="vector"``, a ``fold-into-existing``
             approve purges the deleted sources' vectors from the store
-            (issue #425 embedding hygiene). ``None`` (default) skips the
+            (issue athenaeum#425 embedding hygiene). ``None`` (default) skips the
             purge — vector hygiene is opportunistic, never a hard
             dependency of resolving a merge.
         search_backend: The configured search backend name (``"vector"``
@@ -1118,7 +1118,7 @@ def resolve_merge(
         else:
             # ``create-merged`` path — UNCHANGED behavior. A misclassified
             # create-kind proposal that hits an existing slug still fails
-            # closed here (defense in depth): the #421 precheck should have
+            # closed here (defense in depth): the athenaeum#421 precheck should have
             # classified it fold-into-existing, but a stale/hand-edited
             # block's write_kind is not trusted blindly.
             if target_path.exists():
@@ -1146,7 +1146,7 @@ def resolve_merge(
         )
     elif decision == "reject" and len(target_pm.sources) >= 2:
         # Write a `refines:` declaration into the first source memory
-        # naming the second one. Lane 1 / #167's declared-refinement
+        # naming the second one. Lane 1 / athenaeum#167's declared-refinement
         # short-circuit then suppresses the pair on future detector runs.
         src_a = Path(target_pm.sources[0])
         src_b = Path(target_pm.sources[1])
@@ -1217,7 +1217,7 @@ def ingest_resolved_merges(merges_path: Path) -> int:
     Also COMPACTS the primary file every run: it is rewritten from the
     blocks :func:`_split_blocks` still recognizes as canonical merge
     blocks, which drops any orphan ``## From`` fragments a broken draft
-    fence leaked in an earlier version (issue #394). The recomposed form
+    fence leaked in an earlier version (issue athenaeum#394). The recomposed form
     is stable — re-splitting it yields the same blocks — so once the
     backlog has drained the file stops changing and no needless rewrite
     happens. This is what makes the 13 MB regressed sidecar shrink on the
@@ -1243,7 +1243,7 @@ def ingest_resolved_merges(merges_path: Path) -> int:
 
     # Recompose the primary file from recognized blocks. Any leaked orphan
     # ``## From`` fragment that _split_blocks no longer treats as a block is
-    # dropped here, draining the sidecar (issue #394). Compact even when
+    # dropped here, draining the sidecar (issue athenaeum#394). Compact even when
     # nothing was archived this run, but only actually write when the bytes
     # would change, so a clean file is left untouched.
     primary_parts = ["# Pending Merges", *remaining]
@@ -1318,11 +1318,11 @@ def revalidate_pending_merges(
     now: datetime | None = None,
 ) -> RevalidationResult:
     """Re-validate EXISTING unresolved ``_pending_merges.md`` blocks against
-    the CURRENT suppression gate and archive ones that now fail it (issue #481).
+    the CURRENT suppression gate and archive ones that now fail it (issue athenaeum#481).
 
-    #480 closed the write-path bypass, so no NEW degenerate over-cluster
+    athenaeum#480 closed the write-path bypass, so no NEW degenerate over-cluster
     proposal can be appended. This is the complement: it retires entries that
-    were queued BEFORE the #400/#421 gate tightened — the class the pipeline
+    were queued BEFORE the athenaeum#400/#421 gate tightened — the class the pipeline
     would never propose today (the reported 1,711/1,746-source
     ``merge-workflow-pattern`` and 16-source ``contact-contacts-wiki``, and the
     font-name / year-range / hash-fragment over-clusters). Without it, a
@@ -1333,7 +1333,7 @@ def revalidate_pending_merges(
 
     * A retired block is MOVED to ``_pending_merges_archive.md`` with the gate
       reason recorded — never deleted — so a surprising purge is auditable.
-    * It writes NO ``refines:`` suppression on the source pages (the #437
+    * It writes NO ``refines:`` suppression on the source pages (the athenaeum#437
       trap). Retiring a stale proposal leaves the pair free to be re-proposed
       if a future, healthy pipeline would emit it — this is a queue-hygiene
       sweep, NOT a per-pair rejection and NOT a queue-clearing tool.

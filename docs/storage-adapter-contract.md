@@ -1,6 +1,6 @@
 # Storage-adapter layer (entity class → surface + corpus policy)
 
-> **Status:** internal seam (issue #429). The Python API
+> **Status:** internal seam (issue athenaeum#429). The Python API
 > (`athenaeum.storage`) is importable but not part of the stable `__all__`
 > surface; signatures may change between minor releases until this contract is
 > promoted to a stable extension point.
@@ -9,8 +9,8 @@ Athenaeum persists every compiled entity as a markdown page in a flat `wiki/`
 tree, and every corpus consumer — the embedder, `recall`, and the wiki-dedup
 merge engine — scans that tree. That single hardcoded decision is fine until a
 class of entity should live *somewhere else with a different corpus policy*:
-archival contact data that must stay out of recall (#427), or skill files that
-want an athenaeum-like sync without joining the recalled corpus (#426,
+archival contact data that must stay out of recall (athenaeum#427), or skill files that
+want an athenaeum-like sync without joining the recalled corpus (athenaeum#426,
 deferred).
 
 The **storage-adapter layer** makes that decision a **configuration choice,
@@ -42,12 +42,12 @@ you want a *storage* adapter.
 A surface's `corpus_policy` declares participation in three **orthogonal**
 capabilities. Each is **enforced** — a class routed to a surface that opts out
 of a capability is dropped from it, even for a page that physically sits inside
-`wiki/` (issue #532). The enforcement point per capability:
+`wiki/` (issue athenaeum#532). The enforcement point per capability:
 
 | Capability | Meaning | Enforced at |
 |---|---|---|
-| `embedded` | pages are indexed into the FTS5 / vector store | index **build** — a non-`embedded` class is dropped by the scan (`search._scan_indexed_records`), the same way a `pii:`-flagged page is (#427). No persisted index for the keyword backend, so it is inert there. |
-| `recallable` | pages are eligible to be returned by `recall` | recall **render** — a non-`recallable` class is dropped against fresh on-disk frontmatter (`mcp_server._recall_via_backend`, and the `athenaeum recall` CLI), the same fail-closed re-check the audience predicate uses (#312 Layer C). Applies to every backend. |
+| `embedded` | pages are indexed into the FTS5 / vector store | index **build** — a non-`embedded` class is dropped by the scan (`search._scan_indexed_records`), the same way a `pii:`-flagged page is (athenaeum#427). No persisted index for the keyword backend, so it is inert there. |
+| `recallable` | pages are eligible to be returned by `recall` | recall **render** — a non-`recallable` class is dropped against fresh on-disk frontmatter (`mcp_server._recall_via_backend`, and the `athenaeum recall` CLI), the same fail-closed re-check the audience predicate uses (athenaeum#312 Layer C). Applies to every backend. |
 | `merge_eligible` | pages may be proposed for wiki-dedup consolidation | candidate discovery — a non-`merge_eligible` class is dropped from merge candidates (`wiki_dedupe.discover_wiki_dedupe_candidates`). |
 
 All three are **defense-in-depth on top of the by-construction path exclusion**
@@ -72,12 +72,12 @@ layer existed. "The wiki is just the default adapter."
 
 Backing store: markdown on a surface **outside `wiki/`** (default `excluded/`).
 Corpus policy: **all-false** — nothing on it is embedded, recalled, or merged.
-This is what #427's PII / archival-contact surface consumes.
+This is what athenaeum#427's PII / archival-contact surface consumes.
 
 **Exclusion is by construction.** An excluded surface's root lives outside the
 corpus scanners' search set (`wiki/` plus the configured
 `recall.extra_intake_roots`), so its pages are excluded from embed / recall /
-merge *without any change to those scanners* — the fail-closed property #427
+merge *without any change to those scanners* — the fail-closed property athenaeum#427
 requires. A `pii: true` flag would fail *open* (one unflagged page leaks); a
 separate path fails *closed* (a new page under the excluded root is invisible to
 the corpus by default).
@@ -129,7 +129,7 @@ embed / recall / merge core:
 - **From config** — define it under `storage.adapters` and map a class to it
   under `storage.mapping` (as above).
 - **From code** — call `athenaeum.storage.register_adapter(...)` at import time
-  (the seam #426's deferred skill-file-sync surface would use):
+  (the seam athenaeum#426's deferred skill-file-sync surface would use):
 
   ```python
   from athenaeum.storage import StorageAdapter, CorpusPolicy, register_adapter
@@ -156,11 +156,11 @@ consumer needs:
 | Function | Returns |
 |---|---|
 | `resolve_adapter_for_class(cls, config)` | the resolved `StorageAdapter` |
-| `surface_root_for_class(cls, config, knowledge_root)` | absolute on-disk root where the class lives (the writer entry point #427 consumes instead of a hardcoded path) |
+| `surface_root_for_class(cls, config, knowledge_root)` | absolute on-disk root where the class lives (the writer entry point athenaeum#427 consumes instead of a hardcoded path) |
 | `is_embedded / is_recallable / is_merge_eligible(cls, config)` | the individual policy bits |
 | `is_excluded(cls, config)` | `True` when the class joins no corpus capability |
 
-Every corpus consumer honors the matching policy bit (issue #532):
+Every corpus consumer honors the matching policy bit (issue athenaeum#532):
 
 - The embedder drops a non-`embedded` class at index build
   (`search._scan_indexed_records`).
@@ -176,11 +176,11 @@ exclusion, and each is a no-op for the default all-true wiki surface.
 
 The in-process extension point — `register_adapter`, `resolve_adapter_for_class`,
 `available_adapters`, and the `StorageAdapter` / `CorpusPolicy` dataclasses — is
-**intentional, supported public API of this internal seam** (issue #532, M34).
+**intentional, supported public API of this internal seam** (issue athenaeum#532, M34).
 It is importable from `athenaeum.storage`; like the rest of this module it is
 not yet on the stable `__all__` surface (signatures may change between minor
 releases until the seam is promoted), but it is exercised end to end by a
 contract test — `tests/test_storage_enforcement.py::TestAdapterExtensionPointContract`
 drives a code-registered custom adapter through resolve → index → recall — so it
 is a live, guarded seam rather than untested rot. A downstream consumer (e.g.
-#426's deferred skill-file-sync surface) can rely on it.
+athenaeum#426's deferred skill-file-sync surface) can rely on it.

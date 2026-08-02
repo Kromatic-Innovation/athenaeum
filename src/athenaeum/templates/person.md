@@ -8,7 +8,7 @@ phones: []
 current_title: ""
 current_company: ""
 linkedin_url: ""
-# Source-handle registry keys (issue #453, epic #422). These map an entity
+# Source-handle registry keys (issue athenaeum#453, epic athenaeum#422). These map an entity
 # to the corpus handles the fact-mining pipeline resolves against, and are
 # indexed into `registry.json` by `athenaeum registry`. Leave empty until
 # real handles are known; the index builder tolerates the empty case. See

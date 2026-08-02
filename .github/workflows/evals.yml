@@ -1,6 +1,6 @@
 name: Evals
 
-# Live-API eval suite (issue #331). Triggers:
+# Live-API eval suite (issue athenaeum#331). Triggers:
 #   * workflow_dispatch — on-demand, optionally with `record=true` to
 #     persist raw response bodies to tests/fixtures/recorded/ (a follow-up
 #     PR then commits the drift).

@@ -1,6 +1,6 @@
 # Hook Drift Audit (cwc → athenaeum)
 
-Snapshot 2026-05-10. Closes #129.
+Snapshot 2026-05-10. Closes athenaeum#129.
 
 Athenaeum's `examples/claude-code/` ships an installable hook kit. The
 maintainer's personal Claude Code workspace (a separate private toolkit, "cwc")

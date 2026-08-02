@@ -1,4 +1,4 @@
-# tests/evals — live-API eval suite (issue #331)
+# tests/evals — live-API eval suite (issue athenaeum#331)
 
 Two layers of test that share one recording pipeline.
 
@@ -18,9 +18,9 @@ Layers exercised end-to-end against a real Claude API call:
 | Recall    | Haiku (`ATHENAEUM_TOPIC_MODEL`)    | 6 prompts       | ≥ 5/6  |
 | Classify  | Haiku (`ATHENAEUM_CLASSIFY_MODEL`) | 6 raw intakes   | ≥ 4/6  |
 | Merge     | Sonnet (`ATHENAEUM_WRITE_MODEL`)   | 4 merge cases   | ≥ 3/4  |
-| Backfill  | deferred until #328                | —               | —      |
+| Backfill  | deferred until athenaeum#328                | —               | —      |
 
-Classify and Merge (issue #552) cover `tiers.py`'s Tier-2 CLASSIFY and
+Classify and Merge (issue athenaeum#552) cover `tiers.py`'s Tier-2 CLASSIFY and
 Tier-3 WRITE/MERGE stages — see `docs/evals-inventory.md` for the full
 module-by-module inventory of which stages warrant a live eval and why.
 
@@ -50,7 +50,7 @@ export ANTHROPIC_API_KEY=sk-...   # a live key metered on your account
 pytest -m eval tests/evals/ -v
 ```
 
-Under the `claude-cli` provider (issue #330) a local run costs $0 metered
+Under the `claude-cli` provider (issue athenaeum#330) a local run costs $0 metered
 against your Claude Code subscription. The `api` backend meters at Anthropic
 list rates — expect single-digit cents per full run.
 

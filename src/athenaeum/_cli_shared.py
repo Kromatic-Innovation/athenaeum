@@ -4,7 +4,7 @@
 Contract: the small argparse-type functions (``_positive_int``, ``_iso_date``),
 the run-lock flag group, the lock-acquire helper, and the lock-contention exit
 code that BOTH ``cli.py`` AND the per-subcommand ``_cmd_*.py`` modules need. Extracted
-here (issue #545) so a ``_cmd_*`` module can reuse them WITHOUT importing
+here (issue athenaeum#545) so a ``_cmd_*`` module can reuse them WITHOUT importing
 ``cli.py`` — the ``cli`` <-> ``_cmd_drain`` back-edge that formed a 2-node import
 cycle. ``_cmd_drain`` was the only ``_cmd_*`` module reaching back into ``cli``
 (``_add_lock_args``/``_positive_int``/``_acquire_or_exit``); the other eight import
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 
 def _iso_date(value: str) -> date:
-    """Argparse type for an ISO-8601 ``YYYY-MM-DD`` ``--as-of`` date (issue #308).
+    """Argparse type for an ISO-8601 ``YYYY-MM-DD`` ``--as-of`` date (issue athenaeum#308).
 
     Unlike the fail-open frontmatter date parse, an operator explicitly
     requesting an as-of view with a malformed date gets a loud parse error
@@ -47,7 +47,7 @@ def _iso_date(value: str) -> date:
 def _positive_int(value: str) -> int:
     """Argparse type for flags that must be a strictly positive integer.
 
-    Issue #220: a zero or negative ``--max-api-calls`` would defer the
+    Issue athenaeum#220: a zero or negative ``--max-api-calls`` would defer the
     entire intake while exiting 0 — reject it at parse time instead.
     """
     try:
@@ -62,19 +62,19 @@ def _positive_int(value: str) -> int:
 
 
 #: Exit code returned when a mutating command cannot acquire the run lock
-#: (issue #309). Non-zero so cron / alerting sees the contention; distinct
+#: (issue athenaeum#309). Non-zero so cron / alerting sees the contention; distinct
 #: from the generic error (1) and dry-run-found (2) codes some commands use.
 EXIT_LOCK_HELD = 75
 
 
 def _add_lock_args(parser: argparse.ArgumentParser) -> None:
-    """Add the shared run-lock ``--wait`` / ``--force`` flags (issue #309).
+    """Add the shared run-lock ``--wait`` / ``--force`` flags (issue athenaeum#309).
 
     Mutating commands acquire an exclusive lock on
     ``<knowledge_root>/.athenaeum.lock`` so overlapping runs (nightly cron +
     manual) don't race wiki writes, sidecar appends, or the API-call budget.
     """
-    group = parser.add_argument_group("run lock (single-machine, issue #309)")
+    group = parser.add_argument_group("run lock (single-machine, issue athenaeum#309)")
     group.add_argument(
         "--wait",
         type=float,
@@ -99,7 +99,7 @@ def _acquire_or_exit(
     args: argparse.Namespace,
     config: dict[str, Any] | None = None,
 ) -> "RunLock | int":
-    """Acquire the run lock or return :data:`EXIT_LOCK_HELD` (issue #309).
+    """Acquire the run lock or return :data:`EXIT_LOCK_HELD` (issue athenaeum#309).
 
     Returns an acquired :class:`~athenaeum.runlock.RunLock` on success (the
     caller must ``release()`` it, ideally in a ``finally``), or the

@@ -255,7 +255,7 @@ def test_live_wiki_roundtrip():
     assert checked > 0, "Expected at least one wiki to validate"
 
 
-# --- Provenance (issue #90) ---
+# --- Provenance (issue athenaeum#90) ---
 
 
 class TestProvenanceFields:
@@ -315,7 +315,7 @@ class TestProvenanceFields:
             )
 
     def test_legacy_bare_slug_source_rejected(self) -> None:
-        # Post-#97: legacy bare-slug `source:` form is retired. The live
+        # Post-athenaeum#97: legacy bare-slug `source:` form is retired. The live
         # tree was migrated to `script:<slug>` on 2026-05-09; the schema
         # now rejects bare slugs and requires the typed `<type>:<ref>` form.
         with pytest.raises(ValueError):
@@ -354,11 +354,11 @@ class TestProvenanceFields:
         assert m.field_sources == {"emails": "api:apollo:2026-05-07"}
 
 
-# --- KNOWN_TYPES allowlist (issue #93) ---
+# --- KNOWN_TYPES allowlist (issue athenaeum#93) ---
 
 
 class TestKnownTypes:
-    """Issue #93: validate_wiki_meta warns on unknown types but does not raise."""
+    """Issue athenaeum#93: validate_wiki_meta warns on unknown types but does not raise."""
 
     def test_known_types_includes_concrete_schemas(self) -> None:
         for t in ("person", "company", "project", "concept", "source"):

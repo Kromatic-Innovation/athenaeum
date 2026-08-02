@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for athenaeum.llm_schemas — observe-only LLM response validation (#570, M17).
+"""Tests for athenaeum.llm_schemas — observe-only LLM response validation (athenaeum#570, M17).
 
 The load-bearing guarantee of phase 1 is **behavior neutrality**: schema
 validation observes and logs, but NEVER changes what a call site does with a
@@ -116,7 +116,7 @@ def test_valid_merge_op_with_anchor_and_text_is_not_flagged(
 
 # ---------------------------------------------------------------------------
 # Behavior neutrality — a schema-violating response STILL produces the identical
-# downstream result the site produced before #570, AND logs a mismatch. This is
+# downstream result the site produced before athenaeum#570, AND logs a mismatch. This is
 # the regression guard for the no-behavior-change acceptance criterion.
 # ---------------------------------------------------------------------------
 
@@ -135,7 +135,7 @@ def test_query_topics_schema_violation_is_behavior_neutral(
     with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
         topics = query_topics.extract_topics("Tell me about the Acme deal")
 
-    assert topics == ["ok"]  # identical to pre-#570 behavior
+    assert topics == ["ok"]  # identical to pre-athenaeum#570 behavior
     recs = _mismatch_records(caplog)
     assert len(recs) == 1
     assert "contract=query_topics" in recs[0].getMessage()

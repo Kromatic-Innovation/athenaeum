@@ -213,7 +213,7 @@ class TestVectorBackend:
     ) -> None:
         """Regression: stale/corrupt on-disk state must not break rebuild.
 
-        Reproduces the scenario from issue #32 where chromadb's SQLite and
+        Reproduces the scenario from issue athenaeum#32 where chromadb's SQLite and
         rust-binding state desynced, causing ``create_collection`` to succeed
         but ``collection.add`` to raise ``NotFoundError``. The fix wipes
         ``vector_dir`` wholesale on each rebuild.
@@ -290,7 +290,7 @@ class TestVectorBackend:
 
 
 class TestHitsFromQueryResults:
-    """#489 AC3/AC4: hardened parsing of a chromadb query result — no crash on
+    """athenaeum#489 AC3/AC4: hardened parsing of a chromadb query result — no crash on
     a None metadata, and a degenerate flat-score set surfaces explicitly.
     Pure/deterministic, so no chromadb is needed."""
 
@@ -361,7 +361,7 @@ class TestHitsFromQueryResults:
 
 
 class TestReindexUnderLiveServer:
-    """#489: a long-lived process must observe an out-of-process reindex and
+    """athenaeum#489: a long-lived process must observe an out-of-process reindex and
     re-open its stale chromadb handle — no restart, no degraded/None results."""
 
     def test_build_index_writes_generation_stamp(
@@ -379,7 +379,7 @@ class TestReindexUnderLiveServer:
     ) -> None:
         # Faithful reproduction of the live incident: the reindex runs in a
         # SEPARATE process, so this ("server") process's chromadb SharedSystem
-        # cache stays pinned to the pre-reindex collection. Without the #489
+        # cache stays pinned to the pre-reindex collection. Without the athenaeum#489
         # re-open, the second query serves the stale (deleted) page at the
         # degenerate ~1.5 distance; with it, recall reflects the new corpus.
         import subprocess
@@ -429,7 +429,7 @@ class TestReindexUnderLiveServer:
 
 
 class TestRecallSurfacesDegradedIndex:
-    """#489 AC3: a DegradedIndexError from the backend surfaces to the recall
+    """athenaeum#489 AC3: a DegradedIndexError from the backend surfaces to the recall
     caller as an explicit, actionable message — never as ranked hits."""
 
     def test_recall_reports_degraded_index(self, tmp_path: Path) -> None:
@@ -923,7 +923,7 @@ class TestHybridRescueClassesExtraRoot:
 
 
 # ---------------------------------------------------------------------------
-# Incremental indexing (issue #348) — whole-file hash diff for both backends
+# Incremental indexing (issue athenaeum#348) — whole-file hash diff for both backends
 # ---------------------------------------------------------------------------
 
 
@@ -1040,7 +1040,7 @@ class TestFTS5Incremental:
         """A frontmatter-only edit (body byte-identical) must re-index.
 
         The whole-file hash covers frontmatter, so an audience/tag/name
-        change is caught where a body-only hash would miss it (#312).
+        change is caught where a body-only hash would miss it (athenaeum#312).
         """
         wiki, cache = seeded
         # Body identical to the fixture; only the tags line changes.
@@ -1261,7 +1261,7 @@ class TestVectorIncremental:
 
 
 class TestIndexGlobs:
-    """Corpus-scoping include/exclude globs (issue #348 COULD)."""
+    """Corpus-scoping include/exclude globs (issue athenaeum#348 COULD)."""
 
     def test_exclude_glob_skips_matching_pages(
         self, wiki_with_pages: Path, tmp_path: Path
@@ -1317,7 +1317,7 @@ class TestIncrementalHelpers:
 
 
 # ---------------------------------------------------------------------------
-# Stat pre-filter (issue #370) — skip re-reading files whose (mtime,size) match
+# Stat pre-filter (issue athenaeum#370) — skip re-reading files whose (mtime,size) match
 # ---------------------------------------------------------------------------
 
 
@@ -1439,7 +1439,7 @@ class TestStatPreFilter:
         FTS5Backend().build_index(wiki_with_pages, cache)  # writes v2
         mpath = cache / "fts5-manifest.json"
         m = json.loads(mpath.read_text())
-        # Downgrade to a pre-#370 v1 manifest: drop the stat map entirely.
+        # Downgrade to a pre-athenaeum#370 v1 manifest: drop the stat map entirely.
         mpath.write_text(json.dumps({"version": 1, "hashes": m["hashes"]}))
 
         hash_spy["n"] = 0
@@ -1502,7 +1502,7 @@ class TestStatPreFilter:
 
 
 # ---------------------------------------------------------------------------
-# Periodic full re-hash backstop (issue #373) — heal the #370 stat pre-filter's
+# Periodic full re-hash backstop (issue athenaeum#373) — heal the athenaeum#370 stat pre-filter's
 # blind spot: a content edit that preserves BOTH (mtime_ns, size).
 # ---------------------------------------------------------------------------
 
@@ -1512,7 +1512,7 @@ def _stat_preserving_edit(path: Path, old: str, new: str) -> None:
 
     ``old`` and ``new`` MUST be equal length so the file size is unchanged; the
     original mtime is restored via ``os.utime``. This forges exactly the edit the
-    #370 stat fast-path cannot see — the manifest's stored ``(mtime_ns, size)``
+    athenaeum#370 stat fast-path cannot see — the manifest's stored ``(mtime_ns, size)``
     still match, so the stored hash would be wrongly reused without a re-hash.
     """
     import os
@@ -1528,7 +1528,7 @@ def _stat_preserving_edit(path: Path, old: str, new: str) -> None:
 
 
 def _age_manifest_rehash(manifest_path: Path, days: float) -> None:
-    """Rewind the manifest's ``last_full_rehash_at`` by ``days`` (issue #373)."""
+    """Rewind the manifest's ``last_full_rehash_at`` by ``days`` (issue athenaeum#373)."""
     import json
     import time
 
@@ -1552,8 +1552,8 @@ def hash_spy(monkeypatch: pytest.MonkeyPatch) -> dict:
 
 
 class TestFullReHashBackstopFTS5:
-    """#373: a periodic full re-hash on the incremental path catches a
-    stat-preserved content edit that #370's fast-path would otherwise miss,
+    """athenaeum#373: a periodic full re-hash on the incremental path catches a
+    stat-preserved content edit that athenaeum#370's fast-path would otherwise miss,
     without falling back to a full FTS5 rebuild."""
 
     def test_seed_stamps_last_full_rehash_at(
@@ -1654,7 +1654,7 @@ class TestFullReHashBackstopFTS5:
     def test_backcompat_no_timestamp_triggers_one_rehash_then_stamps(
         self, wiki_with_pages: Path, tmp_path: Path, hash_spy: dict
     ) -> None:
-        """A manifest without last_full_rehash_at (pre-#373) is infinitely stale:
+        """A manifest without last_full_rehash_at (pre-athenaeum#373) is infinitely stale:
         exactly one full re-hash, then it stamps and reverts to the fast-path."""
         import json
 
@@ -1662,7 +1662,7 @@ class TestFullReHashBackstopFTS5:
         FTS5Backend().build_index(wiki_with_pages, cache)
         mpath = cache / "fts5-manifest.json"
         m = json.loads(mpath.read_text())
-        # Simulate a pre-#373 manifest: keep stats, drop the timestamp.
+        # Simulate a pre-athenaeum#373 manifest: keep stats, drop the timestamp.
         m.pop("last_full_rehash_at", None)
         mpath.write_text(json.dumps(m))
 
@@ -1679,7 +1679,7 @@ class TestFullReHashBackstopFTS5:
 
 
 class TestFullReHashBackstopVector:
-    """#373 for the vector backend: a stale re-hash catches a stat-preserved edit
+    """athenaeum#373 for the vector backend: a stale re-hash catches a stat-preserved edit
     and re-embeds ONLY the changed file (no rmtree / full re-embed)."""
 
     @pytest.fixture(autouse=True)

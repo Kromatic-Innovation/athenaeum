@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Recall-sidecar live-API eval (issue #331).
+"""Recall-sidecar live-API eval (issue athenaeum#331).
 
 The recall pipeline this covers:
 
     prompt --> query_topics.extract_topics (LIVE Haiku call) --> topics
            --> recall_search (fixture wiki, keyword backend, offline)
            --> formatted output text asserted against expected page uids
-               and the #325 provenance header
+               and the athenaeum#325 provenance header
 
 Only ``extract_topics`` hits the network; :func:`recall_search` runs
 against the ``tests/evals/data/recall/wiki/`` fixture with the keyword
@@ -156,7 +156,7 @@ def test_recall_case(
             f"distinct_pages={len(hit_uids)} < {min_distinct}"
         )
     if expected.get("contradiction_flag"):
-        # #325 header: recall output must surface the flag for the
+        # athenaeum#325 header: recall output must surface the flag for the
         # expected page. Substring match is sufficient — the formatter
         # renders exactly ``**Status:** contradiction-flagged (see
         # _pending_questions.md)`` (see ``_recall_metadata_lines``).

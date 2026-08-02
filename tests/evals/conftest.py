@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pytest wiring for the live-API eval suite (issue #331).
+"""Pytest wiring for the live-API eval suite (issue athenaeum#331).
 
 Adds three knobs:
 
@@ -34,7 +34,7 @@ from tests.evals.harness import (
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    group = parser.getgroup("evals", "live-API eval suite (issue #331)")
+    group = parser.getgroup("evals", "live-API eval suite (issue athenaeum#331)")
     group.addoption(
         "--record",
         action="store_true",
@@ -81,7 +81,7 @@ def eval_session(request: pytest.FixtureRequest) -> Any:
         else REPO_ROOT / "eval-summary.json"
     )
     session.emit_summary(summary_path)
-    # Hard budget guard (issue #331 "hard budget guard" acceptance) — a
+    # Hard budget guard (issue athenaeum#331 "hard budget guard" acceptance) — a
     # runaway golden set should fail the run loudly, not silently spend.
     total_tokens = session.input_tokens + session.output_tokens
     assert total_tokens <= EVAL_TOKEN_CEILING, (

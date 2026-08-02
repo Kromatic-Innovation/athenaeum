@@ -149,12 +149,12 @@ class PendingQuestion:
     answered: bool
     answer_lines: list[str]
     raw_block: str
-    # Issue #198: claim-pair fingerprint embedded by tier4_escalate. Recovered
+    # Issue athenaeum#198: claim-pair fingerprint embedded by tier4_escalate. Recovered
     # off the ``**Fingerprint**:`` line so resolution can persist the
     # adjudication to ``raw/_resolved_contradictions.jsonl``. Empty when the
-    # block predates #198 or carried no recoverable passage pair.
+    # block predates athenaeum#198 or carried no recoverable passage pair.
     fingerprint: str = ""
-    # Issue #157: entities sharing the same source-memory pair that
+    # Issue athenaeum#157: entities sharing the same source-memory pair that
     # got merged into this block instead of getting their own. The
     # primary entity (header) is NOT included here. Empty by default
     # — only populated when the dedup path in tier4_escalate fires.
@@ -200,8 +200,8 @@ def _split_blocks(text: str) -> list[str]:
     Historically this split naively on ``startswith("## ")`` and bare ``---``
     with NO fence tracking, so a ``---`` or ``## `` inside a human's fenced
     answer split the block and silently dropped the tail — taking the answer
-    with it (the #394 failure class, fixed in ``pending_merges`` only; audit M11
-    / #527). It now delegates to the shared
+    with it (the athenaeum#394 failure class, fixed in ``pending_merges`` only; audit M11
+    / athenaeum#527). It now delegates to the shared
     :func:`athenaeum.sidecar_blocks.split_blocks` — the single fence-aware
     splitter — parameterized with the Entity header and a generic backtick
     fence-opener (a human answer may fence with any language, not just
@@ -352,7 +352,7 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
             description = stripped.removeprefix("**Description**:").strip()
             continue
         if stripped.startswith("**Also affects**:"):
-            # Issue #157: dedup-merge tag. Comma-separated entity names
+            # Issue athenaeum#157: dedup-merge tag. Comma-separated entity names
             # that share the source-memory pair with this block's primary
             # entity. Recognized as metadata so it does NOT leak into
             # answer_lines (which would forge a phantom user answer).
@@ -361,7 +361,7 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
             also_affects = [name.strip() for name in payload.split(",") if name.strip()]
             continue
         if stripped.startswith("**Fingerprint**:"):
-            # Issue #198: claim-pair fingerprint metadata. Recognized so it
+            # Issue athenaeum#198: claim-pair fingerprint metadata. Recognized so it
             # does NOT leak into answer_lines (which would forge a phantom
             # user answer).
             in_description = False
@@ -473,7 +473,7 @@ def _render_answer_raw_file(pq: PendingQuestion, resolved_at: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Source write-back (issue #197)
+# Source write-back (issue athenaeum#197)
 # ---------------------------------------------------------------------------
 #
 # Answering a pending question must APPLY the ratified verdict to the
@@ -502,7 +502,7 @@ _VERDICT_TOKENS: frozenset[str] = frozenset(
     )
 )
 
-# Single-source historical verdicts (#197): a HUMAN answer can ask to archive
+# Single-source historical verdicts (athenaeum#197): a HUMAN answer can ask to archive
 # / deprecate / supersede a named source outright. These are NOT in develop's
 # resolver ``ENACTING_ACTIONS`` (a/b-indexed delete/mark); they take the
 # whole-file ``deprecated: true`` marker path via ``_mark_member_frontmatter``.
@@ -515,7 +515,7 @@ _MEMBER_PATHS_RE = re.compile(
     r"^\s*\*\*Member paths\*\*:\s*(?P<payload>.+)$", re.MULTILINE
 )
 # ``Members involved: a, b`` — the detector's source-attribution line on
-# auto-memory contradiction blocks (issue #210 follow-up). The refs are
+# auto-memory contradiction blocks (issue athenaeum#210 follow-up). The refs are
 # relative to the configured intake roots (default ``raw/auto-memory``), and
 # the block's ``source:`` header points at a compiled wiki page rather than
 # the raw memory — so this line is the only handle on the true source files.
@@ -569,7 +569,7 @@ def _extract_member_path_refs(raw_block: str) -> list[str]:
 def _extract_members_involved_refs(raw_block: str) -> list[str]:
     """Return ``Members involved:`` source refs from a pending block.
 
-    Issue #210 follow-up: auto-memory contradiction blocks carry their true
+    Issue athenaeum#210 follow-up: auto-memory contradiction blocks carry their true
     source files on a ``Members involved:`` line (comma-separated, relative to
     the intake roots), while the block ``source:`` header names a compiled
     wiki page. Without recovering these refs the write-back resolves nothing
@@ -645,8 +645,8 @@ def _writeback_source(
     verdicts always annotate (do not call the proposer).
 
     When ``usage`` is a :class:`athenaeum.models.TokenUsage`, the proposer
-    call is metered into it (#248): this function bumps ``api_calls`` once per
-    attempted proposer call (the caller counts attempts, mirroring the #239
+    call is metered into it (athenaeum#248): this function bumps ``api_calls`` once per
+    attempted proposer call (the caller counts attempts, mirroring the athenaeum#239
     convention) and the proposer accumulates the response's token + cache
     counts. Verdict paths that make no API call leave ``usage`` untouched.
     """
@@ -699,7 +699,7 @@ def _writeback_source(
             result = enact_resolution(proposal, member_paths)
             return 1 if result is not None else 0
 
-        # --- Historical / archive a single named source (#197). ---
+        # --- Historical / archive a single named source (athenaeum#197). ---
         # ``archive`` / ``deprecate`` / ``supersede`` mark the source(s)
         # ``deprecated: true`` (whole-file inactive) — reuse the existing
         # frontmatter marker rather than a new editor.
@@ -743,9 +743,9 @@ def _writeback_source(
                 path_to_meta[path] = meta or {}
 
             if source_pairs:
-                # #248: count one attempt per proposer call at the call site
+                # athenaeum#248: count one attempt per proposer call at the call site
                 # (the callee accumulates tokens but never bumps api_calls,
-                # mirroring the #239 convention). Bump BEFORE the call so an
+                # mirroring the athenaeum#239 convention). Bump BEFORE the call so an
                 # API failure still counts as an attempt.
                 if usage is not None:
                     usage.api_calls += 1
@@ -841,11 +841,11 @@ def ingest_answers(
         return 0
 
     answers_dir = raw_root / "answers"
-    # Issue #197: roots under which a block's source ref(s) are resolved for
+    # Issue athenaeum#197: roots under which a block's source ref(s) are resolved for
     # write-back. raw_root first (auto-memory sources live there), then the
     # wiki root (``pending_path.parent``) for wiki-side memories.
     #
-    # Issue #210 follow-up: the detector attributes auto-memory contradictions
+    # Issue athenaeum#210 follow-up: the detector attributes auto-memory contradictions
     # via ``Members involved:`` refs that are relative to the configured intake
     # roots (default ``raw/auto-memory``), not to ``raw/`` directly. Add the
     # auto-memory root and any configured extra intake roots so those refs
@@ -862,7 +862,7 @@ def ingest_answers(
     except Exception:  # noqa: BLE001 -- config is best-effort; defaults suffice
         pass
 
-    # #248: meter the LLM calls this run makes (the free-text proposer is the
+    # athenaeum#248: meter the LLM calls this run makes (the free-text proposer is the
     # only API call on the ingest-answers path). The accumulator is threaded
     # into _writeback_source; a one-line cost summary is emitted at the end of
     # a run that made >= 1 API call. No budget enforcement on this path.
@@ -919,12 +919,12 @@ def ingest_answers(
             counter += 1
         atomic_write_text(candidate, _render_answer_raw_file(pq, iso_ts))
 
-        # Issue #197/#210: apply the ratified verdict to the source memory
+        # Issue athenaeum#197/#210: apply the ratified verdict to the source memory
         # file(s). The provenance doc above is the audit trail and is ALWAYS
         # written first; this write-back is what stops the contradiction from
         # regenerating on the next wiki build. Failures are swallowed inside
         # _writeback_source so the audit/archive path is never blocked.
-        # Issue #210: thread client/config so free-text answers can use the
+        # Issue athenaeum#210: thread client/config so free-text answers can use the
         # LLM-backed proposer to enact source edits instead of annotating only.
         edited = _writeback_source(
             pq, source_roots, client=client, config=config, usage=usage
@@ -937,19 +937,19 @@ def ingest_answers(
                 pq.entity,
             )
 
-        # Issue #198: persist the human resolution to the fingerprint cache so
+        # Issue athenaeum#198: persist the human resolution to the fingerprint cache so
         # the settled claim-pair stops re-escalating on future pages.
-        # resolved_by="human" is load-bearing for sibling #199 (only human
+        # resolved_by="human" is load-bearing for sibling athenaeum#199 (only human
         # verdicts auto-apply there). No-op when the block carried no
-        # fingerprint (pre-#198 block or no recoverable passage pair).
+        # fingerprint (pre-athenaeum#198 block or no recoverable passage pair).
         if pq.fingerprint:
             verdict, _ = _parse_verdict("\n".join(pq.answer_lines))
-            # Issue #199: persist per-side anchors in the verdict's ORIGINAL
+            # Issue athenaeum#199: persist per-side anchors in the verdict's ORIGINAL
             # a/b orientation so the auto-apply lane can reconcile a swapped
             # re-surfacing of the same (order-independent-fingerprinted) pair.
             # side a = Passage 1 = pq.source = member_paths[0]; side b =
             # Passage 2. Normalized with the SAME helper the fingerprint uses.
-            # Issue #216 (follow-up to #211): derive side passages from the
+            # Issue athenaeum#216 (follow-up to athenaeum#211): derive side passages from the
             # FULL raw block, not pq.description. ``_parse_block`` truncates the
             # description at the first line starting with ``**`` (an intervening
             # bold passage line drops Passage 2), which silently emptied the
@@ -961,7 +961,7 @@ def ingest_answers(
             side_b_norm = (
                 normalize_side(side_passages[1]) if len(side_passages) >= 2 else None
             )
-            # Issue #211 + #216: persist member_key and pair_text so the
+            # Issue athenaeum#211 + athenaeum#216: persist member_key and pair_text so the
             # decision-log matcher can suppress re-detections that share the
             # same member pair even when the passage text drifted. The real
             # source attribution is the ``Members involved:`` line (the block
@@ -998,7 +998,7 @@ def ingest_answers(
         _archived_raw_blocks.append(pq.raw_block)
         ingested += 1
 
-    # #248: one cost summary per run that made >= 1 API call (the free-text
+    # athenaeum#248: one cost summary per run that made >= 1 API call (the free-text
     # proposer). Mirrors the librarian's run-summary format string in
     # ``librarian.run`` (tokens in/out, cache written/read, estimated cost).
     # No line is emitted when zero API calls were made. The per-call cache
@@ -1017,7 +1017,7 @@ def ingest_answers(
             usage.cache_read_input_tokens,
             usage.estimated_cost_usd,
         )
-    # Issue #378: persist the answers-ingest spend to the durable ledger,
+    # Issue athenaeum#378: persist the answers-ingest spend to the durable ledger,
     # tagged with the resolved provider so the free-text proposer's metered
     # (or subscription) usage is answerable from data. Best-effort.
     from athenaeum import spend
@@ -1113,7 +1113,7 @@ def list_unanswered(
     Each dict has: ``id``, ``entity``, ``source``, ``question``,
     ``conflict_type``, ``description``, ``created_at``.
 
-    Issue #538: a restricted ``caller_audience`` (non-owner) sees only questions
+    Issue athenaeum#538: a restricted ``caller_audience`` (non-owner) sees only questions
     whose originating ``source`` memory it is authorized to read — the same
     fail-closed predicate ``recall`` applies. Owner (``None``, the default)
     sees everything, preserving existing behavior. ``knowledge_root`` is the

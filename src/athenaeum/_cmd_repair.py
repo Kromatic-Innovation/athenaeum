@@ -55,13 +55,13 @@ def add_repair_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--legacy-source-slugs",
         action="store_true",
         help="Migrate legacy bare-slug `source:` values to typed "
-        "`script:<slug>` form (issue #97 / design-lock §5).",
+        "`script:<slug>` form (issue athenaeum#97 / design-lock §5).",
     )
     repair_mode.add_argument(
         "--backfill-sources",
         action="store_true",
         help="Re-classify memories whose source was DEFAULTED to "
-        "`claude:inferred` against their origin transcript (issue #328): "
+        "`claude:inferred` against their origin transcript (issue athenaeum#328): "
         "user-stated / agent-observed upgrades, else confirm inferred.",
     )
     repair_mode.add_argument(
@@ -120,7 +120,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
         repair_value_quoting,
     )
 
-    # Source-backfill (issue #328) reads the scope-indexed auto-memory tree, not
+    # Source-backfill (issue athenaeum#328) reads the scope-indexed auto-memory tree, not
     # the wiki, so it branches BEFORE the wiki_root resolution below.
     if getattr(args, "backfill_sources", False):
         return _cmd_repair_backfill_sources(args)
@@ -130,7 +130,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
         print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
         return 1
 
-    # Issue #309: --apply mutates wiki frontmatter and can race a concurrent
+    # Issue athenaeum#309: --apply mutates wiki frontmatter and can race a concurrent
     # `run`, so it takes the run lock. A dry-run reads only — no lock.
     lock: RunLock | int | None = None
     if args.apply:
@@ -195,7 +195,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
 
 def _cmd_repair_backfill_sources(args: argparse.Namespace) -> int:
-    """Run the #328 source-backfill pass over the auto-memory tree.
+    """Run the athenaeum#328 source-backfill pass over the auto-memory tree.
 
     Exit codes:
         0 — clean run (zero upgrades, OR ``--apply`` succeeded with no errors).
@@ -219,7 +219,7 @@ def _cmd_repair_backfill_sources(args: argparse.Namespace) -> int:
     asserter = resolve_owner_asserter(cfg)
 
     # --apply mutates frontmatter and can race a concurrent `run`, so it takes
-    # the run lock (issue #309). A dry-run reads only — no lock.
+    # the run lock (issue athenaeum#309). A dry-run reads only — no lock.
     lock: RunLock | int | None = None
     if args.apply:
         lock = _acquire_or_exit(knowledge_root, args, cfg)
@@ -271,7 +271,7 @@ def _cmd_repair_legacy_slugs(
     apply: bool,
     runner: Callable[..., Any],
 ) -> int:
-    """Run the legacy bare-slug ``source:`` migration (issue #97).
+    """Run the legacy bare-slug ``source:`` migration (issue athenaeum#97).
 
     Exit codes:
         0 — clean run (zero candidates found, OR ``--apply`` succeeded

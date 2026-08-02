@@ -1,29 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Import-graph SCC guard (issue #545).
+"""Import-graph SCC guard (issue athenaeum#545).
 
 This test walks EVERY ``src/athenaeum/*.py`` module with :mod:`ast`, collecting
 BOTH top-level AND function-local (deferred) ``import athenaeum.X`` /
 ``from athenaeum.X import ...`` edges, then runs Tarjan's algorithm over the
-full graph. It exists to lock in the #545 refactor, which hoisted three shared
+full graph. It exists to lock in the athenaeum#545 refactor, which hoisted three shared
 raw-intake primitives (``discover_raw_files``, ``discover_auto_memory_files``,
 ``tier0_passthrough``) DOWN to the :mod:`athenaeum.intake` leaf so the eight
 formerly mutually-recursive modules (librarian, merge, tiers, pending_merges,
 batch, status, retire, wiki_dedupe) no longer form one giant strongly-connected
 component (SCC), and broke the ``cli`` <-> ``_cmd_drain`` 2-node cycle.
 
-CONTEXT ON "8 vs 14": the #545 audit prose described "a single 8-node SCC". The
-REAL pre-#545 full-graph SCC (top-level + function-local) was larger — 14 nodes
+CONTEXT ON "8 vs 14": the athenaeum#545 audit prose described "a single 8-node SCC". The
+REAL pre-athenaeum#545 full-graph SCC (top-level + function-local) was larger — 14 nodes
 — because those eight hub modules were additionally tangled, through their OWN
 top-level and deferred edges, with ``answers``, ``calibration``,
-``contradictions``, ``drain``, ``reasoning_tiers``, and ``resolutions``. #545's
+``contradictions``, ``drain``, ``reasoning_tiers``, and ``resolutions``. athenaeum#545's
 NAMED, in-scope goal was to dissolve the librarian-centered named-8 coupling
 (hoist the 3 primitives + break cli/_cmd_drain), and that is done: ``batch``,
 ``status``, ``retire``, ``wiki_dedupe``, ``cli``, and ``_cmd_drain`` are now
 free of their former cycles.
 
-The three residual SCCs that #545 left in place ({answers, contradictions,
+The three residual SCCs that athenaeum#545 left in place ({answers, contradictions,
 resolutions, tiers}, {calibration, merge, pending_merges, reasoning_tiers}, and
-{drain, librarian, status}) were dissolved in issue #640, so the full-graph SCC
+{drain, librarian, status}) were dissolved in issue athenaeum#640, so the full-graph SCC
 is now EMPTY. The allowed baseline (:data:`ALLOWED_SCCS`) is therefore ``[]``:
 the guard FAILS if ANY multi-node SCC appears at all. The graph is fully acyclic
 and must stay that way — any new cycle is a regression.
@@ -36,11 +36,11 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "athenaeum"
 
-# The allowed baseline of residual import SCCs. Issue #640 dissolved the last
-# three residuals that #545 left in place, so the full-graph SCC is now EMPTY
+# The allowed baseline of residual import SCCs. Issue athenaeum#640 dissolved the last
+# three residuals that athenaeum#545 left in place, so the full-graph SCC is now EMPTY
 # and this baseline is ``[]``: ANY multi-node SCC is now a regression. The three
 # hoists that got here (each "move the shared primitive DOWN to a leaf, then drop
-# the back-edge", the pattern #545 established with intake.py/vecmath.py):
+# the back-edge", the pattern athenaeum#545 established with intake.py/vecmath.py):
 #   * {tiers, contradictions, resolutions, answers} — DEFAULT_CLASSIFY_MODEL
 #     moved tiers -> config, dropping the contradictions -> tiers back-edge.
 #   * {merge, pending_merges, calibration, reasoning_tiers} —
@@ -155,12 +155,12 @@ def _multi_node_sccs(graph: dict[str, set[str]]) -> list[frozenset[str]]:
 def test_no_import_scc_outside_allowed_baseline() -> None:
     """Every cyclic SCC must fit within the pinned, documented baseline.
 
-    The baseline is ``[]`` since issue #640 (which dissolved the three residual
-    SCCs #545 left behind), so this now asserts the full import graph is entirely
-    acyclic: ANY multi-node SCC is a violation. Pre-#545 the full graph had a
+    The baseline is ``[]`` since issue athenaeum#640 (which dissolved the three residual
+    SCCs athenaeum#545 left behind), so this now asserts the full import graph is entirely
+    acyclic: ANY multi-node SCC is a violation. Pre-athenaeum#545 the full graph had a
     14-node SCC spanning the named-8 hub modules plus answers/calibration/
-    contradictions/drain/reasoning_tiers/resolutions; #545 shrank it to three
-    residuals and #640 removed those.
+    contradictions/drain/reasoning_tiers/resolutions; athenaeum#545 shrank it to three
+    residuals and athenaeum#640 removed those.
     """
     graph = build_import_graph()
     sccs = _multi_node_sccs(graph)
@@ -176,15 +176,15 @@ def test_no_import_scc_outside_allowed_baseline() -> None:
     allowed_repr = "; ".join(str(sorted(a)) for a in ALLOWED_SCCS)
     assert not violations, (
         "New/grown import SCC(s) detected — the import graph regressed past the "
-        "#545 baseline:\n  " + "\n  ".join(violations)
+        "athenaeum#545 baseline:\n  " + "\n  ".join(violations)
         + f"\nAllowed baseline: {allowed_repr}"
     )
 
 
 def test_named_eight_scc_is_dissolved() -> None:
-    """The #545 payload: no SCC may couple the named-8 hub modules together.
+    """The athenaeum#545 payload: no SCC may couple the named-8 hub modules together.
 
-    Guards the concrete value #545 delivered — batch, status, retire,
+    Guards the concrete value athenaeum#545 delivered — batch, status, retire,
     wiki_dedupe (and cli/_cmd_drain) are freed, and no single SCC spans the
     former 8-module cluster. A member may still appear in a SMALL residual SCC
     (pinned in ALLOWED_SCCS), but never in one that re-tangles the whole named
@@ -208,14 +208,14 @@ def test_named_eight_scc_is_dissolved() -> None:
         # touching the named-8 is {merge, pending_merges, ...} with 2.)
         assert len(overlap) <= 2, (
             f"SCC {sorted(scc)} re-couples {sorted(overlap)} of the named-8 hub "
-            "modules — the #545 dissolution regressed."
+            "modules — the athenaeum#545 dissolution regressed."
         )
 
     # These four must be entirely free of any cycle.
     freed = {"batch", "retire", "wiki_dedupe", "_cmd_drain", "cli"}
     for scc in _multi_node_sccs(graph):
         assert not (scc & freed), (
-            f"SCC {sorted(scc)} contains a module #545 freed of all cycles: "
+            f"SCC {sorted(scc)} contains a module athenaeum#545 freed of all cycles: "
             f"{sorted(scc & freed)}"
         )
 

@@ -30,10 +30,10 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
 try:
-    # Single-sourced from the installed distribution's metadata (issue #555,
+    # Single-sourced from the installed distribution's metadata (issue athenaeum#555,
     # L12) -- hatchling populates this from pyproject.toml's `version` at
     # build time, so this constant and pyproject.toml can never drift apart
-    # the way a hand-duplicated literal here could (and once did: #555).
+    # the way a hand-duplicated literal here could (and once did: athenaeum#555).
     __version__ = _pkg_version("athenaeum")
 except PackageNotFoundError:
     # Editable/source checkout with no installed dist metadata (e.g. running

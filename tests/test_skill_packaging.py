@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The bundled skills/ directory must ship in the BUILT artifact (issue #419).
+"""The bundled skills/ directory must ship in the BUILT artifact (issue athenaeum#419).
 
 A committed file is not enough: the panelist precedent (a `.claude/agents/`
 persona file committed to git but silently excluded by an npm `files` allowlist)

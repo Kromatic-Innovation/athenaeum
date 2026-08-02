@@ -1,9 +1,9 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Design: tracking deprecated / bounced email identifiers (#565)
+# Design: tracking deprecated / bounced email identifiers (athenaeum#565)
 
 **Status: PROPOSAL — awaiting operator ratification before any implementation.**
-This document is the deliverable of issue #565. It answers the five design
+This document is the deliverable of issue athenaeum#565. It answers the five design
 questions the issue poses, recommends a default, and defines the raw-intake
 contract that maecenas#42 is blocked on. Nothing here is built yet; the
 acceptance criteria call for the design to be **reviewed before implementation**,
@@ -216,14 +216,14 @@ filed once this design is ratified.
 
 ---
 
-## Consistency with #505 and the PII work
+## Consistency with athenaeum#505 and the PII work
 
 This design treats email addresses as **durable historical identifiers**, which
-is exactly the frame #505 (migrating `name:`-is-an-email pages) and #502 already
+is exactly the frame athenaeum#505 (migrating `name:`-is-an-email pages) and athenaeum#502 already
 adopt: an address is preserved and moved to the excluded contact record rather
 than discarded. Deprecation is the natural next state on that same record —
 "still a durable identifier, now non-deliverable" — so the two land
-consistently. It does not cut across the in-flight PII decisions in #428 / #437;
+consistently. It does not cut across the in-flight PII decisions in athenaeum#428 / athenaeum#437;
 it adds a status to records those slices already place in the excluded surface.
 
 ---

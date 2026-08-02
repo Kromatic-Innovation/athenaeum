@@ -346,7 +346,7 @@ def test_atomic_write_no_tmp_left_behind(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Legacy bare-slug source: migration  (issue #97 / design-lock §5)
+# 3. Legacy bare-slug source: migration  (issue athenaeum#97 / design-lock §5)
 
 LEGACY_EXTENDED = """\
 ---

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``athenaeum.owner`` — owner-namespace memory routing (#263)."""
+"""Tests for ``athenaeum.owner`` — owner-namespace memory routing (athenaeum#263)."""
 
 from __future__ import annotations
 

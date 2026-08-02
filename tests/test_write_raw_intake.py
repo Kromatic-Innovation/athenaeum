@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Durability of the raw-intake write chokepoint (issue #534, M13).
+"""Durability of the raw-intake write chokepoint (issue athenaeum#534, M13).
 
 The value of moving ``remember()``'s intake write behind
 :func:`athenaeum.storage.write_raw_intake` is entirely in the *interrupt* path:

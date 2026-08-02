@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tier audit sampler + calibration ledger (issue #438).
+"""Tier audit sampler + calibration ledger (issue athenaeum#438).
 
-The **calibration loop** for the tiered reasoning pass (#423 T1 reject-and-
-route, #432 T2 approve/amend/draft/escalate). Escalations already reach the
+The **calibration loop** for the tiered reasoning pass (athenaeum#423 T1 reject-and-
+route, athenaeum#432 T2 approve/amend/draft/escalate). Escalations already reach the
 human queue; what they DON'T catch is a tier that is quietly *wrong* in the
 direction that never escalates — a T1 that wrongly rejects a good merge (a
 false-reject) or a T2 that wrongly approves a bad one (a false-approve). This
@@ -184,7 +184,7 @@ def sample_tier_decision(
     Idempotent — re-sampling an already-recorded decision returns ``None``
     rather than duplicating it.
 
-    ``applied`` (issue #602): ``True`` iff the sampled decision was a T2
+    ``applied`` (issue athenaeum#602): ``True`` iff the sampled decision was a T2
     ``approve`` that was ALREADY auto-finalized (the merge is live in the
     wiki by the time this is called — see
     :func:`athenaeum.merge.t2_screen_merge_proposal`), as opposed to a T1
@@ -271,10 +271,10 @@ def record_audit_review(
     *overturned* when they differ, *confirmed* when they match. Recording is
     the whole effect: a confirm leaves the original decision untouched, and an
     overturn is a calibration signal only (no merge is executed or unwound
-    here — automated unwinding is explicitly OUT OF SCOPE, issue #602).
+    here — automated unwinding is explicitly OUT OF SCOPE, issue athenaeum#602).
     Returns the review record.
 
-    ``overturned_applied`` (issue #602): ``True`` iff this is an overturn
+    ``overturned_applied`` (issue athenaeum#602): ``True`` iff this is an overturn
     (``overturned`` is ``True``) of an audit item that was itself
     ``applied`` (a T2 approve that had ALREADY auto-finalized a live wiki
     write — see :func:`sample_tier_decision`'s ``applied`` param). This is
@@ -336,7 +336,7 @@ def calibration_summary(
     ledger — so the summary is a stable shape a human (or the ``calibration
     summary`` CLI / MCP tool) can read directly.
 
-    ``applied`` / ``overturned_applied`` (issue #602): ``applied`` counts
+    ``applied`` / ``overturned_applied`` (issue athenaeum#602): ``applied`` counts
     sampled items that were ALREADY auto-finalized (a live wiki write) at
     sample time — always 0 for T1 (a reject never writes anything).
     ``overturned_applied`` is the subset of ``overturned`` that were also

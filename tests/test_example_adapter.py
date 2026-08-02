@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the synthetic minimal source adapter (issue #419).
+"""Tests for the synthetic minimal source adapter (issue athenaeum#419).
 
 Exercises ``examples/adapters/minimal_adapter.py`` against a scratch knowledge
 root and asserts it honours the Lane-A raw-intake contract documented in

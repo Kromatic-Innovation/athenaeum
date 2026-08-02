@@ -13,7 +13,7 @@ Three modes:
 - ``next``     the OLDEST unresolved question (one block)
 - ``count``    ``N unresolved (oldest: <iso-date>)`` summary
 
-The proposal block (``**Proposed resolution**`` etc., shipped in #126) is
+The proposal block (``**Proposed resolution**`` etc., shipped in athenaeum#126) is
 extracted from the raw block tail when present. Entries without a proposal
 remain valid and just emit an empty ``proposal`` field in JSON output.
 
@@ -36,7 +36,7 @@ from typing import Any
 from athenaeum.answers import PendingQuestion, parse_pending_questions
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
-# Keys the resolver appends to a block tail (locked by issue #126 and the
+# Keys the resolver appends to a block tail (locked by issue athenaeum#126 and the
 # resolutions.py module docstring). Order matters for re-extraction.
 _PROPOSAL_KEYS = (
     "**Proposed resolution**:",
@@ -194,7 +194,7 @@ def add_questions_subparser(subparsers: argparse._SubParsersAction) -> None:
     # object]]] (the nested kwargs dicts mix `type: Path`, `default: ...`,
     # `action: str`, `help: str` values, so the value type widens to `object`),
     # which then fails every `**common[...][1]` call below with "Argument
-    # after ** must be a mapping, not object" (issue #595). argparse's own
+    # after ** must be a mapping, not object" (issue athenaeum#595). argparse's own
     # ``add_argument(**kwargs)`` is typed to accept ``**Any`` anyway, so
     # ``dict[str, Any]`` here is the concrete-enough type — it just needs to
     # not be ``object``.
@@ -220,7 +220,7 @@ def add_questions_subparser(subparsers: argparse._SubParsersAction) -> None:
                 "action": "store_true",
                 "help": (
                     "Include the (optional) `**Proposed resolution**` "
-                    "block from the resolver (#126)."
+                    "block from the resolver (athenaeum#126)."
                 ),
             },
         ),

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Retraction cascade (issue #435).
+"""Retraction cascade (issue athenaeum#435).
 
-Wires issue #425's merge-provenance ledger to issue #427's observation
+Wires issue athenaeum#425's merge-provenance ledger to issue athenaeum#427's observation
 supersession (correction) records. When a supersession retracts an
 observation that a merge's provenance record lists as a *supporting source*,
 this module emits a **review item** into the human decisions queue naming the

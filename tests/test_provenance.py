@@ -42,8 +42,8 @@ class TestParseSourceScalar:
             "1numeric:start",
             "type:has\nnewline",
             "Has-Uppercase",  # uppercase rejected
-            "extended-tier-build",  # legacy bare-slug form retired in #97
-            "warm-network-detect",  # legacy bare-slug form retired in #97
+            "extended-tier-build",  # legacy bare-slug form retired in athenaeum#97
+            "warm-network-detect",  # legacy bare-slug form retired in athenaeum#97
             "has spaces",
             "",  # empty
             "type:   ",  # whitespace-only ref
@@ -56,14 +56,14 @@ class TestParseSourceScalar:
             parse_source(bad)
 
     def test_legacy_bare_slug_retired(self) -> None:
-        # Legacy bare-slug form retired post-#97 (live tree migrated
+        # Legacy bare-slug form retired post-athenaeum#97 (live tree migrated
         # 15,403 wikis to `script:<slug>` on 2026-05-09). The parser now
         # rejects bare slugs with a helpful pointer to the typed form.
         with pytest.raises(ValueError, match="typed"):
             parse_source("extended-tier-build")
 
     def test_typed_form_post_migration(self) -> None:
-        # Idempotency check: the typed form that #97 migrates to must
+        # Idempotency check: the typed form that athenaeum#97 migrates to must
         # round-trip cleanly through parse_source.
         typed = parse_source("script:extended-tier-build")
         assert typed.type == "script"
@@ -136,7 +136,7 @@ class TestValidateSourceValue:
             validate_source_value("Has-Uppercase")  # malformed
 
     def test_legacy_bare_slug_rejected(self) -> None:
-        # Post-#97: legacy bare-slug form no longer validates.
+        # Post-athenaeum#97: legacy bare-slug form no longer validates.
         with pytest.raises(ValueError):
             validate_source_value("extended-tier-build")
 
@@ -170,7 +170,7 @@ class TestValidateFieldSources:
 
 
 class TestPerValueFieldSources:
-    """Per-value list-of-records shape for list fields (issue #102)."""
+    """Per-value list-of-records shape for list fields (issue athenaeum#102)."""
 
     def test_parse_basic_per_value_list(self) -> None:
         v = [
@@ -257,7 +257,7 @@ class TestSourceRefToScalar:
 
 
 class TestResolveRememberSources:
-    """Disambiguation helper for MCP ``remember(sources=...)`` (issue #96).
+    """Disambiguation helper for MCP ``remember(sources=...)`` (issue athenaeum#96).
 
     Locks design-lock §4 in ``docs/provenance-shape.md``: explicit
     ``_source`` / ``_field_sources`` wrappers; the bare-dict heuristic
@@ -294,7 +294,7 @@ class TestResolveRememberSources:
         assert fs == {"linkedin_url": "linkedin:tristankromer"}
 
     def test_pathological_bare_type_ref_rejected(self) -> None:
-        # Locked pathological case from issue #96: bare dict whose user
+        # Locked pathological case from issue athenaeum#96: bare dict whose user
         # fields happen to be named ``type`` / ``ref``.
         with pytest.raises(ValueError, match="_field_sources"):
             resolve_remember_sources({"type": "api:x", "ref": "linkedin:y"})
@@ -331,7 +331,7 @@ class TestResolveRememberSources:
 
 
 class TestResolveRememberExtras:
-    """Channel-split extras on ``remember(sources=...)`` (issue #326).
+    """Channel-split extras on ``remember(sources=...)`` (issue athenaeum#326).
 
     Locks §10 in ``docs/provenance-shape.md`` — the ``_source_type`` /
     ``_source_ref`` / ``_model`` / ``_on_behalf_of`` / ``_asserter``

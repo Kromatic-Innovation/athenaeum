@@ -1,12 +1,12 @@
-# Backfill-sidecar eval golden set — DEFERRED until #328 lands
+# Backfill-sidecar eval golden set — DEFERRED until athenaeum#328 lands
 
-This directory is a deliberately-empty scaffold. Per issue #331:
+This directory is a deliberately-empty scaffold. Per issue athenaeum#331:
 
-> The backfill-sidecar golden set is EXPLICITLY deferred until #328 lands —
+> The backfill-sidecar golden set is EXPLICITLY deferred until athenaeum#328 lands —
 > build the detector/resolver/recall sets + harness + recording now; leave
 > a clearly-marked stub directory for the sidecar set.
 
-## When #328 lands, add here
+## When athenaeum#328 lands, add here
 
 Following the same shape as `../detector/cases.yaml` and
 `../resolver/cases.yaml`:
@@ -32,6 +32,6 @@ so they live in the deselected-by-default layer alongside the other three.
 Two reasons:
 1. The evals.yml workflow already runs `pytest -m eval tests/evals/` — an
    empty directory here means the workflow does not need editing when
-   #328 lands, only the case file + test file get added.
-2. A discoverable stub tells the #328 implementer where the eval slice
+   athenaeum#328 lands, only the case file + test file get added.
+2. A discoverable stub tells the athenaeum#328 implementer where the eval slice
    goes, so it does not get bolted on separately.

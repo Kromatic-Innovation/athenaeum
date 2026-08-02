@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #578 — per-stage explicit ``thinking`` + re-baselined ``max_tokens``.
+"""Issue athenaeum#578 — per-stage explicit ``thinking`` + re-baselined ``max_tokens``.
 
 Cross-cutting assertions that span every LLM call site (``tiers.py``,
 ``resolutions.py``, ``contradictions.py``, ``claim_kind.py``,
@@ -11,7 +11,7 @@ Cross-cutting assertions that span every LLM call site (``tiers.py``,
 2. Every call site's built params dict carries an explicit ``thinking`` key
    (never omitted, never ``None``) with the correct per-stage posture.
 3. The re-baselined ``max_tokens`` defaults (resolver, merge_patch, and the
-   other write/resolve-knob stages) never shrink relative to the pre-#578
+   other write/resolve-knob stages) never shrink relative to the pre-athenaeum#578
    values.
 4. No stage combines ``output_config.effort`` of ``xhigh``/``max`` with
    ``thinking: {"type": "disabled"}`` — that 400s on Opus 5.
@@ -58,7 +58,7 @@ from athenaeum.tiers import (
     tier3_merge_params,
 )
 
-# Pre-#578 values (see issue body's "Call sites and current max_tokens
+# Pre-athenaeum#578 values (see issue body's "Call sites and current max_tokens
 # defaults" table + the classify/topic/reasoning stages not in that table but
 # covered by the "every LLM call site" acceptance criterion). Used only to
 # assert the re-baseline NEVER SHRINKS a budget.
@@ -68,7 +68,7 @@ _PRE_578_MAX_TOKENS = {
     "merge_patch": 2048,
     "merge_create": 2048,
     "merge_full": 8192,
-    "classify": 4096,  # tier2 classify — untouched by #578, must not shrink
+    "classify": 4096,  # tier2 classify — untouched by athenaeum#578, must not shrink
     "claim_kind": 64,  # untouched
     "contradiction_detect": 1024,  # untouched
     "topic": 256,  # untouched
@@ -246,7 +246,7 @@ _EXPECTED_THINKING_TYPE = {
     "claim_kind.classify_claim_kind": "disabled",
     "contradictions.detect_contradictions": "disabled",
     "reasoning_tiers.build_t1_request_params": "disabled",
-    # write/resolve-tier (bumped to Sonnet 5 / Opus 5 under #580): adaptive —
+    # write/resolve-tier (bumped to Sonnet 5 / Opus 5 under athenaeum#580): adaptive —
     # these stages do genuine drafting/reasoning work.
     "tiers.tier3_create_params": "adaptive",
     "tiers.tier3_merge_params": "adaptive",
@@ -292,13 +292,13 @@ class TestThinkingKeyPresentPerStage:
 
 
 # ---------------------------------------------------------------------------
-# 3. max_tokens re-baseline never shrinks a pre-#578 budget.
+# 3. max_tokens re-baseline never shrinks a pre-athenaeum#578 budget.
 # ---------------------------------------------------------------------------
 
 
 class TestMaxTokensNeverShrinks:
     def test_resolver_and_merge_patch_are_raised(self) -> None:
-        # The two stages issue #578 explicitly flagged as tightest / highest
+        # The two stages issue athenaeum#578 explicitly flagged as tightest / highest
         # risk must have gone UP, not just "not down".
         from athenaeum.resolutions import _RESOLVER_MAX_TOKENS
 
@@ -372,7 +372,7 @@ class TestNoXhighOrMaxWithDisabledThinking:
 
     def test_no_call_site_sets_output_config_at_all_today(self) -> None:
         # Today no stage sets output_config.effort (out of scope per issue
-        # #578 — that's a separate future tuning pass). This test documents
+        # athenaeum#578 — that's a separate future tuning pass). This test documents
         # the current state so the guard above stays meaningful: if this
         # ever flips true, the xhigh/max guard above is what protects us.
         for label, params in _all_params().items():
@@ -471,7 +471,7 @@ class TestClaudeCliHonorsMaxTokensFalseStillGetsThinking:
 
 
 # ---------------------------------------------------------------------------
-# 6. REGRESSION: adaptive thinking is production-safe (issue #578).
+# 6. REGRESSION: adaptive thinking is production-safe (issue athenaeum#578).
 #
 # On the CURRENT Opus 4.7 / Sonnet 4.6 defaults (not just a future Opus 5 /
 # Sonnet 5 bump), a stage that sets ``thinking: {"type": "adaptive"}`` receives

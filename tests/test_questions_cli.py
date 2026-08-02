@@ -1,4 +1,4 @@
-"""Tests for `athenaeum questions {list,next,count}` (issue #128).
+"""Tests for `athenaeum questions {list,next,count}` (issue athenaeum#128).
 
 Covers the three modes against a synthetic `_pending_questions.md`:
 

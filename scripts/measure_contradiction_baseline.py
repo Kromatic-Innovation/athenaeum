@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Baseline metric harness for the C4 contradiction detector (#198).
+"""Baseline metric harness for the C4 contradiction detector (athenaeum#198).
 
 Runs the auto-memory discovery → cluster → merge → contradiction pipeline
 against a live ``~/knowledge/`` tree (or a user-specified knowledge root)

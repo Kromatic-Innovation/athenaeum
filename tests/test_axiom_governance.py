@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for axiom promotion/demotion governance + assignment audit (issue #434).
+"""Tests for axiom promotion/demotion governance + assignment audit (issue athenaeum#434).
 
 Covers the four acceptance criteria:
 
@@ -14,7 +14,7 @@ Covers the four acceptance criteria:
 4. A scoped axiom's ``scope`` round-trips through parse/serialize
    (frontmatter) AND through a promotion record.
 
-Explicitly NOT covered here (out of scope for #434): scope ENFORCEMENT
+Explicitly NOT covered here (out of scope for athenaeum#434): scope ENFORCEMENT
 (deciding whether the current context matches a page's scope) — the issue
 is explicit that's a consumer's concern.
 """
@@ -113,7 +113,7 @@ class TestUnbackedAxiomFlagged:
         assert flagged is False
 
     def test_validate_wiki_meta_itself_is_unchanged_by_434(self) -> None:
-        """#424's validator accepts `axiom` same as before — #434's governance
+        """athenaeum#424's validator accepts `axiom` same as before — athenaeum#434's governance
         is layered ON TOP via a separate function, not baked into the
         pydantic field validator (which has no ledger I/O access)."""
         meta = {"uid": "abc12345", "type": "concept", "name": "X", "memory_class": "axiom"}
@@ -413,9 +413,9 @@ class TestScopeRoundTrip:
         assert m.scope is None
 
     def test_validate_wiki_meta_surfaces_scope(self) -> None:
-        # validate_wiki_meta (the #424 schema boundary) has no ledger access,
+        # validate_wiki_meta (the athenaeum#424 schema boundary) has no ledger access,
         # so it cannot know whether this axiom is backed by a promotion
-        # record -- that check is #434's separate warn_if_unbacked_axiom,
+        # record -- that check is athenaeum#434's separate warn_if_unbacked_axiom,
         # exercised in TestUnbackedAxiomFlagged above. Here we only assert
         # the scope field itself surfaces through validation.
         meta = {

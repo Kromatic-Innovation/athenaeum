@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the disambiguation question mode (#166 follow-up).
+"""Tests for the disambiguation question mode (athenaeum#166 follow-up).
 
 When the resolver hits a FACT/identity conflict it cannot confidently
 resolve (and which is NOT two sequential dated snapshots), it returns the

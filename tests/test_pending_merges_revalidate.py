@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #481 — ``revalidate_pending_merges`` periodic re-validation sweep.
+"""Issue athenaeum#481 — ``revalidate_pending_merges`` periodic re-validation sweep.
 
-#480 closed the write-path bypass so no NEW degenerate over-cluster proposal
+athenaeum#480 closed the write-path bypass so no NEW degenerate over-cluster proposal
 can be appended to ``wiki/_pending_merges.md``. This sweep is the complement:
-it re-validates entries queued BEFORE the #400/#421 gate tightened against the
+it re-validates entries queued BEFORE the athenaeum#400/#421 gate tightened against the
 CURRENT suppression gate and archives ones that now fail it — non-destructively
 (moved to the archive with the gate reason, never deleted; no ``refines:``
-suppression written on the source pages, the #437 trap).
+suppression written on the source pages, the athenaeum#437 trap).
 
 Covered:
 

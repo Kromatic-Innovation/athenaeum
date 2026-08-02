@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Authority manifest + duplicate detector + pointer-stub converter (issue #426).
+"""Authority manifest + duplicate detector + pointer-stub converter (issue athenaeum#426).
 
 Stops memories from duplicating content a **live source** (a skill file, a
 code path, a config file) already owns. A live source can drift out from
@@ -10,8 +10,8 @@ source currently says.
 This module is the standalone, unit-testable slice: it builds the manifest
 format + loader/validator, the lookup-based duplicate detector, and the
 pointer-stub converter. It deliberately does NOT wire into any reasoning-tier
-consumption path (that is #423's T1 duplicate bin / #432's T2 rejection) and
-does NOT run against the live corpus (that is operator task #437) — see the
+consumption path (that is athenaeum#423's T1 duplicate bin / athenaeum#432's T2 rejection) and
+does NOT run against the live corpus (that is operator task athenaeum#437) — see the
 issue body for the re-scope rationale.
 
 Manifest format + location (design choice, documented here):
@@ -72,10 +72,10 @@ from athenaeum.models import parse_frontmatter, render_frontmatter
 
 log = logging.getLogger(__name__)
 
-#: The only schema version this loader understands (issue #426, slice 1).
+#: The only schema version this loader understands (issue athenaeum#426, slice 1).
 SUPPORTED_MANIFEST_VERSION = 1
 
-#: The frontmatter flag stamped on a converted pointer stub (issue #426).
+#: The frontmatter flag stamped on a converted pointer stub (issue athenaeum#426).
 #: Consulted by :mod:`athenaeum.wiki_dedupe` (merge-eligibility) and
 #: :mod:`athenaeum.search` (embed-input) so a stub is excluded from both by
 #: construction rather than by a second ad hoc check at each call site.
@@ -134,7 +134,7 @@ def _normalize_topic(topic: str) -> str:
 
 
 def _is_qualified_topic(normalized_topic: str) -> bool:
-    """True when a topic is *qualified* rather than a bare single word (#488).
+    """True when a topic is *qualified* rather than a bare single word (athenaeum#488).
 
     A qualified topic carries a discriminator beyond a lone entity token — it
     contains whitespace (``spartacus persona``) or a hyphen
@@ -145,10 +145,10 @@ def _is_qualified_topic(normalized_topic: str) -> bool:
     :func:`_page_duplicate_candidates`): a page whose entire ``name`` is a
     lone entity token (e.g. a 20KB accumulated ``Spartacus`` entity record)
     is the entity, not a topical summary of a source, and must not be flagged
-    as a duplicate on that name alone — the false positive AC2 of #488 forbids
+    as a duplicate on that name alone — the false positive AC2 of athenaeum#488 forbids
     (acting on it would destroy the richest record in the wiki). Explicit
     ``topics``/``topic``/``tags`` metadata is the author's deliberate claim of
-    subject and is matched without this gate, exactly as before #488.
+    subject and is matched without this gate, exactly as before athenaeum#488.
     """
     return " " in normalized_topic or "-" in normalized_topic
 
@@ -284,11 +284,11 @@ def _page_duplicate_candidates(meta: dict[str, Any]) -> list[tuple[str, bool]]:
 
     Single source of truth for what a page declares as its subject, so
     :func:`find_duplicate_source` and :func:`find_duplicates_in_wiki` cannot
-    drift apart (before #488 each collected candidates independently).
+    drift apart (before athenaeum#488 each collected candidates independently).
 
     Explicit ``topics`` (list or scalar), ``topic`` (scalar), and ``tags``
     (list) entries are the author's deliberate subject claim and yield
-    ``from_name=False``. The page ``name`` (issue #488) is a weaker title
+    ``from_name=False``. The page ``name`` (issue athenaeum#488) is a weaker title
     signal and yields ``from_name=True`` so the caller can apply the
     qualified-topic gate to it — a bare single-word ``name`` on a rich entity
     page must not flag as a duplicate (AC2), while a qualified name such as
@@ -351,7 +351,7 @@ def find_duplicate_source(
     Deterministic LOOKUP against the manifest's owned topics/slugs — NEVER
     semantic similarity. A memory page is considered to duplicate a live
     source when its frontmatter carries a ``topics:`` list (or a single
-    ``topic:`` scalar), a ``tags:`` list, or a ``name:`` (issue #488) with an
+    ``topic:`` scalar), a ``tags:`` list, or a ``name:`` (issue athenaeum#488) with an
     entry that matches (case-insensitively, whitespace-trimmed) one of the
     manifest's owned topic strings for some source. A ``name`` matches only a
     *qualified* topic (see :func:`_is_qualified_topic`) so a bare entity name
@@ -405,7 +405,7 @@ def find_duplicates_in_wiki(
 
 
 def is_pointer_stub(meta: dict[str, Any] | None) -> bool:
-    """True when frontmatter carries a truthy ``pointer_stub`` flag (#426).
+    """True when frontmatter carries a truthy ``pointer_stub`` flag (athenaeum#426).
 
     Same coercion contract as :func:`athenaeum.models.parse_deprecated`:
     accepts a real bool or a truthy string variant; missing/falsey => False.
@@ -432,7 +432,7 @@ def pointer_stub_line(title: str, source: AuthoritySource) -> str:
     """Render the one-line pointer body: ``title`` + authoritative location.
 
     This single line is the ENTIRE stub body (see :func:`convert_to_pointer_stub`)
-    and is also the only text a stub contributes to embeddings (issue #426
+    and is also the only text a stub contributes to embeddings (issue athenaeum#426
     "stub hygiene") — recall still needs *something* findable, but nothing
     beyond the pointer.
     """

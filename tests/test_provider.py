@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue #330 — LLM provider seam + claude-cli subscription backend.
+"""Issue athenaeum#330 — LLM provider seam + claude-cli subscription backend.
 
 All CLI interaction is STUBBED via monkeypatched ``subprocess.run``. No test
 here shells out to a real ``claude``; there is no live API or network.
@@ -246,7 +246,7 @@ class TestClaudeCliCreate:
         argv = cap["argv"]
         assert "--system-prompt" in argv
         assert "SYSTEM-TEXT" in argv
-        # Issue #543 (L4): the user prompt goes on STDIN, never argv/`ps`.
+        # Issue athenaeum#543 (L4): the user prompt goes on STDIN, never argv/`ps`.
         assert "USER-TEXT" not in argv
         assert cap["kwargs"]["input"] == "USER-TEXT"
         # ``-p`` is present but carries no positional prompt (stdin does).
@@ -257,7 +257,7 @@ class TestClaudeCliCreate:
         assert "--append-system-prompt" not in argv
 
     def test_user_prompt_passed_on_stdin_not_argv(self, monkeypatch):
-        # Issue #543 (L4): the user's own notes must never sit in the process
+        # Issue athenaeum#543 (L4): the user's own notes must never sit in the process
         # table. The prompt rides subprocess stdin (`input=`), and no element of
         # argv equals or contains it — pinning that a future refactor can't
         # quietly reintroduce ``-p <prompt>``.
@@ -274,7 +274,7 @@ class TestClaudeCliCreate:
         assert all(secret not in element for element in cap["argv"])
 
     def test_suppresses_host_desktop_notification(self, monkeypatch):
-        # #377: every programmatic ``claude -p`` call must set
+        # athenaeum#377: every programmatic ``claude -p`` call must set
         # CLAUDE_SUPPRESS_NOTIFY=1, merged on top of the inherited env so
         # PATH/HOME/ambient auth still reach the subprocess.
         monkeypatch.setenv("PATH", "/sentinel/bin")
@@ -325,14 +325,14 @@ class TestClaudeCliCreate:
         assert "RESOLVER-SYSTEM" in flat
         assert "cache_control" not in flat
         assert "ephemeral" not in flat
-        # Issue #543 (L4): the user block's text rides stdin, not argv, and is
+        # Issue athenaeum#543 (L4): the user block's text rides stdin, not argv, and is
         # flattened to plain text (no cache_control / block structure).
         assert "USER-BLOCK" not in flat
         assert cap["kwargs"]["input"] == "USER-BLOCK"
 
     def test_malformed_result_json_still_leniently_extracted(self, monkeypatch):
         # The model fenced its JSON answer in prose — extract_json_object (the
-        # same #219/#222 path used for API responses) must still recover it.
+        # same athenaeum#219/#222 path used for API responses) must still recover it.
         fenced = 'Here you go:\n```json\n{"detected": true}\n```\nHope that helps.'
         _stub_run(monkeypatch, stdout=_envelope(result=fenced))
         client = ClaudeCliClient()
@@ -385,7 +385,7 @@ class TestClaudeCliErrors:
             )
 
     def test_unparseable_envelope_redacts_pii_in_error(self, monkeypatch):
-        # Issue #543 (L5): raw model output embedded in the unparseable-envelope
+        # Issue athenaeum#543 (L5): raw model output embedded in the unparseable-envelope
         # RuntimeError must be run through redact_outbound_text first, so a PII
         # email in the (non-JSON) stdout does not leak into logs/exceptions.
         _stub_run(monkeypatch, stdout="oops not json, contact bob@secret.example")
@@ -478,7 +478,7 @@ class TestBackendParity:
 
 
 # ---------------------------------------------------------------------------
-# $0 subscription-covered cost accounting (#330)
+# $0 subscription-covered cost accounting (athenaeum#330)
 # ---------------------------------------------------------------------------
 
 
@@ -501,14 +501,14 @@ class TestSubscriptionCost:
 
 
 # ---------------------------------------------------------------------------
-# LLMBackend contract — the declared seam (#572 / epic #515)
+# LLMBackend contract — the declared seam (athenaeum#572 / epic athenaeum#515)
 # ---------------------------------------------------------------------------
 
 
 class TestLLMBackendContract:
     """The backend contract is DECLARED (a Protocol), and the shipping
     ``claude-cli`` backend ACTUALLY satisfies it — not a `# type: ignore`
-    duck-type (the anti-pattern #572 calls out from search.py:1654)."""
+    duck-type (the anti-pattern athenaeum#572 calls out from search.py:1654)."""
 
     def test_claude_cli_client_is_an_llm_backend(self):
         # runtime_checkable: ClaudeCliClient exposes the ``messages`` facade.
@@ -555,7 +555,7 @@ class TestLLMBackendContract:
 
 
 # ---------------------------------------------------------------------------
-# ProviderCapabilities — each backend DECLARES what it can honor (#573)
+# ProviderCapabilities — each backend DECLARES what it can honor (athenaeum#573)
 # ---------------------------------------------------------------------------
 
 
@@ -590,7 +590,7 @@ class TestProviderCapabilities:
             caps.honors_max_tokens = True  # type: ignore[misc]
 
     def test_supports_batches_is_the_folded_batch_guard(self):
-        # The batch-mode startup guard now reads this flag (issue #573):
+        # The batch-mode startup guard now reads this flag (issue athenaeum#573):
         # claude-cli cannot batch; api can.
         assert capabilities_for("claude-cli").supports_batches is False
         assert capabilities_for("api").supports_batches is True
@@ -600,7 +600,7 @@ class TestProviderCapabilities:
 
 
 # ---------------------------------------------------------------------------
-# reported_stop_reason — trust stop_reason only when the backend reports it (#574)
+# reported_stop_reason — trust stop_reason only when the backend reports it (athenaeum#574)
 # ---------------------------------------------------------------------------
 
 
@@ -625,7 +625,7 @@ class TestReportedStopReason:
 
 
 # ---------------------------------------------------------------------------
-# resolve_max_tokens — per-stage budget, env > yaml > default (#575)
+# resolve_max_tokens — per-stage budget, env > yaml > default (athenaeum#575)
 # ---------------------------------------------------------------------------
 
 
@@ -676,7 +676,7 @@ class TestResolveMaxTokens:
 
 
 # ---------------------------------------------------------------------------
-# resolve_thinking — per-stage thinking posture, env > yaml > default (#578)
+# resolve_thinking — per-stage thinking posture, env > yaml > default (athenaeum#578)
 # ---------------------------------------------------------------------------
 
 
@@ -751,7 +751,7 @@ class TestResolveThinking:
         }
 
     def test_never_returns_none(self, monkeypatch):
-        # Per issue #578's acceptance criteria: prefer an explicit disabled
+        # Per issue athenaeum#578's acceptance criteria: prefer an explicit disabled
         # dict over None so no stage relies on the model default.
         monkeypatch.delenv(self._ENV, raising=False)
         result = resolve_thinking("resolve", self._ENV, "disabled", None)

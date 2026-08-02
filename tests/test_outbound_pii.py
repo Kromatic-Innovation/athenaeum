@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the outbound-draft PII lint (issue #455, split from #428).
+"""Tests for the outbound-draft PII lint (issue athenaeum#455, split from athenaeum#428).
 
 Structure mirrors the issue's acceptance criteria:
 
@@ -129,7 +129,7 @@ class TestNoFalsePositives:
         "prose",
         [
             "shipped in 2026 after 3 revisions",
-            "see issue #455 and PR #460",
+            "see issue athenaeum#455 and PR athenaeum#460",
             "chapter 12 page 340",
             "version 1.2.3 released",
         ],
@@ -148,7 +148,7 @@ class TestNoFalsePositives:
     )
     def test_parenthesized_dates_and_ids_are_not_phones(self, prose: str) -> None:
         # scan_outbound_text shares _PHONE_RE / _has_enough_digits with
-        # find_inline_phones and inherited the same leading-paren bug (#683):
+        # find_inline_phones and inherited the same leading-paren bug (athenaeum#683):
         # a parenthesized date/uid was over-flagged on the egress path. It now
         # applies the same provably-not-a-phone exclusion.
         assert scan_outbound_text(prose) == []

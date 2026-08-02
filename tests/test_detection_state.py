@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the per-cluster detection-incomplete marker store (issue #569)."""
+"""Tests for the per-cluster detection-incomplete marker store (issue athenaeum#569)."""
 
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ class TestIncompleteMemberPaths:
 
 
 class TestLibrarianDeltaInjection:
-    """Issue #569 (H6): _run_cluster_pass folds marked clusters' member paths
+    """Issue athenaeum#569 (H6): _run_cluster_pass folds marked clusters' member paths
     into the delta set so live-delta re-examines them regardless of file
     changes."""
 
