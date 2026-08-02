@@ -1,0 +1,20 @@
+{
+  "case_id": "passing_mention_not_substantive",
+  "content_blocks": [
+    {
+      "text": "```json\n[\n  {\n    \"name\": \"Bob\",\n    \"entity_type\": \"person\",\n    \"tags\": [\"internal\", \"active\"],\n    \"access\": \"internal\",\n    \"observations\": \"IT support staff member who rebooted the CI runner after it became unhealthy due to a flaky agent.\"\n  }\n]\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "classify",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:a0fd3a8963d526b624dbc026540d3eedf6faf66616e63075eca2d714d03b1870",
+  "recorded_at": "2026-08-02T18:05:01.043180+00:00",
+  "response_text": "```json\n[\n  {\n    \"name\": \"Bob\",\n    \"entity_type\": \"person\",\n    \"tags\": [\"internal\", \"active\"],\n    \"access\": \"internal\",\n    \"observations\": \"IT support staff member who rebooted the CI runner after it became unhealthy due to a flaky agent.\"\n  }\n]\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 632,
+    "output_tokens": 84
+  }
+}

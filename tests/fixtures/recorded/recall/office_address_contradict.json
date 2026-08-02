@@ -1,0 +1,20 @@
+{
+  "case_id": "office_address_contradict",
+  "content_blocks": [
+    {
+      "text": "```json\n[]\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "recall",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:a5f7641ab1b59c810e1de462b47d703a662bbddceddcbdf7319e6e194b27597b",
+  "recorded_at": "2026-08-02T18:05:32.346358+00:00",
+  "response_text": "```json\n[]\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 147,
+    "output_tokens": 9
+  }
+}

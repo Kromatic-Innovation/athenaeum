@@ -1,0 +1,20 @@
+{
+  "case_id": "multiple_entities_project_and_person",
+  "content_blocks": [
+    {
+      "text": "```json\n[\n  {\n    \"name\": \"Amir Khan\",\n    \"entity_type\": \"person\",\n    \"tags\": [\"active\"],\n    \"access\": \"internal\",\n    \"observations\": \"Senior consultant at the firm who joined last spring. Leading the Atlas Retooling engagement for Meridian Advisory.\"\n  },\n  {\n    \"name\": \"Meridian Advisory\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"client\", \"active\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client engagement called Atlas Retooling. Involves a full audit of the client's internal tooling stack over two quarters. Led by Amir Khan.\"\n  },\n  {\n    \"name\": \"Atlas Retooling\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"active\"],\n    \"access\": \"internal\",\n    \"observations\": \"Engagement for Meridian Advisory involving a full audit of the client's internal tooling stack. Spans two quarters. Led by Amir Khan.\"\n  }\n]\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "classify",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:fb2620a6eac6859e81038f5e436ee825cbf2058eca06668dc0acd875a35031db",
+  "recorded_at": "2026-08-02T18:04:59.240841+00:00",
+  "response_text": "```json\n[\n  {\n    \"name\": \"Amir Khan\",\n    \"entity_type\": \"person\",\n    \"tags\": [\"active\"],\n    \"access\": \"internal\",\n    \"observations\": \"Senior consultant at the firm who joined last spring. Leading the Atlas Retooling engagement for Meridian Advisory.\"\n  },\n  {\n    \"name\": \"Meridian Advisory\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"client\", \"active\"],\n    \"access\": \"internal\",\n    \"observations\": \"Client engagement called Atlas Retooling. Involves a full audit of the client's internal tooling stack over two quarters. Led by Amir Khan.\"\n  },\n  {\n    \"name\": \"Atlas Retooling\",\n    \"entity_type\": \"project\",\n    \"tags\": [\"active\"],\n    \"access\": \"internal\",\n    \"observations\": \"Engagement for Meridian Advisory involving a full audit of the client's internal tooling stack. Spans two quarters. Led by Amir Khan.\"\n  }\n]\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 652,
+    "output_tokens": 251
+  }
+}

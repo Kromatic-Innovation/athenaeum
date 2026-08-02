@@ -1,0 +1,20 @@
+{
+  "case_id": "pto_policy",
+  "content_blocks": [
+    {
+      "text": "```json\n[\"PTO policy\"]\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "recall",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:dcd088717f24ca3f12651ba012bc70f99cfd949ecff52c830c0502c52e15bf6e",
+  "recorded_at": "2026-08-02T18:05:29.332325+00:00",
+  "response_text": "```json\n[\"PTO policy\"]\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 151,
+    "output_tokens": 13
+  }
+}

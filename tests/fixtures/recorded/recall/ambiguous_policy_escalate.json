@@ -1,0 +1,20 @@
+{
+  "case_id": "ambiguous_policy_escalate",
+  "content_blocks": [
+    {
+      "text": "[]",
+      "type": "text"
+    }
+  ],
+  "layer": "recall",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:90f8631763c02e87fcf18b62dfcb76137c3950f91622d3596ce8459b6e4d3106",
+  "recorded_at": "2026-08-02T18:05:31.041731+00:00",
+  "response_text": "[]",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 147,
+    "output_tokens": 4
+  }
+}
