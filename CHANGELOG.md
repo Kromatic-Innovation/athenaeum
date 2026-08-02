@@ -409,6 +409,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (plus `examples/adapters/README.md`) — a generic Lane-A adapter, no private
     specifics or PII, usable as a starting point.
 
+### Changed
+
+- **Dropped the DCO sign-off requirement; inbound licensing is Apache-2.0 §5
+  (athenaeum#678).** athenaeum#544 landed the DCO *documentation* and deferred the
+  enforcement mechanism under an operator constraint ("do not land a check that
+  wedges the overnight build conveyor"). Its premise — that the fleet's bot
+  commit path emits a valid `Signed-off-by` — was verified false (none of the
+  six most recently merged PRs' commits, nor dependabot's, carry the trailer),
+  so a required DCO check would red every lane immediately. Since nearly all
+  commits here are bot-authored through automated lanes, a sign-off ceremony the
+  fleet performs on its own behalf certifies nothing a human asserted, and
+  Apache-2.0 §5 already grants inbound contribution licensing without it. The
+  DCO requirement is removed from `AGENTS.md` and `CONTRIBUTING.md` (the
+  `git commit -s` guidance removed, not merely softened), `CONTRIBUTING.md` now
+  states plainly that inbound contributions are licensed under Apache-2.0 §5,
+  and **no** enforcement mechanism is added (no DCO app, no `dco` CI job). This
+  is a decision recorded in the issue, not just a doc edit.
+
 ### Fixed
 
 - **`prune-code-entities` no longer treats a bare `/` in an entity name as a
