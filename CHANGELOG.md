@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`transcript_verify` honors `CLAUDE_CONFIG_DIR` (athenaeum#723).**
+  `DEFAULT_PROJECTS_ROOT` was hardcoded to `~/.claude/projects` and ignored the
+  standard `CLAUDE_CONFIG_DIR` override (which relocates `~/.claude`), so in a
+  custom-`CLAUDE_CONFIG_DIR` environment any transcript-root-dependent path
+  silently read the wrong location and found nothing — flagged by Seer on
+  athenaeum#722 (reference-determination under-reporting precision). A new
+  `transcript_verify.default_projects_root()` resolves `<CLAUDE_CONFIG_DIR>/
+  projects` (falling back to `~/.claude/projects` when unset/empty) at CALL
+  time, and every caller — `verify_user_stated`, `classify_backfill_claim`, and
+  `push_metrics.run_reference_determination` — routes through it, so all benefit
+  automatically with no per-caller `projects_root` plumbing. `DEFAULT_PROJECTS_
+  ROOT` is retained as an import-time snapshot for backward compatibility.
+  Best-effort semantics are unchanged: a missing transcript is still an honest
+  "cannot determine," never a fabricated figure.
+
 ### Added
 
 - **LLM schema-observation is now measurable: durable ledger, denominators,
