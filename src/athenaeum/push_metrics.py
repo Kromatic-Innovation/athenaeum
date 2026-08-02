@@ -442,7 +442,7 @@ def determine_references(
     to determine) or the transcript cannot be located (rolled off / never
     existed — an honest "cannot determine", never a fabricated 0 or 1).
     """
-    from athenaeum.transcript_verify import DEFAULT_PROJECTS_ROOT, _iter_session_records
+    from athenaeum.transcript_verify import _iter_session_records, default_projects_root
 
     records = [
         r for r in read_push_records(cache_dir) if r.get("session_id") == session_id
@@ -459,7 +459,7 @@ def determine_references(
     if not pushed_ids:
         return None
 
-    root = projects_root if projects_root is not None else DEFAULT_PROJECTS_ROOT
+    root = projects_root if projects_root is not None else default_projects_root()
     located = _find_session_transcript(session_id, root)
     if located is None:
         return None
