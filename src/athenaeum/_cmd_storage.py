@@ -373,23 +373,34 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
     # athenaeum#745: the rename slice, scoped to this one page. Runs BEFORE the body
     # migration because a rename moves the file — planning a migration against a
     # path the rename is about to invalidate would be reading a stale target.
+    renamed_this_run = False
     if getattr(args, "rename_name_email", False):
+        wiki_root = knowledge_root / "wiki"
         rename_report = _run_rename_slice(
-            args, knowledge_root / "wiki", config, knowledge_root, [page_path]
+            args, wiki_root, config, knowledge_root, [page_path]
         )
-        if getattr(args, "rename_only", False) or (args.apply and rename_report.renamed):
-            # Either the caller asked for the rename alone, or the page just
-            # moved and its address already went to the excluded record as part
-            # of the rename. Re-planning a body migration here would target a
-            # path that no longer exists.
+        if getattr(args, "rename_only", False):
             if args.apply and rename_report.renamed:
                 _post_apply_index_step(args, knowledge_root, config)
             return 0
+        if args.apply and rename_report.renamed:
+            # The page MOVED. Retarget the body migration at its new path
+            # rather than skipping it: --rename-name-email without
+            # --rename-only asks for both operations, and the rename only
+            # clears the name: field — body-text contact data on the same page
+            # is a separate finding and would otherwise be silently left
+            # behind (caught in review of athenaeum#745).
+            renamed_this_run = True
+            page_path = wiki_root / f"{rename_report.renames[-1][1]}.md"
 
     plan = plan_pii_migration(page_path, config, knowledge_root)
 
     if not plan.changed:
         print(f"no archival contact data (emails/phones) found in {page_path}; nothing to migrate.")
+        if renamed_this_run:
+            # The rename still wrote; its index step is owed regardless of
+            # whether the body pass found anything.
+            _post_apply_index_step(args, knowledge_root, config)
         return 0
 
     summary = (

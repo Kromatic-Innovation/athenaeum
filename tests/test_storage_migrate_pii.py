@@ -1360,6 +1360,44 @@ class TestRenameSliceScopingAndRenameOnly:
         # No body-migration summary line was emitted.
         assert "excluded contact record(s) to create" not in out
 
+    def test_page_rename_plus_body_migration_both_run(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """--page --rename-name-email --apply must do BOTH, not stop at the rename.
+
+        Raised in review of athenaeum#745: an early return after a successful rename
+        silently left body-text PII in place on the renamed page. The rename
+        moves the file, so the body pass has to be retargeted at the NEW path
+        rather than skipped.
+        """
+        root = tmp_path / "knowledge"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        # One page that is BOTH name-is-an-email AND carries a body address.
+        page = _write_name_email_page(
+            root / "wiki",
+            "jane.doe-at-acme.md",
+            uid="b1",
+            email="jane.doe@acme.example",
+            body="Backup contact: other.person@acme.example on weekends.",
+        )
+
+        rc = main(
+            [
+                "storage", "migrate-pii", "--path", str(root),
+                "--page", str(page), "--apply", "--rename-name-email",
+            ]
+        )
+
+        assert rc == 0
+        renamed = root / "wiki" / "jane-doe.md"
+        assert renamed.is_file()
+        assert not page.exists()
+        # The body address must be gone from the renamed page too.
+        assert "other.person@acme.example" not in renamed.read_text(encoding="utf-8")
+
     def test_rename_only_implies_rename_name_email(self, tmp_path: Path, capsys) -> None:
         root = tmp_path / "knowledge"
         self._seed(root)
