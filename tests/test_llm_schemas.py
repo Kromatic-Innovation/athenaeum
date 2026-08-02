@@ -214,7 +214,7 @@ def test_tier2_schema_violation_is_behavior_neutral(
 #
 # Before athenaeum#724 the instrument logged only ON a mismatch, with no
 # denominator, and a total parse failure returned BEFORE reaching observe() — so
-# the #608 measurement got "0 across every contract" and could not tell 0/0 from
+# the athenaeum#608 measurement got "0 across every contract" and could not tell 0/0 from
 # 0/400. These pin the three defects fixed: every observation is counted, every
 # mismatch carries its class, and a parse failure is a countable record.
 
