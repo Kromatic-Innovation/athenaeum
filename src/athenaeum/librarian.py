@@ -120,7 +120,11 @@ from athenaeum.config import (
     resolve_retire,
 )
 from athenaeum.config import resolve_cache_dir as _resolve_cache_dir_config
-from athenaeum.delta import compute_affected_clusters, splice_cluster_report
+from athenaeum.delta import (
+    _relpath_for,
+    compute_affected_clusters,
+    splice_cluster_report,
+)
 from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE re-exported for back-compat
     _AUTO_MEMORY_SKIP_NAMES,
     AUTO_MEMORY_FILE_RE,
@@ -1104,18 +1108,40 @@ def _delta_cluster_pass(
         threshold=threshold,
     )
     spliced = splice_cluster_report(prior_rows, scope.affected_ids, new_partial)
+
+    # Issue #681: complete-linkage formation splits a re-clustered pool into
+    # several cliques, most of which are byte-identical to their prior rows
+    # (a change usually re-partitions only one corner of a component). The
+    # merge pass rewrites the wiki entry for every cluster id we return here,
+    # so returning the WHOLE pool would churn untouched entries (new mtime,
+    # identical bytes) — diverging from a full run, which only rewrites what
+    # actually changed. Return exactly the cliques that are genuinely new /
+    # re-partitioned (a content-addressed id absent from the prior report) OR
+    # whose membership is unchanged but contains a file whose body changed
+    # (same path-derived id, new content). Everything else is left untouched.
+    prior_ids = {str(row.get("cluster_id", "")) for row in prior_rows}
+    changed_relpaths = {_relpath_for(p, extra_roots) for p in changed_paths}
+    recompile_ids = {
+        c.cluster_id
+        for c in new_partial
+        if c.cluster_id not in prior_ids
+        or any(mp in changed_relpaths for mp in c.member_paths)
+    }
+
     log.info(
         "delta cluster pass: %d changed file(s), %d pooled member(s) → "
-        "%d affected cluster(s) re-clustered; %d total cluster(s) in report",
+        "%d affected cluster(s) re-clustered, %d changed clique(s) to recompile; "
+        "%d total cluster(s) in report",
         len(changed_paths),
         len(scope.pool),
         len(new_partial),
+        len(recompile_ids),
         len(spliced),
     )
     _write_cluster_report_and_prune(
         spliced, output_path, knowledge_root, resolved_config
     )
-    return {c.cluster_id for c in new_partial}
+    return recompile_ids
 
 
 def _delta_slug_collision(
