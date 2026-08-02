@@ -28,17 +28,24 @@ from typing import Any
 
 from athenaeum.models import parse_frontmatter
 from athenaeum.storage_migrate import iter_entity_pages
-from athenaeum.tiers import is_code_artifact_name
+from athenaeum.tiers import classify_code_artifact_name
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class FilenameEntityCandidate:
-    """One ``wiki/*.md`` entity page slated for removal, with its reason."""
+    """One ``wiki/*.md`` entity page slated for removal, with its reason.
+
+    ``rule`` is the matched-rule label from
+    :func:`athenaeum.tiers.classify_code_artifact_name` (currently always
+    ``"extension"`` — a bare path separator no longer kills, #721) so a dry run
+    can print, per entry, WHICH rule marked the page and an operator can audit
+    the kill-list by class rather than by eyeball."""
 
     path: Path
     reason: str
+    rule: str = "extension"
 
 
 @dataclass
@@ -87,13 +94,32 @@ def build_filename_entity_report(
             continue
         meta, _body = parse_frontmatter(text)
         name = _page_entity_name(meta, path)
-        if is_code_artifact_name(name, config):
+        rule = classify_code_artifact_name(name, config)
+        if rule is not None:
             report.kill.append(
-                FilenameEntityCandidate(path, f"filename-derived entity (name={name!r})")
+                FilenameEntityCandidate(
+                    path,
+                    f"filename-derived entity (name={name!r}, rule={rule})",
+                    rule=rule,
+                )
             )
         else:
             report.retained.append((path, "not a code-artifact name"))
     return report
+
+
+def kill_rule_counts(report: FilenameEntityReport) -> dict[str, int]:
+    """Count kill-list entries per matched rule (issue #721).
+
+    The extension/non-extension split an operator confirms on the live dry run:
+    a ``{"extension": N}`` breakdown of what ``prune-code-entities`` proposes to
+    retire, by the rule that marked each page. Since #721 removed the bare
+    path-separator signal, ``extension`` is the only rule that ever fires — a
+    non-``extension`` key appearing here would itself flag a regression."""
+    counts: dict[str, int] = {}
+    for cand in report.kill:
+        counts[cand.rule] = counts.get(cand.rule, 0) + 1
+    return counts
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
