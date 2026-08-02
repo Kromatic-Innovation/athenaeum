@@ -83,6 +83,12 @@
 #                              install -q -e ".[<extras>]")
 #   ATHENAEUM_GUARD_STAMP_CMD    stamp command run after a successful refresh
 #                             (default: python3 <scriptdir>/write_build_sha.py against <dir>)
+#   ATHENAEUM_GUARD_VERSION_CHECK_CMD  metadata-drift check run against the deploy
+#                             venv (issue #685; exit 0 in-sync / 10 drift / 20
+#                             undetermined). Default:
+#                             <dir>/.venv/bin/python -m athenaeum.deploy_check --check <dir>
+#   ATHENAEUM_GUARD_METADATA_REFRESH_CMD  metadata-only editable reinstall run on
+#                             drift (default: <dir>/.venv/bin/pip install -q -e . --no-deps)
 #   ATHENAEUM_DEPLOY_EXTRAS   pip extras for the default install (default: mcp,vector —
 #                             what the MCP server + librarian's vector search need;
 #                             matches deploy-sync.sh)
@@ -167,6 +173,61 @@ _dg_default_stamp_cmd() {
     "$1" "$(_dg_script_dir)"
 }
 
+# --- metadata-drift reconcile (issue #685) ---------------------------------
+# An editable install picks up code on a fast-forward but NOT metadata: the
+# .dist-info version is frozen at install time, so importlib.metadata.version()
+# (== athenaeum.__version__) can silently lag pyproject.toml across a version
+# bump. A git fast-forward that DID reinstall the venv refreshes it; but an
+# in-sync HEAD with stale metadata never does. These steps close that gap.
+
+# The read-only version-drift check, run in the deploy venv so it reads that
+# venv's installed metadata. Exit: 0 in-sync, 10 drift, 20 undetermined.
+_dg_default_version_check_cmd() {
+  printf '"%s/.venv/bin/python" -m athenaeum.deploy_check --check "%s"' "$1" "$1"
+}
+
+# The metadata-only editable reinstall: refreshes .dist-info WITHOUT touching
+# the dependency tree (--no-deps), so a version bump is picked up cheaply.
+_dg_default_metadata_refresh_cmd() {
+  printf '"%s/.venv/bin/pip" install -q -e . --no-deps' "$1"
+}
+
+# Reconcile the editable install's metadata to the tree's declared version.
+# On drift (check exits 10) refresh the metadata and re-verify; a refresh that
+# fails or does not clear the drift aborts LOUDLY. An UNDETERMINED check (20) or
+# a check that cannot run (e.g. the deploy venv predates this module, before the
+# one-off `pip install -e .` in AC5) is WARNED loudly but does NOT block the
+# redeploy — the standalone `python -m athenaeum.deploy_check` surface still
+# reports it. Returns 0 (ok/warned) or 1 (loud abort).
+_dg_reconcile_metadata() {
+  local dir="$1" check refresh rc
+  check="${ATHENAEUM_GUARD_VERSION_CHECK_CMD:-$(_dg_default_version_check_cmd "$dir")}"
+  ( cd "$dir" && eval "$check" ) >/dev/null 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0  # installed metadata already matches the tree
+  fi
+  if [ "$rc" -ne 10 ]; then
+    # Undetermined (20) or unrunnable: loud, but do not block the redeploy.
+    echo "deploy-guard: WARN version-check could not confirm metadata (rc=${rc}) in ${dir} — run '(cd ${dir} && .venv/bin/pip install -e .)' to seed the check; leaving metadata as-is" >&2
+    return 0
+  fi
+  echo "deploy-guard: metadata drift (installed != pyproject) — refreshing editable install metadata in ${dir}" >&2
+  refresh="${ATHENAEUM_GUARD_METADATA_REFRESH_CMD:-$(_dg_default_metadata_refresh_cmd "$dir")}"
+  if ! ( cd "$dir" && eval "$refresh" ) >/dev/null 2>&1; then
+    _dg_alert "metadata refresh failed in ${dir} (cmd: ${refresh}). Recovery: refresh by hand (cd ${dir} && ${refresh}) and confirm 'athenaeum --version' matches pyproject.toml."
+    return 1
+  fi
+  ( cd "$dir" && eval "$check" ) >/dev/null 2>&1
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _dg_alert "metadata still drifted after refresh in ${dir} (version-check rc=${rc}). Recovery: (cd ${dir} && .venv/bin/pip install -e . --no-deps) and check 'athenaeum --version'."
+    return 1
+  fi
+  echo "deploy-guard: metadata refreshed — installed version now matches pyproject in ${dir}" >&2
+  return 0
+}
+
 # Loud abort: always stderr; optionally a JSONL line for a supervising job to
 # surface. Keep $summary free of double-quotes so the JSONL stays valid.
 _dg_alert() {
@@ -241,6 +302,9 @@ _dg_sync() {
   # checkout is AT the ref AND the build marker already records it.
   if [ -n "$head_before" ] && [ "$head_before" = "$refsha" ] && [ "$marker" = "$refsha" ]; then
     echo "deploy-guard: in-sync ${refsha} (${dir} @ origin/${ref})" >&2
+    # Git is in-sync, but the editable install's metadata can still be stale
+    # (issue #685) — reconcile it here since no venv refresh runs on this path.
+    _dg_reconcile_metadata "$dir" || return 1
     return 0
   fi
 
@@ -282,6 +346,12 @@ _dg_sync() {
     _dg_alert "build-sha stamp failed after refresh (cmd: ${stamp}). Recovery: re-stamp by hand (${stamp}) so hestia redeploy and the deploy-lag aggregator see the running commit."
     return 1
   fi
+
+  # The venv refresh above (`pip install -e .`) also refreshes .dist-info, so
+  # metadata is normally fresh here — but confirm (and refresh if a partial
+  # install left it stale) so a synced report can never hide a lying version
+  # string (issue #685).
+  _dg_reconcile_metadata "$dir" || return 1
 
   # Report the OBSERVED post-sync HEAD, never the intended target.
   echo "deploy-guard: synced ${dir} to origin/${ref} (observed HEAD ${head_after}) and refreshed .venv" >&2
