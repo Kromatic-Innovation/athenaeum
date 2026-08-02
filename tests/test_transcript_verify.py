@@ -416,3 +416,102 @@ class TestInferred:
         assert sref == f"{session}#turn3"
         assert "auto-memory" not in sref
         assert not sref.endswith(".md")
+
+
+class TestDefaultProjectsRootHonorsClaudeConfigDir:
+    """athenaeum#723: DEFAULT_PROJECTS_ROOT must honor CLAUDE_CONFIG_DIR (which
+    relocates ~/.claude), resolved at call time so every caller benefits with no
+    per-caller projects_root plumbing."""
+
+    def test_custom_config_dir_relocates_the_root(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.transcript_verify import default_projects_root
+
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/custom-claude-home")
+        assert default_projects_root() == Path("/tmp/custom-claude-home") / "projects"
+
+    def test_default_unchanged_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from athenaeum.transcript_verify import default_projects_root
+
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        assert default_projects_root() == Path.home() / ".claude" / "projects"
+
+    def test_empty_config_dir_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.transcript_verify import default_projects_root
+
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "")
+        assert default_projects_root() == Path.home() / ".claude" / "projects"
+
+    def test_caller_locates_transcripts_under_custom_config_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A transcript_verify caller passing NO explicit projects_root must find
+        # the transcript under the custom CLAUDE_CONFIG_DIR — no plumbing added.
+        from athenaeum.transcript_verify import verify_user_stated
+
+        config_dir = tmp_path / "custom-config"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        scope = "-Users-tristankromer-Code-voltaire"
+        session = "cfg12345"
+        _write_transcript(
+            config_dir / "projects",
+            scope,
+            session,
+            [
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "Relocated home works."},
+                }
+            ],
+        )
+        stype, sref = verify_user_stated(
+            scope, session, turn=1, claim="Relocated home works"
+        )
+        assert stype == "user-stated"
+        assert sref == f"{session}#turn1"
+
+    def test_push_metrics_reference_determination_honors_config_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # AC: `athenaeum push-metrics` reference-determination locates
+        # transcripts under a custom CLAUDE_CONFIG_DIR (it passes no
+        # projects_root, so it resolves through default_projects_root()).
+        from athenaeum import push_metrics
+
+        config_dir = tmp_path / "custom-config"
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "pmref-session")
+
+        # Seed a push record whose pushed id is later referenced in the session
+        # transcript located under the CUSTOM config dir.
+        record = push_metrics.build_push_record(
+            session_id="pmref-session",
+            query="q",
+            backend="keyword",
+            hits=[("thing-uid-1.md", {"uid": "pushed-uid-1"}, "some body text")],
+        )
+        push_metrics.record_push(record, cache_dir=cache_dir)
+        pushed_id = record.items[0].id  # the opaque id that must be referenced
+
+        scope = "-Users-tristankromer-Code-voltaire"
+        _write_transcript(
+            config_dir / "projects",
+            scope,
+            "pmref-session",
+            [
+                {
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": f"used {pushed_id} here"},
+                }
+            ],
+        )
+        result = push_metrics.run_reference_determination(
+            "pmref-session", cache_dir=cache_dir
+        )
+        # The transcript under the custom dir was located and scanned — a
+        # determination was produced (not the None "no transcript" outcome).
+        assert result is not None

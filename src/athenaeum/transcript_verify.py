@@ -35,15 +35,39 @@ misattributing a claim to the wrong session.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from athenaeum.models import DEFAULT_SOURCE_TYPE
 
+
+def default_projects_root() -> Path:
+    """Resolve the transcript home, honoring ``CLAUDE_CONFIG_DIR`` (issue athenaeum#723).
+
+    ``CLAUDE_CONFIG_DIR`` relocates the whole ``~/.claude`` tree (the standard
+    Claude Code override); the transcript root sits at ``<config>/projects``.
+    Falls back to ``~/.claude/projects`` when the variable is unset or empty.
+
+    Resolved at CALL time (not import) so every ``transcript_verify`` caller —
+    ``verify_user_stated``, ``classify_backfill_claim``, and
+    ``push_metrics.run_reference_determination`` — honors a custom
+    ``CLAUDE_CONFIG_DIR`` automatically, with no per-caller ``projects_root``
+    plumbing. Best-effort semantics are unchanged: a missing transcript is still
+    an honest "cannot determine," never a fabricated figure.
+    """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(config_dir) if config_dir else Path.home() / ".claude"
+    return base / "projects"
+
+
 # Default transcript home. Overridable via the ``projects_root`` parameter so
 # tests inject a synthetic tree and never read the operator's real sessions.
-DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
+# Import-time snapshot of :func:`default_projects_root` kept for backward
+# compatibility; live callers resolve via the function so a custom
+# ``CLAUDE_CONFIG_DIR`` is honored at call time (issue athenaeum#723).
+DEFAULT_PROJECTS_ROOT = default_projects_root()
 
 _URL_RE = re.compile(r"https?://[^\s)>\]\"']+")
 
@@ -166,7 +190,7 @@ def verify_user_stated(
         ultimate reference — session+turn, URL, or (fallback) the session id.
         The ref is NEVER the raw ``auto-memory/...`` filename.
     """
-    root = projects_root if projects_root is not None else DEFAULT_PROJECTS_ROOT
+    root = projects_root if projects_root is not None else default_projects_root()
     fallback = _best_effort_ref(session_id, turn)
 
     needle = _normalize(claim)
@@ -364,7 +388,7 @@ def classify_backfill_claim(
         claim: the fact text to match (title/name, or first body line).
         projects_root: transcript root; defaults to ``~/.claude/projects``.
     """
-    root = projects_root if projects_root is not None else DEFAULT_PROJECTS_ROOT
+    root = projects_root if projects_root is not None else default_projects_root()
     ref = _best_effort_ref(session_id, turn)
 
     records = _iter_session_records(root / scope, session_id)
