@@ -18,6 +18,62 @@ from athenaeum import push_metrics
 from athenaeum.config import resolve_push_metrics_enabled
 
 # ---------------------------------------------------------------------------
+# Session-id resolution (issue athenaeum#734)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveSessionId:
+    """The single helper that resolves the consuming session's id. athenaeum#734
+    fixed a silent no-op: every call site read ``CLAUDE_SESSION_ID``, a name
+    Claude Code never sets (it exports ``CLAUDE_CODE_SESSION_ID``), so the
+    ``if session_id:`` guard was always false and no push record was ever
+    written.
+    """
+
+    def test_candidate_names_are_pinned_in_precedence_order(self) -> None:
+        # The name list is asserted EXPLICITLY, so silently reading a name
+        # nothing exports (the athenaeum#734 defect) is a failing diff, not a
+        # silent no-op. CLAUDE_CODE_SESSION_ID must come first.
+        assert push_metrics.SESSION_ID_ENV_VARS == (
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_SESSION_ID",
+        )
+
+    def test_reads_the_real_variable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-code")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        assert push_metrics.resolve_session_id() == "sess-code"
+
+    def test_code_name_takes_precedence_over_legacy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-code")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "sess-legacy")
+        assert push_metrics.resolve_session_id() == "sess-code"
+
+    def test_falls_back_to_legacy_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "sess-legacy")
+        assert push_metrics.resolve_session_id() == "sess-legacy"
+
+    def test_empty_string_env_is_treated_as_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An exported-but-empty CLAUDE_CODE_SESSION_ID falls through to the
+        # fallback rather than resolving to "".
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "")
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "sess-legacy")
+        assert push_metrics.resolve_session_id() == "sess-legacy"
+
+    def test_neither_set_returns_empty_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        assert push_metrics.resolve_session_id() == ""
+
+
+# ---------------------------------------------------------------------------
 # Config accessor
 # ---------------------------------------------------------------------------
 
