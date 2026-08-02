@@ -1190,3 +1190,25 @@ class TestRunIntegration:
         assert any(
             "page-size guardrail check failed" in rec.message for rec in caplog.records
         ), "expected non-fatal degrade warning when the scan raises"
+
+
+# ---------------------------------------------------------------------------
+# Module docstring model defaults reference the constants, not literals (#686)
+# ---------------------------------------------------------------------------
+
+
+def test_module_docstring_references_model_constants_not_literals() -> None:
+    """#686: the librarian env-var docstring documents the Tier-2/Tier-3 model
+    defaults by pointing at the DEFAULT_*_MODEL constants (the authority) rather
+    than restating their values, so it cannot silently drift again — which is
+    how it came to document `claude-sonnet-4-6` while `tiers.DEFAULT_WRITE_MODEL`
+    shipped `claude-sonnet-5`.
+    """
+    import athenaeum.librarian as lib
+
+    doc = lib.__doc__ or ""
+    assert "config.DEFAULT_CLASSIFY_MODEL" in doc
+    assert "tiers.DEFAULT_WRITE_MODEL" in doc
+    # The drifted literal (and its classify sibling) are gone from the docstring.
+    assert "claude-sonnet-4-6" not in doc
+    assert "claude-haiku-4-5-20251001" not in doc
