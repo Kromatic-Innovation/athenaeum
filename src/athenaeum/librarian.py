@@ -160,6 +160,7 @@ from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
     Tier2ParseStats,
+    partition_code_artifact_classifications,
     schema_fragment_state,
     tier1_programmatic_match,
     tier2_classify,
@@ -827,6 +828,17 @@ def process_one(
 
         for c in classified:
             c.access = more_restrictive(c.access, sticky_access)
+
+    # Issue #680: a candidate whose name is a filename/path (a code artifact)
+    # must NOT become a wiki entity — the repo is the source of truth for its own
+    # code, so a memory of it is stale by construction and costs a session to
+    # disprove. Drop it AT CREATION, before the tier-3 create call (complementary
+    # to, and no change to, #662's read-side stopword gate).
+    classified, _dropped_code = partition_code_artifact_classifications(
+        classified, config
+    )
+    for _name in _dropped_code:
+        log.info("  T3 create skipped (issue #680, code artifact): %s", _name)
 
     # Build actions
     actions: list[EntityAction] = []
