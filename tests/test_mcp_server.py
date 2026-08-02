@@ -796,6 +796,99 @@ class TestRecallSearchExtraRoots:
 
 
 # ---------------------------------------------------------------------------
+# Push-metrics instrumentation on the recall path (issue #711)
+# ---------------------------------------------------------------------------
+
+
+class TestRecallPushMetricsInstrumentation:
+    """recall_search is the single point recall assembles a push payload into
+    a session (_recall_via_backend's ``blocks`` loop). Instrumentation hooked
+    there must record a push AND must never alter what recall renders.
+    """
+
+    def test_instrumentation_on_writes_a_push_record(
+        self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import push_metrics
+
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "test-session-711")
+        monkeypatch.delenv("ATHENAEUM_PUSH_METRICS_ENABLED", raising=False)
+        cache_dir = tmp_path / "cache"
+
+        recall_search(wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_dir)
+
+        rows = push_metrics.read_push_records(cache_dir=cache_dir)
+        assert len(rows) == 1
+        assert rows[0]["session_id"] == "test-session-711"
+        assert rows[0]["pushed_count"] >= 1
+        # The opaque uid is recorded, never a raw filename/name.
+        ids = [item["id"] for item in rows[0]["items"]]
+        assert "a1b2c3d4" in ids
+
+    def test_instrumentation_never_changes_recall_output(
+        self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import push_metrics
+
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "sess-compare")
+
+        cache_on = tmp_path / "cache_on"
+        monkeypatch.delenv("ATHENAEUM_PUSH_METRICS_ENABLED", raising=False)
+        out_on = recall_search(
+            wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_on
+        )
+
+        cache_off = tmp_path / "cache_off"
+        monkeypatch.setenv("ATHENAEUM_PUSH_METRICS_ENABLED", "0")
+        out_off = recall_search(
+            wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_off
+        )
+
+        assert out_on == out_off
+        assert push_metrics.read_push_records(cache_dir=cache_on) != []
+        assert push_metrics.read_push_records(cache_dir=cache_off) == []
+
+    def test_no_push_record_when_no_session_id(
+        self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import push_metrics
+
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        cache_dir = tmp_path / "cache"
+        recall_search(wiki_dir, "Acme", search_backend="keyword", cache_dir=cache_dir)
+        assert push_metrics.read_push_records(cache_dir=cache_dir) == []
+
+    def test_no_push_record_on_no_hits(
+        self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import push_metrics
+
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "sess-nohits")
+        cache_dir = tmp_path / "cache"
+        recall_search(
+            wiki_dir, "xyznonexistentquery", search_backend="keyword", cache_dir=cache_dir
+        )
+        assert push_metrics.read_push_records(cache_dir=cache_dir) == []
+
+    def test_push_metrics_failure_never_breaks_recall(
+        self, wiki_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import push_metrics
+
+        monkeypatch.setenv("CLAUDE_SESSION_ID", "sess-broken")
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("ledger unavailable")
+
+        monkeypatch.setattr(push_metrics, "record_push", _boom)
+        # Must not raise despite the instrumentation call failing internally.
+        result = recall_search(
+            wiki_dir, "Acme", search_backend="keyword", cache_dir=tmp_path / "cache"
+        )
+        assert "Acme Corp" in result
+
+
+# ---------------------------------------------------------------------------
 # CLI integration
 # ---------------------------------------------------------------------------
 

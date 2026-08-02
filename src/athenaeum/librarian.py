@@ -4597,6 +4597,20 @@ def session_end(
             backend=backend,
         )
 
+    # Issue #711: reference determination — mark which of THIS session's
+    # pushed ids were actually referenced afterward, so precision
+    # (referenced / pushed) accrues per session. Scoped to `session` (the
+    # same originating-session id `session_end` already takes for its
+    # incremental-ingest scoping) and skipped on a dry-run (no durable writes
+    # on a preview). Best-effort: `run_reference_determination` swallows its
+    # own failures and must never break session_end.
+    if session and not dry_run:
+        from athenaeum import push_metrics
+
+        push_metrics.run_reference_determination(
+            session, cache_dir=cache_dir, config=config
+        )
+
     return SessionEndResult(
         ingest=ingest_result,
         reindexed=reindexed,
