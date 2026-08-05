@@ -143,7 +143,12 @@ from athenaeum.models import (
     validity_bound_str,
     validity_windows_disjoint,
 )
-from athenaeum.pending_merges import _make_id, resolve_merge, write_pending_merge
+from athenaeum.pending_merges import (
+    _make_id,
+    classify_write_kind,
+    resolve_merge,
+    write_pending_merge,
+)
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.provider import resolve_provider
 from athenaeum.reasoning_tiers import (
@@ -1170,17 +1175,16 @@ def _is_low_cohesion_cross_scope(
 def _classify_merge_write_kind(merge_target_name: str, wiki_root: Path) -> str:
     """Classify a merge proposal by whether its target slug already exists (athenaeum#421).
 
-    Returns ``"fold-into-existing"`` when a wiki page already owns the derived
-    target slug, else ``"create-merged"``. The existence check mirrors
-    :func:`athenaeum.pending_merges.resolve_merge`'s approve-time target path
-    EXACTLY (``wiki_root / f"{slugify(name)}.md"``) so a ``create-merged``
-    proposal can never later fail ``target_exists`` at approve. Only the
-    CLASSIFICATION lives here; the fold WRITE path is athenaeum#425.
+    Thin delegator to
+    :func:`athenaeum.pending_merges.classify_write_kind` — the single source
+    of truth for this classification (issue athenaeum#748). Kept as a named
+    entry point in this module for the proposal-time callers (and their tests)
+    that already import it; the logic lives in ``pending_merges`` so
+    :func:`~athenaeum.pending_merges.write_pending_merge` can derive the same
+    value at write time without reintroducing the ``pending_merges`` ->
+    ``merge`` back-edge dissolved by issue athenaeum#640.
     """
-    target_slug = slugify(merge_target_name)
-    if (wiki_root / f"{target_slug}.md").exists():
-        return "fold-into-existing"
-    return "create-merged"
+    return classify_write_kind(merge_target_name, wiki_root)
 
 
 def t1_screen_rejects_merge_proposal(

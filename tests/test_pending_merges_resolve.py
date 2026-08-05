@@ -740,6 +740,11 @@ def test_write_kind_round_trips(tmp_path: Path) -> None:
     from athenaeum.pending_merges import list_pending_merges, parse_pending_merges
 
     merges = tmp_path / "_pending_merges.md"
+    # athenaeum#748: write_kind is derived from whether the target slug exists,
+    # so the canonical page must be present for a fold-into-existing to persist.
+    (tmp_path / "folded-topic.md").write_text(
+        "---\nname: folded-topic\n---\nbody\n", encoding="utf-8"
+    )
     write_pending_merge(
         merges,
         merge_target_name="folded-topic",
