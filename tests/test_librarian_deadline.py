@@ -522,3 +522,191 @@ def test_cli_max_runtime_defaults_to_none(
     rc = main(["run", "--dry-run", "--path", str(tmp_path)])
     assert rc == 0
     assert captured["max_runtime"] is None
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#761 — the phase-boundary / C4 deadline exit must push too
+#
+# `stop_on_deadline` returned 124 to run()'s caller BEFORE _run_finalize_phase,
+# so the post-run push (librarian.push_after_run) never fired on the phase-
+# boundary / C4 path — 26 commits stranded on one machine over three days.
+# The fix pushes from inside stop_on_deadline, right after the partial commit.
+# ---------------------------------------------------------------------------
+
+
+def _spy_git_push(
+    monkeypatch: pytest.MonkeyPatch, *, succeed: bool = True
+) -> list[dict[str, object]]:
+    """Spy on ``librarian.git_push`` and return the recorded calls."""
+    from athenaeum import librarian
+
+    calls: list[dict[str, object]] = []
+
+    def fake_push(knowledge_root, remote="origin", branch=None):
+        calls.append({"knowledge_root": knowledge_root, "remote": remote})
+        return succeed
+
+    monkeypatch.setattr(librarian, "git_push", fake_push)
+    return calls
+
+
+def _trip_c4_deadline(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wire the auto-memory/merge (C4) phase to write partial progress and then
+    raise ``RunDeadlineExceeded`` — the exact phase-boundary path
+    ``test_run_catches_merge_deadline_and_exits_124`` drives, factored out."""
+    monkeypatch.setattr(
+        "athenaeum.librarian.discover_auto_memory_files",
+        lambda *_a, **_k: [SimpleNamespace(origin_scope="scope-a")],
+    )
+
+    def _boom(*_a, **_k):
+        (root / "wiki" / "auto-partial.md").write_text(
+            "---\nname: partial\n---\npartial C3 output\n", encoding="utf-8"
+        )
+        raise RunDeadlineExceeded("C4 contradiction detector / resolver")
+
+    monkeypatch.setattr("athenaeum.librarian._compile_auto_memory", _boom)
+
+
+def test_761_phase_boundary_deadline_pushes_after_partial_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The C4 / phase-boundary deadline exit pushes when push_after_run is on
+    and the run committed. FAILS against pre-athenaeum#761 (no push on this path)."""
+    root = _seed_knowledge_root(tmp_path, n_files=0)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+    monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+    calls = _spy_git_push(monkeypatch)
+    _trip_c4_deadline(root, monkeypatch)
+
+    rc = run(
+        raw_root=root / "raw",
+        wiki_root=root / "wiki",
+        knowledge_root=root,
+        max_api_calls=100,
+        max_runtime=3600,
+        push_after_run=True,
+    )
+
+    assert rc == 124
+    assert _porcelain(root) == ""
+    # The partial-progress commit moved HEAD, so the push fires — exactly once.
+    assert len(calls) == 1, "phase-boundary deadline path must push the partial commit"
+    assert calls[0]["knowledge_root"] == root
+
+
+def test_761_entity_loop_deadline_pushes_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The entity-loop deadline path falls through to _run_finalize_phase, which
+    already pushes. Adding the stop_on_deadline push must NOT double it: the
+    entity trip sets deadline_tripped and skips the auto-memory block (and its
+    stop_on_deadline call sites), so the push still fires exactly once."""
+    root = _seed_knowledge_root(tmp_path, n_files=3)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+    monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+    calls = _spy_git_push(monkeypatch)
+
+    clock = _FakeClock(start=0.0)
+    monkeypatch.setattr("athenaeum.librarian.time.monotonic", clock.monotonic)
+
+    def _bump() -> None:
+        clock.now = 5000.0
+
+    monkeypatch.setattr(
+        "athenaeum.librarian.process_one",
+        _writing_process_one_factory(root / "wiki", bump_clock=_bump, bump_after=1),
+    )
+
+    rc = run(
+        raw_root=root / "raw",
+        wiki_root=root / "wiki",
+        knowledge_root=root,
+        max_api_calls=100,
+        max_runtime=1000,
+        push_after_run=True,
+    )
+
+    assert rc == 124
+    assert len(calls) == 1, "entity-loop deadline path must push exactly once, not twice"
+
+
+def test_761_dry_run_deadline_never_pushes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--dry-run must never push on the phase-boundary path (the push call is
+    nested under `if not self.dry_run` and _maybe_push_after_run guards dry_run
+    a second time)."""
+    root = _seed_knowledge_root(tmp_path, n_files=1)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+    monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+    calls = _spy_git_push(monkeypatch)
+
+    clock = _FakeClock(start=0.0)
+    monkeypatch.setattr("athenaeum.librarian.time.monotonic", clock.monotonic)
+    monkeypatch.setattr(
+        "athenaeum.wiki_dedupe.propose_wiki_page_merges",
+        lambda *_a, **_k: setattr(clock, "now", 5000.0),
+    )
+
+    rc = run(
+        raw_root=root / "raw",
+        wiki_root=root / "wiki",
+        knowledge_root=root,
+        max_api_calls=100,
+        max_runtime=1000,
+        dry_run=True,
+        push_after_run=True,
+    )
+
+    assert rc == 124
+    assert calls == [], "--dry-run must never push, even on the deadline path"
+
+
+def test_761_deadline_push_failure_keeps_124(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A push failure on the deadline path is non-fatal — the 124 exit code is
+    unchanged (mirrors the finalize-phase push contract)."""
+    root = _seed_knowledge_root(tmp_path, n_files=0)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+    monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+    calls = _spy_git_push(monkeypatch, succeed=False)
+    _trip_c4_deadline(root, monkeypatch)
+
+    rc = run(
+        raw_root=root / "raw",
+        wiki_root=root / "wiki",
+        knowledge_root=root,
+        max_api_calls=100,
+        max_runtime=3600,
+        push_after_run=True,
+    )
+
+    assert rc == 124, "a failed push must not change the 124 deadline exit code"
+    assert len(calls) == 1
+
+
+def test_761_skipped_push_emits_log_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Issue athenaeum#761 acceptance criterion: an opted-in push that is SKIPPED
+    (here: no new commits) is no longer silent — it emits a log line so an
+    operator can tell a skipped push from one that happened or failed."""
+    import logging
+
+    from athenaeum.librarian import _capture_head, _maybe_push_after_run
+
+    root = _seed_knowledge_root(tmp_path, n_files=0)
+    head = _capture_head(root)
+    with caplog.at_level(logging.INFO, logger="athenaeum.librarian"):
+        _maybe_push_after_run(
+            root,
+            config=None,
+            push_after_run=True,
+            dry_run=False,
+            head_at_start=head,  # HEAD unchanged → skip, but must log why
+        )
+    assert any(
+        "post-run push skipped: no new commits" in r.message for r in caplog.records
+    ), "a skipped opted-in push must emit a log line"
