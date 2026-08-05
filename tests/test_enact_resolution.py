@@ -244,11 +244,35 @@ class TestTier4EnactsOnAutoApply:
     def test_correct_a_high_confidence_removes_wrong_claim(
         self, tmp_path: Path
     ) -> None:
+        # Issue athenaeum#752: correct_a/correct_b auto-apply is gated on
+        # transcript-verified human authorship of the WINNING member's claim,
+        # not confidence. The winning member (side "a") must carry an origin
+        # pointing at a transcript where the claim is genuinely user-stated.
+        import json
+
         scope = tmp_path / "scope"
-        a = _make_member(scope, "right.md", "the correct claim")
+        a = _make_member(
+            scope,
+            "right.md",
+            "---\noriginSessionId: sess1\noriginTurn: 3\n---\nthe correct claim",
+        )
         b = _make_member(scope, "wrong.md", "the wrong claim")
         pending = tmp_path / "_pending_questions.md"
         cfg = {"resolve": {"auto_apply": True}}
+
+        projects_root = tmp_path / "projects"
+        transcript_dir = projects_root / "scope"
+        transcript_dir.mkdir(parents=True)
+        (transcript_dir / "sess1.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "the correct claim"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         item = _item(
             "CorrectEntity",
@@ -257,9 +281,10 @@ class TestTier4EnactsOnAutoApply:
             a_ref="scope/right.md",
             b_ref="scope/wrong.md",
         )
-        tier4_escalate([item], pending, config=cfg)
+        tier4_escalate([item], pending, config=cfg, projects_root=projects_root)
 
-        # correct_a: a is right, b's wrong claim is removed.
+        # correct_a: a is right (transcript-verified user-stated), b's wrong
+        # claim is removed.
         assert a.exists()
         assert not b.exists()
 

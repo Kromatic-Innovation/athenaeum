@@ -483,6 +483,83 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 
 ---
 
+## 14. `correct_a` / `correct_b` destructive auto-delete gated on transcript-verified human authorship, not confidence (issue athenaeum#752)
+
+- **Files:** `src/athenaeum/resolutions.py` (`_transcript_authorizes_correct`,
+  `_winning_member_path`, `_member_origin_and_claim`); `src/athenaeum/tiers.py`
+  (`tier4_escalate._should_auto_apply`, `reresolve_open_questions._should_auto_apply`
+  — both call sites share the resolutions.py helper rather than duplicating
+  the logic); `src/athenaeum/transcript_verify.py` (`classify_backfill_claim`,
+  reused unchanged from issue athenaeum#328).
+- **Companion tests:** `tests/test_correct_authorship_gate.py` (the primary
+  suite — unit tests on the helper plus `tier4_escalate` /
+  `reresolve_open_questions` integration), plus the updated fixtures in
+  `tests/test_enact_resolution.py` and `tests/test_auto_apply_threshold.py`.
+- **The rule.** `enact_resolution` DELETES the losing raw-memory member for
+  `correct_a`/`correct_b` — the resolver's single most dangerous action.
+  Before athenaeum#752 the only barrier to that delete was a confidence float
+  (`resolve.auto_apply_threshold_per_action.correct_a`/`correct_b`, default
+  `0.95`). Confidence is the wrong axis for an irreversible delete: models are
+  poorly calibrated exactly at the top of their range. athenaeum#752 REPLACES the
+  confidence gate for these two actions (it does not stack on top of it — see
+  `docs/configuration.md`) with a check against a record the model did not
+  author: **auto-apply fires only when the WINNING member's claim — the side
+  named by the resolver's `recommended_winner`, i.e. the side asserting the
+  correction — is classified `user-stated` by
+  `transcript_verify.classify_backfill_claim` against its ORIGIN-SESSION
+  transcript, evaluated fresh at ENACT time.** `agent-observed`, `inferred`,
+  and `unavailable` (missing/rolled-off transcript — the most likely
+  production outcome) all escalate to the human instead of deleting. The
+  check deliberately **never reads the member's own `source_type`
+  frontmatter field** — that field is self-declared by whoever wrote the
+  memory (possibly the model itself), and trusting it would let a model grant
+  itself deletion authority by emitting a string, exactly the hole this gate
+  closes. The gate decision (channel + ref) is logged for every `correct_*`
+  verdict, permit or refuse, via the module logger.
+- **Scope boundary — `forget_a`/`forget_b` unchanged.** `forget_*` deletes a
+  *transient* member cleanly with no human assertion behind it (legitimate
+  janitorial cleanup, not a disputed correction) and is explicitly OUT OF
+  SCOPE for athenaeum#752; it keeps auto-applying on its `0.95` confidence floor
+  with no transcript check, pinned by
+  `tests/test_correct_authorship_gate.py::TestTier4CorrectGateIntegration::test_ac6_forget_a_still_enacts_on_confidence_floor_no_authorship_check`.
+  `keep_*`/`scope_*` are non-destructive (mark, don't delete) and were never
+  in scope either.
+- **Scope boundary — human-ratified answers are NOT gated.** Two other
+  `enact_resolution` call sites construct a `correct_a`/`correct_b` proposal
+  from a verdict a HUMAN already typed, not a fresh model auto-apply
+  decision: `answers._writeback_source` (a human checked `[x]` on a pending
+  question and wrote `correct_a` as their answer; `ingest-answers` relays it)
+  and `tiers.tier4_escalate`'s prior-human-verdict reconciliation branch
+  (gated on `record.get("resolved_by") == "human"`, re-applying a verdict a
+  human already ratified for the identical claim pair on an earlier run).
+  Both stay ungated by athenaeum#752 — a human's literal typed answer is already the
+  kind of record-the-model-didn't-author this gate exists to require, and is
+  a stronger signal than a transcript substring match.
+
+### Known limits — do not mistake this for a verified-identity guarantee
+
+- **Substring matching establishes that the user typed these words, not that
+  the user authorized this deletion.** `classify_backfill_claim` matches the
+  claim as a whitespace-normalized, case-insensitive substring of a
+  user-authored transcript message. Pasting an error log containing "the
+  Heroku page is wrong" produces a user-authored turn containing those words.
+  This is a limit on what the mechanism can *mean*, not a gap in its rigor.
+- **Transcripts roll off.** The failure mode is safe (`unavailable` →
+  escalate, never delete), but authority that expires is not durable
+  authority — a legitimately user-stated claim whose transcript has aged out
+  will escalate exactly like an unverifiable one.
+- **The transcript is not immutable.** Session transcripts are plain JSONL
+  under `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR/projects/`),
+  user-owned, with no signature and no hash chain. A process with filesystem
+  access — including an agent with shell tools — can rewrite one. athenaeum#752
+  raises self-authorization from "emit a string in a memory's frontmatter" to
+  "deliberately write to a file outside the memory channel" — a real
+  escalation in difficulty and deliberateness, but not a cryptographic
+  guarantee. Transcript durability/retention/tamper-evidence is tracked as a
+  separate, not-yet-filed follow-up (see the athenaeum#752 issue body).
+
+---
+
 ## Comparison matrix — who wins on each field type
 
 | Resolver | Scalar (truthy/either) | Scalar (always) | List | Numeric | Date | Body | Provenance (`field_sources`) |
