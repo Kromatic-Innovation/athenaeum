@@ -187,11 +187,19 @@ _DISPUTED: dict[str, str] = {
     # athenaeum#737 adjudicated `tool_choice_editor`: the golden was corrected
     # to conflict_type 'factual' (the model's answer), so it is no longer
     # disputed and its detector case now passes without an xfail.
+    # athenaeum#760/athenaeum#715: this resolver-side xfail STAYS. Removing it
+    # needs a re-record (the recorded response is `scope_a`, which
+    # `_classify_proposal` maps to `scope_a` != golden `keep_pick_winner`), and
+    # a re-record needs a live backend this offline issue does not use. The
+    # golden's rationale is recorded on the case in
+    # tests/evals/data/resolver/cases.yaml; the xfail is removed when athenaeum#715
+    # removes the resolver. This mark is TRACKED, not an untracked failure.
     "decision_conflict_hosting_migration": (
         "athenaeum#737: golden expects action_class 'keep_pick_winner'; the model "
         "returns 'scope_a'. The members are a Feb Heroku decision superseded by "
         "a May Fly.io cutover — temporal supersession, not a live contradiction "
-        "with a winner to pick."
+        "with a winner to pick. Kept per athenaeum#760; removed by athenaeum#715 "
+        "(needs a re-record)."
     ),
 }
 

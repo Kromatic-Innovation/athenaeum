@@ -97,6 +97,22 @@
 # declared in the text" rule, and "as of <date>, X" framing fires the
 # sequential-snapshot FACT rule — both defensibly yield not_a_conflict.
 # Neither is the intended keep_pick_winner outcome, so both are avoided here.
+# athenaeum#760: this golden stays `keep_pick_winner` — but NOT because `scope_*`
+# is the wrong class for superseded decisions in general. The reason is
+# specific to these members: NEITHER carries a `valid_from` (both have only
+# `updated:`, and `models.parse_valid_from` reads `valid_from` exclusively with
+# no fallback). `_narrow_scope_interval` (src/athenaeum/resolutions.py) closes
+# the target's `valid_until` at the day before the OTHER side's `valid_from` and
+# returns `None` when that side has no `valid_from` — so `scope_a` narrows
+# nothing and cannot enact, while `keep_*` always enacts. The model's `scope_a`
+# answer is defensible in principle but UNEXECUTABLE on this pair, so the golden
+# is right. The underlying question — a verdict that silently no-ops when a
+# coordinate is absent — is superseded by the memory model v6 work (athenaeum#714
+# typed `interval` dimension / athenaeum#715 five-verdict comparator), which
+# deletes this prompt path. Do NOT edit `_RESOLVE_SYSTEM` or re-record the
+# fixture for this: the trap must be avoided in v6, not patched in a prompt
+# scheduled for deletion. See the resolver-side xfail in
+# tests/test_recorded_fixtures.py.
 - id: decision_conflict_hosting_migration
   outcome_class: contradict
   expected:

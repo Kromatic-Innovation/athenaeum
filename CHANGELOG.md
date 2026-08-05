@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Record why the `decision_conflict_hosting_migration` resolver golden stands,
+  and hand the boundary to v6 (athenaeum#760).** A comment on the case in
+  `tests/evals/data/resolver/cases.yaml` now records that the golden stays
+  `keep_pick_winner` **because** neither member carries `valid_from` (so
+  `_narrow_scope_interval` returns `None` and the model's `scope_a` cannot
+  enact) — *not* because `scope_*` is the wrong class for superseded decisions
+  in general — and that the underlying trap (a verdict that silently no-ops when
+  a coordinate is absent) is superseded by v6 (athenaeum#714/athenaeum#715), so
+  the prompt is not to be edited for it. The resolver-side `xfail(strict=True)`
+  and its `_DISPUTED` entry in `tests/test_recorded_fixtures.py` **stay** (removing
+  them needs a re-record, which athenaeum#715 will do when it removes the
+  resolver), now with a one-line comment pointing at athenaeum#760/athenaeum#715
+  so the mark reads as tracked, not an untracked failure. Comment-only: no prompt,
+  registered golden, recorded fixture, or `docs/prompts.md` edit; no `--record`.
+
 ### Fixed
 
 - **The C4 contradiction-detector / resolver loop now ticks the run-lock
