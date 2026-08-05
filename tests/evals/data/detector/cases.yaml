@@ -152,11 +152,20 @@
         source_ref: "session-2026-04-03"
         updated: "2026-04-03"
 
+# athenaeum#737: conflict_type is `factual`, NOT `prescriptive`. The detector
+# prompt defines `prescriptive` as "two snippets give opposing GUIDANCE for the
+# same situation" (its example: "always commit directly" vs "never commit
+# directly"). Neither member below directs anyone to do anything — both are
+# statements about WHERE docs live (Notion vs Google Docs), which is the
+# prompt's own definition of `factual`: "two snippets state incompatible facts
+# about the same thing." The golden originally encoded `prescriptive`; the model
+# returns `factual` and is right. Do not revert this to `prescriptive` — no
+# taxonomy boundary is in dispute, the class was simply wrong.
 - id: tool_choice_editor
   outcome_class: contradict
   expected:
     detected: true
-    conflict_type: prescriptive
+    conflict_type: factual
   members:
     - filename: feedback_editor_notion.md
       body: "The consulting team uses Notion for all client-facing project docs."

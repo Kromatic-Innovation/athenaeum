@@ -184,11 +184,9 @@ def _materialise_members(
 # to be removed deliberately — an xfail that quietly starts passing is how a
 # quarantine becomes permanent.
 _DISPUTED: dict[str, str] = {
-    "tool_choice_editor": (
-        "athenaeum#737: golden expects conflict_type 'prescriptive'; the model returns "
-        "'factual'. Both members state where docs live rather than directing "
-        "anyone to act, so 'factual' is arguably the better reading."
-    ),
+    # athenaeum#737 adjudicated `tool_choice_editor`: the golden was corrected
+    # to conflict_type 'factual' (the model's answer), so it is no longer
+    # disputed and its detector case now passes without an xfail.
     "decision_conflict_hosting_migration": (
         "athenaeum#737: golden expects action_class 'keep_pick_winner'; the model "
         "returns 'scope_a'. The members are a Feb Heroku decision superseded by "
