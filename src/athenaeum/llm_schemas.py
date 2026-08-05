@@ -139,11 +139,14 @@ MISMATCH_OTHER = "other"
 
 #: Every contract :func:`observe` instruments, so :func:`aggregate_observations`
 #: can report a contract with ZERO observations as an EXPLICIT *no-data* row
-#: rather than a silent absence (athenaeum#724). ``claim_kind`` in particular has
-#: no production caller today (``stamp_claim_kind`` is unwired — tracked
-#: separately for the wire-vs-remove decision), so it is a structural no-data
-#: row until that is resolved; surfacing it explicitly is what keeps a permanent
-#: no-data contract from reading as "0 mismatches" (a false clean signal).
+#: rather than a silent absence (athenaeum#724). ``claim_kind`` was a structural
+#: no-data row before athenaeum#742 wired ``stamp_claim_kind`` into the nightly
+#: auto-memory intake phase (``librarian._stamp_unclassified_claim_kinds``,
+#: called from ``_run_auto_memory_phase``); now that real traffic flows, its
+#: row reports actual observations like every other contract here. Surfacing
+#: a genuinely-unreached contract explicitly (as this tuple still does for any
+#: future no-caller addition) is what keeps a permanent no-data contract from
+#: reading as "0 mismatches" (a false clean signal).
 INSTRUMENTED_CONTRACTS: tuple[str, ...] = (
     "query_topics",
     "claim_kind",
