@@ -3095,6 +3095,75 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         )
 
 
+def _stamp_unclassified_claim_kinds(
+    auto_memory_files: list[AutoMemoryFile],
+    client: Any,
+    config: dict[str, object] | None,
+    usage: TokenUsage | None,
+) -> None:
+    """Stamp ``claim_kind:`` onto each not-yet-classified auto-memory file (athenaeum#742).
+
+    Wires :func:`athenaeum.claim_kind.stamp_claim_kind` into the nightly
+    intake path: the single natural point where the run already holds a live
+    ``anthropic`` client (``ctx.merge_client``, shared with the C4
+    contradiction detector) AND iterates every raw auto-memory file exactly
+    once per run. Called from :func:`_run_auto_memory_phase` right after C1
+    discovery and BEFORE the C2 cluster pass, so a freshly-stamped
+    ``claim_kind`` is visible to clustering, C3 merge, and (via
+    :func:`athenaeum.resolutions._stance_attribution_verdict`) the C4
+    resolver in the SAME run it was stamped.
+
+    ``stamp_claim_kind`` is itself idempotent and fail-open (see
+    ``claim_kind.py``): a file that already carries a valid ``claim_kind:``
+    is skipped with NO LLM call (an author-supplied value is never
+    overwritten), and a classification failure leaves the file unstamped
+    rather than raising. This wrapper additionally short-circuits on
+    ``am.claim_kind`` (already populated by :func:`discover_auto_memory_files`
+    from the on-disk frontmatter) so an already-classified file costs not
+    even a frontmatter re-read.
+
+    On a successful stamp, updates ``am.claim_kind`` on the (mutable)
+    in-memory :class:`AutoMemoryFile` record directly — cheaper than
+    re-running discovery, and the in-memory record is what clustering/merge/
+    resolution consume for the rest of this run.
+
+    No-op when ``client`` is ``None`` (dry-run / keyless run) or the list is
+    empty. Never raises: a per-file stamp failure is logged by
+    ``stamp_claim_kind`` itself and simply leaves that file unclassified.
+    ``getattr(am, "claim_kind"/"path", ...)`` (rather than direct attribute
+    access) tolerates the ``SimpleNamespace(origin_scope=...)`` doubles
+    several pre-existing budget/deadline tests substitute for
+    ``discover_auto_memory_files`` — those tests exercise unrelated run-loop
+    machinery and never intended to opt into claim_kind stamping; a bare
+    double is treated the same as an already-classified/unpathed record
+    (skipped, no call, no crash).
+    """
+    if client is None or not auto_memory_files:
+        return
+    # Lazy import (issue athenaeum#742 AC): keeps the claim_kind classifier — and the
+    # athenaeum.llm_schemas / pydantic weight it pulls in via observe_claim_kind
+    # — off every import path that does not reach this run-loop phase,
+    # matching the deferred-import pattern already used for
+    # athenaeum.batch.process_batch_run just above in this module. In
+    # particular this must NEVER be imported at athenaeum.librarian module
+    # scope, since librarian is reachable (indirectly) from CLI startup.
+    from athenaeum.claim_kind import stamp_claim_kind
+
+    stamped = 0
+    for am in auto_memory_files:
+        if getattr(am, "claim_kind", ""):
+            continue
+        path = getattr(am, "path", None)
+        if path is None:
+            continue
+        kind = stamp_claim_kind(path, client, config=config, usage=usage)
+        if kind:
+            am.claim_kind = kind
+            stamped += 1
+    if stamped:
+        log.info("claim_kind: stamped %d previously-unclassified auto-memory file(s)", stamped)
+
+
 def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     """The auto-memory block: C1 discover + C2 cluster / C3 merge / C4
     detect, the post-compile deadline check, retire, and athenaeum#188 reresolve.
@@ -3131,6 +3200,17 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             log.info(
                 "  [DRY RUN] auto-memory scope %s: %d file(s)", scope, count
             )
+    else:
+        # Issue athenaeum#742: stamp claim_kind on every not-yet-classified member
+        # BEFORE clustering, so the freshly-stamped kind is visible to C2/C3
+        # and to the C4 resolver's opinion-attribution short-circuit
+        # (resolutions._stance_attribution_verdict) in this SAME run. No-op
+        # (no LLM call, no write) when the run has no client (dry-run/keyless)
+        # — mirrors every other LLM-bearing step in this phase, which is
+        # already skipped above for dry-run.
+        _stamp_unclassified_claim_kinds(
+            auto_memory_files, ctx.merge_client, ctx.config, ctx.usage
+        )
 
     # Issue athenaeum#463 (slice D of athenaeum#460): the nightly run's own delta
     # baseline. A caller that already threads an explicit

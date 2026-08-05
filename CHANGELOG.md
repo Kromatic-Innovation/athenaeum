@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`claim_kind.stamp_claim_kind` wired into the nightly auto-memory intake
+  phase (athenaeum#742).** The intake-time epistemic-kind classifier (Haiku,
+  one cheap call per not-yet-classified raw auto-memory file) had no
+  production caller — only tests exercised it — so
+  `resolutions._stance_attribution_verdict`'s opinion-attribution
+  short-circuit almost never fired. `librarian._stamp_unclassified_claim_kinds`
+  now runs from `_run_auto_memory_phase` right after C1 discovery and before
+  the C2 cluster pass, using the run's existing shared `anthropic` client
+  (the same one C4 contradiction detection reuses) — no new client, no new
+  config knob. Idempotent and fail-open throughout: an author-supplied
+  `claim_kind:` is never re-classified or overwritten, a file with no client
+  or a classification failure is left unstamped, and the classifier's own
+  import stays lazy at the call site (never at `athenaeum.librarian` module
+  scope) so it never reaches the 3-second-budget recall hot path
+  (`query_topics.extract_topics`). Once stamped, a `claim_kind` round-trips
+  through `discover_auto_memory_files` on the next read and is what the
+  resolver's `attribute_both` action now sees on genuine opinion pairs.
+
 - **`athenaeum merges propose-fold` — an operator CLI for the fold path (athenaeum#747).**
   Consolidating duplicate entities previously required hand-constructing a
   `_pending_merges.md` block through the Python API and calling `resolve_merge`
