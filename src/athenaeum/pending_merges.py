@@ -167,6 +167,34 @@ class PendingMerge:
     auto_applied: bool = False
 
 
+WRITE_KINDS = ("create-merged", "fold-into-existing")
+
+
+def classify_write_kind(merge_target_name: str, wiki_root: Path) -> str:
+    """Classify a merge proposal by whether its target slug already exists.
+
+    Returns ``"fold-into-existing"`` when a wiki page already owns the derived
+    target slug, else ``"create-merged"`` (issue athenaeum#421). The existence
+    check MUST mirror :func:`resolve_merge`'s approve-time target path EXACTLY
+    (``wiki_root / f"{slugify(name)}.md"``) so a ``create-merged`` proposal can
+    never later fail ``target_exists`` at approve, and a derived
+    ``fold-into-existing`` proposal can never later fail ``fold_target_missing``.
+
+    This is the single source of truth for the classification (issue
+    athenaeum#748): :func:`write_pending_merge` derives ``write_kind`` from it so
+    a caller cannot smuggle in a value that disagrees with reality, and
+    :func:`athenaeum.merge._classify_merge_write_kind` delegates here so the
+    proposal-time and write-time classifications can never drift apart. It
+    lives in this module (not ``merge``) so ``write_pending_merge`` can reach
+    it without reintroducing the ``pending_merges`` -> ``merge`` back-edge that
+    issue athenaeum#640 dissolved.
+    """
+    target_slug = slugify(merge_target_name)
+    if (wiki_root / f"{target_slug}.md").exists():
+        return "fold-into-existing"
+    return "create-merged"
+
+
 def _make_id(sources: list[str], target_name: str) -> str:
     """Stable id derived from source paths + merge target name.
 
@@ -444,7 +472,7 @@ def write_pending_merge(
     draft_merged_body: str,
     confidence: float,
     created_at: str | None = None,
-    write_kind: str = "create-merged",
+    write_kind: str | None = None,
 ) -> str:
     """Append one merge-proposal block to ``_pending_merges.md``.
 
@@ -453,9 +481,40 @@ def write_pending_merge(
     if a block with the same id already exists in the file (resolved or
     not), nothing is appended.
 
-    Issue athenaeum#421: ``write_kind`` carries the proposal-time slug-collision
+    Issue athenaeum#421: ``write_kind`` carries the slug-collision
     classification (``create-merged`` | ``fold-into-existing``).
+
+    Issue athenaeum#748: ``write_kind`` is DERIVED here, not trusted from the
+    caller. The classification is computed from whether the target slug
+    already exists under the wiki root (``merges_path.parent`` — the same
+    root :func:`resolve_merge` resolves the approve-time target path against
+    by default), so a proposal for a slug that does not exist is always
+    ``create-merged`` regardless of what the caller passes, and one whose
+    slug exists is always ``fold-into-existing``. The parameter is retained
+    only as a validated override: passing a ``write_kind`` that DISAGREES
+    with the derived classification **fails closed** with a :class:`ValueError`
+    rather than storing a block whose ``fold-into-existing`` value would, at
+    approve time, delete every source page (the destructive misclassification
+    that motivated this issue). ``None`` (the default) simply uses the derived
+    value. Passing an unrecognized ``write_kind`` string also fails closed.
     """
+    derived_write_kind = classify_write_kind(merge_target_name, merges_path.parent)
+    if write_kind is None:
+        write_kind = derived_write_kind
+    elif write_kind not in WRITE_KINDS:
+        raise ValueError(
+            f"write_kind must be one of {WRITE_KINDS!r}, got {write_kind!r}"
+        )
+    elif write_kind != derived_write_kind:
+        raise ValueError(
+            "write_kind mismatch (athenaeum#748): caller passed "
+            f"{write_kind!r} but target slug "
+            f"{slugify(merge_target_name)!r} classifies as "
+            f"{derived_write_kind!r} under {merges_path.parent}. "
+            "Refusing to store a misclassified proposal — a wrong "
+            "'fold-into-existing' deletes the source pages at approve time. "
+            "Pass write_kind=None to derive it, or correct merge_target_name."
+        )
     block = render_block(
         merge_target_name=merge_target_name,
         sources=sources,
@@ -824,6 +883,24 @@ def _purge_vector_ids(
         return 0
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    """True when ``a`` and ``b`` denote the same file (issue athenaeum#748).
+
+    Uses :meth:`Path.samefile` when both paths exist (catches hardlinks and
+    distinct spellings of one file), and falls back to comparing
+    ``resolve()`` d paths otherwise so the check is meaningful even when one
+    side has already been removed. Never raises — a comparison error degrades
+    to ``False`` (treat as distinct) so this guard can only ever PREVENT a
+    delete, never cause one.
+    """
+    try:
+        if a.exists() and b.exists():
+            return a.samefile(b)
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
+
+
 def _apply_fold_into_existing(
     pm: PendingMerge,
     *,
@@ -912,6 +989,14 @@ def _apply_fold_into_existing(
     for src in folded_sources:
         src_path = Path(src)
         try:
+            # Issue athenaeum#748: never delete a source whose resolved path IS
+            # the canonical target page, even if it slipped past the slug-based
+            # ``folded_sources`` filter above (e.g. a differently-spelled path
+            # that resolves to the same file). The slug filter is the primary
+            # guard; this path-equality check is defense in depth so no code
+            # path can delete the page being folded into.
+            if _same_file(src_path, target_path):
+                continue
             if src_path.is_file():
                 src_path.unlink()
                 deleted_paths.append(src)
@@ -1094,6 +1179,29 @@ def resolve_merge(
         write_kind = target_pm.write_kind
 
         if write_kind == "fold-into-existing":
+            # Issue athenaeum#748: re-verify the fold target actually exists
+            # before taking the delete-sources path. ``write_pending_merge``
+            # now derives ``write_kind`` and cannot produce a fold block for a
+            # non-existent target, but a hand-edited / legacy sidecar block can
+            # still carry a misclassified ``fold-into-existing``. Folding when
+            # the target is absent would write the draft to a NEW page and then
+            # delete every source — including the canonical page the fold was
+            # meant to fold INTO (the 2026-08-02 incident). Fail closed with a
+            # distinct error code instead of proceeding to the delete; do NOT
+            # flip the checkbox (return before flushing ``rewritten``).
+            if not target_path.exists():
+                return {
+                    "ok": False,
+                    "error_code": "fold_target_missing",
+                    "message": (
+                        f"fold target {target_path} does not exist; refusing "
+                        "to fold — a fold whose target is absent would delete "
+                        "the source pages and create a new page. Reclassify "
+                        "as create-merged (rename merge_target_name to the "
+                        "canonical page's name)."
+                    ),
+                    "resolved_block": None,
+                }
             fold_result = _apply_fold_into_existing(
                 target_pm,
                 target_path=target_path,

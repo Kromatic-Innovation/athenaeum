@@ -553,25 +553,33 @@ class TestT2ScreenGuards:
 
 
 class TestResolveMergeFailureAfterApprove:
-    def test_target_exists_collision_leaves_block_unresolved(
+    def test_misclassified_create_for_existing_target_fails_closed_at_write(
         self, tmp_path: Path
     ) -> None:
+        """Since athenaeum#748, a ``create-merged`` write_kind for a target slug
+        that ALREADY exists is refused at WRITE time (an even stronger guard
+        than the pre-existing approve-time ``target_exists`` fail-closed): the
+        write is rejected, so nothing is queued, nothing is resolved, the
+        pre-existing page is untouched, and no provenance is recorded.
+
+        In production this mismatch is unreachable — the T2 path derives
+        write_kind via ``_classify_merge_write_kind``, so an existing target
+        yields ``fold-into-existing``, never ``create-merged``. Passing a stale
+        ``create-merged`` here simulates that misclassification and pins the
+        fail-closed behavior."""
+        import pytest
+
         wiki = _wiki(tmp_path)
-        # Pre-create the target page so resolve_merge's create-merged path
-        # fails closed with target_exists, simulating a race/misclassification.
         (wiki / "merged-topic.md").write_text("pre-existing page\n", encoding="utf-8")
         pre_existing_mtime = (wiki / "merged-topic.md").stat().st_mtime
 
         client = _approve_client()
-        handled, _ = _screen(tmp_path, wiki_root=wiki, client=client)
-        assert handled is True  # already written; caller must not re-write
+        with pytest.raises(ValueError, match="write_kind mismatch"):
+            _screen(tmp_path, wiki_root=wiki, client=client)
 
-        pms = parse_pending_merges(wiki / "_pending_merges.md")
-        assert len(pms) == 1
-        assert pms[0].resolved is False, (
-            "a resolve_merge failure after the approve must leave the "
-            "block UNRESOLVED, not falsely marked approved"
-        )
+        # Nothing was queued.
+        merges_path = wiki / "_pending_merges.md"
+        assert parse_pending_merges(merges_path) == [] or not merges_path.exists()
         # The pre-existing page must be untouched — no partial/garbled write.
         assert (wiki / "merged-topic.md").stat().st_mtime == pre_existing_mtime
         assert (wiki / "merged-topic.md").read_text(encoding="utf-8") == (

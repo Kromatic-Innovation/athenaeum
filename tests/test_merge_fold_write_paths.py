@@ -211,7 +211,15 @@ class TestCreateMergedUnchanged:
         self, tmp_path: Path
     ) -> None:
         """Defense in depth: a stale/hand-edited block claiming create-merged
-        must still fail closed if the slug is actually taken."""
+        must still fail closed if the slug is actually taken.
+
+        Since athenaeum#748 ``write_pending_merge`` derives ``write_kind`` and
+        would refuse to STORE this misclassified block, the misclassified block
+        is hand-written directly into the sidecar (the exact shape a legacy /
+        hand-edited ``_pending_merges.md`` can carry) so the approve-time
+        ``target_exists`` guard is exercised on its own."""
+        from athenaeum.pending_merges import render_block
+
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         target = wiki / "existing-name.md"
@@ -223,8 +231,9 @@ class TestCreateMergedUnchanged:
         _write_source(src_b, name="y")
 
         merges_path = wiki / "_pending_merges.md"
-        write_pending_merge(
-            merges_path,
+        # Hand-write a misclassified create-merged block for a slug that IS
+        # taken — bypassing write_pending_merge's athenaeum#748 write-time guard.
+        block = render_block(
             merge_target_name="existing-name",
             sources=[str(src_a), str(src_b)],
             rationale="r",
@@ -232,6 +241,7 @@ class TestCreateMergedUnchanged:
             confidence=0.9,
             write_kind="create-merged",
         )
+        merges_path.write_text("# Pending Merges\n\n" + block + "\n", encoding="utf-8")
         pm_id = parse_pending_merges(merges_path)[0].id
         result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
 

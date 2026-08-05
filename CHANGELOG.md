@@ -29,6 +29,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Merge `write_kind` is derived and validated, not trusted from the caller (athenaeum#748).**
+  `write_pending_merge` accepted `write_kind` as a caller-supplied string and
+  stored it unvalidated; `resolve_merge` then dispatched on it and, for
+  `fold-into-existing`, **deleted every source page**. A hand-set
+  `fold-into-existing` whose target slug did not exist wrote the draft to a
+  *new* page and deleted all sources — including the canonical page the fold
+  was meant to fold into (the 2026-08-02 incident found while executing
+  athenaeum#437). Three defenses now close this: (1) `write_pending_merge`
+  **derives** `write_kind` from whether the target slug exists under the wiki
+  root and keeps the parameter only as a validated override — a value that
+  disagrees with the derived classification (or an unknown value) **fails
+  closed** with a `ValueError` instead of storing a misclassified proposal;
+  (2) `resolve_merge` **re-checks** target existence before the fold path and
+  refuses with a distinct `fold_target_missing` error code (deleting nothing)
+  when the target slug is absent, catching any legacy/hand-edited sidecar block
+  that bypassed the write-time guard; (3) the fold's source-deletion step never
+  deletes a source whose resolved path IS the canonical target page, as defense
+  in depth beyond the existing slug filter. The classification now lives in a
+  single source of truth (`pending_merges.classify_write_kind`), to which
+  `merge._classify_merge_write_kind` delegates, so the proposal-time and
+  write-time classifications cannot drift. Correctly-classified proposals behave
+  exactly as before.
 - **`transcript_verify` honors `CLAUDE_CONFIG_DIR` (athenaeum#723).**
   `DEFAULT_PROJECTS_ROOT` was hardcoded to `~/.claude/projects` and ignored the
   standard `CLAUDE_CONFIG_DIR` override (which relocates `~/.claude`), so in a
