@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`stop_on_deadline` now performs the post-run push — the phase-boundary /
+  C4 deadline exit no longer strands commits (athenaeum#761).**
+  `RunContext.stop_on_deadline` committed partial progress and returned `124`
+  to `run()`'s caller *before* `_run_finalize_phase`, so `librarian.push_after_run`
+  never fired on the phase-boundary path (a `RunDeadlineExceeded` from the merge
+  pass, or a between-phase deadline check — the C4 route). Every run that tripped
+  the wall-clock deadline in that position committed locally and never pushed,
+  silently defeating the move-then-retire recovery guarantee (athenaeum#284) —
+  26 commits stranded on the operator host over three days (2026-08-02→05). The
+  push now fires from inside `stop_on_deadline`, immediately after the partial
+  commit; every `stop_on_deadline` call site (wiki-dedup boundary, `merge_only`
+  catch, auto-memory catch, post-compile boundary) routes through it, so all
+  phase-boundary exits are covered by one change. The push stays non-fatal (a
+  `git push` failure never changes the `124` exit code), `--dry-run` still never
+  pushes, and the entity-loop deadline path (which falls through to the
+  finalize-phase push) still pushes exactly once, not twice. `_maybe_push_after_run`
+  additionally logs a single line when an opted-in push is *skipped* (dry-run, no
+  pre-run HEAD, or no new commits) so a skipped push is no longer silent — an
+  operator can now tell a push that happened from one skipped (and why) from one
+  that failed.
+
 ### Added
 
 - **`claim_kind.stamp_claim_kind` wired into the nightly auto-memory intake

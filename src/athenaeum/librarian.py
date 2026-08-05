@@ -418,11 +418,34 @@ def _maybe_push_after_run(
     Issue athenaeum#284 gating: (a) explicit opt-in, (b) not a ``--dry-run``,
     (c) HEAD moved during the run. Push failure is non-fatal — ``git_push``
     logs a warning; the run's exit code is unchanged.
+
+    Issue athenaeum#761: a *skipped* push is no longer silent. When push is
+    opted in (``push_after_run`` true) but the push is not attempted — dry-run,
+    no pre-run HEAD, or no new commits — a single ``INFO`` line records that it
+    was skipped and why, so an operator reading the run log can tell a push
+    that happened (``git_push`` logs "Pushed …"), from one that was skipped
+    (and why), from one that failed (``git_push`` logs ``athenaeum-push-failed:``).
+    A run that never opted in stays silent — the default is off, and logging a
+    skip on every non-opted-in run would be pure noise.
     """
-    if not push_after_run or dry_run or head_at_start is None:
+    if not push_after_run:
+        return
+    if dry_run:
+        log.debug("post-run push skipped: --dry-run (issue athenaeum#284)")
+        return
+    if head_at_start is None:
+        log.info(
+            "post-run push skipped: no pre-run HEAD captured — nothing to push "
+            "(issue athenaeum#284)"
+        )
         return
     head_now = _capture_head(knowledge_root)
     if head_now is None or head_now == head_at_start:
+        log.info(
+            "post-run push skipped: no new commits this run (HEAD unchanged at "
+            "%s) (issue athenaeum#284)",
+            (head_at_start or "?")[:12],
+        )
         return
     git_push(
         knowledge_root,
@@ -2164,6 +2187,26 @@ class RunContext:
                 self.knowledge_root,
                 f"librarian: partial run (deadline {self.max_runtime}s exceeded "
                 f"during {phase})",
+            )
+            # Issue athenaeum#761: this is the phase-boundary / C4 deadline exit —
+            # it returns to run()'s caller BEFORE _run_finalize_phase (and the
+            # cluster_only / merge_only returns), which are the OTHER sites that
+            # call _maybe_push_after_run. Every stop_on_deadline call site
+            # (wiki-dedup boundary, merge_only catch, auto-memory catch,
+            # post-compile boundary) routes through here, so pushing HERE — right
+            # after the partial-progress commit — is what covers them all. Without
+            # this, a run that trips the deadline at a phase boundary commits
+            # locally and never pushes, defeating librarian.push_after_run and
+            # stranding commits on one machine (26 commits over 3 days, 2026-08-02→05).
+            # push_after_run is resolved to a concrete bool by _resolve_run_config,
+            # which runs before any deadline check can fire; bool(None) → False is a
+            # defensive floor for a RunContext constructed directly in a test.
+            _maybe_push_after_run(
+                self.knowledge_root,
+                config=self.config,
+                push_after_run=bool(self.push_after_run),
+                dry_run=self.dry_run,
+                head_at_start=self.head_at_start,
             )
         # Issue athenaeum#464: emit the per-phase summary for whatever ran BEFORE the
         # trip — the 124 exit paths are exactly the case the athenaeum#440 profiling
