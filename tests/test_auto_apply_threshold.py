@@ -385,13 +385,19 @@ class TestTier4PerActionGate:
         assert "- [x]" in text
         assert "**Auto-resolved**: true" in text
 
-    @pytest.mark.parametrize(
-        "action", ["correct_a", "correct_b", "forget_a", "forget_b"]
-    )
+    @pytest.mark.parametrize("action", ["forget_a", "forget_b"])
     def test_correct_forget_auto_apply_above_threshold(
         self, action: str, tmp_path: Path
     ) -> None:
-        """athenaeum#166 follow-up: correct/forget auto-apply at confidence >= 0.95."""
+        """athenaeum#166 follow-up: forget auto-applies at confidence >= 0.95.
+
+        Issue athenaeum#752: ``correct_a``/``correct_b`` are DELIBERATELY excluded
+        from this parametrization — their auto-apply gate is no longer the
+        confidence threshold at all (it is the transcript-authorship gate;
+        see ``tests/test_correct_authorship_gate.py``), so a fixture with no
+        transcript would refuse them regardless of confidence, which is not
+        what this test pins.
+        """
         pending = tmp_path / "_pending_questions.md"
         cfg = {"resolve": {"auto_apply": True}}  # defaults — 0.95 floor.
         item = _escalation(f"{action}Entity", _proposal(action, 0.96))
@@ -407,7 +413,15 @@ class TestTier4PerActionGate:
     def test_correct_forget_stay_open_below_threshold(
         self, action: str, tmp_path: Path
     ) -> None:
-        """Below the 0.95 floor, correct/forget stay open for the human."""
+        """Below the 0.95 floor, forget stays open for the human.
+
+        For correct_a/correct_b (issue athenaeum#752) this proposal also has no
+        ``members`` (see ``_escalation``), so it stays open for the SAME
+        reason as forget's threshold miss — "no resolvable winning member"
+        (an unrelated cause coincidentally producing the same open-block
+        result). The authorship-specific refusal paths are pinned
+        separately in ``tests/test_correct_authorship_gate.py``.
+        """
         pending = tmp_path / "_pending_questions.md"
         cfg = {"resolve": {"auto_apply": True}}
         item = _escalation(f"{action}Entity", _proposal(action, 0.80))
@@ -423,10 +437,18 @@ class TestTier4PerActionGate:
     def test_destructive_action_at_0_92_does_not_auto_enact(
         self, action: str, tmp_path: Path
     ) -> None:
-        """The 0.95 destructive bar: a 0.92 forget/correct must NOT auto-enact.
+        """The 0.95 destructive bar: a 0.92 forget must NOT auto-enact.
 
         0.92 clears the old 0.90 floor but sits below the new 0.95 floor, so
         the block stays open AND no member file is deleted.
+
+        Issue athenaeum#752: correct_a/correct_b are still parametrized here, but
+        for a DIFFERENT reason than the confidence bar — ``_proposal()``
+        gives them ``recommended_winner="neither"``, so the transcript-
+        authorship gate refuses with "no resolvable winning member"
+        regardless of confidence. The confidence-specific boundary for
+        correct_* no longer exists (see
+        ``tests/test_correct_authorship_gate.py`` for the real gate).
         """
         pending = tmp_path / "_pending_questions.md"
         member_a = tmp_path / "member_a.md"
@@ -457,14 +479,18 @@ class TestTier4PerActionGate:
         [
             ("forget_a", 0, 1),  # forget a → delete a
             ("forget_b", 1, 0),  # forget b → delete b
-            ("correct_a", 1, 0),  # a correct → delete b
-            ("correct_b", 0, 1),  # b correct → delete a
         ],
     )
     def test_destructive_action_at_0_96_auto_enacts(
         self, action: str, deleted_idx: int, survivor_idx: int, tmp_path: Path
     ) -> None:
-        """At 0.96 (>= 0.95) a forget/correct auto-applies AND enacts the delete."""
+        """At 0.96 (>= 0.95) a forget auto-applies AND enacts the delete.
+
+        Issue athenaeum#752: correct_a/correct_b are DELIBERATELY excluded — their
+        destructive delete no longer auto-enacts on confidence at all; see
+        ``tests/test_correct_authorship_gate.py::TestTier4CorrectGateIntegration``
+        for the transcript-gated equivalent of this test.
+        """
         pending = tmp_path / "_pending_questions.md"
         members = [tmp_path / "member_a.md", tmp_path / "member_b.md"]
         members[0].write_text("a-claim", encoding="utf-8")

@@ -114,6 +114,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Best-effort semantics are unchanged: a missing transcript is still an honest
   "cannot determine," never a fabricated figure.
 
+### Security
+
+- **`correct_a`/`correct_b` destructive auto-delete is gated on
+  transcript-verified human authorship, not confidence (athenaeum#752).**
+  `enact_resolution` DELETES the losing raw-memory member for these two
+  actions — the resolver's most dangerous verdicts — and the only barrier was
+  a confidence float (`resolve.auto_apply_threshold_per_action.correct_a`/
+  `correct_b`, default `0.95`); models are poorly calibrated exactly at the
+  top of their range, where a destructive auto-apply fires. The confidence
+  gate is now **replaced** (not stacked) for `correct_a`/`correct_b`: at
+  enact time, the WINNING member's claim (the side named by the resolver's
+  `recommended_winner`) is classified against its origin-session transcript
+  via `transcript_verify.classify_backfill_claim`, and auto-apply proceeds
+  ONLY when the classified channel is `user-stated`. `agent-observed`,
+  `inferred`, and `unavailable` (missing/rolled-off transcript — the most
+  likely production path) all escalate to the human instead of deleting. The
+  check re-derives the channel from the transcript on every call and
+  **never** reads the member's own `source_type` frontmatter field — that
+  field is self-declared by whoever wrote the memory (possibly the model
+  itself), and trusting it would let a model grant itself deletion authority
+  by emitting a string. The gate decision (channel + ref) is logged for
+  every `correct_*` verdict, permit or refuse. `forget_a`/`forget_b` (a
+  transient-member cleanup with no human assertion behind it) and
+  human-ratified pending-question answers are explicitly out of scope and
+  unaffected — see `docs/conflict-resolution.md` §14 for the full rule,
+  scope boundaries, and known limits (substring match ≠ authorization;
+  transcripts roll off; the transcript itself is not immutable).
+
 ### Added
 
 - **LLM schema-observation is now measurable: durable ledger, denominators,

@@ -612,9 +612,57 @@ the other model knobs (`resolve.model` is the legacy fallback — see
 | Not-a-conflict TTL (days) | `ATHENAEUM_NOT_A_CONFLICT_TTL_DAYS` | `contradiction.not_a_conflict_ttl_days` | `0` | Read-time decay of stale **auto** `not_a_conflict` suppressions (athenaeum#251). `0` disables decay (current behavior — a suppression never expires). When `> 0`, an auto suppression whose `resolved_at` is older than this many days is treated as absent from the confirmation-pass skip set, so the pair re-enters the Opus confirmation. Human verdicts and enacting auto verdicts (`keep_*`/`correct_*`/`forget_*`/`deprecate_both`) never decay; undated rows keep suppressing (fail-safe). The append-only cache is never mutated; re-validation flows through the existing `resolve_max_per_run` cap. |
 | Auto-apply | `ATHENAEUM_RESOLVE_AUTO_APPLY` | `resolve.auto_apply` | `true` | Apply high-confidence resolver proposals without human review (athenaeum#156). Env accepts `true`/`false`, `1`/`0`, `yes`/`no` (case-insensitive). |
 | Auto-apply threshold (legacy scalar) | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | `resolve.auto_apply_threshold` | `0.90` | Confidence floor in `[0.0, 1.0]`; out-of-range values raise on read. Since athenaeum#170 this scalar is honored only as a backward-compat fallback for `keep_a` / `keep_b`. |
-| Per-action thresholds | — | `resolve.auto_apply_threshold_per_action` | `not_a_conflict: 0.75`, `keep_a`/`keep_b`/`deprecate_both`: `0.90`, `correct_a`/`correct_b`/`forget_a`/`forget_b`: `0.95` | Per-action confidence floors (athenaeum#170, athenaeum#191). `propose_merge` **never** auto-applies regardless of confidence. |
+| Per-action thresholds | — | `resolve.auto_apply_threshold_per_action` | `not_a_conflict: 0.75`, `keep_a`/`keep_b`/`deprecate_both`: `0.90`, `correct_a`/`correct_b`/`forget_a`/`forget_b`: `0.95` | Per-action confidence floors (athenaeum#170, athenaeum#191). `propose_merge` **never** auto-applies regardless of confidence. **As of athenaeum#752, the `correct_a`/`correct_b` entries here are no longer consulted for the auto-apply decision** — see the note immediately below the table. `forget_a`/`forget_b` are unaffected and still gate on their `0.95` floor exactly as before. |
 | Full-body token cap | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | `resolve.full_body_token_cap` | `1500` | Per-side body cap for the resolver's full-body context (athenaeum#168), ~4 chars/token. Must be a positive integer; zero/negative raise — set a large value to effectively disable truncation. |
 | Tier-4 escalation dedup | `ATHENAEUM_TIER4_DEDUP` | — | `true` | Dedupe `_pending_questions.md` escalations by source-memory pair (athenaeum#157). Set `false`/`0`/`no`/`off` to restore the legacy always-append behavior. |
+
+#### `correct_a` / `correct_b` auto-apply: authorship, not confidence (issue athenaeum#752)
+
+`correct_a` / `correct_b` are the resolver's most dangerous verdicts —
+enactment **deletes** the losing member's raw file (`enact_resolution`,
+`src/athenaeum/resolutions.py`). Prior to athenaeum#752 that delete was gated purely
+on the `resolve.auto_apply_threshold_per_action.correct_a`/`correct_b`
+confidence floor (default `0.95`, shown in the table above). Confidence is
+the wrong axis to gate an irreversible delete on — models are poorly
+calibrated exactly at the top of their range, where a destructive auto-apply
+fires.
+
+**The authorship gate REPLACES the confidence threshold for these two
+actions; it does not stack on top of it.** For `correct_a`/`correct_b`:
+
+- The per-action threshold key (`resolve.auto_apply_threshold_per_action.correct_a`
+  / `.correct_b`, and the legacy scalar `resolve.auto_apply_threshold`) is
+  **not consulted at all** — setting it has no effect on `correct_*`
+  auto-apply, regardless of value.
+- Instead, auto-apply requires the WINNING member (the side named by the
+  resolver's `recommended_winner` — the side asserting the correction) to
+  trace to a **transcript-verified human utterance**: at enact time,
+  `athenaeum.transcript_verify.classify_backfill_claim` reads the winning
+  member's origin-session transcript (`origin_scope` / `origin_session_id` /
+  `origin_turn`) and classifies its claim. Auto-apply proceeds ONLY when the
+  classified channel is `user-stated`. `agent-observed`, `inferred`, and
+  `unavailable` (missing/rolled-off transcript — the most likely production
+  outcome) all escalate to the human instead of deleting.
+- The check **re-derives the channel from the transcript on every call** and
+  never reads the member's own `source_type` frontmatter field — that field
+  is self-declared by whoever wrote the memory (possibly the model itself),
+  and trusting it would let a model grant itself deletion authority by
+  emitting a string.
+- The gate decision (channel + ref, e.g. `user-stated sess123#turn4`, or
+  `unavailable sess123`) is logged for **every** `correct_*` verdict — permit
+  or refuse — via the module logger, so a refusal is diagnosable without
+  re-running the resolver.
+- This gate is not itself configurable (no yaml knob) — see
+  `docs/conflict-resolution.md` §14 for the full rule and its known limits.
+
+Every OTHER action's threshold behavior is unchanged: `not_a_conflict`,
+`keep_a`/`keep_b`, `deprecate_both`, `scope_a`/`scope_b`, `attribute_both`,
+and `forget_a`/`forget_b` all still gate purely on their per-action
+confidence floor exactly as documented in the table above. `forget_a`/
+`forget_b` in particular are explicitly OUT OF SCOPE for athenaeum#752 — they
+delete a *transient* member with no human assertion behind it (legitimate
+janitorial cleanup), so they keep auto-applying on their `0.95` floor with
+no transcript check.
 
 ### Scoped-claim tree (`scope:`, athenaeum#329)
 
