@@ -2339,8 +2339,15 @@ def tier4_escalate(
     pending_path: Path,
     *,
     config: dict[str, Any] | None = None,
+    projects_root: Path | None = None,
 ) -> int:
     """Append escalation items to ``_pending_questions.md``.
+
+    ``projects_root`` overrides the transcript home used by the
+    ``correct_a``/``correct_b`` authorship gate (issue athenaeum#752); tests inject a
+    tmp directory. Defaults to ``None``, which resolves to
+    ``athenaeum.transcript_verify.default_projects_root()`` (honors
+    ``CLAUDE_CONFIG_DIR``) inside the gate helper.
 
     Returns the number of candidate escalations SUPPRESSED because their
     claim-pair fingerprint was already resolved (issue athenaeum#198). A settled
@@ -2382,8 +2389,11 @@ def tier4_escalate(
     # (resolutions imports AutoMemoryFile from models, models is imported
     # here at module load via the top-of-file import block).
     from athenaeum.resolutions import (
+        CORRECT_A_ACTION,
+        CORRECT_B_ACTION,
         ENACTING_ACTIONS,
         ResolutionProposal,
+        _transcript_authorizes_correct,
         apply_auto_resolution,
         enact_resolution,
         flip_action,
@@ -2391,6 +2401,10 @@ def tier4_escalate(
         resolve_auto_apply_threshold_for,
     )
     from athenaeum.resolutions import _get_model as _resolver_model
+
+    # Issue athenaeum#752: correct_a/correct_b are gated on transcript-verified
+    # human authorship, NOT confidence — see _should_auto_apply below.
+    _CORRECT_ACTIONS = (CORRECT_A_ACTION, CORRECT_B_ACTION)
 
     # Enactment lane (athenaeum#166 follow-up): when a high-confidence forget_*/
     # correct_* verdict auto-applies, the recorded `[x]` is not enough —
@@ -2463,7 +2477,9 @@ def tier4_escalate(
             return None
         return resolve_auto_apply_threshold_for(config, action)
 
-    def _should_auto_apply(prop: Any) -> tuple[bool, float | None]:
+    def _should_auto_apply(
+        prop: Any, members: list[str] | None = None
+    ) -> tuple[bool, float | None]:
         """Single source of truth for the per-action auto-apply gate.
 
         Returns ``(should_apply, threshold)``. ``threshold`` is the
@@ -2471,12 +2487,41 @@ def tier4_escalate(
         can log it without a second lookup; it is ``None`` when the gate
         rejected before threshold lookup (no proposal, no action, or the
         action is on the never-auto-apply list).
+
+        Issue athenaeum#752: for ``correct_a``/``correct_b`` the confidence threshold
+        is NOT consulted at all — the destructive delete these two actions
+        enact is gated ONLY on whether the winning member's claim traces to
+        a transcript-verified human utterance
+        (:func:`athenaeum.resolutions._transcript_authorizes_correct`). The
+        gate decision (channel + ref) is logged here for EVERY correct_*
+        verdict, permit or refuse, so a refusal is diagnosable without
+        re-running the resolver. Every other action's threshold gate is
+        unchanged.
         """
         if prop is None:
             return (False, None)
         action = getattr(prop, "action", None)
         if not isinstance(action, str):
             return (False, None)
+        if action in _CORRECT_ACTIONS:
+            authorized, channel_ref = _transcript_authorizes_correct(
+                prop, members, config, projects_root
+            )
+            if authorized:
+                log.info(
+                    "resolver authorship gate: PERMIT %s — winning member "
+                    "verified %s",
+                    action,
+                    channel_ref,
+                )
+            else:
+                log.info(
+                    "resolver authorship gate: REFUSE %s — %s "
+                    "(escalating to human; confidence threshold not consulted)",
+                    action,
+                    channel_ref,
+                )
+            return (authorized, None)
         thr = _threshold_for(action)
         if thr is None:
             return (False, None)
@@ -2773,19 +2818,24 @@ def tier4_escalate(
             f"{fingerprint_line}"
         )
         proposal = getattr(item, "proposal", None)
+        item_members = getattr(item, "members", None)
         if auto_apply_enabled:
-            should_apply, gate_threshold = _should_auto_apply(proposal)
+            should_apply, gate_threshold = _should_auto_apply(proposal, item_members)
             if should_apply and proposal is not None:
                 block = apply_auto_resolution(block, proposal, model=resolver_model_id)
                 log.info(
                     "Auto-resolved escalation for entity=%s action=%s "
-                    "(confidence=%.2f >= threshold=%.2f)",
+                    "(confidence=%.2f%s)",
                     item.entity_name,
                     proposal.action,
                     proposal.confidence,
-                    gate_threshold,
+                    (
+                        f" >= threshold={gate_threshold:.2f}"
+                        if gate_threshold is not None
+                        else " — transcript-authorized (athenaeum#752)"
+                    ),
                 )
-                _maybe_enact(proposal, getattr(item, "members", None), key)
+                _maybe_enact(proposal, item_members, key)
                 _record_auto(proposal, key)
         if key is not None:
             batch_index[key] = len(sections)
@@ -2799,18 +2849,22 @@ def tier4_escalate(
     if auto_apply_enabled:
         for key, slot in batch_index.items():
             best: ResolutionProposal | None = best_proposal.get(key)
-            should_apply, gate_threshold = _should_auto_apply(best)
+            should_apply, gate_threshold = _should_auto_apply(best, best_members.get(key))
             if not should_apply or best is None:
                 continue
             updated = apply_auto_resolution(sections[slot], best, model=resolver_model_id)
             if updated != sections[slot]:
                 log.info(
                     "Auto-resolved batched escalation key=%s action=%s "
-                    "(best confidence=%.2f >= threshold=%.2f)",
+                    "(best confidence=%.2f%s)",
                     key,
                     best.action,
                     best.confidence,
-                    gate_threshold,
+                    (
+                        f" >= threshold={gate_threshold:.2f}"
+                        if gate_threshold is not None
+                        else " — transcript-authorized (athenaeum#752)"
+                    ),
                 )
                 _maybe_enact(best, best_members.get(key), key)
                 _record_auto(best, key)
@@ -2838,17 +2892,24 @@ def tier4_escalate(
             if auto_apply_enabled:
                 key_for_block = block_to_key.get(original_block)
                 best = best_proposal.get(key_for_block) if key_for_block is not None else None
-                should_apply, gate_threshold = _should_auto_apply(best)
+                best_block_members = (
+                    best_members.get(key_for_block) if key_for_block is not None else None
+                )
+                should_apply, gate_threshold = _should_auto_apply(best, best_block_members)
                 if should_apply and best is not None:
                     rewritten = apply_auto_resolution(updated_block, best, model=resolver_model_id)
                     if rewritten != updated_block:
                         log.info(
                             "Auto-resolved cross-batch escalation key=%s action=%s "
-                            "(best confidence=%.2f >= threshold=%.2f)",
+                            "(best confidence=%.2f%s)",
                             key_for_block,
                             best.action,
                             best.confidence,
-                            gate_threshold,
+                            (
+                                f" >= threshold={gate_threshold:.2f}"
+                                if gate_threshold is not None
+                                else " — transcript-authorized (athenaeum#752)"
+                            ),
                         )
                         if key_for_block is not None:
                             _maybe_enact(best, best_members.get(key_for_block), key_for_block)
@@ -2986,6 +3047,7 @@ def reresolve_open_questions(
     client: "anthropic.Anthropic | None",
     config: dict[str, Any] | None = None,
     usage: TokenUsage | None = None,
+    projects_root: Path | None = None,
 ) -> int:
     """Re-resolve OPEN, PROPOSAL-LESS pending questions (issue athenaeum#188).
 
@@ -3014,6 +3076,11 @@ def reresolve_open_questions(
     - Offline-safe: ``client=None`` leaves every proposal-less block exactly
       as-is (still raw, still open) — no mutation, returns 0.
 
+    ``projects_root`` overrides the transcript home used by the
+    ``correct_a``/``correct_b`` authorship gate (issue athenaeum#752); tests inject a
+    tmp directory. Defaults to ``None`` (resolves to
+    ``athenaeum.transcript_verify.default_projects_root()``).
+
     Returns the number of blocks re-resolved (annotated/auto-applied) PLUS the
     number dropped as not-a-conflict.
     """
@@ -3029,10 +3096,13 @@ def reresolve_open_questions(
     from athenaeum.answers import parse_pending_questions
     from athenaeum.contradictions import ContradictionResult
     from athenaeum.resolutions import (
+        CORRECT_A_ACTION,
+        CORRECT_B_ACTION,
         ENACTING_ACTIONS,
         SUPPRESS_ACTION,
         MergeProposal,
         ResolutionProposal,
+        _transcript_authorizes_correct,
         apply_auto_resolution,
         enact_resolution,
         propose_resolution,
@@ -3042,6 +3112,10 @@ def reresolve_open_questions(
         resolve_max_per_run,
     )
     from athenaeum.resolutions import _get_model as _resolver_model
+
+    # Issue athenaeum#752: correct_a/correct_b are gated on transcript-verified
+    # human authorship, NOT confidence — see _should_auto_apply below.
+    _CORRECT_ACTIONS = (CORRECT_A_ACTION, CORRECT_B_ACTION)
 
     questions = parse_pending_questions(pending_path)
     # Fast exit: nothing proposal-less and open → no work, no discovery cost.
@@ -3083,10 +3157,32 @@ def reresolve_open_questions(
     auto_apply_enabled = resolve_auto_apply(resolved_config)
     resolver_model_id = _resolver_model(resolved_config)
 
-    def _should_auto_apply(prop: Any) -> bool:
+    def _should_auto_apply(prop: Any, members: list[str] | None = None) -> bool:
         action = getattr(prop, "action", None)
         if not isinstance(action, str):
             return False
+        # Issue athenaeum#752: correct_a/correct_b are gated on transcript-verified
+        # human authorship, not confidence — the per-action threshold is not
+        # consulted for these two actions. See resolutions._transcript_authorizes_correct.
+        if action in _CORRECT_ACTIONS:
+            authorized, channel_ref = _transcript_authorizes_correct(
+                prop, members, resolved_config, projects_root
+            )
+            if authorized:
+                log.info(
+                    "resolver authorship gate: PERMIT %s — winning member "
+                    "verified %s",
+                    action,
+                    channel_ref,
+                )
+            else:
+                log.info(
+                    "resolver authorship gate: REFUSE %s — %s "
+                    "(escalating to human; confidence threshold not consulted)",
+                    action,
+                    channel_ref,
+                )
+            return authorized
         thr = resolve_auto_apply_threshold_for(resolved_config, action)
         if thr is None:
             return False
@@ -3172,7 +3268,8 @@ def reresolve_open_questions(
         if rendered:
             block = block + "\n" + rendered
 
-        if auto_apply_enabled and _should_auto_apply(proposal):
+        member_paths = [str(m.path) for m in members]
+        if auto_apply_enabled and _should_auto_apply(proposal, member_paths):
             applied = apply_auto_resolution(block, proposal, model=resolver_model_id)
             if applied != block:
                 log.info(
@@ -3182,7 +3279,7 @@ def reresolve_open_questions(
                     confidence,
                 )
                 if action in ENACTING_ACTIONS:
-                    enact_resolution(proposal, [str(m.path) for m in members])
+                    enact_resolution(proposal, member_paths)
             block = applied
         else:
             log.info(

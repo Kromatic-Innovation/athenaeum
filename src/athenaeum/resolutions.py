@@ -85,6 +85,7 @@ from athenaeum.models import (
 from athenaeum.prompt_safety import data_only_clause, defang_tag
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
 from athenaeum.scoped_claims import ScopeTree, ScopeVerdict, scope_comparison
+from athenaeum.transcript_verify import classify_backfill_claim
 
 if TYPE_CHECKING:
     import anthropic
@@ -2282,6 +2283,136 @@ def _sequential_snapshot_close(
             older, newer_from, newer_ing = b_path, a_from, a_ing
         return older, (newer_from or newer_ing)
     return None, None
+
+
+# ---------------------------------------------------------------------------
+# Transcript-verified authorship gate for correct_a / correct_b (issue athenaeum#752)
+# ---------------------------------------------------------------------------
+#
+# correct_a / correct_b are the resolver's most dangerous verdicts: enactment
+# DELETES the losing member's file. Pre-athenaeum#752 the only barrier was a
+# confidence float (DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION["correct_a"/"b"]).
+# Confidence is the wrong axis to gate an irreversible delete on — models are
+# poorly calibrated exactly at the top of their range. This helper REPLACES
+# the confidence gate for correct_* with a check against a record the model
+# did not author: the origin-session transcript.
+#
+# The check re-derives the channel from the transcript on every call via
+# transcript_verify.classify_backfill_claim — it deliberately NEVER reads the
+# member's own ``source_type`` frontmatter field, because that field is
+# self-declared by whoever wrote the memory (possibly the model itself) and
+# trusting it would reopen exactly the self-authorization hole this gate
+# closes.
+
+
+def _winning_member_path(
+    proposal: ResolutionProposal, member_paths: list[Path]
+) -> Path | None:
+    """Return the member path the proposal names as `recommended_winner`.
+
+    For correct_a / correct_b, ``recommended_winner`` is "a" or "b" — the
+    side asserting the correction (the side that SURVIVES). Returns None for
+    any other winner value (``"merge"`` / ``"neither"``) or an out-of-range
+    index.
+    """
+    winner = getattr(proposal, "recommended_winner", None)
+    idx = {"a": 0, "b": 1}.get(winner) if isinstance(winner, str) else None
+    if idx is None or len(member_paths) <= idx:
+        return None
+    return member_paths[idx]
+
+
+def _member_origin_and_claim(path: Path) -> tuple[str, str | None, int | None, str]:
+    """Read ``(origin_scope, origin_session_id, origin_turn, claim)`` from a member file.
+
+    Mirrors ``retire.py``'s ``_enrich_entry`` / ``_member_claim`` pattern:
+    reads the raw frontmatter directly (no full :class:`AutoMemoryFile`
+    discovery pass needed for a single known path) and falls back to the
+    body text for the claim, then to the frontmatter ``name``/``description``,
+    exactly as :func:`athenaeum.retire._member_claim` does for its fallback.
+    Best-effort: an unreadable file returns empty/None fields rather than
+    raising — the caller treats that as "cannot verify" (escalate).
+
+    ``origin_scope`` is NEVER stored in frontmatter (see
+    :class:`athenaeum.models.AutoMemoryFile` / :func:`athenaeum.intake.discover_auto_memory_files`)
+    — it is always the member's PARENT DIRECTORY name
+    (``raw/auto-memory/<scope>/<file>.md``), so it is derived from the path,
+    matching every other reader of this convention.
+    """
+    origin_scope = path.parent.name
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return origin_scope, None, None, ""
+    meta, body = parse_frontmatter(text)
+    meta = meta if isinstance(meta, dict) else {}
+    origin_session_id = meta.get("originSessionId")
+    origin_session_id = str(origin_session_id) if origin_session_id is not None else None
+    origin_turn_raw = meta.get("originTurn")
+    origin_turn: int | None
+    try:
+        origin_turn = int(cast(str, origin_turn_raw)) if origin_turn_raw is not None else None
+    except (TypeError, ValueError):
+        origin_turn = None
+    claim = body.strip()
+    if not claim:
+        name = meta.get("name")
+        description = meta.get("description")
+        claim = str(description or name or "")
+    return origin_scope, origin_session_id, origin_turn, claim
+
+
+def _transcript_authorizes_correct(
+    proposal: ResolutionProposal,
+    member_paths: list[Path] | list[str] | None,
+    config: dict[str, Any] | None = None,
+    projects_root: Path | None = None,
+) -> tuple[bool, str]:
+    """Gate a ``correct_a``/``correct_b`` delete on transcript-verified authorship.
+
+    Resolves the WINNING member (the side named by
+    ``proposal.recommended_winner`` — the side asserting the correction),
+    reads its origin fields, and classifies its claim against the
+    ORIGINATING session transcript via
+    :func:`athenaeum.transcript_verify.classify_backfill_claim`. Auto-apply
+    is authorized ONLY when the classified channel is ``"user-stated"`` —
+    a genuine human utterance the model did not author. Every other channel
+    (``"agent-observed"``, ``"inferred"``, ``"unavailable"``, or an
+    unresolvable winner/member) refuses.
+
+    This function deliberately does NOT consult ``member.source_type`` —
+    only the live transcript read decides. ``config`` is currently unused
+    (present so a future config-driven transcript root or opt-out can be
+    threaded through without changing the call sites); ``projects_root`` is
+    the injectable transcript root tests point at a tmp directory.
+
+    Returns ``(authorized, channel_ref)`` where ``channel_ref`` is a
+    human-readable ``"<channel> <ref>"`` string suitable for logging — always
+    populated (even on refusal) so a refusal is diagnosable without
+    re-running the resolver.
+    """
+    del config  # unused for now — reserved for a future opt-out knob.
+    if not member_paths:
+        return False, "no member_paths supplied"
+    paths = [Path(p) for p in member_paths]
+    winner_path = _winning_member_path(proposal, paths)
+    if winner_path is None:
+        return False, "no resolvable winning member (recommended_winner not a/b)"
+    origin_scope, origin_session_id, origin_turn, claim = _member_origin_and_claim(
+        winner_path
+    )
+    if not origin_session_id:
+        return False, f"{winner_path}: no origin session recorded"
+    classification = classify_backfill_claim(
+        origin_scope,
+        origin_session_id,
+        origin_turn,
+        claim=claim,
+        projects_root=projects_root,
+    )
+    channel_ref = f"{classification.channel} {classification.ref}".strip()
+    authorized = classification.channel == "user-stated"
+    return authorized, channel_ref
 
 
 def enact_resolution(
