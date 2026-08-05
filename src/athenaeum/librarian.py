@@ -2175,9 +2175,18 @@ class RunContext:
     def stop_on_deadline(self, phase: str) -> int:
         """Commit partial progress and return 124 when the deadline trips in
         a pre-entity phase — mirrors the athenaeum#337 interrupt-checkpoint path
-        (greppable partial commit, exit 124, resumable). The run-lock is
-        released by the CLI caller's ``finally`` on return; the deferred
-        intake / un-run phases are picked up by the next run."""
+        (greppable partial commit, exit 124, resumable). The deferred intake /
+        un-run phases are picked up by the next run.
+
+        The run-lock's ``flock`` is dropped by the CLI caller's ``finally`` on
+        return (:meth:`RunLock.release`). Note "released" means only that the
+        kernel ``flock`` is dropped — the ``.athenaeum.lock`` FILE is left on
+        disk by design (``release`` never unlinks it; see
+        :meth:`RunLock.release` and athenaeum#763). A residual lockfile naming
+        this now-exited PID after the run is the normal steady state and blocks
+        nothing — mutual exclusion is the kernel ``flock``, not the file's
+        contents. Do NOT read "the lock still exists on disk" as "release
+        failed"."""
         log.warning(
             "librarian: wall-clock deadline (%ds) exceeded during %s — "
             "committing partial progress and stopping (resumable, issue athenaeum#396)",

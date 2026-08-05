@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **`runlock`: correct the docstrings that made a normal residual lockfile read
+  as a leak (athenaeum#763).** There is no lock leak — a diagnosis established
+  that `release()` never unlinks the lockfile (by design, always), that a
+  dead-PID residual lockfile blocks nothing (mutual exclusion is the kernel
+  `flock`, not the file's contents), and that the reported "leak" was the normal
+  steady state. The misreading was invited by the code's own docs, so the fix is
+  documentation: `release()`'s docstring now states plainly that it does not
+  remove the lockfile and that a residual dead-PID file is expected and harmless,
+  with a comment recording **why** it must not unlink (the athenaeum#526
+  orphan-inode race); `stop_on_deadline`'s docstring no longer lets "the run-lock
+  is released" be misread as "the file should be gone"; the module docstring
+  leads with a prominent "Reading a residual lockfile" note so a debugger meets
+  the kernel-`flock`-not-contents explanation first; and `is_stale()` plus the
+  `--force` break message now distinguish a **benign** dead holder (safe to
+  ignore) from the **actionable** alive-but-stalled one. No behavior change — in
+  particular, `release()` still does NOT unlink (adding that would reintroduce
+  athenaeum#526).
+
 - **Record why the `decision_conflict_hosting_migration` resolver golden stands,
   and hand the boundary to v6 (athenaeum#760).** A comment on the case in
   `tests/evals/data/resolver/cases.yaml` now records that the golden stays
