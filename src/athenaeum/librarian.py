@@ -1283,6 +1283,7 @@ def _compile_auto_memory(
     full_compile_due: bool = False,
     out_delta_taken: dict[str, bool] | None = None,
     out_merge_stats: dict | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> list:
     """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
 
@@ -1415,6 +1416,7 @@ def _compile_auto_memory(
         deadline=deadline,
         max_api_calls=max_api_calls,
         out_stats=out_merge_stats,
+        heartbeat=heartbeat,
     )
 
 
@@ -3326,6 +3328,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             full_compile_due=full_compile_due,  # issue athenaeum#463
             out_delta_taken=_delta_taken_out,  # issue athenaeum#463
             out_merge_stats=_merge_stats,  # issue athenaeum#464
+            heartbeat=ctx.heartbeat,  # issue athenaeum#762: tick run-lock heartbeat in C4
         )
     except RunDeadlineExceeded as exc:
         # Issue athenaeum#464: record the auto-memory phase's partial elapsed
