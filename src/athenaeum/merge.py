@@ -78,7 +78,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -1554,6 +1554,7 @@ def merge_clusters_to_wiki(
     deadline: float | None = None,
     max_api_calls: int | None = None,
     out_stats: dict | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> list[MergedWikiEntry]:
     """Read the canonical cluster JSONL and emit one wiki entry per cluster.
 
@@ -2242,12 +2243,35 @@ def merge_clusters_to_wiki(
         "merge-detect", total=len(entries), interval_s=heartbeat_interval
     )
     detect_heartbeat.start()
+
+    # Issue athenaeum#762: refresh the RUN LOCK's heartbeat from inside the C4
+    # detector/resolver loop. `detect_heartbeat` (PhaseHeartbeat) above only
+    # LOGS progress; it does not touch `~/knowledge/.athenaeum.lock`'s
+    # `heartbeat:` field. That field is refreshed by the `heartbeat` callable
+    # (RunLock.heartbeat, threaded from run() via ctx.heartbeat), which was
+    # never wired into this phase — so a run that spent 25+ minutes in C4 kept
+    # a healthy, working lock looking wedged to every consumer that reads
+    # heartbeat age (athenaeum#397's contended-acquire auto-break). Ticking here,
+    # per cluster AND per chunk (the finest boundary, right where the slow
+    # `claude -p` detector/resolver calls happen), makes heartbeat age track C4
+    # progress. Best-effort by contract: a refresh failure must never break or
+    # slow the run — RunLock.heartbeat already swallows OSError, and this guard
+    # swallows anything else defensively.
+    def _beat() -> None:
+        if heartbeat is None:
+            return
+        try:
+            heartbeat()
+        except Exception as exc:  # noqa: BLE001 — heartbeat is best-effort (athenaeum#762)
+            log.debug("librarian: C4 heartbeat refresh skipped: %s", exc)
+
     # Issue athenaeum#569 (H6): resolved once for the per-cluster detection-incomplete
     # marker writes/clears below (same cache-dir resolution the cluster pass
     # reads with, so writes here and reads in _run_cluster_pass agree).
     _incomplete_cache_dir = detection_state.resolve_cache_dir()
     for entry in entries:
         detect_heartbeat.tick(entry.cluster_id)
+        _beat()  # athenaeum#762: per-cluster run-lock heartbeat refresh
         if use_ancestor:
             pooled = pool_cluster_with_ancestors(
                 entry.resolved_members,
@@ -2270,6 +2294,13 @@ def merge_clusters_to_wiki(
         # error is force-re-queued into the next run's delta set.
         entry_incomplete = False
         for chunk in chunks:
+            # Issue athenaeum#762: refresh the run-lock heartbeat at the per-chunk
+            # boundary too — this is the finest granularity, immediately around
+            # the slow `claude -p` detector (Haiku) + resolver (Opus) calls, so
+            # the max gap between heartbeat refreshes during C4 is bounded by a
+            # single chunk's detector+resolver latency instead of the whole
+            # phase's duration.
+            _beat()
             # Issue athenaeum#396: wall-clock deadline check at the C4 detector/resolver
             # chunk boundary — the EXACT site the athenaeum#396 incident wedged in
             # (cycling `claude -p` merge subprocesses for ~3.5h). Bounds a
@@ -2486,6 +2517,10 @@ def merge_clusters_to_wiki(
             require_raw_side=True,
         )
         for cand in candidates:
+            # Issue athenaeum#762: the similarity sweep is the OTHER C4-family loop
+            # that runs a per-pair `claude -p` detector and can run long — tick
+            # the run-lock heartbeat here too so it does not go dark either.
+            _beat()
             pair = candidate_to_auto_memory_files(cand)
             # Lane 1 / athenaeum#167: skip similarity-sweep pairs that declare
             # each other. Mirrors the primary-pass short-circuit so a

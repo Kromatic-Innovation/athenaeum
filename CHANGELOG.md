@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The C4 contradiction-detector / resolver loop now ticks the run-lock
+  heartbeat, so a long, healthy C4 phase no longer looks wedged (athenaeum#762).**
+  `merge_clusters_to_wiki`'s C4 loop refreshed only the log-only `merge-detect`
+  `PhaseHeartbeat`; it never called the run-lock heartbeat callable
+  (`RunLock.heartbeat`, threaded from `run()` via `ctx.heartbeat`) — that
+  callable was not even a parameter of `merge_clusters_to_wiki`. A run that
+  spent 25+ minutes in C4 therefore stopped refreshing
+  `~/knowledge/.athenaeum.lock`'s `heartbeat:` field and became
+  indistinguishable from a wedged run to every consumer that reads heartbeat
+  age (the athenaeum#397 contended-acquire auto-break). The callable is now
+  threaded through `_compile_auto_memory` → `merge_clusters_to_wiki` and fired
+  at the per-cluster **and** per-chunk boundaries (the finest granularity, right
+  around the slow `claude -p` detector/resolver calls), plus per-pair in the
+  cross-scope similarity sweep (the other long C4-family loop). The refresh is
+  best-effort by contract: a failure is swallowed and never breaks or slows the
+  run. The 21600s (6h) auto-break threshold is **left unchanged** — see the PR
+  for the reasoning (the per-chunk tick delivers the observability benefit
+  immediately; lowering the threshold is a separate tuning decision best made
+  once real post-fix per-cluster cadence is observed over several nightly runs).
+
 ### Changed
 
 - **Golden case `tool_choice_editor` adjudicated: `conflict_type` corrected
