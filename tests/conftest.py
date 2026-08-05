@@ -133,6 +133,39 @@ def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point ``resolve_cache_dir(cache_dir=None)`` at a per-test tmp dir (athenaeum#750).
+
+    Without this, any test that drives a parse site through
+    ``athenaeum.llm_schemas.observe``/``record_observation`` — or anything else
+    that resolves the cache dir with no explicit ``cache_dir`` argument — falls
+    through ``resolve_cache_dir``'s ``arg > ATHENAEUM_CACHE_DIR env > default``
+    order to the real ``~/.cache/athenaeum``, appending to the operator's
+    production ``_llm_schema_observations.jsonl`` ledger on every test run.
+    ``ATHENAEUM_CACHE_DIR`` here is what ``resolve_cache_dir`` and, in turn,
+    ``athenaeum.llm_schemas.observations_path()`` consult, so pointing it at
+    ``tmp_path`` (function-scoped, unique per test — the right granularity
+    since ``tmp_path`` itself is function-scoped) redirects every no-arg
+    resolution during the test into a throwaway directory.
+
+    Belt-and-braces: also default ``ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=0``
+    under test, so a test that never touches the cache dir at all still can't
+    write a ledger record by accident. Tests that specifically exercise the
+    ledger (``tests/test_llm_schemas.py``) opt back in explicitly via
+    ``monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")`` and/or
+    pass an explicit ``cache_dir=tmp_path`` (which wins over the env var per
+    ``resolve_cache_dir``'s precedence).
+
+    Returns the tmp cache dir in case a test wants to assert against it
+    directly.
+    """
+    cache_dir = tmp_path / ".cache-athenaeum"
+    monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "0")
+    return cache_dir
+
+
 @pytest.fixture
 def wiki_dir(tmp_path: Path) -> Path:
     """Create a minimal wiki directory with sample entity pages."""

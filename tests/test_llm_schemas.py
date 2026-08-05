@@ -12,11 +12,17 @@ so validation is provably running AND provably inert.
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 from typing import get_args
 
 import pytest
 
 from athenaeum import contradictions, llm_schemas, query_topics, resolutions
+from athenaeum.config import resolve_cache_dir
 from athenaeum.llm_schemas import SCHEMA_MISMATCH_MARKER
 from athenaeum.models import CLAIM_KINDS
 from athenaeum.resolutions import _VALID_ACTIONS
@@ -35,9 +41,19 @@ def _isolate_observation_ledger(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Point the athenaeum#724 observation ledger at a per-test tmp cache dir, so
-    observe() writes never touch the real ``~/.cache/athenaeum`` during the run."""
+    observe() writes never touch the real ``~/.cache/athenaeum`` during the run.
+
+    This module's tests specifically exercise the ledger (they assert
+    observations ARE recorded), so — unlike the rest of the suite — it opts
+    back IN to recording explicitly: the repo-wide ``tests/conftest.py``
+    ``_isolate_cache_dir`` autouse fixture (athenaeum#750) defaults
+    ``ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=0`` for every test, so this
+    re-enables it here. ``ATHENAEUM_CACHE_DIR`` is re-pointed too (own tmp dir
+    per test via ``tmp_path_factory``, distinct from the global fixture's
+    ``tmp_path``) so this module's ledger reads/writes stay self-contained.
+    """
     monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path_factory.mktemp("obs-cache")))
-    monkeypatch.delenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", raising=False)
+    monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")
 
 
 # ---------------------------------------------------------------------------
@@ -347,3 +363,141 @@ class TestParseGuardCallSitesCountFailures:
         # …and the parse failure is now counted.
         agg = llm_schemas.aggregate_observations()
         assert agg["claim_kind"]["by_class"].get(llm_schemas.MISMATCH_PARSE_FAIL) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test-suite isolation from the production ledger (issue athenaeum#750)
+# ---------------------------------------------------------------------------
+#
+# Before athenaeum#750, ``tests/conftest.py`` isolated nothing: any test that drove
+# a parse site through ``observe()``/``record_observation()`` with no explicit
+# ``cache_dir`` fell through ``resolve_cache_dir``'s ``arg > ATHENAEUM_CACHE_DIR
+# env > default`` order to the real ``~/.cache/athenaeum``, appending to the
+# operator's production ``_llm_schema_observations.jsonl`` on every test run.
+# The two tests below pin the fix from opposite ends: the first proves the
+# no-arg resolution lands under the test's own tmp dir (unit-level); the
+# second proves it end-to-end by spawning a REAL, separate pytest process —
+# deliberately with none of THIS test's env overrides inherited — and
+# confirming the real ledger file is untouched by it.
+
+
+class TestObservationsPathIsolation:
+    def test_observations_path_no_arg_resolves_under_test_tmp_dir(self) -> None:
+        """AC3 regression pin: ``observations_path()`` with NO argument must
+        resolve under a test-owned tmp dir, never the real user cache dir,
+        because an autouse fixture has already pointed ``ATHENAEUM_CACHE_DIR``
+        at one — the repo-wide ``tests/conftest.py`` ``_isolate_cache_dir``
+        fixture (athenaeum#750) for the suite generally, or this module's own
+        ``_isolate_observation_ledger`` override here specifically. Either
+        way, the property under test is "the env var wins over the real
+        default", so the assertions read the env var pytest actually set
+        rather than hardcoding either fixture's tmp path.
+        """
+        resolved = llm_schemas.observations_path()
+        real_default = Path("~/.cache/athenaeum").expanduser()
+        assert resolved != real_default / llm_schemas.OBSERVATIONS_FILENAME
+        assert resolved.name == llm_schemas.OBSERVATIONS_FILENAME
+        # It must live under whatever ATHENAEUM_CACHE_DIR an autouse fixture
+        # pointed at (this module's own, or the repo-wide one in
+        # tests/conftest.py — either way, the point is "the env var wins,
+        # and the env var is a test tmp dir"), and that dir must NOT be the
+        # real home cache dir.
+        env_cache_dir = Path(os.environ["ATHENAEUM_CACHE_DIR"]).expanduser()
+        assert env_cache_dir != real_default
+        assert resolved == env_cache_dir / llm_schemas.OBSERVATIONS_FILENAME
+        assert resolve_cache_dir(cache_dir=None) == env_cache_dir
+
+    def test_nested_pytest_run_does_not_pollute_real_ledger(self) -> None:
+        """AC1: running the suite writes ZERO records into the REAL
+        ``~/.cache/athenaeum/_llm_schema_observations.jsonl`` — proven by
+        spawning a genuinely separate ``pytest`` child process (not merely
+        inspecting fixture code), snapshotting the real ledger's line count
+        (or its absence) before and after, and asserting it is unchanged.
+
+        The child's test calls ``record_observation`` with NO explicit
+        ``cache_dir``, so if ``tests/conftest.py``'s autouse isolation fixture
+        did not fire in the child process, the record would land in the real
+        ledger — exactly the athenaeum#750 defect. The child is launched with
+        this test's own ``ATHENAEUM_CACHE_DIR`` / observations-enabled env
+        overrides stripped (not just left as inherited monkeypatch state), so
+        the child's OWN conftest.py autouse fixture is what has to do the
+        isolating — proving the mechanism itself, not this test's env.
+        """
+        real_ledger = (
+            Path("~/.cache/athenaeum").expanduser() / llm_schemas.OBSERVATIONS_FILENAME
+        )
+
+        def _line_count() -> int:
+            if not real_ledger.exists():
+                return 0
+            return len(real_ledger.read_text(encoding="utf-8").splitlines())
+
+        before = _line_count()
+
+        # The child test file MUST live inside the real tests/ directory (not
+        # under tmp_path) so that pytest's normal conftest.py auto-loading
+        # picks up the REAL tests/conftest.py — that autouse fixture is the
+        # exact mechanism under test. tmp_path is a sibling directory pytest
+        # would not associate with tests/conftest.py at all, which would prove
+        # nothing. Cleaned up in `finally` regardless of outcome.
+        repo_root = Path(__file__).resolve().parent.parent
+        tests_dir = repo_root / "tests"
+        child_test_path = tests_dir / "test__nested_pollution_probe_750.py"
+        assert not child_test_path.exists(), (
+            f"stray probe file already present at {child_test_path}; "
+            "a previous run may have crashed before cleanup"
+        )
+        child_test_path.write_text(
+            textwrap.dedent(
+                """
+                from athenaeum.llm_schemas import record_observation
+
+                def test_calls_record_observation_with_no_explicit_cache_dir():
+                    # No cache_dir kwarg — exercises the SAME no-arg resolution
+                    # path production call sites use, so this only stays out of
+                    # the real ledger if the child process's own conftest.py
+                    # autouse fixture isolated ATHENAEUM_CACHE_DIR.
+                    record_observation(
+                        contract="query_topics",
+                        call_site="nested-pytest-pollution-probe",
+                        outcome="ok",
+                    )
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        child_env = dict(os.environ)
+        child_env.pop("ATHENAEUM_CACHE_DIR", None)
+        child_env.pop("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", None)
+
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "-q",
+                    "-p",
+                    "no:cacheprovider",
+                    str(child_test_path),
+                ],
+                cwd=repo_root,
+                env=child_env,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        finally:
+            child_test_path.unlink(missing_ok=True)
+
+        assert result.returncode == 0, (
+            f"nested pytest child failed:\nstdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+        after = _line_count()
+        assert after == before, (
+            "nested pytest run polluted the REAL observation ledger "
+            f"({real_ledger}): line count went from {before} to {after}"
+        )
