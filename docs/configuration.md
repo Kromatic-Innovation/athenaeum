@@ -565,8 +565,9 @@ made the observation **complete and measurable**:
 - `athenaeum.llm_schemas.aggregate_observations()` summarises the ledger
   per contract. A contract with **zero** observations is reported as an
   explicit `no_data` row (rate `None`), distinct from 0 mismatches over 400 —
-  so a contract with no production caller (e.g. `claim_kind`, whose stamper is
-  currently unwired) can never read as a false clean 0.
+  so a contract with no production caller can never read as a false clean 0.
+  (`claim_kind` was such a row until athenaeum#742 wired `stamp_claim_kind` into
+  the nightly auto-memory intake phase; it now reports real traffic.)
 
 The ledger records only schema **shape** — field paths, error messages, and
 unexpected key *names* — never a field **value**, so no claim content or
