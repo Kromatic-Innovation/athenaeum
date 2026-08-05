@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Golden case `tool_choice_editor` adjudicated: `conflict_type` corrected
+  `prescriptive` → `factual` (athenaeum#737).** The first live fixture recording
+  (athenaeum#610) surfaced the detector returning `factual` where the golden
+  expected `prescriptive`. On inspection the model is right: both members state
+  *where* client-facing docs live (Notion vs Google Docs) rather than directing
+  anyone to act, which is the detector prompt's own definition of `factual`, not
+  `prescriptive` ("opposing guidance"). The golden in
+  `tests/evals/data/detector/cases.yaml` is corrected with a comment recording
+  *why*, and `tool_choice_editor` is removed from the `_DISPUTED` strict-xfail map
+  in `tests/test_recorded_fixtures.py` — its detector replay now passes without an
+  xfail. Offline/detector-only: no prompt edit, no `prompt_hash` movement, no
+  re-record. The resolver-side `decision_conflict_hosting_migration` xfail is
+  untouched (it is athenaeum#760's to record, and removing it here needs a
+  re-record).
+
 ### Fixed
 
 - **`stop_on_deadline` now performs the post-run push — the phase-boundary /
