@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum merges propose-fold` — an operator CLI for the fold path (athenaeum#747).**
+  Consolidating duplicate entities previously required hand-constructing a
+  `_pending_merges.md` block through the Python API and calling `resolve_merge`
+  directly — the exact route by which the athenaeum#748 `write_kind`
+  misclassification was introduced. `merges propose-fold --into <canonical-page>
+  --source <page> [--source ...]` now proposes a fold from named source pages
+  into a named canonical page, deriving every field the mechanics depend on:
+  `merge_target_name` is read from the canonical page's `name:` frontmatter (never
+  taken as a string, so the target slug and the page cannot disagree), and
+  `write_kind` is derived (athenaeum#748), never accepted as an argument. The draft
+  defaults to the canonical page's current text **verbatim** — a fold's value is
+  alias bookkeeping and source deletion, not a body rewrite — with `--draft-file`
+  for a genuine content merge. Dry-run by default (prints the canonical page, each
+  source, and the derived `write_kind`; writes nothing); `--apply` queues via the
+  existing `write_pending_merge`, and approval stays the separate, unchanged
+  `resolve_merge` step (no second write path). Refuses when `--into` is not an
+  existing wiki page, when a `--source` equals `--into`, or when the canonical
+  page's filename is not its own name-slug (which would classify as `create-merged`
+  and silently not fold — rename it first).
 - **`storage migrate-pii --rename-only` + target-scoped renames (athenaeum#745).**
   `--rename-name-email` (athenaeum#505's name-is-an-email slice) was reachable only
   through `--all`, which always ran the body-text contact-data migration in the
