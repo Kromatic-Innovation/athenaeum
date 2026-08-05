@@ -12,6 +12,25 @@ commands on a single machine via an advisory :func:`fcntl.flock` on
 behavior over network filesystems (NFS/SMB) is unreliable, so this guard makes
 no attempt at multi-machine coordination — that is explicitly out of scope.
 
+**Reading a residual lockfile (issue athenaeum#763) — read this first if you are
+debugging a "stale" lock.** Mutual exclusion comes from the kernel ``flock``,
+**never** from the file's contents. Two consequences that routinely get
+misread:
+
+* A ``.athenaeum.lock`` file left on disk naming a PID that is no longer alive
+  is the **normal, expected steady state after every run** — :meth:`RunLock.release`
+  drops the ``flock`` and closes the fd but deliberately does NOT unlink the
+  file (only ``--force`` / auto-break's :meth:`_break_lock` unlinks). That
+  residual file **blocks nothing**: :meth:`RunLock.acquire` re-flocks the path
+  and succeeds immediately, because the kernel released the dead holder's
+  ``flock`` the instant it exited. It never inspects the file's contents to
+  decide whether the lock is held. So "a dead-PID lockfile is present" is NOT a
+  leak, NOT a wedge, and NOT the cause of any ``LockHeld`` — do not chase it.
+* The ONE case that actually blocks and is actionable is the opposite: a holder
+  that is still **alive** but has hung (its heartbeat has gone stale). That is
+  the athenaeum#397 auto-break / ``warn_stale_after`` path below. A dead holder
+  is benign; only an alive-but-stalled one needs intervention.
+
 Behavior:
 
 * **Default (``wait=0``, ``force=False``)** — non-blocking acquire. If the lock
@@ -237,6 +256,15 @@ def is_stale(lockfile: Path) -> bool:
     ``--force`` (which breaks the lock unconditionally); it is used to label the
     audit-log line and by callers that want to report staleness. A lockfile with
     no parseable PID is treated as NOT stale (conservative).
+
+    Interpreting the result (issue athenaeum#763): ``True`` (dead PID) is the
+    **benign** case — the kernel already released that holder's ``flock``, so
+    the residual lockfile blocks nothing and a normal :meth:`RunLock.acquire`
+    succeeds regardless of it; it needs no intervention (it is not even unlinked
+    until the next ``--force``/auto-break). The **actionable** case is the
+    opposite: a holder that is still alive but heartbeat-stale (hung) — that one
+    genuinely holds the ``flock`` and blocks others (the athenaeum#397 auto-break
+    path). So a ``True`` here is "safe to ignore", not "leak to clean up".
     """
     holder = read_holder(lockfile)
     if not holder:
@@ -364,11 +392,22 @@ class RunLock:
             if holder:
                 pid = holder.get("pid", "?")
                 age = _age_str(holder.get("timestamp")) or "unknown age"
-                stale = "stale" if is_stale(self.lockfile) else "LIVE"
+                # Issue athenaeum#763: name the two cases distinctly. A dead PID is
+                # a BENIGN residual — the kernel already dropped its flock, so
+                # this --force is just tidying a file that blocked nothing. A
+                # LIVE holder is the real override: an active/hung run whose
+                # flock this break supersedes.
+                if is_stale(self.lockfile):
+                    disposition = (
+                        "residual (dead PID — kernel already released its flock; "
+                        "this file blocked nothing)"
+                    )
+                else:
+                    disposition = "LIVE (active/hung holder — override supersedes it)"
                 log.warning(
                     "runlock: --force breaking %s lock held by PID %s (held %s) "
                     "on %s",
-                    stale,
+                    disposition,
                     pid,
                     age,
                     self.lockfile,
@@ -519,7 +558,20 @@ class RunLock:
             log.warning("runlock: could not refresh heartbeat: %s", exc)
 
     def release(self) -> None:
-        """Release the lock (idempotent). Safe to call when never acquired."""
+        """Release the lock (idempotent). Safe to call when never acquired.
+
+        "Release" means the kernel ``flock`` is dropped and the fd is closed —
+        it does **NOT** remove the lockfile. ``release`` contains no
+        ``os.unlink``; the only code that unlinks is :meth:`_break_lock`
+        (reached solely via ``--force`` or auto-break). So a residual
+        ``.athenaeum.lock`` on disk naming a now-exited PID is the **normal,
+        expected steady state after every run**, and it is harmless: mutual
+        exclusion comes from the kernel ``flock`` (dropped the instant this
+        process exits), never from the file's contents, so that residual file
+        blocks nothing. A reader who sees the lockfile still present after a run
+        must NOT conclude the release failed — see the module docstring's
+        "Reading a residual lockfile" note (issue athenaeum#763).
+        """
         if not self._acquired:
             return
         self._acquired = False
@@ -527,6 +579,14 @@ class RunLock:
         self._fd = None
         if fd is None:  # no-fcntl degrade path held no fd
             return
+        # Issue athenaeum#763: deliberately NO os.unlink here. Unlinking on release
+        # would reintroduce the athenaeum#526 orphan-inode race: a waiter polling
+        # inside acquire() can hold an fd on an inode that a concurrent release
+        # just unlinked, then "successfully" re-flock the orphan while a new
+        # holder owns the fresh inode at the path (see _holds_current_inode).
+        # The no-unlink design is exactly what keeps the path's inode stable;
+        # the residual file is benign (blocks nothing — see the docstring). Do
+        # NOT "tidy up" by adding an unlink here — it is an active regression.
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_UN)
