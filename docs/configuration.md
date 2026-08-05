@@ -576,6 +576,23 @@ personal data reaches it.
 |---|---|---|---|
 | Observation ledger enabled | `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED` | `1` | Append one record per LLM-contract observation. Set `0` to disable (behaviour is otherwise unchanged — observation is passive). |
 
+**This ledger is production-only.** Before athenaeum#750, `tests/conftest.py`
+isolated nothing, so any test that drove a parse site through
+`observe()`/`record_observation()` with no explicit `cache_dir` fell through
+`resolve_cache_dir`'s `arg > ATHENAEUM_CACHE_DIR env > default` order to the
+real `~/.cache/athenaeum`, silently appending test noise to the operator's
+production ledger. As of **2026-08-05**, `tests/conftest.py` carries an
+autouse fixture (`_isolate_cache_dir`, function-scoped) that points
+`ATHENAEUM_CACHE_DIR` at a per-test tmp dir and defaults
+`ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=0` for every test — so the ledger is
+trustworthy (free of test-run pollution) only for records written from
+**2026-08-05 onward**; rows already in an existing ledger from before that
+date may include test-suite noise. A test that specifically needs to exercise
+the ledger opts back in explicitly (see `tests/test_llm_schemas.py`'s
+`_isolate_observation_ledger` fixture): pass an explicit `cache_dir` (which
+wins over the env var per `resolve_cache_dir`'s precedence) and/or
+`monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")`.
+
 ## Contradiction detection and resolver
 
 Detection knobs live under the `contradiction:` yaml block; resolver behavior

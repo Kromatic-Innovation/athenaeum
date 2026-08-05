@@ -108,6 +108,18 @@ SCHEMA_MISMATCH_MARKER = "llm-schema-mismatch"
 #: total parse failure (which returns BEFORE the payload ever reaches
 #: :func:`observe`, athenaeum#724 defect 1) is counted via
 #: :func:`observe_parse_failure`.
+#:
+#: **This ledger is production-only** (issue athenaeum#750). ``tests/conftest.py``
+#: carries an autouse fixture that isolates ``ATHENAEUM_CACHE_DIR`` to a
+#: per-test tmp dir and defaults ``ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=0``,
+#: so the test suite no longer appends to the real ``~/.cache/athenaeum``
+#: ledger by default — trustworthy (free of test-run pollution) for records
+#: written from 2026-08-05 onward. A test that specifically needs to exercise
+#: this module's ledger (``tests/test_llm_schemas.py``) opts back in
+#: explicitly: pass ``cache_dir=`` (wins over the env var per
+#: :func:`athenaeum.config.resolve_cache_dir`'s precedence) and/or
+#: ``monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")``. See
+#: ``docs/configuration.md`` § "LLM schema-observation ledger".
 OBSERVATIONS_FILENAME = "_llm_schema_observations.jsonl"
 
 #: Schema version stamped on every observation record.

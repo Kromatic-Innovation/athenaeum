@@ -48,6 +48,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The test suite no longer pollutes the production observation ledger (athenaeum#750).**
+  `record_observation()` (`athenaeum.llm_schemas`) resolves its ledger path via
+  `resolve_cache_dir(cache_dir=None)`, whose precedence is `arg >
+  ATHENAEUM_CACHE_DIR env > default (~/.cache/athenaeum)` — but `tests/conftest.py`
+  isolated nothing, so any test that drove a parse site through
+  `observe()`/`record_observation()` with no explicit `cache_dir` fell through to
+  the real `~/.cache/athenaeum/_llm_schema_observations.jsonl`, silently appending
+  test-run noise to the operator's production ledger on every local/CI run. A new
+  autouse, function-scoped `tests/conftest.py` fixture (`_isolate_cache_dir`) now
+  points `ATHENAEUM_CACHE_DIR` at a per-test tmp dir and defaults
+  `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=0` for every test, so a newly added test
+  cannot reintroduce the pollution without opting out explicitly; a nested-pytest
+  regression test (`tests/test_llm_schemas.py`) spawns a real child `pytest`
+  process and asserts the real ledger's line count is unchanged by the run.
+  `tests/test_llm_schemas.py`'s own tests, which specifically assert observations
+  ARE recorded, opt back in via its existing `_isolate_observation_ledger`
+  fixture (now also re-enabling `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED=1`
+  explicitly rather than relying on unset-defaults-to-enabled). Bisecting a
+  full-suite run surfaced one fixture-invisible leak the autouse fixture alone
+  could not close: `tests/test_thinking_seam.py`'s `@pytest.mark.parametrize("label",
+  sorted(_all_params()))` decorator arguments call real call sites
+  (`classify_claim_kind`, `detect_contradictions`, …) at pytest COLLECTION time
+  — before any fixture, autouse or otherwise, has run — so that module now sets
+  `ATHENAEUM_CACHE_DIR` / `ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED` at module
+  import time, ahead of the parametrize decorators. **The ledger is trustworthy
+  (free of test-run pollution) only for records written from 2026-08-05
+  onward** — rows already present in an existing ledger from before that date
+  may include test-suite noise; no existing ledger file was moved, quarantined,
+  or otherwise touched by this change.
 - **Merge `write_kind` is derived and validated, not trusted from the caller (athenaeum#748).**
   `write_pending_merge` accepted `write_kind` as a caller-supplied string and
   stored it unvalidated; `resolve_merge` then dispatched on it and, for
