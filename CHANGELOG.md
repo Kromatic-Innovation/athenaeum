@@ -31,8 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   respectively. Also records the outcome-vocabulary gap (Voltaire's
   three-valued detection vs. Q1's two-valued `status`, voltaire#81) and notes
   Q4's optional lint issue (athenaeum#767) was closed as not planned because
-  its premise (diffing the now-superseded ledger) no longer holds. Docs-only;
-  no code changed.
+  its premise (diffing the now-superseded ledger) no longer holds. **Reconciled
+  a second time the same day, once athenaeum#765 actually merged (PR
+  athenaeum#826):** the doc's Q1 and Q3 previously described the eventual
+  mark as "whatever athenaeum#712's verdict ledger produces" — the shipped
+  code doesn't wait on #712 at all. It reuses athenaeum#308's existing
+  `valid_until` claim-validity close directly (`pii.mark_bounced` /
+  `pii.is_bounced`), gated by a new LLM-free Tier 0 branch
+  (`librarian.tier0_bounce_mark`) that requires the raw note's own
+  `observed_at` + `source` frontmatter and a body matching
+  `pii.detect_hard_bounce_fact` (exactly one email token, an RFC 3463 `5.x.x`
+  code). Q3's `remember()` contract example was also corrected: per-claim
+  provenance rides `sources`, not `source` (the latter only selects the
+  `raw/<session>/` landing directory) — verified end-to-end against
+  `remember_write()` + `tier0_bounce_mark()`, matching
+  `tests/test_bounce_mark.py`. Docs-only; no code changed.
 
 ### Fixed
 
