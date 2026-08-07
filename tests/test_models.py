@@ -601,6 +601,89 @@ class TestPerModelCostAttribution:
         assert usage.estimated_cost_usd > 0
 
 
+class TestPerKnobAttribution:
+    """athenaeum#781: per-knob attribution in ``TokenUsage.per_knob``.
+
+    Mirrors ``TestPerModelCostAttribution`` — ``knob=`` is an independent
+    tag alongside ``model=`` on the same accumulation methods, using the
+    same additive-subset bucket shape. Unlike per-model, per-knob never
+    feeds ``estimated_cost_usd`` — it is a pure WHERE-did-the-tokens-go
+    breakdown, so the scalar totals stay authoritative either way.
+    """
+
+    def test_add_tags_knob_independently_of_model(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(100, 50, 10, 20, model="claude-sonnet-4-6", knob="write")
+        assert usage.per_knob["write"]["input_tokens"] == 100
+        assert usage.per_knob["write"]["output_tokens"] == 50
+        assert usage.per_knob["write"]["cache_creation_input_tokens"] == 10
+        assert usage.per_knob["write"]["cache_read_input_tokens"] == 20
+        # per_model still tags independently -- the two dicts don't collide.
+        assert usage.per_model["claude-sonnet-4-6"]["input_tokens"] == 100
+
+    def test_knob_accumulates_across_calls(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(100, 50, knob="classify")
+        usage.add(200, 75, knob="classify")
+        assert usage.per_knob["classify"]["input_tokens"] == 300
+        assert usage.per_knob["classify"]["output_tokens"] == 125
+
+    def test_untagged_knob_leaves_per_knob_empty(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(100, 50)
+        assert usage.per_knob == {}
+        # Scalar totals stay authoritative regardless of knob tagging.
+        assert usage.input_tokens == 100
+
+    def test_multiple_knobs_stay_separate(self) -> None:
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add(1_000, 100, model="claude-haiku-4-5-20251001", knob="classify")
+        usage.add(2_000, 200, model="claude-sonnet-4-6", knob="write")
+        assert set(usage.per_knob) == {"classify", "write"}
+        assert usage.per_knob["classify"]["input_tokens"] == 1_000
+        assert usage.per_knob["write"]["input_tokens"] == 2_000
+        # Additive-subset invariant: scalar totals are the authoritative sum.
+        assert usage.input_tokens == 3_000
+
+    def test_add_tokens_threads_knob(self) -> None:
+        """athenaeum#239-style attempt-uncounted accumulation also threads knob."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add_tokens(1_000, 500, model="claude-opus-4-7", knob="resolve")
+        assert usage.api_calls == 0
+        assert usage.per_knob["resolve"]["input_tokens"] == 1_000
+
+    def test_add_batch_tokens_threads_knob(self) -> None:
+        """Batch traffic (athenaeum#236) is knob-attributed too, mirroring per-model."""
+        from athenaeum.models import TokenUsage
+
+        usage = TokenUsage()
+        usage.add_batch_tokens(1_000, 500, model="claude-haiku-4-5-20251001", knob="classify")
+        assert usage.per_knob["classify"]["input_tokens"] == 1_000
+        assert usage.per_knob["classify"]["batch_input_tokens"] == 1_000
+        # Batch discount still prices via per-model, unaffected by per-knob.
+        assert usage.estimated_cost_usd > 0
+
+    def test_knob_does_not_affect_cost_estimation(self) -> None:
+        """per_knob is a pure attribution breakdown -- it never feeds pricing."""
+        from athenaeum.models import TokenUsage
+
+        tagged = TokenUsage()
+        tagged.add(1_000_000, 1_000_000, model="claude-opus-4-7", knob="reasoning_t1")
+        untagged = TokenUsage()
+        untagged.add(1_000_000, 1_000_000, model="claude-opus-4-7")
+        assert tagged.estimated_cost_usd == untagged.estimated_cost_usd
+
+
 class TestCacheUsageCounts:
     """Direct unit coverage for ``cache_usage_counts`` (athenaeum#239 nit b)."""
 

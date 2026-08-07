@@ -1477,6 +1477,16 @@ class TokenUsage:
     # the blended rate for the untagged remainder. Excluded from ``repr``
     # to keep run-summary logging concise.
     per_model: dict[str, dict[str, int]] = field(default_factory=dict, repr=False)
+    # Per-knob attribution (issue athenaeum#781). Keyed by the model-KNOB string
+    # (``classify`` / ``write`` / ``resolve`` / ``topic`` / ``reasoning_t1`` /
+    # ``reasoning_t2`` — see ``prompt_registry._META_ROWS``, the single source
+    # of truth) that the call site already passes to
+    # :func:`athenaeum.config.resolve_model`. Mirrors ``per_model`` exactly:
+    # same bucket shape, same additive-subset pattern (the scalar totals
+    # above stay authoritative; this dict never feeds cost estimation, it is
+    # purely a WHERE-did-the-tokens-go breakdown for ``athenaeum spend
+    # --by-knob``). Excluded from ``repr`` to keep run-summary logging concise.
+    per_knob: dict[str, dict[str, int]] = field(default_factory=dict, repr=False)
     # Subscription-covered flag (issue athenaeum#330). When the run is served by the
     # ``claude-cli`` provider, the operator's Claude Code SUBSCRIPTION pays for
     # the tokens — there is no per-token API bill. Token COUNTS still
@@ -1520,6 +1530,46 @@ class TokenUsage:
             bucket["batch_cache_creation_input_tokens"] += cache_creation_input_tokens
             bucket["batch_cache_read_input_tokens"] += cache_read_input_tokens
 
+    def _tag_knob(
+        self,
+        knob: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation_input_tokens: int,
+        cache_read_input_tokens: int,
+        *,
+        is_batch: bool,
+    ) -> None:
+        """Accumulate this call's counts into the per-knob subset (athenaeum#781).
+
+        Same bucket shape and accumulation rule as :meth:`_tag_model` — kept
+        as a separate method (rather than a shared helper parametrized on
+        the target dict) so each call site can tag model and knob
+        independently, exactly mirroring how ``model=`` already works.
+        """
+        bucket = self.per_knob.setdefault(
+            knob,
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "batch_input_tokens": 0,
+                "batch_output_tokens": 0,
+                "batch_cache_creation_input_tokens": 0,
+                "batch_cache_read_input_tokens": 0,
+            },
+        )
+        bucket["input_tokens"] += input_tokens
+        bucket["output_tokens"] += output_tokens
+        bucket["cache_creation_input_tokens"] += cache_creation_input_tokens
+        bucket["cache_read_input_tokens"] += cache_read_input_tokens
+        if is_batch:
+            bucket["batch_input_tokens"] += input_tokens
+            bucket["batch_output_tokens"] += output_tokens
+            bucket["batch_cache_creation_input_tokens"] += cache_creation_input_tokens
+            bucket["batch_cache_read_input_tokens"] += cache_read_input_tokens
+
     def add(
         self,
         input_tokens: int,
@@ -1527,12 +1577,20 @@ class TokenUsage:
         cache_creation_input_tokens: int = 0,
         cache_read_input_tokens: int = 0,
         model: str | None = None,
+        knob: str | None = None,
     ) -> None:
         """Record tokens from one API call.
 
         *model* (issue athenaeum#247) is the serving model-id; when given, the
         counts are additionally attributed to that model for per-model
         cost estimation. Untagged calls fall back to the blended rate.
+
+        *knob* (issue athenaeum#781) is the model-KNOB string (``classify`` /
+        ``write`` / ``resolve`` / ``topic`` / ``reasoning_t1`` /
+        ``reasoning_t2``) the call site already passes to
+        :func:`athenaeum.config.resolve_model`; when given, the counts are
+        additionally attributed to that knob in :attr:`per_knob`, mirroring
+        *model*'s ``per_model`` accumulation.
         """
         self.add_tokens(
             input_tokens,
@@ -1540,6 +1598,7 @@ class TokenUsage:
             cache_creation_input_tokens,
             cache_read_input_tokens,
             model=model,
+            knob=knob,
         )
         self.api_calls += 1
 
@@ -1550,6 +1609,7 @@ class TokenUsage:
         cache_creation_input_tokens: int = 0,
         cache_read_input_tokens: int = 0,
         model: str | None = None,
+        knob: str | None = None,
     ) -> None:
         """Accumulate token counters WITHOUT counting an API call (athenaeum#239).
 
@@ -1560,7 +1620,10 @@ class TokenUsage:
         token + cache counts here once they are known.
 
         *model* (issue athenaeum#247) optionally tags the serving model-id for
-        per-model cost attribution.
+        per-model cost attribution. *knob* (issue athenaeum#781) optionally tags the
+        model-knob for per-knob attribution (:attr:`per_knob`) — independent
+        of *model*, exactly mirroring how the two kwargs already coexist at
+        every real call site (both sourced from the same config resolution).
         """
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
@@ -1575,6 +1638,15 @@ class TokenUsage:
                 cache_read_input_tokens,
                 is_batch=False,
             )
+        if knob:
+            self._tag_knob(
+                knob,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                is_batch=False,
+            )
 
     def add_batch_tokens(
         self,
@@ -1583,6 +1655,7 @@ class TokenUsage:
         cache_creation_input_tokens: int = 0,
         cache_read_input_tokens: int = 0,
         model: str | None = None,
+        knob: str | None = None,
     ) -> None:
         """Accumulate token counters from a Batch API result (athenaeum#236).
 
@@ -1596,11 +1669,13 @@ class TokenUsage:
 
         *model* (issue athenaeum#247) optionally tags the serving model-id; the
         batch share is attributed per model so the 50% discount composes
-        with that model's rates.
+        with that model's rates. *knob* (issue athenaeum#781) optionally tags the
+        model-knob; the batch share is attributed per knob the same way.
         """
-        # Accumulate into the scalar + per-model counters once (untagged
-        # remainder stays blended); add_tokens with model=None here so the
-        # batch share is tagged via _tag_model below with is_batch=True.
+        # Accumulate into the scalar + per-model/per-knob counters once
+        # (untagged remainder stays blended); add_tokens with model=None/
+        # knob=None here so the batch share is tagged via _tag_model /
+        # _tag_knob below with is_batch=True.
         self.add_tokens(
             input_tokens,
             output_tokens,
@@ -1614,6 +1689,15 @@ class TokenUsage:
         if model:
             self._tag_model(
                 model,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                is_batch=True,
+            )
+        if knob:
+            self._tag_knob(
+                knob,
                 input_tokens,
                 output_tokens,
                 cache_creation_input_tokens,

@@ -202,6 +202,7 @@ def extract_topics(
                 int(getattr(_usage, "cache_creation_input_tokens", 0) or 0),
                 int(getattr(_usage, "cache_read_input_tokens", 0) or 0),
                 model=_get_topic_model(config),
+                knob="topic",
             )
             spend.record_spend(
                 _u,

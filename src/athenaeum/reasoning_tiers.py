@@ -706,7 +706,12 @@ def run_t1_tier(
             response
         )
         usage.add(
-            input_toks, output_toks, cache_creation, cache_read, model=params["model"]
+            input_toks,
+            output_toks,
+            cache_creation,
+            cache_read,
+            model=params["model"],
+            knob="reasoning_t1",
         )
 
     # Issue athenaeum#578: response_text skips any leading thinking block (T1 runs
@@ -1240,7 +1245,12 @@ def run_t2_tier(
             response
         )
         usage.add(
-            input_toks, output_toks, cache_creation, cache_read, model=params["model"]
+            input_toks,
+            output_toks,
+            cache_creation,
+            cache_read,
+            model=params["model"],
+            knob="reasoning_t2",
         )
 
     # Issue athenaeum#578: T2 enables adaptive thinking — response_text skips any

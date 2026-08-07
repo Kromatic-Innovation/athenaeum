@@ -197,7 +197,14 @@ def classify_claim_kind(
         input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(
             response
         )
-        usage.add(input_toks, output_toks, cache_creation, cache_read, model=model)
+        usage.add(
+            input_toks,
+            output_toks,
+            cache_creation,
+            cache_read,
+            model=model,
+            knob="classify",
+        )
 
     try:
         # Issue athenaeum#578: response_text skips any leading thinking block (this

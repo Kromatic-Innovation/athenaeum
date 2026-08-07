@@ -489,7 +489,12 @@ def detect_contradictions(
     input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
     if usage is not None:
         usage.add_tokens(
-            input_toks, output_toks, cache_creation, cache_read, model=detect_model
+            input_toks,
+            output_toks,
+            cache_creation,
+            cache_read,
+            model=detect_model,
+            knob="classify",
         )
     log.debug(
         "contradictions: detector usage input=%d output=%d"
