@@ -55,6 +55,7 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
         baseline = push_metrics.compute_baseline(
             since=since,
             cache_dir=args.cache_dir,
+            exclude_sessions=getattr(args, "exclude_session", None),
         )
         docs_path = args.docs_path.expanduser().resolve()
         push_metrics.write_snapshot(baseline, docs_path=docs_path)
@@ -67,12 +68,18 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
                 if baseline.precision is not None
                 else "n/a — accrues as sessions run"
             )
+            excluded_sessions_str = (
+                ",".join(baseline.excluded_sessions) if baseline.excluded_sessions else "none"
+            )
             print(
                 f"window: {baseline.start} .. {baseline.end}\n"
                 f"sessions: {baseline.session_count}\n"
                 f"push_records: {baseline.push_record_count}\n"
                 f"reference_records: {baseline.reference_record_count}\n"
                 f"precision: {precision_str}\n"
+                f"excluded_sessions: {excluded_sessions_str}\n"
+                f"excluded_push_records: {baseline.excluded_push_record_count}\n"
+                f"excluded_reference_records: {baseline.excluded_reference_record_count}\n"
                 f"athenaeum_version: {baseline.athenaeum_version}\n"
                 f"git_sha: {baseline.git_sha}\n"
                 f"snapshot written to: {docs_path}"
@@ -153,6 +160,17 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         default=Path("docs/memory-model-measurements.md"),
         help="Where the snapshot section is written/appended "
         "(default: docs/memory-model-measurements.md).",
+    )
+    baseline_p.add_argument(
+        "--exclude-session",
+        action="append",
+        default=None,
+        metavar="SESSION_ID",
+        help="Exclude a KNOWN-synthetic session id (e.g. one that ran the "
+        "test suite and leaked fixture pushes into the ledger, issue "
+        "athenaeum#791) from the precision/session counts. Repeatable. "
+        "Excluded sessions and their record counts are always reported, "
+        "never silently dropped.",
     )
 
     coverage_p = p_sub.add_parser(

@@ -7,6 +7,10 @@ progress logging, so a stall in any of them was invisible in the log. These
 tests drive each phase directly (reusing the fixture/stub conventions from
 ``tests/test_librarian_merge.py`` and ``tests/test_wiki_dedupe.py``) and
 assert the ``librarian-heartbeat`` start/done lines appear via ``caplog``.
+
+The entity-phase suite near the bottom of this file (issue athenaeum#800) covers the
+one phase that carried ZERO heartbeat coverage until now — see
+``TestEntityHeartbeat`` below.
 """
 
 from __future__ import annotations
@@ -14,14 +18,22 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+from athenaeum.librarian import ENTITY_FILE_FAILURE_PREFIX, run
 from athenaeum.merge import merge_clusters_to_wiki
 from athenaeum.models import EscalationItem
 from athenaeum.tiers import reresolve_open_questions, tier4_escalate
 from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+# Reuse the deadline suite's run harness verbatim (same convention
+# `test_librarian_entity_share.py` follows) — driving `run()` end-to-end with
+# `process_one` stubbed is the only way to exercise the real per-file entity
+# loop this issue instruments.
+from tests.test_librarian_deadline import _seed_knowledge_root, _writing_process_one_factory
 
 
 def _heartbeat_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -423,3 +435,199 @@ class TestC4RunLockHeartbeat:
             heartbeat=None,
         )
         assert len(entries) == 2
+
+
+# ---------------------------------------------------------------------------
+# entity phase (issue athenaeum#800) — the one dark zone left with ZERO
+# heartbeat coverage. Run 631aaade (2026-08-06) spent 85% of a 3446s window
+# here and emitted nothing between "start" and its budget trip.
+# ---------------------------------------------------------------------------
+
+
+def _entity_heartbeat_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        rec.message
+        for rec in caplog.records
+        if "librarian-heartbeat" in rec.message and "phase=entity" in rec.message
+    ]
+
+
+class TestEntityHeartbeat:
+    def test_start_tick_done_shape_and_one_tick_per_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Same contract as merge-detect/merge-write/wiki-dedupe/reresolve:
+        status=start|tick|done, done/total, compiled/unchanged/error, unit=
+        (the raw file path), cumulative elapsed=. One tick per raw file
+        processed — the property that makes per-file wall-clock recoverable
+        by differencing consecutive `elapsed=` values.
+        """
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        root = _seed_knowledge_root(tmp_path, n_files=3)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+        # interval_s=0 → every tick call emits its own line (mirrors how the
+        # sibling heartbeat tests force this via `heartbeat_interval: 0`).
+        monkeypatch.setenv("ATHENAEUM_HEARTBEAT_INTERVAL", "0")
+
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one",
+            _writing_process_one_factory(root / "wiki"),
+        )
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+            max_runtime=1000,
+        )
+        assert rc == 0
+
+        lines = _entity_heartbeat_lines(caplog)
+        assert any("status=start" in line for line in lines)
+        assert any("status=done" in line for line in lines)
+        tick_lines = [line for line in lines if "status=tick" in line]
+        assert len(tick_lines) == 3, "one tick per raw file processed"
+
+        done_line = next(line for line in lines if "status=done" in line)
+        assert "done=3" in done_line
+        assert "total=3" in done_line
+        # Every file in `_writing_process_one_factory` returns created=[...],
+        # so all 3 ticks are compiled, none unchanged/error.
+        assert "compiled=3" in done_line
+        assert "unchanged=0" in done_line
+        assert "error=0" in done_line
+
+    def test_tick_unit_is_the_raw_file_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+        monkeypatch.setenv("ATHENAEUM_HEARTBEAT_INTERVAL", "0")
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one",
+            _writing_process_one_factory(root / "wiki"),
+        )
+
+        # `_seed_knowledge_root(n_files=1)` writes exactly this deterministic
+        # filename (i=0) — captured BEFORE run() because a successful entity
+        # pass deletes the raw file, so it can't be globbed back afterward.
+        raw_ref = "20240410T120000Z-aabbccd0.md"
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+            max_runtime=1000,
+        )
+        assert rc == 0
+
+        tick_line = next(
+            line for line in _entity_heartbeat_lines(caplog) if "status=tick" in line
+        )
+        assert f"unit=sessions/{raw_ref}" in tick_line
+
+    def test_file_failure_logs_reason_at_warning_with_path_and_exception(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#800 AC: a file failure logs the reason (exception type +
+        message) at WARNING with the file path — not only the filename in the
+        trailing "Failed files" summary. Run 631aaade recorded three failed
+        files with no error text captured at any level the log sweep caught.
+        """
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        def _boom_process_one(raw, index, wiki_root_arg, client, *args, **kwargs):
+            raise ValueError("malformed frontmatter block")
+
+        monkeypatch.setattr("athenaeum.librarian.process_one", _boom_process_one)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+            max_runtime=1000,
+        )
+        assert rc == 1  # the existing "Failed files" exit code (unchanged)
+
+        raw_ref = next((root / "raw" / "sessions").glob("2024041*.md")).name
+        failure_lines = [
+            rec.message for rec in caplog.records if ENTITY_FILE_FAILURE_PREFIX in rec.message
+        ]
+        assert len(failure_lines) == 1
+        line = failure_lines[0]
+        assert f"sessions/{raw_ref}" in line
+        assert "ValueError" in line
+        assert "malformed frontmatter block" in line
+
+    def test_entity_share_trip_warning_names_resource_with_both_numbers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """athenaeum#800 AC: the trip warning must name WHICH resource tripped
+        (the entity runtime share, not the call budget) and give both call-
+        budget numbers. Run 631aaade tripped at 28/1200 calls (2.3%) while the
+        log said only "entity phase runtime share exhausted" — indistinguishable
+        from a call-budget exhaustion and misleading on its own.
+        """
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        root = _seed_knowledge_root(tmp_path, n_files=3)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+        monkeypatch.delenv("ATHENAEUM_ENTITY_RUNTIME_SHARE", raising=False)
+
+        from tests.test_librarian_deadline import _FakeClock
+
+        clock = _FakeClock(start=0.0)
+        monkeypatch.setattr("athenaeum.librarian.time.monotonic", clock.monotonic)
+
+        state = {"n": 0}
+
+        def _fake_process_one(raw, index, wiki_root_arg, client, *args, usage=None, **kwargs):
+            state["n"] += 1
+            page = (root / "wiki") / f"entity-{state['n']}.md"
+            page.write_text(f"# Entity {state['n']}\n", encoding="utf-8")
+            if usage is not None:
+                usage.add(100, 50)  # one simulated API call's tokens
+            if state["n"] == 1:
+                clock.now = 700.0  # past the default 0.6 share of a 1000s window
+            return SimpleNamespace(created=[page.name], updated=[], escalated=[], skipped=[])
+
+        monkeypatch.setattr("athenaeum.librarian.process_one", _fake_process_one)
+        monkeypatch.setattr(
+            "athenaeum.librarian.discover_auto_memory_files",
+            lambda *_a, **_k: [],
+        )
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+            max_runtime=1000,
+        )
+        assert rc == 0
+
+        # Filtered on "api_call_budget usage" (unique to the trip-time WARNING)
+        # rather than "entity phase runtime share exhausted" alone — that
+        # shorter phrase also appears, unchanged, in the later "Done
+        # (DEGRADED — ...)" summary line, which is not the warning this AC
+        # is about.
+        trip_lines = [
+            rec.message for rec in caplog.records if "api_call_budget usage" in rec.message
+        ]
+        assert len(trip_lines) == 1
+        line = trip_lines[0]
+        # Names the tripped resource distinctly from the call budget...
+        assert "entity phase runtime share exhausted" in line
+        # ...but still gives both api_call_budget numbers (1 call made of a
+        # 100 budget = 1.0%), so a reader can rule the call budget in or out.
+        assert "1/100 calls" in line
+        assert "1.0%" in line
