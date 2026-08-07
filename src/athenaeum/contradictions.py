@@ -65,7 +65,7 @@ from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_te
 
 if TYPE_CHECKING:
     import anthropic
-    from anthropic.types import MessageParam, ThinkingConfigParam
+    from anthropic.types import MessageParam, TextBlockParam, ThinkingConfigParam
 
 log = logging.getLogger(__name__)
 
@@ -459,7 +459,25 @@ def detect_contradictions(
                         config,
                     ),
                 ),
-                system=_DETECT_SYSTEM,
+                # Prompt-caching breakpoint (issue athenaeum#790): the detector system
+                # prompt is constant across every detector call in a run (86 calls
+                # in the athenaeum#764 drain run) and does not vary by cluster, so
+                # it is the stable prefix worth marking cacheable. Mirrors the
+                # resolver's breakpoint (issue athenaeum#230, resolutions.py
+                # `_RESOLVE_SYSTEM`) — set unconditionally at the call site; the
+                # `api` backend preserves it and the `claude-cli` backend strips
+                # it, per `ProviderCapabilities.honors_cache_control`
+                # (athenaeum#573).
+                system=cast(
+                    "list[TextBlockParam]",
+                    [
+                        {
+                            "type": "text",
+                            "text": _DETECT_SYSTEM,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                ),
                 messages=cast(
                     "list[MessageParam]", [{"role": "user", "content": user_msg}]
                 ),
