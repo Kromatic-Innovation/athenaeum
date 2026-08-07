@@ -27,6 +27,7 @@ from athenaeum.pending_merges import write_pending_merge
 from athenaeum.reasoning_tiers import (
     BODY_EXCERPT_WORD_LIMIT,
     DEFAULT_T1_MODEL,
+    DEFAULT_T2_MODEL,
     REASONING_TIER_VERDICTS,
     REJECT_REASON_CROSS_MEMORY_CLASS,
     REJECT_REASON_LIVE_SOURCE_DUPLICATE,
@@ -37,6 +38,7 @@ from athenaeum.reasoning_tiers import (
     build_t1_request_params,
     default_reasoning_tier_log_path,
     get_t1_model,
+    get_t2_model,
     read_reasoning_tier_decisions,
     record_reasoning_tier_decision,
     run_reasoning_pipeline,
@@ -599,3 +601,84 @@ class TestT1RejectBins:
         )
         decision = run_t1_tier(proposal, client=client)
         assert decision.verdict == "pass_up"
+
+
+class TestInertModelKnobWarning:
+    """Issue athenaeum#780 (L10): the T1/T2 model knobs silently did nothing
+    when ``ATHENAEUM_REASONING_TIER_AUDITING_ENABLED`` is off. These prove a
+    warning now fires at resolution time, naming the flag to set — and that
+    it stays silent whenever there is nothing to warn about (knob unset, or
+    auditing actually on).
+    """
+
+    def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_REASONING_TIER_AUDITING_ENABLED", raising=False)
+        monkeypatch.delenv("ATHENAEUM_REASONING_T1_MODEL", raising=False)
+        monkeypatch.delenv("ATHENAEUM_REASONING_T2_MODEL", raising=False)
+
+    def test_t1_env_knob_warns_when_auditing_disabled(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("ATHENAEUM_REASONING_T1_MODEL", "claude-custom-t1")
+        with caplog.at_level("WARNING", logger="athenaeum.reasoning_tiers"):
+            get_t1_model(None)
+        assert len(caplog.records) == 1
+        msg = caplog.records[0].getMessage()
+        assert "ATHENAEUM_REASONING_T1_MODEL" in msg
+        assert "ATHENAEUM_REASONING_TIER_AUDITING_ENABLED" in msg
+
+    def test_t2_env_knob_warns_when_auditing_disabled(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("ATHENAEUM_REASONING_T2_MODEL", "claude-custom-t2")
+        with caplog.at_level("WARNING", logger="athenaeum.reasoning_tiers"):
+            get_t2_model(None)
+        assert len(caplog.records) == 1
+        msg = caplog.records[0].getMessage()
+        assert "ATHENAEUM_REASONING_T2_MODEL" in msg
+        assert "ATHENAEUM_REASONING_TIER_AUDITING_ENABLED" in msg
+
+    def test_yaml_knob_warns_when_auditing_disabled(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._clear_env(monkeypatch)
+        config = {"models": {"reasoning_t1": "claude-yaml-t1"}}
+        with caplog.at_level("WARNING", logger="athenaeum.reasoning_tiers"):
+            get_t1_model(config)
+        assert len(caplog.records) == 1
+        assert "ATHENAEUM_REASONING_T1_MODEL" in caplog.records[0].message
+
+    def test_no_warning_when_knob_unset(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._clear_env(monkeypatch)
+        with caplog.at_level("WARNING", logger="athenaeum.reasoning_tiers"):
+            assert get_t1_model(None) == DEFAULT_T1_MODEL
+            assert get_t2_model(None) == DEFAULT_T2_MODEL
+        assert caplog.records == []
+
+    def test_no_warning_when_auditing_enabled_env(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("ATHENAEUM_REASONING_TIER_AUDITING_ENABLED", "1")
+        monkeypatch.setenv("ATHENAEUM_REASONING_T1_MODEL", "claude-custom-t1")
+        monkeypatch.setenv("ATHENAEUM_REASONING_T2_MODEL", "claude-custom-t2")
+        with caplog.at_level("WARNING", logger="athenaeum.reasoning_tiers"):
+            get_t1_model(None)
+            get_t2_model(None)
+        assert caplog.records == []
+
+    def test_no_warning_when_auditing_enabled_yaml(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._clear_env(monkeypatch)
+        config = {
+            "librarian": {"reasoning_tier_auditing_enabled": True},
+            "models": {"reasoning_t1": "claude-yaml-t1"},
+        }
+        with caplog.at_level("WARNING", logger="athenaeum.reasoning_tiers"):
+            get_t1_model(config)
+        assert caplog.records == []
