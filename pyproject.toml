@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "athenaeum"
-version = "0.16.38"
+version = "0.16.39"
 description = "Open source knowledge management pipeline — append-only intake, tiered compilation, configurable schemas"
 readme = "README.md"
 license = "Apache-2.0"
@@ -111,8 +111,26 @@ include = [
 # discoverable at runtime via importlib.resources.files("athenaeum") / "skills".
 # The sdist keeps skills/ automatically via hatchling's VCS default (every
 # git-tracked file), so no separate sdist config is needed.
+#
+# examples/ hits the identical trap (issue athenaeum#793) and is force-included
+# for the same reason, deliberately decided rather than defaulted: the issue
+# offered a tiebreaker — skills was force-included on the argument that a
+# bundled resource users need at runtime belongs in the wheel; examples/ is
+# arguably documentation instead, which would argue for leaving the wheel
+# alone and just improving discoverability (Option B in the issue). We chose
+# to force-include anyway (Option A) because examples/claude-code/ is not
+# just reference material — it is the only way to install the passive-recall
+# hook kit (settings-snippet.json, four hook scripts, the env-var reference),
+# so "documentation" undersells it. Concretely, a correctness fix to
+# user-prompt-recall.sh landed in athenaeum#792 immediately before this
+# decision; a fix a `pip install`-only user cannot receive is not much of a
+# fix. That tips the same "runtime resource" argument that justified `skills`
+# in favor of `examples` too, so the two force-includes match rather than
+# differ. Costs a modest wheel-size increase; the sdist already carried
+# examples/ via hatchling's VCS default, unaffected by this change.
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "athenaeum/skills"
+"examples" = "athenaeum/examples"
 
 # sdist: keep AGENTS.md OUT of the published source distribution (issue athenaeum#612).
 # By hatchling's VCS default every git-tracked file — including AGENTS.md —
