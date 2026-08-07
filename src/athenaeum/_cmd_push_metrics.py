@@ -5,7 +5,14 @@ Two subcommands over :mod:`athenaeum.push_metrics`:
 
 - ``baseline``       compute precision + coverage over a stated window and
                        write/append a dated snapshot into
-                       ``docs/memory-model-measurements.md``.
+                       ``docs/memory-model-measurements.md`` — unless
+                       ``--dry-run`` was passed (inspect only, never write),
+                       or the window has zero reference-determination
+                       records, in which case the write is REFUSED (issue
+                       athenaeum#795: precision is not computable against a
+                       dead instrument, so there is nothing meaningful to
+                       persist — a prior version wrote a placeholder here
+                       unconditionally).
 - ``coverage-audit``  sample N sessions' push records and emit a FILE
                        worksheet a human reviewer marks relevant-but-missed
                        on; the worksheet's miss rate (once reviewed) is the
@@ -55,17 +62,35 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
         baseline = push_metrics.compute_baseline(
             since=since,
             cache_dir=args.cache_dir,
+            exclude_sessions=getattr(args, "exclude_session", None),
         )
         docs_path = args.docs_path.expanduser().resolve()
-        push_metrics.write_snapshot(baseline, docs_path=docs_path)
+        dry_run = getattr(args, "dry_run", False)
+
+        if not dry_run:
+            try:
+                push_metrics.write_snapshot(baseline, docs_path=docs_path)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
 
         if args.json:
-            sys.stdout.write(json.dumps(baseline.to_dict()) + "\n")
+            payload = baseline.to_dict()
+            payload["dry_run"] = dry_run
+            sys.stdout.write(json.dumps(payload) + "\n")
         else:
             precision_str = (
                 f"{baseline.precision:.4f}"
                 if baseline.precision is not None
                 else "n/a — accrues as sessions run"
+            )
+            excluded_sessions_str = (
+                ",".join(baseline.excluded_sessions) if baseline.excluded_sessions else "none"
+            )
+            snapshot_line = (
+                "dry run: no snapshot written (pass without --dry-run to write)"
+                if dry_run
+                else f"snapshot written to: {docs_path}"
             )
             print(
                 f"window: {baseline.start} .. {baseline.end}\n"
@@ -73,9 +98,12 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
                 f"push_records: {baseline.push_record_count}\n"
                 f"reference_records: {baseline.reference_record_count}\n"
                 f"precision: {precision_str}\n"
+                f"excluded_sessions: {excluded_sessions_str}\n"
+                f"excluded_push_records: {baseline.excluded_push_record_count}\n"
+                f"excluded_reference_records: {baseline.excluded_reference_record_count}\n"
                 f"athenaeum_version: {baseline.athenaeum_version}\n"
                 f"git_sha: {baseline.git_sha}\n"
-                f"snapshot written to: {docs_path}"
+                f"{snapshot_line}"
             )
         return 0
 
@@ -138,7 +166,9 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
     baseline_p = p_sub.add_parser(
         "baseline",
         help="Compute precision + coverage over a window; write the dated "
-        "snapshot to docs/memory-model-measurements.md.",
+        "snapshot to docs/memory-model-measurements.md. Refuses to write "
+        "(exit 1) when the window has zero reference-determination records. "
+        "See --dry-run to inspect without writing.",
     )
     _add_common(baseline_p)
     baseline_p.add_argument(
@@ -153,6 +183,26 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         default=Path("docs/memory-model-measurements.md"),
         help="Where the snapshot section is written/appended "
         "(default: docs/memory-model-measurements.md).",
+    )
+    baseline_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute and display the baseline without writing to "
+        "--docs-path. This is the read-only way to check whether a baseline "
+        "is computable (issue athenaeum#795) — combine with --json for a "
+        "read-only machine-readable inspection. Note: --json alone does NOT "
+        "suppress the write; use --dry-run for that.",
+    )
+    baseline_p.add_argument(
+        "--exclude-session",
+        action="append",
+        default=None,
+        metavar="SESSION_ID",
+        help="Exclude a KNOWN-synthetic session id (e.g. one that ran the "
+        "test suite and leaked fixture pushes into the ledger, issue "
+        "athenaeum#791) from the precision/session counts. Repeatable. "
+        "Excluded sessions and their record counts are always reported, "
+        "never silently dropped.",
     )
 
     coverage_p = p_sub.add_parser(

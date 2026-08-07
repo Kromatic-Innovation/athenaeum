@@ -152,3 +152,69 @@ def test_cache_dir_literal_constructed_in_exactly_one_module() -> None:
         "The ~/.cache/athenaeum literal must be constructed only in config.py; "
         f"found constructions at: {offenders}"
     )
+
+
+def _find_env_literal_spans(text: str) -> list[tuple[int, str]]:
+    """Return ``(line_no, literal_text)`` for each ``env = {...}`` / ``env={...}``
+    dict-literal in *text*, via balanced-brace matching from the ``{``
+    immediately after the ``=``. Deliberately targets only hand-built LITERAL
+    dicts (``env = {"HOME": ...}``) — not derived envs like ``dict(os.environ)``,
+    which don't set ``HOME`` as a literal key and are out of scope here.
+    """
+    spans: list[tuple[int, str]] = []
+    for m in re.finditer(r"\benv\s*=\s*\{", text):
+        start = m.end() - 1  # index of the opening brace
+        depth = 0
+        i = start
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        literal = text[start : i + 1]
+        line_no = text.count("\n", 0, m.start()) + 1
+        spans.append((line_no, literal))
+    return spans
+
+
+def test_env_literal_setting_home_also_sets_cache_dir() -> None:
+    """Guard (athenaeum#791): a hand-built ``env = {...}`` dict literal that sets
+    ``HOME`` must also set ``ATHENAEUM_CACHE_DIR`` explicitly.
+
+    ``resolve_cache_dir()``'s precedence is ``arg > ATHENAEUM_CACHE_DIR env >
+    ~/.cache/athenaeum default``. A subprocess env dict that redirects ``HOME``
+    but omits ``ATHENAEUM_CACHE_DIR`` is protected only INCIDENTALLY — by
+    ``HOME`` no longer pointing at the real home directory. Any athenaeum
+    Python code such a subprocess shells out to, that resolves its cache dir
+    with no explicit argument, falls through straight to the operator's real
+    ``~/.cache/athenaeum`` the moment a future edit changes what ``HOME``
+    points to while leaving the rest of the dict unchanged — exactly the
+    escape route the athenaeum#791 correction identified in
+    ``tests/test_shell_hooks.py``'s ``hook_env`` fixture (fixed alongside this
+    guard, which is why it now passes). Requiring ``ATHENAEUM_CACHE_DIR``
+    explicitly is belt-and-braces, not a behavior change: the example shell
+    hooks derive their own cache dir from ``HOME``, so this does not change
+    any hook's resolved cache dir today — it only protects the Python-side
+    resolver against a future dict that stops redirecting ``HOME``.
+    """
+    tests_root = Path(__file__).resolve().parent
+    self_path = Path(__file__).resolve()
+    offenders: list[str] = []
+    for py in sorted(tests_root.rglob("*.py")):
+        if py.resolve() == self_path:
+            continue  # this module's own docstrings quote the flagged shape as an example
+        text = py.read_text(encoding="utf-8")
+        for line_no, literal in _find_env_literal_spans(text):
+            if '"HOME"' not in literal and "'HOME'" not in literal:
+                continue
+            if "ATHENAEUM_CACHE_DIR" in literal:
+                continue
+            offenders.append(f"{py.relative_to(tests_root)}:{line_no}")
+    assert offenders == [], (
+        "env literal(s) set HOME without also setting ATHENAEUM_CACHE_DIR — a "
+        "hand-built subprocess env dict must not rely on HOME's redirect alone "
+        f"(athenaeum#791): {offenders}"
+    )

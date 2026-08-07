@@ -108,11 +108,14 @@ from athenaeum.config import (
 from athenaeum.config import (
     load_config,
     preflight_model_rates,
+    resolve_corrections_max_escalations_per_run,
+    resolve_corrections_runtime_share,
     resolve_delta_enabled,
     resolve_delta_max_affected_clusters,
     resolve_delta_max_affected_members,
     resolve_extra_intake_roots,
     resolve_full_compile_every_days,
+    resolve_heartbeat_interval,
     resolve_live_delta_enabled,
     resolve_model_rates,
     resolve_pull_before_run,
@@ -122,6 +125,11 @@ from athenaeum.config import (
     resolve_retire,
 )
 from athenaeum.config import resolve_cache_dir as _resolve_cache_dir_config
+from athenaeum.corrections import (
+    open_correction_ids,
+    render_correction_id_marker,
+    run_correction_phase,
+)
 from athenaeum.delta import (
     _relpath_for,
     compute_affected_clusters,
@@ -145,6 +153,7 @@ from athenaeum.models import (
     AutoMemoryFile,
     EntityAction,
     EntityIndex,
+    EscalationItem,
     ProcessingResult,
     RawFile,
     TokenUsage,
@@ -161,6 +170,7 @@ from athenaeum.pii import (
     detect_hard_bounce_fact,
     mark_bounced,
 )
+from athenaeum.progress import PhaseHeartbeat
 from athenaeum.provider import (
     ProviderConfigError,
     build_llm_client,
@@ -283,6 +293,15 @@ DEFAULT_STUCK_FILE_THRESHOLD = 3
 # log-scraper / watchdog can grep this without parsing prose — the athenaeum#663
 # requirement that a permanently-stuck file be LOUD, not merely logged.
 STUCK_FILE_PREFIX = "librarian-stuck-file"
+
+# Stable, machine-greppable prefix for the WARNING emitted when a raw file
+# fails entity-phase processing (issue athenaeum#800). Before this, the failure
+# reason lived only in an ERROR-level `log.exception`/`log.error` line and in
+# the run's trailing "Failed files" summary (filename only, no reason) — a
+# 2026-08-06 run (631aaade) recorded three failed files with no error text
+# captured at any level the operator's log sweep captured. This line carries
+# both the file path and the exception type/message at a WARNING level.
+ENTITY_FILE_FAILURE_PREFIX = "librarian-entity-file-failure"
 
 # Fallback valid values if schema files are missing
 FALLBACK_TYPES = [
@@ -2137,6 +2156,9 @@ class RunContext:
     usage: TokenUsage = field(default_factory=TokenUsage)
     merge_client: Any = None
     run_deadline: float | None = None
+    # Issue athenaeum#797: run-summary disposition counts from
+    # ``_run_correction_phase`` (``None`` until that phase runs).
+    corrections_summary: dict[str, Any] | None = None
     # Issue athenaeum#440: absolute monotonic instant after which the entity phase stops
     # CLAIMING new files, reserving the remainder of ``run_deadline`` for the
     # phases downstream of it (auto-memory C2/C3 and the C4 contradiction
@@ -2606,6 +2628,118 @@ def _arm_run_deadline(ctx: RunContext) -> None:
         ctx.out_run_stats.setdefault("failed_files", [])
 
 
+def _run_correction_phase(ctx: RunContext) -> None:
+    """Field-correction fast path (issue athenaeum#797, `docs/field-corrections.md`).
+
+    Runs immediately after :func:`_arm_run_deadline` and BEFORE the entity
+    tier phase (`docs/field-corrections.md` §10.1) — a corpus where the
+    reasoning tiers routinely exhaust the wall-clock budget must not starve
+    this deterministic, LLM-free path; ordering it first on its own small
+    fixed share means an overrun degrades the (already-degrading) expensive
+    path, never the cheap one.
+
+    Carries its OWN runtime share (:func:`~athenaeum.config.resolve_corrections_runtime_share`,
+    default 5%) derived from ``ctx.run_deadline`` exactly like
+    :func:`librarian_entity_runtime_share` does for the entity phase, and is
+    checked at BATCH boundaries only (never mid-batch,
+    `athenaeum.corrections.run_correction_phase`'s ``deadline_check``).
+
+    Makes ZERO LLM calls and consumes ZERO of ``ctx.usage.api_calls`` — the
+    assertion below is not decorative: every write this phase performs
+    (frontmatter merge, JSONL ledger append, `_pending_questions.md`
+    escalation, git retirement) is mechanical. A future edit that
+    accidentally threads ``ctx.merge_client`` into this path would trip it
+    immediately instead of silently eating into the entity phase's budget.
+    """
+    pending_path = ctx.wiki_root / "_pending_questions.md"
+    max_escalations = resolve_corrections_max_escalations_per_run(ctx.config)
+    open_ids = open_correction_ids(pending_path) if pending_path.exists() else set()
+    escalated_this_run: set[str] = set()
+    # issue athenaeum#797 §10.2: flood-guard summary line -- named per (submitter,
+    # field) so the operator has an actionable target when the cap trips.
+    cap_hits: dict[tuple[str, str], int] = {}
+
+    def _escalate_one(result: Any, outcome: Any) -> bool:
+        # issue athenaeum#797 §7.2/§5.4: this callback also records
+        # ``held-schema-proposal`` results (a schema-amendment proposal) on
+        # `_pending_questions.md`, not just ``escalated`` conflicts -- both
+        # are "the existing human-decision surface" the design doc names,
+        # and share the same correction_id dedup + §10.2 rate cap below.
+        if result.correction_id in open_ids:
+            return True  # already open -- dedup (§8/§10.2), still "recorded"
+        if len(escalated_this_run) >= max_escalations and max_escalations > 0:
+            key = (outcome.submitter, str(result.field))
+            cap_hits[key] = cap_hits.get(key, 0) + 1
+            return False
+        target_desc = json.dumps(result.target, sort_keys=True) if result.target else "?"
+        is_schema_proposal = result.disposition == "held-schema-proposal"
+        description_lines = [
+            f"Target: {target_desc}",
+            f"Field: {result.field}",
+            f"Op: {result.op}",
+            f"Value: {result.value!r}",
+            f"Source: {result.source}",
+            f"Reason: {result.reason}",
+        ]
+        if result.note:
+            description_lines.append(f"Note: {result.note}")
+        description_lines.append(render_correction_id_marker(result.correction_id))
+        item = EscalationItem(
+            raw_ref=f"{outcome.source}/{outcome.path.name}",
+            entity_name=result.entity_name or "unknown",
+            conflict_type="schema-amendment" if is_schema_proposal else "field-correction",
+            description="\n".join(description_lines),
+        )
+        tier4_escalate([item], pending_path, config=ctx.config, projects_root=ctx.projects_root)
+        open_ids.add(result.correction_id)
+        escalated_this_run.add(result.correction_id)
+        return True
+
+    _corrections_share = resolve_corrections_runtime_share(ctx.config)
+    corrections_deadline: float | None = None
+    if ctx.run_deadline is not None and _corrections_share > 0.0 and ctx.max_runtime is not None:
+        corrections_deadline = time.monotonic() + _corrections_share * ctx.max_runtime
+
+    def _deadline_check() -> bool:
+        return corrections_deadline is not None and time.monotonic() >= corrections_deadline
+
+    index = EntityIndex(ctx.wiki_root)
+    _corrections_calls_before = ctx.usage.api_calls
+    summary = run_correction_phase(
+        raw_root=ctx.raw_root,
+        wiki_root=ctx.wiki_root,
+        knowledge_root=ctx.knowledge_root,
+        index=index,
+        config=ctx.config,
+        escalate_one=_escalate_one,
+        deadline_check=_deadline_check,
+        dry_run=ctx.dry_run,
+    )
+    assert ctx.usage.api_calls == _corrections_calls_before, (
+        "field-correction phase must make zero LLM calls (issue athenaeum#797) — "
+        f"api_calls moved from {_corrections_calls_before} to {ctx.usage.api_calls}"
+    )
+    ctx.corrections_summary = summary
+    if cap_hits:
+        (submitter, field_name), count = max(cap_hits.items(), key=lambda kv: kv[1])
+        log.warning(
+            "corrections: escalation rate cap (%d/run) hit — highest count "
+            "submitter=%r field=%r (%d suppressed)",
+            max_escalations,
+            submitter,
+            field_name,
+            count,
+        )
+    if summary["batches_processed"] or summary["batches_carried_over"]:
+        log.info(
+            "corrections: %d batch(es) processed, %d carried over, "
+            "dispositions=%s",
+            summary["batches_processed"],
+            summary["batches_carried_over"],
+            summary["dispositions"],
+        )
+
+
 def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
     """Issue athenaeum#290 wiki-page dedup pass, then the post-phase deadline check.
 
@@ -2953,6 +3087,20 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # run state, rather than retried identically forever.
                     stuck_ledger = _load_stuck_ledger(ctx.wiki_root)
                     stuck_threshold = librarian_stuck_file_threshold(ctx.config)
+                    # Issue athenaeum#800: the entity phase was the one dark zone left
+                    # with ZERO heartbeat coverage — a nightly run that spent 85% of
+                    # its window here (2,918s of 3,446s, run 631aaade) emitted no
+                    # per-file progress at all, only aggregate `entity secs` + `calls`
+                    # after the fact. Mirrors merge-detect/merge-write/wiki-dedupe/
+                    # reresolve: one tick per raw file so per-file wall-clock is
+                    # recoverable by differencing consecutive `elapsed=` values.
+                    entity_heartbeat_interval = resolve_heartbeat_interval(ctx.config)
+                    entity_heartbeat = PhaseHeartbeat(
+                        "entity",
+                        total=len(ctx.raw_files),
+                        interval_s=entity_heartbeat_interval,
+                    )
+                    entity_heartbeat.start()
                     for i, raw in enumerate(ctx.raw_files):
                         # Issue athenaeum#526 (H10): heartbeat at every per-file boundary
                         # so a long healthy entity phase keeps the lock's
@@ -3031,12 +3179,27 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # that blew the real deadline still reports that (the
                         # more severe condition), never this.
                         if not ctx.dry_run and ctx.entity_budget_exceeded():
+                            # Issue athenaeum#800: name the resource that actually
+                            # tripped (the entity phase's runtime SHARE, not the
+                            # run-level API call budget) and give both numbers for
+                            # the latter. A run (631aaade) tripped this at 28/1200
+                            # calls — 2.3% of the call budget — while the message
+                            # named only the runtime share, which read as call-budget
+                            # exhaustion and misled the first pass of a diagnosis.
                             log.warning(
                                 "librarian: entity phase runtime share exhausted "
-                                "after %d file(s) - deferring %d remaining file(s) "
+                                "after %d file(s) (api_call_budget usage: %d/%d "
+                                "calls, %.1f%%) - deferring %d remaining file(s) "
                                 "and yielding the rest of the window to the "
                                 "auto-memory / C4 phases (resumable, issue athenaeum#440)",
                                 i,
+                                ctx.usage.api_calls,
+                                ctx.max_api_calls,
+                                (
+                                    100.0 * ctx.usage.api_calls / ctx.max_api_calls
+                                    if ctx.max_api_calls
+                                    else 0.0
+                                ),
                                 len(ctx.raw_files) - i,
                             )
                             ctx.deferred_refs = [r.ref for r in ctx.raw_files[i:]]
@@ -3089,6 +3252,20 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 raw.ref,
                                 type(exc.last_error).__name__,
                             )
+                            # Issue athenaeum#800: a run (631aaade) recorded three
+                            # failed files with no error text captured at any log
+                            # level the operator's sweep captured — the trailing
+                            # "Failed files" summary (below, end of run) names only
+                            # the filename. This WARNING carries the file path AND
+                            # the exception type/message at the point of failure.
+                            log.warning(
+                                "%s ref=%s reason=%s: %s",
+                                ENTITY_FILE_FAILURE_PREFIX,
+                                raw.ref,
+                                type(exc.last_error).__name__,
+                                exc.last_error,
+                            )
+                            entity_heartbeat.tick(raw.ref, error=1)
                             ctx.failed_files.append(raw.ref)
                             # Issue athenaeum#663: a genuinely transient overload will NOT
                             # recur on the same file N nights running, so counting
@@ -3109,6 +3286,19 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             continue
                         except Exception as exc:
                             log.exception("Failed to process %s", raw.ref)
+                            # Issue athenaeum#800: WARNING-level failure reason (file
+                            # path + exception type/message), distinct from the
+                            # ERROR-level traceback above and from the trailing
+                            # "Failed files" filename-only summary — see the
+                            # TransientAPIError branch above for the full rationale.
+                            log.warning(
+                                "%s ref=%s reason=%s: %s",
+                                ENTITY_FILE_FAILURE_PREFIX,
+                                raw.ref,
+                                type(exc).__name__,
+                                exc,
+                            )
+                            entity_heartbeat.tick(raw.ref, error=1)
                             ctx.failed_files.append(raw.ref)
                             # Issue athenaeum#663: same stuck-file accounting for a
                             # non-transient processing failure (malformed file, a
@@ -3138,6 +3328,17 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         ctx.total_degraded += getattr(result, "degraded", 0)
                         ctx.total_truncated += getattr(result, "truncated", 0)  # athenaeum#476
 
+                        # Issue athenaeum#800: tick the entity heartbeat for this file —
+                        # `compiled` when it produced a create/update, `unchanged`
+                        # otherwise (T1-only match, dry-run preview, or an all-skip
+                        # classification). Mirrors merge-write's compiled=1-per-write.
+                        _entity_made_change = bool(result.created or result.updated)
+                        entity_heartbeat.tick(
+                            raw.ref,
+                            compiled=1 if _entity_made_change else 0,
+                            unchanged=0 if _entity_made_change else 1,
+                        )
+
                         if not ctx.dry_run:
                             raw.path.unlink()
                             log.info("  Deleted: %s", raw.path)
@@ -3147,6 +3348,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             # consecutive count rather than inheriting a stale one.
                             stuck_ledger.pop(raw.ref, None)
 
+                    entity_heartbeat.done()  # issue athenaeum#800
                     # Issue athenaeum#663: persist the updated stuck-file ledger (or remove
                     # it when empty). Durable cross-run state, committed with the
                     # run's git snapshot exactly like the deferred manifest.
@@ -3990,6 +4192,12 @@ def run(
     # Phase: build the shared LLM client, seed `usage`, arm the run-level
     # wall-clock deadline.
     _arm_run_deadline(ctx)
+
+    # Phase: field-correction fast path (issue athenaeum#797) -- deterministic,
+    # LLM-free, own runtime share. Ordered here (after the deadline is armed,
+    # before the entity tier phase) per docs/field-corrections.md §10.1 so an
+    # entity-phase overrun never starves this cheap path.
+    _run_correction_phase(ctx)
 
     # Phase: OS signal handling is installed/removed INSIDE the entity-tier
     # phase below (`_run_entity_tier_phase`), not as its own standalone
