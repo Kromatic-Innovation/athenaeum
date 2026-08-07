@@ -273,6 +273,237 @@ class TestWorkedExampleEndToEnd:
         # Nothing escalated for this fully-conformant batch.
         assert not (wiki / "_pending_questions.md").exists()
 
+    def _seed_scratch_tree(self, root: Path, meta: dict) -> tuple[Path, Path]:
+        """Shared scaffolding for the §11 end-to-end tests: schema tables, one
+        entity page, and a git-initialized ``knowledge_root`` (mirrors
+        `test_11_2_bulk_relationship_graph`'s exact seeding pattern)."""
+        wiki = root / "wiki"
+        (wiki / "_schema").mkdir(parents=True)
+        (wiki / "_schema" / "types.md").write_text("# Types\n\n| Type |\n|------|\n| person |\n")
+        (wiki / "_schema" / "tags.md").write_text("# Tags\n\n| Tag |\n|-----|\n| active |\n")
+        (wiki / "_schema" / "access-levels.md").write_text(
+            "# Access\n\n| Level |\n|-------|\n| internal |\n"
+        )
+        page = _write_page(wiki, "entity.md", meta)
+        return wiki, page
+
+    def _seed_git(self, root: Path) -> None:
+        subprocess.run(["git", "init", "-q", "-b", "test-branch"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
+        )
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=root, check=True)
+
+    def test_11_1_delivery_status_flag_monotone_and_pii_routed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§11.1 end-to-end: a delivery-status monitor's `bounced` correction
+        is BOTH the monotone case (§6.3) and the sensitivity-routed case
+        (§7.1) -- it is set regardless of precedence AND lands on the PII
+        surface rather than the entity page it named, even though the
+        correction proposed entity frontmatter as the destination."""
+        root = tmp_path / "knowledge"
+        root.mkdir()
+        meta = {"uid": "person-alex", "type": "person", "name": "Alex Doe"}
+        wiki, page = self._seed_scratch_tree(root, meta)
+        page_before = page.read_text()
+
+        (root / "registry.json").write_text(
+            json.dumps(
+                {
+                    "entities": {
+                        "person-alex": {
+                            "type": "person",
+                            "handles": {"alt_emails": ["alex@example.org"]},
+                        }
+                    }
+                }
+            )
+        )
+
+        raw = root / "raw" / "delivery-monitor"
+        raw.mkdir(parents=True)
+        batch = raw / "20260806T140211Z-9f3ac1d2.jsonl"
+        batch.write_text(
+            _batch(
+                {
+                    "record": "correction",
+                    "target": {"type": "person", "handle": {"alt_emails": "alex@example.org"}},
+                    "op": "set",
+                    "field": "bounced",
+                    "value": "2026-08-06",
+                    "note": "permanent delivery failure reported by the receiving server",
+                },
+                submitter="delivery-monitor",
+                defaults={
+                    "source": "api:delivery-monitor:2026-08-06",
+                    "observed_at": "2026-08-06T14:01:55Z",
+                },
+            )
+        )
+        self._seed_git(root)
+
+        config_path = root / "athenaeum.yaml"
+        config_path.write_text(
+            "librarian:\n"
+            "  corrections:\n"
+            "    fields:\n"
+            "      bounced:\n"
+            "        shape: scalar\n"
+            "        writers: [delivery-monitor]\n"
+            "        monotone: true\n"
+            "    sensitive_fields:\n"
+            "      bounced: pii\n"
+            "storage:\n"
+            "  mapping:\n"
+            "    pii: excluded\n"
+        )
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        rc = run(raw_root=root / "raw", wiki_root=wiki, knowledge_root=root, max_runtime=30)
+        assert rc == 0
+
+        # The entity page named by the correction is untouched.
+        assert page.read_text() == page_before
+
+        # The fact landed on the PII surface instead.
+        surface_file = root / "excluded" / "person-alex.json"
+        assert surface_file.exists()
+        assert json.loads(surface_file.read_text())["bounced"] == "2026-08-06"
+
+        ledger = wiki / "_corrections_applied.jsonl"
+        record = json.loads(ledger.read_text().splitlines()[0])
+        assert record["dispositions"].get("routed-elsewhere") == 1
+        assert not batch.exists()  # retired
+
+    def test_11_3_third_party_enrichment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§11.3: `api:` (rank 3) overwrites a `claude:`-sourced title (rank
+        6) end-to-end through `run()`."""
+        root = tmp_path / "knowledge"
+        root.mkdir()
+        meta = {"uid": "person-alex-doe-a1b2c3d4", "type": "person", "name": "Alex Doe"}
+        wiki, page = self._seed_scratch_tree(root, meta)
+        page.write_text(
+            page.read_text().replace(
+                "name: Alex Doe",
+                "name: Alex Doe\ncurrent_title: Engineer\n"
+                "field_sources:\n  current_title: 'claude:session-1'",
+            )
+        )
+
+        raw = root / "raw" / "enrichment-service"
+        raw.mkdir(parents=True)
+        batch = raw / "20260806T060000Z-5e6f7a8b.jsonl"
+        batch.write_text(
+            _batch(
+                {
+                    "record": "correction",
+                    "correction_id": "c3",
+                    "target": {"uid": "person-alex-doe-a1b2c3d4"},
+                    "op": "set",
+                    "field": "current_title",
+                    "value": "VP Engineering",
+                },
+                submitter="enrichment-service",
+                defaults={
+                    "source": "api:enrichment-vendor:2026-08-06",
+                    "observed_at": "2026-08-06T05:58:40Z",
+                },
+            )
+        )
+        self._seed_git(root)
+
+        config_path = root / "athenaeum.yaml"
+        config_path.write_text(
+            "librarian:\n"
+            "  corrections:\n"
+            "    fields:\n"
+            "      current_title:\n"
+            "        shape: scalar\n"
+            "        writers: [enrichment-service]\n"
+        )
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        rc = run(raw_root=root / "raw", wiki_root=wiki, knowledge_root=root, max_runtime=30)
+        assert rc == 0
+
+        assert "current_title: VP Engineering" in page.read_text()
+
+        ledger = wiki / "_corrections_applied.jsonl"
+        record = json.loads(ledger.read_text().splitlines()[0])
+        assert record["dispositions"].get("applied") == 1
+        assert not batch.exists()  # retired
+
+    def test_11_4_rolled_up_activity_counters(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§11.4: two rollup counters (not the underlying events, §12) applied
+        end-to-end through `run()`, both hoisting `op` from envelope defaults
+        and naming only `field`/`value` per record."""
+        root = tmp_path / "knowledge"
+        root.mkdir()
+        meta = {"uid": "person-alex-doe-a1b2c3d4", "type": "person", "name": "Alex Doe"}
+        wiki, page = self._seed_scratch_tree(root, meta)
+
+        raw = root / "raw" / "cadence-tracker"
+        raw.mkdir(parents=True)
+        batch = raw / "20260806T070000Z-2c3d4e5f.jsonl"
+        batch.write_text(
+            _batch(
+                {
+                    "record": "correction",
+                    "correction_id": "e5",
+                    "target": {"uid": "person-alex-doe-a1b2c3d4"},
+                    "field": "last_contacted_at",
+                    "value": "2026-08-04",
+                },
+                {
+                    "record": "correction",
+                    "correction_id": "f6",
+                    "target": {"uid": "person-alex-doe-a1b2c3d4"},
+                    "field": "contact_count_90d",
+                    "value": 7,
+                },
+                submitter="cadence-tracker",
+                defaults={
+                    "op": "set",
+                    "source": "script:cadence-rollup",
+                    "observed_at": "2026-08-06T07:00:00Z",
+                },
+            )
+        )
+        self._seed_git(root)
+
+        config_path = root / "athenaeum.yaml"
+        config_path.write_text(
+            "librarian:\n"
+            "  corrections:\n"
+            "    fields:\n"
+            "      last_contacted_at:\n"
+            "        shape: scalar\n"
+            "        writers: [cadence-tracker]\n"
+            "      contact_count_90d:\n"
+            "        shape: scalar\n"
+            "        writers: [cadence-tracker]\n"
+        )
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        rc = run(raw_root=root / "raw", wiki_root=wiki, knowledge_root=root, max_runtime=30)
+        assert rc == 0
+
+        text = page.read_text()
+        assert "last_contacted_at: '2026-08-04'" in text or "last_contacted_at: 2026-08-04" in text
+        assert "contact_count_90d: 7" in text
+
+        ledger = wiki / "_corrections_applied.jsonl"
+        record = json.loads(ledger.read_text().splitlines()[0])
+        assert record["dispositions"].get("applied") == 2
+        assert not batch.exists()  # retired
+
 
 class TestBatchRetirement:
     def test_fully_deferred_batch_reruns_three_times_one_ledger_entry(
@@ -417,6 +648,71 @@ class TestEscalationDedup:
         after = pending.read_text()
         assert after.count(render_correction_id_marker(cid)) == 1
         assert before in after
+
+    def test_cap_hit_emits_summary_line(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """§10.2: hitting the escalation rate cap emits one summary line
+        naming the submitter/field/count with the highest suppressed count —
+        "the actionable signal anyway", not a silent drop."""
+        wiki = tmp_path / "wiki"
+        for uid in ("person-a", "person-b"):
+            page = _write_page(wiki, f"{uid}.md", {"uid": uid, "type": "person", "name": uid})
+            page.write_text(
+                page.read_text().replace(
+                    f"name: {uid}",
+                    f"name: {uid}\ncurrent_title: CTO\n"
+                    "field_sources:\n  current_title: 'api:apollo'",
+                )
+            )
+        raw = tmp_path / "raw" / "enrichment-service"
+        raw.mkdir(parents=True)
+        (raw / "20260806T030000Z-1a2b3c4d.jsonl").write_text(
+            _batch(
+                {
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "op": "set",
+                    "field": "current_title",
+                    "value": "VP Engineering",
+                    "source": "api:enrichment-vendor",
+                    "observed_at": "2026-08-06T05:58:40Z",
+                },
+                {
+                    "record": "correction",
+                    "target": {"uid": "person-b"},
+                    "op": "set",
+                    "field": "current_title",
+                    "value": "VP Engineering",
+                    "source": "api:enrichment-vendor",
+                    "observed_at": "2026-08-06T05:58:40Z",
+                },
+                submitter="enrichment-service",
+            )
+        )
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "current_title": {
+                            "shape": "scalar",
+                            "writers": ["enrichment-service"],
+                        }
+                    },
+                    "max_escalations_per_run": 1,
+                }
+            }
+        }
+        with caplog.at_level("WARNING", logger="athenaeum.librarian"):
+            _run_correction_phase(_make_ctx(tmp_path, config))
+
+        summary_lines = [
+            r.message for r in caplog.records if "escalation rate cap" in r.message
+        ]
+        assert len(summary_lines) == 1
+        assert "enrichment-service" in summary_lines[0]
+        assert "current_title" in summary_lines[0]
+        assert "1 suppressed" in summary_lines[0]
 
 
 class TestSchemaAmendmentProposal:
