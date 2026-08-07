@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Qualify three bare issue references that failed `public-safe-lint`
+  (athenaeum#768).** The reconciliation pass landed two references to
+  athenaeum#765 in `docs/deprecated-email-tracking.md` and one to
+  athenaeum#712 in `CHANGELOG.md` without a repo prefix, tripping the
+  `bare-issue-ref` rule on `develop`. All three now carry the `athenaeum`
+  prefix the rest of the document already uses.
+
 ### Documentation
 
 - **Correct `docs/deprecated-email-tracking.md` — Voltaire is the reporter,
@@ -35,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a second time the same day, once athenaeum#765 actually merged (PR
   athenaeum#826):** the doc's Q1 and Q3 previously described the eventual
   mark as "whatever athenaeum#712's verdict ledger produces" — the shipped
-  code doesn't wait on #712 at all. It reuses athenaeum#308's existing
+  code doesn't wait on athenaeum#712 at all. It reuses athenaeum#308's existing
   `valid_until` claim-validity close directly (`pii.mark_bounced` /
   `pii.is_bounced`), gated by a new LLM-free Tier 0 branch
   (`librarian.tier0_bounce_mark`) that requires the raw note's own

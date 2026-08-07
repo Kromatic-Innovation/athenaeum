@@ -7,8 +7,9 @@ code, and reconciled again the same day against the SHIPPED athenaeum#765
 implementation (PR athenaeum#826, merged).** This document was the
 deliverable of issue athenaeum#565 (PR athenaeum#652). It originally answered
 five design questions; three of the five needed correction after
-ratification, and Q3's contract details needed a further pass once #765
-actually landed and the shape of the shipped code diverged from the plan:
+ratification, and Q3's contract details needed a further pass once
+athenaeum#765 actually landed and the shape of the shipped code diverged
+from the plan:
 
 - **Q1 and Q2 are superseded** by the v6 memory model direction (athenaeum#712,
   athenaeum#709) — marked in place below, not deleted, per athenaeum#768. The
@@ -289,7 +290,8 @@ Rules of the contract:
    merge) for the deterministic fast path in point 4 to fire at all; an
    omitted `observed_at` or `source` falls the note straight through to the
    ordinary reasoning tiers, unmarked as a bounce, with no error.
-4. **How recognition actually works (added post-#765-merge, athenaeum#768):**
+4. **How recognition actually works (added post-athenaeum#765-merge,
+   athenaeum#768):**
    this is NOT "the librarian's normal classification pass" in the LLM
    sense — it is a new, LLM-free **Tier 0** branch,
    `librarian.tier0_bounce_mark`, that runs before Tier 1/2/3 in
