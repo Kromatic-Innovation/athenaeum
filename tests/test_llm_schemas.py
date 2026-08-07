@@ -21,7 +21,7 @@ from typing import get_args
 
 import pytest
 
-from athenaeum import contradictions, llm_schemas, query_topics, resolutions
+from athenaeum import contradictions, llm_schemas, push_metrics, query_topics, resolutions, spend
 from athenaeum.config import resolve_cache_dir
 from athenaeum.llm_schemas import SCHEMA_MISMATCH_MARKER
 from athenaeum.models import CLAIM_KINDS
@@ -407,47 +407,18 @@ class TestObservationsPathIsolation:
         assert resolved == env_cache_dir / llm_schemas.OBSERVATIONS_FILENAME
         assert resolve_cache_dir(cache_dir=None) == env_cache_dir
 
-    def test_nested_pytest_run_does_not_pollute_real_ledger(self) -> None:
-        """AC1: running the suite writes ZERO records into the REAL
-        ``~/.cache/athenaeum/_llm_schema_observations.jsonl`` — proven by
-        spawning a genuinely separate ``pytest`` child process (not merely
-        inspecting fixture code), snapshotting the real ledger's line count
-        (or its absence) before and after, and asserting it is unchanged.
-
-        The child's test calls ``record_observation`` with NO explicit
-        ``cache_dir``, so if ``tests/conftest.py``'s autouse isolation fixture
-        did not fire in the child process, the record would land in the real
-        ledger — exactly the athenaeum#750 defect. The child is launched with
-        this test's own ``ATHENAEUM_CACHE_DIR`` / observations-enabled env
-        overrides stripped (not just left as inherited monkeypatch state), so
-        the child's OWN conftest.py autouse fixture is what has to do the
-        isolating — proving the mechanism itself, not this test's env.
-        """
-        real_ledger = (
-            Path("~/.cache/athenaeum").expanduser() / llm_schemas.OBSERVATIONS_FILENAME
-        )
-
-        def _line_count() -> int:
-            if not real_ledger.exists():
-                return 0
-            return len(real_ledger.read_text(encoding="utf-8").splitlines())
-
-        before = _line_count()
-
-        # The child test file MUST live inside the real tests/ directory (not
-        # under tmp_path) so that pytest's normal conftest.py auto-loading
-        # picks up the REAL tests/conftest.py — that autouse fixture is the
-        # exact mechanism under test. tmp_path is a sibling directory pytest
-        # would not associate with tests/conftest.py at all, which would prove
-        # nothing. Cleaned up in `finally` regardless of outcome.
-        repo_root = Path(__file__).resolve().parent.parent
-        tests_dir = repo_root / "tests"
-        child_test_path = tests_dir / "test__nested_pollution_probe_750.py"
-        assert not child_test_path.exists(), (
-            f"stray probe file already present at {child_test_path}; "
-            "a previous run may have crashed before cleanup"
-        )
-        child_test_path.write_text(
+    # AC1/AC2 (athenaeum#791): the pattern below was originally pinned to ONE
+    # cache-dir artifact (``_llm_schema_observations.jsonl``, athenaeum#750).
+    # "the count is the audit trail" applies just as much to the OTHER
+    # artifacts a no-arg cache-dir resolution can escape into — ``spend.jsonl``
+    # (athenaeum#776) and, per the evidence that opened athenaeum#791,
+    # ``_push_records.jsonl`` / ``_push_references.jsonl``. Three independent
+    # ledgers hitting the same escape is the signal that the invariant is
+    # "no cache-dir artifact leaks", not "this one file doesn't leak" — so this
+    # canary is parametrized over every artifact instead of naming one.
+    _NESTED_POLLUTION_CASES = [
+        pytest.param(
+            llm_schemas.OBSERVATIONS_FILENAME,
             textwrap.dedent(
                 """
                 from athenaeum.llm_schemas import record_observation
@@ -456,19 +427,134 @@ class TestObservationsPathIsolation:
                     # No cache_dir kwarg — exercises the SAME no-arg resolution
                     # path production call sites use, so this only stays out of
                     # the real ledger if the child process's own conftest.py
-                    # autouse fixture isolated ATHENAEUM_CACHE_DIR.
+                    # isolation (session AND per-test) fired.
                     record_observation(
                         contract="query_topics",
-                        call_site="nested-pytest-pollution-probe",
+                        call_site="nested-pytest-pollution-probe-791",
                         outcome="ok",
                     )
                 """
             ),
-            encoding="utf-8",
+            id="llm_schema_observations",
+        ),
+        pytest.param(
+            spend.LEDGER_FILENAME,
+            textwrap.dedent(
+                """
+                from athenaeum.models import TokenUsage
+                from athenaeum.spend import record_spend
+
+                def test_calls_record_spend_with_no_explicit_cache_dir():
+                    # Unlike observations, the spend ledger has no separate
+                    # "disabled under test" flag — it is protected ONLY by the
+                    # cache-dir redirect, so this genuinely exercises it.
+                    wrote = record_spend(
+                        TokenUsage(input_tokens=1, output_tokens=1, api_calls=1),
+                        run_type="nested-pytest-pollution-probe-791",
+                        provider="claude-cli",
+                    )
+                    assert wrote is True
+                """
+            ),
+            id="spend",
+        ),
+        pytest.param(
+            push_metrics.PUSH_RECORDS_FILENAME,
+            textwrap.dedent(
+                """
+                from athenaeum.push_metrics import build_push_record, record_push
+
+                def test_calls_record_push_with_no_explicit_cache_dir():
+                    # No cache_dir kwarg — the exact no-arg resolution the
+                    # athenaeum#791 defect took (75 synthetic rows in the
+                    # real ~/.cache/athenaeum/_push_records.jsonl).
+                    record = build_push_record(
+                        session_id="nested-pytest-pollution-probe-791",
+                        query="probe query",
+                        backend="fts5",
+                        hits=[
+                            ("probe.md", {"uid": "probe0001"}, "probe snippet text"),
+                        ],
+                    )
+                    assert record_push(record) is True
+                """
+            ),
+            id="push_records",
+        ),
+        pytest.param(
+            push_metrics.REFERENCE_RECORDS_FILENAME,
+            textwrap.dedent(
+                """
+                from athenaeum.push_metrics import (
+                    ReferenceResult,
+                    record_reference_result,
+                )
+
+                def test_calls_record_reference_result_with_no_explicit_cache_dir():
+                    result = ReferenceResult(
+                        session_id="nested-pytest-pollution-probe-791",
+                        ts="2026-01-01T00:00:00Z",
+                        pushed_ids=["probe0001"],
+                        referenced_ids=["probe0001"],
+                    )
+                    assert record_reference_result(result) is True
+                """
+            ),
+            id="push_references",
+        ),
+    ]
+
+    @pytest.mark.parametrize("artifact_filename, child_body", _NESTED_POLLUTION_CASES)
+    def test_nested_pytest_run_does_not_pollute_real_cache_dir_artifact(
+        self, artifact_filename: str, child_body: str
+    ) -> None:
+        """AC1/AC2: running the suite writes ZERO records into any REAL
+        ``~/.cache/athenaeum`` cache-dir artifact — proven by spawning a
+        genuinely separate ``pytest`` child process (not merely inspecting
+        fixture code) for each artifact, snapshotting that artifact's real
+        line count (or its absence) before and after, and asserting it is
+        unchanged.
+
+        Each child's test calls the artifact's own production write function
+        with NO explicit ``cache_dir``, so if ``tests/conftest.py``'s
+        isolation (the whole-suite ``pytest_configure`` redirect, and/or the
+        per-test ``_isolate_cache_dir`` fixture) did not fire in the child
+        process, the record would land in the real ledger — exactly the
+        athenaeum#750/#776/#791 defect class. The child is launched with this
+        test's own ``ATHENAEUM_CACHE_DIR`` / ``ATHENAEUM_SPEND_LEDGER`` /
+        observations-enabled env overrides stripped (not just left as
+        inherited monkeypatch state), so the child's OWN conftest.py is what
+        has to do the isolating — proving the mechanism itself, not this
+        test's env.
+        """
+        real_artifact = Path("~/.cache/athenaeum").expanduser() / artifact_filename
+
+        def _line_count() -> int:
+            if not real_artifact.exists():
+                return 0
+            return len(real_artifact.read_text(encoding="utf-8").splitlines())
+
+        before = _line_count()
+
+        # The child test file MUST live inside the real tests/ directory (not
+        # under tmp_path) so that pytest's normal conftest.py auto-loading
+        # picks up the REAL tests/conftest.py — that isolation is the exact
+        # mechanism under test. tmp_path is a sibling directory pytest would
+        # not associate with tests/conftest.py at all, which would prove
+        # nothing. Cleaned up in `finally` regardless of outcome.
+        repo_root = Path(__file__).resolve().parent.parent
+        tests_dir = repo_root / "tests"
+        case_slug = artifact_filename.strip("_").split(".")[0]
+        child_test_path = tests_dir / f"test__nested_pollution_probe_791_{case_slug}.py"
+        assert not child_test_path.exists(), (
+            f"stray probe file already present at {child_test_path}; "
+            "a previous run may have crashed before cleanup"
         )
+        child_test_path.write_text(child_body, encoding="utf-8")
 
         child_env = dict(os.environ)
         child_env.pop("ATHENAEUM_CACHE_DIR", None)
+        child_env.pop("ATHENAEUM_SPEND_LEDGER", None)
         child_env.pop("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", None)
 
         try:
@@ -498,6 +584,6 @@ class TestObservationsPathIsolation:
 
         after = _line_count()
         assert after == before, (
-            "nested pytest run polluted the REAL observation ledger "
-            f"({real_ledger}): line count went from {before} to {after}"
+            "nested pytest run polluted the REAL cache-dir artifact "
+            f"({real_artifact}): line count went from {before} to {after}"
         )

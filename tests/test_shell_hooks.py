@@ -101,6 +101,16 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
 
     env = {
         "HOME": str(tmp_path),
+        # Belt-and-braces (athenaeum#791): the hooks derive their own cache
+        # dir from HOME (see e.g. session-start-recall.sh's
+        # ``CACHE_DIR="${HOME}/.cache/athenaeum"``), so redirecting HOME
+        # above is already sufficient — but any athenaeum Python code this
+        # hook shells out to resolves its cache dir via
+        # ``ATHENAEUM_CACHE_DIR env > default``, which falls through to the
+        # real ``~/.cache/athenaeum`` if HOME were ever a real home dir
+        # (e.g. a future edit that drops the HOME redirect but keeps this
+        # dict). Setting it explicitly here closes that route too.
+        "ATHENAEUM_CACHE_DIR": str(tmp_path / ".cache" / "athenaeum"),
         "PATH": os.environ.get("PATH", ""),
         "KNOWLEDGE_ROOT": str(knowledge),
         "ATHENAEUM_SRC": str(athenaeum_src),
@@ -135,6 +145,8 @@ class TestSessionStartRecall:
         _require("bash")
         env = {
             "HOME": str(tmp_path),
+            # See the hook_env fixture's comment (athenaeum#791) for why.
+            "ATHENAEUM_CACHE_DIR": str(tmp_path / ".cache" / "athenaeum"),
             "PATH": os.environ.get("PATH", ""),
             "KNOWLEDGE_ROOT": str(tmp_path / "does-not-exist"),
         }
@@ -250,7 +262,13 @@ class TestUserPromptRecall:
 class TestPreCompactSave:
     def test_emits_system_message_json(self, tmp_path: Path) -> None:
         _require("bash")
-        env = {"HOME": str(tmp_path), "PATH": os.environ.get("PATH", "")}
+        # See the hook_env fixture's comment (athenaeum#791) for why
+        # ATHENAEUM_CACHE_DIR is set explicitly alongside HOME.
+        env = {
+            "HOME": str(tmp_path),
+            "ATHENAEUM_CACHE_DIR": str(tmp_path / ".cache" / "athenaeum"),
+            "PATH": os.environ.get("PATH", ""),
+        }
         result = subprocess.run(
             ["bash", str(PRE_COMPACT)],
             env=env,
@@ -277,6 +295,8 @@ class TestWikiContextInject:
         _require("bash")
         env = {
             "HOME": str(tmp_path),
+            # See the hook_env fixture's comment (athenaeum#791) for why.
+            "ATHENAEUM_CACHE_DIR": str(tmp_path / ".cache" / "athenaeum"),
             "PATH": os.environ.get("PATH", ""),
             "KNOWLEDGE_ROOT": str(tmp_path / "does-not-exist"),
         }
@@ -413,6 +433,8 @@ class TestRebuildIndex:
         _require("bash")
         env = {
             "HOME": str(tmp_path),
+            # See the hook_env fixture's comment (athenaeum#791) for why.
+            "ATHENAEUM_CACHE_DIR": str(tmp_path / ".cache" / "athenaeum"),
             "PATH": os.environ.get("PATH", ""),
             "KNOWLEDGE_ROOT": str(tmp_path / "does-not-exist"),
         }
