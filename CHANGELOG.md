@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Weekly subscription token limit + max-percent-per-day ceiling
+  (athenaeum#785).** `ceiling_tripped()`'s four existing ceilings are correctly
+  unit-split by billing path (subscription bounded in TOKENS, metered API
+  bounded in DOLLARS) but all four are absolute — there was no way to express
+  "no more than N% of what I've allotted myself this week." Adding a
+  percentage sooner was blocked on having a denominator at all: Claude Code
+  subscription limits are rolling-window and are not exposed to athenaeum as
+  a readable quota, so nothing in `provider.py::_parse_envelope` or the
+  ledger schema carries one. New `config.resolve_spend_weekly_token_limit`
+  (`ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT` env > `spend.weekly_token_limit` yaml
+  > `None`) lets the operator STATE that denominator; new
+  `config.resolve_spend_max_pct_per_day` (`ATHENAEUM_SPEND_MAX_PCT_PER_DAY`
+  env > `spend.max_pct_per_day` yaml > `None`) is the percentage taken of it.
+  Both mirror the existing four `resolve_spend_max_*` resolvers' shape via
+  the same shared `_resolve_optional_positive_number` helper, including its
+  malformed-input handling (`bool` / non-numeric / non-positive all fall
+  through to `None`, never a nonsensical ceiling). When both are set,
+  `ceiling_tripped()` enforces a FIFTH, independent ceiling — an effective
+  daily subscription token cap of `weekly_token_limit / 7 * (max_pct_per_day
+  / 100)` — reusing `_start_of_utc_day` for the day boundary (matching all
+  four existing per-day ceilings; a rolling 7-day window is explicitly
+  deferred, per the issue's design notes) and including prior spend already
+  committed earlier the same UTC day, exactly like `spend_today()`'s existing
+  per-day accounting. The breach message names both the derived daily
+  ceiling and the declared weekly limit it came from, so the operator can see
+  what the percentage was taken of (for example: `"per-day subscription
+  percent-of-weekly ceiling reached (51,000/50,000 tokens today, 50% of
+  weekly limit 700,000 tokens)"`). **Strictly opt-in, and setting only ONE of
+  the two knobs is a no-op** — a weekly limit with no percentage has nothing
+  to apply, and a percentage with no weekly figure has nothing to take a
+  percentage of — so there is no partial-config surprise; both cases are
+  covered by tests. **The unit split stays load-bearing**: this ceiling is
+  token-denominated and gates the `claude-cli` SUBSCRIPTION path only — it
+  never reaches the metered API branch of `ceiling_tripped()`, so an
+  API-path run is unaffected by it (asserted by test). No conversion rate
+  was introduced to blend the two into one number: `subscription` notional
+  tokens and `api` real dollars remain two metrics this ledger never sums
+  (athenaeum#487, cwc#1629). The existing four ceilings and their tests are
+  UNCHANGED. Per-area/per-knob halting (stopping one module while another
+  continues) and a rolling 7-day window are both explicitly out of scope,
+  deferred to the per-knob provider-routing issue and a future additive
+  change respectively.
+
 - **Per-MTok pricing is now config-owned, with a startup preflight that fails
   loudly on an unpriced model (athenaeum#783).** Model pricing was the only
   cost-relevant knob with no config resolver — the rate table was a bare
