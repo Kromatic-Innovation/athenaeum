@@ -2217,7 +2217,8 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
 # ``resolve_storage_mapping``'s precedent: no ``ATHENAEUM_*`` env override
 # (a dict has no single scalar env encoding), EMPTY by default. The scalar
 # bound resolvers further down follow ``resolve_delta_max_affected_clusters``'s
-# precedent: ``ATHENAEUM_CORRECTIONS_<KEY>`` env > yaml > code default.
+# precedent: each resolver's own named env var (see its docstring) wins
+# over yaml, which wins over the code default.
 
 
 def resolve_corrections_fields(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -2333,23 +2334,35 @@ def resolve_corrections_schema_slots(config: dict[str, Any] | None) -> dict[str,
     return slots
 
 
-def _corrections_bound(
+def _resolve_corrections_int(
     config: dict[str, Any] | None,
-    *,
     env_var: str,
+    section: str,
+    subsection: str,
     yaml_key: str,
     default: int,
 ) -> int:
-    """Shared resolver body for the four §10.2 integer volume bounds."""
+    """Shared body for the four §10.2 integer volume bounds below.
+
+    ``section``/``subsection`` are always ``"librarian"``/``"corrections"``
+    in practice — passed as explicit literal arguments (not hard-coded in
+    this helper's own body) so that
+    ``tests/test_config_resolver_parity_generic.py``'s static discovery
+    (which walks string-literal call arguments AT EACH RESOLVER'S OWN CALL
+    SITE, in source order) sees the full ``env_var`` -> ``librarian`` ->
+    ``corrections`` -> ``<key>`` chain from a single call, in the correct
+    parent-to-leaf order — a three-level nesting the generic sentinel
+    battery cannot otherwise synthesize from a delegated helper's own body.
+    """
     value = _env_number(env_var, int)
     if value is not None and value > 0:
         return value
     if isinstance(config, dict):
-        librarian_cfg = config.get("librarian") or {}
-        if isinstance(librarian_cfg, dict):
-            corrections_cfg = librarian_cfg.get("corrections")
-            if isinstance(corrections_cfg, dict):
-                raw = corrections_cfg.get(yaml_key)
+        section_cfg = config.get(section) or {}
+        if isinstance(section_cfg, dict):
+            subsection_cfg = section_cfg.get(subsection)
+            if isinstance(subsection_cfg, dict):
+                raw = subsection_cfg.get(yaml_key)
                 if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
                     return raw
     return default
@@ -2357,41 +2370,49 @@ def _corrections_bound(
 
 def resolve_corrections_max_records_per_batch(config: dict[str, Any] | None) -> int:
     """§10.2 ``librarian.corrections.max_records_per_batch`` (default 5,000)."""
-    return _corrections_bound(
+    return _resolve_corrections_int(
         config,
-        env_var="ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_BATCH",
-        yaml_key="max_records_per_batch",
-        default=5000,
+        "ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_BATCH",
+        "librarian",
+        "corrections",
+        "max_records_per_batch",
+        5000,
     )
 
 
 def resolve_corrections_max_records_per_run(config: dict[str, Any] | None) -> int:
     """§10.2 ``librarian.corrections.max_records_per_run`` (default 50,000)."""
-    return _corrections_bound(
+    return _resolve_corrections_int(
         config,
-        env_var="ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_RUN",
-        yaml_key="max_records_per_run",
-        default=50000,
+        "ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_RUN",
+        "librarian",
+        "corrections",
+        "max_records_per_run",
+        50000,
     )
 
 
 def resolve_corrections_max_batch_bytes(config: dict[str, Any] | None) -> int:
     """§10.2 ``librarian.corrections.max_batch_bytes`` (default 32 MiB)."""
-    return _corrections_bound(
+    return _resolve_corrections_int(
         config,
-        env_var="ATHENAEUM_CORRECTIONS_MAX_BATCH_BYTES",
-        yaml_key="max_batch_bytes",
-        default=32 * 1024 * 1024,
+        "ATHENAEUM_CORRECTIONS_MAX_BATCH_BYTES",
+        "librarian",
+        "corrections",
+        "max_batch_bytes",
+        32 * 1024 * 1024,
     )
 
 
 def resolve_corrections_max_escalations_per_run(config: dict[str, Any] | None) -> int:
     """§10.2 ``librarian.corrections.max_escalations_per_run`` (default 50)."""
-    return _corrections_bound(
+    return _resolve_corrections_int(
         config,
-        env_var="ATHENAEUM_CORRECTIONS_MAX_ESCALATIONS_PER_RUN",
-        yaml_key="max_escalations_per_run",
-        default=50,
+        "ATHENAEUM_CORRECTIONS_MAX_ESCALATIONS_PER_RUN",
+        "librarian",
+        "corrections",
+        "max_escalations_per_run",
+        50,
     )
 
 

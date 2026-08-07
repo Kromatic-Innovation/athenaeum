@@ -108,6 +108,8 @@ from athenaeum.config import (
 from athenaeum.config import (
     load_config,
     preflight_model_rates,
+    resolve_corrections_max_escalations_per_run,
+    resolve_corrections_runtime_share,
     resolve_delta_enabled,
     resolve_delta_max_affected_clusters,
     resolve_delta_max_affected_members,
@@ -122,6 +124,11 @@ from athenaeum.config import (
     resolve_retire,
 )
 from athenaeum.config import resolve_cache_dir as _resolve_cache_dir_config
+from athenaeum.corrections import (
+    open_correction_ids,
+    render_correction_id_marker,
+    run_correction_phase,
+)
 from athenaeum.delta import (
     _relpath_for,
     compute_affected_clusters,
@@ -145,6 +152,7 @@ from athenaeum.models import (
     AutoMemoryFile,
     EntityAction,
     EntityIndex,
+    EscalationItem,
     ProcessingResult,
     RawFile,
     TokenUsage,
@@ -2054,6 +2062,9 @@ class RunContext:
     usage: TokenUsage = field(default_factory=TokenUsage)
     merge_client: Any = None
     run_deadline: float | None = None
+    # Issue athenaeum#797: run-summary disposition counts from
+    # ``_run_correction_phase`` (``None`` until that phase runs).
+    corrections_summary: dict[str, Any] | None = None
     # Issue athenaeum#440: absolute monotonic instant after which the entity phase stops
     # CLAIMING new files, reserving the remainder of ``run_deadline`` for the
     # phases downstream of it (auto-memory C2/C3 and the C4 contradiction
@@ -2521,6 +2532,112 @@ def _arm_run_deadline(ctx: RunContext) -> None:
         ctx.out_run_stats.setdefault("beyond_window", 0)
         ctx.out_run_stats.setdefault("deferred_refs", [])
         ctx.out_run_stats.setdefault("failed_files", [])
+
+
+def _run_correction_phase(ctx: RunContext) -> None:
+    """Field-correction fast path (issue athenaeum#797, `docs/field-corrections.md`).
+
+    Runs immediately after :func:`_arm_run_deadline` and BEFORE the entity
+    tier phase (`docs/field-corrections.md` §10.1) — a corpus where the
+    reasoning tiers routinely exhaust the wall-clock budget must not starve
+    this deterministic, LLM-free path; ordering it first on its own small
+    fixed share means an overrun degrades the (already-degrading) expensive
+    path, never the cheap one.
+
+    Carries its OWN runtime share (:func:`~athenaeum.config.resolve_corrections_runtime_share`,
+    default 5%) derived from ``ctx.run_deadline`` exactly like
+    :func:`librarian_entity_runtime_share` does for the entity phase, and is
+    checked at BATCH boundaries only (never mid-batch,
+    `athenaeum.corrections.run_correction_phase`'s ``deadline_check``).
+
+    Makes ZERO LLM calls and consumes ZERO of ``ctx.usage.api_calls`` — the
+    assertion below is not decorative: every write this phase performs
+    (frontmatter merge, JSONL ledger append, `_pending_questions.md`
+    escalation, git retirement) is mechanical. A future edit that
+    accidentally threads ``ctx.merge_client`` into this path would trip it
+    immediately instead of silently eating into the entity phase's budget.
+    """
+    pending_path = ctx.wiki_root / "_pending_questions.md"
+    max_escalations = resolve_corrections_max_escalations_per_run(ctx.config)
+    open_ids = open_correction_ids(pending_path) if pending_path.exists() else set()
+    escalated_this_run: set[str] = set()
+    # issue athenaeum#797 §10.2: flood-guard summary line -- named per (submitter,
+    # field) so the operator has an actionable target when the cap trips.
+    cap_hits: dict[tuple[str, str], int] = {}
+
+    def _escalate_one(result: Any, outcome: Any) -> bool:
+        if result.correction_id in open_ids:
+            return True  # already open -- dedup (§8/§10.2), still "recorded"
+        if len(escalated_this_run) >= max_escalations and max_escalations > 0:
+            key = (outcome.submitter, str(result.field))
+            cap_hits[key] = cap_hits.get(key, 0) + 1
+            return False
+        target_desc = json.dumps(result.target, sort_keys=True) if result.target else "?"
+        description_lines = [
+            f"Target: {target_desc}",
+            f"Field: {result.field}",
+            f"Op: {result.op}",
+            f"Value: {result.value!r}",
+            f"Source: {result.source}",
+            f"Reason: {result.reason}",
+        ]
+        if result.note:
+            description_lines.append(f"Note: {result.note}")
+        description_lines.append(render_correction_id_marker(result.correction_id))
+        item = EscalationItem(
+            raw_ref=f"{outcome.source}/{outcome.path.name}",
+            entity_name=result.entity_name or "unknown",
+            conflict_type="field-correction",
+            description="\n".join(description_lines),
+        )
+        tier4_escalate([item], pending_path, config=ctx.config, projects_root=ctx.projects_root)
+        open_ids.add(result.correction_id)
+        escalated_this_run.add(result.correction_id)
+        return True
+
+    _corrections_share = resolve_corrections_runtime_share(ctx.config)
+    corrections_deadline: float | None = None
+    if ctx.run_deadline is not None and _corrections_share > 0.0 and ctx.max_runtime is not None:
+        corrections_deadline = time.monotonic() + _corrections_share * ctx.max_runtime
+
+    def _deadline_check() -> bool:
+        return corrections_deadline is not None and time.monotonic() >= corrections_deadline
+
+    index = EntityIndex(ctx.wiki_root)
+    _corrections_calls_before = ctx.usage.api_calls
+    summary = run_correction_phase(
+        raw_root=ctx.raw_root,
+        wiki_root=ctx.wiki_root,
+        knowledge_root=ctx.knowledge_root,
+        index=index,
+        config=ctx.config,
+        escalate_one=_escalate_one,
+        deadline_check=_deadline_check,
+        dry_run=ctx.dry_run,
+    )
+    assert ctx.usage.api_calls == _corrections_calls_before, (
+        "field-correction phase must make zero LLM calls (issue athenaeum#797) — "
+        f"api_calls moved from {_corrections_calls_before} to {ctx.usage.api_calls}"
+    )
+    ctx.corrections_summary = summary
+    if cap_hits:
+        (submitter, field_name), count = max(cap_hits.items(), key=lambda kv: kv[1])
+        log.warning(
+            "corrections: escalation rate cap (%d/run) hit — highest count "
+            "submitter=%r field=%r (%d suppressed)",
+            max_escalations,
+            submitter,
+            field_name,
+            count,
+        )
+    if summary["batches_processed"] or summary["batches_carried_over"]:
+        log.info(
+            "corrections: %d batch(es) processed, %d carried over, "
+            "dispositions=%s",
+            summary["batches_processed"],
+            summary["batches_carried_over"],
+            summary["dispositions"],
+        )
 
 
 def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
@@ -3907,6 +4024,12 @@ def run(
     # Phase: build the shared LLM client, seed `usage`, arm the run-level
     # wall-clock deadline.
     _arm_run_deadline(ctx)
+
+    # Phase: field-correction fast path (issue athenaeum#797) -- deterministic,
+    # LLM-free, own runtime share. Ordered here (after the deadline is armed,
+    # before the entity tier phase) per docs/field-corrections.md §10.1 so an
+    # entity-phase overrun never starves this cheap path.
+    _run_correction_phase(ctx)
 
     # Phase: OS signal handling is installed/removed INSIDE the entity-tier
     # phase below (`_run_entity_tier_phase`), not as its own standalone
