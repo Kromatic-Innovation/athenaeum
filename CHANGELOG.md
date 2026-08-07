@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Wiki-page dedup formation is confirmed complete-linkage, and the stale
+  comments claiming otherwise are fixed (athenaeum#803).** `wiki_dedupe`'s
+  `find_wiki_page_clusters` / `propose_wiki_page_merges` already routed
+  through the shared `clusters.cluster_auto_memory_files` — the SAME
+  formation routine athenaeum#681 made complete-linkage on the raw-source
+  clusterer — but `wiki_dedupe.py`'s module docstring and an inline comment
+  in `propose_wiki_page_merges` still described it as "the SAME
+  single-linkage clusterer," which is exactly the drift athenaeum#803 asked
+  to guard against: a reader trusting that stale comment could "fix" an
+  already-fixed path a second, divergent way. Both are corrected to
+  describe complete-linkage formation and explicitly call out that this
+  logic is intentionally shared with the raw-source clusterer, not forked.
+  New tests in `tests/test_wiki_dedupe.py`
+  (`TestWikiClusterFormationIsCompleteLinkage`) pin the property through the
+  wiki-page entry points specifically: a synthetic single-linkage chain of
+  wiki pages does not form one giant cluster, every multi-member wiki
+  cluster's `min_pairwise_score` (not just `centroid_score`) clears the
+  threshold, and a 7-page chain that would have been one over-cap
+  single-linkage component instead reaches `wiki/_pending_merges.md` as
+  legitimate small proposals with zero `over-cluster` suppressions and no
+  member of a legitimate pair lost.
+
 - **`athenaeum push-metrics baseline` no longer writes an unconditional
   snapshot, and refuses to write a placeholder against a dead instrument
   (athenaeum#795).** The write to `docs/memory-model-measurements.md`
