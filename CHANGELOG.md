@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`examples/claude-code/user-prompt-recall.sh` no longer gates the LLM
+  topic extractor on `ANTHROPIC_API_KEY` (athenaeum#792).** `query-topics`
+  routes through `build_llm_client`, which honors `llm.provider` — under
+  `claude-cli` it authenticates via the ambient Claude Code login and needs
+  no key at all, and any client-build failure already falls through to the
+  regex+stopword extractor, so the shell-side key check added nothing that
+  failure path didn't already do. Its only effect was silently disabling
+  the extractor for every `claude-cli` user. Removed the gate (with a
+  comment explaining why it must not come back), corrected two stale prose
+  claims in the same file, updated `README.md`'s 1Password section and
+  troubleshooting table to name the `claude-cli` case, and recorded the
+  back-port in `AUDIT.md`'s `knowledge-recall-on-turn.sh` row (fixed
+  upstream in the maintainer's private fork by cwc#2177, 2026-08-06). New
+  coverage in `tests/test_shell_hooks.py::TestUserPromptRecall` proves the
+  extractor is attempted with no `ANTHROPIC_API_KEY` set, via a stub
+  `$ATHENAEUM_CLI` so the assertion never risks reaching a real LLM.
+
 - **Three provider/cost hygiene fixes from the LLM-provider/cost audit
   (athenaeum#780, findings L7/L8/L10).** (1) `scripts/measure_contradiction_baseline.py`'s
   `_build_client` was the only direct `anthropic.Anthropic(...)` construction
