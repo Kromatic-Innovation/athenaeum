@@ -6,8 +6,10 @@ Athenaeum runs on two cost models that must never be blended:
 * the ``claude-cli`` **subscription** path — no invoice; consumes the
   operator's Claude Code subscription quota. Constrained in TOKENS.
 * the metered ``anthropic`` **API** path (contradiction resolver on the api
-  backend, batch mode, and the per-turn ``query-topics`` recall extractor,
-  which always talks to the SDK directly). Constrained in real DOLLARS.
+  backend, batch mode, and the per-turn ``query-topics`` recall extractor —
+  which, like every other call site, routes through the provider seam
+  (:func:`athenaeum.provider.build_llm_client`) and is metered only when the
+  resolved provider is ``api``). Constrained in real DOLLARS.
 
 The in-memory :class:`~athenaeum.models.TokenUsage` accumulator is logged at
 end-of-run and then DISCARDED — nothing persists spend across runs, so
