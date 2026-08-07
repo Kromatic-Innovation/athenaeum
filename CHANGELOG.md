@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`examples/claude-code/user-prompt-recall.sh` no longer gates the LLM
+  topic extractor on `ANTHROPIC_API_KEY` (athenaeum#792).** `query-topics`
+  routes through `build_llm_client`, which honors `llm.provider` — under
+  `claude-cli` it authenticates via the ambient Claude Code login and needs
+  no key at all, and any client-build failure already falls through to the
+  regex+stopword extractor, so the shell-side key check added nothing that
+  failure path didn't already do. Its only effect was silently disabling
+  the extractor for every `claude-cli` user. Removed the gate (with a
+  comment explaining why it must not come back), corrected two stale prose
+  claims in the same file, updated `README.md`'s 1Password section and
+  troubleshooting table to name the `claude-cli` case, and recorded the
+  back-port in `AUDIT.md`'s `knowledge-recall-on-turn.sh` row (fixed
+  upstream in the maintainer's private fork by cwc#2177, 2026-08-06). New
+  coverage in `tests/test_shell_hooks.py::TestUserPromptRecall` proves the
+  extractor is attempted with no `ANTHROPIC_API_KEY` set, via a stub
+  `$ATHENAEUM_CLI` so the assertion never risks reaching a real LLM.
+
+- **Test suite no longer writes synthetic records into the real
+  `~/.cache/athenaeum` cache-dir artifacts (athenaeum#791).** A prior fix
+  (athenaeum#776) isolated the spend ledger with a session-scoped autouse
+  *fixture* — but fixtures only wrap test EXECUTION, which runs after
+  collection, so a module that resolves the cache dir at COLLECTION time (a
+  module-level statement, or `pytest.mark.parametrize` decorator arguments
+  pytest evaluates while importing the module) ran before any fixture could
+  fire. `tests/conftest.py` now redirects `ATHENAEUM_CACHE_DIR` /
+  `ATHENAEUM_SPEND_LEDGER` in a `pytest_configure` hook instead, which runs
+  before collection begins — closing the gap structurally for every test
+  module. `tests/test_thinking_seam.py`'s bespoke module-level workaround for
+  this same gap is deleted, now redundant. Added: a grep-guard
+  (`tests/test_cache_dir_resolver.py::test_env_literal_setting_home_also_sets_cache_dir`)
+  that scans `tests/` for hand-built `env = {...}` dicts that set `HOME`
+  without also setting `ATHENAEUM_CACHE_DIR` — `tests/test_shell_hooks.py`'s
+  five such dicts (protected only incidentally, by `HOME` already being a
+  tmp dir) now set it explicitly too. The single-artifact pollution canary
+  (`tests/test_llm_schemas.py::TestObservationsPathIsolation::test_nested_pytest_run_does_not_pollute_real_ledger`)
+  is generalized into
+  `test_nested_pytest_run_does_not_pollute_real_cache_dir_artifact`,
+  parametrized over all four cache-dir artifacts (`_llm_schema_observations.jsonl`,
+  `spend.jsonl`, `_push_records.jsonl`, `_push_references.jsonl`) instead of
+  naming one. New `tests/test_push_metrics.py::TestPushRecordsPathIsolation`
+  pins that `push_records_path()`/`reference_records_path()` resolve outside
+  the real cache dir under the suite fixture. `athenaeum push-metrics
+  baseline` gained `--exclude-session SESSION_ID` (repeatable): an explicit
+  operator denylist for known-synthetic sessions (e.g. one that ran the test
+  suite and leaked fixture pushes into the live ledger — the athenaeum#791
+  evidence: 75 of 120 push records at filing, all from one such session).
+  Excluded sessions and their record counts are always reported on
+  `BaselineWindow`/the CLI output/the committed snapshot
+  (`excluded_sessions`/`excluded_push_records`/`excluded_reference_records`),
+  even when empty, so a contaminated window is visible rather than silently
+  folded into a clean-looking total. No change to the push-record schema or
+  to what the recall path writes at runtime.
+
 - **Three provider/cost hygiene fixes from the LLM-provider/cost audit
   (athenaeum#780, findings L7/L8/L10).** (1) `scripts/measure_contradiction_baseline.py`'s
   `_build_client` was the only direct `anthropic.Anthropic(...)` construction
@@ -260,6 +313,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reasoning-tier-auditing cost note (added by athenaeum#779, which explicitly
   said `--by-knob` "does not exist yet") now points at `--by-knob` instead of
   the `--by-model`-keyed-by-model-id workaround it previously documented.
+
+- **Entity-phase heartbeat, per-call LLM timing, and failure-reason logging
+  (athenaeum#800, buildable half of athenaeum#764's Finding 0).** The entity
+  phase (raw-file intake, tier1-4 routing) was the one librarian phase with
+  ZERO `librarian-heartbeat` coverage — a nightly run (`631aaade`) spent 85%
+  of its 3,446s window here with nothing logged between its `start` line and
+  its eventual budget trip, so athenaeum#764's "where did the time go" question could
+  not be answered from the logs. `librarian.py`'s per-file entity loop now
+  emits `librarian-heartbeat phase=entity` lines on the same contract
+  `merge-detect`/`merge-write`/`wiki-dedupe`/`reresolve` already have
+  (`status=start|tick|done`, `done`/`total`, `compiled`/`unchanged`/`error`,
+  `unit=<raw file ref>`, cumulative `elapsed=`), with exactly one `tick` per
+  raw file processed — the same per-unit differencing property that made
+  `merge-detect` diagnosable. Separately, every entity-phase LLM call
+  (`tier2_classify` and its two retries, `tier3_create`, `tier3_merge`,
+  `tier3_merge_full` in `tiers.py`) now logs its own wall-clock under the new
+  `librarian-entity-llm-call` marker via a `_timed_llm_call` wrapper around
+  the existing `with_retry` call — unchanged request/retry/parse behavior,
+  just timed — so a run summary reader can distinguish "few slow calls" from
+  "many fast calls", which the aggregate `entity secs`/`calls` figure alone
+  cannot. A file failure now also logs the reason (exception type + message)
+  at WARNING with the file path under a new `librarian-entity-file-failure`
+  marker — run `631aaade` recorded three failed files with no error text
+  captured at any level the operator's log sweep caught, and the trailing
+  "Failed files" summary names only the filename. Finally, the entity-share
+  budget-trip WARNING now states which resource tripped alongside both
+  `api_call_budget` numbers (`631aaade` tripped at 28/1200 calls — 2.3% of
+  the call budget — while the prior message named only "entity phase runtime
+  share exhausted", reading as call-budget exhaustion and misleading the
+  first pass of the athenaeum#764 diagnosis). Observability only: no change to
+  provider routing, budgets, runtime shares, or deadlines. New
+  `TestEntityHeartbeat` in `tests/test_librarian_heartbeat.py` and
+  `TestEntityLLMCallTiming` in `tests/test_tiers.py` cover the contract.
 
 ### Changed
 

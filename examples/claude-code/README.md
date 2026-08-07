@@ -142,17 +142,20 @@ invariants a future "simplification" must not remove.
 ## 1Password bootstrap (optional)
 
 The LLM topic extractor (`athenaeum query-topics`) needs a real
-`ANTHROPIC_API_KEY` for the Messages API. Claude Code's own
-`CLAUDE_CODE_OAUTH_TOKEN` is rejected with `401 OAuth authentication
-is currently not supported`, so we can't reuse it.
+`ANTHROPIC_API_KEY` for the Messages API when using the default Anthropic
+provider. Claude Code's own `CLAUDE_CODE_OAUTH_TOKEN` is rejected with
+`401 OAuth authentication is currently not supported`, so we can't reuse
+it for that provider. Under `llm.provider: claude-cli`, no API key is
+needed at all — `query-topics` authenticates via the ambient Claude Code
+login instead.
 
 If you have the [1Password CLI](https://developer.1password.com/docs/cli/)
 signed in, `session-start-recall.sh` will `op read` the key at
 `ATHENAEUM_OP_KEY_PATH` and cache it at `~/.cache/athenaeum/config.env`
 (mode 600, owner-only). Silent on any failure.
 
-Without the key, the hook falls back to a regex+stopword extractor —
-still good, just less topic-aware.
+Without a key (and outside `llm.provider: claude-cli`), the hook falls
+back to a regex+stopword extractor — still good, just less topic-aware.
 
 ## Auto-memory integration
 
@@ -208,5 +211,5 @@ athenaeum questions list --with-proposal --limit 5  # all unresolved (capped)
 | `remember` saves but `recall` finds nothing     | Raw observations compile to wiki only when `athenaeum run` fires. Check `ls ~/knowledge/raw/` for pending files, then run `athenaeum run --path ~/knowledge` |
 | No `[Knowledge context]` on user turns          | Run `sqlite3 ~/.cache/athenaeum/wiki-index.db 'select count(*) from wiki'` — should be > 0     |
 | Vector backend silent                           | Re-run with `ATHENAEUM_HOOK_DEBUG=1` — usually `pip install 'athenaeum[vector]'` missing         |
-| `query-topics` running without its API key      | `cat ~/.cache/athenaeum/config.env` — should contain `ANTHROPIC_API_KEY=...`                   |
+| `query-topics` not returning topics             | Under the default Anthropic provider: `cat ~/.cache/athenaeum/config.env` — should contain `ANTHROPIC_API_KEY=...`. Under `llm.provider: claude-cli`, no key is needed — re-run with `ATHENAEUM_HOOK_DEBUG=1` instead |
 | Hook ran "green" but recall never fires         | Check the settings-snippet was merged correctly: `grep UserPromptSubmit ~/.claude/settings.json`|
