@@ -12,11 +12,13 @@
 # feedback loops" -> "Innovation Accounting"). Each backend rescues a
 # class of queries the other handles poorly — the merge is load-bearing.
 #
-# Optional LLM query-rewriting. If `athenaeum query-topics` is available
-# and ANTHROPIC_API_KEY is set, the raw prompt is first run through Haiku
-# to extract substantive topics while ignoring meta-instructions
-# ("quote verbatim", "don't call tools"). Falls back silently to a
-# regex+stopword extractor when unavailable.
+# Optional LLM query-rewriting. If `athenaeum query-topics` is available,
+# the raw prompt is first run through the configured LLM provider (Haiku
+# via the Messages API, or Claude Code's own CLI under `llm.provider:
+# claude-cli` — no ANTHROPIC_API_KEY needed either way) to extract
+# substantive topics while ignoring meta-instructions ("quote verbatim",
+# "don't call tools"). Falls back silently to a regex+stopword extractor
+# when unavailable.
 #
 # Configure in ~/.claude/settings.json:
 #   "hooks": {
@@ -58,9 +60,10 @@ PYTHON="${ATHENAEUM_PYTHON:-python3}"
 
 # ── Source config ──────────────────────────────────────────────────────
 # `set -a` auto-exports sourced variables so child processes (notably
-# `athenaeum query-topics`, which reads ANTHROPIC_API_KEY from its own
-# env) inherit them. Without it, `source` sets vars only in this shell
-# and the child silently runs without the key.
+# `athenaeum query-topics`) inherit them — including ANTHROPIC_API_KEY,
+# for providers that need one. Without it, `source` sets vars only in
+# this shell and the child would silently run without them. Under
+# `llm.provider: claude-cli` no key is needed at all.
 if [ -f "$CONFIG_ENV" ]; then
   set -a
   # shellcheck disable=SC1090
@@ -89,7 +92,15 @@ fi
 
 # ── Extract search terms ────────────────────────────────────────────────
 TERMS=""
-if command -v "$ATHENAEUM_CLI" >/dev/null 2>&1 && [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+# Do NOT gate this on ANTHROPIC_API_KEY (athenaeum#792). `query-topics`
+# routes through build_llm_client, which honors `llm.provider` — under
+# `claude-cli` it authenticates via the ambient Claude Code login and
+# needs no API key at all. Any provider/config combination that can't
+# build a client already returns empty here, which falls through to the
+# regex fallback below; a shell-side key check adds nothing that failure
+# path doesn't already do, and it silently disabled the extractor for
+# every claude-cli user.
+if command -v "$ATHENAEUM_CLI" >/dev/null 2>&1; then
   TERMS=$("$ATHENAEUM_CLI" query-topics "$PROMPT" --timeout 3 2>/dev/null || echo "")
 fi
 

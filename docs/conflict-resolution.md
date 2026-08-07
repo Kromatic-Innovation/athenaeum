@@ -361,6 +361,15 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 - **Provenance behavior:** the taxonomy is enforced at PROMPT time only
   — no deterministic winner-picker runs in-process. The LLM's returned
   `source_precedence_used` field records the comparison it used.
+- **Change (athenaeum#797):** this is no longer the taxonomy's only enforcement
+  point. `src/athenaeum/precedence.py`'s `SOURCE_PRECEDENCE_TIERS` /
+  `source_rank()` is a deterministic, LLM-free MIRROR of this same 9-tier
+  list, added for the tier-0 field-correction applier
+  (`docs/field-corrections.md` §6.1), which cannot call an LLM. It is a
+  fourth site in the drift-guard set alongside `resolutions.py`'s docstring
+  and `_RESOLVE_SYSTEM` comment and the golden-prompt snapshot — bound to
+  THIS block by `tests/test_precedence.py`, which parses (not transcribes)
+  the taxonomy text above and asserts order AND per-tier membership.
 
 ---
 

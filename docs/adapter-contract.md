@@ -44,6 +44,14 @@ your "source" is really an agent's memory folder.
 
 The rest of this document specifies **Lane A**.
 
+A third lane exists for a specific kind of writer: one that already knows the
+exact target entity, attribute, and value it wants changed (a monitor, a bulk
+graph writer, an enrichment service). **Lane C — field corrections** is not a
+new write path — it is a `.jsonl` file recognized by shape inside the SAME
+Lane A `raw/<source>/` tree, giving that writer a conformance format to enter
+the tier ladder at its cheapest, LLM-free rung. See
+[`docs/field-corrections.md`](field-corrections.md).
+
 ---
 
 ## 1. Location convention
@@ -233,6 +241,7 @@ ls /tmp/kb/wiki                                     # see the compiled entity
 - [`skills/adapter-authoring/SKILL.md`](../skills/adapter-authoring/SKILL.md) — the bundled, user-invocable adapter-authoring skill (the guided version of this contract).
 - [`examples/adapters/minimal_adapter.py`](../examples/adapters/minimal_adapter.py) — the synthetic worked example (Lane A, direct drop).
 - [`docs/integrations/claude-code.md`](integrations/claude-code.md) — a complete worked adapter for Lane B (auto-memory), including the frontmatter/citation contract.
+- [`docs/field-corrections.md`](field-corrections.md) — "Lane C": a conformance format a writer that already knows the target entity, attribute, and value MAY use to arrive with the work already done, entering the tier ladder at its cheapest (LLM-free) rung instead of paying prose compilation per fact. Same `raw/<source>/<timestamp>-<uuid8>` tree as Lane A — no reserved subtree, recognized by shape (`.jsonl` + a `record: "batch"` first line), not by a separate write path.
 - [`docs/provenance-shape.md`](provenance-shape.md) — the design lock for on-disk provenance shape and the MCP `remember` API.
 - [`docs/why-athenaeum.md`](why-athenaeum.md) — why the append-only-intake / single-compiler split exists.
 - [`policies/auto-memory-citation.md`](../policies/auto-memory-citation.md) — "cite the ultimate source, never the raw file."

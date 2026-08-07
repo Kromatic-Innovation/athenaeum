@@ -36,6 +36,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/test_push_metrics.py::TestWriteSnapshot::test_creates_new_file`
   (also rewritten to assert the refusal).
 
+- **`examples/claude-code/user-prompt-recall.sh` no longer gates the LLM
+  topic extractor on `ANTHROPIC_API_KEY` (athenaeum#792).** `query-topics`
+  routes through `build_llm_client`, which honors `llm.provider` — under
+  `claude-cli` it authenticates via the ambient Claude Code login and needs
+  no key at all, and any client-build failure already falls through to the
+  regex+stopword extractor, so the shell-side key check added nothing that
+  failure path didn't already do. Its only effect was silently disabling
+  the extractor for every `claude-cli` user. Removed the gate (with a
+  comment explaining why it must not come back), corrected two stale prose
+  claims in the same file, updated `README.md`'s 1Password section and
+  troubleshooting table to name the `claude-cli` case, and recorded the
+  back-port in `AUDIT.md`'s `knowledge-recall-on-turn.sh` row (fixed
+  upstream in the maintainer's private fork by cwc#2177, 2026-08-06). New
+  coverage in `tests/test_shell_hooks.py::TestUserPromptRecall` proves the
+  extractor is attempted with no `ANTHROPIC_API_KEY` set, via a stub
+  `$ATHENAEUM_CLI` so the assertion never risks reaching a real LLM.
+
 - **Test suite no longer writes synthetic records into the real
   `~/.cache/athenaeum` cache-dir artifacts (athenaeum#791).** A prior fix
   (athenaeum#776) isolated the spend ledger with a session-scoped autouse
@@ -104,6 +121,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   yaml).
 
 ### Added
+
+- **Deterministic field-correction fast path — the "Lane C" tier-0 conformance
+  format (athenaeum#797, design lock athenaeum#794).** A writer that already knows the
+  exact target entity, attribute, and value it wants changed (a
+  delivery-status monitor, a bulk relationship-graph writer, a third-party
+  enrichment service) can now drop a `.jsonl` batch into the ordinary
+  `raw/<source>/` intake tree — no reserved subtree, recognized purely by
+  shape (first line parses as `record: "batch"`) — and have it applied at
+  tier 0, LLM-free, instead of paying prose compilation per fact. New
+  `src/athenaeum/precedence.py` mirrors the existing 9-tier
+  `SOURCE-PRECEDENCE TAXONOMY` prompt block in-process
+  (`SOURCE_PRECEDENCE_TIERS` / `source_rank()`), bound to that prompt by a
+  test that PARSES it rather than transcribing the expected tiers. New
+  `src/athenaeum/corrections.py` is the tier-0 applier: target resolution
+  (uid / type+name / registered handle via `registry.json`), the op
+  semantics (`set`/`add`/`remove` with per-value `field_sources`
+  attribution), the delta gate (re-applying an unchanged correction is
+  byte-for-byte a no-op), the conflict policy (source-rank comparison,
+  `observed_at` tie-break, escalation on an undated tie), the `monotone`
+  suppression rule (any permitted writer may set a safety flag; only
+  `user:` tier may unset one), and routing (a sensitivity-classified
+  attribute lands on its mapped surface regardless of the destination the
+  correction named; an attribute with no schema slot is aliased, held for a
+  schema-amendment proposal, or recorded as prose). `intake.discover_raw_files`
+  now globs `*.jsonl` alongside `*.md` so a correction batch is visible to
+  discovery at all — the pre-existing gap this closes: a `.jsonl` file was
+  previously invisible to it, so a malformed batch would have been "seen by
+  nothing," not merely skipped. `librarian.run()` gains a
+  `_run_correction_phase`, ordered after the run deadline is armed and
+  before the entity tier phase, with its own runtime share
+  (`librarian.corrections.runtime_share`) and a hard zero-LLM-calls
+  assertion. Every failure to conform — an unparseable source, an attribute
+  off the allowlist, a target resolving to zero or several entities, an
+  unknown `schema_version` — raises a tier rather than rejecting: conformant
+  records in the same batch still apply, and a non-conformant record's raw
+  text reaches ordinary intake via a `_corrections_applied.jsonl`-ledgered
+  handoff file, never silently dropped. The attribute allowlist
+  (`librarian.corrections.fields`) is **empty by default** — a fresh
+  deployment writes nothing cheaply until an operator opts a specific
+  attribute in. See `docs/field-corrections.md` (design) and
+  `docs/configuration.md`'s new "Field corrections" section (every
+  `librarian.corrections.*` key).
 
 - **`athenaeum spend --reprice` — recompute historical rows at current rates
   (athenaeum#788, audit finding L3).** Schema v2 (athenaeum#487) added
@@ -281,6 +340,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reasoning-tier-auditing cost note (added by athenaeum#779, which explicitly
   said `--by-knob` "does not exist yet") now points at `--by-knob` instead of
   the `--by-model`-keyed-by-model-id workaround it previously documented.
+
+- **Entity-phase heartbeat, per-call LLM timing, and failure-reason logging
+  (athenaeum#800, buildable half of athenaeum#764's Finding 0).** The entity
+  phase (raw-file intake, tier1-4 routing) was the one librarian phase with
+  ZERO `librarian-heartbeat` coverage — a nightly run (`631aaade`) spent 85%
+  of its 3,446s window here with nothing logged between its `start` line and
+  its eventual budget trip, so athenaeum#764's "where did the time go" question could
+  not be answered from the logs. `librarian.py`'s per-file entity loop now
+  emits `librarian-heartbeat phase=entity` lines on the same contract
+  `merge-detect`/`merge-write`/`wiki-dedupe`/`reresolve` already have
+  (`status=start|tick|done`, `done`/`total`, `compiled`/`unchanged`/`error`,
+  `unit=<raw file ref>`, cumulative `elapsed=`), with exactly one `tick` per
+  raw file processed — the same per-unit differencing property that made
+  `merge-detect` diagnosable. Separately, every entity-phase LLM call
+  (`tier2_classify` and its two retries, `tier3_create`, `tier3_merge`,
+  `tier3_merge_full` in `tiers.py`) now logs its own wall-clock under the new
+  `librarian-entity-llm-call` marker via a `_timed_llm_call` wrapper around
+  the existing `with_retry` call — unchanged request/retry/parse behavior,
+  just timed — so a run summary reader can distinguish "few slow calls" from
+  "many fast calls", which the aggregate `entity secs`/`calls` figure alone
+  cannot. A file failure now also logs the reason (exception type + message)
+  at WARNING with the file path under a new `librarian-entity-file-failure`
+  marker — run `631aaade` recorded three failed files with no error text
+  captured at any level the operator's log sweep caught, and the trailing
+  "Failed files" summary names only the filename. Finally, the entity-share
+  budget-trip WARNING now states which resource tripped alongside both
+  `api_call_budget` numbers (`631aaade` tripped at 28/1200 calls — 2.3% of
+  the call budget — while the prior message named only "entity phase runtime
+  share exhausted", reading as call-budget exhaustion and misleading the
+  first pass of the athenaeum#764 diagnosis). Observability only: no change to
+  provider routing, budgets, runtime shares, or deadlines. New
+  `TestEntityHeartbeat` in `tests/test_librarian_heartbeat.py` and
+  `TestEntityLLMCallTiming` in `tests/test_tiers.py` cover the contract.
 
 ### Changed
 
