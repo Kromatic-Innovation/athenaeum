@@ -22,10 +22,12 @@ from athenaeum.cli import main
 from athenaeum.config import (
     resolve_spend_ledger_enabled,
     resolve_spend_ledger_path,
+    resolve_spend_max_pct_per_day,
     resolve_spend_max_tokens_per_day,
     resolve_spend_max_tokens_per_run,
     resolve_spend_max_usd_per_day,
     resolve_spend_max_usd_per_run,
+    resolve_spend_weekly_token_limit,
 )
 from athenaeum.models import TokenUsage
 from tests.conftest import FakeLLMClient, make_llm_response, make_llm_usage
@@ -47,6 +49,8 @@ def ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "ATHENAEUM_SPEND_MAX_USD_PER_RUN",
         "ATHENAEUM_SPEND_MAX_USD_PER_DAY",
         "ATHENAEUM_SPEND_LEDGER_ENABLED",
+        "ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT",
+        "ATHENAEUM_SPEND_MAX_PCT_PER_DAY",
     ):
         monkeypatch.delenv(var, raising=False)
     return path
@@ -480,6 +484,86 @@ class TestCeiling:
 
 
 # ---------------------------------------------------------------------------
+# Weekly subscription token limit + max-percent-per-day (issue athenaeum#785)
+# ---------------------------------------------------------------------------
+
+
+class TestWeeklyPctCeiling:
+    def test_both_set_trips_and_names_derived_figure_and_weekly_limit(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # weekly 700,000 / 7 * 50% -> effective daily cap 50,000 tokens.
+        monkeypatch.setenv("ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT", "700000")
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_PCT_PER_DAY", "50")
+        big = TokenUsage()
+        big.add(40_000, 20_000, 0, 0)  # 60,000 >= 50,000
+        reason = spend.ceiling_tripped(big, provider="claude-cli")
+        assert reason is not None
+        assert "50,000" in reason  # the derived daily ceiling
+        assert "700,000" in reason  # the declared weekly limit it came from
+
+    def test_both_set_under_ceiling_does_not_trip(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT", "700000")
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_PCT_PER_DAY", "50")
+        small = TokenUsage()
+        small.add(100, 50, 0, 0)
+        assert spend.ceiling_tripped(small, provider="claude-cli") is None
+
+    def test_only_weekly_limit_set_leaves_behavior_unchanged(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Weekly limit alone has no denominator to percent-of; no ceiling.
+        monkeypatch.setenv("ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT", "1")
+        huge = TokenUsage()
+        huge.add(1_000_000, 0, 0, 0)
+        assert spend.ceiling_tripped(huge, provider="claude-cli") is None
+
+    def test_only_max_pct_set_leaves_behavior_unchanged(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A percentage with no weekly figure to take it of is a no-op.
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_PCT_PER_DAY", "1")
+        huge = TokenUsage()
+        huge.add(1_000_000, 0, 0, 0)
+        assert spend.ceiling_tripped(huge, provider="claude-cli") is None
+
+    def test_api_path_unaffected_by_pct_ceiling(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The percentage ceiling is token-denominated and subscription-only —
+        # it must not gate an API-path (dollar) run (athenaeum#487, cwc#1629: the
+        # ledger never blends subscription notional and api real dollars).
+        monkeypatch.setenv("ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT", "1")
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_PCT_PER_DAY", "1")
+        assert spend.ceiling_tripped(_api_usage(), provider="api") is None
+
+    def test_counts_prior_ledger_spend_same_utc_day(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-07-15T01:00:00Z",
+                    "provider": "claude-cli",
+                    "total_tokens": 45_000,
+                    "estimated_cost_usd": 0.0,
+                }
+            )
+            + "\n"
+        )
+        # weekly 700,000 / 7 * 50% -> effective daily cap 50,000 tokens.
+        monkeypatch.setenv("ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT", "700000")
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_PCT_PER_DAY", "50")
+        cur = TokenUsage()
+        cur.add(4_000, 2_000, 0, 0)  # prior 45,000 + 6,000 = 51,000 >= 50,000
+        assert spend.ceiling_tripped(cur, provider="claude-cli", now=now) is not None
+
+
+# ---------------------------------------------------------------------------
 # Config resolvers
 # ---------------------------------------------------------------------------
 
@@ -526,6 +610,42 @@ class TestConfigResolvers:
         assert resolve_spend_max_usd_per_day({"spend": {"max_usd_per_day": 0}}) is None
         assert resolve_spend_max_usd_per_day({"spend": {"max_usd_per_day": -5}}) is None
         assert resolve_spend_max_usd_per_day({"spend": {"max_usd_per_day": 2.5}}) == 2.5
+
+    def test_weekly_token_limit_default_none_and_env_over_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT", raising=False)
+        assert resolve_spend_weekly_token_limit(None) is None
+        assert (
+            resolve_spend_weekly_token_limit({"spend": {"weekly_token_limit": 700000}})
+            == 700000
+        )
+        monkeypatch.setenv("ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT", "900000")
+        assert (
+            resolve_spend_weekly_token_limit({"spend": {"weekly_token_limit": 700000}})
+            == 900000
+        )
+
+    def test_max_pct_per_day_default_none_and_env_over_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_PCT_PER_DAY", raising=False)
+        assert resolve_spend_max_pct_per_day(None) is None
+        assert resolve_spend_max_pct_per_day({"spend": {"max_pct_per_day": 50}}) == 50
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_PCT_PER_DAY", "25")
+        assert resolve_spend_max_pct_per_day({"spend": {"max_pct_per_day": 50}}) == 25
+
+    def test_weekly_and_pct_reject_bool_and_nonpositive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT", raising=False)
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_PCT_PER_DAY", raising=False)
+        assert resolve_spend_weekly_token_limit({"spend": {"weekly_token_limit": True}}) is None
+        assert resolve_spend_weekly_token_limit({"spend": {"weekly_token_limit": 0}}) is None
+        assert resolve_spend_weekly_token_limit({"spend": {"weekly_token_limit": -5}}) is None
+        assert resolve_spend_max_pct_per_day({"spend": {"max_pct_per_day": True}}) is None
+        assert resolve_spend_max_pct_per_day({"spend": {"max_pct_per_day": 0}}) is None
+        assert resolve_spend_max_pct_per_day({"spend": {"max_pct_per_day": -5}}) is None
 
 
 # ---------------------------------------------------------------------------

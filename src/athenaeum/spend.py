@@ -715,14 +715,20 @@ def ceiling_tripped(
     bounded in TOKENS (per-run and per-day), the metered ``anthropic`` API path
     in DOLLARS (per-run and per-day). The per-day figures add spend already
     committed earlier today (from the ledger) to the current run's accrual.
+    A FIFTH, subscription-only ceiling (issue athenaeum#785) derives a second
+    per-day token figure from a declared weekly limit and a percentage of it
+    (``weekly_token_limit / 7 * max_pct_per_day / 100``); it is independent of
+    the absolute per-day token ceiling above and never touches the API branch.
     Returns ``None`` when no ceiling is configured or none is breached — a
     ceiling is strictly opt-in.
     """
     from athenaeum.config import (
+        resolve_spend_max_pct_per_day,
         resolve_spend_max_tokens_per_day,
         resolve_spend_max_tokens_per_run,
         resolve_spend_max_usd_per_day,
         resolve_spend_max_usd_per_run,
+        resolve_spend_weekly_token_limit,
     )
 
     is_subscription = ledger_provider(provider) == PROVIDER_CLAUDE_CLI
@@ -743,6 +749,31 @@ def ceiling_tripped(
                 return (
                     f"per-day subscription token ceiling reached "
                     f"({int(day_total):,}/{day_cap:,} tokens today)"
+                )
+        # Weekly-token-limit + max-percent-per-day (issue athenaeum#785): a SECOND,
+        # independent way to bound the subscription per-day figure, derived
+        # rather than absolute. Both knobs are strictly opt-in — either unset
+        # means this ceiling does nothing, so setting only one of the two
+        # leaves behavior unchanged (there is no denominator/no percentage to
+        # apply). Deliberately token-denominated and subscription-only: it
+        # never reaches the API branch below, so it cannot affect a metered
+        # run — subscription notional and API real dollars are two metrics the
+        # ledger never blends (athenaeum#487, cwc#1629). Day boundary matches every
+        # other per-day ceiling: UTC midnight via ``_start_of_utc_day``
+        # (``spend_today``), not a rolling 7-day window (deferred; see the
+        # athenaeum#785 design notes).
+        weekly_limit = resolve_spend_weekly_token_limit(config)
+        max_pct = resolve_spend_max_pct_per_day(config)
+        if weekly_limit is not None and max_pct is not None:
+            effective_day_cap = weekly_limit / 7 * (max_pct / 100)
+            target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
+            prior = spend_today(target, now=now)["subscription_tokens"]
+            day_total = prior + usage.total_tokens
+            if day_total >= effective_day_cap:
+                return (
+                    f"per-day subscription percent-of-weekly ceiling reached "
+                    f"({int(day_total):,}/{effective_day_cap:,.0f} tokens today, "
+                    f"{max_pct:g}% of weekly limit {weekly_limit:,} tokens)"
                 )
         return None
 

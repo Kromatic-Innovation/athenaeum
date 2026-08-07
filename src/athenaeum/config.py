@@ -1420,6 +1420,43 @@ def resolve_spend_max_usd_per_day(config: dict[str, Any] | None) -> float | None
     )
 
 
+def resolve_spend_weekly_token_limit(config: dict[str, Any] | None) -> int | None:
+    """Resolve the operator-declared SUBSCRIPTION weekly token limit (athenaeum#785).
+
+    Claude Code subscription limits are rolling-window and are not exposed to
+    athenaeum as a readable quota, so there is no denominator to derive a
+    percentage ceiling from until the operator states one. This value is that
+    denominator — combined with :func:`resolve_spend_max_pct_per_day` it
+    produces an effective daily subscription token ceiling of
+    ``weekly_token_limit / 7 * (max_pct_per_day / 100)`` (see
+    :func:`athenaeum.spend.ceiling_tripped`). On its own (the other knob
+    unset) it does nothing — strictly opt-in, like every other ceiling.
+    Precedence: ``ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT`` env >
+    ``spend.weekly_token_limit`` yaml > ``None`` (no ceiling).
+    """
+    return _resolve_optional_positive_number(
+        config, "spend", "weekly_token_limit",
+        "ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT", cast=int,
+    )
+
+
+def resolve_spend_max_pct_per_day(config: dict[str, Any] | None) -> float | None:
+    """Resolve the max-percent-of-weekly-allowance-per-day knob (athenaeum#785).
+
+    Paired with :func:`resolve_spend_weekly_token_limit`: this is the percentage
+    taken OF that weekly figure to produce a daily subscription token ceiling.
+    On its own (the weekly limit unset) it does nothing — there is no
+    denominator to apply a percentage to, so setting only one of the two knobs
+    leaves behavior unchanged, exactly like every other ceiling's opt-in
+    contract. Precedence: ``ATHENAEUM_SPEND_MAX_PCT_PER_DAY`` env >
+    ``spend.max_pct_per_day`` yaml > ``None`` (no ceiling).
+    """
+    return _resolve_optional_positive_number(
+        config, "spend", "max_pct_per_day",
+        "ATHENAEUM_SPEND_MAX_PCT_PER_DAY", cast=float,
+    )
+
+
 #: Code default for the classify-model knob (env ``ATHENAEUM_CLASSIFY_MODEL`` >
 #: yaml ``models.classify`` > this literal, via :func:`resolve_model`).
 #: Single-sourced HERE (issue athenaeum#640) rather than in :mod:`athenaeum.tiers`:
