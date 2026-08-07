@@ -543,6 +543,8 @@ like the `max_api_calls` budget), never silently continuing. All ceilings are
 | Per-day token ceiling | `ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY` | `spend.max_tokens_per_day` | — (off) | **Subscription path.** Ledger tokens since UTC midnight + this run. |
 | Per-run dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_RUN` | `spend.max_usd_per_run` | — (off) | **API path.** Stop the run when its estimated USD reaches this. |
 | Per-day dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_DAY` | `spend.max_usd_per_day` | — (off) | **API path.** Ledger dollars since UTC midnight + this run. |
+| Weekly subscription token limit | `ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT` | `spend.weekly_token_limit` | — (off) | **Subscription path.** The operator-declared weekly quota; a denominator, not a ceiling by itself (issue athenaeum#785). |
+| Max percent per day | `ATHENAEUM_SPEND_MAX_PCT_PER_DAY` | `spend.max_pct_per_day` | — (off) | **Subscription path.** Paired with the weekly limit above: `weekly_token_limit / 7 * max_pct_per_day / 100` becomes a SECOND, derived per-day token ceiling (issue athenaeum#785). |
 
 The subscription path is bounded in **tokens**, the API path in **dollars** —
 each ceiling only gates its own path. `bool` / non-numeric / non-positive
@@ -554,7 +556,19 @@ spend:
   # ledger_enabled: true          # on by default
   max_tokens_per_run: 2000000     # cap the nightly subscription burn
   max_usd_per_day: 5.00           # cap real API dollars per day
+  weekly_token_limit: 700000      # declared weekly subscription quota
+  max_pct_per_day: 50             # -> 50,000 token/day derived ceiling
 ```
+
+The weekly-limit + max-percent-per-day pair (issue athenaeum#785) is a SECOND,
+independent way to bound the subscription per-day figure — derived rather
+than absolute, and strictly opt-in like every ceiling here: setting only one
+of the two does nothing (there is no denominator, or no percentage, to apply
+on its own). It reuses the same UTC-midnight day boundary as the per-day
+ceilings above (a rolling 7-day window is deliberately out of scope) and
+never gates the API path — a token-denominated percentage has no meaning
+there, and `subscription` notional tokens and `api` real dollars are two
+metrics this ledger never blends (athenaeum#487, cwc#1629).
 
 ## Push-precision and coverage instrumentation (athenaeum#711)
 
