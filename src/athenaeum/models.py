@@ -1345,8 +1345,20 @@ class EscalationItem:
 # PERIODIC REVIEW: these are hard-coded Anthropic public list prices. They do
 # NOT auto-update — Anthropic price changes (new model families, rate cuts,
 # tier changes) require a manual edit HERE, after re-reading the ``claude-api``
-# skill. This constant is the single update site for model pricing; nothing
-# else in the codebase hard-codes per-MTok rates.
+# skill. This constant is the single update site for model pricing IN CODE;
+# nothing else in the codebase hard-codes per-MTok rates.
+#
+# Issue athenaeum#783: at RUNTIME this table is no longer consulted directly by
+# :func:`_rates_for_model` — it is instead the seed for two things: (1) the
+# process-wide default installed into :data:`_ACTIVE_MODEL_RATES_USD_PER_MTOK`
+# below (so any caller that never loads ``athenaeum.yaml`` — every existing
+# unit test, a library caller instantiating :class:`TokenUsage` directly —
+# sees byte-identical pricing to before athenaeum#783), and (2) the ``pricing:``
+# section :func:`athenaeum.config.write_default_config` serializes into a
+# fresh install's ``athenaeum.yaml`` (via :func:`default_model_rates`) so
+# ``athenaeum init`` ships priced correctly out of the box. Editing this dict
+# is still the one update site — the yaml a maintainer sees at ``init`` time
+# is GENERATED from it, never hand-duplicated.
 _MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     # Claude 5 family (issue athenaeum#577, precondition B1 of epic athenaeum#516). Recorded
     # BEFORE any DEFAULT_*_MODEL moves to it (athenaeum#580) so a bump can never fall
@@ -1387,23 +1399,116 @@ _MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
 # Blended fallback rate (USD per million tokens) for tokens accumulated
 # WITHOUT a model tag, or tagged with an id that matches no prefix above
 # (e.g. routed via a proxy). Matches the historical pre-athenaeum#247 estimate.
+# Issue athenaeum#783: this fallback is UNCHANGED and stays reachable for genuinely
+# untagged tokens — that is its original purpose (athenaeum#247). What changed is
+# the *reachability* for a TAGGED model: :func:`athenaeum.config.preflight_model_rates`
+# (wired into ``athenaeum run``'s precondition gate, mirroring
+# :func:`athenaeum.provider.preflight_provider`) resolves every model-knob this
+# run will actually use and fails the run at startup if any is unpriced under
+# the ACTIVE table below — so a tagged model used by a real run never reaches
+# this fallback silently. ``_rates_for_model`` itself is unchanged for a tag
+# that was never resolved through a knob (e.g. a proxy-routed id) — see the
+# athenaeum#783 issue's "Design decision" for why the preflight, not a change to this
+# function, is the mechanism that keeps that promise.
 _BLENDED_INPUT_USD_PER_MTOK = 1.50
 _BLENDED_OUTPUT_USD_PER_MTOK = 7.50
+
+
+def default_model_rates() -> dict[str, tuple[float, float]]:
+    """Return a COPY of the code-default per-MTok rate table (issue athenaeum#783).
+
+    Two callers: (1) ``athenaeum init``'s default-config generator
+    (:func:`athenaeum.config.write_default_config`) serializes this into a
+    fresh ``athenaeum.yaml``'s ``pricing:`` section, so a new install is
+    priced correctly out of the box from the SAME literal a maintainer edits
+    when a vendor price changes — never a hand-copied second list; (2)
+    :func:`configure_model_rates`'s fallback when no yaml ``pricing:``
+    section is set (pre-athenaeum#783 configs keep today's behavior unchanged
+    until they gain one). A copy, not the live dict, so neither caller can
+    mutate the module constant.
+    """
+    return dict(_MODEL_RATES_USD_PER_MTOK)
+
+
+# The EFFECTIVE / ACTIVE per-MTok rate table :func:`_rates_for_model` and
+# :func:`model_has_price` consult (issue athenaeum#783). Starts as the code default
+# so any caller that never loads config sees byte-identical pricing to before
+# athenaeum#783. A real ``athenaeum run`` REPLACES this wholesale via
+# :func:`configure_model_rates`, once :func:`athenaeum.config.resolve_model_rates`
+# has read the operator's ``athenaeum.yaml`` ``pricing:`` section — REPLACE
+# semantics, not an overlay/merge with this code table. See the athenaeum#783
+# issue's "Design decision" for why a per-prefix merge (yaml overlaying the
+# code table, which stays the floor) was rejected: an omission in yaml would
+# keep silently reading the code default — the invisible second source of
+# truth the athenaeum#783 preflight exists to kill for a model the run actually uses.
+_ACTIVE_MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = dict(
+    _MODEL_RATES_USD_PER_MTOK
+)
+
+
+def configure_model_rates(rates: dict[str, tuple[float, float]] | None) -> None:
+    """Install *rates* as the effective per-MTok table for this process (athenaeum#783).
+
+    REPLACES the active table outright — never merges with the code default.
+    A non-empty *rates* (validated entries from ``athenaeum.yaml``'s
+    ``pricing:`` section, via :func:`athenaeum.config.resolve_model_rates`)
+    becomes the WHOLE table: a prefix the operator's yaml does not mention is
+    no longer priced from this call onward, by design — yaml is authoritative,
+    not a floor the code table backfills (see the athenaeum#783 issue). ``None`` or
+    an empty dict resets to the code default (:func:`default_model_rates`) —
+    correct both for a config with no ``pricing:`` section (pre-athenaeum#783
+    installs) and for test teardown. This function is unconditional (never a
+    no-op on empty input) precisely so a stale table installed by a PRIOR call
+    in the same process (a previous run, or an earlier test) can never leak
+    into this one.
+    """
+    global _ACTIVE_MODEL_RATES_USD_PER_MTOK
+    _ACTIVE_MODEL_RATES_USD_PER_MTOK = dict(rates) if rates else default_model_rates()
+
+
+def _lookup_rate(
+    model: str, rates: dict[str, tuple[float, float]]
+) -> tuple[float, float] | None:
+    """Longest-prefix match of *model* against *rates*, or ``None`` (athenaeum#783).
+
+    Shared by :func:`_rates_for_model` (which falls back to the blended rate
+    on a miss) and :func:`model_has_price` (the athenaeum#783 preflight's check,
+    which must NOT fall back — a miss there is exactly the loud-failure signal
+    the preflight exists to raise).
+    """
+    best: tuple[float, float] | None = None
+    best_len = -1
+    for prefix, candidate in rates.items():
+        if model.startswith(prefix) and len(prefix) > best_len:
+            best, best_len = candidate, len(prefix)
+    return best
+
+
+def model_has_price(model: str) -> bool:
+    """Return whether *model* resolves to a real rate under the ACTIVE table
+    (issue athenaeum#783) — i.e. would NOT fall back to the blended rate.
+
+    Used by the startup preflight (:func:`athenaeum.config.preflight_model_rates`)
+    so a tagged model that would otherwise silently under-report at the
+    blended rate instead fails the run loudly before any cost is computed.
+    """
+    return _lookup_rate(model, _ACTIVE_MODEL_RATES_USD_PER_MTOK) is not None
 
 
 def _rates_for_model(model: str | None) -> tuple[float, float]:
     """Return ``(input, output)`` USD/MTok for *model* (longest-prefix match).
 
-    Untagged (``None``) or unknown ids fall back to the blended rate.
+    Untagged (``None``) or unknown ids fall back to the blended rate. Reads
+    the ACTIVE table (issue athenaeum#783's :data:`_ACTIVE_MODEL_RATES_USD_PER_MTOK`,
+    replaceable via :func:`configure_model_rates`), not the code-default table
+    directly, so a resolved ``athenaeum.yaml`` ``pricing:`` override changes
+    cost immediately without threading config through every :class:`TokenUsage`
+    call site.
     """
     if model:
-        best: tuple[float, float] | None = None
-        best_len = -1
-        for prefix, rates in _MODEL_RATES_USD_PER_MTOK.items():
-            if model.startswith(prefix) and len(prefix) > best_len:
-                best, best_len = rates, len(prefix)
-        if best is not None:
-            return best
+        match = _lookup_rate(model, _ACTIVE_MODEL_RATES_USD_PER_MTOK)
+        if match is not None:
+            return match
     return (_BLENDED_INPUT_USD_PER_MTOK, _BLENDED_OUTPUT_USD_PER_MTOK)
 
 
@@ -1750,13 +1855,15 @@ class TokenUsage:
         """Estimate cost with per-model attribution (issue athenaeum#247).
 
         Tokens tagged with a known model (via the ``model=`` kwarg on the
-        accumulation methods) price at that model's rates from
-        :data:`_MODEL_RATES_USD_PER_MTOK`, matched by longest id prefix.
-        Tokens accumulated WITHOUT a model tag — or tagged with an id that
-        matches no known prefix (e.g. routed through a proxy) — fall back
-        to the blended rate ($1.50/M input, $7.50/M output). The cache
-        multipliers (athenaeum#239) and the Batch API 50% discount (athenaeum#236) compose
-        unchanged per model.
+        accumulation methods) price at that model's rates from the ACTIVE
+        rate table (:data:`_ACTIVE_MODEL_RATES_USD_PER_MTOK` — the code
+        default until an ``athenaeum run`` replaces it with the operator's
+        ``athenaeum.yaml`` ``pricing:`` section, issue athenaeum#783), matched by
+        longest id prefix. Tokens accumulated WITHOUT a model tag — or
+        tagged with an id that matches no known prefix (e.g. routed through
+        a proxy) — fall back to the blended rate ($1.50/M input, $7.50/M
+        output). The cache multipliers (athenaeum#239) and the Batch API 50%
+        discount (athenaeum#236) compose unchanged per model.
 
         Caveat: untagged/unknown-model traffic is still only approximated
         at the blended rate; it cannot be attributed to a specific model.
