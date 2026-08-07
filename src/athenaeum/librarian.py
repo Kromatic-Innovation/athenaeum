@@ -823,9 +823,15 @@ def tier0_bounce_mark(
     if not isinstance(meta, dict):
         return None
     observed_at = str(meta.get("observed_at", "") or "").strip()
-    source = meta.get("source")
-    if not observed_at or not source:
+    raw_source = meta.get("source")
+    if not observed_at or not raw_source:
         return None
+    # Frontmatter values arrive untyped; `source` is either the bare shorthand
+    # string or the per-value mapping shape. Anything else is not a source we
+    # can attribute the mark to, so fall through to the reasoning path.
+    if not isinstance(raw_source, (str, dict)):
+        return None
+    source: str | dict[str, Any] = raw_source
 
     fact = detect_hard_bounce_fact(body)
     if fact is None:
