@@ -3,24 +3,34 @@
 # Design: tracking deprecated / bounced email identifiers (athenaeum#565)
 
 **Status: RATIFIED, then corrected 2026-08-05 (athenaeum#768) against the live
-code and the narrowed athenaeum#765 implementation plan.** This document was
-the deliverable of issue athenaeum#565 (PR athenaeum#652). It originally
-answered five design questions; three of the five needed correction after
-ratification:
+code, and reconciled again the same day against the SHIPPED athenaeum#765
+implementation (PR athenaeum#826, merged).** This document was the
+deliverable of issue athenaeum#565 (PR athenaeum#652). It originally answered
+five design questions; three of the five needed correction after
+ratification, and Q3's contract details needed a further pass once #765
+actually landed and the shape of the shipped code diverged from the plan:
 
-- **Q1 and Q2 are superseded** by the v6 memory model (athenaeum#712,
-  athenaeum#709) — marked in place below, not deleted, per athenaeum#768.
+- **Q1 and Q2 are superseded** by the v6 memory model direction (athenaeum#712,
+  athenaeum#709) — marked in place below, not deleted, per athenaeum#768. The
+  shipped athenaeum#765 mechanism does not wait on either: it reuses
+  athenaeum#308's existing `valid_until` claim-validity close directly (see
+  below), so there is no interim ledger of any kind.
 - **Q3 named the wrong actor.** A 2026-08-05 code review established that
   **Voltaire**, not maecenas, detects and reports the bounce fact; see
   "The actor is wrong" below and the corrected Q3.
 - **Q3 and Q5 specified a bespoke `type: email_bounce` intake schema.** That
   pattern was cut as not generalizable; the reporter uses the existing
-  free-text `remember()` call instead.
+  free-text `remember()` call instead, and Q3 below now describes the exact
+  frontmatter/`sources` shape the shipped `librarian.tier0_bounce_mark`
+  requires to recognize it.
 
 The implementation issue is athenaeum#765, narrowed to exactly what the
 operator asked for: *"The librarian should process it in the wiki by making
-sure that email in our PII file is marked as bounced. That's all."*
-Corrections below reflect that narrowing.
+sure that email in our PII file is marked as bounced. That's all."* It has
+since **shipped** (PR athenaeum#826, merged 2026-08-07) — this document has
+been checked against `src/athenaeum/pii.py` (`detect_hard_bounce_fact`,
+`mark_bounced`, `is_bounced`) and `src/athenaeum/librarian.py`
+(`tier0_bounce_mark`) on `develop` as of that merge, not just the plan.
 
 ## The actor is wrong (corrected 2026-08-05, athenaeum#768)
 
@@ -77,18 +87,23 @@ The recommendation below implements this model; it does not reopen it.
 
 ## Q1 — Where does deprecation live?
 
-> **SUPERSEDED 2026-08-05 (athenaeum#768).** The `_deprecations.jsonl` ledger
-> proposed below was never built. athenaeum#765 (the narrowed implementation
-> issue for this design) cut it on 2026-08-05: athenaeum already has
-> `_observations.jsonl` (append-only, with a supersession fold), and
-> **athenaeum#712** is building the v6 verdict ledger as the single place
-> verdicts are recorded — a second, feature-specific ledger would collide
-> with it. athenaeum#689 was re-scoped on 2026-08-02 by explicit operator
-> decision — *"one ledger"* — for the same reason. The section below is kept
-> for historical context (why a deprecation record is not folded into
-> `Supersession`) but its proposed storage mechanism does not exist and is
-> not being built; the actual mechanism is whatever athenaeum#712's verdict
-> ledger produces.
+> **SUPERSEDED 2026-08-05 (athenaeum#768), and reconciled again once
+> athenaeum#765 shipped (PR athenaeum#826).** The `_deprecations.jsonl`
+> ledger proposed below was never built. athenaeum#765 (the narrowed
+> implementation issue for this design) cut it on 2026-08-05: athenaeum
+> already has `_observations.jsonl` (append-only, with a supersession fold),
+> and a second, feature-specific ledger would collide with **athenaeum#712**'s
+> planned v6 verdict ledger. athenaeum#689 was re-scoped on 2026-08-02 by
+> explicit operator decision — *"one ledger"* — for the same reason. But the
+> shipped mechanism does **not** wait on athenaeum#712 either: `pii.mark_bounced`
+> encodes the mark as a **valid-time close** — it sets `valid_until` to the
+> observed date directly on the identifier's own contact-record frontmatter,
+> reusing athenaeum#308's existing `valid_until_expired` claim-validity
+> predicate (`pii.is_bounced` is the read-side wrapper). No ledger file of
+> any kind — new, `_deprecations.jsonl`-shaped, or v6 — is part of the shipped
+> mark. The section below is kept for historical context (why a deprecation
+> record is not folded into `Supersession`) but its proposed storage
+> mechanism does not exist and is not being built.
 
 **In the excluded contact store, as a new append-only ledger record — NOT in
 wiki frontmatter.**
@@ -146,16 +161,19 @@ non-deliverable* rather than either live or gone.
 
 ## Q2 — Archive vs delete: the configurable preference
 
-> **SUPERSEDED 2026-08-05 (athenaeum#768).** The configurable
+> **SUPERSEDED 2026-08-05 (athenaeum#768), and reconciled again once
+> athenaeum#765 shipped (PR athenaeum#826).** The configurable
 > archive-vs-delete disposition knob proposed below was never built.
 > athenaeum#765 cut it on 2026-08-05: a `delete` disposition is a destructive
 > operation, and athenaeum#709's definition of done item 4 requires **"zero
-> destructive operations without a ledger entry."** Rather than carry a
-> per-feature disposition knob, disposition is a property of the v6 ledger
-> mechanism athenaeum#709/athenaeum#712 are building, not a standalone
-> resolver. The section below is kept for historical context (the
-> archive-over-delete reasoning still holds) but the knob it proposes does
-> not exist and is not being built.
+> destructive operations without a ledger entry."** The shipped mechanism
+> has no disposition knob at all — `pii.mark_bounced` only ever **upserts**
+> fields onto the identifier's existing contact record (idempotent; a
+> re-report is a byte-for-byte no-op) and never deletes the record or the
+> identifier under any configuration, so the outcome is `archive`-only by
+> construction, not by a resolved default. The section below is kept for
+> historical context (the archive-over-delete reasoning still holds) but the
+> knob it proposes does not exist and is not being built.
 
 **Recommended default: `archive` (preserve). Configurable via a resolver knob,
 global with an optional per-source override.**
@@ -202,16 +220,27 @@ deprecation record). Preserve is the safe direction.
 
 ## Q3 — The raw-intake proposal contract
 
-> **CORRECTED 2026-08-05 (athenaeum#768).** Two things were wrong in the
-> original text below, replaced entirely rather than annotated in place: (1)
-> it named maecenas as the reporter — it is **Voltaire**; see "The actor is
-> wrong" above. (2) it specified a dedicated `type: email_bounce` YAML schema
-> with a special-cased librarian intake path — cut as not generalizable for
-> an OSS knowledge system with many fact types.
+> **CORRECTED 2026-08-05 (athenaeum#768), and corrected again the same day
+> once athenaeum#765 shipped (PR athenaeum#826).** Three things were wrong in
+> the original text below, replaced entirely rather than annotated in place:
+> (1) it named maecenas as the reporter — it is **Voltaire**; see "The actor
+> is wrong" above. (2) it specified a dedicated `type: email_bounce` YAML
+> schema with a special-cased librarian intake path — cut as not
+> generalizable for an OSS knowledge system with many fact types. (3) the
+> first-pass correction's own `remember()` example was still wrong once the
+> shipped code could be read: it passed the per-claim provenance value
+> through `remember()`'s `source` parameter, but that parameter selects the
+> `raw/<session>/` subdirectory (the SESSION identifier) — per-claim
+> provenance goes through the separate `sources` parameter instead. The
+> example below matches `tests/test_bounce_mark.py::TestNormalIntakePath`,
+> which exercises the real `remember_write()` entry point, not a
+> hand-crafted fixture.
 
 **Voltaire reports the bounce fact into raw intake as ordinary free text,
 via the existing `remember()` call. No dedicated schema, no special-cased
-librarian intake path.**
+librarian intake path — but two specific frontmatter fields on the note
+itself gate whether the deterministic fast path recognizes it (see "How
+recognition actually works" below).**
 
 Voltaire detects the bounce (`voltaire/src/tiers/bounce.ts`) and invokes
 `handle_bounce.py` to update Google Contacts. That script is hosted in
@@ -220,15 +249,21 @@ directly to the wiki (`write_wiki_bounced()`) and instead reports the bounce
 fact through this contract. maecenas itself does not detect or report; it
 only consumes the resulting suppression state at send time.
 
-**Contract — an ordinary `remember()` call, evidence embedded in the text:**
+**Contract — an ordinary `remember()` call, evidence embedded in the text,
+`observed_at` embedded in the note's own frontmatter, provenance via
+`sources`:**
 
 ```python
 remember(
     content=(
-        "Bounce: person@example.com — 550 5.1.1 user unknown "
-        "(observed 2026-07-15, campaign:spring-2026/msg-abc123)"
+        "---\n"
+        "observed_at: 2026-07-15\n"
+        "---\n\n"
+        "person@example.com hard-bounced. "
+        "Diagnostic: 550 5.1.1 user unknown."
     ),
-    source="campaign:spring-2026/msg-abc123",
+    source="voltaire-bounce-relay",              # session dir, NOT provenance
+    sources="campaign:spring-2026/msg-abc123",   # per-claim provenance
 )
 ```
 
@@ -236,19 +271,50 @@ Rules of the contract:
 
 1. The reporter emits **only the fact**, as free text with the evidence
    embedded — address, diagnostic, observed date, and provenance. There is
-   no `type:` field and no bespoke YAML schema; `content` and `source` are
-   the same two parameters every other `remember()` caller uses.
+   no `type:` field and no bespoke YAML schema; `content`, `source`, and
+   `sources` are the same parameters every other `remember()` caller uses.
+   `source` (bare string) picks the `raw/<session>/` landing directory;
+   `sources` is the per-claim provenance that lands as the raw file's own
+   `source:` frontmatter key.
 2. This is **ordinary raw intake**, like every other fact athenaeum records —
-   the reporter calls `remember()` and stops. The librarian's normal
-   classification pass recognizes the bounce fact and marks the address
-   bounced on the PII surface. There is no dedicated ledger record or
-   disposition to resolve (Q1/Q2 above are superseded — athenaeum#765's
-   narrowed scope is "mark the address bounced on the PII surface, that's
-   all").
+   the reporter calls `remember()` and stops. There is no dedicated ledger
+   record or disposition to resolve (Q1/Q2 above are superseded —
+   athenaeum#765's narrowed scope is "mark the address bounced on the PII
+   surface, that's all").
 3. There is no required-field list beyond what `remember()` already takes.
    The diagnostic and observed date are conventions for what to embed in
-   `content`, not schema fields the librarian parses specially.
-4. The reporter learns the librarian's outcome, if at all, only through the
+   `content`, not schema fields the librarian parses specially — with one
+   caveat: `observed_at` must appear in the note's OWN frontmatter (either
+   embedded by the caller, as above, or already present from an earlier
+   merge) for the deterministic fast path in point 4 to fire at all; an
+   omitted `observed_at` or `source` falls the note straight through to the
+   ordinary reasoning tiers, unmarked as a bounce, with no error.
+4. **How recognition actually works (added post-#765-merge, athenaeum#768):**
+   this is NOT "the librarian's normal classification pass" in the LLM
+   sense — it is a new, LLM-free **Tier 0** branch,
+   `librarian.tier0_bounce_mark`, that runs before Tier 1/2/3 in
+   `process_one` and short-circuits them entirely on a match (mirroring
+   `tier0_handle_upsert`'s shape). It requires, deterministically:
+   - the raw file's own frontmatter carries a non-empty `observed_at` **and**
+     `source` (both pre-existing generic per-claim fields, athenaeum#424 /
+     athenaeum#90 — not new schema); and
+   - the body text matches `pii.detect_hard_bounce_fact`: **exactly one**
+     email-shaped token, plus an RFC 3463 `5.x.x` (hard-failure) code
+     somewhere in the text. A note naming zero or several addresses, or
+     carrying only a `4.x` transient code, is left untouched and falls
+     through to the ordinary Tier 1/2/3 reasoning path like any other raw
+     file — it is not specially declined or logged as a bounce-adjacent
+     case. This is also where the "outcome-vocabulary gap" noted above
+     actually bites: a `4.x`/potentially-stale note (voltaire#81) gets no
+     bounce handling of any kind today, deterministic or otherwise.
+   - On a match, `pii.mark_bounced` upserts `identifier`, `pii: true`,
+     `bounce_diagnostic`, `observed_at`, `source`, and `valid_until` (set to
+     `observed_at`) onto the identifier's own contact-record frontmatter on
+     the excluded contacts surface — never a ledger row. `pii.is_bounced`
+     (`valid_until_expired` under the hood) is the single read-side
+     predicate a consumer calls to tell "present but non-deliverable" apart
+     from "never seen."
+5. The reporter learns the librarian's outcome, if at all, only through the
    normal intake result surface — **ideally it learns nothing**, per the
    operator's "maecenas shouldn't need to worry about this" (which extends
    to Voltaire and the hosted script it invokes).
@@ -277,9 +343,10 @@ that issue's driver note stays current.
 > `moscow:could` and genuinely optional, so it was closed rather than
 > rewritten against a moving target — see the issue for the full review. The
 > text below still describes the `_deprecations.jsonl` record for the same
-> historical-context reason as Q1/Q2 above; the actual mechanism, if this
-> lint is ever rebuilt, would be whatever athenaeum#712's verdict ledger
-> produces.
+> historical-context reason as Q1/Q2 above; the actual shipped mark (see Q1,
+> Q3) is a `valid_until` close on the identifier's own contact-record
+> frontmatter, not a ledger — a rebuilt lint would read that field via
+> `pii.is_bounced`, not diff a ledger.
 
 **Steady state: athenaeum legitimately holds identifiers Google Contacts has
 dropped. That is what "historical identifier" means. No reverse drift-detection
@@ -311,11 +378,13 @@ for the *historical* fact that the address once bounced.
 
 ## Q5 — Retroactive population (backfill)
 
-> **CORRECTED 2026-08-05 (athenaeum#768).** The original text below emitted
-> the **same** bespoke `type: email_bounce` intake proposal Q3 used — cut for
-> the same reason (see Q3). It also implicitly located the backfill on the
-> containerized design-work side; the gcontacts read is a **Voltaire-side**
-> concern, and the backfill issue has moved there: **voltaire#117**.
+> **CORRECTED 2026-08-05 (athenaeum#768), contract detail refreshed the same
+> day once athenaeum#765 shipped (PR athenaeum#826).** The original text
+> below emitted the **same** bespoke `type: email_bounce` intake proposal Q3
+> used — cut for the same reason (see Q3). It also implicitly located the
+> backfill on the containerized design-work side; the gcontacts read is a
+> **Voltaire-side** concern, and the backfill issue has moved there:
+> **voltaire#117**.
 
 **Yes — the `BOUNCED <date>: <diagnostic>` markers already recorded in Google
 Contact biographies are a backfill source. Tracked as voltaire#117.**
@@ -323,11 +392,15 @@ Contact biographies are a backfill source. Tracked as voltaire#117.**
 Bounces have been recorded in gcontacts bios as `BOUNCED <date>: <diagnostic>`
 for some time. A one-time backfill pass parses those markers and reports each
 one through the **same** free-text `remember()` contract as a live bounce
-(Q3) — `source: "backfill:gcontacts-bio"`, `content` embedding the address,
-diagnostic, and the marker's date — so backfill and live bounces flow through
-one code path, not two. Because raw intake is append-only, re-running the
-backfill is safe: the librarian's classification pass treats each `remember()`
-call as an independent fact, same as any duplicate report.
+(Q3) — `sources: "backfill:gcontacts-bio"` (per-claim provenance; `source`
+remains the session-directory selector), `observed_at` embedded in the
+note's own frontmatter set to the marker's date, and `content` embedding the
+address and diagnostic — so backfill and live bounces flow through one code
+path, not two, and both are recognized by the same deterministic
+`librarian.tier0_bounce_mark` gate described in Q3 (not an LLM classification
+pass). Because raw intake is append-only, re-running the backfill is safe:
+`pii.mark_bounced` treats each `remember()` call as an independent, idempotent
+upsert, same as any duplicate report.
 
 The backfill needs read access to the gcontacts bios, which Voltaire already
 has and this document's scope (athenaeum-side design) does not cross —
@@ -349,20 +422,22 @@ it adds a status to records those slices already place in the excluded surface.
 
 ## What ratification unblocks (implementation slices)
 
-> **CORRECTED 2026-08-05 (athenaeum#768).** This list originally named
-> maecenas as the Q3 reporter in items 3-4 and proposed the now-superseded
-> Q1/Q2 mechanism in items 1-2. Updated to the actual disposition of each
-> slice, below, cross-linked to the issue building it (or the issue that
-> closed it, and why).
+> **CORRECTED 2026-08-05 (athenaeum#768), and item 3 flipped to shipped the
+> same day once athenaeum#765 merged (PR athenaeum#826).** This list
+> originally named maecenas as the Q3 reporter in items 3-4 and proposed the
+> now-superseded Q1/Q2 mechanism in items 1-2. Updated to the actual
+> disposition of each slice, below, cross-linked to the issue building it (or
+> the issue that closed it, and why).
 
-1. **Superseded** — `_deprecations.jsonl` record type. Not being built; the
-   mechanism is whatever **athenaeum#712**'s v6 verdict ledger produces (Q1).
+1. **Superseded** — `_deprecations.jsonl` record type. Not built; the shipped
+   mark instead reuses athenaeum#308's `valid_until` close directly (Q1) —
+   it does not wait on **athenaeum#712**'s (still separate) v6 verdict ledger.
 2. **Superseded** — `resolve_bounce_disposition` knob. Not being built; ruled
    out by **athenaeum#709**'s definition-of-done item 4, "zero destructive
    operations without a ledger entry" (Q2).
-3. **In progress** — the librarian marks the address bounced on the PII
-   surface from an ordinary `remember()` call, no dedicated intake path.
-   Tracked by **athenaeum#765**, narrowed to exactly that (Q3).
+3. **Shipped** — the librarian marks the address bounced on the PII surface
+   from an ordinary `remember()` call, no dedicated intake path. Built by
+   **athenaeum#765**, merged 2026-08-07 in **athenaeum#826** (Q3).
 4. **In progress** — the corrected Q3 contract, communicated to
    **maecenas#42**, which tracks fixing the hosted `handle_bounce.py` script
    to stop writing directly to the wiki.
@@ -381,10 +456,11 @@ it adds a status to records those slices already place in the excluded surface.
 > values — and that mechanism was superseded before any of them needed an
 > answer (see Q1/Q2 above). Kept for historical record; none is a live
 > decision point. The one open question that *is* still live is the
-> outcome-vocabulary gap noted under "The actor is wrong": Voltaire's
-> three-valued outcome vocabulary (voltaire#81) versus whatever `status`
-> values the v6 verdict ledger (athenaeum#712) ends up using — tracked as an
-> open question on **athenaeum#765**.
+> outcome-vocabulary gap noted under "The actor is wrong": today the shipped
+> mechanism only ever marks the `5.x` hard-bounce case (Q3); Voltaire's
+> `4.x`/potentially-stale outcome (voltaire#81) has no athenaeum-side handling
+> at all yet, deterministic or otherwise — tracked as an open question on
+> **athenaeum#765**.
 
 - **Default disposition** — this proposed `archive` (preserve). Superseded —
   see Q2.
