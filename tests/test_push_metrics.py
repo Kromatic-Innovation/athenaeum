@@ -640,17 +640,49 @@ class TestComputeBaselineExcludeSessions:
 
 
 class TestWriteSnapshot:
+    @staticmethod
+    def _seed_valid_baseline(cache: Path, *, session_id: str = "s1") -> None:
+        """Seed one push + one fully-referenced record so ``compute_baseline()``
+        over *cache* is valid (``reference_record_count > 0``).
+
+        ``write_snapshot`` refuses on an empty/invalid baseline (issue
+        athenaeum#795), so the idempotence/append tests below — which are
+        about the WRITE MECHANICS, not about the empty-ledger case — need a
+        baseline that is actually writable.
+        """
+        push = push_metrics.build_push_record(
+            session_id=session_id,
+            query="q",
+            backend="fts5",
+            hits=[("f.md", {"uid": "u1"}, "b")],
+        )
+        push_metrics.record_push(push, cache_dir=cache)
+        ref = push_metrics.ReferenceResult(
+            session_id=session_id,
+            ts="2026-01-01T00:00:00Z",
+            pushed_ids=["u1"],
+            referenced_ids=["u1"],
+        )
+        push_metrics.record_reference_result(ref, cache_dir=cache)
+
     def test_creates_new_file(self, tmp_path: Path) -> None:
-        baseline = push_metrics.compute_baseline(cache_dir=tmp_path / "cache", repo_root=Path("."))
+        """athenaeum#795: a baseline with zero reference records is REFUSED,
+        not written as a placeholder — the athenaeum#711 incident this issue
+        fixes. Nothing is written; the docs path never comes into existence.
+        """
+        baseline = push_metrics.compute_baseline(
+            cache_dir=tmp_path / "cache", repo_root=Path(".")
+        )
+        assert baseline.reference_record_count == 0
         docs_path = tmp_path / "docs" / "memory-model-measurements.md"
-        push_metrics.write_snapshot(baseline, docs_path=docs_path)
-        content = docs_path.read_text()
-        assert "## Push-precision and coverage baseline" in content
-        assert "precision: n/a" in content
+        with pytest.raises(ValueError, match="reference_records"):
+            push_metrics.write_snapshot(baseline, docs_path=docs_path)
+        assert not docs_path.exists()
 
     def test_rerun_appends_dated_snapshot_never_corrupts(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         docs_path = tmp_path / "docs.md"
+        self._seed_valid_baseline(cache)
         b1 = push_metrics.compute_baseline(cache_dir=cache, repo_root=Path("."))
         push_metrics.write_snapshot(b1, docs_path=docs_path)
         b2 = push_metrics.compute_baseline(cache_dir=cache, repo_root=Path("."))
@@ -666,6 +698,7 @@ class TestWriteSnapshot:
     def test_idempotent_many_runs(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         docs_path = tmp_path / "docs.md"
+        self._seed_valid_baseline(cache)
         for _ in range(5):
             b = push_metrics.compute_baseline(cache_dir=cache, repo_root=Path("."))
             push_metrics.write_snapshot(b, docs_path=docs_path)
@@ -676,7 +709,9 @@ class TestWriteSnapshot:
     def test_appends_section_to_existing_unrelated_file(self, tmp_path: Path) -> None:
         docs_path = tmp_path / "docs.md"
         docs_path.write_text("# Some other doc\n\nUnrelated content.\n")
-        baseline = push_metrics.compute_baseline(cache_dir=tmp_path / "cache", repo_root=Path("."))
+        cache = tmp_path / "cache"
+        self._seed_valid_baseline(cache)
+        baseline = push_metrics.compute_baseline(cache_dir=cache, repo_root=Path("."))
         push_metrics.write_snapshot(baseline, docs_path=docs_path)
         content = docs_path.read_text()
         assert "Unrelated content." in content
