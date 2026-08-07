@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Test suite no longer writes synthetic records into the real
+  `~/.cache/athenaeum` cache-dir artifacts (athenaeum#791).** A prior fix
+  (athenaeum#776) isolated the spend ledger with a session-scoped autouse
+  *fixture* — but fixtures only wrap test EXECUTION, which runs after
+  collection, so a module that resolves the cache dir at COLLECTION time (a
+  module-level statement, or `pytest.mark.parametrize` decorator arguments
+  pytest evaluates while importing the module) ran before any fixture could
+  fire. `tests/conftest.py` now redirects `ATHENAEUM_CACHE_DIR` /
+  `ATHENAEUM_SPEND_LEDGER` in a `pytest_configure` hook instead, which runs
+  before collection begins — closing the gap structurally for every test
+  module. `tests/test_thinking_seam.py`'s bespoke module-level workaround for
+  this same gap is deleted, now redundant. Added: a grep-guard
+  (`tests/test_cache_dir_resolver.py::test_env_literal_setting_home_also_sets_cache_dir`)
+  that scans `tests/` for hand-built `env = {...}` dicts that set `HOME`
+  without also setting `ATHENAEUM_CACHE_DIR` — `tests/test_shell_hooks.py`'s
+  five such dicts (protected only incidentally, by `HOME` already being a
+  tmp dir) now set it explicitly too. The single-artifact pollution canary
+  (`tests/test_llm_schemas.py::TestObservationsPathIsolation::test_nested_pytest_run_does_not_pollute_real_ledger`)
+  is generalized into
+  `test_nested_pytest_run_does_not_pollute_real_cache_dir_artifact`,
+  parametrized over all four cache-dir artifacts (`_llm_schema_observations.jsonl`,
+  `spend.jsonl`, `_push_records.jsonl`, `_push_references.jsonl`) instead of
+  naming one. New `tests/test_push_metrics.py::TestPushRecordsPathIsolation`
+  pins that `push_records_path()`/`reference_records_path()` resolve outside
+  the real cache dir under the suite fixture. `athenaeum push-metrics
+  baseline` gained `--exclude-session SESSION_ID` (repeatable): an explicit
+  operator denylist for known-synthetic sessions (e.g. one that ran the test
+  suite and leaked fixture pushes into the live ledger — the athenaeum#791
+  evidence: 75 of 120 push records at filing, all from one such session).
+  Excluded sessions and their record counts are always reported on
+  `BaselineWindow`/the CLI output/the committed snapshot
+  (`excluded_sessions`/`excluded_push_records`/`excluded_reference_records`),
+  even when empty, so a contaminated window is visible rather than silently
+  folded into a clean-looking total. No change to the push-record schema or
+  to what the recall path writes at runtime.
+
 - **Three provider/cost hygiene fixes from the LLM-provider/cost audit
   (athenaeum#780, findings L7/L8/L10).** (1) `scripts/measure_contradiction_baseline.py`'s
   `_build_client` was the only direct `anthropic.Anthropic(...)` construction
