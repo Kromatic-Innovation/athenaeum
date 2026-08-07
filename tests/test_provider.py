@@ -256,6 +256,20 @@ class TestClaudeCliCreate:
         # ``--append-system-prompt`` must NOT be used (would inherit persona).
         assert "--append-system-prompt" not in argv
 
+    def test_argv_includes_strict_mcp_config(self, monkeypatch):
+        # athenaeum#775: every ``claude -p`` spawn must pass
+        # ``--strict-mcp-config`` so it does not boot the nine user-scoped
+        # MCP servers from ``~/.claude.json`` (including athenaeum's own).
+        cap = {}
+        _stub_run(monkeypatch, stdout=_envelope(), capture=cap)
+        client = ClaudeCliClient()
+        client.messages.create(
+            model="m-1",
+            system="s",
+            messages=[{"role": "user", "content": "u"}],
+        )
+        assert "--strict-mcp-config" in cap["argv"]
+
     def test_user_prompt_passed_on_stdin_not_argv(self, monkeypatch):
         # Issue athenaeum#543 (L4): the user's own notes must never sit in the process
         # table. The prompt rides subprocess stdin (`input=`), and no element of
