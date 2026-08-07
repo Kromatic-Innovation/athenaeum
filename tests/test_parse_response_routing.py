@@ -12,8 +12,9 @@ They do NOT exercise the prompt itself — every call to
 literal expected JSON payload, so a future prompt edit that drifts the
 classification will NOT fail these tests. Prompt drift is caught by:
 
-- :mod:`tests.test_resolve_system_snapshot` — fails on any unintentional
-  edit to the ``_RESOLVE_SYSTEM`` prompt string.
+- :func:`tests.test_prompt_goldens.test_prompt_matches_golden` — fails on
+  any unintentional edit to the ``_RESOLVE_SYSTEM`` prompt string (and
+  every other registered prompt).
 - :mod:`tests.regression.test_live_prompt_regression` — opt-in (set
   ``ATHENAEUM_LIVE_TESTS=1``) live-LLM check that the real prompt still
   classifies the canonical training cases correctly.
@@ -473,8 +474,9 @@ def test_resolved_case_returns_not_a_conflict(
     prompted resolver to emit. This test does NOT exercise the prompt —
     it verifies that for each canonical input shape the parser routes
     to the right proposal class and preserves the action + confidence.
-    Prompt drift is caught by ``test_resolve_system_snapshot`` and the
-    opt-in live regression in ``tests/regression/``.
+    Prompt drift is caught by
+    ``test_prompt_goldens.py::test_prompt_matches_golden`` and the opt-in
+    live regression in ``tests/regression/``.
     """
     ams = _write_case_files(case, tmp_path)
     detector = _detector_result(case, ams)
