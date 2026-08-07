@@ -113,6 +113,7 @@ from athenaeum.config import (
     resolve_delta_max_affected_members,
     resolve_extra_intake_roots,
     resolve_full_compile_every_days,
+    resolve_heartbeat_interval,
     resolve_live_delta_enabled,
     resolve_model_rates,
     resolve_pull_before_run,
@@ -155,6 +156,7 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
+from athenaeum.progress import PhaseHeartbeat
 from athenaeum.provider import (
     ProviderConfigError,
     build_llm_client,
@@ -277,6 +279,15 @@ DEFAULT_STUCK_FILE_THRESHOLD = 3
 # log-scraper / watchdog can grep this without parsing prose — the athenaeum#663
 # requirement that a permanently-stuck file be LOUD, not merely logged.
 STUCK_FILE_PREFIX = "librarian-stuck-file"
+
+# Stable, machine-greppable prefix for the WARNING emitted when a raw file
+# fails entity-phase processing (issue athenaeum#800). Before this, the failure
+# reason lived only in an ERROR-level `log.exception`/`log.error` line and in
+# the run's trailing "Failed files" summary (filename only, no reason) — a
+# 2026-08-06 run (631aaade) recorded three failed files with no error text
+# captured at any level the operator's log sweep captured. This line carries
+# both the file path and the exception type/message at a WARNING level.
+ENTITY_FILE_FAILURE_PREFIX = "librarian-entity-file-failure"
 
 # Fallback valid values if schema files are missing
 FALLBACK_TYPES = [
@@ -2870,6 +2881,20 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # run state, rather than retried identically forever.
                     stuck_ledger = _load_stuck_ledger(ctx.wiki_root)
                     stuck_threshold = librarian_stuck_file_threshold(ctx.config)
+                    # Issue athenaeum#800: the entity phase was the one dark zone left
+                    # with ZERO heartbeat coverage — a nightly run that spent 85% of
+                    # its window here (2,918s of 3,446s, run 631aaade) emitted no
+                    # per-file progress at all, only aggregate `entity secs` + `calls`
+                    # after the fact. Mirrors merge-detect/merge-write/wiki-dedupe/
+                    # reresolve: one tick per raw file so per-file wall-clock is
+                    # recoverable by differencing consecutive `elapsed=` values.
+                    entity_heartbeat_interval = resolve_heartbeat_interval(ctx.config)
+                    entity_heartbeat = PhaseHeartbeat(
+                        "entity",
+                        total=len(ctx.raw_files),
+                        interval_s=entity_heartbeat_interval,
+                    )
+                    entity_heartbeat.start()
                     for i, raw in enumerate(ctx.raw_files):
                         # Issue athenaeum#526 (H10): heartbeat at every per-file boundary
                         # so a long healthy entity phase keeps the lock's
@@ -2948,12 +2973,27 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # that blew the real deadline still reports that (the
                         # more severe condition), never this.
                         if not ctx.dry_run and ctx.entity_budget_exceeded():
+                            # Issue athenaeum#800: name the resource that actually
+                            # tripped (the entity phase's runtime SHARE, not the
+                            # run-level API call budget) and give both numbers for
+                            # the latter. A run (631aaade) tripped this at 28/1200
+                            # calls — 2.3% of the call budget — while the message
+                            # named only the runtime share, which read as call-budget
+                            # exhaustion and misled the first pass of a diagnosis.
                             log.warning(
                                 "librarian: entity phase runtime share exhausted "
-                                "after %d file(s) - deferring %d remaining file(s) "
+                                "after %d file(s) (api_call_budget usage: %d/%d "
+                                "calls, %.1f%%) - deferring %d remaining file(s) "
                                 "and yielding the rest of the window to the "
                                 "auto-memory / C4 phases (resumable, issue athenaeum#440)",
                                 i,
+                                ctx.usage.api_calls,
+                                ctx.max_api_calls,
+                                (
+                                    100.0 * ctx.usage.api_calls / ctx.max_api_calls
+                                    if ctx.max_api_calls
+                                    else 0.0
+                                ),
                                 len(ctx.raw_files) - i,
                             )
                             ctx.deferred_refs = [r.ref for r in ctx.raw_files[i:]]
@@ -3006,6 +3046,20 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 raw.ref,
                                 type(exc.last_error).__name__,
                             )
+                            # Issue athenaeum#800: a run (631aaade) recorded three
+                            # failed files with no error text captured at any log
+                            # level the operator's sweep captured — the trailing
+                            # "Failed files" summary (below, end of run) names only
+                            # the filename. This WARNING carries the file path AND
+                            # the exception type/message at the point of failure.
+                            log.warning(
+                                "%s ref=%s reason=%s: %s",
+                                ENTITY_FILE_FAILURE_PREFIX,
+                                raw.ref,
+                                type(exc.last_error).__name__,
+                                exc.last_error,
+                            )
+                            entity_heartbeat.tick(raw.ref, error=1)
                             ctx.failed_files.append(raw.ref)
                             # Issue athenaeum#663: a genuinely transient overload will NOT
                             # recur on the same file N nights running, so counting
@@ -3026,6 +3080,19 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             continue
                         except Exception as exc:
                             log.exception("Failed to process %s", raw.ref)
+                            # Issue athenaeum#800: WARNING-level failure reason (file
+                            # path + exception type/message), distinct from the
+                            # ERROR-level traceback above and from the trailing
+                            # "Failed files" filename-only summary — see the
+                            # TransientAPIError branch above for the full rationale.
+                            log.warning(
+                                "%s ref=%s reason=%s: %s",
+                                ENTITY_FILE_FAILURE_PREFIX,
+                                raw.ref,
+                                type(exc).__name__,
+                                exc,
+                            )
+                            entity_heartbeat.tick(raw.ref, error=1)
                             ctx.failed_files.append(raw.ref)
                             # Issue athenaeum#663: same stuck-file accounting for a
                             # non-transient processing failure (malformed file, a
@@ -3055,6 +3122,17 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         ctx.total_degraded += getattr(result, "degraded", 0)
                         ctx.total_truncated += getattr(result, "truncated", 0)  # athenaeum#476
 
+                        # Issue athenaeum#800: tick the entity heartbeat for this file —
+                        # `compiled` when it produced a create/update, `unchanged`
+                        # otherwise (T1-only match, dry-run preview, or an all-skip
+                        # classification). Mirrors merge-write's compiled=1-per-write.
+                        _entity_made_change = bool(result.created or result.updated)
+                        entity_heartbeat.tick(
+                            raw.ref,
+                            compiled=1 if _entity_made_change else 0,
+                            unchanged=0 if _entity_made_change else 1,
+                        )
+
                         if not ctx.dry_run:
                             raw.path.unlink()
                             log.info("  Deleted: %s", raw.path)
@@ -3064,6 +3142,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             # consecutive count rather than inheriting a stale one.
                             stuck_ledger.pop(raw.ref, None)
 
+                    entity_heartbeat.done()  # issue athenaeum#800
                     # Issue athenaeum#663: persist the updated stuck-file ledger (or remove
                     # it when empty). Durable cross-run state, committed with the
                     # run's git snapshot exactly like the deferred manifest.

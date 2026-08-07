@@ -272,6 +272,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   said `--by-knob` "does not exist yet") now points at `--by-knob` instead of
   the `--by-model`-keyed-by-model-id workaround it previously documented.
 
+- **Entity-phase heartbeat, per-call LLM timing, and failure-reason logging
+  (athenaeum#800, buildable half of athenaeum#764's Finding 0).** The entity
+  phase (raw-file intake, tier1-4 routing) was the one librarian phase with
+  ZERO `librarian-heartbeat` coverage — a nightly run (`631aaade`) spent 85%
+  of its 3,446s window here with nothing logged between its `start` line and
+  its eventual budget trip, so athenaeum#764's "where did the time go" question could
+  not be answered from the logs. `librarian.py`'s per-file entity loop now
+  emits `librarian-heartbeat phase=entity` lines on the same contract
+  `merge-detect`/`merge-write`/`wiki-dedupe`/`reresolve` already have
+  (`status=start|tick|done`, `done`/`total`, `compiled`/`unchanged`/`error`,
+  `unit=<raw file ref>`, cumulative `elapsed=`), with exactly one `tick` per
+  raw file processed — the same per-unit differencing property that made
+  `merge-detect` diagnosable. Separately, every entity-phase LLM call
+  (`tier2_classify` and its two retries, `tier3_create`, `tier3_merge`,
+  `tier3_merge_full` in `tiers.py`) now logs its own wall-clock under the new
+  `librarian-entity-llm-call` marker via a `_timed_llm_call` wrapper around
+  the existing `with_retry` call — unchanged request/retry/parse behavior,
+  just timed — so a run summary reader can distinguish "few slow calls" from
+  "many fast calls", which the aggregate `entity secs`/`calls` figure alone
+  cannot. A file failure now also logs the reason (exception type + message)
+  at WARNING with the file path under a new `librarian-entity-file-failure`
+  marker — run `631aaade` recorded three failed files with no error text
+  captured at any level the operator's log sweep caught, and the trailing
+  "Failed files" summary names only the filename. Finally, the entity-share
+  budget-trip WARNING now states which resource tripped alongside both
+  `api_call_budget` numbers (`631aaade` tripped at 28/1200 calls — 2.3% of
+  the call budget — while the prior message named only "entity phase runtime
+  share exhausted", reading as call-budget exhaustion and misleading the
+  first pass of the athenaeum#764 diagnosis). Observability only: no change to
+  provider routing, budgets, runtime shares, or deadlines. New
+  `TestEntityHeartbeat` in `tests/test_librarian_heartbeat.py` and
+  `TestEntityLLMCallTiming` in `tests/test_tiers.py` cover the contract.
+
 ### Changed
 
 - **`claude-cli` provider path now passes `--strict-mcp-config` to every
