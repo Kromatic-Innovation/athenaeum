@@ -51,10 +51,11 @@ import logging
 import os
 import re
 import textwrap
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import anthropic
 
@@ -158,6 +159,33 @@ def _record_usage(
                 cache_creation,
                 cache_read,
             )
+
+
+#: Stable, greppable marker logged (INFO) for each entity-phase LLM call's own
+#: wall-clock duration (issue athenaeum#800). The entity phase's run-summary line
+#: (``entity secs=... calls=...``) is an aggregate over the WHOLE phase — it
+#: cannot distinguish "few slow calls" from "many fast calls" that add up to
+#: the same total. This per-call line is exactly that differencing input.
+ENTITY_LLM_CALL_MARKER = "librarian-entity-llm-call"
+
+
+def _timed_llm_call(call: Callable[[], Any], description: str) -> Any:
+    """Wrap :func:`with_retry` with entity-phase LLM call wall-clock logging.
+
+    Every tier2/tier3 call site below already passes ``call``/*description*
+    straight to :func:`with_retry` unchanged — this only times that same call
+    and logs the duration; it does not alter what is sent, retried, or
+    returned (issue athenaeum#800: observability only, no compile-logic change).
+    """
+    _start = time.monotonic()
+    result = with_retry(call, description=description)
+    log.info(
+        "%s desc=%s elapsed=%.2fs",
+        ENTITY_LLM_CALL_MARKER,
+        description,
+        time.monotonic() - _start,
+    )
+    return result
 
 
 # Cap on operator-tunable schema fragments read from the live wiki at runtime
@@ -805,9 +833,9 @@ def tier2_classify(
         config=config,
     )
 
-    response = with_retry(
+    response = _timed_llm_call(
         lambda: client.messages.create(**params),
-        description=f"tier2_classify {raw.ref}",
+        f"tier2_classify {raw.ref}",
     )
     _record_usage(response, usage, model=params["model"], knob="classify")
 
@@ -895,9 +923,9 @@ def tier2_classify(
                 ),
             },
         ]
-        retry_response = with_retry(
+        retry_response = _timed_llm_call(
             lambda: client.messages.create(**retry_params),
-            description=f"tier2_classify-retry {raw.ref}",
+            f"tier2_classify-retry {raw.ref}",
         )
         _record_usage(retry_response, usage, model=retry_params["model"], knob="classify")
         retry_stats = Tier2ParseStats()
@@ -1193,9 +1221,9 @@ def tier2_reclassify_larger_budget(
         _TIER2_CLASSIFY_RETRY_MAX_TOKENS,
         config,
     )
-    response = with_retry(
+    response = _timed_llm_call(
         lambda: client.messages.create(**params),
-        description=f"tier2_classify-truncation-retry {raw.ref}",
+        f"tier2_classify-truncation-retry {raw.ref}",
     )
     _record_usage(response, usage, model=params["model"], knob="classify")
     retry_stats = Tier2ParseStats()
@@ -1484,9 +1512,9 @@ def tier3_create(
     """Use a capable LLM to create a new entity page."""
     params = tier3_create_params(action, source_ref, wiki_root=wiki_root, config=config)
 
-    response = with_retry(
+    response = _timed_llm_call(
         lambda: client.messages.create(**params),
-        description=f"tier3_create {source_ref}",
+        f"tier3_create {source_ref}",
     )
     _record_usage(response, usage, model=params["model"], knob="write")
 
@@ -1930,9 +1958,9 @@ def tier3_merge(
 
     params = tier3_merge_params(action, existing_body, source_ref, config=config)
 
-    response = with_retry(
+    response = _timed_llm_call(
         lambda: client.messages.create(**params),
-        description=f"tier3_merge {source_ref}",
+        f"tier3_merge {source_ref}",
     )
     _record_usage(response, usage, model=params["model"], knob="write")
 
@@ -1971,9 +1999,9 @@ def tier3_merge_full(
     """
     params = tier3_merge_full_params(action, existing_body, source_ref, config=config)
 
-    response = with_retry(
+    response = _timed_llm_call(
         lambda: client.messages.create(**params),
-        description=f"tier3_merge_full {source_ref}",
+        f"tier3_merge_full {source_ref}",
     )
     _record_usage(response, usage, model=params["model"], knob="write")
 
