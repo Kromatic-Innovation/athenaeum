@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`examples/claude-code/` (the installable Claude Code hook kit) now ships
+  in the built wheel, not just in git and the sdist (athenaeum#793).** A top-
+  level `examples/` lives outside `packages = ["src/athenaeum"]`, so
+  hatchling silently dropped it from the wheel — the same files-allowlist
+  trap `pyproject.toml` already documents (and had already fixed) for
+  `skills/`. Since `pip install athenaeum` resolves a wheel, the hook kit —
+  `settings-snippet.json`, the four hook scripts, and the env-var reference —
+  was invisible to essentially every installing user, including the
+  `user-prompt-recall.sh` correctness fix from athenaeum#792. Force-included
+  `examples` -> `athenaeum/examples` in `pyproject.toml`, mirroring the
+  `skills` force-include, with the Option A vs. Option B reasoning recorded
+  in the comment block next to it. New coverage in
+  `tests/test_skill_packaging.py::test_built_wheel_contains_claude_code_hook_kit`
+  builds a wheel and asserts the kit is present, mirroring the existing
+  `test_built_wheel_contains_skill` for `skills/`.
+
 - **Qualify three bare issue references that failed `public-safe-lint`
   (athenaeum#768).** The reconciliation pass landed two references to
   athenaeum#765 in `docs/deprecated-email-tracking.md` and one to
