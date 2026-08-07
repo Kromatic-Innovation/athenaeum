@@ -537,7 +537,23 @@ class TestModelPlumbingProductionPath:
             "# Access\n\n| Level |\n|-------|\n| internal |\n"
         )
         (root / "athenaeum.yaml").write_text(
-            "models:\n  classify: yaml-classify-model\n  write: yaml-write-model\n",
+            "models:\n  classify: yaml-classify-model\n  write: yaml-write-model\n"
+            # Issue athenaeum#783: athenaeum run now preflights every resolved model
+            # knob against athenaeum.yaml's pricing: section (REPLACE, not
+            # overlay -- a non-empty pricing: section drops the code-default
+            # table wholesale) and refuses to start on a miss. This test
+            # predates athenaeum#783 and is about model ROUTING, not pricing, so it
+            # needs an entry for the two yaml-routed ids above PLUS the
+            # unmodified resolve/topic/reasoning_t1/reasoning_t2 knobs' code
+            # defaults (claude-opus-5, claude-haiku-4-5-*, claude-opus-4-8),
+            # or the preflight would block the run before it ever reaches
+            # tier2/tier3.
+            "pricing:\n"
+            "  yaml-classify-model: [1.0, 5.0]\n"
+            "  yaml-write-model: [3.0, 15.0]\n"
+            "  claude-opus-5: [5.0, 25.0]\n"
+            "  claude-haiku-4-5: [1.0, 5.0]\n"
+            "  claude-opus-4-8: [5.0, 25.0]\n",
             encoding="utf-8",
         )
 

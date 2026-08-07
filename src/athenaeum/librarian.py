@@ -107,12 +107,14 @@ from athenaeum.config import (
 )
 from athenaeum.config import (
     load_config,
+    preflight_model_rates,
     resolve_delta_enabled,
     resolve_delta_max_affected_clusters,
     resolve_delta_max_affected_members,
     resolve_extra_intake_roots,
     resolve_full_compile_every_days,
     resolve_live_delta_enabled,
+    resolve_model_rates,
     resolve_pull_before_run,
     resolve_push_after_run,
     resolve_push_branch,
@@ -147,6 +149,7 @@ from athenaeum.models import (
     RawFile,
     TokenUsage,
     WikiEntity,
+    configure_model_rates,
     load_schema_list,
     parse_access,
     parse_frontmatter,
@@ -2226,9 +2229,42 @@ class RunContext:
         return 124
 
 
+def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """Resolve the model id each LLM-serving knob resolves to for THIS run
+    (issue athenaeum#783's preflight input).
+
+    Calls each knob's OWN getter (its existing env > yaml > default
+    precedence, unchanged) rather than hand-rolling a second resolution
+    path, so the preflight sees exactly what the run will actually serve
+    traffic with. Six DISTINCT knobs — ``claim_kind.py`` and
+    ``contradictions.py`` both resolve the same ``"classify"`` knob
+    :func:`athenaeum.tiers._get_classify_model` does (same env var, same
+    default), so they are not re-listed separately here; same for
+    ``drain_advisor.py``'s ``"write"`` knob. Imports are function-local,
+    matching this module's existing lazy-import convention for
+    ``claim_kind``/``drain_advisor`` (avoids a module-level import cycle:
+    several of these modules already import from ``athenaeum.librarian``
+    at the type-checking layer or import ``athenaeum.config``, which this
+    function's caller lives in).
+    """
+    from athenaeum.query_topics import _get_topic_model
+    from athenaeum.reasoning_tiers import get_t1_model, get_t2_model
+    from athenaeum.resolutions import _get_model as _get_resolve_model
+    from athenaeum.tiers import _get_classify_model, _get_write_model
+
+    return [
+        ("classify", _get_classify_model(config)),
+        ("write", _get_write_model(config)),
+        ("topic", _get_topic_model(config)),
+        ("resolve", _get_resolve_model(config)),
+        ("reasoning_t1", get_t1_model(config)),
+        ("reasoning_t2", get_t2_model(config)),
+    ]
+
+
 def _run_preconditions(ctx: RunContext) -> int | None:
     """Git/config preconditions gate: provider resolution + preflight, the
-    ANTHROPIC_API_KEY/wiki-root/.git existence checks. Issue athenaeum#330/#545 seam.
+    ANTHROPIC_API_KEY/wiki-root/.git existence checks. Issue athenaeum#330/#545/#783 seam.
 
     Returns a nonzero exit code to short-circuit ``run()`` on failure, or
     ``None`` to continue. Mutates ``ctx.provider``.
@@ -2247,6 +2283,21 @@ def _run_preconditions(ctx: RunContext) -> int | None:
     preflight_err = preflight_provider(ctx.provider)
     if preflight_err:
         log.error("%s", preflight_err)
+        return 1
+
+    # Issue athenaeum#783: install the operator's `athenaeum.yaml` `pricing:` section
+    # (if set) as the ACTIVE per-MTok rate table for this process — REPLACES the
+    # code-default table wholesale (see athenaeum.models.configure_model_rates for
+    # why "replace, not overlay"), then fail LOUDLY at startup, naming the model
+    # and the config key to set, if any model a knob will actually resolve to
+    # this run has no price. Mirrors the preflight_provider pattern immediately
+    # above rather than discovering the gap per-file at cost-calculation time,
+    # which the athenaeum#777 Fable/Mythos incident showed silently under-reports
+    # spend 6.67x.
+    configure_model_rates(resolve_model_rates(ctx.config))
+    pricing_err = preflight_model_rates(_resolve_run_models(ctx.config))
+    if pricing_err:
+        log.error("%s", pricing_err)
         return 1
 
     # The ANTHROPIC_API_KEY requirement applies ONLY to the ``api`` backend.

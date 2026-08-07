@@ -59,11 +59,13 @@ from __future__ import annotations
 import copy
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, TypeVar
 
 import yaml
+
+from athenaeum.models import default_model_rates, model_has_price
 
 logger = logging.getLogger(__name__)
 
@@ -1459,6 +1461,127 @@ def resolve_model(
     return default
 
 
+def resolve_model_rates(
+    config: dict[str, Any] | None,
+) -> dict[str, tuple[float, float]]:
+    """Resolve the per-MTok pricing table from ``athenaeum.yaml``'s ``pricing:``
+    section (issue athenaeum#783).
+
+    ``pricing.<prefix>: [input_usd_per_mtok, output_usd_per_mtok]`` — the SAME
+    longest-prefix-match convention :func:`athenaeum.models._rates_for_model`
+    already uses for the code-default table (issue athenaeum#247), so a dated model id
+    (``claude-sonnet-4-6-20260301``) still resolves via the shortest prefix
+    that matches. Only a yaml layer exists for this knob — no env-var
+    override (a whole pricing TABLE is not the single scalar the existing
+    ``ATHENAEUM_*`` env convention fits) and, deliberately, no per-prefix code
+    default merged in HERE: this function returns EXACTLY what
+    ``athenaeum.yaml`` says, nothing more. See
+    :func:`athenaeum.models.configure_model_rates` for what an empty return
+    does at the call site (falls back to the code-default table WHOLESALE,
+    not per missing prefix) and the athenaeum#783 issue's "Design decision" for why a
+    per-prefix merge (yaml overlaying the code table, which stays the floor
+    for anything yaml omits) was rejected: an omission in yaml would keep
+    silently reading the code default — the invisible second source of truth
+    the athenaeum#783 startup preflight (:func:`preflight_model_rates`) exists to kill
+    for a model a run actually resolves to.
+
+    Schema contract (athenaeum#783 "Schema note for the implementer"): **one rate per
+    prefix, no mode dimension.** A prefix key cannot express a time-boxed
+    promo rate (Sonnet 5's introductory $2/$10 through 2026-08-31 — Occam
+    decision 2026-07-31, deliberately not encoded: a prefix-keyed rate cannot
+    expire, so a promo would go silently wrong the day it ends) or a
+    per-request-mode rate (Opus 5's ``speed: "fast"`` $10/$50 — athenaeum does
+    not use fast mode). Both are explicitly out of scope for athenaeum#783; if either is
+    ever needed, it is a schema change here (e.g. a mode-keyed sub-block), not
+    a workaround layered on top of this function.
+
+    Malformed entries WARN and are REJECTED (excluded from the returned
+    dict — treated as unset for that prefix), mirroring
+    :func:`athenaeum.provider.resolve_max_tokens`'s malformed-override
+    convention rather than inventing a new one: wrong arity (not exactly 2
+    elements), a non-numeric element, a ``bool`` element (``bool`` is an
+    ``int`` subclass — ``[true, false]`` must not silently become
+    ``[1.0, 0.0]``), or a negative rate.
+    """
+    rates: dict[str, tuple[float, float]] = {}
+    if not isinstance(config, dict):
+        return rates
+    pricing_cfg = config.get("pricing")
+    if not isinstance(pricing_cfg, dict):
+        return rates
+    for prefix, raw in pricing_cfg.items():
+        if not isinstance(prefix, str) or not prefix.strip():
+            continue
+        if (
+            not isinstance(raw, list)
+            or len(raw) != 2
+            or any(isinstance(v, bool) for v in raw)
+            or not all(isinstance(v, (int, float)) for v in raw)
+        ):
+            logger.warning(
+                "Ignoring malformed pricing entry for %r: expected "
+                "[input_usd_per_mtok, output_usd_per_mtok], got %r",
+                prefix,
+                raw,
+            )
+            continue
+        input_rate, output_rate = float(raw[0]), float(raw[1])
+        if input_rate < 0 or output_rate < 0:
+            logger.warning(
+                "Ignoring pricing entry for %r with a negative rate: %r",
+                prefix,
+                raw,
+            )
+            continue
+        rates[prefix.strip()] = (input_rate, output_rate)
+    return rates
+
+
+def preflight_model_rates(resolved_models: Iterable[tuple[str, str]]) -> str | None:
+    """Return a startup error message if any RESOLVED model has no per-MTok
+    price, else ``None`` (issue athenaeum#783).
+
+    Mirrors :func:`athenaeum.provider.preflight_provider`'s pattern: validate
+    at startup and fail LOUDLY (rc 1) rather than letting an unpriced model
+    silently resolve to the blended fallback at cost-calculation time — the
+    direction that errs DOWNWARD and disarms a spend ceiling (the athenaeum#777
+    Fable/Mythos incident under-reported spend 6.67x this exact way, before it
+    was caught and fixed by hand).
+
+    *resolved_models* is ``(knob, model_id)`` pairs — e.g.
+    ``[("classify", "claude-haiku-4-5-20251001"), ("write", "claude-sonnet-5"),
+    ...]`` — the model id each LLM-serving knob resolves to for THIS run,
+    via that knob's own env > yaml > default precedence, unchanged. The
+    CALLER assembles this list (this module must not import the L3+
+    knob-resolver modules — ``tiers``, ``contradictions``, ``query_topics``,
+    ``resolutions``, ``reasoning_tiers`` — per the module docstring's
+    layering rule; see :func:`athenaeum.librarian._resolve_run_models`),
+    normally right after calling :func:`athenaeum.models.configure_model_rates`
+    so this check runs against the table the run will actually price against.
+
+    Checks :func:`athenaeum.models.model_has_price` — a real longest-prefix
+    match against the ACTIVE table with NO blended fallback — the same test
+    a miss would otherwise (silently) fail at cost-calculation time.
+    """
+    unpriced = [
+        (knob, model)
+        for knob, model in resolved_models
+        if model and not model_has_price(model)
+    ]
+    if not unpriced:
+        return None
+    detail = "; ".join(
+        f"knob {knob!r} resolved to model {model!r} — set pricing.{model} "
+        "(or a shorter matching prefix) in athenaeum.yaml"
+        for knob, model in unpriced
+    )
+    return (
+        "the following resolved model(s) have no per-MTok price and would "
+        f"silently under-report spend via the blended fallback: {detail}. "
+        "Refusing to start (issue athenaeum#783)."
+    )
+
+
 def resolve_screening(config: dict[str, Any] | None) -> dict[str, dict[str, str]]:
     """Resolve intake-screening settings for ``remember()`` (issue athenaeum#320).
 
@@ -1749,6 +1872,24 @@ search_backend: fts5
 #   topic: claude-haiku-4-5-20251001
 #   resolve: claude-opus-5
 
+# Per-MTok pricing table (issue athenaeum#783). UNLIKE the sections above, this
+# block is ACTIVE (not commented out): athenaeum.yaml is the authoritative
+# source for model pricing, and an unpriced model a run resolves to is a
+# LOUD startup failure (exits non-zero, naming the model and this key) rather
+# than a silent fall-through to the blended average — so a fresh install must
+# ship priced correctly out of the box. Seeded here from the current
+# athenaeum.models._MODEL_RATES_USD_PER_MTOK table (edit that constant, not
+# this file, when a vendor price changes — this block is regenerated by
+# write_default_config() from that single update site, never hand-copied).
+# Each entry is ``<model-id-prefix>: [input_usd_per_mtok, output_usd_per_mtok]``,
+# matched by LONGEST prefix so a dated id (e.g. claude-haiku-4-5-20251001)
+# resolves to the right family. Schema contract: ONE rate per prefix, no mode
+# dimension — a time-boxed promo rate or a per-request-mode rate (e.g.
+# Opus 5 "fast" mode) cannot be expressed here by design; both are out of
+# scope for athenaeum#783. Malformed entries (wrong arity, non-numeric, negative) warn
+# and are ignored, same as every other yaml knob.
+{{PRICING_YAML_BLOCK}}
+
 # Cross-scope contradiction detection (issue athenaeum#125).
 # cross_scope_mode: off | ancestor (default) | similarity | both.
 #   - off: per-scope cluster only.
@@ -1820,11 +1961,29 @@ search_backend: fts5
 """
 
 
+def _render_pricing_yaml_block() -> str:
+    """Render the code-default rate table as an active ``pricing:`` yaml
+    block (issue athenaeum#783), for :func:`write_default_config`.
+
+    Generated from :func:`athenaeum.models.default_model_rates` — the SAME
+    literal a maintainer edits when a vendor price changes — never a
+    hand-copied second list, so ``_DEFAULT_CONFIG_CONTENT``'s static
+    surrounding prose stays the only thing anyone edits by hand.
+    """
+    lines = ["pricing:"]
+    for prefix, (input_rate, output_rate) in default_model_rates().items():
+        lines.append(f"  {prefix}: [{input_rate}, {output_rate}]")
+    return "\n".join(lines)
+
+
 def write_default_config(knowledge_root: Path) -> Path:
     """Write the default config file if it doesn't exist. Returns the path."""
     config_path = knowledge_root / "athenaeum.yaml"
     if not config_path.exists():
-        config_path.write_text(_DEFAULT_CONFIG_CONTENT, encoding="utf-8")
+        content = _DEFAULT_CONFIG_CONTENT.replace(
+            "{{PRICING_YAML_BLOCK}}", _render_pricing_yaml_block()
+        )
+        config_path.write_text(content, encoding="utf-8")
     return config_path
 
 
