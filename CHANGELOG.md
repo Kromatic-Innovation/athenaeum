@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-knob spend attribution — `tokens_by_knob` (ledger v3) + `athenaeum
+  spend --by-knob` (athenaeum#781).** The ledger recorded `run_type` and `models`
+  but never the model KNOB, so "what does the contradiction resolver cost
+  me?" was unanswerable — `run_type` is coarse (`librarian` covers classify,
+  write, and resolve in one bucket) and `models` doesn't discriminate (the
+  `classify` knob is shared by `tiers.classify`, `contradictions.detect_system`,
+  and `claim_kind.claim_kind_system`, which all resolve to the same default
+  model, so a row tagged `claude-haiku-4-5-20251001` could be any of the
+  three). `TokenUsage.add` / `add_tokens` / `add_batch_tokens` gain a `knob=`
+  kwarg — mirroring the existing `model=` kwarg and its `per_model`
+  accumulation exactly — that accumulates into a new `per_knob` dict; each
+  real call site threads it from the SAME knob string it already passes to
+  `config.resolve_model` (`tiers.py`, `contradictions.py`, `claim_kind.py`,
+  `query_topics.py`, `resolutions.py`, `reasoning_tiers.py`, and `batch.py`'s
+  `execute_batch`, which tags a whole batch submission at once since the
+  tier-2 classify batch and the tier-3 write batch are each submitted
+  separately). `spend.tokens_by_knob()` mirrors `tokens_by_model()` into a
+  new ledger field `tokens_by_knob`, bumping `LEDGER_VERSION` to 3. Per the
+  issue's explicit override note: `tokens_by_model` is NOT reshaped — it
+  stays the superset of hestia's `cost-ledger.ts` `{input, output, total}`
+  shape that lets one reader serve both ledgers (athenaeum#487, cwc#1627/cwc#1629)
+  — `tokens_by_knob` is a SIBLING field, additive and athenaeum-only (a knob
+  has no hestia counterpart). Pre-v3 rows (and any v3 row that tagged no
+  knob) stay readable and are counted `knob_unattributed_records` in
+  `summarize()`, mirroring the existing pre-v2 `unpriceable_records`
+  treatment exactly — never dropped, still counted in `record_count` and
+  their billing bucket. `summarize()`'s existing `subscription`/`api`/
+  `unknown`/`record_count` shape is unchanged (only additive keys), so the
+  `cicero`/`good-morning` sub-skills do not regress. New `athenaeum spend
+  --by-knob` mirrors the `--by-model` / `--by-provider` output shape and
+  keeps the subscription/API split intact within each knob bucket — never a
+  blended total. The six knobs (`classify`, `write`, `resolve`, `topic`,
+  `reasoning_t1`, `reasoning_t2`) are derived from
+  `prompt_registry._META_ROWS` (the single source of truth) via the new
+  `prompt_registry.KNOBS` constant rather than duplicated, and every one is
+  exercised by a real-call-site test in the new `tests/test_knob_attribution.py`,
+  with a drift-guard test pinning that set against `KNOBS`. `docs/configuration.md`'s
+  reasoning-tier-auditing cost note (added by athenaeum#779, which explicitly
+  said `--by-knob` "does not exist yet") now points at `--by-knob` instead of
+  the `--by-model`-keyed-by-model-id workaround it previously documented.
+
 ### Changed
 
 - **`claude-cli` provider path now passes `--strict-mcp-config` to every

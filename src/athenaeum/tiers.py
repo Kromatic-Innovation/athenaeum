@@ -138,16 +138,20 @@ def _record_usage(
     response: anthropic.types.Message,
     usage: TokenUsage | None,
     model: str | None = None,
+    knob: str | None = None,
 ) -> None:
     """Record token usage from an API response if tracking is enabled.
 
     *model* (issue athenaeum#247) tags the serving model-id so
     ``TokenUsage.estimated_cost_usd`` can attribute cost per model;
-    untagged calls fall back to the blended rate.
+    untagged calls fall back to the blended rate. *knob* (issue athenaeum#781) tags
+    the model-knob (``classify`` / ``write``) so ``TokenUsage.per_knob`` can
+    attribute spend per knob — the same knob string the caller already
+    resolved the model with (``_get_classify_model`` / ``_get_write_model``).
     """
     if usage is not None and hasattr(response, "usage"):
         input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
-        usage.add(input_toks, output_toks, cache_creation, cache_read, model=model)
+        usage.add(input_toks, output_toks, cache_creation, cache_read, model=model, knob=knob)
         if cache_creation or cache_read:
             log.debug(
                 "prompt cache: %d tokens written, %d tokens read",
@@ -805,7 +809,7 @@ def tier2_classify(
         lambda: client.messages.create(**params),
         description=f"tier2_classify {raw.ref}",
     )
-    _record_usage(response, usage, model=params["model"])
+    _record_usage(response, usage, model=params["model"], knob="classify")
 
     from athenaeum.config import resolve_owner
 
@@ -895,7 +899,7 @@ def tier2_classify(
             lambda: client.messages.create(**retry_params),
             description=f"tier2_classify-retry {raw.ref}",
         )
-        _record_usage(retry_response, usage, model=retry_params["model"])
+        _record_usage(retry_response, usage, model=retry_params["model"], knob="classify")
         retry_stats = Tier2ParseStats()
         retry_entities = parse_tier2_entities(
             response_text(retry_response),
@@ -1193,7 +1197,7 @@ def tier2_reclassify_larger_budget(
         lambda: client.messages.create(**params),
         description=f"tier2_classify-truncation-retry {raw.ref}",
     )
-    _record_usage(response, usage, model=params["model"])
+    _record_usage(response, usage, model=params["model"], knob="classify")
     retry_stats = Tier2ParseStats()
     entities = parse_tier2_entities(
         response_text(response),
@@ -1484,7 +1488,7 @@ def tier3_create(
         lambda: client.messages.create(**params),
         description=f"tier3_create {source_ref}",
     )
-    _record_usage(response, usage, model=params["model"])
+    _record_usage(response, usage, model=params["model"], knob="write")
 
     # Issue athenaeum#578: tier3_create enables adaptive thinking — response_text skips
     # any leading thinking block and returns the created page body.
@@ -1930,7 +1934,7 @@ def tier3_merge(
         lambda: client.messages.create(**params),
         description=f"tier3_merge {source_ref}",
     )
-    _record_usage(response, usage, model=params["model"])
+    _record_usage(response, usage, model=params["model"], knob="write")
 
     body, escalation, needs_fallback = parse_merge_ops_response(
         # Issue athenaeum#578: patch merge enables adaptive thinking — skip any leading
@@ -1971,7 +1975,7 @@ def tier3_merge_full(
         lambda: client.messages.create(**params),
         description=f"tier3_merge_full {source_ref}",
     )
-    _record_usage(response, usage, model=params["model"])
+    _record_usage(response, usage, model=params["model"], knob="write")
 
     return parse_tier3_merge(
         # Issue athenaeum#578: full-echo merge enables adaptive thinking — skip any

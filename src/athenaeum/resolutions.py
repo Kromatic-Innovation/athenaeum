@@ -1816,7 +1816,12 @@ def propose_resolution(
         )
         if usage is not None:
             usage.add_tokens(
-                input_toks, output_toks, cache_creation, cache_read, model=resolve_model
+                input_toks,
+                output_toks,
+                cache_creation,
+                cache_read,
+                model=resolve_model,
+                knob="resolve",
             )
         log.debug(
             "resolutions: propose_resolution usage input=%d output=%d"
@@ -2856,7 +2861,12 @@ def propose_freetext_source_edits(
     input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
     if usage is not None:
         usage.add_tokens(
-            input_toks, output_toks, cache_creation, cache_read, model=freetext_model
+            input_toks,
+            output_toks,
+            cache_creation,
+            cache_read,
+            model=freetext_model,
+            knob="resolve",
         )
     log.debug(
         "resolutions: propose_freetext_source_edits usage input=%d output=%d"

@@ -1251,6 +1251,33 @@ class TestBatchUsageAccounting:
         # Attempts are counted at assembly time by the caller, not here.
         assert usage.api_calls == 0
 
+    def test_execute_batch_threads_knob_to_every_result(self) -> None:
+        """athenaeum#781: execute_batch's ``knob=`` kwarg tags the WHOLE batch (every
+        request in one submit shares the same knob -- tier2_classify and
+        tier3_write batches are each submitted in their own execute_batch
+        call, see process_batch_run)."""
+        client = _FakeClient(lambda params: "ok", allow_sync=False)
+        usage = TokenUsage()
+        execute_batch(
+            client,
+            [
+                BatchRequest(
+                    custom_id="a",
+                    params={
+                        "model": "m",
+                        "max_tokens": 16,
+                        "messages": [{"role": "user", "content": "x"}],
+                    },
+                )
+            ],
+            description="test",
+            usage=usage,
+            knob="classify",
+            sleep=lambda s: None,
+        )
+        assert usage.per_knob["classify"]["input_tokens"] == 100
+        assert usage.per_knob["classify"]["batch_input_tokens"] == 100
+
 
 # ---------------------------------------------------------------------------
 # Polling

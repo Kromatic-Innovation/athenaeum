@@ -596,7 +596,9 @@ class TestSchemaV2:
         assert spend.record_spend(_mixed_model_api_usage(), run_type="librarian", provider="api")
         rec = spend.read_ledger(ledger)[0]
 
-        assert rec["v"] == 2
+        # v3 (athenaeum#781) bumped the schema version; this test only cares that
+        # tokens_by_model -- unchanged by that bump -- is still repriceable.
+        assert rec["v"] == spend.LEDGER_VERSION
         tbm = rec["tokens_by_model"]
         assert set(tbm) == {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}
         # Hestia cost-ledger.ts core shape: {input, output, total}.
@@ -721,6 +723,156 @@ class TestSchemaV2:
 
 
 # ---------------------------------------------------------------------------
+# Schema v3 (issue athenaeum#781) — per-knob attribution, tokens_by_knob, and the
+# knob-unattributed pre-v3 contract. Mirrors TestSchemaV2 one field down.
+# ---------------------------------------------------------------------------
+
+
+def _mixed_knob_api_usage() -> TokenUsage:
+    """A metered run spanning two knobs -- Haiku for tier-2 classify and
+    Sonnet for tier-3 write -- each tagged with BOTH model and knob so the
+    accumulator carries per-knob attribution (athenaeum#781) as a SIBLING of the
+    existing per-model attribution."""
+    u = TokenUsage()
+    u.add(
+        300_000, 40_000, 100_000, 5_000,
+        model="claude-haiku-4-5-20251001", knob="classify",
+    )
+    u.add(80_000, 120_000, 0, 0, model="claude-sonnet-4-6", knob="write")
+    return u
+
+
+class TestSchemaV3:
+    def test_ledger_version_is_3(self, ledger: Path) -> None:
+        assert spend.LEDGER_VERSION == 3
+        assert spend.record_spend(_mixed_knob_api_usage(), run_type="librarian", provider="api")
+        rec = spend.read_ledger(ledger)[0]
+        assert rec["v"] == 3
+
+    def test_tokens_by_knob_is_a_sibling_of_tokens_by_model(self, ledger: Path) -> None:
+        """AC: tokens_by_knob carries the right knob per source, and
+        tokens_by_model keeps its EXISTING shape byte-for-byte -- adding
+        tokens_by_knob must never reshape it (athenaeum#781 notes-for-implementer)."""
+        assert spend.record_spend(_mixed_knob_api_usage(), run_type="librarian", provider="api")
+        rec = spend.read_ledger(ledger)[0]
+
+        tbk = rec["tokens_by_knob"]
+        assert set(tbk) == {"classify", "write"}
+        assert tbk["classify"]["input"] == 300_000
+        assert tbk["classify"]["output"] == 40_000
+        assert tbk["classify"]["total"] == 340_000
+        assert tbk["write"]["input"] == 80_000
+        assert tbk["write"]["total"] == 200_000
+
+        # tokens_by_model is untouched by the knob addition -- same shape,
+        # same values as schema v2 produced (hestia's cost-ledger.ts reader
+        # depends on this staying a superset of {input, output, total}).
+        tbm = rec["tokens_by_model"]
+        assert set(tbm) == {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}
+        assert tbm["claude-haiku-4-5-20251001"]["input"] == 300_000
+        assert tbm["claude-haiku-4-5-20251001"]["total"] == 340_000
+        assert tbm["claude-sonnet-4-6"]["input"] == 80_000
+
+    def test_tokens_by_knob_preserves_cache_and_batch_splits(self, ledger: Path) -> None:
+        u = TokenUsage()
+        u.add(1_000, 500, 200, 50, model="claude-sonnet-4-6", knob="resolve")
+        u.add_batch_tokens(400, 100, 0, 0, model="claude-sonnet-4-6", knob="resolve")
+        assert spend.record_spend(u, run_type="librarian", provider="api")
+        entry = spend.read_ledger(ledger)[0]["tokens_by_knob"]["resolve"]
+        assert entry["input"] == 1_400
+        assert entry["output"] == 600
+        assert entry["cache_creation_input_tokens"] == 200
+        assert entry["cache_read_input_tokens"] == 50
+        assert entry["batch_input_tokens"] == 400
+        assert entry["batch_output_tokens"] == 100
+
+    def test_pre_v3_rows_readable_and_counted_knob_unattributed(self, ledger: Path) -> None:
+        """A pre-v3 row (no per-knob attribution) stays readable and is
+        counted as knob-unattributed -- never silently dropped -- exactly as
+        a pre-v2 row is counted unpriceable (athenaeum#781 AC)."""
+        # A genuine v2 row, as athenaeum#487 wrote it: tokens_by_model present,
+        # tokens_by_knob absent entirely.
+        v2 = {
+            "v": 2,
+            "ts": "2026-08-01T00:00:00Z",
+            "run_type": "librarian",
+            "provider": "anthropic",
+            "billing_mode": "api",
+            "subscription_covered": False,
+            "models": ["claude-sonnet-4-6"],
+            "tokens_by_model": {"claude-sonnet-4-6": {"input": 1000, "output": 200, "total": 1200}},
+            "api_calls": 10,
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "total_tokens": 1200,
+            "estimated_cost_usd": 0.15,
+            "notional_usd": 0.15,
+        }
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps(v2, separators=(",", ":")) + "\n", encoding="utf-8")
+        # A conforming v3 row appended after it.
+        spend.record_spend(_mixed_knob_api_usage(), run_type="librarian", provider="api")
+
+        records = spend.read_ledger(ledger)
+        assert len(records) == 2  # the v2 row is NOT dropped
+        summary = spend.summarize(records)
+        assert summary["record_count"] == 2
+        assert summary["knob_unattributed_records"] == 1  # only the v2 row
+        # unpriceable_records is unaffected -- both rows carry per-model
+        # attribution, this is purely the per-knob dimension.
+        assert summary["unpriceable_records"] == 0
+        # The v2 row is still present in its billing bucket.
+        assert summary["api"]["records"] == 2
+
+    def test_by_knob_summarize_and_format(self, ledger: Path) -> None:
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        spend.record_spend(_mixed_knob_api_usage(), run_type="librarian", provider="api")
+        summary = spend.summarize(spend.read_ledger(ledger), by_knob=True)
+        assert "classify" in summary["by_knob"]
+        assert "write" in summary["by_knob"]
+        out = spend.format_summary(summary, since_label="7d", by_knob=True)
+        assert "By knob:" in out
+        assert "classify" in out
+        assert "write" in out
+
+    def test_by_knob_keeps_subscription_api_split_never_blended(self, ledger: Path) -> None:
+        """AC: --by-knob reports tokens AND dollars per knob, but the two
+        cost paths inside each knob bucket are never summed together."""
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        spend.record_spend(_mixed_knob_api_usage(), run_type="librarian", provider="api")
+        summary = spend.summarize(spend.read_ledger(ledger), by_knob=True)
+        write_slot = summary["by_knob"]["write"]
+        assert "subscription" in write_slot
+        assert "api" in write_slot
+        assert write_slot["subscription"]["estimated_cost_usd"] == 0.0
+        assert write_slot["api"]["estimated_cost_usd"] > 0.0
+
+    def test_cli_by_knob_flag(self, ledger: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        spend.record_spend(_mixed_knob_api_usage(), run_type="librarian", provider="api")
+        rc = main(["spend", "--since", "30d", "--by-knob", "--json", "--ledger", str(ledger)])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert "classify" in payload["by_knob"]
+        assert "write" in payload["by_knob"]
+
+        rc = main(["spend", "--since", "30d", "--by-knob", "--ledger", str(ledger)])
+        assert rc == 0
+        human = capsys.readouterr().out
+        assert "By knob:" in human
+
+    def test_summarize_existing_shape_unchanged(self, ledger: Path) -> None:
+        """AC: summarize()'s existing shape (subscription/api/unknown/
+        record_count) is unchanged so cicero/good-morning does not regress --
+        by_knob only ADDS keys."""
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        summary = spend.summarize(spend.read_ledger(ledger))
+        for key in ("subscription", "api", "unknown", "record_count"):
+            assert key in summary
+        # by_knob is opt-in -- absent when not requested.
+        assert "by_knob" not in summary
+
+
+# ---------------------------------------------------------------------------
 # query_topics ledger integration — the metered hot path is recorded
 # ---------------------------------------------------------------------------
 
@@ -756,11 +908,15 @@ class TestQueryTopicsLedger:
         assert recs[0]["estimated_cost_usd"] > 0.0
         # v2 conformance on a genuinely LLM-driven write (issue athenaeum#487): the row
         # carries billing_mode, per-model attribution, and the notional figure.
-        assert recs[0]["v"] == 2
+        assert recs[0]["v"] == 3
         assert recs[0]["billing_mode"] == "api"
         assert recs[0]["notional_usd"] == recs[0]["estimated_cost_usd"]
         tbm = recs[0]["tokens_by_model"]
         assert list(tbm) and tbm[next(iter(tbm))]["input"] == 120
+        # athenaeum#781: the real call site (query_topics.extract_topics) threads the
+        # ``topic`` knob end to end into the ledger row -- one of the six
+        # knobs attributable per the acceptance criterion.
+        assert recs[0]["tokens_by_knob"]["topic"]["input"] == 120
 
 
 # ---------------------------------------------------------------------------

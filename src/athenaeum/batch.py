@@ -147,6 +147,7 @@ def execute_batch(
     *,
     description: str,
     usage: TokenUsage | None = None,
+    knob: str | None = None,
     sleep: Callable[[float], None] = time.sleep,
     poll_interval: float = BATCH_POLL_INTERVAL_SECONDS,
     timeout: float = BATCH_POLL_TIMEOUT_SECONDS,
@@ -158,6 +159,12 @@ def execute_batch(
     failure path. Token usage from succeeded results lands in *usage* via
     :meth:`TokenUsage.add_batch_tokens` (``api_calls`` attempts are counted
     at batch-assembly time by the caller, one per request — not here).
+
+    *knob* (issue athenaeum#781) tags the model-knob for the WHOLE batch — every
+    request in one ``execute_batch`` call shares the same knob (the tier-2
+    classify batch and the tier-3 write batch are each submitted in their
+    own call), unlike *model* which is read per-request from
+    ``request.params["model"]`` because a batch can mix models.
 
     Raises :class:`BatchExecutionError` when the batch cannot be submitted,
     polled, or collected — transient errors that exhausted their retries
@@ -241,6 +248,7 @@ def execute_batch(
                         cache_w,
                         cache_r,
                         model=model_by_cid.get(entry.custom_id),
+                        knob=knob,
                     )
                 results[entry.custom_id] = message
             else:
@@ -449,6 +457,7 @@ def process_batch_run(
                 t2_requests,
                 description="tier2_classify",
                 usage=usage,
+                knob="classify",
                 sleep=sleep,
             )
         except BatchExecutionError as exc:
@@ -715,6 +724,7 @@ def process_batch_run(
                 t3_requests,
                 description="tier3_write",
                 usage=usage,
+                knob="write",
                 sleep=sleep,
             )
         except BatchExecutionError as exc:
