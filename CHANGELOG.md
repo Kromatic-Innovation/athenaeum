@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`cache_control` breakpoints on the detector and resolver system prompts
+  (athenaeum#790, buildable half of athenaeum#774).** The resolver's
+  `_RESOLVE_SYSTEM` already carried an ephemeral `cache_control` breakpoint
+  (athenaeum#230); the detector's `_DETECT_SYSTEM` (`contradictions.py`) did
+  not, even though it is constant across every detector call in a run. Its
+  `messages.create` call now sends the system prompt as a one-block list with
+  `cache_control: {"type": "ephemeral"}`, mirroring the resolver's shape. Set
+  unconditionally at the call site — declared backend capability, not the
+  call site, decides whether it is honored:
+  `capabilities_for("api").honors_cache_control` is `True` (the SDK passes it
+  through unchanged) and `capabilities_for("claude-cli").honors_cache_control`
+  is `False` (`_text_from_system` strips it, unchanged by this issue). No
+  provider is switched by this issue — the `claude-cli` path and its existing
+  golden/parity tests are unmodified, and the golden-pinned
+  `tests/data/prompts/resolutions.resolve_system.txt` /
+  `tests/data/prompts/contradictions.detect_system.txt` compare prompt TEXT
+  only, so this request-metadata-only change leaves both goldens unchanged.
+
 - **Weekly subscription token limit + max-percent-per-day ceiling
   (athenaeum#785).** `ceiling_tripped()`'s four existing ceilings are correctly
   unit-split by billing path (subscription bounded in TOKENS, metered API
