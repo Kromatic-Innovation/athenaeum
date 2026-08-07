@@ -220,6 +220,56 @@ accepts the pre-athenaeum#232 `resolve.model` key for backward compatibility.
 >
 > ² The reasoning-tier knobs are read by `athenaeum.reasoning_tiers`. `DEFAULT_TIER_CHAIN` (the pipeline's own default chain) is indeed empty, but both tiers have real production callers in `merge.py` that bypass that default — `t1_screen_rejects_merge_proposal` (athenaeum#518) and `t2_screen_merge_proposal` (athenaeum#602) — gated behind the single `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` flag, which **defaults off**. With the flag off (a fresh install), these knobs indeed have no runtime effect, matching the code default described above — but that is because the *screen* is opt-in, not because the tiers are unwired or dead code. See [Reasoning-tier screening (T1/T2)](#reasoning-tier-screening-t1t2--off-by-default) for the full picture, including what turning the flag on does.
 
+### Per-MTok pricing (athenaeum#783)
+
+Model pricing is **config-owned**: `athenaeum.yaml`'s `pricing:` section is
+the authoritative per-MTok rate table, resolved by `config.resolve_model_rates`
+and consumed by `TokenUsage.estimated_cost_usd`/`notional_cost_usd` (the same
+cost figures `athenaeum spend` and the run-summary log line report). There is
+**no env-var override** for this knob — a whole rate table doesn't fit the
+single-value `ATHENAEUM_*` convention the other knobs on this page use.
+
+```yaml
+pricing:
+  claude-opus-5: [5.0, 25.0]      # [input_usd_per_mtok, output_usd_per_mtok]
+  claude-sonnet-5: [3.0, 15.0]
+  # ... one entry per model-id PREFIX, matched by LONGEST prefix so a dated
+  # id (claude-haiku-4-5-20251001) resolves to the right family.
+```
+
+`athenaeum init` writes this section **active** (not commented out, unlike
+every other section on this page) and pre-populated with the current rate
+table, generated from `athenaeum.models._MODEL_RATES_USD_PER_MTOK` — so a
+fresh install is priced correctly out of the box.
+
+**Replace, not overlay.** When `pricing:` is set and non-empty, it REPLACES
+the code-default table wholesale — it does not merge on top of it. A model
+prefix the operator's yaml doesn't mention is not backfilled from the code
+default; it becomes unpriced (see the preflight below). This was a deliberate
+choice over an overlay: an overlay would keep the code table as an invisible
+second source of truth, and an omission there (the athenaeum#777 Fable/Mythos
+incident: two new models silently priced at the blended average, under-
+reporting spend 6.67x) would keep going unnoticed. An unset/empty `pricing:`
+section (pre-athenaeum#783 configs) falls back to the code-default table
+unchanged — existing installs are unaffected until they add one.
+
+**Startup preflight.** `athenaeum run` resolves the model each of the six
+LLM-serving knobs (`classify` / `write` / `topic` / `resolve` /
+`reasoning_t1` / `reasoning_t2`) will use for the run and, if any has no
+price under the resolved table, exits **rc 1** before any file is processed —
+naming the unpriced model and the `pricing.<model>` key to set. This mirrors
+`preflight_provider`'s pattern: a misconfiguration is a loud startup failure,
+not a per-call surprise discovered later. Untagged tokens (accumulated with
+no `model=` tag) are unaffected and still price at the blended fallback rate
+— that path's original purpose is unchanged; only a *tagged* model used by
+the run can no longer silently fall through to it.
+
+**Schema contract: one rate per prefix, no mode dimension.** A prefix key
+cannot express a time-boxed promo rate (Sonnet 5's introductory rate through
+2026-08-31) or a per-request-mode rate (Opus 5's `speed: "fast"` rate) — both
+are deliberately out of scope; encoding either is a schema change, not a
+workaround at this layer.
+
 ### Per-stage token and thinking tuning (athenaeum#688)
 
 Each LLM stage resolves two knobs through the same seam the model knobs use
@@ -942,6 +992,11 @@ models:
   write: claude-sonnet-4-6
   topic: claude-haiku-4-5-20251001
   resolve: claude-opus-4-7
+
+pricing:                        # per-MTok rate table (athenaeum#783); athenaeum init
+  claude-opus-5: [5.0, 25.0]    # ships this ACTIVE and pre-populated -- see
+  claude-sonnet-5: [3.0, 15.0]  # "Per-MTok pricing" above for the full table
+  # ... (truncated here; see athenaeum.models._MODEL_RATES_USD_PER_MTOK)
 
 contradiction:
   cross_scope_mode: ancestor
