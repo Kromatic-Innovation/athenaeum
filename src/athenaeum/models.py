@@ -1955,6 +1955,46 @@ class TokenUsage:
         return total
 
 
+def cost_for_token_bucket(model: str | None, bucket: dict[str, int]) -> float:
+    """Price ONE ledger ``tokens_by_model`` bucket at the ACTIVE rates (athenaeum#788).
+
+    *bucket* is a single value from a spend-ledger record's ``tokens_by_model``
+    map (issue athenaeum#487): the core ``{input, output, total}`` plus athenaeum's
+    cache/batch detail keys. ``total`` is ignored — it is a derived convenience
+    field (``input + output``, excluding cache) and pricing it would double-count.
+
+    Exists so ``athenaeum spend --reprice`` (issue athenaeum#788) recomputes a
+    historical row through the SAME arithmetic that wrote it — the cache
+    multipliers and the Batch API 50% discount of :meth:`TokenUsage._cost_for`,
+    at the same longest-prefix rates of :func:`_rates_for_model` — instead of
+    reimplementing the formula in :mod:`athenaeum.spend` where it would silently
+    drift from this one. Reads the ACTIVE table, so an ``athenaeum.yaml``
+    ``pricing:`` override installed via :func:`configure_model_rates` reprices at
+    the operator's current rates, which is the whole point of athenaeum#788.
+
+    Note the deliberate asymmetry with :meth:`TokenUsage._cost_at_api_rates`:
+    that method prices an untagged REMAINDER at the blended fallback, derived by
+    subtracting the tagged subset from the run's scalar totals. A ledger row's
+    per-model map carries no such remainder — a row that tagged no model has an
+    EMPTY map and is *unpriceable* (see :func:`athenaeum.spend.summarize`), a
+    state the repricing consumer must report rather than silently price at the
+    blended rate. So this function prices exactly what it is given, and never
+    reaches the blended fallback for an untagged row.
+    """
+    return TokenUsage._cost_for(
+        int(bucket.get("input", 0) or 0),
+        int(bucket.get("output", 0) or 0),
+        int(bucket.get("cache_creation_input_tokens", 0) or 0),
+        int(bucket.get("cache_read_input_tokens", 0) or 0),
+        int(bucket.get("batch_input_tokens", 0) or 0),
+        int(bucket.get("batch_output_tokens", 0) or 0),
+        int(bucket.get("batch_cache_creation_input_tokens", 0) or 0),
+        int(bucket.get("batch_cache_read_input_tokens", 0) or 0),
+        _rates_for_model(model),
+    )
+
+
+
 def cache_usage_counts(response: object) -> tuple[int, int, int, int]:
     """Extract token counts from an Anthropic API response (issue athenaeum#230).
 

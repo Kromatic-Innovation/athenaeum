@@ -42,6 +42,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum spend --reprice` — recompute historical rows at current rates
+  (athenaeum#788, audit finding L3).** Schema v2 (athenaeum#487) added
+  `tokens_by_model` on the stated rationale that "`tokens x model` is the
+  fact; dollars are derived", so a mixed-model row stays repriceable — and
+  then nothing consumed it. `athenaeum spend` read each row's stored
+  `estimated_cost_usd` verbatim, so correcting a rate (athenaeum#777's 6.67x
+  Fable/Mythos under-report) or making rates config-owned (athenaeum#783)
+  bought nothing *retroactively*. `--reprice` is that missing door: it
+  recomputes each row from its per-model attribution against the current,
+  config-aware rate table and reports the recomputed total alongside the
+  stored one, with the delta. **Read-only** — the ledger is append-only by
+  design, so repricing reports a corrected figure and never rewrites history
+  (a test asserts the file is byte-identical after a run; rewriting in place
+  would be a separate, explicitly-destructive command, deliberately absent).
+  Rows with no per-model attribution stay *unpriceable*: counted per bucket
+  and at the top level, their stored dollars surfaced as
+  `unpriceable_stored_usd` (and named in the human report), never dropped
+  from `record_count` and never silently priced at zero. The
+  subscription/API/unknown split survives repricing intact — a subscription
+  row is `$0.00` stored **and** repriced (repricing never turns subscription
+  draw into money owed; what it corrects there is the counterfactual
+  `notional_usd`), and an `unknown` row (athenaeum#694) reprices inside its own
+  bucket rather than folding into `api`. The delta is measured against
+  `stored_usd_priceable` — the stored value of exactly the rows repriced —
+  so unpriceable rows can never masquerade as a rate change. Per-model
+  arithmetic is delegated to the new `models.cost_for_token_bucket`, which
+  reuses `TokenUsage._cost_for` (athenaeum#239's cache multipliers,
+  athenaeum#236's batch discount) so a reprice cannot drift from the formula
+  that wrote the row. Strictly additive: without the flag the existing report
+  and its `--json` consumer contract are unchanged.
+
 - **`cache_control` breakpoints on the detector and resolver system prompts
   (athenaeum#790, buildable half of athenaeum#774).** The resolver's
   `_RESOLVE_SYSTEM` already carried an ephemeral `cache_control` breakpoint
