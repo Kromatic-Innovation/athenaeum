@@ -480,12 +480,64 @@ metadata — never prompt/response content or credentials.
 Report it with `athenaeum spend`:
 
 ```
-athenaeum spend --since 7d [--by-model] [--by-provider] [--by-knob] [--json]
+athenaeum spend --since 7d [--by-model] [--by-provider] [--by-knob] [--reprice] [--json]
 ```
 
 `--since` accepts a window (`7d` / `24h` / `30m` / `2w`) or an ISO date. The
 output keeps **$ (API)** and **tokens (subscription)** on separate rows;
 `--json` is the machine-readable shape `/good-morning` consumes.
+
+### `athenaeum spend --reprice` — recompute history at current rates (athenaeum#788)
+
+`tokens_by_model` (schema v2, athenaeum#487) exists so that *`tokens x model` is
+the fact and dollars are derived* — a historical row stays repriceable per
+model instead of freezing a blended figure. `--reprice` is what consumes it:
+
+```
+athenaeum spend --since 30d --reprice [--json]
+```
+
+It recomputes each row from its stored per-model token attribution against the
+**current** rate table — including the operator's `pricing:` overrides
+([Per-MTok pricing](#per-mtok-pricing-athenaeum783), athenaeum#783) — and reports the recomputed
+total alongside the stored one, with the delta. This is what makes a rate
+correction worth anything **retroactively**: fixing an under-priced model (the
+athenaeum#777 Fable/Mythos gap under-reported 6.67x) does not rewrite rows already
+written, but `--reprice` tells you what those rows *should* have said.
+
+Three properties worth stating plainly:
+
+- **Read-only.** The ledger is append-only by design. `--reprice` reports a
+  corrected figure; it never rewrites history. The file is byte-identical after
+  a reprice run (pinned by test). Rewriting the ledger in place would be a
+  separate, explicitly-destructive command with its own decision — it does not
+  exist, deliberately.
+- **Unpriceable rows are reported, not dropped and not zeroed.** A row with no
+  per-model attribution (pre-v2, or any run that tagged no model) has an
+  *unknown* price, not a zero one. It stays in `record_count` and in its billing
+  bucket, is counted in `unpriceable_records`, and its stored dollars are
+  surfaced as `unpriceable_stored_usd`. It never contributes to `repriced_usd`.
+- **The billing split survives.** Repricing is per bucket. A `subscription` row
+  is `$0.00` stored **and** `$0.00` repriced — repricing never turns
+  subscription draw into money owed; what it corrects there is the
+  counterfactual `notional_usd`. An `unknown` row reprices inside `unknown` and
+  is never folded into `api`.
+
+With `--json` the payload carries `since`, `ledger_path`, and a single
+`reprice` object: `record_count`, `unpriceable_records`, `repriced_records`,
+and a `subscription` / `api` / `unknown` bucket each carrying `stored_usd`,
+`stored_notional_usd`, `stored_usd_priceable`, `stored_notional_usd_priceable`,
+`repriced_usd`, `repriced_notional_usd`, `delta_usd`, `delta_notional_usd`,
+`records`, `repriced_records`, `unpriceable_records`,
+`unpriceable_stored_usd`, `unpriceable_stored_notional_usd`.
+
+The delta is computed against `stored_usd_priceable` — the stored value of
+**exactly the rows that were repriced** — not against `stored_usd`, which also
+covers the rows repricing could not touch. Comparing against the latter would
+report unpriceable rows as if they were a rate change.
+
+`--reprice` replaces the default report rather than adding to it; without the
+flag, the `--json` contract below is unchanged.
 
 ### `athenaeum spend --json` — consumer contract (athenaeum#694)
 
