@@ -299,6 +299,66 @@ class TestMeanSimilarityFloor:
         )
 
 
+class TestSuppressionReasonPrecision:
+    """Issue athenaeum#804 — the suppression message must print each
+    threshold-comparison value at a precision that makes the printed
+    comparison decidable. The live-store evidence was ``mean pairwise 0.60 <
+    min_merge_mean_similarity=0.60`` for a cluster whose actual mean was
+    0.5996 — true at full float precision, false as printed at 2dp.
+    """
+
+    def test_low_cohesion_message_distinguishes_near_floor_value(self) -> None:
+        # 0.5996 rounds to 0.60 at 2dp — the exact defect reported in
+        # athenaeum#804. At >=4 significant figures the two numbers must
+        # render distinguishably and the printed comparison must be true.
+        reason = _merge_proposal_suppression_reason(
+            n_sources=3,
+            confidence=0.9,
+            config=None,
+            mean_similarity=0.5996,
+            min_pairwise=0.5996,
+            cluster_threshold=0.55,
+        )
+        assert reason is not None and "low cohesion" in reason
+        # This is the literal old-format string the athenaeum#804 evidence
+        # showed; it must not appear once the value is genuinely below the
+        # floor by less than 2dp resolution.
+        assert "mean pairwise 0.60 < min_merge_mean_similarity=0.60" not in reason
+        assert "0.5996" in reason
+        assert "0.6000" in reason
+
+    def test_single_linkage_chain_message_precision(self) -> None:
+        # 0.5501 < 0.5502 — both round to 0.55 at 2dp.
+        reason = _merge_proposal_suppression_reason(
+            n_sources=4,
+            confidence=0.9,
+            config=None,
+            mean_similarity=0.8,
+            min_pairwise=0.5501,
+            cluster_threshold=0.5502,
+        )
+        assert reason is not None and "complete-linkage" in reason
+        assert "0.5501" in reason
+        assert "0.5502" in reason
+
+    def test_low_confidence_message_precision(self) -> None:
+        cfg = {"librarian": {"min_merge_confidence": 0.5000}}
+        reason = _merge_proposal_suppression_reason(
+            n_sources=3, confidence=0.4999, config=cfg
+        )
+        assert reason is not None and "low confidence" in reason
+        assert "0.4999" in reason
+        assert "0.5000" in reason
+
+    def test_over_cluster_message_unchanged_already_exact(self) -> None:
+        # n_sources/max_merge_sources are integers — no rounding ambiguity
+        # existed here, so this message is untouched by the athenaeum#804 fix.
+        reason = _merge_proposal_suppression_reason(
+            n_sources=6, confidence=0.9, config=None
+        )
+        assert reason == "over-cluster: 6 sources > max_merge_sources=5"
+
+
 class TestGateOrdering:
     """Issue athenaeum#421 — size cap, then complete-linkage, then mean, then confidence."""
 

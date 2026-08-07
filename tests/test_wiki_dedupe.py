@@ -419,3 +419,142 @@ class TestSuppressionGates:
             embedding_provider=_fake_embed,
         )
         assert proposals == []
+
+
+def _chain_bodies(n: int) -> list[str]:
+    """*n* distinct page bodies for the single-linkage chain fixture below."""
+    return [
+        f"Chain page number {i} of the athenaeum#803 regression fixture."
+        for i in range(n)
+    ]
+
+
+def _circle_provider(bodies: list[str], degrees: float = 20.0):
+    """Embed each body on a unit circle, ``degrees`` apart from its neighbor.
+
+    Mirrors ``tests/test_librarian_clusters.py::TestClusterFormationIsCompleteLinkage``'s
+    circle-of-vectors fixture: adjacent pages have cosine ``cos(20 deg) ~= 0.94``
+    (an edge at threshold 0.9); pages two apart have ``cos(40 deg) ~= 0.77``
+    (below 0.9, NOT an edge). So the pages form a single-linkage CHAIN but no
+    clique larger than 2.
+    """
+    import math
+
+    vec_by_body = {
+        body: [
+            math.cos(math.radians(degrees * i)),
+            math.sin(math.radians(degrees * i)),
+            0.0,
+        ]
+        for i, body in enumerate(bodies)
+    }
+
+    def provider(texts: list[str]) -> list[list[float]]:
+        return [vec_by_body[t.strip()] for t in texts]
+
+    return provider
+
+
+class TestWikiClusterFormationIsCompleteLinkage:
+    """Issue athenaeum#803: pin complete-linkage FORMATION through the wiki-page
+    entry points specifically. ``find_wiki_page_clusters`` /
+    ``propose_wiki_page_merges`` route through the shared
+    ``athenaeum.clusters.cluster_auto_memory_files`` (see the ``wiki_dedupe``
+    module docstring) — the SAME formation routine issue athenaeum#681 fixed
+    for the raw-source clusterer. This class exercises that sharing through
+    the wiki-page entry points, mirroring
+    ``tests/test_librarian_clusters.py::TestClusterFormationIsCompleteLinkage``,
+    which only covers the raw ``AutoMemoryFile`` entry point
+    (``cluster_auto_memory_files`` itself is not re-tested here — it already
+    has its own unit tests; these confirm the WIKI wrapper actually reaches
+    it with a real single-linkage-chain shape, and that nothing between the
+    wiki entry points and that shared function re-flattens the result back
+    into a single-linkage component).
+    """
+
+    def test_chain_is_not_one_giant_cluster(self, tmp_path: Path) -> None:
+        """The degenerate all-member giant cluster must not exist."""
+        from athenaeum.wiki_dedupe import find_wiki_page_clusters
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        bodies = _chain_bodies(5)
+        for i, body in enumerate(bodies):
+            _write_page(wiki_root, f"chain-{i}.md", body=body)
+
+        clusters = find_wiki_page_clusters(
+            wiki_root, threshold=0.9, embedding_provider=_circle_provider(bodies)
+        )
+
+        assert all(len(c.member_paths) < 5 for c in clusters)
+        assert clusters, "the chain's adjacent pairs must still cluster"
+
+    def test_min_pairwise_score_recorded_not_just_centroid(
+        self, tmp_path: Path
+    ) -> None:
+        """Every multi-member wiki cluster is a clique whose MINIMUM pairwise
+        cosine clears the threshold, not merely its centroid (mean)."""
+        from athenaeum.wiki_dedupe import find_wiki_page_clusters
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        bodies = _chain_bodies(5)
+        for i, body in enumerate(bodies):
+            _write_page(wiki_root, f"chain-{i}.md", body=body)
+
+        clusters = find_wiki_page_clusters(
+            wiki_root, threshold=0.9, embedding_provider=_circle_provider(bodies)
+        )
+
+        multi = [c for c in clusters if len(c.member_paths) > 1]
+        assert multi
+        for c in multi:
+            assert c.min_pairwise_score >= 0.9
+
+    def test_no_legitimate_pair_lost_and_no_over_cluster_suppression(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A 7-page chain that WOULD have been one 7-source single-linkage
+        component (over the default ``max_merge_sources=5``, and thus
+        wholesale suppressed with no record of the legitimate pairs inside
+        it — the loss mode issue athenaeum#681's AC3 was written to detect on
+        the raw-source clusterer) must instead reach ``_pending_merges.md``
+        as legitimate small proposals. The over-cluster gate never fires,
+        because formation now guarantees the property it used to enforce
+        after the fact.
+        """
+        import logging
+
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        bodies = _chain_bodies(7)
+        for i, body in enumerate(bodies):
+            _write_page(wiki_root, f"chain-{i}.md", body=body)
+        knowledge_root = wiki_root.parent
+
+        caplog.set_level(logging.INFO, logger="athenaeum.wiki_dedupe")
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            config={},  # defaults: max_merge_sources=5, min_merge_mean_similarity=0.6
+            threshold=0.9,
+            embedding_provider=_circle_provider(bodies),
+        )
+
+        assert proposals, "legitimate near-duplicate pairs must not be dropped"
+        for proposal in proposals:
+            assert len(proposal["sources"]) <= 5
+
+        suppressed = [r for r in caplog.records if "SUPPRESSED" in r.getMessage()]
+        assert not suppressed, (
+            "over-cluster suppression should not fire once formation is "
+            f"complete-linkage: {[r.getMessage() for r in suppressed]}"
+        )
+
+        merges_path = wiki_root / "_pending_merges.md"
+        assert merges_path.is_file()
+        assert "## [" in merges_path.read_text(encoding="utf-8")
+
+        # No member of a legitimate small cluster is dropped: every proposed
+        # source is one of the original chain pages, and no proposal folds
+        # in an out-of-chain source.
+        all_sources = {Path(s).name for p in proposals for s in p["sources"]}
+        assert all_sources <= {f"chain-{i}.md" for i in range(7)}

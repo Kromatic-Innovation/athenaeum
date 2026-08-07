@@ -60,6 +60,7 @@ import json
 import logging
 import os
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -580,6 +581,15 @@ class BaselineWindow:
     ``precision`` is ``None`` when the window has zero reference-determination
     records — the honest state before ANY session has run with instrumentation
     on, never a fabricated ``0.0`` or ``1.0``.
+
+    ``excluded_sessions``/``excluded_push_record_count``/
+    ``excluded_reference_record_count`` (issue athenaeum#791) report the
+    operator-supplied ``exclude_sessions`` denylist's effect: which of the
+    requested session ids actually had records inside this window, and how
+    many push/reference records those sessions contributed. Always present
+    (empty/zero when no exclusion was requested) so a contaminated window
+    that WAS cleaned is visible in the output, not indistinguishable from a
+    window that was never contaminated.
     """
 
     start: str
@@ -590,6 +600,9 @@ class BaselineWindow:
     precision: float | None
     athenaeum_version: str
     git_sha: str
+    excluded_sessions: tuple[str, ...] = ()
+    excluded_push_record_count: int = 0
+    excluded_reference_record_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -600,6 +613,9 @@ class BaselineWindow:
             "precision": self.precision,
             "athenaeum_version": self.athenaeum_version,
             "git_sha": self.git_sha,
+            "excluded_sessions": list(self.excluded_sessions),
+            "excluded_push_records": self.excluded_push_record_count,
+            "excluded_reference_records": self.excluded_reference_record_count,
         }
 
 
@@ -643,6 +659,7 @@ def compute_baseline(
     since: datetime | None = None,
     cache_dir: Path | None = None,
     repo_root: Path | None = None,
+    exclude_sessions: Iterable[str] | None = None,
 ) -> BaselineWindow:
     """Compute the push-precision baseline over ``[since, now]``.
 
@@ -652,10 +669,26 @@ def compute_baseline(
     push record cannot exist before this instrument shipped, so a window that
     predates the ledger's first record simply contains zero records — reported
     truthfully, not backfilled.
+
+    ``exclude_sessions`` (issue athenaeum#791): an explicit, operator-supplied
+    denylist of KNOWN-synthetic session ids — e.g. a session id an operator
+    has confirmed ran the test suite and leaked fixture pushes into the live
+    ledger (the athenaeum#791 evidence: 75 of 120 push records at filing, all
+    from one such session). Deliberately a denylist, not a heuristic: nothing
+    here infers "synthetic" from record CONTENT (a push id being a bare
+    filename rather than a uid is also the normal shape for a legitimate
+    raw-intake page — see :func:`opaque_push_id` — so guessing from that shape
+    would risk excluding real data). Excluded sessions' push and
+    reference-determination records are dropped from ``session_count``,
+    ``push_record_count``, ``reference_record_count``, and ``precision`` —
+    but never silently: the excluded session ids and record counts are always
+    on the returned :class:`BaselineWindow`, so a cleaned window still shows
+    that it needed cleaning.
     """
     now = datetime.now(tz=timezone.utc)
     pushes = read_push_records(cache_dir)
     refs = _read_jsonl(reference_records_path(cache_dir))
+    exclude_set = {s for s in (exclude_sessions or ()) if s}
 
     def _in_window(ts_raw: Any) -> bool:
         ts = _parse_ts(ts_raw)
@@ -667,6 +700,20 @@ def compute_baseline(
 
     pushes_in = [r for r in pushes if _in_window(r.get("ts"))]
     refs_in = [r for r in refs if _in_window(r.get("ts"))]
+
+    excluded_pushes = [r for r in pushes_in if r.get("session_id") in exclude_set]
+    excluded_refs = [r for r in refs_in if r.get("session_id") in exclude_set]
+    if exclude_set:
+        pushes_in = [r for r in pushes_in if r.get("session_id") not in exclude_set]
+        refs_in = [r for r in refs_in if r.get("session_id") not in exclude_set]
+
+    found_excluded_sessions = sorted(
+        {
+            sid
+            for r in (excluded_pushes + excluded_refs)
+            if isinstance(sid := r.get("session_id"), str) and sid
+        }
+    )
 
     sessions = {r.get("session_id") for r in pushes_in if r.get("session_id")}
 
@@ -689,6 +736,9 @@ def compute_baseline(
         precision=precision,
         athenaeum_version=_get_version(),
         git_sha=_get_git_sha(repo_root),
+        excluded_sessions=tuple(found_excluded_sessions),
+        excluded_push_record_count=len(excluded_pushes),
+        excluded_reference_record_count=len(excluded_refs),
     )
 
 
@@ -711,11 +761,20 @@ def render_snapshot_section(baseline: BaselineWindow, *, coverage_note: str) -> 
     (window start/end, #sessions, #push records, precision point estimate,
     coverage miss rate, athenaeum version + git SHA) appears as a `key:
     value` line so a later agent can parse this without an LLM.
+
+    ``excluded_sessions``/``excluded_push_records``/``excluded_reference_records``
+    (issue athenaeum#791) always appear — ``none``/``0`` when no
+    ``--exclude-session`` was passed — so a snapshot that DID need to drop a
+    known-synthetic session is visibly different from one that never had to,
+    rather than the exclusion being invisible in the committed history.
     """
     precision_str = (
         f"{baseline.precision:.4f}"
         if baseline.precision is not None
         else "n/a — accrues as sessions run"
+    )
+    excluded_sessions_str = (
+        ",".join(baseline.excluded_sessions) if baseline.excluded_sessions else "none"
     )
     lines = [
         _SNAPSHOT_SECTION_HEADING,
@@ -731,6 +790,9 @@ def render_snapshot_section(baseline: BaselineWindow, *, coverage_note: str) -> 
         f"- reference_records: {baseline.reference_record_count}",
         f"- precision: {precision_str}",
         f"- coverage_miss_rate: {coverage_note}",
+        f"- excluded_sessions: {excluded_sessions_str}",
+        f"- excluded_push_records: {baseline.excluded_push_record_count}",
+        f"- excluded_reference_records: {baseline.excluded_reference_record_count}",
         f"- athenaeum_version: {baseline.athenaeum_version}",
         f"- git_sha: {baseline.git_sha}",
         "",
@@ -763,7 +825,28 @@ def write_snapshot(
 
     Uses :func:`athenaeum.atomic_io.atomic_write_text` for the whole-file
     replace so a crash mid-write can never leave a torn file.
+
+    Raises:
+        ValueError: when *baseline* has zero reference-determination records
+            (``reference_record_count == 0``) — precision is not computable,
+            so the only thing there is to write is a placeholder. Issue
+            athenaeum#795: a prior version wrote that placeholder
+            unconditionally, and a run against a dead instrument (zero
+            reference records) silently appended a meaningless dated entry
+            into a tracked docs file. Writing nothing is the correct outcome
+            here; nothing is written before this is raised. Callers that
+            only want to INSPECT a baseline (valid or not) without writing —
+            the exact read-only check the athenaeum#711 incident needed —
+            should not call this function at all; see the CLI's
+            ``--dry-run``.
     """
+    if baseline.reference_record_count == 0:
+        raise ValueError(
+            "refusing to write snapshot: reference_records=0 in this window, "
+            "so precision is not computable — nothing meaningful to record "
+            "(athenaeum#795)"
+        )
+
     from athenaeum.atomic_io import atomic_write_text
 
     new_entry = render_snapshot_section(baseline, coverage_note=coverage_note)
