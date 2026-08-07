@@ -23,6 +23,7 @@ from athenaeum.corrections import (
     process_correction_record,
     resolve_target,
     retire_batch,
+    run_correction_phase,
     write_correction_handoff,
 )
 from athenaeum.models import EntityIndex
@@ -998,3 +999,181 @@ def test_load_registry_reads_entities(tmp_path: Path) -> None:
     )
     reg = load_registry(tmp_path)
     assert "person-a" in reg
+
+
+# ---------------------------------------------------------------------------
+# §10.2 volume bounds -- an over-bound batch is deferred WHOLE, never
+# refused (AC14). `run_correction_phase` is the §10.1 orchestrator these
+# bounds gate.
+# ---------------------------------------------------------------------------
+
+
+def _corrections_batch(*records: dict, submitter: str, **envelope_overrides) -> str:
+    envelope = {
+        "record": "batch",
+        "schema_version": 1,
+        "submitter": submitter,
+        "batch_id": "20260806T030000Z-1a2b3c4d",
+        "created_at": "2026-08-06T03:00:00Z",
+    }
+    envelope.update(envelope_overrides)
+    lines = [json.dumps(envelope)]
+    lines.extend(json.dumps(r) for r in records)
+    return "\n".join(lines) + "\n"
+
+
+class TestVolumeBounds:
+    def _noop_escalate(self, result: object, outcome: object) -> bool:
+        return True
+
+    def test_over_max_records_per_batch_deferred_whole(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
+        raw = tmp_path / "raw" / "graph-writer"
+        raw.mkdir(parents=True)
+        batch = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                {
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "value": "company-b",
+                },
+                {
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "value": "company-c",
+                },
+                submitter="graph-writer",
+                defaults={
+                    "op": "add",
+                    "field": "backlinks",
+                    "source": "script:graph-writer",
+                    "observed_at": "2026-08-06T03:00:00Z",
+                },
+            )
+        )
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"backlinks": {"shape": "list", "writers": ["graph-writer"]}},
+                    "max_records_per_batch": 1,  # batch carries 2 -> over bound
+                }
+            }
+        }
+        summary = run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=self._noop_escalate,
+        )
+        assert summary["batches_processed"] == 0
+        assert summary["batches_carried_over"] == 1
+        assert batch.exists()  # untouched, not deferred/mangled
+        assert not (wiki / "_corrections_applied.jsonl").exists()
+
+    def test_over_max_batch_bytes_deferred_whole(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
+        raw = tmp_path / "raw" / "graph-writer"
+        raw.mkdir(parents=True)
+        batch = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                {
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "value": "company-b",
+                },
+                submitter="graph-writer",
+                defaults={
+                    "op": "add",
+                    "field": "backlinks",
+                    "source": "script:graph-writer",
+                    "observed_at": "2026-08-06T03:00:00Z",
+                },
+            )
+        )
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"backlinks": {"shape": "list", "writers": ["graph-writer"]}},
+                    "max_batch_bytes": 4,  # the file is obviously bigger
+                }
+            }
+        }
+        summary = run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=self._noop_escalate,
+        )
+        assert summary["batches_processed"] == 0
+        assert summary["batches_carried_over"] == 1
+        assert batch.exists()
+
+    def test_over_max_records_per_run_carries_second_batch(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
+        _write_page(wiki, "q.md", {"uid": "person-b", "type": "person", "name": "B"})
+        raw = tmp_path / "raw" / "graph-writer"
+        raw.mkdir(parents=True)
+        # Two separate, individually-conformant batches sorted FIFO by
+        # filename (§10.2).
+        batch1 = raw / "20260806T030000Z-11111111.jsonl"
+        batch1.write_text(
+            _corrections_batch(
+                {"record": "correction", "target": {"uid": "person-a"}, "value": "company-b"},
+                submitter="graph-writer",
+                batch_id="20260806T030000Z-11111111",
+                defaults={
+                    "op": "add",
+                    "field": "backlinks",
+                    "source": "script:graph-writer",
+                    "observed_at": "2026-08-06T03:00:00Z",
+                },
+            )
+        )
+        batch2 = raw / "20260806T040000Z-22222222.jsonl"
+        batch2.write_text(
+            _corrections_batch(
+                {"record": "correction", "target": {"uid": "person-b"}, "value": "company-c"},
+                submitter="graph-writer",
+                batch_id="20260806T040000Z-22222222",
+                defaults={
+                    "op": "add",
+                    "field": "backlinks",
+                    "source": "script:graph-writer",
+                    "observed_at": "2026-08-06T04:00:00Z",
+                },
+            )
+        )
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"backlinks": {"shape": "list", "writers": ["graph-writer"]}},
+                    "max_records_per_run": 1,  # batch1 alone exhausts the run budget
+                }
+            }
+        }
+        summary = run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=self._noop_escalate,
+        )
+        assert summary["batches_processed"] == 1
+        assert summary["batches_carried_over"] == 1
+        assert not batch1.exists()  # applied and retired
+        assert batch2.exists()  # carried over whole, untouched
+
+        page_a = (wiki / "p.md").read_text()
+        page_b = (wiki / "q.md").read_text()
+        assert "company-b" in page_a
+        assert "company-c" not in page_b
