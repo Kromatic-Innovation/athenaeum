@@ -855,9 +855,12 @@ when the transcript carries none).
 Lock discipline: any change to this taxonomy MUST update
 `docs/conflict-resolution.md` (which cross-links to this section),
 `docs/contradiction-detection.md` (which publishes its own copy of this
-taxonomy in its §3), the `_RESOLVE_SYSTEM` prompt + its
-`tests/data/resolve_system.txt` snapshot, AND the corresponding test in
-`tests/test_conflict_resolution.py` in the same change.
+taxonomy in its §3), the `_RESOLVE_SYSTEM` prompt + its golden
+`tests/data/prompts/resolutions.resolve_system.txt` snapshot (regenerated
+via `python -m athenaeum.prompt_registry --write`, pinned by
+`tests/test_prompt_goldens.py::test_prompt_matches_golden`), AND the
+corresponding test in `tests/test_conflict_resolution.py` in the same
+change.
 
 ### 10.1a Source backfill — `repair --backfill-sources` (issue athenaeum#328)
 
