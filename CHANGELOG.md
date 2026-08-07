@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Three provider/cost hygiene fixes from the LLM-provider/cost audit
+  (athenaeum#780, findings L7/L8/L10).** (1) `scripts/measure_contradiction_baseline.py`'s
+  `_build_client` was the only direct `anthropic.Anthropic(...)` construction
+  outside `provider.py::build_llm_client` in the whole repo — it silently
+  could never use the `claude-cli` subscription backend. It now routes
+  through `build_llm_client(config, max_retries=3)`, the same factory every
+  other call site uses; `grep -rn 'anthropic\.Anthropic(' src/ scripts/`
+  returns zero hits outside `provider.py`. The `api` path is unchanged
+  byte-for-byte (`max_retries=3`, `None` when `ANTHROPIC_API_KEY` is unset) —
+  covered by existing `provider.py` tests plus four new tests in
+  `tests/test_measure_contradiction_baseline.py`. (2) `spend.py`'s module
+  docstring wrongly described the per-turn `query-topics` recall extractor as
+  one that "always talks to the SDK directly"; `query_topics.py` actually
+  calls `build_llm_client(config, timeout=timeout, max_retries=0)` like every
+  other call site, so it routes through the provider seam and is metered only
+  when the resolved provider is `api`. Docstring reworded only — the ledger
+  rows themselves were already correct (`build_record` derives `billing_mode`
+  from the resolved provider argument, never from this prose), so no code
+  changed. (3) Setting `ATHENAEUM_REASONING_T1_MODEL` / `T2_MODEL` (env, or
+  `models.reasoning_t1` / `reasoning_t2` yaml) while
+  `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` is off had no effect, with no
+  signal at all. `get_t1_model` / `get_t2_model` now log a warning naming the
+  flag to set whenever the knob is explicitly configured and auditing is
+  off. This is **not** a claim that the tiers are dead: both T1 and T2 have
+  real production callers in `merge.py` (athenaeum#518, athenaeum#602) that
+  bypass the empty `DEFAULT_TIER_CHAIN` and run whenever an operator opts
+  into that same flag — they are opt-in, not unwired. Six new tests in
+  `tests/test_reasoning_tiers.py` cover the warning firing (env knob, yaml
+  knob) and staying silent (knob unset; auditing on via env; auditing on via
+  yaml).
+
 ### Added
 
 - **`cache_control` breakpoints on the detector and resolver system prompts
