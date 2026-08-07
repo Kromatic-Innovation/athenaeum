@@ -27,6 +27,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **Document the reasoning-tier screen (T1/T2) in install/config — default
+  stays OFF (athenaeum#779).** The cheap-to-expensive T1/T2 merge-proposal
+  screen (`athenaeum.reasoning_tiers`) has had real production callers since
+  athenaeum#518/#602, but was undocumented in the install/config docs, so an
+  operator drowning in the human merge queue had no signal a built, tested
+  screening cascade already exists. New `docs/configuration.md` section
+  "Reasoning-tier screening (T1/T2) — off by default" covers what T1 (cheap
+  model, bounded ~100-word excerpts, reject-or-pass-up only, no write
+  authority) and T2 (expensive model, full bodies, T1 pass-ups only) do; the
+  auto-apply consequence stated prominently — a T2 safe-class `approve` calls
+  `pending_merges.resolve_merge(auto_applied=True)` (`merge.py:1408`), writing
+  a merge into the wiki with **no human review**, which is the actual reason
+  the default stays off; the recommendation to enable it once
+  `athenaeum merges count` / `athenaeum decisions count` shows the human queue
+  outgrowing manual triage; the single `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED`
+  env var / `librarian.reasoning_tier_auditing_enabled` yaml key that gates
+  both tiers together; the added LLM spend, visible via `athenaeum spend
+  --by-model` (the issue's proposed `--by-knob` flag does not exist — the real
+  flag buckets by resolved model id, not by knob name, corrected in the docs);
+  and the `wiki/_reasoning_tier_decisions.jsonl` decision log
+  (`tier`/`decision`/`reason`/`reason_code`/`model`/`proposal_id` +
+  timestamp). README gets a matching install-section pointer and a corrected
+  "Note on reasoning tiers" (it previously said "exactly one production call
+  site," stale since athenaeum#602 added the T2 caller). `docs/configuration.md`'s
+  own reasoning-tier-model footnote and `docs/authority-manifest.md`'s
+  "one gated production caller" note carried the same staleness and are
+  corrected too — `reasoning_tiers.py`'s own docstring already warns against
+  calling the tiers "unwired" or claiming "no production caller." The default
+  is unchanged: `resolve_reasoning_tier_auditing_enabled` still defaults OFF,
+  now asserted directly by `TestResolveReasoningTierAuditingEnabled` in
+  `tests/test_config.py`. Docs and tests only — no change to tier logic, the
+  safe-class definition, or the shipped default.
+
 - **`runlock`: correct the docstrings that made a normal residual lockfile read
   as a leak (athenaeum#763).** There is no lock leak — a diagnosis established
   that `release()` never unlinks the lockfile (by design, always), that a
