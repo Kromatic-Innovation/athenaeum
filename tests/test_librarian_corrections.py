@@ -417,3 +417,169 @@ class TestEscalationDedup:
         after = pending.read_text()
         assert after.count(render_correction_id_marker(cid)) == 1
         assert before in after
+
+
+class TestSchemaAmendmentProposal:
+    def test_propose_amendment_reaches_pending_questions(self, tmp_path: Path) -> None:
+        """§7.2/§5.4 regression: `held-schema-proposal` is "a schema
+        amendment... through the existing human-decision surface" and is
+        "terminal once the question or proposal is recorded" -- it must
+        actually reach `_pending_questions.md`, the same surface `escalated`
+        uses, not merely report the disposition string with nothing recorded
+        anywhere an operator can act on."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
+        raw = tmp_path / "raw" / "enrichment-service"
+        raw.mkdir(parents=True)
+        batch_path = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch_path.write_text(
+            _batch(
+                {
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "op": "set",
+                    "field": "custom_attr",
+                    "value": "some-value",
+                    "source": "api:enrichment-vendor",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                },
+                submitter="enrichment-service",
+            )
+        )
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "custom_attr": {"shape": "scalar", "writers": ["enrichment-service"]}
+                    },
+                    "schema_slots": {"custom_attr": {"propose_amendment": True}},
+                }
+            }
+        }
+        ctx = _make_ctx(tmp_path, config)
+        _run_correction_phase(ctx)
+
+        pending = wiki / "_pending_questions.md"
+        assert pending.exists(), (
+            "schema-amendment proposal never reached the pending-questions "
+            "surface (§7.2/§5.4)"
+        )
+        text = pending.read_text()
+        assert "schema-amendment" in text
+        assert "custom_attr" in text
+
+        ledger = wiki / "_corrections_applied.jsonl"
+        record = json.loads(ledger.read_text().splitlines()[0])
+        assert record["dispositions"].get("held-schema-proposal") == 1
+
+        # Recorded and terminal on the first pass -- the batch is retired.
+        assert not batch_path.exists()
+
+
+class TestHandoffIdempotency:
+    def test_handoff_not_duplicated_when_batch_carries_over_for_other_reason(
+        self, tmp_path: Path
+    ) -> None:
+        """§8.1 regression: a batch carrying BOTH a raised-tier record and an
+        escalated record that hits the §10.2 rate cap is NOT retired after
+        the first pass (`escalations_recorded=False`), so the SAME
+        raised-tier record is recomputed on every subsequent pass. Without
+        the `previously_handed_off_correction_ids` guard,
+        `write_correction_handoff` is called again each pass, writing a
+        duplicate `.md` handoff file for a record already handed over --
+        exactly the non-idempotency AC5 forbids ("idempotent on (batch_id,
+        sorted correction_id set) across re-runs"). Exactly ONE handoff file
+        must exist after two passes.
+        """
+        wiki = tmp_path / "wiki"
+        for uid in ("person-a", "person-b", "person-c"):
+            page = _write_page(wiki, f"{uid}.md", {"uid": uid, "type": "person", "name": uid})
+            page.write_text(
+                page.read_text().replace(
+                    f"name: {uid}",
+                    f"name: {uid}\ncurrent_title: CTO\n"
+                    "field_sources:\n  current_title: 'api:apollo'",
+                )
+            )
+        raw = tmp_path / "raw" / "enrichment-service"
+        raw.mkdir(parents=True)
+        batch_path = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch_path.write_text(
+            _batch(
+                {
+                    # Equal rank (api:), differing value, no comparable date
+                    # anywhere -- undated tie -> escalated (§6.2). Three
+                    # distinct targets so, with a per-run cap of 1, at least
+                    # one is still capped on EVERY pass across two runs (a
+                    # 1-per-run budget clears at most 2 of 3 in two passes).
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "op": "set",
+                    "field": "current_title",
+                    "value": "VP Engineering",
+                    "source": "api:enrichment-vendor",
+                    "observed_at": "2026-08-06T05:58:40Z",
+                },
+                {
+                    "record": "correction",
+                    "target": {"uid": "person-b"},
+                    "op": "set",
+                    "field": "current_title",
+                    "value": "VP Engineering",
+                    "source": "api:enrichment-vendor",
+                    "observed_at": "2026-08-06T05:58:40Z",
+                },
+                {
+                    "record": "correction",
+                    "target": {"uid": "person-c"},
+                    "op": "set",
+                    "field": "current_title",
+                    "value": "VP Engineering",
+                    "source": "api:enrichment-vendor",
+                    "observed_at": "2026-08-06T05:58:40Z",
+                },
+                {
+                    # Attribute not on the allowlist -> raised-tier (§8).
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "op": "set",
+                    "field": "not_allowlisted_attr",
+                    "value": "x",
+                    "source": "api:enrichment-vendor",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                },
+                submitter="enrichment-service",
+            )
+        )
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "current_title": {
+                            "shape": "scalar",
+                            "writers": ["enrichment-service"],
+                        }
+                    },
+                    # A cap of 1/run lets one of the three escalations
+                    # record per pass, forcing `escalations_recorded=False`
+                    # (and the batch NOT retired) on every pass for at least
+                    # two runs -- exactly the "carried over for an unrelated
+                    # reason" scenario §8.1's idempotency guard must cover.
+                    "max_escalations_per_run": 1,
+                }
+            }
+        }
+
+        _run_correction_phase(_make_ctx(tmp_path, config))
+        assert batch_path.exists(), "batch should have carried over, not retired"
+        handoff_files_pass_1 = sorted(raw.glob("*.md"))
+        assert len(handoff_files_pass_1) == 1
+
+        _run_correction_phase(_make_ctx(tmp_path, config))
+        assert batch_path.exists(), "batch should still be carried over after pass 2"
+        handoff_files_pass_2 = sorted(raw.glob("*.md"))
+        assert len(handoff_files_pass_2) == 1, (
+            "handoff file duplicated on a carried-over re-run -- §8.1 "
+            "idempotency on (batch_id, sorted correction_id set) was violated"
+        )
+        assert handoff_files_pass_1 == handoff_files_pass_2
