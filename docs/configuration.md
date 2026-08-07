@@ -119,6 +119,23 @@ Path and mode flags on `athenaeum run` (CLI-only): `--raw-root` and
 `--path` (default `~/knowledge`), `--dry-run`, `--cluster-only`,
 `--merge-only`, `--verbose`.
 
+### Field corrections (`librarian.corrections.*`, athenaeum#797)
+
+The deterministic, LLM-free field-correction fast path documented in
+[`field-corrections.md`](field-corrections.md). Runs as its own phase inside
+`athenaeum run`, before the entity tiers, and makes zero LLM calls.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Attribute allowlist | — | `librarian.corrections.fields` | `{}` | §6.3: maps an attribute name to `{shape: "scalar"\|"list", writers: [...], monotone: bool}`. **Empty by default** — with no entry, every submission takes the reasoning-tier fallthrough (§8) and nothing is written cheaply; a fresh deployment cannot have its wiki written by a mechanical writer until an operator opts a specific attribute in. `writers` bounds blast radius, not trust (§12a) — see the security note there. |
+| Sensitivity routing | — | `librarian.corrections.sensitive_fields` | `{}` | §7.1: maps an attribute name to a `storage.mapping` entity-class name (athenaeum#429's existing storage-adapter layer, reused rather than reinvented). A fact bearing on a mapped attribute is routed to that surface REGARDLESS of the destination the correction named — a correction cannot opt out of routing by being specific. Empty by default: sensitivity classification is deployment configuration, never shipped in this repo. |
+| Schema-slot routing | — | `librarian.corrections.schema_slots` | `{}` | §7.2: for an attribute that IS on the `fields` allowlist but has no dedicated schema slot, maps it to `{alias_of: "<field>"}` (route to an equivalent slot), `{propose_amendment: true}` (hold a schema-amendment proposal on `_pending_questions.md`), or `{prose: true}` (record as body prose, one-off). An allowlisted attribute with no entry here writes directly as ordinary frontmatter (schemas.py's per-type models already tolerate unknown keys via `extra="allow"`, the same mechanism source-handle keys use). |
+| Records per batch | `ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_BATCH` | `librarian.corrections.max_records_per_batch` | `5000` | §10.2: a batch carrying more records than this is deferred WHOLE to the next run (never refused) and reported as carry-over. |
+| Records per run | `ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_RUN` | `librarian.corrections.max_records_per_run` | `50000` | §10.2: run-level cap on records actually applied/routed-elsewhere. Batches beyond the cap are untouched and retried next run. |
+| Batch file size | `ATHENAEUM_CORRECTIONS_MAX_BATCH_BYTES` | `librarian.corrections.max_batch_bytes` | `33554432` (32 MiB) | §10.2: a batch file over this size is deferred whole, same treatment as the per-batch record cap. |
+| Escalations per run | `ATHENAEUM_CORRECTIONS_MAX_ESCALATIONS_PER_RUN` | `librarian.corrections.max_escalations_per_run` | `50` | §10.2: flood guard on how many NEW `_pending_questions.md` entries this phase files in one run (a writer with a systematic disagreement could otherwise fill the human queue). Escalations already open (deduped by `correction_id`) do not count against the cap. On hitting the cap the phase keeps applying/deferring normally and emits one summary line naming the submitter + attribute with the highest suppressed count. |
+| Phase runtime share | `ATHENAEUM_CORRECTIONS_RUNTIME_SHARE` | `librarian.corrections.runtime_share` | `0.05` | Fraction of `librarian.max_runtime` this phase may spend, mirroring `entity_runtime_share`'s mechanism. Checked at BATCH boundaries only (never mid-batch). Records that raise a tier (§8) join the ordinary intake queue and are subject to the entity phase's budget instead — they cost what reasoning costs, not what this phase's share allows. |
+
 ### Run lock (single-machine concurrency guard, athenaeum#309)
 
 Every **mutating** command acquires an exclusive advisory
