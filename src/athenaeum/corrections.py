@@ -1078,10 +1078,13 @@ def build_ledger_record(outcome: BatchOutcome) -> dict[str, Any]:
     """
     counts: dict[str, int] = {}
     non_trivial_ids: list[str] = []
+    raised_tier_ids: list[str] = []
     for r in outcome.results:
         counts[r.disposition] = counts.get(r.disposition, 0) + 1
         if r.disposition not in ("applied", "noop"):
             non_trivial_ids.append(r.correction_id)
+        if r.disposition == "raised-tier":
+            raised_tier_ids.append(r.correction_id)
     total_counted = sum(counts.values())
     if total_counted != outcome.records_total:
         raise AssertionError(
@@ -1098,6 +1101,12 @@ def build_ledger_record(outcome: BatchOutcome) -> dict[str, Any]:
         "records_total": outcome.records_total,
         "dispositions": counts,
         "non_trivial_correction_ids": non_trivial_ids,
+        # §8.1 idempotency key: which raised-tier ids from THIS pass got (or
+        # will get, once the caller writes it) a handoff file. A later pass
+        # over the same batch_id (carried over for an unrelated reason, e.g.
+        # the §10.2 escalation cap) scans prior lines for this batch_id and
+        # skips re-emitting a handoff for ids already listed here.
+        "raised_tier_correction_ids": raised_tier_ids,
     }
 
 
@@ -1105,6 +1114,40 @@ def append_corrections_ledger(wiki_root: Path, outcome: BatchOutcome) -> None:
     record = build_ledger_record(outcome)
     path = default_corrections_ledger_path(wiki_root)
     _append_jsonl_line(path, json.dumps(record, sort_keys=True) + "\n")
+
+
+def previously_handed_off_correction_ids(wiki_root: Path, batch_id: str) -> set[str]:
+    """§8.1 idempotency: correction_ids from *batch_id* that already got a
+    handoff file written on an earlier pass, recovered from prior
+    ``_corrections_applied.jsonl`` lines for this batch (their
+    ``raised_tier_correction_ids``).
+
+    A batch can be carried over (§5.4) for a reason unrelated to its
+    raised-tier records — e.g. the §10.2 escalation rate cap holding an
+    ``escalated`` record open — in which case the SAME raised-tier records
+    are recomputed on the next pass. Without this check the caller would
+    call :func:`write_correction_handoff` again for ids it already handed
+    off, writing a duplicate `.md` file every carried-over run.
+    """
+    path = default_corrections_ledger_path(wiki_root)
+    ids: set[str] = set()
+    if not path.exists():
+        return ids
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("batch_id") == batch_id:
+                    ids.update(rec.get("raised_tier_correction_ids") or [])
+    except OSError:
+        return ids
+    return ids
 
 
 # ---------------------------------------------------------------------------
@@ -1288,10 +1331,16 @@ def run_correction_phase(
             1 for r in outcome.results if r.disposition in ("applied", "routed-elsewhere")
         )
 
+        # §7.2/§5.4: ``held-schema-proposal`` is terminal only once the
+        # proposal is actually RECORDED on the human-decision surface, same
+        # as ``escalated`` (§8's own text: "the question or proposal is
+        # recorded... the pending-questions surface owns it from that
+        # point"). Both go through the same ``escalate_one`` callback and
+        # the same §10.2 rate cap / correction_id dedup.
         escalations_recorded = True
         if not dry_run:
             for r in outcome.results:
-                if r.disposition == "escalated":
+                if r.disposition in ("escalated", "held-schema-proposal"):
                     if not escalate_one(r, outcome):
                         escalations_recorded = False
 
@@ -1305,7 +1354,16 @@ def run_correction_phase(
 
         raised = [r for r in outcome.results if r.disposition == "raised-tier"]
         if raised:
-            write_correction_handoff(outcome, raised, raw_root=raw_root)
+            # §8.1 idempotency: only hand off ids not already recorded as
+            # handed-off in a prior pass over this same batch_id (a batch
+            # carried over for an unrelated reason -- e.g. the escalation
+            # cap above -- must not re-emit a duplicate handoff file).
+            already_handed_off = previously_handed_off_correction_ids(
+                wiki_root, outcome.batch_id
+            )
+            new_raised = [r for r in raised if r.correction_id not in already_handed_off]
+            if new_raised:
+                write_correction_handoff(outcome, new_raised, raw_root=raw_root)
 
         append_corrections_ledger(wiki_root, outcome)
 

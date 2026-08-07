@@ -2577,6 +2577,11 @@ def _run_correction_phase(ctx: RunContext) -> None:
     cap_hits: dict[tuple[str, str], int] = {}
 
     def _escalate_one(result: Any, outcome: Any) -> bool:
+        # issue athenaeum#797 §7.2/§5.4: this callback also records
+        # ``held-schema-proposal`` results (a schema-amendment proposal) on
+        # `_pending_questions.md`, not just ``escalated`` conflicts -- both
+        # are "the existing human-decision surface" the design doc names,
+        # and share the same correction_id dedup + §10.2 rate cap below.
         if result.correction_id in open_ids:
             return True  # already open -- dedup (§8/§10.2), still "recorded"
         if len(escalated_this_run) >= max_escalations and max_escalations > 0:
@@ -2584,6 +2589,7 @@ def _run_correction_phase(ctx: RunContext) -> None:
             cap_hits[key] = cap_hits.get(key, 0) + 1
             return False
         target_desc = json.dumps(result.target, sort_keys=True) if result.target else "?"
+        is_schema_proposal = result.disposition == "held-schema-proposal"
         description_lines = [
             f"Target: {target_desc}",
             f"Field: {result.field}",
@@ -2598,7 +2604,7 @@ def _run_correction_phase(ctx: RunContext) -> None:
         item = EscalationItem(
             raw_ref=f"{outcome.source}/{outcome.path.name}",
             entity_name=result.entity_name or "unknown",
-            conflict_type="field-correction",
+            conflict_type="schema-amendment" if is_schema_proposal else "field-correction",
             description="\n".join(description_lines),
         )
         tier4_escalate([item], pending_path, config=ctx.config, projects_root=ctx.projects_root)
