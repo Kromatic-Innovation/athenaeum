@@ -21,6 +21,7 @@ from athenaeum.config import (
     resolve_push_after_run,
     resolve_push_branch,
     resolve_push_remote,
+    resolve_reasoning_tier_auditing_enabled,
     resolve_reindex_full_rehash_max_age_days,
     resolve_retire,
     write_default_config,
@@ -310,6 +311,48 @@ class TestResolvePushAfterRun:
     def test_non_bool_falls_through_to_off(self) -> None:
         # A non-bool (e.g. yaml string) must not silently enable push.
         assert resolve_push_after_run({"librarian": {"push_after_run": "yes"}}) is False
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "librarian" not in _DEFAULTS
+
+
+class TestResolveReasoningTierAuditingEnabled:
+    """Issue athenaeum#779: the reasoning-tier screen (T1/T2) ships OFF by
+    default — enabling it lets T2 auto-apply a merge with no human review, so
+    an unconfigured install must never opt into that silently."""
+
+    def test_default_off(self) -> None:
+        assert resolve_reasoning_tier_auditing_enabled(None) is False
+        assert resolve_reasoning_tier_auditing_enabled({}) is False
+        assert resolve_reasoning_tier_auditing_enabled({"librarian": {}}) is False
+
+    def test_env_true_enables(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_REASONING_TIER_AUDITING_ENABLED", "true")
+        assert resolve_reasoning_tier_auditing_enabled(None) is True
+
+    def test_env_false_explicit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_REASONING_TIER_AUDITING_ENABLED", "false")
+        cfg = {"librarian": {"reasoning_tier_auditing_enabled": True}}
+        assert resolve_reasoning_tier_auditing_enabled(cfg) is False
+
+    def test_yaml_true_enables(self) -> None:
+        assert (
+            resolve_reasoning_tier_auditing_enabled(
+                {"librarian": {"reasoning_tier_auditing_enabled": True}}
+            )
+            is True
+        )
+
+    def test_non_bool_yaml_falls_through_to_off(self) -> None:
+        # A non-bool (e.g. yaml string) must not silently enable auto-apply.
+        assert (
+            resolve_reasoning_tier_auditing_enabled(
+                {"librarian": {"reasoning_tier_auditing_enabled": "yes"}}
+            )
+            is False
+        )
 
     def test_not_seeded_in_defaults(self) -> None:
         from athenaeum.config import _DEFAULTS

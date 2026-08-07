@@ -218,7 +218,7 @@ accepts the pre-athenaeum#232 `resolve.model` key for backward compatibility.
 
 > ¹ `resolve.model` is still read post-athenaeum#512/#513 (`athenaeum.resolutions._get_model`), not yet removed. Precedence, highest first: `ATHENAEUM_RESOLVE_MODEL` env var, then `models.resolve` yaml, then `resolve.model` yaml (legacy), then the code default — so if both `models.resolve` and `resolve.model` are set, **`models.resolve` wins**. There is no scheduled removal; it is kept indefinitely so existing `athenaeum.yaml` files keep working unchanged. Prefer `models.resolve` for new configs, for consistency with the other model knobs.
 >
-> ² The reasoning-tier knobs are read by `athenaeum.reasoning_tiers`. That subsystem currently has no production caller (`DEFAULT_TIER_CHAIN` is empty), so setting these has no runtime effect today — they are documented here for completeness because `src/` reads them. If the subsystem is removed, these two rows go with it.
+> ² The reasoning-tier knobs are read by `athenaeum.reasoning_tiers`. `DEFAULT_TIER_CHAIN` (the pipeline's own default chain) is indeed empty, but both tiers have real production callers in `merge.py` that bypass that default — `t1_screen_rejects_merge_proposal` (athenaeum#518) and `t2_screen_merge_proposal` (athenaeum#602) — gated behind the single `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` flag, which **defaults off**. With the flag off (a fresh install), these knobs indeed have no runtime effect, matching the code default described above — but that is because the *screen* is opt-in, not because the tiers are unwired or dead code. See [Reasoning-tier screening (T1/T2)](#reasoning-tier-screening-t1t2--off-by-default) for the full picture, including what turning the flag on does.
 
 ### Per-stage token and thinking tuning (athenaeum#688)
 
@@ -702,6 +702,86 @@ intake per the configured action and access.
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
 | Authority manifest path | `ATHENAEUM_AUTHORITY_MANIFEST` | `librarian.authority_manifest_path` | `<knowledge_root>/authority-manifest.yaml` | Path to the authority manifest mapping authoritative LIVE sources. Relative yaml values resolve against the knowledge root; a missing file is treated as "no manifest configured". Full reference: [`docs/authority-manifest.md`](authority-manifest.md). |
+
+## Reasoning-tier screening (T1/T2) — off by default
+
+A cheap-to-expensive cascade (`src/athenaeum/reasoning_tiers.py`, issues
+athenaeum#423/#432) that screens each merge proposal *before* it reaches the
+human decision queue (`wiki/_pending_merges.md`). The governing rule: **write
+authority increases with tier — cheap tiers only reject and route, never
+approve.**
+
+- **T1** — a cheap (haiku-class) model, given only a *bounded* view of each
+  candidate source: title, frontmatter, and the first ~100 words of the body
+  — never the full text. T1 can only **reject** (with a logged reason) or
+  **pass up**; approval is not a representable outcome for T1 at all, at the
+  type level. A confident reject drops the proposal before a human — or
+  T2 — ever sees it.
+- **T2** — an expensive (opus-class) model, consulted only on a T1 pass-up,
+  and given each source's **full body**. T2's decision space is broader
+  (approve / amend / draft / escalate) — and unlike T1, **T2 can auto-apply a
+  merge**: an `approve` verdict inside the *safe class* finalizes the merge
+  directly via `pending_merges.resolve_merge(..., auto_applied=True)`
+  (`src/athenaeum/merge.py:1408`) — **without human review**. The safe class
+  is ALL of: every source shares the same `memory_class`, at most 3 source
+  pages, no source carries a truthy `pii` flag, and no source is a
+  `memory_class: axiom` member (`reasoning_tiers.safe_class_violation`). Any
+  violation — or a model response that pairs `approve` with rewritten
+  content — makes the safe-class approval structurally unreachable; the
+  decision downgrades to `escalate`/`draft` and falls through to the human
+  queue instead, regardless of what the model itself returned.
+
+> **This is why the default is off.** Turning this subsystem on means
+> athenaeum can write merges into your wiki without a human ever looking at
+> them. That is a reasonable trade for an operator who is drowning in the
+> merge queue and opts in with open eyes — it is not something an
+> Apache-2.0 package should do to every installer by default. Everything
+> below is opt-in.
+
+**When to turn it on.** The recommended trigger is a human merge queue that
+has grown beyond what you can triage by hand. The concrete signal to watch
+is `athenaeum merges count` (or `athenaeum decisions count` for the unified
+question+merge view) — both report the live depth of
+`wiki/_pending_merges.md`. (Don't hand-parse that file directly — see
+["Never hand-parse `wiki/_pending_merges.md`"](../README.md#one-unified-decisions-needed-list)
+in the README.) There is no built-in numeric threshold; "beyond what you can
+handle" is an operator judgment call, not a code-enforced ceiling.
+
+**How to enable.** One flag gates *both* tiers — there is no separate
+opt-in for T1 vs. T2:
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Reasoning-tier auditing | `ATHENAEUM_REASONING_TIER_AUDITING_ENABLED` | `librarian.reasoning_tier_auditing_enabled` | `false` (**off**) | Gates the T1 screen in the merge path, the T2 screen it can pass up to, and the `athenaeum calibration` display surface, all together. `1`/`true`/`yes`/`on` (case-insensitive) enable via env; a non-bool yaml value or an unrecognized env string falls through to off. See [`resolve_reasoning_tier_auditing_enabled`](../src/athenaeum/config.py). |
+
+```yaml
+librarian:
+  reasoning_tier_auditing_enabled: true
+```
+
+The T1/T2 *model* and per-stage token/thinking knobs (`ATHENAEUM_REASONING_T1_MODEL` /
+`ATHENAEUM_REASONING_T2_MODEL` and friends, see [Models](#models) and
+[Per-stage token and thinking tuning](#per-stage-token-and-thinking-tuning-athenaeum688)
+above) are read regardless of this flag, but have no runtime effect while it
+is off — there is nothing for them to tune until the screen actually runs.
+
+**What it costs.** Enabling this adds LLM calls on a merge path that
+currently makes none: every T1 pass-up call and every T2 escalation call is
+real spend, landing under the `reasoning_t1` / `reasoning_t2` model knobs.
+Use `athenaeum spend --by-model` to see it broken out — note that bucket is
+keyed by **model id**, not by knob name, so if a reasoning-tier knob
+resolves to the same model id as another stage (e.g. the shared
+haiku default), their spend is not distinguishable in that view without
+also correlating against the model knobs' configured values.
+
+**How to observe it.** Every tier decision — at either tier, whatever the
+verdict — is appended to `wiki/_reasoning_tier_decisions.jsonl` (append-only
+JSONL, same `O_APPEND` + fsync durability as the merge-provenance ledger) as
+one record per decision: `tier`, `decision`, `reason`, `reason_code`,
+`model`, and `proposal_id`, plus an ISO-8601 UTC timestamp
+(`reasoning_tiers._build_log_record_fields`). Read it back with
+`reasoning_tiers.read_reasoning_tier_decisions()`, optionally filtered by
+`proposal_id` or `tier`.
 
 ## Recall and search
 
