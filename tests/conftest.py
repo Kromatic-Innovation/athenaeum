@@ -212,6 +212,29 @@ def _isolate_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return cache_dir
 
 
+@pytest.fixture(autouse=True)
+def _reset_model_rates() -> Iterator[None]:
+    """Reset the ACTIVE per-MTok rate table to the code default after every
+    test (issue athenaeum#783).
+
+    ``athenaeum.models.configure_model_rates`` installs a process-wide
+    mutable global (``_ACTIVE_MODEL_RATES_USD_PER_MTOK``) so
+    ``TokenUsage.estimated_cost_usd`` can pick up an ``athenaeum.yaml``
+    ``pricing:`` override without threading config through every call site.
+    Left unreset, a test that configures a custom/partial table (e.g. the
+    AC1 override test, or a preflight test that installs a table missing
+    most prefixes) would leak into the NEXT test in the same session and
+    silently change its pricing — the exact cross-test global-state leak
+    ``_isolate_cache_dir_suite`` above already had to fix once for the cache
+    dir (athenaeum#776). Autouse and function-scoped so no test can opt out or
+    forget to clean up.
+    """
+    yield
+    from athenaeum.models import configure_model_rates
+
+    configure_model_rates(None)
+
+
 @pytest.fixture
 def wiki_dir(tmp_path: Path) -> Path:
     """Create a minimal wiki directory with sample entity pages."""

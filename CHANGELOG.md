@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-MTok pricing is now config-owned, with a startup preflight that fails
+  loudly on an unpriced model (athenaeum#783).** Model pricing was the only
+  cost-relevant knob with no config resolver — the rate table was a bare
+  module constant (`models._MODEL_RATES_USD_PER_MTOK`), so a vendor price
+  correction needed a code edit, version bump, full suite run, and deploy
+  (unlike every other cost knob, which resolves `env > yaml > code default`
+  via `resolve_model` / `resolve_max_tokens` / `resolve_thinking` /
+  `resolve_provider` / the four `resolve_spend_max_*`). New
+  `config.resolve_model_rates(config)` reads `athenaeum.yaml`'s
+  `pricing.<model-id-prefix>: [input_usd_per_mtok, output_usd_per_mtok]`
+  section (malformed entries — wrong arity, non-numeric, `bool`, negative —
+  WARN and are dropped, mirroring `resolve_max_tokens`'s convention, not a
+  new one). **Design decision (settled, not an overlay):** yaml REPLACES the
+  active rate table wholesale rather than merging on top of the code table as
+  a floor — an overlay would keep the code table as an invisible second
+  source of truth, and an omission there (the athenaeum#777 Fable/Mythos incident:
+  two models silently priced at the blended average, under-reporting spend
+  6.67x) would keep silently going unnoticed. New
+  `models.configure_model_rates(rates)` installs the resolved table as the
+  process-wide ACTIVE table `TokenUsage.estimated_cost_usd` reads (starts as
+  the code default so every existing call site that never loads config is
+  unaffected); `models.model_has_price(model)` is a real prefix-match lookup
+  with **no** blended fallback. New `config.preflight_model_rates(...)` —
+  mirroring the `preflight_provider()` pattern rather than discovering the
+  gap per-file at cost-calculation time — is wired into `athenaeum run`'s
+  precondition gate (`librarian._run_preconditions`, right after the
+  provider preflight): it resolves the model each of the six LLM-serving
+  knobs (`classify` / `write` / `topic` / `resolve` / `reasoning_t1` /
+  `reasoning_t2`, the same set `prompt_registry.KNOBS` defines for athenaeum#781)
+  will actually use for this run, and exits rc 1 — naming the model AND the
+  `pricing.<model>` config key to set — if any is unpriced under the active
+  table, rather than starting and silently under-reporting. The blended
+  fallback is UNCHANGED for genuinely untagged tokens (its original athenaeum#247
+  purpose) — only a *tagged* model used by a real run can no longer reach it
+  silently. `athenaeum init`'s default `athenaeum.yaml` now ships an ACTIVE
+  (uncommented) `pricing:` section pre-populated with the current rate table,
+  generated at write-time from the same `models._MODEL_RATES_USD_PER_MTOK`
+  literal a maintainer edits (never hand-copied), so a fresh install prices
+  correctly out of the box. Schema contract, spelled out in
+  `resolve_model_rates`'s docstring: one rate per prefix, no mode dimension —
+  a time-boxed promo rate (Sonnet 5's introductory rate through 2026-08-31)
+  or a per-request-mode rate (Opus 5's `speed: "fast"` rate) cannot be
+  expressed and are explicitly out of scope, per the issue.
+
 - **Per-knob spend attribution — `tokens_by_knob` (ledger v3) + `athenaeum
   spend --by-knob` (athenaeum#781).** The ledger recorded `run_type` and `models`
   but never the model KNOB, so "what does the contradiction resolver cost

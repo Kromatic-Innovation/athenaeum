@@ -65,6 +65,21 @@ resolver cannot silently join the exclusion set without this file changing):
   body, so the source-introspection strategy cannot discover them from
   ``resolve_model`` itself. It is instead exercised directly with explicit
   arguments (still generically, not hand-listing its callers).
+- ``resolve_model_rates`` (issue athenaeum#783): its yaml key (``pricing``) IS a
+  static literal — ``_env_and_yaml_literals`` finds it fine — but the VALUE
+  under that key is a MAPPING of operator-chosen model-id-prefix strings to
+  ``[input, output]`` lists, not a scalar/bool/list/dict-of-scalars leaf like
+  every other resolver in this module. ``_candidate_nestings``' sentinel
+  battery (``_SENTINEL_VALUES``) has no candidate shaped
+  ``{"<any-key>": [<num>, <num>]}`` — a dict-of-2-element-numeric-lists — so
+  every candidate this generic prober can construct is rejected by
+  ``resolve_model_rates``'s own malformed-entry validation and correctly
+  returns the empty-dict baseline, which looks identical to "never read the
+  key". This is a real shape gap in the prober, not evidence the resolver is
+  broken: ``tests/test_pricing_config.py::TestResolveModelRates`` hand-covers
+  the yaml-key-is-read property directly (valid entries change the result;
+  malformed ones warn and are dropped) — the same "excluded from generic,
+  covered by a direct test" treatment ``resolve_model`` gets above.
 
 Every other resolver goes through the full generic check.
 """
@@ -98,6 +113,7 @@ _RESOLVER_NAMES = sorted(name for name, _ in _ALL_RESOLVERS)
 # asserted below so a new resolver cannot land in it silently.
 _NO_YAML_KEY = frozenset({"resolve_cache_dir"})
 _GENERIC_HELPER_SIGNATURE = frozenset({"resolve_model"})
+_STRUCTURED_CONTAINER_VALUE = frozenset({"resolve_model_rates"})
 
 _ENV_VAR_RE = re.compile(r"^ATHENAEUM_[A-Z0-9_]+$")
 _YAML_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -285,6 +301,7 @@ def test_exclusion_sets_are_subsets_of_enumerated_resolvers() -> None:
     all_names = set(_RESOLVER_NAMES)
     assert _NO_YAML_KEY <= all_names
     assert _GENERIC_HELPER_SIGNATURE <= all_names
+    assert _STRUCTURED_CONTAINER_VALUE <= all_names
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +326,13 @@ class TestGenericResolverParity:
             )
         if name in _NO_YAML_KEY:
             pytest.skip(f"{name}: documented to have no yaml key (see module docstring)")
+        if name in _STRUCTURED_CONTAINER_VALUE:
+            pytest.skip(
+                f"{name}: yaml value is a structured multi-entry mapping the "
+                "sentinel battery cannot express; covered directly in "
+                "tests/test_pricing_config.py::TestResolveModelRates (see "
+                "module docstring)"
+            )
 
         # Clear every ATHENAEUM_* env var so a stray operator/CI env value
         # cannot mask the yaml-read check.
