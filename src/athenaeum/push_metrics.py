@@ -825,7 +825,28 @@ def write_snapshot(
 
     Uses :func:`athenaeum.atomic_io.atomic_write_text` for the whole-file
     replace so a crash mid-write can never leave a torn file.
+
+    Raises:
+        ValueError: when *baseline* has zero reference-determination records
+            (``reference_record_count == 0``) — precision is not computable,
+            so the only thing there is to write is a placeholder. Issue
+            athenaeum#795: a prior version wrote that placeholder
+            unconditionally, and a run against a dead instrument (zero
+            reference records) silently appended a meaningless dated entry
+            into a tracked docs file. Writing nothing is the correct outcome
+            here; nothing is written before this is raised. Callers that
+            only want to INSPECT a baseline (valid or not) without writing —
+            the exact read-only check the athenaeum#711 incident needed —
+            should not call this function at all; see the CLI's
+            ``--dry-run``.
     """
+    if baseline.reference_record_count == 0:
+        raise ValueError(
+            "refusing to write snapshot: reference_records=0 in this window, "
+            "so precision is not computable — nothing meaningful to record "
+            "(athenaeum#795)"
+        )
+
     from athenaeum.atomic_io import atomic_write_text
 
     new_entry = render_snapshot_section(baseline, coverage_note=coverage_note)
