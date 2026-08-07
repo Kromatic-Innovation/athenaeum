@@ -95,6 +95,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deterministic field-correction fast path — the "Lane C" tier-0 conformance
+  format (athenaeum#797, design lock athenaeum#794).** A writer that already knows the
+  exact target entity, attribute, and value it wants changed (a
+  delivery-status monitor, a bulk relationship-graph writer, a third-party
+  enrichment service) can now drop a `.jsonl` batch into the ordinary
+  `raw/<source>/` intake tree — no reserved subtree, recognized purely by
+  shape (first line parses as `record: "batch"`) — and have it applied at
+  tier 0, LLM-free, instead of paying prose compilation per fact. New
+  `src/athenaeum/precedence.py` mirrors the existing 9-tier
+  `SOURCE-PRECEDENCE TAXONOMY` prompt block in-process
+  (`SOURCE_PRECEDENCE_TIERS` / `source_rank()`), bound to that prompt by a
+  test that PARSES it rather than transcribing the expected tiers. New
+  `src/athenaeum/corrections.py` is the tier-0 applier: target resolution
+  (uid / type+name / registered handle via `registry.json`), the op
+  semantics (`set`/`add`/`remove` with per-value `field_sources`
+  attribution), the delta gate (re-applying an unchanged correction is
+  byte-for-byte a no-op), the conflict policy (source-rank comparison,
+  `observed_at` tie-break, escalation on an undated tie), the `monotone`
+  suppression rule (any permitted writer may set a safety flag; only
+  `user:` tier may unset one), and routing (a sensitivity-classified
+  attribute lands on its mapped surface regardless of the destination the
+  correction named; an attribute with no schema slot is aliased, held for a
+  schema-amendment proposal, or recorded as prose). `intake.discover_raw_files`
+  now globs `*.jsonl` alongside `*.md` so a correction batch is visible to
+  discovery at all — the pre-existing gap this closes: a `.jsonl` file was
+  previously invisible to it, so a malformed batch would have been "seen by
+  nothing," not merely skipped. `librarian.run()` gains a
+  `_run_correction_phase`, ordered after the run deadline is armed and
+  before the entity tier phase, with its own runtime share
+  (`librarian.corrections.runtime_share`) and a hard zero-LLM-calls
+  assertion. Every failure to conform — an unparseable source, an attribute
+  off the allowlist, a target resolving to zero or several entities, an
+  unknown `schema_version` — raises a tier rather than rejecting: conformant
+  records in the same batch still apply, and a non-conformant record's raw
+  text reaches ordinary intake via a `_corrections_applied.jsonl`-ledgered
+  handoff file, never silently dropped. The attribute allowlist
+  (`librarian.corrections.fields`) is **empty by default** — a fresh
+  deployment writes nothing cheaply until an operator opts a specific
+  attribute in. See `docs/field-corrections.md` (design) and
+  `docs/configuration.md`'s new "Field corrections" section (every
+  `librarian.corrections.*` key).
+
 - **`athenaeum spend --reprice` — recompute historical rows at current rates
   (athenaeum#788, audit finding L3).** Schema v2 (athenaeum#487) added
   `tokens_by_model` on the stated rationale that "`tokens x model` is the

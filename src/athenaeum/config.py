@@ -2207,3 +2207,248 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
             continue
         adapters[name.strip()] = definition
     return adapters
+
+
+# ---------------------------------------------------------------------------
+# Field corrections (issue athenaeum#797, docs/field-corrections.md §10.3)
+# ---------------------------------------------------------------------------
+#
+# Every key lives under ``librarian.corrections``. The two structural
+# (dict-shaped) keys below — ``fields`` and ``sensitive_fields`` — follow
+# ``resolve_storage_mapping``'s precedent: no ``ATHENAEUM_*`` env override
+# (a dict has no single scalar env encoding), EMPTY by default. The scalar
+# bound resolvers further down follow ``resolve_delta_max_affected_clusters``'s
+# precedent: each resolver's own named env var (see its docstring) wins
+# over yaml, which wins over the code default.
+
+
+def resolve_corrections_fields(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Resolve ``librarian.corrections.fields`` — the attribute allowlist
+    that bounds what a correction may write CHEAPLY at tier 0
+    (`docs/field-corrections.md` §6.3).
+
+    Maps an attribute name to ``{"shape": "scalar"|"list", "writers":
+    [...], "monotone": bool}``. **Empty by default** (§10.3) — with no
+    config, no attribute is allowlisted, so every correction takes the
+    reasoning-tier fallthrough (§8) and nothing is written cheaply. A fresh
+    deployment cannot have its wiki written by a mechanical writer until an
+    operator opts in per-attribute. Malformed entries (non-string attribute
+    name, non-dict definition) are dropped defensively rather than raised —
+    a config typo degrades to "this attribute reasons instead of writing
+    cheaply," never a crash.
+    """
+    if not isinstance(config, dict):
+        return {}
+    librarian_cfg = config.get("librarian") or {}
+    if not isinstance(librarian_cfg, dict):
+        return {}
+    corrections_cfg = librarian_cfg.get("corrections")
+    if not isinstance(corrections_cfg, dict):
+        return {}
+    raw = corrections_cfg.get("fields")
+    if not isinstance(raw, dict):
+        return {}
+    fields: dict[str, dict[str, Any]] = {}
+    for name, definition in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(definition, dict):
+            continue
+        fields[name.strip()] = definition
+    return fields
+
+
+def resolve_corrections_sensitive_fields(config: dict[str, Any] | None) -> dict[str, str]:
+    """Resolve ``librarian.corrections.sensitive_fields`` — the §7.1
+    sensitivity-routing table (`docs/field-corrections.md` §7.1).
+
+    Maps an attribute name to a :mod:`athenaeum.storage` entity-CLASS name
+    (resolved through the existing ``storage.mapping`` adapter layer, athenaeum#429
+    — reused rather than reinvented) that a fact bearing on that attribute
+    is routed to, REGARDLESS of the destination a correction named. Empty by
+    default: **sensitivity classification is deployment configuration**,
+    never shipped in this repo (docs/field-corrections.md §7.1, issue athenaeum#797
+    out-of-scope list).
+    """
+    if not isinstance(config, dict):
+        return {}
+    librarian_cfg = config.get("librarian") or {}
+    if not isinstance(librarian_cfg, dict):
+        return {}
+    corrections_cfg = librarian_cfg.get("corrections")
+    if not isinstance(corrections_cfg, dict):
+        return {}
+    raw = corrections_cfg.get("sensitive_fields")
+    if not isinstance(raw, dict):
+        return {}
+    mapping: dict[str, str] = {}
+    for field_name, surface_class in raw.items():
+        if not isinstance(field_name, str) or not field_name.strip():
+            continue
+        if not isinstance(surface_class, str) or not surface_class.strip():
+            continue
+        mapping[field_name.strip()] = surface_class.strip()
+    return mapping
+
+
+def resolve_corrections_schema_slots(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Resolve ``librarian.corrections.schema_slots`` — the §7.2 schema-
+    evolution table (`docs/field-corrections.md` §7.2) for attributes that
+    ARE on the :func:`resolve_corrections_fields` allowlist but that the
+    deployment's schema has no dedicated slot for.
+
+    Maps an attribute name to one of three shapes deciding which §7.2
+    disposition an allowlisted-but-slot-less attribute takes:
+
+    - ``{"alias_of": "<other-field>"}`` — a slot exists under a different
+      name; the write is transparently redirected there.
+    - ``{"propose_amendment": true}`` — no slot, and the deployment wants a
+      human-decision schema-amendment proposal (``held-schema-proposal``,
+      recorded on `_pending_questions.md`).
+    - ``{"prose": true}`` — no slot, one-off; recorded as body prose on the
+      entity (``recorded-as-prose``).
+
+    An allowlisted attribute with NO entry here writes directly as ordinary
+    frontmatter (schemas.py's per-type models already tolerate unknown keys
+    via ``extra="allow"``, the same mechanism source-handle keys use) — §7.2
+    only fires when the deployment explicitly asks for non-default routing.
+    Empty by default, same rationale as :func:`resolve_corrections_sensitive_fields`.
+    """
+    if not isinstance(config, dict):
+        return {}
+    librarian_cfg = config.get("librarian") or {}
+    if not isinstance(librarian_cfg, dict):
+        return {}
+    corrections_cfg = librarian_cfg.get("corrections")
+    if not isinstance(corrections_cfg, dict):
+        return {}
+    raw = corrections_cfg.get("schema_slots")
+    if not isinstance(raw, dict):
+        return {}
+    slots: dict[str, dict[str, Any]] = {}
+    for name, definition in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(definition, dict):
+            continue
+        slots[name.strip()] = definition
+    return slots
+
+
+def _resolve_corrections_int(
+    config: dict[str, Any] | None,
+    env_var: str,
+    section: str,
+    subsection: str,
+    yaml_key: str,
+    default: int,
+) -> int:
+    """Shared body for the four §10.2 integer volume bounds below.
+
+    ``section``/``subsection`` are always ``"librarian"``/``"corrections"``
+    in practice — passed as explicit literal arguments (not hard-coded in
+    this helper's own body) so that
+    ``tests/test_config_resolver_parity_generic.py``'s static discovery
+    (which walks string-literal call arguments AT EACH RESOLVER'S OWN CALL
+    SITE, in source order) sees the full ``env_var`` -> ``librarian`` ->
+    ``corrections`` -> ``<key>`` chain from a single call, in the correct
+    parent-to-leaf order — a three-level nesting the generic sentinel
+    battery cannot otherwise synthesize from a delegated helper's own body.
+    """
+    value = _env_number(env_var, int)
+    if value is not None and value > 0:
+        return value
+    if isinstance(config, dict):
+        section_cfg = config.get(section) or {}
+        if isinstance(section_cfg, dict):
+            subsection_cfg = section_cfg.get(subsection)
+            if isinstance(subsection_cfg, dict):
+                raw = subsection_cfg.get(yaml_key)
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    return raw
+    return default
+
+
+def resolve_corrections_max_records_per_batch(config: dict[str, Any] | None) -> int:
+    """§10.2 ``librarian.corrections.max_records_per_batch`` (default 5,000)."""
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_BATCH",
+        "librarian",
+        "corrections",
+        "max_records_per_batch",
+        5000,
+    )
+
+
+def resolve_corrections_max_records_per_run(config: dict[str, Any] | None) -> int:
+    """§10.2 ``librarian.corrections.max_records_per_run`` (default 50,000)."""
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_RUN",
+        "librarian",
+        "corrections",
+        "max_records_per_run",
+        50000,
+    )
+
+
+def resolve_corrections_max_batch_bytes(config: dict[str, Any] | None) -> int:
+    """§10.2 ``librarian.corrections.max_batch_bytes`` (default 32 MiB)."""
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_CORRECTIONS_MAX_BATCH_BYTES",
+        "librarian",
+        "corrections",
+        "max_batch_bytes",
+        32 * 1024 * 1024,
+    )
+
+
+def resolve_corrections_max_escalations_per_run(config: dict[str, Any] | None) -> int:
+    """§10.2 ``librarian.corrections.max_escalations_per_run`` (default 50)."""
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_CORRECTIONS_MAX_ESCALATIONS_PER_RUN",
+        "librarian",
+        "corrections",
+        "max_escalations_per_run",
+        50,
+    )
+
+
+def resolve_corrections_runtime_share(config: dict[str, Any] | None) -> float:
+    """§10.2 ``librarian.corrections.runtime_share`` (default 0.05).
+
+    Mirrors :func:`athenaeum.librarian.librarian_entity_runtime_share`'s
+    coercion rules: only ``0 < share < 1`` reserves anything; a bool
+    (int-subclass guard), non-numeric, or out-of-range value falls back to
+    the default rather than disabling the reserve — unlike the entity
+    share, an operator who sets this key at all almost certainly wants SOME
+    reserve, so a malformed value should not silently zero it out.
+    """
+    default = 0.05
+
+    def _coerce(value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return None
+        try:
+            share = float(value)
+        except (TypeError, ValueError):
+            return None
+        return share if 0.0 < share < 1.0 else None
+
+    env = os.environ.get("ATHENAEUM_CORRECTIONS_RUNTIME_SHARE")
+    if env is not None:
+        resolved = _coerce(env)
+        if resolved is not None:
+            return resolved
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian") or {}
+        if isinstance(librarian_cfg, dict):
+            corrections_cfg = librarian_cfg.get("corrections")
+            if isinstance(corrections_cfg, dict):
+                resolved = _coerce(corrections_cfg.get("runtime_share"))
+                if resolved is not None:
+                    return resolved
+    return default
