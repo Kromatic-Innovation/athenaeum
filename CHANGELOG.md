@@ -32,6 +32,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bare-issue-ref` rule on `develop`. All three now carry the `athenaeum`
   prefix the rest of the document already uses.
 
+- **Sweep stale pointers to the golden files deleted by athenaeum#561
+  (athenaeum#799).** athenaeum#561 replaced the single-prompt golden
+  snapshot with the multi-prompt golden set, deleting
+  `tests/data/resolve_system.txt` and `tests/test_resolve_system_snapshot.py`
+  — but seven in-tree comments/docstrings still pointed at the deleted
+  pair, including a DRIFT GUARD comment in `src/athenaeum/resolutions.py`
+  that a doc author transcribed faithfully into `docs/field-corrections.md`
+  §6.1 (athenaeum#796), shipping a normative guard citing two nonexistent
+  files (caught and corrected in athenaeum#798). Corrected all seven sites
+  — the module docstring and `_RESOLVE_SYSTEM` drift-guard comment in
+  `src/athenaeum/resolutions.py`, `docs/conflict-resolution.md`,
+  `docs/provenance-shape.md`, `tests/regression/test_live_prompt_regression.py`,
+  and two docstrings in `tests/test_parse_response_routing.py` — to point at
+  the live pin, `tests/data/prompts/resolutions.resolve_system.txt`
+  (`tests/test_prompt_goldens.py::test_prompt_matches_golden`). The
+  `resolutions.py` drift-guard comment now also names which sites are
+  INDEPENDENT (hand-edited, bound by a test) versus DERIVED (regenerated
+  and already pinned), matching the split `docs/field-corrections.md` §6.1
+  uses, so the golden is no longer described as something to hand-maintain.
+  Left the intentional historical mentions alone (the `docs/field-
+  corrections.md` §6.1 parenthetical that exists to warn readers off the
+  stale pair, and `tests/test_prompt_goldens.py`'s own "both removed"
+  header). New coverage in `tests/test_drift_guard_paths.py` parses every
+  DRIFT GUARD comment under `src/athenaeum/` and asserts each referenced
+  `tests/*.py` path actually exists, so a stale guard fails CI instead of
+  silently misleading the next editor.
+
 ### Documentation
 
 - **Correct `docs/deprecated-email-tracking.md` — Voltaire is the reporter,

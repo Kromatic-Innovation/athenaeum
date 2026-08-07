@@ -15,9 +15,9 @@ propose_merge case borrowed from
 resolver must return the expected action with confidence >= 0.85.
 
 These tests guard against prompt drift on the classification side:
-``test_resolve_system_snapshot`` flags ANY edit to the prompt string, and
-this test confirms that an intentional edit hasn't broken classification
-quality on the canonical training set.
+``tests.test_prompt_goldens.test_prompt_matches_golden`` flags ANY edit to
+the prompt string, and this test confirms that an intentional edit hasn't
+broken classification quality on the canonical training set.
 """
 
 from __future__ import annotations

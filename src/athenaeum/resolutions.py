@@ -6,8 +6,11 @@ cheap Haiku detector) and :func:`athenaeum.tiers.tier4_escalate` (the
 human-review writer). When the detector flags a cluster, the resolver
 proposes a winner using a 9-tier source-precedence taxonomy (canonical
 tier list: the ``SOURCE-PRECEDENCE TAXONOMY`` block of ``_RESOLVE_SYSTEM``
-below — keep this ``9-tier`` count and the byte-exact golden snapshot
-``tests/data/resolve_system.txt`` in sync if the taxonomy changes; also
+below — keep this ``9-tier`` count in sync if the taxonomy changes. The
+golden ``tests/data/prompts/resolutions.resolve_system.txt`` is DERIVED,
+not hand-maintained: regenerate it via ``python -m athenaeum.prompt_registry
+--write``; it stays pinned by
+``tests/test_prompt_goldens.py::test_prompt_matches_golden``. Also
 keep :data:`athenaeum.precedence.SOURCE_PRECEDENCE_TIERS` — the tier-0
 field-correction applier's deterministic, LLM-free mirror of this same
 taxonomy, issue athenaeum#797 — in sync, order AND per-tier membership,
@@ -391,15 +394,24 @@ class MergeProposal:
 # ---------------------------------------------------------------------------
 #
 # DRIFT GUARD: the ``SOURCE-PRECEDENCE TAXONOMY`` inside this string is the
-# CANONICAL tier list. If you change the tier count or order, also update the
-# ``9-tier`` count in this module's docstring above AND regenerate the
-# byte-exact golden snapshot ``tests/data/resolve_system.txt`` (pinned by
-# ``tests/test_resolve_system_snapshot.py``) in the same commit. A FOURTH site
-# also derives from this block: ``athenaeum.precedence.SOURCE_PRECEDENCE_TIERS``
-# (issue athenaeum#797) — the deterministic tier-0 mirror of this taxonomy for the
-# field-correction applier, which cannot call an LLM. Update it in the same
-# commit; ``tests/test_precedence.py`` parses THIS block (not a transcription)
-# to bind the two on order and per-tier membership.
+# CANONICAL tier list every other copy derives from. The tier list — its
+# order and each tier's membership — exists in several places; the useful
+# split is INDEPENDENT (hand-edited, must be bound by a test) versus
+# DERIVED (regenerated and already pinned, no new work).
+#
+# INDEPENDENT — keep these in sync if you change the tier count or order:
+# (1) :data:`athenaeum.precedence.SOURCE_PRECEDENCE_TIERS` (issue
+# athenaeum#797) — the deterministic, LLM-free tier-0 mirror of this same
+# taxonomy for the field-correction applier, which cannot call an LLM;
+# ``tests/test_precedence.py`` parses THIS block (not a transcription) to
+# bind the two on order AND per-tier membership; (2) this block itself;
+# (3) the ``9-tier`` count in this module's docstring above; (4) §11 of
+# ``docs/conflict-resolution.md`` and §6.1 of ``docs/field-corrections.md``.
+#
+# DERIVED — already guarded, no new work: the golden
+# ``tests/data/prompts/resolutions.resolve_system.txt``, pinned by
+# ``tests/test_prompt_goldens.py::test_prompt_matches_golden``; and
+# ``docs/prompts.md``, pinned byte-current by its own test.
 
 
 _RESOLVE_SYSTEM = """You are a resolver for an AI agent's long-term memory system.
