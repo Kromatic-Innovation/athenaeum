@@ -283,7 +283,7 @@ to a list whose other entries came from a human is not a conflict.
 ### 6.3 The field allowlist, and the monotone-safety carve-out
 
 A correction may only touch a field on the allowlist, declared in config
-(`corrections.fields`) with three properties: `shape` (`scalar` | `list`), `writers`
+(`librarian.corrections.fields`, §8.4) with three properties: `shape` (`scalar` | `list`), `writers`
 (the submitters permitted to touch it), and `monotone` (bool).
 
 The `writers` list is a blast-radius bound, not a trust model — the structural guarantee
@@ -323,7 +323,7 @@ The escalated correction is **not** re-queued on disk. It has been surfaced; the
 answer is the resolution path. If the submitter still believes it, it re-submits — which
 is free (§5.1).
 
-**Escalation is rate-capped** (`corrections.max_escalations_per_run`, default 50). A
+**Escalation is rate-capped** (`librarian.corrections.max_escalations_per_run`, default 50). A
 mechanical writer with a systematic disagreement could otherwise flood the human queue
 with thousands of identical questions in one night. On hitting the cap the applier stops
 escalating, keeps applying and dropping normally, and emits a single loud summary line
@@ -374,8 +374,8 @@ A new `_run_correction_phase(ctx)` in `librarian.run()`, ordered **after**
 `_arm_run_deadline` and **before** `_run_entity_tier_phase`. It:
 
 - makes **zero LLM calls** and consumes **zero** of `librarian_max_api_calls`;
-- carries its own runtime share, `corrections.runtime_share` (default `0.05` of
-  `librarian_max_runtime`), parallel to the existing `librarian_entity_runtime_share`;
+- carries its own runtime share, `librarian.corrections.runtime_share` (default `0.05`
+  of `librarian_max_runtime`), parallel to the existing `librarian_entity_runtime_share`;
 - checks `ctx.deadline_exceeded()` between batches, and stops cleanly at a batch
   boundary — never mid-batch.
 
@@ -389,12 +389,12 @@ the cheap deterministic one. Corrections are the work most likely to be safety-r
 
 ### 8.2 The numbers
 
-| Bound | Default | On exceeding |
-|---|---|---|
-| Records per batch file | 5,000 | Batch **parked** (§8.3). Split it. |
-| Records applied per run | 50,000 | Remaining batches stay on disk; the run reports `carried-over: N batches`. Next run resumes FIFO by filename. |
-| Batch file size | 32 MiB | Parked. |
-| Escalations per run | 50 | Cap, with a summary line (§6.5). |
+| Bound | Config key | Default | On exceeding |
+|---|---|---|---|
+| Records per batch file | `librarian.corrections.max_records_per_batch` | 5,000 | Batch **parked** (§8.3). Split it. |
+| Records applied per run | `librarian.corrections.max_records_per_run` | 50,000 | Remaining batches stay on disk; the run reports `carried-over: N batches`. Next run resumes FIFO by filename. |
+| Batch file size | `librarian.corrections.max_batch_bytes` | 32 MiB | Parked. |
+| Escalations per run | `librarian.corrections.max_escalations_per_run` | 50 | Cap, with a summary line (§6.5). |
 
 These are configuration defaults, not constants. The applied-per-run ceiling is a
 safety rail against a runaway submitter, not a throughput target — 50,000 deterministic
@@ -419,6 +419,34 @@ voltaire's bounce path is explicitly designed as batch/eventual (§10.1).
 
 Neither ever raises. One malformed batch must not wedge the nightly compile — the same
 posture the stuck-file ledger takes for Lane A.
+
+### 8.4 Config surface
+
+Every key above follows athenaeum's existing librarian-config convention exactly — the
+`librarian.*` YAML namespace, an `ATHENAEUM_*` env override that wins over YAML, and a
+`librarian_<key>()` accessor with the same bool-is-an-int-subclass guard the existing
+resolvers carry. Nesting one level under `librarian` matches the precedent set by
+`librarian.delta.*` and `librarian.reindex.*`.
+
+| Setting | Env | YAML | Default |
+|---|---|---|---|
+| Correction-phase runtime share | `ATHENAEUM_CORRECTIONS_RUNTIME_SHARE` | `librarian.corrections.runtime_share` | `0.05` |
+| Records per batch file | `ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_BATCH` | `librarian.corrections.max_records_per_batch` | `5000` |
+| Records applied per run | `ATHENAEUM_CORRECTIONS_MAX_RECORDS_PER_RUN` | `librarian.corrections.max_records_per_run` | `50000` |
+| Batch file size cap (bytes) | `ATHENAEUM_CORRECTIONS_MAX_BATCH_BYTES` | `librarian.corrections.max_batch_bytes` | `33554432` |
+| Escalations per run | `ATHENAEUM_CORRECTIONS_MAX_ESCALATIONS_PER_RUN` | `librarian.corrections.max_escalations_per_run` | `50` |
+| Field allowlist | — | `librarian.corrections.fields` | *(empty — see below)* |
+
+`librarian.corrections.fields` maps a frontmatter key to `{shape, writers, monotone}`. It
+is **empty by default**: with no allowlist entry every correction is rejected, so a fresh
+deployment cannot have its wiki written by a correction until an operator opts in
+per-field. The live deployment's starting set is the fields the §10 consumers need —
+`bounced`, `do_not_email`, `backlinks`, `tags`, `emails`, `current_title`,
+`last_contacted_at`, `contact_count_90d` — configured against the private store, not
+shipped in this repo.
+
+The implementation issue adds all of these to `docs/configuration.md`'s librarian-run
+table in the same change; a key that exists in code and not in that table is drift.
 
 ---
 
@@ -502,6 +530,12 @@ and the case that motivated it. This is issue
 Two fields, not seven interaction events. The events live in the P5 store; only the
 rollup reaches the page. Note the shape: this is the *whole* wiki-facing surface of P5 —
 which is why the storage question resolves the way it does.
+
+> **A premise changed here.** athenaeum#794 AC #6 asks for a worked example of a *contact-frequency
+> event*. The §11 decision means interaction events never reach the wiki at all, so there
+> is no event-shaped correction to write — the rollup above is the answer to that AC, not
+> a substitution for it. Flagged rather than silently relabelled, because an AC checked
+> against its original wording would otherwise read as a miss.
 
 ---
 
