@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 import textwrap
 from collections.abc import Iterator
 from pathlib import Path
@@ -134,41 +137,48 @@ def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _isolate_cache_dir_suite(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> Iterator[Path]:
-    """Redirect the cache dir / spend ledger for the WHOLE suite (athenaeum#776).
+def pytest_configure(config: pytest.Config) -> None:
+    """Redirect the cache dir / spend ledger for the WHOLE suite, BEFORE collection
+    (athenaeum#791; supersedes the ``_isolate_cache_dir_suite`` fixture from
+    athenaeum#776).
 
-    ``_isolate_cache_dir`` below is function-scoped, so it only covers code
-    that runs inside a test function's fixture scope. Anything that resolves
-    the cache dir OUTSIDE that scope — a ``session``/``module``-scoped fixture,
-    a collection-time import, a ``conftest`` hook — still falls through
-    ``resolve_cache_dir``'s ``arg > ATHENAEUM_CACHE_DIR env > default`` order
-    to the operator's real ``~/.cache/athenaeum`` and appends to their live
-    ``spend.jsonl``. That is how the fixture model ids ``yaml-topic-model`` /
-    ``yaml-classify-model`` / ``yaml-write-model`` reached the production
-    ledger (athenaeum#776): synthetic rows inflate ``athenaeum spend`` totals,
-    are permanently unpriceable, and — because ``spend_today()`` feeds
-    ``ceiling_tripped()`` — move a guardrail that limits REAL spend.
+    The fixture this replaces was session-scoped and autouse, which sounds like
+    the same guarantee as "in force from the first import to the last teardown"
+    — but it is not. Fixtures (of any scope) only wrap test *execution*; they
+    run during the setup phase of the first test that needs them, which is
+    already AFTER collection. A module that resolves the cache dir at
+    *collection* time — a module-level statement, or ``pytest.mark.parametrize``
+    decorator arguments, which pytest evaluates while IMPORTING the module —
+    runs before any fixture has had a chance to fire, session-scoped or not.
+    That gap is exactly how ``tests/test_thinking_seam.py`` needed its own
+    bespoke module-level ``os.environ[...]`` workaround (deleted in this same
+    change) to protect its collection-time ``@pytest.mark.parametrize(...,
+    _all_params())`` call.
 
-    Session-scoped and autouse is the granularity that closes that hole for
-    good: a new test cannot opt out of it, and it is in force from the first
-    import to the last teardown. ``ATHENAEUM_SPEND_LEDGER`` is set explicitly
-    alongside the cache dir rather than left to fall out of it, so a config
-    carrying ``spend.ledger_path`` cannot route around the redirect either.
+    ``pytest_configure`` runs once, after conftest.py discovery but BEFORE
+    test collection begins — so setting the env vars here closes the gap
+    structurally for every test module, instead of requiring each escaping
+    module to invent its own workaround (three independent ledgers have
+    already needed exactly that fix once: athenaeum#750, athenaeum#776, and
+    the ``test_thinking_seam.py`` workaround this change removes).
 
-    ``pytest.MonkeyPatch()`` is constructed directly because the
-    ``monkeypatch`` fixture is function-scoped and cannot be requested here.
+    ``ATHENAEUM_SPEND_LEDGER`` is set explicitly alongside the cache dir
+    rather than left to fall out of it, so a config carrying
+    ``spend.ledger_path`` cannot route around the redirect either. Plain
+    ``os.environ`` assignment (not ``monkeypatch``, which is a fixture and
+    unavailable here) — undone by :func:`pytest_unconfigure` below.
     """
-    cache_dir = tmp_path_factory.mktemp("athenaeum-suite-cache")
-    mp = pytest.MonkeyPatch()
-    mp.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
-    mp.setenv("ATHENAEUM_SPEND_LEDGER", str(cache_dir / "spend.jsonl"))
-    try:
-        yield cache_dir
-    finally:
-        mp.undo()
+    cache_dir = Path(tempfile.mkdtemp(prefix="athenaeum-suite-cache-"))
+    config._athenaeum_suite_cache_dir = cache_dir  # type: ignore[attr-defined]
+    os.environ["ATHENAEUM_CACHE_DIR"] = str(cache_dir)
+    os.environ["ATHENAEUM_SPEND_LEDGER"] = str(cache_dir / "spend.jsonl")
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Clean up the whole-suite cache dir :func:`pytest_configure` created."""
+    cache_dir = getattr(config, "_athenaeum_suite_cache_dir", None)
+    if cache_dir is not None:
+        shutil.rmtree(cache_dir, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
@@ -198,12 +208,12 @@ def _isolate_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     Returns the tmp cache dir in case a test wants to assert against it
     directly.
 
-    Narrows ``_isolate_cache_dir_suite`` above rather than replacing it: the
-    session fixture is the floor that no test can escape, this one gives each
-    test its own directory on top. ``ATHENAEUM_SPEND_LEDGER`` is re-pointed
-    into the same per-test directory (athenaeum#776) so the ledger follows the
-    per-test cache dir instead of accumulating rows from earlier tests in the
-    session-wide file.
+    Narrows the whole-suite ``pytest_configure`` redirect above rather than
+    replacing it: that hook is the floor no test (or collection-time import)
+    can escape, this one gives each test its own directory on top.
+    ``ATHENAEUM_SPEND_LEDGER`` is re-pointed into the same per-test directory
+    (athenaeum#776) so the ledger follows the per-test cache dir instead of
+    accumulating rows from earlier tests in the suite-wide file.
     """
     cache_dir = tmp_path / ".cache-athenaeum"
     monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
@@ -224,10 +234,10 @@ def _reset_model_rates() -> Iterator[None]:
     Left unreset, a test that configures a custom/partial table (e.g. the
     AC1 override test, or a preflight test that installs a table missing
     most prefixes) would leak into the NEXT test in the same session and
-    silently change its pricing — the exact cross-test global-state leak
-    ``_isolate_cache_dir_suite`` above already had to fix once for the cache
-    dir (athenaeum#776). Autouse and function-scoped so no test can opt out or
-    forget to clean up.
+    silently change its pricing — the exact cross-test global-state leak the
+    whole-suite ``pytest_configure`` redirect above already had to fix once
+    for the cache dir (athenaeum#776). Autouse and function-scoped so no test
+    can opt out or forget to clean up.
     """
     yield
     from athenaeum.models import configure_model_rates
