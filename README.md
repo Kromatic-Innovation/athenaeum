@@ -149,13 +149,17 @@ config change, not a core rewrite — but as of this writing it has one real
 built-in consumer (the PII-exclusion surface), not a general policy engine.
 
 > **Note on reasoning tiers.** `reasoning_tiers.py` implements a tiered
-> reasoning pipeline (`DEFAULT_TIER_CHAIN` is the empty tuple by default), but
-> it is not part of any default run path. It is reachable through exactly one
-> production call site — `merge.py`'s `t1_screen_rejects_merge_proposal` —
-> which is itself gated behind `resolve_reasoning_tier_auditing_enabled`, an
-> explicit opt-in that defaults to **off**. Until an operator turns that
-> setting on, production merge behavior is unaffected. We're listing this for
-> accuracy, not billing it as a current feature.
+> reasoning pipeline that screens merge proposals before the human queue
+> (`DEFAULT_TIER_CHAIN`, the pipeline's own default chain, is the empty tuple),
+> but it is not part of any default run path. It has two production call
+> sites in `merge.py` — `t1_screen_rejects_merge_proposal` (reject/pass-up
+> only) and `t2_screen_merge_proposal` (which can auto-apply a safe-class
+> merge with **no human review**) — both gated behind the same
+> `resolve_reasoning_tier_auditing_enabled` flag, an explicit opt-in that
+> defaults to **off**. Until an operator turns that setting on, production
+> merge behavior is unaffected. Full writeup, including when it's worth
+> turning on and what it costs:
+> [Reasoning-tier screening (T1/T2)](docs/configuration.md#reasoning-tier-screening-t1t2--off-by-default).
 
 ## The MCP surface
 
@@ -265,6 +269,13 @@ Requires Python 3.11+.
 ```bash
 pip install athenaeum
 ```
+
+> Athenaeum ships an optional reasoning-tier screen (T1/T2) that can
+> pre-screen merge proposals before they reach your human review queue — off
+> by default, since the T2 tier can auto-apply a merge with no human review.
+> Worth turning on once your merge queue outgrows manual triage; see
+> [Reasoning-tier screening (T1/T2)](docs/configuration.md#reasoning-tier-screening-t1t2--off-by-default)
+> for when and how.
 
 ## Quick start
 
