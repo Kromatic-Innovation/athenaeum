@@ -27,7 +27,6 @@ the Anthropic SDK shape, exactly like the sibling ``test_provider.py`` /
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,25 +34,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# Issue athenaeum#750: ``_all_params()`` below (and its ``_all_direct_builder_params``/
-# ``_all_inline_call_site_params`` halves) drives real call sites —
-# ``classify_claim_kind``, ``detect_contradictions``, the ``tiers``/
-# ``reasoning_tiers`` builders — that end in ``athenaeum.llm_schemas.observe*``.
-# It is invoked by ``@pytest.mark.parametrize("label", sorted(_all_params()))``
-# decorator ARGUMENTS below, which pytest evaluates at COLLECTION time (module
-# import), before any fixture — including the repo-wide autouse
-# ``tests/conftest.py`` ``_isolate_cache_dir`` fixture — has run. Fixtures only
-# wrap test EXECUTION, so a collection-time call is structurally invisible to
-# them and, left alone, resolves the observation ledger's cache dir straight
-# through to the real ``~/.cache/athenaeum``. Setting these two env vars here,
-# at module import time (before the parametrize decorators below evaluate
-# ``_all_params()``), isolates every collection-time AND execution-time call in
-# this module regardless of fixture timing. The per-test autouse fixture still
-# applies its own (different) tmp dir during execution; this module-level
-# override is what covers the collection-time gap the fixture cannot reach.
-os.environ["ATHENAEUM_CACHE_DIR"] = tempfile.mkdtemp(prefix="athenaeum-thinking-seam-cache-")
-os.environ["ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED"] = "0"
-
+# Issue athenaeum#750/#791: ``_all_params()`` below (and its
+# ``_all_direct_builder_params``/``_all_inline_call_site_params`` halves) drives
+# real call sites — ``classify_claim_kind``, ``detect_contradictions``, the
+# ``tiers``/``reasoning_tiers`` builders — that end in
+# ``athenaeum.llm_schemas.observe*``. It is invoked by
+# ``@pytest.mark.parametrize("label", sorted(_all_params()))`` decorator
+# ARGUMENTS below, which pytest evaluates at COLLECTION time (module import),
+# before any fixture has run. This module used to carry its own module-level
+# ``os.environ[...]`` workaround for that gap; it is no longer needed —
+# ``tests/conftest.py``'s ``pytest_configure`` hook (athenaeum#791) redirects
+# ``ATHENAEUM_CACHE_DIR`` before collection begins for the whole suite, which
+# covers this module's collection-time call the same as every other module's.
 from athenaeum.claim_kind import _CLAIM_KIND_MAX_TOKENS, classify_claim_kind
 from athenaeum.contradictions import _DETECT_MAX_TOKENS, detect_contradictions
 from athenaeum.models import AutoMemoryFile, EntityAction, RawFile
