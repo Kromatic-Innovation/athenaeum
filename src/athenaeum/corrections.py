@@ -78,6 +78,7 @@ import logging
 import os
 import subprocess
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from datetime import date, datetime, timezone
@@ -87,6 +88,9 @@ from typing import Any
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     resolve_corrections_fields,
+    resolve_corrections_max_batch_bytes,
+    resolve_corrections_max_records_per_batch,
+    resolve_corrections_max_records_per_run,
     resolve_corrections_schema_slots,
     resolve_corrections_sensitive_fields,
 )
@@ -860,13 +864,17 @@ class BatchOutcome:
     def submitter(self) -> str:
         return str(self.envelope.get("submitter", ""))
 
-    def all_terminal(self) -> bool:
+    def all_terminal(self, *, escalations_recorded: bool = True) -> bool:
         """§5.4: a batch is retired once EVERY record reaches a terminal
-        disposition. Deliberately does not special-case ``escalated`` /
-        ``held-schema-proposal`` here — the caller (which knows whether the
-        escalation rate cap actually let the write through) downgrades an
-        UN-recorded escalation before calling this, per §5.4's own
-        distinction ("terminal once the question... is RECORDED")."""
+        disposition. ``escalated`` counts as terminal only once the
+        question is actually RECORDED in `_pending_questions.md` (§5.4's
+        own distinction) — the caller passes ``escalations_recorded=False``
+        when the §10.2 rate cap (or a dedup hit that still needs a NEXT-run
+        retry, which does not apply here since dedup means it's already
+        open) prevented that this pass, so the batch correctly carries over
+        instead of being retired with an un-filed question."""
+        if not escalations_recorded:
+            return False
         return all(r.disposition in _FIRST_PASS_TERMINAL for r in self.results)
 
 
@@ -1193,3 +1201,117 @@ def open_correction_ids(pending_path: Path) -> set[str]:
             if stripped.startswith(_CORRECTION_ID_MARKER):
                 ids.add(stripped.removeprefix(_CORRECTION_ID_MARKER).strip())
     return ids
+
+
+# ---------------------------------------------------------------------------
+# §10.1 phase orchestration — called from ``librarian._run_correction_phase``
+# ---------------------------------------------------------------------------
+
+
+def run_correction_phase(
+    *,
+    raw_root: Path,
+    wiki_root: Path,
+    knowledge_root: Path,
+    index: EntityIndex,
+    config: dict[str, Any] | None,
+    escalate_one: Callable[[CorrectionRecordResult, BatchOutcome], bool],
+    deadline_check: Callable[[], bool] | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """§10.1 orchestration: find candidate batches, process each respecting
+    the §10.2 volume bounds and a BATCH-BOUNDARY-ONLY deadline check, then
+    ledger/handoff/retire. Deliberately makes zero LLM calls and touches no
+    ``TokenUsage`` — every write here is mechanical (frontmatter merge,
+    JSONL append, git). The caller supplies ``escalate_one`` because the
+    actual `_pending_questions.md` write goes through
+    ``tiers.tier4_escalate``, which this module must not import (layering,
+    see the module docstring) — the caller (which DOES sit above `tiers`)
+    owns the §10.2 rate cap and the correction_id dedup
+    (:func:`open_correction_ids`) and returns whether the escalation was
+    actually RECORDED this pass.
+
+    Returns a summary dict: ``batches_processed``, ``batches_carried_over``,
+    ``dispositions`` (disposition -> count, across every processed batch),
+    ``records_total``.
+    """
+    max_batch_bytes = resolve_corrections_max_batch_bytes(config)
+    max_records_per_batch = resolve_corrections_max_records_per_batch(config)
+    max_records_per_run = resolve_corrections_max_records_per_run(config)
+
+    summary: dict[str, Any] = {
+        "batches_processed": 0,
+        "batches_carried_over": 0,
+        "dispositions": {},
+        "records_total": 0,
+    }
+    registry_entities = load_registry(knowledge_root)
+    applied_this_run = 0
+
+    for path, source, envelope in find_correction_batches(raw_root):
+        if deadline_check is not None and deadline_check():
+            # §10.1: deadline checked at BATCH boundaries only -- never
+            # mid-batch. Every remaining candidate (including this one) is
+            # untouched and naturally retried next run.
+            summary["batches_carried_over"] += 1
+            continue
+
+        if applied_this_run >= max_records_per_run:
+            summary["batches_carried_over"] += 1
+            continue
+
+        try:
+            size = path.stat().st_size
+            with path.open("r", encoding="utf-8") as fh:
+                n_records = sum(1 for i, ln in enumerate(fh) if i > 0 and ln.strip())
+        except OSError:
+            summary["batches_carried_over"] += 1
+            continue
+
+        if size > max_batch_bytes or n_records > max_records_per_batch:
+            # §10.2: an over-bound batch is deferred WHOLE, never refused --
+            # untouched, retried next run.
+            summary["batches_carried_over"] += 1
+            continue
+
+        outcome = process_batch_file(
+            path,
+            envelope,
+            source,
+            index=index,
+            knowledge_root=knowledge_root,
+            config=config,
+            dry_run=dry_run,
+            registry_entities=registry_entities,
+        )
+        applied_this_run += sum(
+            1 for r in outcome.results if r.disposition in ("applied", "routed-elsewhere")
+        )
+
+        escalations_recorded = True
+        if not dry_run:
+            for r in outcome.results:
+                if r.disposition == "escalated":
+                    if not escalate_one(r, outcome):
+                        escalations_recorded = False
+
+        for k, v in build_ledger_record(outcome)["dispositions"].items():
+            summary["dispositions"][k] = summary["dispositions"].get(k, 0) + v
+        summary["records_total"] += outcome.records_total
+        summary["batches_processed"] += 1
+
+        if dry_run:
+            continue
+
+        raised = [r for r in outcome.results if r.disposition == "raised-tier"]
+        if raised:
+            write_correction_handoff(outcome, raised, raw_root=raw_root)
+
+        append_corrections_ledger(wiki_root, outcome)
+
+        if outcome.all_terminal(escalations_recorded=escalations_recorded):
+            retire_batch(knowledge_root, path)
+        else:
+            summary["batches_carried_over"] += 1
+
+    return summary
