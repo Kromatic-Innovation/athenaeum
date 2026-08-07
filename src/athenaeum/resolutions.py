@@ -7,7 +7,11 @@ human-review writer). When the detector flags a cluster, the resolver
 proposes a winner using a 9-tier source-precedence taxonomy (canonical
 tier list: the ``SOURCE-PRECEDENCE TAXONOMY`` block of ``_RESOLVE_SYSTEM``
 below — keep this ``9-tier`` count and the byte-exact golden snapshot
-``tests/data/resolve_system.txt`` in sync if the taxonomy changes). The
+``tests/data/resolve_system.txt`` in sync if the taxonomy changes; also
+keep :data:`athenaeum.precedence.SOURCE_PRECEDENCE_TIERS` — the tier-0
+field-correction applier's deterministic, LLM-free mirror of this same
+taxonomy, issue athenaeum#797 — in sync, order AND per-tier membership,
+guarded by ``tests/test_precedence.py``). The
 proposal — winner, action, confidence, rationale, the precedence
 comparison the resolver leaned on — is rendered as an OPTIONAL trailing
 block on each ``_pending_questions.md`` entry. The user remains the
@@ -390,7 +394,12 @@ class MergeProposal:
 # CANONICAL tier list. If you change the tier count or order, also update the
 # ``9-tier`` count in this module's docstring above AND regenerate the
 # byte-exact golden snapshot ``tests/data/resolve_system.txt`` (pinned by
-# ``tests/test_resolve_system_snapshot.py``) in the same commit.
+# ``tests/test_resolve_system_snapshot.py``) in the same commit. A FOURTH site
+# also derives from this block: ``athenaeum.precedence.SOURCE_PRECEDENCE_TIERS``
+# (issue athenaeum#797) — the deterministic tier-0 mirror of this taxonomy for the
+# field-correction applier, which cannot call an LLM. Update it in the same
+# commit; ``tests/test_precedence.py`` parses THIS block (not a transcription)
+# to bind the two on order and per-tier membership.
 
 
 _RESOLVE_SYSTEM = """You are a resolver for an AI agent's long-term memory system.
