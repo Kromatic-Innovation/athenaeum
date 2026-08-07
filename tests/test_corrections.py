@@ -429,6 +429,64 @@ class TestScalarSetApplier:
         assert "unknown key" in result.reason
 
 
+class TestMixedDispositionBatch:
+    def test_conformant_record_still_applies_alongside_a_fallthrough_record(
+        self, tmp_path: Path
+    ) -> None:
+        """§8: "A fallthrough is not a failure and never fails a batch:
+        conformant records in the same batch apply normally." One malformed
+        record and one conformant record in the SAME batch -- the malformed
+        one raises a tier, the conformant one still writes."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
+        env = _envelope(submitter="enrichment-service")
+        lines = [
+            json.dumps(env),
+            json.dumps(
+                {
+                    # Unparseable source -> raised-tier (§8).
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "op": "set",
+                    "field": "current_title",
+                    "value": "x",
+                    "source": "not a valid source ref",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                }
+            ),
+            json.dumps(
+                {
+                    # Fully conformant.
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "op": "set",
+                    "field": "current_title",
+                    "value": "VP Engineering",
+                    "source": "api:enrichment-vendor",
+                    "observed_at": "2026-08-06T05:58:40Z",
+                }
+            ),
+        ]
+        batch_path = tmp_path / "raw" / "enrichment-service" / "b.jsonl"
+        batch_path.parent.mkdir(parents=True)
+        batch_path.write_text("\n".join(lines) + "\n")
+        index = EntityIndex(wiki)
+        outcome = process_batch_file(
+            batch_path,
+            env,
+            "enrichment-service",
+            index=index,
+            knowledge_root=tmp_path,
+            config=_fields_config(
+                current_title={"shape": "scalar", "writers": ["enrichment-service"]}
+            ),
+        )
+        dispositions = [r.disposition for r in outcome.results]
+        assert dispositions.count("raised-tier") == 1
+        assert dispositions.count("applied") == 1
+        assert "current_title: VP Engineering" in (wiki / "p.md").read_text()
+
+
 # ---------------------------------------------------------------------------
 # §4 add/remove list ops
 # ---------------------------------------------------------------------------
