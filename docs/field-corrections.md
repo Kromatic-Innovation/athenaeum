@@ -121,12 +121,30 @@ write requirement. **There is no reserved subtree and no separate discovery func
 
 That is deliberate. A reserved subtree skipped by `discover_raw_files` would mean a
 non-conforming batch is seen by nothing at all — the bypass this design exists to remove.
-Because corrections live in the ordinary tree, the fallback is free: a file that does not
-parse as a correction batch is simply a file in raw intake, and the existing pipeline
-already knows what to do with those.
 
-Discovery recognizes a correction batch **by shape**: a `.jsonl` file whose first line
+**Discovery recognizes a correction batch by shape**: a `.jsonl` file whose first line
 parses as JSON with `record: "batch"`. Anything else is ordinary intake.
+
+Making that literally true takes one change to `intake.discover_raw_files`, and the
+implementation must not skip it. Today that function globs `*.md` and matches
+`RAW_FILE_RE = ^(\d{8}T\d{6}Z?)-([0-9a-f]{8})\.md$` — so a `.jsonl` file in `raw/<source>/`
+is invisible to it. "Falls through to ordinary intake" would silently mean "is seen by
+nothing," which is the exact failure this section claims to have removed. Required:
+
+- `discover_raw_files` globs `*.md` **and** `*.jsonl`, with `RAW_FILE_RE` widened to accept
+  either extension.
+- It **skips** a `.jsonl` whose first line parses as a valid batch envelope — that file is
+  claimed by the correction phase. This is the only correction-shape knowledge the generic
+  discovery function carries, and it is one check.
+- Every other `.jsonl` is ordinary intake. The tiers classify text; nothing requires the
+  body to be markdown.
+
+Note what is NOT skipped by name. `discover_raw_files` skips exactly one directory today
+(`answers`, issue athenaeum#414). `raw/auto-memory/` is not skipped — it is simply never matched,
+because auto-memory filenames do not satisfy `RAW_FILE_RE`, and
+`discover_auto_memory_files` walks it separately. Corrections follow the auto-memory
+pattern (claimed by shape, by a different consumer), not the `answers` pattern (excluded
+by directory name).
 
 ### 3.2 File format — JSONL, envelope-first
 
@@ -246,19 +264,42 @@ this design introduces one.
 
 New module **`src/athenaeum/precedence.py`**:
 
+**A tier may hold more than one source type**, so the structure is one entry per tier
+carrying that tier's type tokens — not a flat 9-tuple. Tier 2 of the canonical taxonomy is
+*"`linkedin:<username>` / `twitter:<username>` — user-curated public profile"*: two tokens,
+one rank. A flat tuple indexed by position cannot express that, and would silently drop
+`twitter:` to the unknown-type default of 9 — seven ranks below its documented position.
+
 ```python
-SOURCE_PRECEDENCE_TIERS: tuple[str, ...] = (
-    "user", "linkedin", "api", "wikipedia", "agent-observed",
-    "claude", "script", "model-prior", "unsourced",
+#: One entry per precedence tier, highest first; index + 1 is the rank.
+#: A tier may carry several source-type tokens that rank equally.
+SOURCE_PRECEDENCE_TIERS: tuple[tuple[str, ...], ...] = (
+    ("user",),                  # 1  user said it directly
+    ("linkedin", "twitter"),    # 2  user-curated public profile
+    ("api",),                   # 3  third-party authoritative source
+    ("wikipedia",),             # 4  consensus public source
+    ("agent-observed",),        # 5  derived from an in-session artifact
+    ("claude",),                # 6  LLM-generated
+    ("script",),                # 7  pipeline-generated, no upstream evidence
+    ("model-prior",),           # 8  training-data assertion, no session evidence
+    ("unsourced",),             # 9  always loses to any sourced claim
 )
 
 def source_rank(source: str | dict | None) -> int:
-    """Return the 1-based precedence rank; 9 for None/unparseable."""
+    """Return the 1-based precedence rank.
+
+    A source type absent from every tier ranks 9, as does ``None`` or an
+    unparseable value.
+    """
 ```
 
-`twitter:` ranks with `linkedin:` at tier 2, as the taxonomy's own tier-2 line states.
+Any source type not listed in a tier ranks 9. Because that default is indistinguishable
+from a genuine `unsourced`, **an omitted token is a silent seven-rank demotion, not a
+visible failure** — which is precisely why the drift-guard test below must compare tier
+*membership* against the prompt block, not merely the tier count.
 
-> **DRIFT GUARD.** The tier list now exists in four places that must change together:
+> **DRIFT GUARD.** The tier list — its order **and each tier's membership** — now exists in
+> four places that must change together:
 > 1. `SOURCE_PRECEDENCE_TIERS` in `src/athenaeum/precedence.py`;
 > 2. the `SOURCE-PRECEDENCE TAXONOMY` block of `_RESOLVE_SYSTEM` in
 >    `src/athenaeum/resolutions.py` (the canonical prose list);
@@ -360,6 +401,36 @@ schema design onto every writer — precisely the per-consumer coupling §1.1 re
 
 A fallthrough is not a failure and never fails a batch: conformant records in the same
 batch apply normally, and the ledger counts the rest as `raised-tier`.
+
+### 8.1 How a tier raise actually happens
+
+"Raises a tier" must name a mechanism, or it is an assumption that quietly becomes a
+drop. There are two cases and they resolve differently.
+
+**Whole-file** (rows 1-2 above — no valid envelope). Nothing to do: §3.1's widened
+`discover_raw_files` sees the file and does not skip it, because the skip is conditional
+on a valid envelope. The file is ordinary intake by construction.
+
+**Per-record** (rows 3-6 — the envelope is valid, but individual records are not
+cheaply applicable). The generic discovery function has already skipped this file, so
+these records reach nothing unless the correction phase hands them over explicitly. It
+must: for each batch with at least one raised record, the phase writes **one ordinary
+raw-intake file** — canonical `<timestamp>-<uuid8>.md` in the same `raw/<source>/`
+directory — whose body states each raised record as a plain claim, carrying its `note`
+(the *why*) and the reason it was raised. The next pass classifies it as ordinary prose.
+
+Three properties this must have:
+
+- **Idempotent.** The handoff file is written once per (batch, raised-record-set); a batch
+  re-examined on a later run must not re-emit it. Key it on `batch_id` plus the sorted
+  `correction_id` set, recorded in the audit ledger (§5.3).
+- **Provenance-preserving.** The handoff file carries the original `source` per claim in
+  `field_sources`, not `script:correction-handoff`. The submitter's authority is the
+  submitter's; the handoff is a transport step, not a new assertion.
+- **Visible.** It is a normal intake file with normal provenance, so retirement, dedupe
+  and contradiction detection all apply to it unchanged. Nothing about a raised record is
+  special downstream — it is just a fact that arrived as prose, which is what it would
+  have been had the submitter not tried the cheap path.
 
 **On cost.** Bulk writers propose at thousands-per-pass scale, and in a large corpus a
 substantial share of proposed targets may not resolve — so fallthrough is a common path,
