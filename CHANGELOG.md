@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Correct `docs/deprecated-email-tracking.md` — Voltaire is the reporter,
+  drop the bespoke schema, mark Q1/Q2 superseded (athenaeum#768).** Three
+  corrections to the athenaeum#565 design doc, verified against the live code
+  2026-08-05: (1) the doc's Q3 named maecenas as the bounce-fact reporter,
+  contradicting its own line describing maecenas as "a campaign tool" that
+  shouldn't need to know about librarian bookkeeping — the actual chain is
+  Voltaire detects (`voltaire/src/tiers/bounce.ts`) → updates Google Contacts
+  → reports the fact to athenaeum as ordinary raw intake → the librarian
+  marks the address bounced; maecenas only hosts the `handle_bounce.py`
+  script Voltaire invokes and consumes suppression state at send time
+  (maecenas#42 tracks fixing that script). (2) Q3/Q5 specified a dedicated
+  `type: email_bounce` YAML schema and a special-cased librarian intake
+  path — not generalizable for an OSS knowledge system with many fact types;
+  corrected to the existing free-text `remember()` contract, and Q5 now
+  notes the gcontacts read moved to the Voltaire side (voltaire#117). (3) Q1
+  (the `_deprecations.jsonl` ledger) and Q2 (the archive-vs-delete
+  disposition knob) are marked superseded in place, dated 2026-08-05, rather
+  than deleted — pointing at athenaeum#712 (the v6 verdict ledger) and
+  athenaeum#709's "zero destructive operations without a ledger entry"
+  respectively. Also records the outcome-vocabulary gap (Voltaire's
+  three-valued detection vs. Q1's two-valued `status`, voltaire#81) and notes
+  Q4's optional lint issue (athenaeum#767) was closed as not planned because
+  its premise (diffing the now-superseded ledger) no longer holds. **Reconciled
+  a second time the same day, once athenaeum#765 actually merged (PR
+  athenaeum#826):** the doc's Q1 and Q3 previously described the eventual
+  mark as "whatever athenaeum#712's verdict ledger produces" — the shipped
+  code doesn't wait on #712 at all. It reuses athenaeum#308's existing
+  `valid_until` claim-validity close directly (`pii.mark_bounced` /
+  `pii.is_bounced`), gated by a new LLM-free Tier 0 branch
+  (`librarian.tier0_bounce_mark`) that requires the raw note's own
+  `observed_at` + `source` frontmatter and a body matching
+  `pii.detect_hard_bounce_fact` (exactly one email token, an RFC 3463 `5.x.x`
+  code). Q3's `remember()` contract example was also corrected: per-claim
+  provenance rides `sources`, not `source` (the latter only selects the
+  `raw/<session>/` landing directory) — verified end-to-end against
+  `remember_write()` + `tier0_bounce_mark()`, matching
+  `tests/test_bounce_mark.py`. Docs-only; no code changed.
+
 ### Fixed
 
 - **Merge-proposal suppression messages print threshold comparisons at a
