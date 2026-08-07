@@ -1022,9 +1022,10 @@ def resolve_lock_timeout(config: dict[str, Any] | None) -> float:
 def resolve_heartbeat_interval(config: dict[str, Any] | None) -> float:
     """Resolve the progress-heartbeat emit interval (seconds) (athenaeum#398).
 
-    The dark-zone phases (T3 merge, C4 contradiction detection, the athenaeum#290
-    wiki-dedup pass, the athenaeum#188 re-resolve pass) emit a periodic
-    ``librarian-heartbeat`` progress line via :class:`athenaeum.progress.PhaseHeartbeat`
+    The dark-zone phases (the entity phase, issue athenaeum#800; T3 merge; C4
+    contradiction detection; the athenaeum#290 wiki-dedup pass; the athenaeum#188
+    re-resolve pass) emit a periodic ``librarian-heartbeat`` progress line via
+    :class:`athenaeum.progress.PhaseHeartbeat`
     so a stall in one of these phases is visible in the log and detectable by
     a watchdog. This resolves how often (in seconds) a slow/wedged phase
     emits a tick::
