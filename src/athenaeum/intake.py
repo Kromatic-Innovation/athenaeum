@@ -18,12 +18,25 @@ cycle" move.
 Layering: L2 primitive. Imports only leaf/service modules that do NOT import
 any SCC member back — :mod:`athenaeum.models`, :mod:`athenaeum.config`,
 :mod:`athenaeum.ephemeral`, :mod:`athenaeum._lint`, :mod:`athenaeum.schemas`,
-and :mod:`athenaeum.atomic_io`. It must NEVER import ``librarian``, ``merge``,
+:mod:`athenaeum.atomic_io`, and (issue athenaeum#797) :mod:`athenaeum.corrections`, a
+peer L2 primitive. It must NEVER import ``librarian``, ``merge``,
 ``tiers``, ``pending_merges``, ``batch``, ``status``, ``retire``, or
 ``wiki_dedupe`` (that would re-introduce the cycle this module exists to
 break). ``librarian`` re-exports these three names for backward compatibility,
 so existing ``from athenaeum.librarian import discover_raw_files`` call sites
 (and the public ``athenaeum.discover_raw_files`` re-export) keep working.
+
+Issue athenaeum#797 (`docs/field-corrections.md` §3.1): a field-correction batch is
+a `.jsonl` file living in the ORDINARY `raw/<source>/` tree — no reserved
+subtree, no second discovery walk. :func:`discover_raw_files` recognizes one
+by shape (its first line parses as a valid batch envelope, per
+:func:`athenaeum.corrections.parse_batch_envelope`) and skips it — claimed by
+the correction phase, which reads it directly rather than through this
+function. Every OTHER `.jsonl` (malformed batch, unknown `schema_version`,
+or a file that never claimed to be a batch at all) is ordinary intake,
+exactly like a `.md` file — this is the only correction-shape knowledge this
+function carries, and it must not carry any more than that (§3.1: "There is
+no reserved subtree and no separate discovery function").
 """
 
 from __future__ import annotations
@@ -43,6 +56,7 @@ from athenaeum.config import (
     resolve_extra_intake_roots,
     resolve_operational_markers,
 )
+from athenaeum.corrections import parse_batch_envelope
 from athenaeum.ephemeral import classify_ephemeral
 from athenaeum.models import (
     AutoMemoryFile,
@@ -68,8 +82,13 @@ from athenaeum.schemas import validate_wiki_meta
 
 log = logging.getLogger(__name__)
 
-# Raw file naming: {timestamp}-{uuid8}.md
-RAW_FILE_RE = re.compile(r"^(\d{8}T\d{6}Z?)-([0-9a-f]{8})\.md$", re.IGNORECASE)
+# Raw file naming: {timestamp}-{uuid8}.md or (issue athenaeum#797) {timestamp}-{uuid8}.jsonl
+# -- the same filename convention a correction batch uses
+# (docs/field-corrections.md §3.1), widened here so a batch's timestamp/uuid
+# still parse like any other raw-intake file. The extension is NOT what
+# decides whether a .jsonl is claimed by the correction phase -- shape
+# (parse_batch_envelope on the first line) decides that, in the caller below.
+RAW_FILE_RE = re.compile(r"^(\d{8}T\d{6}Z?)-([0-9a-f]{8})\.(?:md|jsonl)$", re.IGNORECASE)
 
 # Auto-memory file naming: <prefix>_<slug>.md where prefix is one of
 # feedback|project|reference|user|Recall. Slug is underscore-separated
@@ -268,8 +287,44 @@ def discover_auto_memory_files(
     return files
 
 
+def _is_claimed_correction_batch(fpath: Path) -> bool:
+    """True when *fpath* is a `.jsonl` whose first line is a valid batch
+    envelope (issue athenaeum#797, `docs/field-corrections.md` §3.1) — claimed by
+    the correction phase, which reads it directly, rather than by this
+    discovery function.
+
+    Only the FIRST LINE is read (a batch may carry thousands of records;
+    reading the whole file just to decide visibility defeats the streaming
+    point of the format). Any read failure (permission error, bad encoding)
+    or an empty first line (a zero-byte file) means "not a valid envelope" —
+    conservatively falls through to ordinary intake, never silently
+    disappears.
+    """
+    try:
+        with fpath.open("r", encoding="utf-8") as fh:
+            first_line = fh.readline()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not first_line.strip():
+        return False
+    return parse_batch_envelope(first_line) is not None
+
+
 def discover_raw_files(raw_root: Path) -> list[RawFile]:
-    """Find all raw intake files, sorted by timestamp."""
+    """Find all raw intake files, sorted by timestamp.
+
+    Issue athenaeum#797 (`docs/field-corrections.md` §3.1): globs `*.jsonl` in
+    addition to `*.md` so a correction batch — which lives in this SAME
+    ordinary `raw/<source>/` tree, no reserved subtree — is visible at all.
+    A `.jsonl` is skipped (claimed by the correction phase instead of being
+    appended here) ONLY when its first line is a valid batch envelope
+    (:func:`athenaeum.corrections.parse_batch_envelope`); every other
+    `.jsonl` — not JSON, valid JSON but not `record: "batch"`, an unknown
+    `schema_version`, or a zero-byte file — is ordinary intake, appended
+    below exactly like a `.md` file. This is deliberate: a malformed batch
+    must still reach ordinary intake (reasoning classifies its raw text),
+    never disappear.
+    """
     files: list[RawFile] = []
     if not raw_root.exists():
         return files
@@ -286,8 +341,19 @@ def discover_raw_files(raw_root: Path) -> list[RawFile]:
         # before any tier classification can re-escalate them.
         if source == "answers":
             continue
-        for fpath in sorted(source_dir.glob("*.md")):
+        candidates = sorted(
+            {*source_dir.glob("*.md"), *source_dir.glob("*.jsonl")}
+        )
+        for fpath in candidates:
             if fpath.name == ".gitkeep":
+                continue
+            if fpath.suffix.lower() == ".jsonl" and _is_claimed_correction_batch(
+                fpath
+            ):
+                # Claimed by the correction phase (§3.1) -- not ordinary
+                # intake, and NOT a second discovery walk: the correction
+                # phase reads this exact file directly by path/shape, it is
+                # simply not appended to the list this function returns.
                 continue
             m = RAW_FILE_RE.match(fpath.name)
             if m:

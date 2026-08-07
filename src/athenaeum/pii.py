@@ -21,12 +21,15 @@ surfaces, different lifecycles — kept as separate modules on purpose, though
 ``outbound_pii`` imports this module's compiled detection regexes so there is
 one definition of "what an email/phone looks like" shared by both.
 
-**Layering:** L3 service. Imports only :mod:`athenaeum.storage` (L2) at
-module scope. Consumed by :mod:`athenaeum.search` (the ``is_pii_flagged``
-corpus-exclusion predicate) and by the merge-candidate discovery in
-:mod:`athenaeum.wiki_dedupe` — never the reverse.
+**Layering:** L3 service. Imports :mod:`athenaeum.storage` (L2),
+:mod:`athenaeum.models` (L1), and :mod:`athenaeum.atomic_io` (L0) at module
+scope — all strictly lower layers, so this remains a one-way edge. Consumed
+by :mod:`athenaeum.search` (the ``is_pii_flagged`` corpus-exclusion
+predicate), by the merge-candidate discovery in :mod:`athenaeum.wiki_dedupe`,
+and by :mod:`athenaeum.librarian`'s ``tier0_bounce_mark`` (issue athenaeum#765) —
+never the reverse.
 
-Four pieces, in the order the issue settles them:
+Five pieces, in the order the issue settles them:
 
 1. **Contacts surface** (:func:`contacts_surface_root` / :func:`is_pii_class`)
    — a thin convenience wrapper over :mod:`athenaeum.storage`'s athenaeum#429 adapter
@@ -76,6 +79,26 @@ Four pieces, in the order the issue settles them:
    observation a supersession record retracts) — deliberately NO
    clustering/similarity step, so this does not recreate the wiki-dedup
    merge problem the rest of the codebase works hard to keep separate.
+
+5. **Hard-bounce recognition + mark** (:func:`detect_hard_bounce_fact` /
+   :func:`mark_bounced`, issue athenaeum#765). A hard-bounce fact (identifier +
+   diagnostic + observed date + source) arrives as an ORDINARY free-text
+   raw-intake note — no new intake schema, no ``type:`` field, no dedicated
+   code path (see :func:`athenaeum.librarian.tier0_bounce_mark`, which is
+   just one more deterministic decline-or-apply branch in the SAME tier
+   dispatch every raw file already goes through). Recognition keys on a
+   RFC 3463 enhanced-status-code of class ``5.x.x`` — the hard-bounce class
+   — so a ``4.x`` transient diagnostic (voltaire#81's "potentially stale"
+   case) never matches and is left untouched; this issue is scoped to hard
+   bounces only. The mark itself is a VALID-TIME close
+   (``valid_until``, reusing athenaeum#308's existing claim-validity mechanism —
+   see :func:`athenaeum.models.valid_until_expired`) rather than a new status
+   enum: "deliverable until the observed date" is exactly what that
+   mechanism already expresses. The mark lives on the identifier's own
+   contact-record frontmatter (upserted in place — idempotent, never
+   deleted, no new ledger file); :func:`is_bounced` is the single read-side
+   predicate a consumer (recall, lint) calls to tell present-but-
+   non-deliverable apart from absent.
 """
 
 from __future__ import annotations
@@ -85,10 +108,12 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from athenaeum.atomic_io import atomic_write_text
+from athenaeum.models import parse_frontmatter, render_frontmatter, slugify, valid_until_expired
 from athenaeum.storage import surface_root_for_class
 
 log = logging.getLogger(__name__)
@@ -1228,6 +1253,173 @@ def resolve_identifier(
     return fold_observations(observations, supersessions).get(identifier, [])
 
 
+# ---------------------------------------------------------------------------
+# 5. Hard-bounce recognition + mark (issue athenaeum#765)
+# ---------------------------------------------------------------------------
+#
+# Voltaire's ``bounce.ts`` (see ``docs/deprecated-email-tracking.md``,
+# superseded by this issue) gates a HARD bounce on an RFC 3463 enhanced
+# delivery-status code of the PERMANENT-FAILURE class, ``5.x.x``; a ``4.x``
+# code is a transient give-up (voltaire#81's "potentially stale" case, e.g. a
+# live address behind a temporary Office 365 routing misconfiguration) and is
+# deliberately OUT OF SCOPE — marking a ``4.x``-diagnosed address bounced
+# would be wrong. :func:`detect_hard_bounce_fact` keys on that same ``5.x.x``
+# signal, so a ``4.x`` report (or an ambiguous one naming more than one
+# address) simply never matches and falls through to the ordinary
+# prose-classification tiers untouched — "nothing is rejected, a
+# non-conformant note just climbs a tier," the same posture every other
+# raw-intake shape in this pipeline already has.
+#
+# The mark is a VALID-TIME close (``valid_until``), reusing the EXISTING
+# claim-validity mechanism (issue athenaeum#308, :func:`athenaeum.models.valid_until_expired`)
+# rather than inventing a ``bounced``/``deprecated`` status enum — "deliverable
+# until the observed date" is exactly what that mechanism already expresses.
+# No new ledger file: the mark is upserted onto the identifier's own
+# contact-record frontmatter on the excluded contacts surface, in place —
+# idempotent (re-reporting the identical fact is a no-op), and the identifier
+# is never deleted, only ever gains fields.
+
+#: An RFC 3463 enhanced delivery-status code restricted to the ``5.x.x``
+#: permanent-failure class. Matches ``550 5.1.1 user unknown`` and bare
+#: ``5.1.1`` alike; never matches a ``4.x.x`` transient code.
+_HARD_BOUNCE_CODE_RE = re.compile(r"\b5\.\d{1,3}\.\d{1,3}\b")
+
+
+@dataclass(frozen=True)
+class HardBounceFact:
+    """A hard-bounce fact recognized in ordinary free-text raw intake.
+
+    ``identifier`` is the single email-shaped token the note names;
+    ``diagnostic`` is the verbatim line the ``5.x.x`` status code was found
+    on (falling back to the bare matched code if line-splitting somehow
+    yields nothing, which cannot happen for the input :func:`detect_hard_bounce_fact`
+    itself already required to match).
+    """
+
+    identifier: str
+    diagnostic: str
+
+
+def detect_hard_bounce_fact(text: str) -> HardBounceFact | None:
+    """Recognize a hard-bounce fact in free text, or ``None`` — never guesses.
+
+    Deliberately conservative: BOTH of these must hold, or this declines so
+    the note falls through to ordinary prose classification exactly like any
+    other raw intake file (issue athenaeum#765 — "nothing is rejected"):
+
+    - exactly ONE email-shaped token (:func:`find_inline_emails`) — a note
+      naming zero or several addresses is ambiguous and left to reasoning,
+      not guessed at;
+    - a ``5.x.x`` enhanced-status-code diagnostic
+      (:data:`_HARD_BOUNCE_CODE_RE`) somewhere in the text — a ``4.x`` (or
+      no) diagnostic never matches, which is what keeps voltaire#81's
+      transient case out of scope by construction rather than by a separate
+      status check.
+    """
+    emails = find_inline_emails(text or "")
+    if len(emails) != 1:
+        return None
+    match = _HARD_BOUNCE_CODE_RE.search(text or "")
+    if match is None:
+        return None
+    diagnostic = next(
+        (line.strip() for line in (text or "").splitlines() if match.group(0) in line),
+        match.group(0),
+    )
+    return HardBounceFact(identifier=emails[0], diagnostic=diagnostic)
+
+
+def default_bounce_record_path(contacts_root: Path, identifier: str) -> Path:
+    """Per-identifier contact-record path under the (excluded) contacts surface.
+
+    One record per IDENTIFIER (not per person) — the bounce is a fact about
+    the address's own deliverability, independent of whose it is or whether
+    that attribution is even known.
+    """
+    return Path(contacts_root) / f"contact-{slugify(identifier)}.md"
+
+
+def read_bounce_record(record_path: Path) -> dict[str, Any]:
+    """Read an existing contact record's frontmatter, or ``{}`` if absent."""
+    if not record_path.exists():
+        return {}
+    meta, _ = parse_frontmatter(record_path.read_text(encoding="utf-8"))
+    return meta if isinstance(meta, dict) else {}
+
+
+def is_bounced(meta: dict[str, Any] | None, as_of: date | None = None) -> bool:
+    """True when a contact record's ``valid_until`` has passed — present, non-deliverable.
+
+    The single read-side predicate a consumer (recall, lint) calls to tell a
+    bounced-but-still-present identifier apart from one that was never seen
+    at all (an absent/missing record, or a record with no ``valid_until`` —
+    both read as ``False`` here, mirroring :func:`is_pii_flagged`'s
+    "single predicate every consumer calls" shape). Delegates entirely to
+    :func:`athenaeum.models.valid_until_expired` — the SAME upper-bound
+    predicate already wired into recall/compile for every other claim's
+    ``valid_until`` — rather than a second, drifting implementation.
+    """
+    return valid_until_expired(meta, as_of)
+
+
+def mark_bounced(
+    contacts_root: Path,
+    identifier: str,
+    *,
+    diagnostic: str,
+    observed_at: str,
+    source: str | dict[str, Any],
+    record_path: Path | None = None,
+) -> tuple[Path, bool]:
+    """Upsert the hard-bounce mark onto *identifier*'s contact record. Idempotent.
+
+    Creates the record if absent; otherwise merges onto the EXISTING
+    frontmatter (any other field already on the record survives byte-for-byte
+    — this never overwrites the whole file, only sets its own keys) and
+    rewrites atomically. Never deletes the record or the identifier.
+
+    Returns ``(record_path, changed)``. ``changed`` is ``False`` — no write —
+    when the merged frontmatter is byte-for-byte identical to what is
+    already on disk (the delta gate :func:`athenaeum.librarian.tier0_handle_upsert`
+    already uses for the same reason: re-reporting the identical fact must be
+    a true no-op, never a duplicate mark).
+
+    Encodes deliverability as a VALID-TIME close: ``valid_until`` is set to
+    *observed_at* (see the module-docstring's point 5 for why this is not a
+    ``bounced``/``deprecated`` status enum). Re-reporting a LATER bounce
+    (a different *observed_at* / *diagnostic*) updates the same record in
+    place rather than duplicating it.
+    """
+    target = (
+        record_path
+        if record_path is not None
+        else default_bounce_record_path(contacts_root, identifier)
+    )
+    existing_meta = read_bounce_record(target)
+    existing_body = ""
+    if target.exists():
+        _, existing_body = parse_frontmatter(target.read_text(encoding="utf-8"))
+
+    merged_meta = dict(existing_meta)
+    merged_meta["identifier"] = identifier
+    merged_meta[PII_FLAG] = True
+    merged_meta["bounce_diagnostic"] = diagnostic
+    merged_meta["observed_at"] = observed_at
+    merged_meta["valid_until"] = observed_at
+    merged_meta["source"] = source
+
+    if merged_meta == existing_meta:
+        return target, False
+
+    body = existing_body or (
+        f"Contact record for {identifier!r} — marked non-deliverable (hard "
+        "bounce, issue athenaeum#765). A historical identifier: present, not "
+        "deleted.\n"
+    )
+    atomic_write_text(target, render_frontmatter(merged_meta) + "\n" + body)
+    return target, True
+
+
 __all__ = [
     "PII_ENTITY_CLASS",
     "PII_FLAG",
@@ -1265,4 +1457,10 @@ __all__ = [
     "read_supersessions",
     "fold_observations",
     "resolve_identifier",
+    "HardBounceFact",
+    "detect_hard_bounce_fact",
+    "default_bounce_record_path",
+    "read_bounce_record",
+    "is_bounced",
+    "mark_bounced",
 ]

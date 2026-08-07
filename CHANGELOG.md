@@ -36,6 +36,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Merge-proposal suppression messages print threshold comparisons at a
+  precision that makes the printed comparison decidable (athenaeum#804).**
+  The cohesion-floor suppression log line asserted `mean pairwise 0.60 <
+  min_merge_mean_similarity=0.60` — false as printed, because both values
+  were rounded to 2dp for the message while the comparison itself ran on
+  the unrounded floats (e.g. an actual 0.5996 < 0.6000). The underlying
+  comparison was confirmed correct all along; this is a reporting-only fix,
+  not a behaviour change. `_merge_proposal_suppression_reason`'s
+  `single-linkage chain`, `low cohesion`, and `low confidence` messages now
+  print their compared values at 4 decimal places instead of 2 (the
+  `over-cluster` message was already exact — it compares integers). New
+  tests in `tests/test_merge_proposal_gates.py`
+  (`TestSuppressionReasonPrecision`) pin the new format and assert a value
+  just below a floor renders distinguishably from the floor itself; this
+  unblocks the operator adjudication athenaeum#697's AC4 asks for.
+
+- **Wiki-page dedup formation is confirmed complete-linkage, and the stale
+  comments claiming otherwise are fixed (athenaeum#803).** `wiki_dedupe`'s
+  `find_wiki_page_clusters` / `propose_wiki_page_merges` already routed
+  through the shared `clusters.cluster_auto_memory_files` — the SAME
+  formation routine athenaeum#681 made complete-linkage on the raw-source
+  clusterer — but `wiki_dedupe.py`'s module docstring and an inline comment
+  in `propose_wiki_page_merges` still described it as "the SAME
+  single-linkage clusterer," which is exactly the drift athenaeum#803 asked
+  to guard against: a reader trusting that stale comment could "fix" an
+  already-fixed path a second, divergent way. Both are corrected to
+  describe complete-linkage formation and explicitly call out that this
+  logic is intentionally shared with the raw-source clusterer, not forked.
+  New tests in `tests/test_wiki_dedupe.py`
+  (`TestWikiClusterFormationIsCompleteLinkage`) pin the property through the
+  wiki-page entry points specifically: a synthetic single-linkage chain of
+  wiki pages does not form one giant cluster, every multi-member wiki
+  cluster's `min_pairwise_score` (not just `centroid_score`) clears the
+  threshold, and a 7-page chain that would have been one over-cap
+  single-linkage component instead reaches `wiki/_pending_merges.md` as
+  legitimate small proposals with zero `over-cluster` suppressions and no
+  member of a legitimate pair lost.
+
+- **`athenaeum push-metrics baseline` no longer writes an unconditional
+  snapshot, and refuses to write a placeholder against a dead instrument
+  (athenaeum#795).** The write to `docs/memory-model-measurements.md`
+  previously happened before the `--json`/text branch and regardless of
+  whether the baseline had anything meaningful to say — `--json` only
+  redirected stdout, so there was no read-only way to check whether a
+  baseline was computable. That caused a real incident: a run with `--json`
+  meant purely as a check silently appended a dated placeholder snapshot,
+  went unnoticed for ~2 hours, and had to be reverted with a correction
+  comment on athenaeum#711. Two fixes: (1) a new `--dry-run` flag computes
+  and displays the baseline (text or `--json`) without touching
+  `--docs-path` at all — `--json` itself is unchanged, a stdout-format
+  concern only, and does not by itself suppress the write; (2) a baseline
+  with zero reference-determination records (precision not computable) is
+  now refused — `athenaeum.push_metrics.write_snapshot` raises `ValueError`
+  naming what was missing, the CLI reports it on stderr and exits `1`, and
+  nothing is written. Covered by
+  `tests/test_push_metrics_cli.py::test_baseline_dry_run_does_not_write`,
+  `test_baseline_dry_run_inspects_invalid_baseline_without_writing`,
+  `test_baseline_json_alone_still_writes`,
+  `test_baseline_empty_ledger_is_honest` (rewritten to assert the refusal),
+  `test_baseline_default_docs_path_not_written_for_invalid_baseline` (the
+  default relative `docs_path` — the thing that actually wrote into the
+  repo during the incident — was previously exercised by no test), and
+  `tests/test_push_metrics.py::TestWriteSnapshot::test_creates_new_file`
+  (also rewritten to assert the refusal).
+
+- **`examples/claude-code/user-prompt-recall.sh` no longer gates the LLM
+  topic extractor on `ANTHROPIC_API_KEY` (athenaeum#792).** `query-topics`
+  routes through `build_llm_client`, which honors `llm.provider` — under
+  `claude-cli` it authenticates via the ambient Claude Code login and needs
+  no key at all, and any client-build failure already falls through to the
+  regex+stopword extractor, so the shell-side key check added nothing that
+  failure path didn't already do. Its only effect was silently disabling
+  the extractor for every `claude-cli` user. Removed the gate (with a
+  comment explaining why it must not come back), corrected two stale prose
+  claims in the same file, updated `README.md`'s 1Password section and
+  troubleshooting table to name the `claude-cli` case, and recorded the
+  back-port in `AUDIT.md`'s `knowledge-recall-on-turn.sh` row (fixed
+  upstream in the maintainer's private fork by cwc#2177, 2026-08-06). New
+  coverage in `tests/test_shell_hooks.py::TestUserPromptRecall` proves the
+  extractor is attempted with no `ANTHROPIC_API_KEY` set, via a stub
+  `$ATHENAEUM_CLI` so the assertion never risks reaching a real LLM.
+
+- **Test suite no longer writes synthetic records into the real
+  `~/.cache/athenaeum` cache-dir artifacts (athenaeum#791).** A prior fix
+  (athenaeum#776) isolated the spend ledger with a session-scoped autouse
+  *fixture* — but fixtures only wrap test EXECUTION, which runs after
+  collection, so a module that resolves the cache dir at COLLECTION time (a
+  module-level statement, or `pytest.mark.parametrize` decorator arguments
+  pytest evaluates while importing the module) ran before any fixture could
+  fire. `tests/conftest.py` now redirects `ATHENAEUM_CACHE_DIR` /
+  `ATHENAEUM_SPEND_LEDGER` in a `pytest_configure` hook instead, which runs
+  before collection begins — closing the gap structurally for every test
+  module. `tests/test_thinking_seam.py`'s bespoke module-level workaround for
+  this same gap is deleted, now redundant. Added: a grep-guard
+  (`tests/test_cache_dir_resolver.py::test_env_literal_setting_home_also_sets_cache_dir`)
+  that scans `tests/` for hand-built `env = {...}` dicts that set `HOME`
+  without also setting `ATHENAEUM_CACHE_DIR` — `tests/test_shell_hooks.py`'s
+  five such dicts (protected only incidentally, by `HOME` already being a
+  tmp dir) now set it explicitly too. The single-artifact pollution canary
+  (`tests/test_llm_schemas.py::TestObservationsPathIsolation::test_nested_pytest_run_does_not_pollute_real_ledger`)
+  is generalized into
+  `test_nested_pytest_run_does_not_pollute_real_cache_dir_artifact`,
+  parametrized over all four cache-dir artifacts (`_llm_schema_observations.jsonl`,
+  `spend.jsonl`, `_push_records.jsonl`, `_push_references.jsonl`) instead of
+  naming one. New `tests/test_push_metrics.py::TestPushRecordsPathIsolation`
+  pins that `push_records_path()`/`reference_records_path()` resolve outside
+  the real cache dir under the suite fixture. `athenaeum push-metrics
+  baseline` gained `--exclude-session SESSION_ID` (repeatable): an explicit
+  operator denylist for known-synthetic sessions (e.g. one that ran the test
+  suite and leaked fixture pushes into the live ledger — the athenaeum#791
+  evidence: 75 of 120 push records at filing, all from one such session).
+  Excluded sessions and their record counts are always reported on
+  `BaselineWindow`/the CLI output/the committed snapshot
+  (`excluded_sessions`/`excluded_push_records`/`excluded_reference_records`),
+  even when empty, so a contaminated window is visible rather than silently
+  folded into a clean-looking total. No change to the push-record schema or
+  to what the recall path writes at runtime.
+
 - **Three provider/cost hygiene fixes from the LLM-provider/cost audit
   (athenaeum#780, findings L7/L8/L10).** (1) `scripts/measure_contradiction_baseline.py`'s
   `_build_client` was the only direct `anthropic.Anthropic(...)` construction
@@ -68,6 +186,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   yaml).
 
 ### Added
+
+- **Hard-bounce recognition + mark on the PII/contacts surface (athenaeum#765,
+  implements athenaeum#565 as corrected by operator design direction
+  2026-08-05).** A hard-bounce fact (identifier, diagnostic, observed date,
+  source) arrives as an ORDINARY free-text raw-intake note via the existing
+  `remember()` path — no new intake schema, `type:` field, or dedicated code
+  path (a test asserts the raw frontmatter carries no `type` key at all).
+  New `librarian.tier0_bounce_mark` is one more deterministic decline-or-apply
+  branch in the SAME tier dispatch every raw file already goes through
+  (`process_one`), mirroring `tier0_handle_upsert`'s shape: it requires the
+  raw's own (pre-existing, generic) `observed_at` and `source` frontmatter
+  fields plus a body recognized by new `pii.detect_hard_bounce_fact` — exactly
+  one email-shaped identifier and an RFC 3463 `5.x.x` enhanced-status-code
+  diagnostic. Deliberately excludes `4.x` (voltaire#81's "potentially stale"
+  case) by construction, so a transient DSN can never be marked bounced; this
+  issue is scoped to the hard-bounce case only. `pii.mark_bounced` upserts the
+  mark onto the identifier's own per-address contact record on the excluded
+  contacts surface — encoded as a valid-time close (`valid_until` = observed
+  date, reusing athenaeum#308's existing claim-validity mechanism) rather than a
+  new `bounced`/`deprecated` status enum, and never a new ledger file (no new
+  `*.jsonl` under the contacts surface — reuse `_observations.jsonl`'s
+  discipline if one is ever needed). Idempotent: re-reporting the identical
+  fact is a byte-for-byte no-op; re-reporting a later bounce updates the same
+  record in place. Nothing is deleted under any configuration. New
+  `pii.is_bounced` is the single read-side predicate a consumer (recall, lint)
+  calls to tell a bounced-but-present identifier apart from one never seen.
+  Explicitly out of scope (cut, not deferred, per the issue): a new
+  `_deprecations.jsonl` ledger, an archive-vs-delete disposition knob, and a
+  `bounced`/`deprecated` status enum as the durable representation — each
+  collides with in-flight work (athenaeum#689's "one ledger" decision, athenaeum#709's
+  zero-destructive-ops rule, athenaeum#714's typed valid-time interval).
+
+- **Deterministic field-correction fast path — the "Lane C" tier-0 conformance
+  format (athenaeum#797, design lock athenaeum#794).** A writer that already knows the
+  exact target entity, attribute, and value it wants changed (a
+  delivery-status monitor, a bulk relationship-graph writer, a third-party
+  enrichment service) can now drop a `.jsonl` batch into the ordinary
+  `raw/<source>/` intake tree — no reserved subtree, recognized purely by
+  shape (first line parses as `record: "batch"`) — and have it applied at
+  tier 0, LLM-free, instead of paying prose compilation per fact. New
+  `src/athenaeum/precedence.py` mirrors the existing 9-tier
+  `SOURCE-PRECEDENCE TAXONOMY` prompt block in-process
+  (`SOURCE_PRECEDENCE_TIERS` / `source_rank()`), bound to that prompt by a
+  test that PARSES it rather than transcribing the expected tiers. New
+  `src/athenaeum/corrections.py` is the tier-0 applier: target resolution
+  (uid / type+name / registered handle via `registry.json`), the op
+  semantics (`set`/`add`/`remove` with per-value `field_sources`
+  attribution), the delta gate (re-applying an unchanged correction is
+  byte-for-byte a no-op), the conflict policy (source-rank comparison,
+  `observed_at` tie-break, escalation on an undated tie), the `monotone`
+  suppression rule (any permitted writer may set a safety flag; only
+  `user:` tier may unset one), and routing (a sensitivity-classified
+  attribute lands on its mapped surface regardless of the destination the
+  correction named; an attribute with no schema slot is aliased, held for a
+  schema-amendment proposal, or recorded as prose). `intake.discover_raw_files`
+  now globs `*.jsonl` alongside `*.md` so a correction batch is visible to
+  discovery at all — the pre-existing gap this closes: a `.jsonl` file was
+  previously invisible to it, so a malformed batch would have been "seen by
+  nothing," not merely skipped. `librarian.run()` gains a
+  `_run_correction_phase`, ordered after the run deadline is armed and
+  before the entity tier phase, with its own runtime share
+  (`librarian.corrections.runtime_share`) and a hard zero-LLM-calls
+  assertion. Every failure to conform — an unparseable source, an attribute
+  off the allowlist, a target resolving to zero or several entities, an
+  unknown `schema_version` — raises a tier rather than rejecting: conformant
+  records in the same batch still apply, and a non-conformant record's raw
+  text reaches ordinary intake via a `_corrections_applied.jsonl`-ledgered
+  handoff file, never silently dropped. The attribute allowlist
+  (`librarian.corrections.fields`) is **empty by default** — a fresh
+  deployment writes nothing cheaply until an operator opts a specific
+  attribute in. See `docs/field-corrections.md` (design) and
+  `docs/configuration.md`'s new "Field corrections" section (every
+  `librarian.corrections.*` key).
 
 - **`athenaeum spend --reprice` — recompute historical rows at current rates
   (athenaeum#788, audit finding L3).** Schema v2 (athenaeum#487) added
@@ -245,6 +436,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reasoning-tier-auditing cost note (added by athenaeum#779, which explicitly
   said `--by-knob` "does not exist yet") now points at `--by-knob` instead of
   the `--by-model`-keyed-by-model-id workaround it previously documented.
+
+- **Entity-phase heartbeat, per-call LLM timing, and failure-reason logging
+  (athenaeum#800, buildable half of athenaeum#764's Finding 0).** The entity
+  phase (raw-file intake, tier1-4 routing) was the one librarian phase with
+  ZERO `librarian-heartbeat` coverage — a nightly run (`631aaade`) spent 85%
+  of its 3,446s window here with nothing logged between its `start` line and
+  its eventual budget trip, so athenaeum#764's "where did the time go" question could
+  not be answered from the logs. `librarian.py`'s per-file entity loop now
+  emits `librarian-heartbeat phase=entity` lines on the same contract
+  `merge-detect`/`merge-write`/`wiki-dedupe`/`reresolve` already have
+  (`status=start|tick|done`, `done`/`total`, `compiled`/`unchanged`/`error`,
+  `unit=<raw file ref>`, cumulative `elapsed=`), with exactly one `tick` per
+  raw file processed — the same per-unit differencing property that made
+  `merge-detect` diagnosable. Separately, every entity-phase LLM call
+  (`tier2_classify` and its two retries, `tier3_create`, `tier3_merge`,
+  `tier3_merge_full` in `tiers.py`) now logs its own wall-clock under the new
+  `librarian-entity-llm-call` marker via a `_timed_llm_call` wrapper around
+  the existing `with_retry` call — unchanged request/retry/parse behavior,
+  just timed — so a run summary reader can distinguish "few slow calls" from
+  "many fast calls", which the aggregate `entity secs`/`calls` figure alone
+  cannot. A file failure now also logs the reason (exception type + message)
+  at WARNING with the file path under a new `librarian-entity-file-failure`
+  marker — run `631aaade` recorded three failed files with no error text
+  captured at any level the operator's log sweep caught, and the trailing
+  "Failed files" summary names only the filename. Finally, the entity-share
+  budget-trip WARNING now states which resource tripped alongside both
+  `api_call_budget` numbers (`631aaade` tripped at 28/1200 calls — 2.3% of
+  the call budget — while the prior message named only "entity phase runtime
+  share exhausted", reading as call-budget exhaustion and misleading the
+  first pass of the athenaeum#764 diagnosis). Observability only: no change to
+  provider routing, budgets, runtime shares, or deadlines. New
+  `TestEntityHeartbeat` in `tests/test_librarian_heartbeat.py` and
+  `TestEntityLLMCallTiming` in `tests/test_tiers.py` cover the contract.
 
 ### Changed
 

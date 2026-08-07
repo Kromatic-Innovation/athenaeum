@@ -22,6 +22,7 @@ from athenaeum.tiers import (
     _TIER2_CLASSIFY_MAX_TOKENS,
     _TIER2_CLASSIFY_RETRY_MAX_TOKENS,
     _TIER3_CREATE_MAX_TOKENS,
+    ENTITY_LLM_CALL_MARKER,
     MERGE_FALLBACK_LOG_PREFIX,
     MERGE_PARSE_FAIL_AMBIGUOUS,
     MERGE_PARSE_FAIL_NO_JSON,
@@ -2414,3 +2415,75 @@ class TestPerStageMaxTokensThroughSeam:
         assert _TIER3_CREATE_MAX_TOKENS == 6144
         assert _TIER2_CLASSIFY_MAX_TOKENS == 4096
         assert _TIER2_CLASSIFY_RETRY_MAX_TOKENS == 8192
+
+
+# ---------------------------------------------------------------------------
+# Entity-phase per-call wall-clock logging (issue athenaeum#800)
+# ---------------------------------------------------------------------------
+
+
+class TestEntityLLMCallTiming:
+    """The entity run-summary's ``entity secs=... calls=...`` line is an
+    aggregate over the WHOLE phase — it cannot tell "few slow calls" apart
+    from "many fast calls" that sum to the same total. Every entity-phase LLM
+    call site (tier2_classify, its two retries, tier3_create, tier3_merge,
+    tier3_merge_full) routes through ``_timed_llm_call``, which times and logs
+    each call individually under the stable :data:`ENTITY_LLM_CALL_MARKER`.
+    """
+
+    def _call_timing_lines(self, caplog: pytest.LogCaptureFixture) -> list[str]:
+        return [
+            rec.message
+            for rec in caplog.records
+            if ENTITY_LLM_CALL_MARKER in rec.message
+        ]
+
+    def test_tier2_classify_logs_call_wall_clock(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        raw = _make_raw("Had coffee with Alice Zhang, she runs product at Acme.")
+        client = _mock_client("[]")
+
+        tier2_classify(raw, [], ["person"], [], ["internal"], client)
+
+        lines = self._call_timing_lines(caplog)
+        assert len(lines) == 1, "exactly one LLM call → exactly one timing line"
+        assert f"desc=tier2_classify {raw.ref}" in lines[0]
+        assert "elapsed=" in lines[0]
+
+    def test_tier3_create_logs_call_wall_clock(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        action = EntityAction(
+            kind="create",
+            name="Test Entity",
+            entity_type="person",
+            tags=[],
+            access="internal",
+            existing_uid=None,
+            observations="Some observation.",
+        )
+        client = _mock_client("# Test Entity\n\nContent.")
+
+        tier3_create(action, "sessions/raw.md", client)
+
+        lines = self._call_timing_lines(caplog)
+        assert len(lines) == 1
+        assert "desc=tier3_create sessions/raw.md" in lines[0]
+        assert "elapsed=" in lines[0]
+
+    def test_two_classify_calls_produce_two_distinct_timing_lines(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Two files → two per-call lines — the per-call granularity the
+        aggregate ``entity secs``/``calls`` figure cannot provide."""
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        client = _mock_client("[]")
+
+        tier2_classify(_make_raw("First file."), [], ["person"], [], ["internal"], client)
+        tier2_classify(_make_raw("Second file."), [], ["person"], [], ["internal"], client)
+
+        lines = self._call_timing_lines(caplog)
+        assert len(lines) == 2

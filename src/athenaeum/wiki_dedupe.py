@@ -29,8 +29,16 @@ be re-flagged.
 Design (see PR body for the full rationale):
 
 - Reuses :func:`athenaeum.clusters.cluster_auto_memory_files` for the
-  actual single-linkage/cosine clustering — this module does NOT
-  reimplement that logic. Each candidate wiki page is wrapped as an
+  actual clustering — this module does NOT reimplement that logic, and
+  MUST NOT grow a second copy of it (issue athenaeum#803). Formation is
+  complete-linkage: single-linkage connected components are computed
+  first as a cheap scoping step, then refined into complete-linkage
+  cliques (issue athenaeum#681) so a weak bridging edge can no longer
+  chain this wiki-page pass into a giant component either — the SAME
+  formation routine the raw-source C1-C4 pass uses, intentionally shared
+  rather than forked. See :mod:`athenaeum.clusters` module docstring for
+  the formation algorithm itself; do not re-describe or re-derive it
+  here. Each candidate wiki page is wrapped as an
   :class:`~athenaeum.models.AutoMemoryFile` (the dataclass already has
   exactly the shape clustering needs: ``path``, ``origin_scope``,
   ``name``, ``description``, ``content``) so the existing clustering
@@ -43,7 +51,7 @@ Design (see PR body for the full rationale):
   ``raw/auto-memory`` extra-root entries, so that lookup path would never
   hit. ``cluster_auto_memory_files`` grew an ``embeddings=`` override
   (clusters.py) specifically so this precomputed-embeddings caller does
-  not have to duplicate the cosine/single-linkage code to route around
+  not have to duplicate the cosine/complete-linkage code to route around
   that mismatch. When chromadb is unavailable, falls back to the same
   hashing-trick embedder ``clusters.py`` already uses for its own
   no-deps degradation path (imported, not duplicated).
@@ -384,19 +392,37 @@ def propose_wiki_page_merges(
 
         # Issue athenaeum#478: the athenaeum#400/#421 degenerate-over-cluster suppression gate
         # must run on THIS write path too, not just merge.py's resolver path.
-        # ``find_wiki_page_clusters`` uses the SAME single-linkage clusterer
-        # (``cluster_auto_memory_files``) that merge.py's own docstring blames
-        # for the 1,711-page incident: one weak bridging edge can chain
-        # hundreds/thousands of loosely-related pages into a giant component.
-        # Before this gate those clusters were written straight to
-        # ``_pending_merges.md`` (the live 1,711-/1,746-source
-        # ``merge-workflow-pattern`` and 16-source ``contact-contacts-wiki``
-        # proposals), bypassing the active-by-default ``max_merge_sources`` (5)
-        # / ``min_merge_mean_similarity`` (0.6) guardrails. This mirrors
-        # merge.py ``_emit_escalation``'s call EXACTLY (size cap +
-        # complete-linkage + mean-cohesion + confidence floor), evaluated
-        # BEFORE the proposal is written — and before the ``dry_run`` branch,
-        # so a dry-run preview reflects what a real gated run would do.
+        # ``find_wiki_page_clusters`` uses the SAME shared formation routine
+        # (``cluster_auto_memory_files``) as the raw-source C1-C4 pass — as of
+        # issue athenaeum#681, formation itself is complete-linkage (single-linkage
+        # connected components refined into cliques), so a weak bridging edge
+        # can no longer chain hundreds/thousands of loosely-related pages into
+        # a giant component in the first place. This gate is therefore a
+        # BACKSTOP, not the load-bearing defense: it still matters for
+        # legitimately large/incohesive cliques and for any pre-athenaeum#681
+        # legacy data, but it is no longer what stands between formation and
+        # the giant-component incident.
+        #
+        # Historical note (pre-athenaeum#681, before formation was complete-linkage):
+        # single-linkage chains reached ``_pending_merges.md`` directly (the
+        # live 1,711-/1,746-source ``merge-workflow-pattern`` and 16-source
+        # ``contact-contacts-wiki`` proposals), bypassing the active-by-default
+        # ``max_merge_sources`` (5) / ``min_merge_mean_similarity`` (0.6)
+        # guardrails below.
+        #
+        # Issue athenaeum#803: confirmed this formation logic is (and must stay)
+        # shared with the raw-source clusterer rather than forked a second
+        # time — do not reimplement single-linkage-then-complete-linkage
+        # refinement here or in ``merge.py``'s resolver path. Change the
+        # algorithm once, in :mod:`athenaeum.clusters`
+        # (``_single_linkage``/``_complete_linkage``/``cluster_auto_memory_files``),
+        # and both call sites pick it up.
+        #
+        # This gate call mirrors merge.py ``_emit_escalation``'s call EXACTLY
+        # (size cap + complete-linkage min-pairwise + mean-cohesion +
+        # confidence floor), evaluated BEFORE the proposal is written — and
+        # before the ``dry_run`` branch, so a dry-run preview reflects what a
+        # real gated run would do.
         suppression = _merge_proposal_suppression_reason(
             n_sources=len(sources),
             confidence=cluster.centroid_score,

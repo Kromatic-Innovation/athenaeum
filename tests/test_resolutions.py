@@ -580,7 +580,9 @@ class TestJsonRepairRetry:
 
 
 # Each tuple: (tier_label, source_a, source_b, expected_winner, expected_action)
-# Covers the 7-tier taxonomy from the issue body. The Opus client is
+# Covers all 9 tiers of the SOURCE-PRECEDENCE TAXONOMY (see
+# `resolutions._RESOLVE_SYSTEM`, mirrored deterministically by
+# `precedence.SOURCE_PRECEDENCE_TIERS`, issue athenaeum#797). The Opus client is
 # stubbed to return a proposal whose rationale cites the precedence
 # tiers compared — we assert the shape, not Opus's actual reasoning.
 _PRECEDENCE_CASES = [
@@ -588,8 +590,10 @@ _PRECEDENCE_CASES = [
     ("linkedin", "linkedin:tkromer", None, "a", "keep_a"),
     ("apollo", "api:apollo", None, "a", "keep_a"),
     ("wikipedia", "wikipedia:Foo", None, "a", "keep_a"),
+    ("agent-observed", "agent-observed:claude:session-2026-05", None, "a", "keep_a"),
     ("claude", "claude:tier3-write", None, "a", "keep_a"),
     ("script", "script:enrich", None, "a", "keep_a"),
+    ("model-prior", "model-prior:claude-3-opus", None, "a", "keep_a"),
     ("unsourced", None, None, "neither", "retain_both_with_context"),
 ]
 
