@@ -15,6 +15,7 @@ from athenaeum.corrections import (
     CorrectionRecordResult,
     build_ledger_record,
     compute_correction_id,
+    decide_verdict,
     find_correction_batches,
     hoist_record,
     load_registry,
@@ -624,6 +625,83 @@ class TestMonotone:
             config=self._config(),
         )
         assert result2.disposition == "applied"
+
+    def test_monotone_apply_is_logged_distinctly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """§6.3: "every monotone apply is logged distinctly so the rule is
+        auditable" — not just correctly applied, but actually logged."""
+        wiki = tmp_path / "wiki"
+        page = _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
+        page.write_text(
+            page.read_text().replace(
+                "name: A", "name: A\nfield_sources:\n  bounced: 'user:conv-1'"
+            )
+        )
+        record = {
+            "record": "correction",
+            "target": {"uid": "person-a"},
+            "op": "set",
+            "field": "bounced",
+            "value": "2026-08-06",
+            "source": "script:delivery-monitor",
+            "observed_at": "2026-08-06T14:01:55Z",
+        }
+        with caplog.at_level("INFO", logger="athenaeum.corrections"):
+            result = process_correction_record(
+                record,
+                _envelope(submitter="delivery-monitor"),
+                index=EntityIndex(wiki),
+                knowledge_root=tmp_path,
+                registry_entities={},
+                config=self._config(),
+            )
+        assert result.disposition == "applied"
+        monotone_lines = [r.message for r in caplog.records if "monotone apply" in r.message]
+        assert len(monotone_lines) == 1
+        assert "bounced" in monotone_lines[0]
+
+
+# ---------------------------------------------------------------------------
+# §6.2 equal-rank tie-break on observed_at (dated branches; the undated ->
+# escalate branch is covered end-to-end by TestEscalationDedup)
+# ---------------------------------------------------------------------------
+
+
+class TestDecideVerdictDatedTies:
+    def _kwargs(self, **overrides) -> dict:
+        base = dict(
+            existing_source="api:apollo",
+            incoming_source="api:enrichment-vendor",
+            existing_value="CTO",
+            incoming_value="VP Engineering",
+            observed_at="2026-08-06T00:00:00Z",
+            monotone=False,
+            op="set",
+            existing_updated="2026-08-01",
+        )
+        base.update(overrides)
+        return base
+
+    def test_newer_observed_at_wins(self) -> None:
+        verdict, reason = decide_verdict(
+            **self._kwargs(observed_at="2026-08-06", existing_updated="2026-08-01")
+        )
+        assert verdict == "apply"
+        assert "newer" in reason
+
+    def test_older_observed_at_defers(self) -> None:
+        verdict, reason = decide_verdict(
+            **self._kwargs(observed_at="2026-08-01", existing_updated="2026-08-06")
+        )
+        assert verdict == "defer"
+        assert "newer" in reason  # "existing is newer"
+
+    def test_indistinguishable_dates_escalate(self) -> None:
+        verdict, reason = decide_verdict(
+            **self._kwargs(observed_at="2026-08-06", existing_updated="2026-08-06")
+        )
+        assert verdict == "escalate"
 
 
 # ---------------------------------------------------------------------------
