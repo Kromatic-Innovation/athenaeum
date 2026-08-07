@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -133,6 +134,43 @@ def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_cache_dir_suite(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[Path]:
+    """Redirect the cache dir / spend ledger for the WHOLE suite (athenaeum#776).
+
+    ``_isolate_cache_dir`` below is function-scoped, so it only covers code
+    that runs inside a test function's fixture scope. Anything that resolves
+    the cache dir OUTSIDE that scope — a ``session``/``module``-scoped fixture,
+    a collection-time import, a ``conftest`` hook — still falls through
+    ``resolve_cache_dir``'s ``arg > ATHENAEUM_CACHE_DIR env > default`` order
+    to the operator's real ``~/.cache/athenaeum`` and appends to their live
+    ``spend.jsonl``. That is how the fixture model ids ``yaml-topic-model`` /
+    ``yaml-classify-model`` / ``yaml-write-model`` reached the production
+    ledger (athenaeum#776): synthetic rows inflate ``athenaeum spend`` totals,
+    are permanently unpriceable, and — because ``spend_today()`` feeds
+    ``ceiling_tripped()`` — move a guardrail that limits REAL spend.
+
+    Session-scoped and autouse is the granularity that closes that hole for
+    good: a new test cannot opt out of it, and it is in force from the first
+    import to the last teardown. ``ATHENAEUM_SPEND_LEDGER`` is set explicitly
+    alongside the cache dir rather than left to fall out of it, so a config
+    carrying ``spend.ledger_path`` cannot route around the redirect either.
+
+    ``pytest.MonkeyPatch()`` is constructed directly because the
+    ``monkeypatch`` fixture is function-scoped and cannot be requested here.
+    """
+    cache_dir = tmp_path_factory.mktemp("athenaeum-suite-cache")
+    mp = pytest.MonkeyPatch()
+    mp.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+    mp.setenv("ATHENAEUM_SPEND_LEDGER", str(cache_dir / "spend.jsonl"))
+    try:
+        yield cache_dir
+    finally:
+        mp.undo()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point ``resolve_cache_dir(cache_dir=None)`` at a per-test tmp dir (athenaeum#750).
@@ -159,9 +197,17 @@ def _isolate_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     Returns the tmp cache dir in case a test wants to assert against it
     directly.
+
+    Narrows ``_isolate_cache_dir_suite`` above rather than replacing it: the
+    session fixture is the floor that no test can escape, this one gives each
+    test its own directory on top. ``ATHENAEUM_SPEND_LEDGER`` is re-pointed
+    into the same per-test directory (athenaeum#776) so the ledger follows the
+    per-test cache dir instead of accumulating rows from earlier tests in the
+    session-wide file.
     """
     cache_dir = tmp_path / ".cache-athenaeum"
     monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("ATHENAEUM_SPEND_LEDGER", str(cache_dir / "spend.jsonl"))
     monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "0")
     return cache_dir
 
