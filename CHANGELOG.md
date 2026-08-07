@@ -44,6 +44,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`claude-fable-5` / `claude-mythos-5` were missing from
+  `_MODEL_RATES_USD_PER_MTOK`, so tagged spend under-reported 6.67x
+  (athenaeum#777).** Both ids matched no prefix in the rate table and fell
+  through to the blended fallback ($1.50 input / $7.50 output per MTok)
+  instead of their real $10.00/$50.00 catalog rate. The sibling
+  `_SAMPLING_PARAMS_REJECTED_PREFIXES`
+  table had listed `claude-fable-5` since athenaeum#577 — its own comment says
+  "maintain the two tables together," and the two had drifted out of step.
+  Because `models.<knob>` in `athenaeum.yaml` is operator-configurable,
+  `models.resolve: claude-fable-5` was a supported one-line config change that
+  would have silently let a $10/day spend ceiling not trip until roughly $67
+  of real spend. Latent today (no `DEFAULT_*_MODEL` points at Fable or Mythos
+  yet), but live in both `develop` and `main` (byte-identical for
+  `models.py`). Fixed by adding explicit `_MODEL_RATES_USD_PER_MTOK` entries
+  for `claude-fable-5`, `claude-mythos-5`, and — for legibility, not because
+  the prefix match was wrong — `claude-opus-4-8`, `claude-opus-4-7`,
+  `claude-opus-4-6`, `claude-sonnet-4-6`, and `claude-haiku-4-5`. Two new
+  tests in `tests/test_model_rates.py` guard the fix and the drift: a
+  parametrized sweep asserting every catalog id resolves to a real
+  (non-blended) rate, and a one-directional invariant asserting every prefix
+  `_SAMPLING_PARAMS_REJECTED_PREFIXES` declares also resolves to a real rate
+  in `_MODEL_RATES_USD_PER_MTOK` (the two tables answer different questions,
+  so identical key sets are not required — but the sampling table may never
+  reference a model the rate table has never priced). The Sonnet 5
+  standard-vs-introductory-rate decision (Occam, 2026-07-31) is unchanged.
+
 - **Suite-wide isolation of the spend ledger, pinned by tests (athenaeum#776).**
   A test run that resolves `spend.resolve_ledger_path()` with no override lands
   on the operator's real `~/.cache/athenaeum/spend.jsonl`: fixture model ids

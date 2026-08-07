@@ -1358,6 +1358,27 @@ _MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     # spend, the safe direction for a financial consumer.
     "claude-opus-5": (5.0, 25.0),
     "claude-sonnet-5": (3.0, 15.0),
+    # claude-fable-5 / claude-mythos-5 (issue athenaeum#777): the "maintain the two
+    # tables together" comment on _SAMPLING_PARAMS_REJECTED_PREFIXES below was
+    # violated — that table has listed claude-fable-5 since athenaeum#577, but this
+    # one never did, so any run tagged claude-fable-5 or claude-mythos-5 fell
+    # through to the blended fallback and under-reported spend 6.67x ($1.50/$7.50
+    # blended vs. the real $10.00/$50.00). claude-mythos-5 is Project
+    # Glasswing-only but is a real, released model, priced identically to Fable.
+    # Recorded BEFORE either can be armed by a DEFAULT_*_MODEL move, for the same
+    # reason as the Claude 5 family above.
+    "claude-fable-5": (10.0, 50.0),
+    "claude-mythos-5": (10.0, 50.0),
+    # Explicit 4.6/4.7/4.8-tier and Sonnet-4.6/Haiku-4.5 entries (issue athenaeum#777).
+    # The shorter claude-opus-4 / claude-sonnet-4 / claude-haiku-4 prefixes below
+    # already resolve these correctly via longest-prefix match — this is
+    # legibility and future-proofing (a reader should not have to trust prefix
+    # arithmetic to know these are priced), not a second pricing bug.
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0),
+    "claude-opus-4-6": (5.0, 25.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
     "claude-opus-4": (5.0, 25.0),
     "claude-sonnet-4": (3.0, 15.0),
     "claude-haiku-4": (1.0, 5.0),
