@@ -89,6 +89,67 @@ def test_built_wheel_contains_skill() -> None:
         )
 
 
+def test_pyproject_force_includes_examples() -> None:
+    """The Claude Code hook kit ships in the wheel via force-include (athenaeum#793)."""
+    with (_REPO_ROOT / "pyproject.toml").open("rb") as fh:
+        pyproject = tomllib.load(fh)
+    force_include = (
+        pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    )
+    assert force_include.get("examples") == "athenaeum/examples", (
+        "wheel must force-include examples/ -> athenaeum/examples so the "
+        "installable Claude Code hook kit (examples/claude-code/) ships in the "
+        "built wheel, not just in git"
+    )
+
+
+def test_built_wheel_contains_claude_code_hook_kit() -> None:
+    """Build a wheel and assert the Claude Code hook kit is inside it (athenaeum#793).
+
+    Mirrors test_built_wheel_contains_skill above: a committed file is not
+    enough, examples/ is outside `packages = ["src/athenaeum"]` just like
+    skills/ was, and this guards against the force-include silently
+    regressing the way its absence silently shipped in the first place.
+    """
+    pytest.importorskip("build", reason="`build` not installed; `pip install athenaeum[dev]`")
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as outdir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "build",
+                "--wheel",
+                "--no-isolation",
+                "--outdir",
+                outdir,
+                str(_REPO_ROOT),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            f"wheel build failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        wheels = list(Path(outdir).glob("*.whl"))
+        assert len(wheels) == 1, f"expected one wheel, got {wheels}"
+        with zipfile.ZipFile(wheels[0]) as zf:
+            names = zf.namelist()
+        expected = {
+            "athenaeum/examples/claude-code/README.md",
+            "athenaeum/examples/claude-code/settings-snippet.json",
+            "athenaeum/examples/claude-code/user-prompt-recall.sh",
+        }
+        missing = expected - set(names)
+        assert not missing, (
+            "Claude Code hook kit missing from the built wheel; force-include is "
+            f"broken. missing: {sorted(missing)}\nwheel contents (examples):\n"
+            + "\n".join(n for n in names if "examples" in n)
+        )
+
+
 def _split_frontmatter(text: str) -> tuple[dict, str]:
     import yaml
 
