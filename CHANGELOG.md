@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI Python matrix pinned to 3.13 only; `requires-python` and trove
+  classifiers now match (athenaeum#815).** The `test` job in
+  `.github/workflows/ci.yml` dropped its three-leg
+  `["3.11", "3.12", "3.13"]` matrix to a single `["3.13"]` entry, and the
+  `types` (mypy) job's `Set up Python` step and `[tool.mypy] python_version`
+  in `pyproject.toml` moved from 3.11 to 3.13 to match. This is a product and
+  maintenance decision, **not a cost saving** — athenaeum is a public repo, so
+  GitHub-hosted Linux runner minutes are free and unlimited here; the org paid
+  nothing for the two extra legs. What the extra legs cost is maintenance
+  surface: every dependency bump had to satisfy three interpreters, every
+  version-conditional path had to be kept alive, and every red leg had to be
+  triaged even when the others were green, for a compatibility promise this
+  single-maintainer project never committed to keeping. `requires-python` in
+  `pyproject.toml` moved from `>=3.11` to `>=3.13`, and the `Programming
+  Language :: Python :: 3.11` / `:: 3.12` trove classifiers were removed
+  (`:: 3.13` and the generic `:: 3` remain), so packaging metadata no longer
+  advertises support CI does not verify. `.github/workflows/oss-readiness.yml`
+  and `.github/workflows/release.yml` each pinned a standalone
+  `python-version: "3.12"` for packaging/build steps unrelated to the test
+  matrix; both moved to `"3.13"` to stay consistent with the new policy.
+  `.github/workflows/evals.yml` (pins 3.12) and
+  `.github/workflows/scorecard.yml` were left untouched — explicitly out of
+  scope per the issue. A new "Supported Python version" section in
+  `CONTRIBUTING.md` documents the one-version-at-a-time policy and states
+  that bumping it means changing the matrix, `requires-python`, and the
+  classifiers together. **Bumped MINOR (0.16.40 -> 0.17.0), not PATCH:**
+  raising `requires-python` to `>=3.13` means `pip install athenaeum` now
+  refuses to install this release on 3.11/3.12, which is a break for any
+  consumer still on those interpreters.
+
 ### Fixed
 
 - **`examples/claude-code/` (the installable Claude Code hook kit) now ships
