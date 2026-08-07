@@ -10,12 +10,55 @@ that instrumentation ON does not change what ``recall`` returns.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from athenaeum import push_metrics
-from athenaeum.config import resolve_push_metrics_enabled
+from athenaeum.config import resolve_cache_dir, resolve_push_metrics_enabled
+
+# ---------------------------------------------------------------------------
+# Cache-dir isolation (athenaeum#791 AC1) — the push-records ledger is one of
+# the artifacts athenaeum#791 found the test suite writing into the
+# operator's real ~/.cache/athenaeum/_push_records.jsonl (75 synthetic
+# records, 62% of the live ledger at filing).
+# ---------------------------------------------------------------------------
+
+
+class TestPushRecordsPathIsolation:
+    def test_push_records_path_no_arg_resolves_outside_real_cache_dir(self) -> None:
+        """AC1: ``push_records_path()`` with NO argument — the exact no-arg
+        resolution :func:`athenaeum.push_metrics.record_push`'s production
+        call site uses — must resolve under a test-owned tmp dir, never the
+        operator's real ``~/.cache/athenaeum``, because an autouse isolation
+        mechanism in ``tests/conftest.py`` (the whole-suite ``pytest_configure``
+        redirect, narrowed per-test by ``_isolate_cache_dir``) has already
+        pointed ``ATHENAEUM_CACHE_DIR`` at one.
+        """
+        resolved = push_metrics.push_records_path()
+        real_default = Path("~/.cache/athenaeum").expanduser()
+        assert resolved != real_default / push_metrics.PUSH_RECORDS_FILENAME
+        assert not str(resolved).startswith(str(real_default))
+        assert resolved.name == push_metrics.PUSH_RECORDS_FILENAME
+        # It must live under whatever ATHENAEUM_CACHE_DIR an autouse fixture
+        # pointed at, and that dir must NOT be the real home cache dir.
+        env_cache_dir = Path(os.environ["ATHENAEUM_CACHE_DIR"]).expanduser()
+        assert env_cache_dir != real_default
+        assert resolved == env_cache_dir / push_metrics.PUSH_RECORDS_FILENAME
+        assert resolve_cache_dir(cache_dir=None) == env_cache_dir
+
+    def test_reference_records_path_no_arg_resolves_outside_real_cache_dir(self) -> None:
+        """Same property as above, for the sibling reference-determination
+        ledger (``_push_references.jsonl``) — the other artifact
+        :func:`athenaeum.push_metrics.record_reference_result` writes with no
+        explicit ``cache_dir`` at its production call site.
+        """
+        resolved = push_metrics.reference_records_path()
+        real_default = Path("~/.cache/athenaeum").expanduser()
+        assert resolved != real_default / push_metrics.REFERENCE_RECORDS_FILENAME
+        assert not str(resolved).startswith(str(real_default))
+
 
 # ---------------------------------------------------------------------------
 # Session-id resolution (issue athenaeum#734)
@@ -501,6 +544,94 @@ class TestComputeBaseline:
             repo_root=Path("."),
         )
         assert baseline.reference_record_count == 0
+
+
+class TestComputeBaselineExcludeSessions:
+    """athenaeum#791 AC3: a ledger containing a synthetic session must either be
+    excludable, or its contamination must be reported as a distinct field —
+    never silently folded into a clean-looking total.
+
+    ``synth`` below mirrors the athenaeum#791 evidence shape: one session
+    whose push items are fixture-style filenames, mixed into a ledger that
+    also has genuinely clean sessions.
+    """
+
+    @staticmethod
+    def _seed_ledger(cache: Path) -> None:
+        clean_push = push_metrics.build_push_record(
+            session_id="clean-session",
+            query="q",
+            backend="fts5",
+            hits=[("f.md", {"uid": "a1b2c3d4"}, "clean body")],
+        )
+        push_metrics.record_push(clean_push, cache_dir=cache)
+        clean_ref = push_metrics.ReferenceResult(
+            session_id="clean-session",
+            ts="2026-01-01T00:00:00Z",
+            pushed_ids=["a1b2c3d4"],
+            referenced_ids=["a1b2c3d4"],
+        )
+        push_metrics.record_reference_result(clean_ref, cache_dir=cache)
+
+        synth_push = push_metrics.build_push_record(
+            session_id="synth-session",
+            query="q",
+            backend="fts5",
+            hits=[("test-page.md", None, "fixture body")],
+        )
+        push_metrics.record_push(synth_push, cache_dir=cache)
+        synth_ref = push_metrics.ReferenceResult(
+            session_id="synth-session",
+            ts="2026-01-01T00:00:00Z",
+            pushed_ids=["test-page.md"],
+            referenced_ids=[],
+        )
+        push_metrics.record_reference_result(synth_ref, cache_dir=cache)
+
+    def test_default_reports_the_contaminated_total_not_silently(self, tmp_path: Path) -> None:
+        """No exclusion requested: the contamination is still visible — the
+        session/record counts include the synthetic session (nothing is
+        silently dropped by default), and the exclusion fields are the
+        honest zero/empty, not fabricated.
+        """
+        cache = tmp_path
+        self._seed_ledger(cache)
+        baseline = push_metrics.compute_baseline(cache_dir=cache, repo_root=Path("."))
+        assert baseline.session_count == 2
+        assert baseline.push_record_count == 2
+        assert baseline.reference_record_count == 2
+        assert baseline.excluded_sessions == ()
+        assert baseline.excluded_push_record_count == 0
+        assert baseline.excluded_reference_record_count == 0
+
+    def test_exclude_sessions_drops_the_synthetic_session(self, tmp_path: Path) -> None:
+        cache = tmp_path
+        self._seed_ledger(cache)
+        baseline = push_metrics.compute_baseline(
+            cache_dir=cache, repo_root=Path("."), exclude_sessions=["synth-session"]
+        )
+        assert baseline.session_count == 1
+        assert baseline.push_record_count == 1
+        assert baseline.reference_record_count == 1
+        # 1 pushed (a1b2c3d4), 1 referenced -> precision 1.0, no longer diluted
+        # by the synthetic session's 0/1.
+        assert baseline.precision == pytest.approx(1.0)
+        assert baseline.excluded_sessions == ("synth-session",)
+        assert baseline.excluded_push_record_count == 1
+        assert baseline.excluded_reference_record_count == 1
+
+    def test_excluding_a_session_absent_from_the_window_reports_zero(self, tmp_path: Path) -> None:
+        """Requesting exclusion of a session id with no records in the window
+        must not fabricate a count — it reports zero, honestly.
+        """
+        cache = tmp_path
+        self._seed_ledger(cache)
+        baseline = push_metrics.compute_baseline(
+            cache_dir=cache, repo_root=Path("."), exclude_sessions=["never-ran"]
+        )
+        assert baseline.excluded_sessions == ()
+        assert baseline.excluded_push_record_count == 0
+        assert baseline.session_count == 2  # unaffected
 
 
 # ---------------------------------------------------------------------------
