@@ -340,6 +340,37 @@ class TestPromptBuilding:
         for name in ("alpha.md", "bravo.md", "charlie.md"):
             assert name in user_content
 
+    def test_detector_call_carries_cache_control_breakpoint(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#790: the detector system prompt is sent as a cacheable block.
+
+        The detector system prompt is constant across every call in a run, so
+        it is marked with an ephemeral ``cache_control`` breakpoint (mirroring
+        the resolver's pre-existing breakpoint, issue athenaeum#230) so prompt
+        caching engages on the ``api`` backend whenever the configured model's
+        minimum cacheable prefix allows it.
+        """
+        import athenaeum.contradictions as contradictions_mod
+
+        scope = tmp_path / "scope"
+        m1 = _write_am(scope, "a.md", "x")
+        m2 = _write_am(scope, "b.md", "y")
+        client = _fake_client(
+            '{"detected": false, "conflict_type": null, '
+            '"members_involved": [], "conflicting_passages": [], '
+            '"rationale": ""}'
+        )
+        detect_contradictions([m1, m2], client)
+
+        kwargs = client.messages.create.call_args.kwargs
+        system = kwargs["system"]
+        assert isinstance(system, list) and len(system) == 1
+        block = system[0]
+        assert block["type"] == "text"
+        assert block["text"] == contradictions_mod._DETECT_SYSTEM
+        assert block["cache_control"] == {"type": "ephemeral"}
+
 
 # ---------------------------------------------------------------------------
 # Dataclass
