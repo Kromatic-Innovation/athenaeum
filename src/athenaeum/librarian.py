@@ -155,6 +155,12 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
+from athenaeum.pii import (
+    HardBounceFact,
+    contacts_surface_root,
+    detect_hard_bounce_fact,
+    mark_bounced,
+)
 from athenaeum.provider import (
     ProviderConfigError,
     build_llm_client,
@@ -781,6 +787,64 @@ def tier0_handle_upsert(
     return entity, True
 
 
+def tier0_bounce_mark(
+    raw: RawFile,
+    wiki_root: Path,
+    config: dict[str, object] | None = None,
+    dry_run: bool = False,
+) -> HardBounceFact | None:
+    """Deterministically recognize + mark a hard-bounce fact, LLM-free (issue athenaeum#765).
+
+    A hard-bounce fact arrives as an ORDINARY free-text raw-intake note — the
+    same ``remember()`` call every other fact uses. No new intake schema, no
+    ``type:`` field, no dedicated code path: this is just one more
+    decline-or-apply branch in the SAME tier dispatch every raw file already
+    goes through in :func:`process_one`, mirroring :func:`tier0_handle_upsert`'s
+    shape (deterministic, eligibility-gated, ``None`` falls through to
+    Tier 1/2/3 with today's behaviour intact).
+
+    Eligibility (ALL required, else ``None``):
+
+    - the raw's OWN frontmatter carries a non-empty ``observed_at`` and
+      ``source`` — both PRE-EXISTING generic per-claim fields (athenaeum#424,
+      athenaeum#90) every ``remember()`` call can already carry, not a new
+      schema; and
+    - the body text is recognized by :func:`athenaeum.pii.detect_hard_bounce_fact`
+      — exactly one email-shaped identifier plus a ``5.x.x`` hard-bounce
+      diagnostic. A ``4.x`` (transient) diagnostic, or a note naming zero or
+      several addresses, never matches and is left for the LLM tiers.
+
+    On a match, the mark is written to the identifier's contact record on
+    the PII/contacts surface (:func:`athenaeum.pii.mark_bounced`) unless
+    *dry_run*, mirroring :func:`tier0_handle_upsert`'s dry-run posture
+    (detect and report, never write).
+    """
+    meta, body = parse_frontmatter(raw.content)
+    if not isinstance(meta, dict):
+        return None
+    observed_at = str(meta.get("observed_at", "") or "").strip()
+    source = meta.get("source")
+    if not observed_at or not source:
+        return None
+
+    fact = detect_hard_bounce_fact(body)
+    if fact is None:
+        return None
+
+    if dry_run:
+        return fact
+
+    contacts_root = contacts_surface_root(wiki_root.parent, config)
+    mark_bounced(
+        contacts_root,
+        fact.identifier,
+        diagnostic=fact.diagnostic,
+        observed_at=observed_at,
+        source=source,
+    )
+    return fact
+
+
 def process_one(
     raw: RawFile,
     index: EntityIndex,
@@ -859,6 +923,19 @@ def process_one(
                 entity.name,
                 entity.filename,
             )
+        return result
+
+    # --- Tier 0 (bounce mark): deterministic hard-bounce recognition onto
+    # the PII/contacts surface (issue athenaeum#765). See tier0_bounce_mark's
+    # docstring — anything that does not conform (ambiguous identifier, a
+    # 4.x code, missing observed_at/source) falls through to Tier 1/2/3
+    # completely unchanged.
+    bounce_fact = tier0_bounce_mark(raw, wiki_root, config=config, dry_run=dry_run)
+    if bounce_fact is not None:
+        log.info(
+            "  T0 bounce-mark: %s marked non-deliverable on the contacts surface",
+            bounce_fact.identifier,
+        )
         return result
 
     # --- Tier 1: Programmatic matching ---
