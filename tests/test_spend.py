@@ -1040,6 +1040,392 @@ class TestQueryTopicsLedger:
 
 
 # ---------------------------------------------------------------------------
+# Repricing (issue athenaeum#788) — `athenaeum spend --reprice`
+#
+# tokens_by_model (athenaeum#487) exists SO THAT history can be repriced; before
+# athenaeum#788 nothing consumed it, so correcting a rate (athenaeum#777's 6.67x Fable
+# under-report) or making rates config-owned (athenaeum#783) bought nothing
+# retroactively. These pin the door: read-only, unpriceable rows reported
+# rather than dropped or zeroed, and the two cost paths never blended.
+# ---------------------------------------------------------------------------
+
+
+def _write_raw_row(ledger: Path, record: dict[str, Any]) -> None:
+    """Append a hand-built row, bypassing build_record.
+
+    The only way to produce a genuinely pre-v2 row (no ``tokens_by_model``) —
+    the writer always emits the field now, so the unpriceable path cannot be
+    exercised through ``record_spend``.
+    """
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
+def _pre_v2_api_row(usd: float = 4.25) -> dict[str, Any]:
+    """A pre-athenaeum#487 API row: real stored dollars, NO per-model attribution."""
+    return {
+        "v": 1,
+        "ts": "2026-01-01T00:00:00Z",
+        "run_type": "librarian",
+        "provider": "anthropic",
+        "session_id": None,
+        "models": [],
+        "api_calls": 3,
+        "input_tokens": 500_000,
+        "output_tokens": 100_000,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 600_000,
+        "estimated_cost_usd": usd,
+    }
+
+
+def _knowledge_dir(tmp_path: Path, pricing_yaml: str = "") -> Path:
+    """A knowledge dir for ``--path``, optionally carrying a ``pricing:`` block.
+
+    Always passed explicitly by the CLI reprice tests: ``--path`` defaults to
+    the operator's real ``~/knowledge``, so a test that omits it would resolve
+    ITS pricing section and stop being hermetic.
+    """
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir(parents=True, exist_ok=True)
+    (knowledge / "athenaeum.yaml").write_text(pricing_yaml, encoding="utf-8")
+    return knowledge
+
+
+class TestReprice:
+    def test_reprice_reports_new_figure_while_stored_row_is_untouched(
+        self, ledger: Path
+    ) -> None:
+        """athenaeum#788 AC5 (and the heart of AC1): write a row under one rate
+        table, change the rate, and --reprice reports the NEW figure while the
+        stored row keeps the old one."""
+        from athenaeum.models import configure_model_rates
+
+        assert spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+        stored_row = spend.read_ledger(ledger)[0]
+        stored_usd = stored_row["estimated_cost_usd"]
+        assert stored_usd > 0.0
+
+        # Double the rate for the model this row is tagged with.
+        configure_model_rates({"claude-opus-4": (10.0, 50.0)})
+        repriced = spend.reprice(spend.read_ledger(ledger))
+
+        assert repriced["api"]["repriced_usd"] == pytest.approx(stored_usd * 2)
+        assert repriced["api"]["stored_usd"] == pytest.approx(stored_usd)
+        assert repriced["api"]["delta_usd"] == pytest.approx(stored_usd)
+        # The ROW on disk still carries the original figure — repricing reports,
+        # it does not rewrite.
+        assert spend.read_ledger(ledger)[0]["estimated_cost_usd"] == stored_usd
+
+    def test_ledger_file_is_byte_identical_after_a_reprice_run(
+        self, ledger: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """athenaeum#788 AC2: the ledger is append-only; a reprice must leave the
+        file byte-for-byte unchanged. Asserted against the CLI, the surface an
+        operator actually runs."""
+        from athenaeum.models import configure_model_rates
+
+        spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        _write_raw_row(ledger, _pre_v2_api_row())
+
+        before = ledger.read_bytes()
+        before_mtime = ledger.stat().st_mtime_ns
+
+        configure_model_rates({"claude-opus-4": (99.0, 99.0)})
+        rc = main(
+            ["spend", "--since", "3650d", "--reprice",
+             "--ledger", str(ledger), "--path", str(_knowledge_dir(tmp_path))]
+        )
+        assert rc == 0
+        capsys.readouterr()
+
+        assert ledger.read_bytes() == before
+        assert ledger.stat().st_mtime_ns == before_mtime
+
+    def test_unpriceable_rows_are_counted_never_dropped_never_zeroed(
+        self, ledger: Path
+    ) -> None:
+        """athenaeum#788 AC3: a row with no tokens_by_model is reported as
+        unpriceable with a count — it stays in record_count, its stored dollars
+        are still reported, and it is never silently priced at zero."""
+        spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+        _write_raw_row(ledger, _pre_v2_api_row(usd=4.25))
+
+        repriced = spend.reprice(spend.read_ledger(ledger))
+
+        # Not dropped.
+        assert repriced["record_count"] == 2
+        assert repriced["api"]["records"] == 2
+        # Counted, at both levels.
+        assert repriced["unpriceable_records"] == 1
+        assert repriced["api"]["unpriceable_records"] == 1
+        assert repriced["repriced_records"] == 1
+        # Not zeroed — the stored dollars repricing could not touch are
+        # reported explicitly.
+        assert repriced["api"]["unpriceable_stored_usd"] == pytest.approx(4.25)
+        # ...and they are excluded from the like-for-like delta base, so the
+        # delta reflects the repriced row alone rather than the unpriceable
+        # row's stored value masquerading as a rate change.
+        assert repriced["api"]["stored_usd"] == pytest.approx(
+            repriced["api"]["stored_usd_priceable"] + 4.25
+        )
+        assert repriced["api"]["delta_usd"] == pytest.approx(
+            repriced["api"]["repriced_usd"] - repriced["api"]["stored_usd_priceable"]
+        )
+
+    def test_reprice_record_returns_none_not_zero_for_an_unattributed_row(self) -> None:
+        """The unit-level distinction AC3 rests on: unknown price is None, which
+        a caller can tell apart from a genuine $0."""
+        assert spend.reprice_record(_pre_v2_api_row()) is None
+        assert spend.reprice_record({"tokens_by_model": {}}) is None
+        priced = spend.reprice_record(
+            {"tokens_by_model": {"claude-opus-4": {"input": 1_000_000, "output": 0}}}
+        )
+        assert priced == pytest.approx(5.0)
+
+    def test_subscription_and_api_are_never_blended(self, ledger: Path) -> None:
+        """athenaeum#788 AC4: repricing preserves the billing-mode split — a
+        subscription row never becomes real dollars, and the two paths are
+        reported in separate buckets."""
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+
+        repriced = spend.reprice(spend.read_ledger(ledger))
+
+        assert repriced["subscription"]["records"] == 1
+        assert repriced["api"]["records"] == 1
+        # A subscription row carries $0 real dollars stored AND repriced —
+        # repricing must never turn subscription notional into money owed.
+        assert repriced["subscription"]["stored_usd"] == 0.0
+        assert repriced["subscription"]["repriced_usd"] == 0.0
+        assert repriced["subscription"]["delta_usd"] == 0.0
+        # Its notional IS repriced — that is the figure that means something on
+        # this path.
+        assert repriced["subscription"]["repriced_notional_usd"] > 0.0
+        # And the api bucket carries only the api row's dollars: no subscription
+        # tokens leaked in.
+        assert repriced["api"]["repriced_usd"] == pytest.approx(
+            spend.reprice_record(spend.read_ledger(ledger)[1])
+        )
+
+    def test_unknown_billing_mode_stays_in_its_own_bucket(self, ledger: Path) -> None:
+        """athenaeum#694's distinct-state contract survives repricing: an
+        undeterminable row is never folded into api."""
+        _write_raw_row(
+            ledger,
+            {
+                "v": 2,
+                "ts": "2026-01-01T00:00:00Z",
+                "run_type": "librarian",
+                "provider": "mystery-proxy",
+                "estimated_cost_usd": 1.0,
+                "notional_usd": 1.0,
+                "tokens_by_model": {"claude-opus-4": {"input": 1_000_000, "output": 0}},
+            },
+        )
+        repriced = spend.reprice(spend.read_ledger(ledger))
+        assert repriced["unknown"]["records"] == 1
+        assert repriced["unknown"]["repriced_usd"] == pytest.approx(5.0)
+        assert repriced["api"]["records"] == 0
+        assert repriced["api"]["repriced_usd"] == 0.0
+
+    def test_reprice_uses_the_writers_own_cache_and_batch_arithmetic(
+        self, ledger: Path
+    ) -> None:
+        """A row with cache and batch traffic must reprice through the SAME
+        multipliers that wrote it (athenaeum#239's 1.25x/0.10x, athenaeum#236's 50%
+        batch discount) — at an UNCHANGED rate table, reprice must reproduce
+        the stored figure exactly. This is what catches a reimplemented formula
+        drifting from TokenUsage._cost_for."""
+        u = TokenUsage()
+        u.add(100_000, 20_000, 40_000, 90_000, model="claude-sonnet-4-6")
+        u.add_batch_tokens(200_000, 30_000, 10_000, 5_000, model="claude-haiku-4-5")
+        assert spend.record_spend(u, run_type="librarian", provider="api")
+
+        rec = spend.read_ledger(ledger)[0]
+        assert spend.reprice_record(rec) == pytest.approx(rec["estimated_cost_usd"])
+
+        repriced = spend.reprice([rec])
+        assert repriced["api"]["delta_usd"] == pytest.approx(0.0)
+
+    def test_reprice_at_unchanged_rates_reports_a_zero_delta(self, ledger: Path) -> None:
+        """The no-op case: nothing has changed, so the report says so."""
+        spend.record_spend(_mixed_model_api_usage(), run_type="librarian", provider="api")
+        repriced = spend.reprice(spend.read_ledger(ledger))
+        assert repriced["api"]["delta_usd"] == pytest.approx(0.0)
+        assert repriced["api"]["repriced_records"] == 1
+        assert repriced["unpriceable_records"] == 0
+
+    def test_empty_ledger_reprices_to_an_empty_report(self, ledger: Path) -> None:
+        repriced = spend.reprice([])
+        assert repriced["record_count"] == 0
+        assert repriced["repriced_records"] == 0
+        assert repriced["unpriceable_records"] == 0
+        for bucket in ("subscription", "api", "unknown"):
+            assert repriced[bucket]["delta_usd"] == 0.0
+
+    def test_format_reprice_shows_stored_repriced_and_delta(self, ledger: Path) -> None:
+        from athenaeum.models import configure_model_rates
+
+        spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+        _write_raw_row(ledger, _pre_v2_api_row())
+        configure_model_rates({"claude-opus-4": (10.0, 50.0)})
+
+        out = spend.format_reprice(
+            spend.reprice(spend.read_ledger(ledger)), since_label="30d"
+        )
+        assert "reprice" in out.lower()
+        assert "ledger NOT modified" in out
+        assert "repriced" in out
+        assert "delta" in out
+        assert "unpriceable" in out
+        # The stored dollars repricing could not touch are NAMED, not just
+        # counted -- "not zeroed" has to be legible in the human report too.
+        assert "4.2500" in out
+        # The unknown row is absent, so its line is suppressed -- mirroring
+        # format_summary, which surfaces unknown only when present.
+        assert "Unknown" not in out
+
+    def test_format_reprice_surfaces_an_unknown_row_when_present(
+        self, ledger: Path
+    ) -> None:
+        """athenaeum#694's distinct state must be VISIBLE in the report, not just
+        in the JSON — an undeterminable row a reader never sees is one they
+        will mistake for no activity."""
+        _write_raw_row(
+            ledger,
+            {
+                "v": 2,
+                "ts": "2026-01-01T00:00:00Z",
+                "run_type": "librarian",
+                "provider": "mystery-proxy",
+                "estimated_cost_usd": 1.0,
+                "notional_usd": 1.0,
+                "tokens_by_model": {"claude-opus-4": {"input": 1_000_000, "output": 0}},
+            },
+        )
+        out = spend.format_reprice(
+            spend.reprice(spend.read_ledger(ledger)), since_label="30d"
+        )
+        assert "Unknown" in out
+        assert "undeterminable" in out
+
+    def test_a_malformed_per_model_entry_is_skipped_not_fatal(self) -> None:
+        """The ledger reader already tolerates a torn/hand-edited line; the
+        repricer must not become the thing that crashes on one. A non-dict
+        bucket is skipped, and the row still reprices from its sound entries."""
+        priced = spend.reprice_record(
+            {
+                "tokens_by_model": {
+                    "claude-opus-4": {"input": 1_000_000, "output": 0},
+                    "claude-sonnet-4-6": "corrupt",
+                }
+            }
+        )
+        assert priced == pytest.approx(5.0)
+
+
+class TestRepriceCommand:
+    def test_cli_reprice_json_shape(
+        self, ledger: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """athenaeum#788 AC1 over the CLI: recomputed alongside stored, with the
+        delta, in the machine-readable shape."""
+        spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+        stored = spend.read_ledger(ledger)[0]["estimated_cost_usd"]
+        knowledge = _knowledge_dir(
+            tmp_path, "pricing:\n  claude-opus-4: [10.0, 50.0]\n"
+        )
+
+        rc = main(
+            ["spend", "--since", "30d", "--reprice", "--json",
+             "--ledger", str(ledger), "--path", str(knowledge)]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+
+        assert payload["ledger_path"] == str(ledger)
+        api = payload["reprice"]["api"]
+        assert api["stored_usd"] == pytest.approx(stored)
+        assert api["repriced_usd"] == pytest.approx(stored * 2)
+        assert api["delta_usd"] == pytest.approx(stored)
+
+    def test_cli_reprice_human_output(
+        self, ledger: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+        spend.record_spend(_sub_usage(), run_type="librarian", provider="claude-cli")
+        rc = main(
+            ["spend", "--since", "30d", "--reprice",
+             "--ledger", str(ledger), "--path", str(_knowledge_dir(tmp_path))]
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "API" in out
+        assert "Subscription" in out
+        assert "delta" in out
+
+    def test_cli_reprice_honours_the_yaml_pricing_section(
+        self, ledger: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """athenaeum#788: "at CURRENT rates" means the operator's CONFIGURED
+        rates (athenaeum#783), not the code-default table — the whole reason
+        configurable pricing was a blocker for this issue. Pinned by contrast:
+        the SAME ledger reprices differently under two different configs, and
+        an in-process rate table cannot override what the config says.
+        """
+        from athenaeum.models import configure_model_rates
+
+        spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+        stored = spend.read_ledger(ledger)[0]["estimated_cost_usd"]
+
+        # An ambient process table must NOT leak into the report: the command
+        # resolves rates from config, so its answer is reproducible from the
+        # operator's yaml alone.
+        configure_model_rates({"claude-opus-4": (1000.0, 1000.0)})
+
+        override = _knowledge_dir(
+            tmp_path / "with", "pricing:\n  claude-opus-4: [10.0, 50.0]\n"
+        )
+        rc = main(
+            ["spend", "--since", "30d", "--reprice", "--json",
+             "--ledger", str(ledger), "--path", str(override)]
+        )
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["reprice"]["api"][
+            "repriced_usd"
+        ] == pytest.approx(stored * 2)
+
+        # No pricing: section -> the code-default table, so an unchanged rate
+        # reprices to the stored figure.
+        plain = _knowledge_dir(tmp_path / "without")
+        rc = main(
+            ["spend", "--since", "30d", "--reprice", "--json",
+             "--ledger", str(ledger), "--path", str(plain)]
+        )
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["reprice"]["api"][
+            "repriced_usd"
+        ] == pytest.approx(stored)
+
+    def test_cli_default_report_is_unchanged_by_the_new_flag(
+        self, ledger: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--reprice is strictly additive: without it, the existing report and
+        its JSON shape (what /good-morning consumes) are untouched."""
+        spend.record_spend(_api_usage(), run_type="query-topics", provider="api")
+        rc = main(["spend", "--since", "30d", "--json", "--ledger", str(ledger)])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert "reprice" not in payload
+        for key in ("subscription", "api", "unknown", "record_count"):
+            assert key in payload
+
+
+# ---------------------------------------------------------------------------
 # Suite-wide ledger isolation (issue athenaeum#776)
 # ---------------------------------------------------------------------------
 

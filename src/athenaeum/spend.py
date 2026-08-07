@@ -69,10 +69,25 @@ trailing line. It records ONLY counts, model ids, run type, provider,
 session id and timestamp — never prompt/response content, environment
 values, or credentials.
 
+**Repricing (issue athenaeum#788).** ``tokens_by_model`` exists so a historical row
+can be repriced when a rate is corrected or made config-owned (athenaeum#783) —
+:func:`reprice` is that door. It recomputes each row from its per-model
+attribution against the CURRENT rate table and reports the delta against the
+stored figure. It is **read-only**: the ledger is append-only by design, so
+repricing reports a corrected number and never rewrites history. Rows with no
+per-model attribution stay *unpriceable* — counted and reported, never dropped
+and never priced at zero.
+
 **Layering:** L3 service. Module scope imports only :mod:`athenaeum.config`
 (L2); ``athenaeum.models.TokenUsage`` is a ``TYPE_CHECKING``-only import
 (the type is never constructed here — callers pass their own accumulator in)
-so this module carries no runtime dependency on :mod:`athenaeum.models`.
+so this module carries no MODULE-SCOPE runtime dependency on
+:mod:`athenaeum.models`. The athenaeum#788 reprice path takes a FUNCTION-level
+import of :func:`athenaeum.models.cost_for_token_bucket` — the same
+convention this module already uses for the :mod:`athenaeum.config` resolvers
+— so that a reprice reuses the writer's own pricing arithmetic instead of
+reimplementing (and drifting from) it. :mod:`athenaeum.models` imports nothing
+from athenaeum, so no cycle is possible.
 Consumed by the L4 pipeline (:mod:`athenaeum.librarian`, :mod:`athenaeum.drain`)
 at the end of a run — never imports either back.
 """
@@ -667,6 +682,206 @@ def format_summary(
                 f"    {knob:<28} sub {_fmt_tokens(s['total_tokens'])} tok"
                 f"  / api ${a['estimated_cost_usd']:.2f}"
             )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Repricing (issue athenaeum#788) — recompute history at CURRENT rates, read-only
+# ---------------------------------------------------------------------------
+
+
+def _blank_reprice_bucket() -> dict[str, Any]:
+    return {
+        # Stored figures, summed over EVERY record in this billing bucket —
+        # including the unpriceable ones, so the bucket's stored total still
+        # reconciles against ``summarize``.
+        "stored_usd": 0.0,
+        "stored_notional_usd": 0.0,
+        # Stored figures for the REPRICEABLE subset only. The like-for-like
+        # base for the delta below — comparing a repriced subset against a
+        # stored total that also covers unpriceable rows would report a
+        # difference that is really just the rows repricing could not touch.
+        "stored_usd_priceable": 0.0,
+        "stored_notional_usd_priceable": 0.0,
+        # Recomputed at the CURRENT active rate table, repriceable rows only.
+        "repriced_usd": 0.0,
+        "repriced_notional_usd": 0.0,
+        # repriced - stored_*_priceable.
+        "delta_usd": 0.0,
+        "delta_notional_usd": 0.0,
+        "records": 0,
+        "repriced_records": 0,
+        # Rows in this bucket carrying no per-model attribution, and the stored
+        # dollars they account for. Reported, never dropped and never zeroed.
+        "unpriceable_records": 0,
+        "unpriceable_stored_usd": 0.0,
+        "unpriceable_stored_notional_usd": 0.0,
+    }
+
+
+def reprice_record(record: dict[str, Any]) -> float | None:
+    """Recompute one record's API-rate cost from ``tokens_by_model`` (athenaeum#788).
+
+    Returns the recomputed dollar figure at the CURRENT active rate table
+    (:func:`athenaeum.models.configure_model_rates` — so an operator's
+    ``athenaeum.yaml`` ``pricing:`` section applies), or ``None`` when the row
+    carries no per-model attribution and is therefore *unpriceable* — the same
+    condition :func:`summarize` counts as ``unpriceable_records``. ``None`` is
+    deliberately NOT ``0.0``: a pre-v2 row (or any run that tagged no model) has
+    an unknown price, not a zero one, and a caller must be able to tell them
+    apart (issue athenaeum#788's third acceptance criterion).
+
+    This is a pure computation over the record dict — it never touches the
+    ledger file. The ledger is append-only by design; repricing REPORTS a
+    corrected figure, it does not rewrite history.
+
+    The per-model arithmetic (cache multipliers, the Batch API 50% discount,
+    longest-prefix rate match) is delegated to
+    :func:`athenaeum.models.cost_for_token_bucket` — the same code path that
+    priced the row when it was written, so a reprice can never drift from the
+    writer's formula. That import is function-level to keep this module's
+    MODULE-scope runtime dependency set at :mod:`athenaeum.config` alone (see
+    the module docstring's layering note); :mod:`athenaeum.models` imports
+    nothing from athenaeum, so there is no cycle to create.
+    """
+    from athenaeum.models import cost_for_token_bucket
+
+    by_model = record.get("tokens_by_model")
+    if not isinstance(by_model, dict) or not by_model:
+        return None
+    total = 0.0
+    for model, bucket in by_model.items():
+        if not isinstance(bucket, dict):
+            continue
+        total += cost_for_token_bucket(model, bucket)
+    return total
+
+
+def reprice(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Reprice ledger records at the CURRENT rates, keeping the paths SEPARATE.
+
+    Mirrors :func:`summarize`'s contract exactly, one dimension over: a
+    ``subscription`` / ``api`` / ``unknown`` split that is NEVER blended (issue
+    athenaeum#487, athenaeum#694), reporting for each bucket the stored figure, the
+    recomputed figure, and the delta between them.
+
+    The UNIT differs per path, as everywhere else in this module:
+
+    * **api** — real dollars. ``stored_usd`` is what the row recorded;
+      ``repriced_usd`` is the same tokens at today's table.
+    * **subscription** — real dollars are ``0.0`` on this path by construction
+      and STAY ``0.0`` after repricing (a subscription row never becomes real
+      money). The figure repricing actually corrects here is the counterfactual
+      ``notional_usd`` (issue athenaeum#487), so the subscription bucket's signal is
+      ``*_notional_usd``. Both are carried on every bucket for a uniform shape,
+      but they are never summed with each other.
+    * **unknown** — an undeterminable row (issue athenaeum#694) is repriced within its
+      own bucket and never folded into ``api``.
+
+    Rows with no ``tokens_by_model`` are counted as ``unpriceable_records``,
+    per bucket and at the top level, and their STORED dollars are reported as
+    ``unpriceable_stored_usd``. They are never dropped from ``record_count``,
+    never contribute to ``repriced_usd``, and never silently price at zero.
+    The delta is computed against ``stored_usd_priceable`` — the stored value of
+    exactly the rows that were repriced — so it is a like-for-like comparison.
+
+    Read-only: like :func:`reprice_record`, this only reads the records handed
+    to it. Nothing in the reprice path opens the ledger for writing.
+    """
+    buckets = {
+        "subscription": _blank_reprice_bucket(),
+        "api": _blank_reprice_bucket(),
+        "unknown": _blank_reprice_bucket(),
+    }
+    unpriceable = 0
+
+    for record in records:
+        bucket = buckets[resolve_billing_bucket(record)]
+        is_subscription = bucket is buckets["subscription"]
+        stored_usd = float(record.get("estimated_cost_usd", 0.0) or 0.0)
+        stored_notional = float(record.get("notional_usd", 0.0) or 0.0)
+        bucket["records"] += 1
+        bucket["stored_usd"] += stored_usd
+        bucket["stored_notional_usd"] += stored_notional
+
+        recomputed = reprice_record(record)
+        if recomputed is None:
+            unpriceable += 1
+            bucket["unpriceable_records"] += 1
+            bucket["unpriceable_stored_usd"] += stored_usd
+            bucket["unpriceable_stored_notional_usd"] += stored_notional
+            continue
+
+        bucket["repriced_records"] += 1
+        bucket["stored_usd_priceable"] += stored_usd
+        bucket["stored_notional_usd_priceable"] += stored_notional
+        # The subscription path is not billed, so its recomputed REAL dollars
+        # stay 0.0 exactly as ``build_record`` writes them — repricing must
+        # never turn subscription notional into money owed. Its recomputed
+        # figure lands on ``notional`` alone.
+        bucket["repriced_usd"] += 0.0 if is_subscription else recomputed
+        bucket["repriced_notional_usd"] += recomputed
+
+    for bucket in buckets.values():
+        bucket["delta_usd"] = bucket["repriced_usd"] - bucket["stored_usd_priceable"]
+        bucket["delta_notional_usd"] = (
+            bucket["repriced_notional_usd"] - bucket["stored_notional_usd_priceable"]
+        )
+
+    return {
+        "record_count": len(records),
+        "unpriceable_records": unpriceable,
+        "repriced_records": sum(b["repriced_records"] for b in buckets.values()),
+        **buckets,
+    }
+
+
+def format_reprice(reprice_summary: dict[str, Any], *, since_label: str) -> str:
+    """Render a repricing report: stored vs recomputed vs delta, never blended."""
+    sub = reprice_summary["subscription"]
+    api = reprice_summary["api"]
+    unknown = reprice_summary["unknown"]
+    lines = [
+        f"Athenaeum spend reprice (since {since_label}) "
+        f"— recomputed at CURRENT rates; ledger NOT modified:"
+    ]
+    lines.append(
+        f"  API           stored ${api['stored_usd_priceable']:.4f}"
+        f"  ->  repriced ${api['repriced_usd']:.4f}"
+        f"  (delta {api['delta_usd']:+.4f}, {api['repriced_records']} row(s))"
+    )
+    # Subscription real dollars are $0 stored and $0 repriced by construction —
+    # report the NOTIONAL, which is the figure repricing actually corrects here.
+    lines.append(
+        f"  Subscription  notional ${sub['stored_notional_usd_priceable']:.4f}"
+        f"  ->  ${sub['repriced_notional_usd']:.4f}"
+        f"  (delta {sub['delta_notional_usd']:+.4f}, {sub['repriced_records']} row(s))"
+    )
+    if unknown["records"] > 0:
+        lines.append(
+            f"  Unknown       notional ${unknown['stored_notional_usd_priceable']:.4f}"
+            f"  ->  ${unknown['repriced_notional_usd']:.4f}"
+            f"  (delta {unknown['delta_notional_usd']:+.4f},"
+            f" {unknown['repriced_records']} row(s)"
+            f" — billing mode undeterminable)"
+        )
+    tail = (
+        f"  Repriced {reprice_summary['repriced_records']} of "
+        f"{reprice_summary['record_count']} row(s); "
+        f"{reprice_summary['unpriceable_records']} unpriceable "
+        f"(no per-model attribution — reported, not dropped, not zeroed)"
+    )
+    # Name the stored dollars repricing could NOT touch, not just the row
+    # count: a reader who sees only a count has no way to tell whether the
+    # opaque rows are a rounding error or most of the bill, and "not zeroed"
+    # should be legible in the human report, not only in --json.
+    stranded = sum(
+        b["unpriceable_stored_usd"]
+        for b in (sub, api, unknown)
+    )
+    if reprice_summary["unpriceable_records"]:
+        tail += f", holding ${stranded:.4f} of stored API cost"
+    lines.append(tail + ".")
     return "\n".join(lines)
 
 
