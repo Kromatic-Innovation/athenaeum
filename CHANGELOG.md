@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`athenaeum push-metrics baseline` no longer writes an unconditional
+  snapshot, and refuses to write a placeholder against a dead instrument
+  (athenaeum#795).** The write to `docs/memory-model-measurements.md`
+  previously happened before the `--json`/text branch and regardless of
+  whether the baseline had anything meaningful to say — `--json` only
+  redirected stdout, so there was no read-only way to check whether a
+  baseline was computable. That caused a real incident: a run with `--json`
+  meant purely as a check silently appended a dated placeholder snapshot,
+  went unnoticed for ~2 hours, and had to be reverted with a correction
+  comment on athenaeum#711. Two fixes: (1) a new `--dry-run` flag computes
+  and displays the baseline (text or `--json`) without touching
+  `--docs-path` at all — `--json` itself is unchanged, a stdout-format
+  concern only, and does not by itself suppress the write; (2) a baseline
+  with zero reference-determination records (precision not computable) is
+  now refused — `athenaeum.push_metrics.write_snapshot` raises `ValueError`
+  naming what was missing, the CLI reports it on stderr and exits `1`, and
+  nothing is written. Covered by
+  `tests/test_push_metrics_cli.py::test_baseline_dry_run_does_not_write`,
+  `test_baseline_dry_run_inspects_invalid_baseline_without_writing`,
+  `test_baseline_json_alone_still_writes`,
+  `test_baseline_empty_ledger_is_honest` (rewritten to assert the refusal),
+  `test_baseline_default_docs_path_not_written_for_invalid_baseline` (the
+  default relative `docs_path` — the thing that actually wrote into the
+  repo during the incident — was previously exercised by no test), and
+  `tests/test_push_metrics.py::TestWriteSnapshot::test_creates_new_file`
+  (also rewritten to assert the refusal).
+
 - **`examples/claude-code/user-prompt-recall.sh` no longer gates the LLM
   topic extractor on `ANTHROPIC_API_KEY` (athenaeum#792).** `query-topics`
   routes through `build_llm_client`, which honors `llm.provider` — under
