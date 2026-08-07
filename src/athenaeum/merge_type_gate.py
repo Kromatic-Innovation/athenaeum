@@ -321,18 +321,18 @@ def _merge_proposal_suppression_reason(
         return f"over-cluster: {n_sources} sources > max_merge_sources={max_sources}"
     if cluster_threshold > 0.0 and min_pairwise < cluster_threshold:
         return (
-            f"single-linkage chain: min pairwise {min_pairwise:.2f} < "
-            f"cluster_threshold {cluster_threshold:.2f} (not complete-linkage)"
+            f"single-linkage chain: min pairwise {min_pairwise:.4f} < "
+            f"cluster_threshold {cluster_threshold:.4f} (not complete-linkage)"
         )
     min_mean = resolve_min_merge_mean_similarity(config)
     if min_mean > 0.0 and mean_similarity < min_mean:
         return (
-            f"low cohesion: mean pairwise {mean_similarity:.2f} < "
-            f"min_merge_mean_similarity={min_mean:.2f}"
+            f"low cohesion: mean pairwise {mean_similarity:.4f} < "
+            f"min_merge_mean_similarity={min_mean:.4f}"
         )
     min_conf = resolve_min_merge_confidence(config)
     if min_conf > 0.0 and confidence < min_conf:
-        return f"low confidence: {confidence:.2f} < min_merge_confidence={min_conf:.2f}"
+        return f"low confidence: {confidence:.4f} < min_merge_confidence={min_conf:.4f}"
     return None
 
 
