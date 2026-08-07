@@ -105,6 +105,21 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
         "KNOWLEDGE_ROOT": str(knowledge),
         "ATHENAEUM_SRC": str(athenaeum_src),
         "ATHENAEUM_PYTHON": sys.executable,
+        # `user-prompt-recall.sh` no longer gates its LLM topic extractor
+        # on ANTHROPIC_API_KEY (athenaeum#792), so the extractor branch is
+        # reachable under test whenever `command -v $ATHENAEUM_CLI`
+        # succeeds. `PATH` above is inherited from the real environment,
+        # which may have a genuine `athenaeum` CLI installed — invoking
+        # that for real would shell out to `query-topics` and could reach
+        # a live LLM (the exact hazard athenaeum#776 and athenaeum#791 are
+        # open about).
+        # Point ATHENAEUM_CLI at a path that provably does not exist so
+        # `command -v` fails deterministically and every test falls
+        # through to the regex extractor by construction, not by the
+        # accident of ANTHROPIC_API_KEY being unset. Tests that want to
+        # exercise the extractor branch itself override this with their
+        # own stub.
+        "ATHENAEUM_CLI": str(tmp_path / "no-such-athenaeum-binary"),
     }
     return env
 
@@ -194,6 +209,63 @@ class TestUserPromptRecall:
         hook_output = payload["hookSpecificOutput"]
         assert hook_output.get("hookEventName") == "UserPromptSubmit"
         assert "Customer Development" in hook_output["additionalContext"]
+
+    def test_attempts_llm_extractor_without_api_key(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#792: the extractor must be *attempted* even with no
+        ANTHROPIC_API_KEY set — under `llm.provider: claude-cli` none is
+        needed, and the hook must not silently skip it on that basis.
+
+        `$ATHENAEUM_CLI` is pointed at a local stub that records its own
+        invocation, never a real `athenaeum` binary — this proves the
+        branch is *reached* without the test ever touching a live LLM.
+
+        Uses a placeholder file (not a real FTS5 build via
+        `session-start-recall.sh`) to satisfy the hook's early "no index
+        at all" bail, so this test does not depend on the `sqlite3` CLI
+        being installed on the runner — it only needs to prove the
+        extractor call itself is reached.
+        """
+        _require("bash")
+        _require("jq")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "wiki-index.db").write_text("")
+
+        marker = tmp_path / "extractor-invoked.marker"
+        stub = tmp_path / "athenaeum-stub.sh"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo invoked >> {marker}\n"
+            "echo 'customer development'\n"
+        )
+        stub.chmod(0o755)
+
+        env = dict(hook_env)
+        env["ATHENAEUM_CLI"] = str(stub)
+        env.pop("ANTHROPIC_API_KEY", None)  # explicit: no key present
+
+        stdin_payload = json.dumps(
+            {
+                "prompt": "Tell me about customer development frameworks",
+                "session_id": f"test-{uuid.uuid4().hex}",
+            }
+        )
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=stdin_payload,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert marker.is_file(), (
+            "extractor stub was never invoked with no ANTHROPIC_API_KEY set — "
+            "the gate this test guards against has come back"
+        )
 
     def test_silent_on_short_prompt(self, hook_env: dict[str, str]) -> None:
         _require("bash")
