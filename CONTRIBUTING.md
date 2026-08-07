@@ -16,6 +16,30 @@ in `chromadb`, which the vector-search and clustering tests need. If you don't
 intend to touch search or clustering, `[dev]` alone works and those tests skip
 automatically; MCP server tests need `fastmcp` (already included in `[dev]`).
 
+## Supported Python version
+
+Athenaeum supports **one Python version at a time — currently 3.13.** CI
+(`.github/workflows/ci.yml`) tests that version only.
+
+This is a maintenance-burden decision, not a cost saving: athenaeum is a
+public repo, so GitHub-hosted Linux runner minutes are free and unlimited
+here, and the org pays nothing for extra matrix legs. What extra legs cost is
+maintenance surface — every dependency bump has to satisfy every pinned
+interpreter, every version-conditional code path has to be kept alive, and
+every red leg has to be triaged even when the others are green. Read a
+single-version matrix as intentional, not an oversight — do not re-add legs
+to "restore compatibility" or "save CI cost" (there is none to save).
+
+Bumping the supported version is one change, not three independent ones —
+update these together, in the same PR:
+
+- `strategy.matrix.python-version` in `.github/workflows/ci.yml` (plus the
+  `types` job's `Set up Python` step and its `[tool.mypy] python_version` in
+  `pyproject.toml`, which track the same version)
+- `requires-python` in `pyproject.toml`
+- the `Programming Language :: Python :: 3.*` trove classifiers in
+  `pyproject.toml`
+
 ## Pull requests
 
 - Open PRs against the `develop` branch. Never open a PR directly against `main` — `main` is the release branch and is only updated via the promotion workflow.
