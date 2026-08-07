@@ -26,18 +26,24 @@ from pathlib import Path
 import pytest
 
 from athenaeum.pii import (
+    HardBounceFact,
     Observation,
     Supersession,
     append_observation,
     append_supersession,
     contacts_surface_root,
+    default_bounce_record_path,
+    detect_hard_bounce_fact,
     find_inline_emails,
     find_inline_phones,
     fold_observations,
     has_inline_contact_fields,
+    is_bounced,
     is_pii_class_excluded,
     is_pii_flagged,
     lint_inline_contact_fields,
+    mark_bounced,
+    read_bounce_record,
     read_observations,
     read_supersessions,
     resolve_identifier,
@@ -901,3 +907,238 @@ class TestObservationLogOnExcludedSurface:
         assert contacts_surface_root(knowledge_root, EXCLUDED_CONFIG) == surface_root_for_class(
             "pii", EXCLUDED_CONFIG, knowledge_root
         )
+
+
+# ---------------------------------------------------------------------------
+# Hard-bounce recognition + mark (issue athenaeum#765)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectHardBounceFact:
+    def test_recognizes_hard_bounce(self) -> None:
+        fact = detect_hard_bounce_fact(
+            "Alex's address alex@example.org hard-bounced. "
+            "Diagnostic: 550 5.1.1 user unknown."
+        )
+        assert fact == HardBounceFact(
+            identifier="alex@example.org",
+            diagnostic=(
+                "Alex's address alex@example.org hard-bounced. "
+                "Diagnostic: 550 5.1.1 user unknown."
+            ),
+        )
+
+    def test_declines_transient_4xx_code(self) -> None:
+        # voltaire#81's "potentially stale" case — out of scope for this
+        # issue. A 4.x code must never be recognized as a hard bounce.
+        assert (
+            detect_hard_bounce_fact(
+                "alex@example.org soft-bounced. Diagnostic: 421 4.4.62 "
+                "routing issue."
+            )
+            is None
+        )
+
+    def test_declines_no_diagnostic(self) -> None:
+        assert detect_hard_bounce_fact("alex@example.org seems unreachable.") is None
+
+    def test_declines_ambiguous_multiple_addresses(self) -> None:
+        assert (
+            detect_hard_bounce_fact(
+                "alex@example.org and blair@example.org both bounced: 550 5.1.1"
+            )
+            is None
+        )
+
+    def test_declines_no_address(self) -> None:
+        assert detect_hard_bounce_fact("Something bounced: 550 5.1.1 user unknown.") is None
+
+    def test_declines_empty_text(self) -> None:
+        assert detect_hard_bounce_fact("") is None
+
+    def test_bare_status_code_still_recognized(self) -> None:
+        # The diagnostic need not carry the leading SMTP reply code.
+        fact = detect_hard_bounce_fact("blair@example.org: 5.1.1")
+        assert fact is not None
+        assert fact.identifier == "blair@example.org"
+
+
+class TestMarkBounced:
+    def test_creates_record_carrying_diagnostic_observed_at_source(
+        self, tmp_path: Path
+    ) -> None:
+        contacts_root = tmp_path / "contacts"
+        path, changed = mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1 user unknown",
+            observed_at="2026-08-05",
+            source="script:voltaire-bounce-relay",
+        )
+        assert changed is True
+        assert path.exists()
+        meta = read_bounce_record(path)
+        assert meta["identifier"] == "alex@example.org"
+        assert meta["bounce_diagnostic"] == "550 5.1.1 user unknown"
+        assert meta["observed_at"] == "2026-08-05"
+        assert meta["source"] == "script:voltaire-bounce-relay"
+        assert meta["pii"] is True
+
+    def test_default_path_is_under_contacts_root(self, tmp_path: Path) -> None:
+        contacts_root = tmp_path / "contacts"
+        path, _ = mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1",
+            observed_at="2026-08-05",
+            source="manual",
+        )
+        assert path == default_bounce_record_path(contacts_root, "alex@example.org")
+        assert path.parent == contacts_root
+
+    def test_encoded_as_valid_time_close_not_a_status_enum(self, tmp_path: Path) -> None:
+        # The mark is a valid-time close (athenaeum#308's existing mechanism),
+        # never a `bounced`/`deprecated` status field — athenaeum#765 explicitly
+        # cuts that as a durable representation.
+        contacts_root = tmp_path / "contacts"
+        path, _ = mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1",
+            observed_at="2026-08-05",
+            source="manual",
+        )
+        meta = read_bounce_record(path)
+        assert meta["valid_until"] == "2026-08-05"
+        assert "status" not in meta
+        assert "bounced" not in meta
+        assert "deprecated" not in meta
+
+    def test_idempotent_reporting_same_bounce_is_a_noop(self, tmp_path: Path) -> None:
+        contacts_root = tmp_path / "contacts"
+        path1, changed1 = mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1 user unknown",
+            observed_at="2026-08-05",
+            source="script:voltaire-bounce-relay",
+        )
+        before = path1.read_text(encoding="utf-8")
+        path2, changed2 = mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1 user unknown",
+            observed_at="2026-08-05",
+            source="script:voltaire-bounce-relay",
+        )
+        assert changed1 is True
+        assert changed2 is False  # re-reporting the identical fact: no-op
+        assert path1 == path2
+        assert path2.read_text(encoding="utf-8") == before  # byte-for-byte stable
+
+    def test_re_bounce_updates_in_place_no_duplicate_record(self, tmp_path: Path) -> None:
+        contacts_root = tmp_path / "contacts"
+        mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1 user unknown",
+            observed_at="2026-08-05",
+            source="script:first-report",
+        )
+        path, changed = mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1 mailbox disabled",
+            observed_at="2026-08-20",
+            source="script:second-report",
+        )
+        assert changed is True
+        meta = read_bounce_record(path)
+        assert meta["observed_at"] == "2026-08-20"
+        assert meta["valid_until"] == "2026-08-20"
+        assert meta["bounce_diagnostic"] == "550 5.1.1 mailbox disabled"
+        # Still exactly one record for this identifier — updated, not duplicated.
+        assert list(contacts_root.glob("*.md")) == [path]
+
+    def test_preserves_existing_frontmatter_fields(self, tmp_path: Path) -> None:
+        contacts_root = tmp_path / "contacts"
+        contacts_root.mkdir(parents=True)
+        record_path = default_bounce_record_path(contacts_root, "alex@example.org")
+        record_path.write_text(
+            "---\nidentifier: alex@example.org\nname: Alex\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        _, changed = mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1",
+            observed_at="2026-08-05",
+            source="manual",
+        )
+        assert changed is True
+        meta = read_bounce_record(record_path)
+        assert meta["name"] == "Alex"  # untouched pre-existing field survives
+
+    def test_nothing_deleted_identifier_stays_on_disk(self, tmp_path: Path) -> None:
+        contacts_root = tmp_path / "contacts"
+        path, _ = mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1",
+            observed_at="2026-08-05",
+            source="manual",
+        )
+        assert path.exists()
+        meta = read_bounce_record(path)
+        assert meta["identifier"] == "alex@example.org"
+
+    def test_no_new_ledger_file_created(self, tmp_path: Path) -> None:
+        contacts_root = tmp_path / "contacts"
+        mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1",
+            observed_at="2026-08-05",
+            source="manual",
+        )
+        assert list(contacts_root.glob("*.jsonl")) == []
+
+
+class TestIsBounced:
+    def test_read_back_true_after_valid_until_passes(self, tmp_path: Path) -> None:
+        from datetime import date
+
+        contacts_root = tmp_path / "contacts"
+        path, _ = mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1",
+            observed_at="2026-08-05",
+            source="manual",
+        )
+        meta = read_bounce_record(path)
+        assert is_bounced(meta, as_of=date(2026, 8, 6)) is True
+        assert is_bounced(meta, as_of=date(2026, 8, 5)) is False  # still deliverable through this date
+
+    def test_absent_record_reads_as_not_bounced(self) -> None:
+        assert is_bounced({}) is False
+        assert is_bounced(None) is False
+
+    def test_present_but_non_deliverable_distinguishable_from_absent(
+        self, tmp_path: Path
+    ) -> None:
+        from datetime import date
+
+        contacts_root = tmp_path / "contacts"
+        path, _ = mark_bounced(
+            contacts_root,
+            "alex@example.org",
+            diagnostic="550 5.1.1",
+            observed_at="2026-08-05",
+            source="manual",
+        )
+        meta = read_bounce_record(path)
+        # Present (readable identifier + diagnostic) AND flagged non-deliverable —
+        # never absent, per the issue's AC.
+        assert meta["identifier"] == "alex@example.org"
+        assert is_bounced(meta, as_of=date(2026, 9, 1)) is True
