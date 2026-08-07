@@ -108,7 +108,11 @@ from athenaeum.authority import (
     find_duplicate_source,
     load_authority_manifest,
 )
-from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
+from athenaeum.config import (
+    DEFAULT_CLASSIFY_MODEL,
+    resolve_model,
+    resolve_reasoning_tier_auditing_enabled,
+)
 from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge
 from athenaeum.pii import is_pii_flagged
@@ -139,11 +143,49 @@ _T2_MAX_TOKENS = 4096
 DEFAULT_T1_MODEL = DEFAULT_CLASSIFY_MODEL
 
 
+def _warn_if_tier_model_knob_inert(
+    knob: str, env_var: str, config: dict[str, Any] | None
+) -> None:
+    """Warn when a reasoning-tier model knob is set but has no effect (athenaeum#780).
+
+    ``ATHENAEUM_REASONING_T1_MODEL`` / ``T2_MODEL`` (and their ``models.<knob>``
+    yaml equivalents) are read regardless of
+    ``ATHENAEUM_REASONING_TIER_AUDITING_ENABLED``, but only matter once that
+    flag turns the T1/T2 screen on — see ``docs/configuration.md``'s
+    "Reasoning-tier screening" section. With the flag off (the default),
+    setting the model knob silently does nothing. This is NOT a claim that
+    the tiers are dead: both have real production callers in ``merge.py``
+    (``t1_screen_rejects_merge_proposal``, athenaeum#518;
+    ``t2_screen_merge_proposal``, athenaeum#602) that run whenever an operator
+    opts in — see this module's "Production status" note above. The knob is
+    opt-in-only, not inert-by-design.
+    """
+    if resolve_reasoning_tier_auditing_enabled(config):
+        return
+    explicit = os.environ.get(env_var) is not None
+    if not explicit and isinstance(config, dict):
+        models = config.get("models")
+        if isinstance(models, dict):
+            raw = models.get(knob)
+            explicit = isinstance(raw, str) and bool(raw.strip())
+    if explicit:
+        log.warning(
+            "%s is set but has no effect: reasoning-tier auditing is "
+            "disabled, so the %s tier never runs. Set "
+            "ATHENAEUM_REASONING_TIER_AUDITING_ENABLED=1 (or yaml "
+            "librarian.reasoning_tier_auditing_enabled: true) to enable it.",
+            env_var,
+            knob,
+        )
+
+
 def get_t1_model(config: dict[str, Any] | None = None) -> str:
     """Resolve the T1 tier's model id (env > yaml > default, issue athenaeum#232)."""
-    return resolve_model(
+    model = resolve_model(
         "reasoning_t1", "ATHENAEUM_REASONING_T1_MODEL", DEFAULT_T1_MODEL, config
     )
+    _warn_if_tier_model_knob_inert("reasoning_t1", "ATHENAEUM_REASONING_T1_MODEL", config)
+    return model
 
 
 # ---------------------------------------------------------------------------
@@ -774,9 +816,11 @@ DEFAULT_T2_MODEL = "claude-opus-4-8"  # Opus 4.8 (was 4.1, retiring; athenaeum#6
 
 def get_t2_model(config: dict[str, Any] | None = None) -> str:
     """Resolve the T2 tier's model id (env > yaml > default, issue athenaeum#232)."""
-    return resolve_model(
+    model = resolve_model(
         "reasoning_t2", "ATHENAEUM_REASONING_T2_MODEL", DEFAULT_T2_MODEL, config
     )
+    _warn_if_tier_model_knob_inert("reasoning_t2", "ATHENAEUM_REASONING_T2_MODEL", config)
+    return model
 
 
 #: T2's decision space — DIFFERENT and BROADER than T1's
