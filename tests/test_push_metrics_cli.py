@@ -77,6 +77,60 @@ def test_baseline_text_output(tmp_path: Path) -> None:
     assert "athenaeum_version:" in out
 
 
+def test_baseline_exclude_session_flag(tmp_path: Path) -> None:
+    """athenaeum#791 AC3/AC4: ``--exclude-session`` drops a known-synthetic
+    session from the counts/precision and reports it as a distinct field.
+    """
+    cache_dir = tmp_path / "cache"
+    clean = push_metrics.build_push_record(
+        session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+    )
+    push_metrics.record_push(clean, cache_dir=cache_dir)
+    synth = push_metrics.build_push_record(
+        session_id="synth", query="q", backend="fts5", hits=[("test-page.md", None, "b")]
+    )
+    push_metrics.record_push(synth, cache_dir=cache_dir)
+
+    rc, out = _run(
+        [
+            "push-metrics",
+            "baseline",
+            "--cache-dir",
+            str(cache_dir),
+            "--docs-path",
+            str(tmp_path / "docs.md"),
+            "--exclude-session",
+            "synth",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["sessions"] == 1
+    assert payload["push_records"] == 1
+    assert payload["excluded_sessions"] == ["synth"]
+    assert payload["excluded_push_records"] == 1
+
+
+def test_baseline_without_exclude_session_reports_honest_zero(tmp_path: Path) -> None:
+    rc, out = _run(
+        [
+            "push-metrics",
+            "baseline",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--docs-path",
+            str(tmp_path / "docs.md"),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["excluded_sessions"] == []
+    assert payload["excluded_push_records"] == 0
+    assert payload["excluded_reference_records"] == 0
+
+
 def test_coverage_audit_writes_worksheet_file(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     rec = push_metrics.build_push_record(
