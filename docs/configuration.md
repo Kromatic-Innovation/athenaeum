@@ -430,7 +430,7 @@ metadata — never prompt/response content or credentials.
 Report it with `athenaeum spend`:
 
 ```
-athenaeum spend --since 7d [--by-model] [--by-provider] [--json]
+athenaeum spend --since 7d [--by-model] [--by-provider] [--by-knob] [--json]
 ```
 
 `--since` accepts a window (`7d` / `24h` / `30m` / `2w`) or an ISO date. The
@@ -450,11 +450,13 @@ ratios.** The shape:
 | `ledger_path` | string | — | Absolute path of the ledger file read. |
 | `record_count` | int | rows | Total ledger rows in the window. Every row is counted here — including `unknown` rows — so a bucket total plus `unknown` reconciles to it. |
 | `unpriceable_records` | int | rows | Rows with no per-model attribution (pre-v2, or a v2 run that tagged no model). They are **not dropped** and stay in their billing bucket; the count tells a re-pricing consumer how many rows it must treat as opaque. |
+| `knob_unattributed_records` | int | rows | Rows with no per-knob attribution (pre-v3, or a v3 run that tagged no knob — issue athenaeum#781). Same treatment as `unpriceable_records` one level down: **not dropped**, stays in its billing bucket. |
 | `subscription` | object (bucket) | **tokens** | The `claude-cli` path. Report its **tokens**. `estimated_cost_usd` is hard-`0.0` here and must be ignored — subscription draw has no invoice. |
 | `api` | object (bucket) | **dollars** | The metered `anthropic` path. `estimated_cost_usd` is real money. |
 | `unknown` | object (bucket) | **tokens** | Rows whose billing mode could **not** be determined (no known `billing_mode` and no recognised `provider` — a hand-edited or corrupt row). **Always present** (blank when none) so *unknown is a distinct state from zero*: a consumer must never mistake an undeterminable row for API spend, or for no activity. Never folded into `api`/`subscription`; report its **tokens**, since its unit is by definition unknown. |
 | `by_model` | object | — | Present only with `--by-model`; each model maps to `{subscription, api, unknown}` sub-buckets. |
 | `by_run_type` | object | — | Present only with `--by-provider`; each run type maps to `{subscription, api, unknown}` sub-buckets. |
+| `by_knob` | object | — | Present only with `--by-knob` (issue athenaeum#781); each model knob (`classify` / `write` / `resolve` / `topic` / `reasoning_t1` / `reasoning_t2`) maps to `{subscription, api, unknown}` sub-buckets — the subscription/API split stays intact within each knob, never blended. |
 
 Each **bucket** object carries: `input_tokens`, `output_tokens`,
 `cache_creation_input_tokens`, `cache_read_input_tokens`, `total_tokens`,
@@ -768,11 +770,12 @@ is off — there is nothing for them to tune until the screen actually runs.
 **What it costs.** Enabling this adds LLM calls on a merge path that
 currently makes none: every T1 pass-up call and every T2 escalation call is
 real spend, landing under the `reasoning_t1` / `reasoning_t2` model knobs.
-Use `athenaeum spend --by-model` to see it broken out — note that bucket is
-keyed by **model id**, not by knob name, so if a reasoning-tier knob
-resolves to the same model id as another stage (e.g. the shared
-haiku default), their spend is not distinguishable in that view without
-also correlating against the model knobs' configured values.
+Use `athenaeum spend --by-knob` to see it broken out — that bucket is keyed
+by **knob name** (`reasoning_t1` / `reasoning_t2`, alongside `classify` /
+`write` / `resolve` / `topic`), so the two reasoning-tier stages stay
+distinguishable even when a knob resolves to the same model id as another
+stage (e.g. the shared haiku default) — `--by-model` cannot separate that
+case since it keys on model id, not knob name.
 
 **How to observe it.** Every tier decision — at either tier, whatever the
 verdict — is appended to `wiki/_reasoning_tier_decisions.jsonl` (append-only

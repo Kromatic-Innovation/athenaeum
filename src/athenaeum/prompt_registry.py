@@ -99,6 +99,13 @@ PROMPT_META: dict[str, PromptMeta] = {
     for name, constant, knob, max_tokens in _META_ROWS
 }
 
+#: The distinct model knobs, derived from ``_META_ROWS`` (issue athenaeum#781) rather
+#: than duplicated here — this IS the single source of truth the spend-ledger
+#: per-knob attribution (:mod:`athenaeum.spend`, ``athenaeum spend --by-knob``)
+#: and its tests key off of, so the knob set cannot drift from the prompts
+#: that actually define it. Sorted for stable iteration/display order.
+KNOBS: tuple[str, ...] = tuple(sorted({knob for _, _, knob, _ in _META_ROWS}))
+
 
 def _resolve(meta: PromptMeta) -> str:
     """Import the home module and return the live constant — the text is not copied."""

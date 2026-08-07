@@ -45,6 +45,22 @@ additively — pre-v2 readers keep working:
 Pre-v2 rows (and any row with no per-model attribution) stay readable and are
 counted as *unpriceable* by :func:`summarize` — never silently dropped.
 
+Schema v3 (issue athenaeum#781) adds, additively — pre-v3 readers keep working:
+
+* ``tokens_by_knob`` — per-KNOB token attribution, a SIBLING of
+  ``tokens_by_model`` (same bucket shape), keyed by the model-knob string
+  (``classify`` / ``write`` / ``resolve`` / ``topic`` / ``reasoning_t1`` /
+  ``reasoning_t2`` — see ``prompt_registry._META_ROWS``, the single source of
+  truth). ``tokens_by_model`` is deliberately NOT reshaped to carry this —
+  it stays a superset of hestia's ``cost-ledger.ts`` shape so that cross-repo
+  reader keeps working (see the ``tokens_by_model`` docstring above). A knob
+  has no hestia counterpart, so it is athenaeum-only.
+
+Pre-v3 rows (and any row with no per-knob attribution) stay readable and are
+counted as *knob-unattributed* by :func:`summarize` — mirroring the
+pre-v2/*unpriceable* treatment exactly: never dropped, still counted in
+``record_count`` and their billing bucket.
+
 The ledger is append-only and crash-safe: each record is a single
 ``O_APPEND`` write of one small line, and the reader tolerates a torn
 trailing line. It records ONLY counts, model ids, run type, provider,
@@ -80,8 +96,12 @@ log = logging.getLogger(__name__)
 #: the ``billing_mode`` vocabulary, and the ``notional_usd`` counterfactual —
 #: all ADDITIVE. Pre-v2 rows stay readable and are counted as *unpriceable*
 #: (they lack per-model attribution, so they cannot be repriced), never
-#: dropped. See the module docstring and :func:`summarize`.
-LEDGER_VERSION = 2
+#: dropped. v3 (issue athenaeum#781) adds per-KNOB token attribution
+#: (``tokens_by_knob``), a SIBLING field alongside ``tokens_by_model`` —
+#: also ADDITIVE. Pre-v3 rows stay readable and are counted as
+#: *knob-unattributed*, never dropped. See the module docstring and
+#: :func:`summarize`.
+LEDGER_VERSION = 3
 
 #: The two billing modes, in cwc#1629's vocabulary. ``subscription`` notional
 #: dollars and ``api`` real dollars are two metrics that are NEVER summed.
@@ -187,6 +207,30 @@ def tokens_by_model(usage: "TokenUsage") -> dict[str, dict[str, int]]:
     return out
 
 
+def tokens_by_knob(usage: "TokenUsage") -> dict[str, dict[str, int]]:
+    """Per-knob token attribution for a ledger row (issue athenaeum#781).
+
+    Same bucket shape as :func:`tokens_by_model` — a SIBLING field, not a
+    reshape of it (``tokens_by_model`` keeps its existing shape so the
+    hestia ``cost-ledger.ts`` reader is unaffected; a knob has no hestia
+    counterpart). Sourced from :attr:`TokenUsage.per_knob`, which each call
+    site populates with the same ``knob=`` string it already passes to
+    :func:`athenaeum.config.resolve_model`. Empty when the run tagged no
+    knob — such a row carries no per-knob attribution and is therefore
+    *knob-unattributed* (see :func:`summarize`), mirroring how an
+    untagged-model row is *unpriceable*.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for knob, bucket in usage.per_knob.items():
+        inp = int(bucket.get("input_tokens", 0) or 0)
+        outp = int(bucket.get("output_tokens", 0) or 0)
+        entry = {"input": inp, "output": outp, "total": inp + outp}
+        for key in _PER_MODEL_DETAIL_KEYS:
+            entry[key] = int(bucket.get(key, 0) or 0)
+        out[knob] = entry
+    return out
+
+
 def build_record(
     usage: "TokenUsage",
     *,
@@ -231,6 +275,12 @@ def build_record(
         # tokens x model x timestamp, so a mixed-model row stays repriceable per
         # model instead of collapsing into an unrepriceable blended total.
         "tokens_by_model": tokens_by_model(usage),
+        # Per-knob token attribution (issue athenaeum#781): a SIBLING of
+        # tokens_by_model, not a reshape — answers "what does the
+        # contradiction resolver / write / classify / ... knob cost me?",
+        # which run_type/models cannot answer on their own (see the module
+        # docstring's v3 note).
+        "tokens_by_knob": tokens_by_knob(usage),
         "api_calls": usage.api_calls,
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
@@ -462,13 +512,16 @@ def summarize(
     *,
     by_model: bool = False,
     by_provider: bool = False,
+    by_knob: bool = False,
 ) -> dict[str, Any]:
     """Summarise ledger records, keeping the two cost paths SEPARATE.
 
     Returns a dict with a ``subscription`` bucket (report its TOKENS) and an
     ``api`` bucket (report its DOLLARS) — never a blended total. ``by_model``
     adds per-model sub-buckets; ``by_provider`` adds a per-run-type breakdown
-    within each path.
+    within each path; ``by_knob`` (issue athenaeum#781) adds per-knob sub-buckets,
+    mirroring ``by_model`` exactly (record-level attribution, same never-a-
+    blended-total split within each knob).
     """
     subscription = _blank_bucket()
     api = _blank_bucket()
@@ -476,7 +529,9 @@ def summarize(
     buckets = {"subscription": subscription, "api": api, "unknown": unknown}
     per_model: dict[str, dict[str, Any]] = {}
     per_run_type: dict[str, dict[str, Any]] = {}
+    per_knob: dict[str, dict[str, Any]] = {}
     unpriceable = 0
+    knob_unattributed = 0
 
     def _blank_slot() -> dict[str, Any]:
         return {
@@ -495,6 +550,13 @@ def summarize(
         # tells a repricing consumer how many rows it must treat as opaque.
         if not record.get("tokens_by_model"):
             unpriceable += 1
+        # Mirrors the unpriceable count above, one level down: a row with no
+        # per-knob attribution (pre-v3, or a v3 run that tagged no knob)
+        # cannot say WHERE its spend went — count it as knob-unattributed
+        # (issue athenaeum#781). Never dropped; still in record_count and its
+        # billing bucket.
+        if not record.get("tokens_by_knob"):
+            knob_unattributed += 1
         if by_model:
             for model in record.get("models") or ["(untagged)"]:
                 slot = per_model.setdefault(model, _blank_slot())
@@ -503,6 +565,10 @@ def summarize(
             rt = str(record.get("run_type", "(unknown)"))
             slot = per_run_type.setdefault(rt, _blank_slot())
             _accumulate(slot[path], record)
+        if by_knob:
+            for knob in record.get("tokens_by_knob") or ["(unattributed)"]:
+                slot = per_knob.setdefault(knob, _blank_slot())
+                _accumulate(slot[path], record)
 
     # The subscription path carries no real dollars — surface tokens only.
     subscription["estimated_cost_usd"] = 0.0
@@ -513,6 +579,10 @@ def summarize(
         # ``subscription``/``api``/``record_count`` shape is unchanged so
         # cwc#1218's /good-morning section does not regress.
         "unpriceable_records": unpriceable,
+        # Count of rows with no per-knob attribution — pre-v3 rows and any v3
+        # run that tagged no knob (issue athenaeum#781). Additive, same treatment
+        # as ``unpriceable_records`` one level down.
+        "knob_unattributed_records": knob_unattributed,
         "subscription": subscription,
         "api": api,
         # Rows whose billing mode could not be determined (issue athenaeum#694):
@@ -526,6 +596,8 @@ def summarize(
         summary["by_model"] = per_model
     if by_provider:
         summary["by_run_type"] = per_run_type
+    if by_knob:
+        summary["by_knob"] = per_knob
     return summary
 
 
@@ -543,6 +615,7 @@ def format_summary(
     since_label: str,
     by_model: bool = False,
     by_provider: bool = False,
+    by_knob: bool = False,
 ) -> str:
     """Render a human report that never blends dollars into subscription rows."""
     sub = summary["subscription"]
@@ -580,6 +653,16 @@ def format_summary(
             s, a = slot["subscription"], slot["api"]
             lines.append(
                 f"    {model:<28} sub {_fmt_tokens(s['total_tokens'])} tok"
+                f"  / api ${a['estimated_cost_usd']:.2f}"
+            )
+    if by_knob and summary.get("by_knob"):
+        # Mirrors the "By model:" rendering above (issue athenaeum#781) — the
+        # subscription/api split stays intact within each knob, never blended.
+        lines.append("  By knob:")
+        for knob, slot in sorted(summary["by_knob"].items()):
+            s, a = slot["subscription"], slot["api"]
+            lines.append(
+                f"    {knob:<28} sub {_fmt_tokens(s['total_tokens'])} tok"
                 f"  / api ${a['estimated_cost_usd']:.2f}"
             )
     return "\n".join(lines)
