@@ -349,9 +349,12 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   `repair --backfill-sources` pass (issue athenaeum#328) when it re-classifies a
   memory whose source was DEFAULTED to `claude:inferred` and finds the claim
   in a tool-result block. This is a §10.1 LOCK-DISCIPLINE change — the
-  taxonomy in `resolutions.py` (`_RESOLVE_SYSTEM`), the
-  `tests/data/resolve_system.txt` snapshot, and the Section 11 test class in
-  `tests/test_conflict_resolution.py` are updated together.
+  taxonomy in `resolutions.py` (`_RESOLVE_SYSTEM`), the golden
+  `tests/data/prompts/resolutions.resolve_system.txt` snapshot (regenerated
+  via `python -m athenaeum.prompt_registry --write`, pinned by
+  `tests/test_prompt_goldens.py::test_prompt_matches_golden`), and the
+  Section 11 test class in `tests/test_conflict_resolution.py` are updated
+  together.
 - **Cross-reference:** the channel-split source_type vocabulary (with
   the parallel `agent-observed` and `model-prior` claim-level values)
   is locked in `docs/provenance-shape.md` §10; the two docs cross-link
