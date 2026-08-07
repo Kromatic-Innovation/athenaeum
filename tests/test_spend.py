@@ -761,3 +761,95 @@ class TestQueryTopicsLedger:
         assert recs[0]["notional_usd"] == recs[0]["estimated_cost_usd"]
         tbm = recs[0]["tokens_by_model"]
         assert list(tbm) and tbm[next(iter(tbm))]["input"] == 120
+
+
+# ---------------------------------------------------------------------------
+# Suite-wide ledger isolation (issue athenaeum#776)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def _ledger_path_seen_at_session_scope() -> Path:
+    """Resolve the ledger path from OUTSIDE any test function's fixture scope.
+
+    This is the case the pre-existing function-scoped ``_isolate_cache_dir``
+    (athenaeum#750) cannot cover: a session- or module-scoped fixture runs
+    before/outside it, so before athenaeum#776 this resolved to the operator's
+    real ledger. Session-scoped here on purpose — the scope IS the test.
+    """
+    return spend.resolve_ledger_path().resolve()
+
+
+class TestSuiteLedgerIsolation:
+    """The suite must never append to the operator's live spend ledger.
+
+    Fixture model ids from ``tests/test_config_parity.py`` were found in 30
+    rows of the operator's real ``~/.cache/athenaeum/spend.jsonl``, dated
+    2026-07-15 through 2026-08-02. Synthetic rows inflate ``athenaeum spend``
+    totals, are permanently unpriceable (no rate-table prefix matches them),
+    and contaminate a live guardrail: ``spend_today()`` feeds
+    ``ceiling_tripped()``, so a local suite run moves a ceiling that bounds
+    REAL spend. These tests pin the redirect that stops it.
+    """
+
+    def _live_cache_dir(self) -> Path:
+        return Path("~/.cache/athenaeum").expanduser().resolve()
+
+    def test_resolve_ledger_path_is_not_the_live_ledger(self) -> None:
+        """The headline invariant, asserted with no fixture setup at all.
+
+        Deliberately requests neither ``ledger`` nor ``monkeypatch``: what is
+        under test is the ambient state every other test in the suite runs
+        under, so anything this test set up itself would be begging the
+        question.
+        """
+        resolved = spend.resolve_ledger_path().resolve()
+        live = self._live_cache_dir()
+        assert resolved != live / spend.LEDGER_FILENAME
+        assert live not in resolved.parents
+
+    def test_default_cache_dir_is_not_the_live_cache_dir(self) -> None:
+        """Same invariant one layer down, since the ledger path derives from it."""
+        assert spend.default_cache_dir().resolve() != self._live_cache_dir()
+
+    def test_ledger_write_lands_in_tmp_not_the_live_ledger(self) -> None:
+        """An actual ``record_spend`` under ambient fixtures writes to tmp.
+
+        Path resolution being right is necessary but not sufficient — this
+        drives the real writer, which is what put rows in the live ledger.
+        """
+        usage = TokenUsage()
+        usage.subscription_covered = True
+        usage.add(10, 5, 0, 0, model="yaml-topic-model")
+
+        assert spend.record_spend(usage, run_type="query-topics", provider="claude-cli") is True
+
+        written_to = spend.resolve_ledger_path().resolve()
+        assert self._live_cache_dir() not in written_to.parents
+        assert written_to.exists()
+        assert "yaml-topic-model" in written_to.read_text()
+
+    def test_isolation_reaches_session_scoped_fixtures(
+        self, _ledger_path_seen_at_session_scope: Path
+    ) -> None:
+        """The redirect covers code running outside a test function's scope.
+
+        The function-scoped fixture alone leaves this hole open; only the
+        session-scoped one closes it.
+        """
+        live = self._live_cache_dir()
+        assert _ledger_path_seen_at_session_scope != live / spend.LEDGER_FILENAME
+        assert live not in _ledger_path_seen_at_session_scope.parents
+
+    def test_session_fixture_pins_both_env_vars(self) -> None:
+        """Both knobs are set, not just the cache dir.
+
+        ``ATHENAEUM_SPEND_LEDGER`` is set explicitly so a config carrying
+        ``spend.ledger_path`` cannot route around the cache-dir redirect.
+        """
+        import os
+
+        for var in ("ATHENAEUM_CACHE_DIR", "ATHENAEUM_SPEND_LEDGER"):
+            value = os.environ.get(var)
+            assert value, f"{var} must be set by the autouse isolation fixtures"
+            assert self._live_cache_dir() != Path(value).expanduser().resolve()
