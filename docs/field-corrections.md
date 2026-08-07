@@ -126,18 +126,42 @@ non-conforming batch is seen by nothing at all — the bypass this design exists
 parses as JSON with `record: "batch"`. Anything else is ordinary intake.
 
 Making that literally true takes one change to `intake.discover_raw_files`, and the
-implementation must not skip it. Today that function globs `*.md` and matches
-`RAW_FILE_RE = ^(\d{8}T\d{6}Z?)-([0-9a-f]{8})\.md$` — so a `.jsonl` file in `raw/<source>/`
-is invisible to it. "Falls through to ordinary intake" would silently mean "is seen by
-nothing," which is the exact failure this section claims to have removed. Required:
+implementation must not skip it.
 
-- `discover_raw_files` globs `*.md` **and** `*.jsonl`, with `RAW_FILE_RE` widened to accept
-  either extension.
-- It **skips** a `.jsonl` whose first line parses as a valid batch envelope — that file is
-  claimed by the correction phase. This is the only correction-shape knowledge the generic
-  discovery function carries, and it is one check.
+**The cause is the glob, and only the glob.** `discover_raw_files` iterates
+`source_dir.glob("*.md")`, so a `.jsonl` file in `raw/<source>/` is never visited — and
+"falls through to ordinary intake" would silently mean "is seen by nothing," the exact
+failure this section claims to remove. `RAW_FILE_RE` is **not** a second cause: a filename
+that fails the pattern still reaches the `else` branch and is appended as a `RawFile` with
+an empty `timestamp`/`uuid8`. Widening the regex is needed so a correction batch parses
+its timestamp and uuid like any other intake file; it is not what makes the file visible.
+Getting this distinction right matters because it decides what the regression test asserts.
+
+Required:
+
+- `discover_raw_files` globs `*.md` **and** `*.jsonl`; `RAW_FILE_RE` widens to accept
+  either extension so the timestamp/uuid parse still works.
+- It **skips** a `.jsonl` that carries a **valid envelope** — defined once, below. That
+  file is claimed by the correction phase. This is the only correction-shape knowledge the
+  generic discovery function carries.
 - Every other `.jsonl` is ordinary intake. The tiers classify text; nothing requires the
   body to be markdown.
+
+#### Valid envelope — the single definition
+
+"Valid envelope" is used by the skip above and by §8's fallthrough table, and the two must
+not drift. A first line is a valid envelope **only when all of these hold**:
+
+1. It parses as JSON.
+2. `record == "batch"`.
+3. `schema_version` is present and is a version this build **knows how to process**.
+4. `batch_id` and `created_at` are present.
+
+Condition 3 is the one an implementation is most likely to drop, and dropping it
+reintroduces the bug in full: a batch declaring `schema_version: 7` would satisfy a naive
+`record == "batch"` check, be skipped by discovery, and then be un-processable by the
+correction phase — seen by nothing. An unknown `schema_version` is therefore **not** a
+valid envelope, and such a file stays ordinary intake, consistent with §8 row 2.
 
 Note what is NOT skipped by name. `discover_raw_files` skips exactly one directory today
 (`answers`, issue athenaeum#414). `raw/auto-memory/` is not skipped — it is simply never matched,
@@ -239,18 +263,82 @@ re-submit; that is the designed behaviour.
 correction_id = sha256(canonical_json([schema_version, target, op, field, value]))[:16]
 ```
 
-with keys sorted and no insignificant whitespace. **`source` and `observed_at` are
-deliberately excluded** — the same factual change proposed twice is the same correction
-regardless of when it was observed.
+with keys sorted and no insignificant whitespace.
+
+**The hash is computed over the EFFECTIVE record — after the envelope's `defaults` are
+hoisted in, not over the literal line.** §3.2 lets `op`, `field`, `source` and
+`observed_at` arrive only from `defaults`, and §11.2's records legitimately carry a
+`correction_id` while omitting `op` and `field` entirely. Hashing the literal line would
+make the same correction hash differently depending on whether the submitter inlined a
+value or hoisted it, so two conformant submitters would produce different ids for an
+identical change — breaking the within-batch dedupe and the audit key that both depend on
+it. Hoist first, then hash.
+
+**`source` and `observed_at` are deliberately excluded** from the hash — the same factual
+change proposed twice is the same correction regardless of when it was observed.
 
 Used for within-batch dedupe, the audit ledger, and naming a record in an escalation.
 Not a global applied-once ledger — the delta gate already provides that.
 
 **5.3 Audit ledger.** Each batch appends one line to `wiki/_corrections_applied.jsonl`
-with counts by disposition (`applied`, `noop`, `deferred-lower-precedence`, `escalated`,
-`raised-tier`) plus per-record ids for everything that was not `applied`/`noop`. Same
-append-only-JSONL discipline as `provenance.MERGE_PROVENANCE_FILENAME`. Diagnostics,
-not control flow.
+with counts by disposition plus per-record ids for everything that was not
+`applied`/`noop`. Same append-only-JSONL discipline as
+`provenance.MERGE_PROVENANCE_FILENAME`.
+
+The disposition vocabulary is closed — every record ends in exactly one:
+
+| Disposition | Meaning |
+|---|---|
+| `applied` | Written (§6.2). |
+| `noop` | No delta (§5.1). |
+| `deferred-lower-precedence` | Incumbent outranks the correction (§6.2). |
+| `escalated` | Raised to `_pending_questions.md` (§6.2 undated tie). |
+| `raised-tier` | Handed to reasoning (§8). |
+| `routed-elsewhere` | Applied, but to a surface other than the proposed target (§7.1). |
+| `held-schema-proposal` | Attribute has no slot; a schema amendment is pending (§7.2). |
+| `recorded-as-prose` | No slot, one-off; written to the entity body (§7.2). |
+
+**The ledger carries a denominator.** Each batch line records `records_total`, and the run
+asserts that the dispositions sum to it, failing loudly on a mismatch. Without this, a
+streaming JSONL reader that drops records — a final line with no trailing newline, an early
+stop at a blank line, a swallowed decode error mid-stream — reports a clean run over a
+silently truncated batch. Counts alone cannot distinguish "5,000 records, all
+dispositioned" from "4,999 dispositioned, one never seen."
+
+Otherwise diagnostics, not control flow — with the one exception in §5.4.
+
+**5.4 Batch lifecycle — a batch must be retired, and this is control flow.**
+
+Everything above describes what happens to a batch *once*. Without a retirement rule, a
+batch is re-read on every subsequent run — and §5.1's delta gate does **not** save us,
+because it only suppresses records that attempt a write. A `deferred-lower-precedence`
+record never attempts one, so it is re-deferred forever. An `escalated` record re-escalates,
+and §10.2's cap is a per-run flood guard, not a dedupe. A batch that is entirely deferred,
+or that escalates anything, would pollute the human queue and re-do its own work on every
+run, indefinitely.
+
+This is precisely the failure issue athenaeum#414 fixed for `raw/answers/`, whose in-tree comment
+— in the very function §3.1 modifies — reads: *"the same ruling re-surfaces as fresh
+pending questions on every subsequent run."* Reintroducing it on the path that cites it as
+precedent would be an unforced error.
+
+**The rule:** a batch is retired once every record in it reaches a terminal disposition.
+Retirement follows the existing raw-intake convention (`adapter-contract.md` §4.5) — a
+`git rm` after a provenance-snapshot commit, recoverable from history, never hard-deleted.
+
+- `applied`, `noop`, `routed-elsewhere`, `deferred-lower-precedence`, `recorded-as-prose`
+  are terminal on the first pass.
+- `raised-tier` is terminal for the *batch* once §8.1's handoff file is written — the fact
+  now lives in ordinary intake and is that path's responsibility.
+- `escalated` and `held-schema-proposal` are terminal once the question or proposal is
+  **recorded**. The correction does not wait for the human answer; the pending-questions
+  surface owns it from that point. Re-submitting is free (§5.1) if the submitter still
+  believes it.
+- A batch not retired because the run hit a bound (§10.2) carries over whole and is
+  retried next run — that is the one case where re-reading is correct.
+
+An escalation is also deduped on `correction_id` against open entries, so a carried-over
+batch cannot double-file the same question.
 
 ---
 
@@ -298,18 +386,35 @@ from a genuine `unsourced`, **an omitted token is a silent seven-rank demotion, 
 visible failure** — which is precisely why the drift-guard test below must compare tier
 *membership* against the prompt block, not merely the tier count.
 
-> **DRIFT GUARD.** The tier list — its order **and each tier's membership** — now exists in
-> four places that must change together:
+> **DRIFT GUARD.** The tier list — its order **and each tier's membership** — exists in
+> several places. The useful split is *independent* (hand-edited, needs guarding) versus
+> *derived* (regenerated and already pinned).
+>
+> **Independent — these are what a membership test must bind:**
 > 1. `SOURCE_PRECEDENCE_TIERS` in `src/athenaeum/precedence.py`;
 > 2. the `SOURCE-PRECEDENCE TAXONOMY` block of `_RESOLVE_SYSTEM` in
->    `src/athenaeum/resolutions.py` (the canonical prose list);
+>    `src/athenaeum/resolutions.py` — the canonical prose list, and the source every other
+>    copy derives from;
 > 3. the `9-tier` count in `resolutions.py`'s module docstring;
-> 4. the golden snapshot `tests/data/resolve_system.txt`, pinned by
->    `tests/test_resolve_system_snapshot.py`.
+> 4. §11 of `docs/conflict-resolution.md`, and this section.
 >
-> Plus §11 of `docs/conflict-resolution.md` and this section. The implementation MUST add
-> a test asserting the ranker and the prompt block agree — a second unguarded encoding of
-> an already-guarded list is how the guard dies.
+> **Derived — already guarded, no new work:** the golden
+> `tests/data/prompts/resolutions.resolve_system.txt`, pinned by
+> `tests/test_prompt_goldens.py::test_prompt_matches_golden`, and `docs/prompts.md`, pinned
+> byte-current by its own test.
+>
+> *(An earlier draft of this section cited `tests/data/resolve_system.txt` and
+> `tests/test_resolve_system_snapshot.py`. Both were **deleted** by issue athenaeum#561, which
+> replaced the single-prompt snapshot with the multi-prompt golden set above. Stale
+> pointers to the removed pair still survive in several in-tree comments — tracked
+> separately; do not copy them.)*
+>
+> The implementation MUST add a test binding the ranker to the prompt block. **Derive the
+> expected tiers by parsing the prompt block; do not transcribe them.** Transcription is
+> what produced the omitted `twitter` token in the first place. The test must also assert
+> its own denominator (it parsed 9 tiers and at least 10 tokens) and carry a positive
+> control that mutates the prompt text in-test and asserts the comparison fails — otherwise
+> a parser that silently extracts nothing compares empty to empty and passes forever.
 
 ### 6.2 The policy
 
@@ -629,6 +734,34 @@ mechanism.
 discussed*, not *when did it happen* — that is a different artifact. Narrative content is
 prose intake and a relationship record; a frequency counter is a rollup. Routing them
 differently is correct, not a gap.
+
+---
+
+## 12a. Trust boundary — who may assert a `source`
+
+§6.3 says the `writers` allowlist is "a blast-radius bound, not a trust model," and §8 says
+an unparseable `source` must reach reasoning because *"the source is the authorization to
+write."* Both are true, and together they oblige this document to say what the trust
+boundary actually is.
+
+**It is write access to `raw/`.** Anything that can append to the intake tree can claim any
+`source`, including `user:` — rank 1, which outranks every other tier. §6.2 protects a
+`user:` *incumbent* from being overwritten by a machine; it does nothing about a forged
+`user:` *incoming*. There is no authentication of `submitter` or `source`, and none is
+proposed here.
+
+This is the same boundary athenaeum has always had — the append-only-intake /
+single-compiler split is a structural guarantee about *who writes the wiki*, not an
+authentication scheme for who may report a fact ([`docs/why-athenaeum.md`](why-athenaeum.md)).
+A correction changes nothing about it. But this contract is the first surface that makes
+the consequence sharp, because it lets a writer name an exact field and an exact
+precedence tier, so it is stated here rather than left implied.
+
+**What follows for a deployment:** treat `raw/` write access as fully trusted, and scope it
+accordingly. A CI job or third-party integration granted intake access can assert any fact
+at any precedence. If that is not acceptable for a given deployment, the control is
+filesystem permissions on the intake tree plus the per-attribute `writers` allowlist
+(§6.3) — not anything in the record format.
 
 ---
 
