@@ -756,6 +756,16 @@ class ClaudeCliClient:
             # REPLACE Claude Code's default agent persona so the tier prompt
             # is the entire instruction context (athenaeum#330).
             argv += ["--system-prompt", system_text]
+        # ``--strict-mcp-config`` (athenaeum#775): without it, every ``claude
+        # -p`` spawn boots all nine user-scoped MCP servers from
+        # ``~/.claude.json`` regardless of ``cwd`` — including athenaeum's own
+        # MCP server, so the compile process boots the server that reads the
+        # corpus it is compiling. Measured on the operator's host 2026-08-06:
+        # ~8.7s CPU and ~12k tokens per call. No athenaeum call path relies on
+        # an MCP tool being present (``--system-prompt`` already replaces the
+        # agent persona; tier prompts are pure text-in/JSON-out), and output
+        # was verified byte-identical with the flag on vs. off.
+        argv.append("--strict-mcp-config")
         return argv
 
     def _create(self, **params: Any) -> _CliResponse:

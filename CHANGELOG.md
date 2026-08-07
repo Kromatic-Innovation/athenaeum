@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`claude-cli` provider path now passes `--strict-mcp-config` to every
+  `claude -p` spawn (athenaeum#775).** `ClaudeCliClient.__init__` already runs
+  the subprocess from a neutral `cwd` so it does not inherit a project
+  `CLAUDE.md` / `.mcp.json` — but that guard only reaches *project*-scoped
+  config. User-scoped MCP servers declared in `~/.claude.json` still booted on
+  every call regardless of `cwd`, including all nine of the operator's
+  globally-configured servers — notably athenaeum's own MCP server, so the
+  compile process was booting the server that reads the corpus it is
+  compiling. `_build_argv` now appends `--strict-mcp-config`, which suppresses
+  that user-scoped load. Per the issue's host-measured figures (operator host,
+  2026-08-06, not reproduced here): ~14.7s user CPU dropping to ~6.0s and
+  roughly 12k fewer tokens per call, with output verified byte-identical
+  between the two argv variants on an identical JSON-returning prompt. One
+  argv element; `capabilities_for("claude-cli")` is unchanged — this alters
+  what the subprocess loads, not what the backend can honor.
+
 ### Documentation
 
 - **`runlock`: correct the docstrings that made a normal residual lockfile read
