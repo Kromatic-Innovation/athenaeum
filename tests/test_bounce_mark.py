@@ -25,8 +25,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from athenaeum.librarian import process_one, tier0_bounce_mark
 from athenaeum.mcp_server import remember_write
 from athenaeum.models import EntityIndex, RawFile, parse_frontmatter

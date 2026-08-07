@@ -1118,7 +1118,8 @@ class TestIsBounced:
         )
         meta = read_bounce_record(path)
         assert is_bounced(meta, as_of=date(2026, 8, 6)) is True
-        assert is_bounced(meta, as_of=date(2026, 8, 5)) is False  # still deliverable through this date
+        # still deliverable through this date
+        assert is_bounced(meta, as_of=date(2026, 8, 5)) is False
 
     def test_absent_record_reads_as_not_bounced(self) -> None:
         assert is_bounced({}) is False
