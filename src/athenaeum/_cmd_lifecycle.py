@@ -146,6 +146,13 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "reasoning_t1/reasoning_t2).",
     )
     spend_parser.add_argument(
+        "--reprice",
+        action="store_true",
+        help="Recompute historical rows from their per-model token attribution "
+        "at the CURRENT rates and report the delta against the stored figures. "
+        "READ-ONLY — the ledger file is never modified.",
+    )
+    spend_parser.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON (what /good-morning consumes).",
@@ -274,6 +281,13 @@ def cmd_spend(args: argparse.Namespace) -> int:
     Separates real API DOLLARS from subscription TOKENS — never a blended
     figure. ``--json`` emits the machine-readable shape ``/good-morning``
     consumes; the human default renders the two paths as distinct rows.
+
+    ``--reprice`` (issue athenaeum#788) switches the report to recompute each row
+    from its stored per-model token attribution at the CURRENT rate table —
+    including the operator's ``athenaeum.yaml`` ``pricing:`` overrides (issue
+    athenaeum#783) — and show the delta against the stored figures. Strictly
+    READ-ONLY: it opens the ledger for reading only, exactly as the default
+    report does.
     """
     import json
 
@@ -301,6 +315,38 @@ def cmd_spend(args: argparse.Namespace) -> int:
         return 2
 
     records = spend.read_ledger(ledger_path, since=since_dt)
+
+    if getattr(args, "reprice", False):
+        # Issue athenaeum#788: reprice against the rate table the operator is on
+        # NOW, which means installing their `athenaeum.yaml` `pricing:` section
+        # (issue athenaeum#783) first — same REPLACE-wholesale call `athenaeum run`
+        # makes. Without this the reprice would silently read the code-default
+        # table and report a "current" figure that is not the operator's.
+        # Deliberately NOT gated behind preflight_model_rates: that preflight
+        # fails a RUN loudly on an unpriced model it is about to use, whereas a
+        # historical row naming a model the current table does not price is a
+        # legitimate thing to report on, not a reason to refuse the report.
+        from athenaeum.config import resolve_model_rates
+        from athenaeum.models import configure_model_rates
+
+        configure_model_rates(resolve_model_rates(config))
+        repriced = spend.reprice(records)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "since": since_dt.isoformat().replace("+00:00", "Z"),
+                        "ledger_path": str(ledger_path),
+                        "reprice": repriced,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(spend.format_reprice(repriced, since_label=args.since))
+        return 0
+
     summary = spend.summarize(
         records,
         by_model=args.by_model,
