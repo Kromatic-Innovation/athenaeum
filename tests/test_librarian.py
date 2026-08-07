@@ -131,6 +131,153 @@ class TestDiscoverRawFiles:
         files = discover_raw_files(tmp_path / "does_not_exist")
         assert files == []
 
+    def test_characterization_md_corpus_unchanged_by_jsonl_widening(
+        self, raw_dir: Path
+    ) -> None:
+        """Regression pin (issue athenaeum#797): widening the glob/regex to also
+        accept `.jsonl` must not change discovery output over the existing
+        `.md`-only fixture corpus one byte. This is the largest-blast-radius
+        regression named in the issue — every existing caller of
+        `discover_raw_files` depends on this being a no-op for pre-existing
+        trees.
+        """
+        from athenaeum.librarian import discover_raw_files
+
+        files = discover_raw_files(raw_dir)
+        assert len(files) == 4
+        assert {f.path.name for f in files} == {
+            "20240406T120000Z-aabb0011.md",
+            "20240406T120100Z-ccdd2233.md",
+            "20240406T130000Z-eeff4455.md",
+            "random-notes.md",
+        }
+        standard = [f for f in files if f.timestamp]
+        assert len(standard) == 3
+        assert all(f.uuid8 for f in standard)
+
+
+class TestDiscoverRawFilesCorrections:
+    """Issue athenaeum#797, `docs/field-corrections.md` §3.1: a correction batch
+    lives in the ordinary `raw/<source>/` tree, recognized by shape (its
+    first line is a valid batch envelope), not by a reserved subtree. The
+    test that matters is that a MALFORMED `.jsonl` still reaches ordinary
+    intake — "falls through to ordinary intake" must not silently mean
+    "seen by nothing," which is the bug this design removes.
+    """
+
+    _VALID_ENVELOPE = (
+        '{"record":"batch","schema_version":1,"submitter":"graph-writer",'
+        '"batch_id":"20260806T140211Z-9f3ac1d2",'
+        '"created_at":"2026-08-06T14:02:11Z"}\n'
+        '{"record":"correction","correction_id":"a1b2c3d4e5f60718",'
+        '"target":{"uid":"person-alex-doe-a1b2c3d4"},"op":"add",'
+        '"field":"backlinks","value":"company-northwind-77aa11bc",'
+        '"source":"script:graph-writer","observed_at":"2026-08-06T03:00:00Z"}\n'
+    )
+
+    def _mkraw(self, tmp_path: Path) -> Path:
+        raw = tmp_path / "raw"
+        (raw / "graph-writer").mkdir(parents=True)
+        return raw
+
+    def test_valid_envelope_batch_is_skipped(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import discover_raw_files
+
+        raw = self._mkraw(tmp_path)
+        batch = raw / "graph-writer" / "20260806T140211Z-9f3ac1d2.jsonl"
+        batch.write_text(self._VALID_ENVELOPE)
+
+        files = discover_raw_files(raw)
+        assert files == []
+
+    def test_not_json_reaches_ordinary_intake(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import discover_raw_files
+
+        raw = self._mkraw(tmp_path)
+        batch = raw / "graph-writer" / "20260806T140211Z-11111111.jsonl"
+        batch.write_text("this is not json at all\nsecond line\n")
+
+        files = discover_raw_files(raw)
+        assert [f.path.name for f in files] == ["20260806T140211Z-11111111.jsonl"]
+        assert files[0].timestamp == "20260806T140211Z"
+        assert files[0].uuid8 == "11111111"
+
+    def test_valid_json_wrong_record_reaches_ordinary_intake(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.librarian import discover_raw_files
+
+        raw = self._mkraw(tmp_path)
+        batch = raw / "graph-writer" / "20260806T140211Z-22222222.jsonl"
+        batch.write_text('{"record":"note","text":"just a note"}\n')
+
+        files = discover_raw_files(raw)
+        assert [f.path.name for f in files] == ["20260806T140211Z-22222222.jsonl"]
+
+    def test_unknown_schema_version_reaches_ordinary_intake(
+        self, tmp_path: Path
+    ) -> None:
+        """Adjudicated contradiction (design doc §3.1 vs §8): an unknown
+        `schema_version` is NOT a valid envelope and MUST reach ordinary
+        intake, not be skipped.
+        """
+        from athenaeum.librarian import discover_raw_files
+
+        raw = self._mkraw(tmp_path)
+        batch = raw / "graph-writer" / "20260806T140211Z-33333333.jsonl"
+        batch.write_text(
+            '{"record":"batch","schema_version":7,"submitter":"x",'
+            '"batch_id":"b1","created_at":"2026-08-06T14:02:11Z"}\n'
+        )
+
+        files = discover_raw_files(raw)
+        assert [f.path.name for f in files] == ["20260806T140211Z-33333333.jsonl"]
+
+    def test_zero_byte_jsonl_reaches_ordinary_intake(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import discover_raw_files
+
+        raw = self._mkraw(tmp_path)
+        batch = raw / "graph-writer" / "20260806T140211Z-44444444.jsonl"
+        batch.write_text("")
+
+        files = discover_raw_files(raw)
+        assert [f.path.name for f in files] == ["20260806T140211Z-44444444.jsonl"]
+
+    def test_missing_batch_id_reaches_ordinary_intake(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import discover_raw_files
+
+        raw = self._mkraw(tmp_path)
+        batch = raw / "graph-writer" / "20260806T140211Z-55555555.jsonl"
+        batch.write_text(
+            '{"record":"batch","schema_version":1,"submitter":"x",'
+            '"created_at":"2026-08-06T14:02:11Z"}\n'
+        )
+
+        files = discover_raw_files(raw)
+        assert [f.path.name for f in files] == ["20260806T140211Z-55555555.jsonl"]
+
+    def test_malformed_batch_alongside_ordinary_md_both_discovered(
+        self, tmp_path: Path
+    ) -> None:
+        """A malformed batch must not eclipse ordinary sibling intake, and
+        must itself still be discovered (not seen by nothing)."""
+        from athenaeum.librarian import discover_raw_files
+
+        raw = self._mkraw(tmp_path)
+        malformed = raw / "graph-writer" / "20260806T140211Z-66666666.jsonl"
+        malformed.write_text("not json\n")
+        note = raw / "graph-writer" / "20260806T150000Z-77777777.md"
+        note.write_text("An ordinary observation.\n")
+        valid_batch = raw / "graph-writer" / "20260806T160000Z-88888888.jsonl"
+        valid_batch.write_text(self._VALID_ENVELOPE)
+
+        files = discover_raw_files(raw)
+        names = {f.path.name for f in files}
+        assert names == {
+            "20260806T140211Z-66666666.jsonl",
+            "20260806T150000Z-77777777.md",
+        }
+
 
 # ---------------------------------------------------------------------------
 # RawFile content loading
