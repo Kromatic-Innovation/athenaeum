@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Merge-proposal suppression messages print threshold comparisons at a
+  precision that makes the printed comparison decidable (athenaeum#804).**
+  The cohesion-floor suppression log line asserted `mean pairwise 0.60 <
+  min_merge_mean_similarity=0.60` — false as printed, because both values
+  were rounded to 2dp for the message while the comparison itself ran on
+  the unrounded floats (e.g. an actual 0.5996 < 0.6000). The underlying
+  comparison was confirmed correct all along; this is a reporting-only fix,
+  not a behaviour change. `_merge_proposal_suppression_reason`'s
+  `single-linkage chain`, `low cohesion`, and `low confidence` messages now
+  print their compared values at 4 decimal places instead of 2 (the
+  `over-cluster` message was already exact — it compares integers). New
+  tests in `tests/test_merge_proposal_gates.py`
+  (`TestSuppressionReasonPrecision`) pin the new format and assert a value
+  just below a floor renders distinguishably from the floor itself; this
+  unblocks the operator adjudication athenaeum#697's AC4 asks for.
+
 - **Wiki-page dedup formation is confirmed complete-linkage, and the stale
   comments claiming otherwise are fixed (athenaeum#803).** `wiki_dedupe`'s
   `find_wiki_page_clusters` / `propose_wiki_page_merges` already routed
