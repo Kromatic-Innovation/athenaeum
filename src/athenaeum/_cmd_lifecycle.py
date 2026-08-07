@@ -140,6 +140,12 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
         help="Break down per run type within each cost path.",
     )
     spend_parser.add_argument(
+        "--by-knob",
+        action="store_true",
+        help="Break down per model knob (classify/write/resolve/topic/"
+        "reasoning_t1/reasoning_t2).",
+    )
+    spend_parser.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON (what /good-morning consumes).",
@@ -296,7 +302,10 @@ def cmd_spend(args: argparse.Namespace) -> int:
 
     records = spend.read_ledger(ledger_path, since=since_dt)
     summary = spend.summarize(
-        records, by_model=args.by_model, by_provider=args.by_provider
+        records,
+        by_model=args.by_model,
+        by_provider=args.by_provider,
+        by_knob=args.by_knob,
     )
 
     if args.json:
@@ -313,6 +322,7 @@ def cmd_spend(args: argparse.Namespace) -> int:
                 since_label=args.since,
                 by_model=args.by_model,
                 by_provider=args.by_provider,
+                by_knob=args.by_knob,
             )
         )
     return 0
