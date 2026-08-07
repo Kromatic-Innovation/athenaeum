@@ -160,6 +160,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hard-bounce recognition + mark on the PII/contacts surface (athenaeum#765,
+  implements athenaeum#565 as corrected by operator design direction
+  2026-08-05).** A hard-bounce fact (identifier, diagnostic, observed date,
+  source) arrives as an ORDINARY free-text raw-intake note via the existing
+  `remember()` path — no new intake schema, `type:` field, or dedicated code
+  path (a test asserts the raw frontmatter carries no `type` key at all).
+  New `librarian.tier0_bounce_mark` is one more deterministic decline-or-apply
+  branch in the SAME tier dispatch every raw file already goes through
+  (`process_one`), mirroring `tier0_handle_upsert`'s shape: it requires the
+  raw's own (pre-existing, generic) `observed_at` and `source` frontmatter
+  fields plus a body recognized by new `pii.detect_hard_bounce_fact` — exactly
+  one email-shaped identifier and an RFC 3463 `5.x.x` enhanced-status-code
+  diagnostic. Deliberately excludes `4.x` (voltaire#81's "potentially stale"
+  case) by construction, so a transient DSN can never be marked bounced; this
+  issue is scoped to the hard-bounce case only. `pii.mark_bounced` upserts the
+  mark onto the identifier's own per-address contact record on the excluded
+  contacts surface — encoded as a valid-time close (`valid_until` = observed
+  date, reusing athenaeum#308's existing claim-validity mechanism) rather than a
+  new `bounced`/`deprecated` status enum, and never a new ledger file (no new
+  `*.jsonl` under the contacts surface — reuse `_observations.jsonl`'s
+  discipline if one is ever needed). Idempotent: re-reporting the identical
+  fact is a byte-for-byte no-op; re-reporting a later bounce updates the same
+  record in place. Nothing is deleted under any configuration. New
+  `pii.is_bounced` is the single read-side predicate a consumer (recall, lint)
+  calls to tell a bounced-but-present identifier apart from one never seen.
+  Explicitly out of scope (cut, not deferred, per the issue): a new
+  `_deprecations.jsonl` ledger, an archive-vs-delete disposition knob, and a
+  `bounced`/`deprecated` status enum as the durable representation — each
+  collides with in-flight work (athenaeum#689's "one ledger" decision, athenaeum#709's
+  zero-destructive-ops rule, athenaeum#714's typed valid-time interval).
+
 - **Deterministic field-correction fast path — the "Lane C" tier-0 conformance
   format (athenaeum#797, design lock athenaeum#794).** A writer that already knows the
   exact target entity, attribute, and value it wants changed (a
