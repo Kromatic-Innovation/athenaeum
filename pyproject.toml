@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "athenaeum"
-version = "0.16.40"
+version = "0.17.0"
 description = "Open source knowledge management pipeline — append-only intake, tiered compilation, configurable schemas"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 authors = [
     { name = "Kromatic Innovation", email = "open-source@kromatic.com" },
 ]
@@ -18,8 +18,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -174,7 +172,7 @@ select = ["E", "F", "I", "W", "RUF100", "BLE001"]
 # `warn_unused_ignores` keeps dead `# type: ignore` markers from accumulating.
 # Strictness is intentionally still incremental here — tighten `[tool.mypy]`
 # (e.g. `disallow_untyped_defs`) in a follow-up, keeping the check green.
-python_version = "3.11"
+python_version = "3.13"
 files = ["src/athenaeum"]
 warn_unused_ignores = true
 # Third-party deps ship without stubs (anthropic, chromadb, fastmcp, …);
