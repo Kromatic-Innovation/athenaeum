@@ -44,6 +44,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Suite-wide isolation of the spend ledger, pinned by tests (athenaeum#776).**
+  A test run that resolves `spend.resolve_ledger_path()` with no override lands
+  on the operator's real `~/.cache/athenaeum/spend.jsonl`: fixture model ids
+  `yaml-topic-model` / `yaml-classify-model` / `yaml-write-model` were measured
+  in 30 live rows dated 2026-07-15 through 2026-08-02. That is not merely
+  untidy — synthetic rows inflate the totals `athenaeum spend` and the
+  `cicero/good-morning` sub-skills report, they are permanently unpriceable (no
+  rate-table prefix matches them, so a repricing pass can never resolve them),
+  and they contaminate a live guardrail: `spend_today()` feeds
+  `ceiling_tripped()`, so a local suite run on the same UTC day as a real run
+  moves a ceiling that bounds REAL spend. A **session-scoped, autouse** fixture
+  in `tests/conftest.py` now redirects both `ATHENAEUM_CACHE_DIR` and
+  `ATHENAEUM_SPEND_LEDGER` into a `tmp_path_factory` directory for the whole
+  suite, and the function-scoped `_isolate_cache_dir` re-points the ledger into
+  each test's own directory on top of it. Session scope is what this adds:
+  athenaeum#750's function-scoped fixture already covers every write made
+  *inside* a test function — measured, and it is why a suite run on the current
+  tip leaves the live ledger byte-identical — but it cannot cover a
+  session/module-scoped fixture, a collection-time import, or a config carrying
+  `spend.ledger_path`, each of which still resolved to the live ledger. Five new
+  tests pin the invariant end to end (path resolution, an actual `record_spend`
+  write, both env vars, and resolution from session scope) so it cannot regress
+  silently. Test-only change — no production code was touched.
+
 - **The C4 contradiction-detector / resolver loop now ticks the run-lock
   heartbeat, so a long, healthy C4 phase no longer looks wedged (athenaeum#762).**
   `merge_clusters_to_wiki`'s C4 loop refreshed only the log-only `merge-detect`
