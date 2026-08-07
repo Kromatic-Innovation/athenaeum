@@ -68,18 +68,22 @@ from athenaeum.merge import (  # noqa: E402
     read_cluster_rows,
     resolve_cluster_output_path,
 )
+from athenaeum.provider import build_llm_client  # noqa: E402
 
 log = logging.getLogger("measure_contradiction_baseline")
 
 
-def _build_client():
-    """Return a live Anthropic client or ``None`` when no key is set."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return None
-    import anthropic
+def _build_client(config: dict[str, object] | None):
+    """Return a live LLM client via the provider seam, or ``None`` (athenaeum#780).
 
-    return anthropic.Anthropic(api_key=api_key, max_retries=3)
+    Routes through :func:`build_llm_client` instead of constructing
+    ``anthropic.Anthropic`` directly so this script can use the
+    subscription (``claude-cli``) backend like every other call site, not
+    just the ``api`` backend. On the ``api`` path this preserves prior
+    behavior byte-for-byte: ``max_retries=3``, ``None`` when
+    ``ANTHROPIC_API_KEY`` is unset.
+    """
+    return build_llm_client(config, max_retries=3)
 
 
 def main() -> int:
@@ -167,7 +171,7 @@ def main() -> int:
         if entry is not None:
             entries.append(entry)
 
-    client = _build_client()
+    client = _build_client(config)
 
     type_counter: Counter[str] = Counter()
     unavailable = 0
