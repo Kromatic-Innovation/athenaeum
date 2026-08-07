@@ -2,13 +2,55 @@
 
 # Design: tracking deprecated / bounced email identifiers (athenaeum#565)
 
-**Status: PROPOSAL — awaiting operator ratification before any implementation.**
-This document is the deliverable of issue athenaeum#565. It answers the five design
-questions the issue poses, recommends a default, and defines the raw-intake
-contract that maecenas#42 is blocked on. Nothing here is built yet; the
-acceptance criteria call for the design to be **reviewed before implementation**,
-and each downstream implementation slice below is filed separately once this is
-ratified.
+**Status: RATIFIED, then corrected 2026-08-05 (athenaeum#768) against the live
+code and the narrowed athenaeum#765 implementation plan.** This document was
+the deliverable of issue athenaeum#565 (PR athenaeum#652). It originally
+answered five design questions; three of the five needed correction after
+ratification:
+
+- **Q1 and Q2 are superseded** by the v6 memory model (athenaeum#712,
+  athenaeum#709) — marked in place below, not deleted, per athenaeum#768.
+- **Q3 named the wrong actor.** A 2026-08-05 code review established that
+  **Voltaire**, not maecenas, detects and reports the bounce fact; see
+  "The actor is wrong" below and the corrected Q3.
+- **Q3 and Q5 specified a bespoke `type: email_bounce` intake schema.** That
+  pattern was cut as not generalizable; the reporter uses the existing
+  free-text `remember()` call instead.
+
+The implementation issue is athenaeum#765, narrowed to exactly what the
+operator asked for: *"The librarian should process it in the wiki by making
+sure that email in our PII file is marked as bounced. That's all."*
+Corrections below reflect that narrowing.
+
+## The actor is wrong (corrected 2026-08-05, athenaeum#768)
+
+The original text below said maecenas reports the bounce fact into raw
+intake. That is wrong, and it contradicted this document's own framing of
+maecenas as "a campaign tool" that shouldn't need to know about the librarian's
+bookkeeping. Verified against the live code, 2026-08-05:
+
+- **`voltaire/src/tiers/bounce.ts` is the detector.** `detectBounce` gates on
+  strong DSN signals (mailer-daemon/postmaster sender and a
+  `multipart/report; report-type=delivery-status` reporting `Action: failed`)
+  and on status class — `5.x` hard, `4.x` declined to `temp-bounce.ts`.
+- **Voltaire invokes `handle_bounce.py`**, which removes the address from
+  Google Contacts. That script lives in `maecenas/rsb_campaign/`, but
+  maecenas only **hosts** it — it does not run the detection logic.
+- **maecenas consumes** suppression state at send time. It neither detects
+  nor reports the bounce.
+
+Corrected chain:
+
+> **Voltaire detects → updates Google Contacts → reports the bounce fact to
+> athenaeum as ordinary raw intake → the librarian marks the address bounced
+> on the PII surface.**
+
+**Outcome-vocabulary gap (unresolved, noted here rather than papered over):**
+Voltaire distinguishes **three** outcomes — hard bounce, potentially-stale
+after repeated `4.x` past a threshold (voltaire#81), and fine — while Q1
+below proposed a **two**-valued `status` (`bounced` / `deprecated`). This
+document does not resolve that gap; see athenaeum#765's open question and
+voltaire#81 for the source of the third state.
 
 ## The operator's model (given, not re-litigated)
 
@@ -22,14 +64,31 @@ ratified.
   the address stays discoverable as a historical identifier, marked
   no-longer-deliverable.
 - **maecenas should not need to know any of this.** It is a campaign tool; it
-  reports the bounce fact into raw intake and knows nothing about how the
-  librarian records it (maecenas#42, maecenas#41).
+  neither detects nor reports the bounce, and knows nothing about how the
+  librarian records it. **Voltaire** detects the bounce and reports the fact
+  into raw intake (corrected 2026-08-05, athenaeum#768 — see "The actor is
+  wrong" above); maecenas only consumes the resulting suppression state at
+  send time, and hosts the `handle_bounce.py` script Voltaire invokes
+  (maecenas#42, maecenas#41).
 
 The recommendation below implements this model; it does not reopen it.
 
 ---
 
 ## Q1 — Where does deprecation live?
+
+> **SUPERSEDED 2026-08-05 (athenaeum#768).** The `_deprecations.jsonl` ledger
+> proposed below was never built. athenaeum#765 (the narrowed implementation
+> issue for this design) cut it on 2026-08-05: athenaeum already has
+> `_observations.jsonl` (append-only, with a supersession fold), and
+> **athenaeum#712** is building the v6 verdict ledger as the single place
+> verdicts are recorded — a second, feature-specific ledger would collide
+> with it. athenaeum#689 was re-scoped on 2026-08-02 by explicit operator
+> decision — *"one ledger"* — for the same reason. The section below is kept
+> for historical context (why a deprecation record is not folded into
+> `Supersession`) but its proposed storage mechanism does not exist and is
+> not being built; the actual mechanism is whatever athenaeum#712's verdict
+> ledger produces.
 
 **In the excluded contact store, as a new append-only ledger record — NOT in
 wiki frontmatter.**
@@ -87,6 +146,17 @@ non-deliverable* rather than either live or gone.
 
 ## Q2 — Archive vs delete: the configurable preference
 
+> **SUPERSEDED 2026-08-05 (athenaeum#768).** The configurable
+> archive-vs-delete disposition knob proposed below was never built.
+> athenaeum#765 cut it on 2026-08-05: a `delete` disposition is a destructive
+> operation, and athenaeum#709's definition of done item 4 requires **"zero
+> destructive operations without a ledger entry."** Rather than carry a
+> per-feature disposition knob, disposition is a property of the v6 ledger
+> mechanism athenaeum#709/athenaeum#712 are building, not a standalone
+> resolver. The section below is kept for historical context (the
+> archive-over-delete reasoning still holds) but the knob it proposes does
+> not exist and is not being built.
+
 **Recommended default: `archive` (preserve). Configurable via a resolver knob,
 global with an optional per-source override.**
 
@@ -116,7 +186,7 @@ resolve_bounce_disposition(config)  ->  "archive" | "delete"
 
 **Granularity: global default, optional per-source override.** The common case
 is one global preference. A per-source override (`librarian.bounce_disposition_by_source`)
-lets an operator, e.g., archive bounces reported by maecenas campaigns (default)
+lets an operator, e.g., archive bounces from one campaign source (default)
 while deleting bounces from a source known to over-report transient failures.
 Per-*person* granularity is deliberately **not** proposed: deprecation is a
 property of an address's deliverability, not of a person, and per-person tiers
@@ -130,44 +200,86 @@ deprecation record). Preserve is the safe direction.
 
 ---
 
-## Q3 — The raw-intake proposal contract (maecenas#42)
+## Q3 — The raw-intake proposal contract
 
-maecenas submits a **bounce fact** into raw intake and nothing more. It does not
-know about the ledger, the excluded surface, archive-vs-delete, or the wiki.
+> **CORRECTED 2026-08-05 (athenaeum#768).** Two things were wrong in the
+> original text below, replaced entirely rather than annotated in place: (1)
+> it named maecenas as the reporter — it is **Voltaire**; see "The actor is
+> wrong" above. (2) it specified a dedicated `type: email_bounce` YAML schema
+> with a special-cased librarian intake path — cut as not generalizable for
+> an OSS knowledge system with many fact types.
 
-**Contract — the minimal bounce-fact proposal maecenas#42 emits:**
+**Voltaire reports the bounce fact into raw intake as ordinary free text,
+via the existing `remember()` call. No dedicated schema, no special-cased
+librarian intake path.**
 
-```yaml
-type: email_bounce            # the intake proposal kind the librarian recognizes
-identifier: person@example.com   # the address that bounced (required)
-event: bounced                # "bounced" (hard failure observed) — the only value maecenas sends
-observed_at: 2026-07-15       # ISO-8601 date the bounce was observed (required)
-diagnostic: "550 5.1.1 user unknown"   # the SMTP/provider bounce diagnostic, verbatim (optional but preferred)
-source: "campaign:spring-2026/msg-abc123"   # where the bounce came from (required, for provenance)
+Voltaire detects the bounce (`voltaire/src/tiers/bounce.ts`) and invokes
+`handle_bounce.py` to update Google Contacts. That script is hosted in
+`maecenas/rsb_campaign/` — maecenas#42 tracks fixing it so it stops writing
+directly to the wiki (`write_wiki_bounced()`) and instead reports the bounce
+fact through this contract. maecenas itself does not detect or report; it
+only consumes the resulting suppression state at send time.
+
+**Contract — an ordinary `remember()` call, evidence embedded in the text:**
+
+```python
+remember(
+    content=(
+        "Bounce: person@example.com — 550 5.1.1 user unknown "
+        "(observed 2026-07-15, campaign:spring-2026/msg-abc123)"
+    ),
+    source="campaign:spring-2026/msg-abc123",
+)
 ```
 
 Rules of the contract:
 
-1. maecenas emits **only the fact**. It never sets `disposition`, never decides
-   archive-vs-delete, never touches the contact store or the wiki. The librarian
-   resolves the disposition (Q2) when it consumes the proposal.
-2. The proposal is **append-only intake**, like every other raw-intake record —
-   maecenas writes it into the raw intake area and stops. The librarian's normal
-   intake pass picks it up, resolves the disposition, and writes the
-   `_deprecations.jsonl` record (and, if `delete`, removes the identifier).
-3. `identifier`, `observed_at`, and `source` are required; `diagnostic` is
-   optional but strongly preferred (it is what distinguishes a hard bounce from
-   a transient one at review time).
-4. maecenas learns the librarian's outcome, if at all, only through the normal
-   intake result surface — **ideally it learns nothing**, per the operator's
-   "maecenas shouldn't need to worry about this."
+1. The reporter emits **only the fact**, as free text with the evidence
+   embedded — address, diagnostic, observed date, and provenance. There is
+   no `type:` field and no bespoke YAML schema; `content` and `source` are
+   the same two parameters every other `remember()` caller uses.
+2. This is **ordinary raw intake**, like every other fact athenaeum records —
+   the reporter calls `remember()` and stops. The librarian's normal
+   classification pass recognizes the bounce fact and marks the address
+   bounced on the PII surface. There is no dedicated ledger record or
+   disposition to resolve (Q1/Q2 above are superseded — athenaeum#765's
+   narrowed scope is "mark the address bounced on the PII surface, that's
+   all").
+3. There is no required-field list beyond what `remember()` already takes.
+   The diagnostic and observed date are conventions for what to embed in
+   `content`, not schema fields the librarian parses specially.
+4. The reporter learns the librarian's outcome, if at all, only through the
+   normal intake result surface — **ideally it learns nothing**, per the
+   operator's "maecenas shouldn't need to worry about this" (which extends
+   to Voltaire and the hosted script it invokes).
 
-**This is the contract maecenas#42 is blocked on.** On ratification, this
-section is copied to maecenas#42 so that issue can proceed.
+**maecenas#42** tracks the fix to the hosted `handle_bounce.py` script
+(stop writing directly to the wiki; report via this contract instead). On
+ratification of this correction, this section is copied to maecenas#42 so
+that issue's driver note stays current.
 
 ---
 
 ## Q4 — Reconciliation with Google Contacts
+
+> **Note (2026-08-05, athenaeum#768) — principle unaffected, implementation
+> issue closed.** None of the corrections in this document touch Q4's
+> principle: surfacing only, never auto-correction; athenaeum is never
+> authoritative over gcontacts for a current address. Its optional
+> implementation issue, **athenaeum#767** (the
+> `deprecated-here-but-live-in-gcontacts` lint), was **closed as not planned**
+> on 2026-08-05. Two reasons: (1) the lint's premise was diffing the
+> `_deprecations.jsonl` ledger against gcontacts, and that ledger was cut from
+> athenaeum#765 the same day (see Q1) — there is no longer anything to diff;
+> (2) the lint has athenaeum reading Google Contacts directly, the same
+> boundary inversion **voltaire#117** exists to fix on the Voltaire side (the
+> read belongs where the gcontacts access already lives). The lint was
+> `moscow:could` and genuinely optional, so it was closed rather than
+> rewritten against a moving target — see the issue for the full review. The
+> text below still describes the `_deprecations.jsonl` record for the same
+> historical-context reason as Q1/Q2 above; the actual mechanism, if this
+> lint is ever rebuilt, would be whatever athenaeum#712's verdict ledger
+> produces.
 
 **Steady state: athenaeum legitimately holds identifiers Google Contacts has
 dropped. That is what "historical identifier" means. No reverse drift-detection
@@ -199,20 +311,27 @@ for the *historical* fact that the address once bounced.
 
 ## Q5 — Retroactive population (backfill)
 
+> **CORRECTED 2026-08-05 (athenaeum#768).** The original text below emitted
+> the **same** bespoke `type: email_bounce` intake proposal Q3 used — cut for
+> the same reason (see Q3). It also implicitly located the backfill on the
+> containerized design-work side; the gcontacts read is a **Voltaire-side**
+> concern, and the backfill issue has moved there: **voltaire#117**.
+
 **Yes — the `BOUNCED <date>: <diagnostic>` markers already recorded in Google
-Contact biographies are a backfill source. Scoped as a follow-up slice.**
+Contact biographies are a backfill source. Tracked as voltaire#117.**
 
 Bounces have been recorded in gcontacts bios as `BOUNCED <date>: <diagnostic>`
-for some time. A one-time backfill pass parses those markers and emits the
-**same** `type: email_bounce` intake proposals (Q3) with `source:
-"backfill:gcontacts-bio"` and `observed_at` taken from the marker's date — so
-backfill and live bounces flow through one code path, not two. Because intake is
-append-only and the ledger is idempotent on `dep_id` (caller-minted from the
-marker's `identifier + observed_at`), the backfill can be re-run safely.
+for some time. A one-time backfill pass parses those markers and reports each
+one through the **same** free-text `remember()` contract as a live bounce
+(Q3) — `source: "backfill:gcontacts-bio"`, `content` embedding the address,
+diagnostic, and the marker's date — so backfill and live bounces flow through
+one code path, not two. Because raw intake is append-only, re-running the
+backfill is safe: the librarian's classification pass treats each `remember()`
+call as an independent fact, same as any duplicate report.
 
-The backfill is a distinct implementation slice (it needs read access to the
-gcontacts bios, a boundary this containerized design work does not cross); it is
-filed once this design is ratified.
+The backfill needs read access to the gcontacts bios, which Voltaire already
+has and this document's scope (athenaeum-side design) does not cross —
+**voltaire#117** tracks it.
 
 ---
 
@@ -228,26 +347,50 @@ it adds a status to records those slices already place in the excluded surface.
 
 ---
 
-## What ratification unblocks (implementation slices, filed on approval)
+## What ratification unblocks (implementation slices)
 
-1. `_deprecations.jsonl` record type + append/read helpers in `athenaeum.pii`,
-   mirroring the observation ledger (append-only, schema-versioned).
-2. `resolve_bounce_disposition` knob (env > yaml > default `archive`) + optional
-   per-source override.
-3. The `type: email_bounce` intake path in the librarian that consumes the Q3
-   proposal and writes the deprecation record per the resolved disposition.
-4. The maecenas#42 contract (Q3), communicated to that issue.
-5. Backfill pass from gcontacts `BOUNCED` bio markers (Q5).
-6. (Optional) the `deprecated-here-but-live-in-gcontacts` reconciliation lint (Q4).
+> **CORRECTED 2026-08-05 (athenaeum#768).** This list originally named
+> maecenas as the Q3 reporter in items 3-4 and proposed the now-superseded
+> Q1/Q2 mechanism in items 1-2. Updated to the actual disposition of each
+> slice, below, cross-linked to the issue building it (or the issue that
+> closed it, and why).
+
+1. **Superseded** — `_deprecations.jsonl` record type. Not being built; the
+   mechanism is whatever **athenaeum#712**'s v6 verdict ledger produces (Q1).
+2. **Superseded** — `resolve_bounce_disposition` knob. Not being built; ruled
+   out by **athenaeum#709**'s definition-of-done item 4, "zero destructive
+   operations without a ledger entry" (Q2).
+3. **In progress** — the librarian marks the address bounced on the PII
+   surface from an ordinary `remember()` call, no dedicated intake path.
+   Tracked by **athenaeum#765**, narrowed to exactly that (Q3).
+4. **In progress** — the corrected Q3 contract, communicated to
+   **maecenas#42**, which tracks fixing the hosted `handle_bounce.py` script
+   to stop writing directly to the wiki.
+5. **In progress** — backfill pass from gcontacts `BOUNCED` bio markers.
+   Moved to the Voltaire side: **voltaire#117** (Q5).
+6. **Closed, not planned** — the `deprecated-here-but-live-in-gcontacts`
+   reconciliation lint. **athenaeum#767**, closed 2026-08-05: its premise
+   (diffing `_deprecations.jsonl`) was cut, and the gcontacts read it
+   proposed belongs on the Voltaire side per the same boundary voltaire#117
+   exists to fix (Q4).
 
 ## Open questions for the ratifying reviewer
 
-- **Default disposition** — this proposes `archive` (preserve). Confirm, or
-  choose `delete` as the global default (not recommended, per Q2's
-  reversibility argument).
+> **Note (2026-08-05, athenaeum#768):** the three open questions below were
+> about the Q1/Q2 mechanism — default disposition, ledger filename, `status`
+> values — and that mechanism was superseded before any of them needed an
+> answer (see Q1/Q2 above). Kept for historical record; none is a live
+> decision point. The one open question that *is* still live is the
+> outcome-vocabulary gap noted under "The actor is wrong": Voltaire's
+> three-valued outcome vocabulary (voltaire#81) versus whatever `status`
+> values the v6 verdict ledger (athenaeum#712) ends up using — tracked as an
+> open question on **athenaeum#765**.
+
+- **Default disposition** — this proposed `archive` (preserve). Superseded —
+  see Q2.
 - **Ledger filename / surface** — `_deprecations.jsonl` under the contacts
-  (excluded) surface is proposed for consistency with `_observations.jsonl`.
-  Confirm that surface is the intended home.
-- **`status` values** — `bounced` vs `deprecated` are proposed as distinct
-  (observed hard failure vs operator/marker assertion). Confirm both are wanted,
-  or collapse to one.
+  (excluded) surface was proposed for consistency with `_observations.jsonl`.
+  Superseded — see Q1.
+- **`status` values** — `bounced` vs `deprecated` were proposed as distinct
+  (observed hard failure vs operator/marker assertion). Superseded along with
+  the record type that would have carried them — see Q1.
