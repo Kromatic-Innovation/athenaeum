@@ -89,8 +89,6 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-import anthropic
-
 from athenaeum import detection_state, spend
 from athenaeum._retry import TransientAPIError
 from athenaeum.atomic_io import atomic_write_text
@@ -172,6 +170,7 @@ from athenaeum.pii import (
 )
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.provider import (
+    LLMBackend,
     ProviderConfigError,
     build_llm_client,
     capabilities_for,
@@ -874,7 +873,7 @@ def process_one(
     raw: RawFile,
     index: EntityIndex,
     wiki_root: Path,
-    client: anthropic.Anthropic | None,
+    client: LLMBackend | None,
     valid_types: list[str],
     valid_tags: list[str],
     valid_access: list[str],
@@ -1565,7 +1564,7 @@ def _run_reresolve_pass(
     knowledge_root: Path,
     *,
     config: dict[str, object] | None,
-    client: anthropic.Anthropic | None,
+    client: LLMBackend | None,
     usage: TokenUsage | None = None,
 ) -> int:
     """Re-resolve open, proposal-less pending questions (issue athenaeum#188).
