@@ -377,16 +377,73 @@ def _source_and_eval(func_call: str, env_extra: dict[str, str]) -> str:
     return r.stdout.strip()
 
 
-def test_default_install_cmd_uses_athenaeum_extras() -> None:
+def _source_and_eval_rc(func_call: str, env_extra: dict[str, str]) -> tuple[int, str]:
+    """_source_and_eval's variant for helpers that signal failure via exit status."""
+    env = dict(os.environ)
+    env.pop("ATHENAEUM_DEPLOY_EXTRAS", None)
+    env.pop("ATHENAEUM_GUARD_PYTHON", None)
+    env.update(env_extra)
+    r = subprocess.run(
+        ["bash", "-c", f'. "{GUARD}"; {func_call}'],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return r.returncode, r.stdout.strip()
+
+
+def _shim_dir(tmp_path: Path, versions: dict[str, str]) -> Path:
+    """A PATH dir of fake interpreters that report a fixed MAJ.MIN.
+
+    The guard asks an interpreter for its OWN version rather than trusting its
+    name, so a two-line shim is enough to stand in for a real 3.11/3.13 — which
+    is what keeps the athenaeum#832 regression tests hermetic: no pyenv, no
+    homebrew, no real venv build, and identical behavior on any CI runner.
+    """
+    shims = tmp_path / "shims"
+    shims.mkdir(exist_ok=True)
+    for name, version in versions.items():
+        shim = shims / name
+        shim.write_text(f"#!/bin/sh\necho {version}\n")
+        shim.chmod(0o755)
+    return shims
+
+
+def _tree_with_floor(tmp_path: Path, spec: str) -> Path:
+    """A throwaway package tree declaring `requires-python = <spec>`."""
+    tree = tmp_path / "tree"
+    tree.mkdir(parents=True, exist_ok=True)
+    (tree / "pyproject.toml").write_text(
+        f'[project]\nname = "athenaeum"\nrequires-python = "{spec}"\n'
+    )
+    return tree
+
+
+def _shimmed_path(shims: Path) -> str:
+    return f"{shims}:{os.environ.get('PATH', '')}"
+
+
+def test_default_install_cmd_uses_athenaeum_extras(tmp_path: Path) -> None:
     # The Python build step is adapted to athenaeum's real deploy (deploy-sync.sh):
     # editable install WITH the mcp+vector extras, not a bare uv sync / pip install.
-    out = _source_and_eval("_dg_default_install_cmd", {})
-    assert out == 'python3 -m venv .venv && .venv/bin/pip install -q -e ".[mcp,vector]"'
+    # Since athenaeum#832 the interpreter is a RESOLVED absolute path rather than
+    # bare `python3`; the shim pins it so the assertion stays machine-independent.
+    tree = _tree_with_floor(tmp_path, ">=3.13")
+    shims = _shim_dir(tmp_path, {"python3": "3.13"})
+    out = _source_and_eval(f"_dg_default_install_cmd {tree}", {"PATH": _shimmed_path(shims)})
+    assert out == (
+        f'"{shims}/python3" -m venv .venv && .venv/bin/pip install -q -e ".[mcp,vector]"'
+    )
 
 
-def test_deploy_extras_override_flows_into_install() -> None:
-    out = _source_and_eval("_dg_default_install_cmd", {"ATHENAEUM_DEPLOY_EXTRAS": "mcp"})
-    assert out == 'python3 -m venv .venv && .venv/bin/pip install -q -e ".[mcp]"'
+def test_deploy_extras_override_flows_into_install(tmp_path: Path) -> None:
+    tree = _tree_with_floor(tmp_path, ">=3.13")
+    shims = _shim_dir(tmp_path, {"python3": "3.13"})
+    out = _source_and_eval(
+        f"_dg_default_install_cmd {tree}",
+        {"ATHENAEUM_DEPLOY_EXTRAS": "mcp", "PATH": _shimmed_path(shims)},
+    )
+    assert out == f'"{shims}/python3" -m venv .venv && .venv/bin/pip install -q -e ".[mcp]"'
 
 
 def test_default_reconcile_cmd_is_hard_reset_to_origin_ref() -> None:
@@ -516,3 +573,192 @@ def test_default_version_check_cmd_targets_deploy_venv() -> None:
 def test_default_metadata_refresh_cmd_is_no_deps_editable() -> None:
     out = _source_and_eval("_dg_default_metadata_refresh_cmd /tmp/deploy", {})
     assert out == '"/tmp/deploy/.venv/bin/pip" install -q -e . --no-deps'
+
+
+# ---------------------------------------------------------------------------
+# Interpreter selection (issue athenaeum#832) — the venv rebuild must resolve an
+# interpreter that SATISFIES the deploy tree's requires-python, never trust bare
+# `python3` on $PATH. AC3: these cover the case where `python3` does not meet it.
+# ---------------------------------------------------------------------------
+
+
+def test_requires_python_floor_parsed_from_pyproject(tmp_path: Path) -> None:
+    for i, (spec, expected) in enumerate(
+        [
+            (">=3.13", "3.13"),
+            (">=3.13,<4.0", "3.13"),
+            (">= 3.13", "3.13"),
+            (">=3", "3.0"),
+        ]
+    ):
+        tree = _tree_with_floor(tmp_path / f"case{i}", spec)
+        assert _source_and_eval(f"_dg_requires_python {tree}", {}) == expected, spec
+
+
+def test_requires_python_absent_is_not_an_error(tmp_path: Path) -> None:
+    # A tree that declares no floor has none to enforce -> non-zero, and the
+    # caller keeps the historical bare-`python3` behavior rather than aborting.
+    empty = tmp_path / "no-pyproject"
+    empty.mkdir()
+    rc, out = _source_and_eval_rc(f"_dg_requires_python {empty}", {})
+    assert rc != 0
+    assert out == ""
+
+
+def test_resolver_rejects_too_old_bare_python3(tmp_path: Path) -> None:
+    # THE athenaeum#832 REGRESSION: `python3` resolves to 3.11 (the deploy host's
+    # pyenv shim) while a satisfying 3.13 exists under a versioned name. Before
+    # the fix the guard built the venv with 3.11 and pip failed with
+    # "requires a different Python: 3.11.15 not in '>=3.13'".
+    tree = _tree_with_floor(tmp_path, ">=3.13")
+    shims = _shim_dir(tmp_path, {"python3": "3.11", "python3.13": "3.13"})
+    out = _source_and_eval(f"_dg_resolve_python {tree}", {"PATH": _shimmed_path(shims)})
+    assert out == f"{shims}/python3.13"
+
+    cmd = _source_and_eval(f"_dg_default_install_cmd {tree}", {"PATH": _shimmed_path(shims)})
+    assert cmd.startswith(f'"{shims}/python3.13" -m venv')
+
+
+def test_resolver_prefers_bare_python3_when_it_already_satisfies(tmp_path: Path) -> None:
+    # A healthy machine keeps today's exact behavior and cost — the fix must not
+    # start preferring a versioned interpreter over a perfectly good `python3`.
+    tree = _tree_with_floor(tmp_path, ">=3.13")
+    shims = _shim_dir(tmp_path, {"python3": "3.13", "python3.14": "3.14"})
+    out = _source_and_eval(f"_dg_resolve_python {tree}", {"PATH": _shimmed_path(shims)})
+    assert out == f"{shims}/python3"
+
+
+def test_resolver_accepts_a_newer_minor_than_the_floor(tmp_path: Path) -> None:
+    tree = _tree_with_floor(tmp_path, ">=3.13")
+    shims = _shim_dir(tmp_path, {"python3": "3.11", "python3.15": "3.15"})
+    out = _source_and_eval(f"_dg_resolve_python {tree}", {"PATH": _shimmed_path(shims)})
+    assert out == f"{shims}/python3.15"
+
+
+def test_resolver_fails_when_nothing_satisfies(tmp_path: Path) -> None:
+    # No interpreter on PATH meets the floor -> silent non-zero, so the caller
+    # can abort loudly instead of handing pip an interpreter it will reject.
+    tree = _tree_with_floor(tmp_path, ">=3.99")
+    shims = _shim_dir(tmp_path, {"python3": "3.11"})
+    rc, out = _source_and_eval_rc(f"_dg_resolve_python {tree}", {"PATH": _shimmed_path(shims)})
+    assert rc != 0
+    assert out == ""
+
+
+def test_guard_python_override_is_used_when_it_satisfies(tmp_path: Path) -> None:
+    tree = _tree_with_floor(tmp_path, ">=3.13")
+    shims = _shim_dir(tmp_path, {"python3": "3.11", "python3.13": "3.13"})
+    out = _source_and_eval(
+        f"_dg_resolve_python {tree}",
+        {"PATH": _shimmed_path(shims), "ATHENAEUM_GUARD_PYTHON": "python3.13"},
+    )
+    assert out == f"{shims}/python3.13"
+
+
+def test_guard_python_override_that_does_not_satisfy_is_refused(tmp_path: Path) -> None:
+    # An operator's explicit choice is the ONLY candidate: silently probing past
+    # a bad ATHENAEUM_GUARD_PYTHON would hide the misconfiguration.
+    tree = _tree_with_floor(tmp_path, ">=3.13")
+    shims = _shim_dir(tmp_path, {"python3": "3.11", "python3.13": "3.13"})
+    rc, out = _source_and_eval_rc(
+        f"_dg_resolve_python {tree}",
+        {"PATH": _shimmed_path(shims), "ATHENAEUM_GUARD_PYTHON": "python3"},
+    )
+    assert rc != 0
+    assert out == ""
+
+
+def test_stale_venv_below_the_floor_is_rebuilt_with_clear(tmp_path: Path) -> None:
+    # `venv` reuses an existing tree, so a .venv built by 3.11 would keep failing
+    # even with the right interpreter — the exact state the operator had to fix by
+    # hand. A mismatched .venv is rebuilt with --clear.
+    tree = _tree_with_floor(tmp_path, ">=3.13")
+    (tree / ".venv" / "bin").mkdir(parents=True)
+    stale = tree / ".venv" / "bin" / "python"
+    stale.write_text("#!/bin/sh\necho 3.11\n")
+    stale.chmod(0o755)
+    shims = _shim_dir(tmp_path, {"python3": "3.13"})
+    out = _source_and_eval(f"_dg_default_install_cmd {tree}", {"PATH": _shimmed_path(shims)})
+    assert " -m venv --clear .venv" in out
+
+
+def test_satisfying_venv_is_reused_without_clear(tmp_path: Path) -> None:
+    tree = _tree_with_floor(tmp_path, ">=3.13")
+    (tree / ".venv" / "bin").mkdir(parents=True)
+    ok = tree / ".venv" / "bin" / "python"
+    ok.write_text("#!/bin/sh\necho 3.13\n")
+    ok.chmod(0o755)
+    shims = _shim_dir(tmp_path, {"python3": "3.13"})
+    out = _source_and_eval(f"_dg_default_install_cmd {tree}", {"PATH": _shimmed_path(shims)})
+    assert "--clear" not in out
+    assert " -m venv .venv" in out
+
+
+def test_sync_aborts_loud_when_no_interpreter_satisfies(tmp_path: Path) -> None:
+    # End-to-end on the drift path: rather than surface pip's opaque "requires a
+    # different Python" AFTER reconciling the checkout, the guard aborts with the
+    # constraint and a recovery hint naming ATHENAEUM_GUARD_PYTHON.
+    repo = _make_repo(tmp_path)
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "athenaeum"\nrequires-python = ">=3.13"\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "declare requires-python")
+    head = _head(repo)
+    shims = _shim_dir(tmp_path, {"python3": "3.11"})
+    r = _run(
+        [],
+        {
+            "ATHENAEUM_DEPLOY_DIR": str(repo),
+            "ATHENAEUM_GUARD_REF_SHA": head,
+            "ATHENAEUM_GUARD_PYTHON": str(shims / "python3"),  # forced, too old
+            "ATHENAEUM_GUARD_STAMP_CMD": "true",
+        },
+    )
+    assert r.returncode != 0
+    assert "no Python interpreter satisfying requires-python >=3.13" in r.stderr
+    assert "ATHENAEUM_GUARD_PYTHON" in r.stderr
+
+
+def test_install_cmd_override_bypasses_interpreter_resolution(tmp_path: Path) -> None:
+    # ATHENAEUM_GUARD_INSTALL_CMD stays a full escape hatch: an explicit command
+    # is run as-is, and resolution never gets a chance to veto it.
+    repo = _make_repo(tmp_path)
+    head = _head(repo)
+    marker = tmp_path / "installed"
+    r = _run(
+        [],
+        {
+            "ATHENAEUM_DEPLOY_DIR": str(repo),
+            "ATHENAEUM_GUARD_REF_SHA": head,
+            "ATHENAEUM_GUARD_PYTHON": "/nonexistent/python",  # would fail resolution
+            "ATHENAEUM_GUARD_INSTALL_CMD": f"touch {marker}",
+            "ATHENAEUM_GUARD_STAMP_CMD": "true",
+            "ATHENAEUM_GUARD_VERSION_CHECK_CMD": "true",
+        },
+    )
+    assert r.returncode == 0, r.stderr
+    assert marker.exists()
+
+
+def test_real_repo_resolves_an_interpreter_meeting_its_own_floor() -> None:
+    # Not a shim: against THIS repo's real pyproject.toml, whatever the guard
+    # resolves must genuinely satisfy the declared floor. Skips (rather than
+    # fails) on a machine with no satisfying interpreter on PATH — that is the
+    # abort path, covered hermetically by the shim tests above.
+    repo_root = GUARD.parent.parent
+    floor = _source_and_eval(f"_dg_requires_python {repo_root}", {})
+    assert floor, "athenaeum's pyproject.toml must declare a >= requires-python floor"
+    rc, resolved = _source_and_eval_rc(f"_dg_resolve_python {repo_root}", {})
+    if rc != 0:
+        pytest.skip(f"no Python >={floor} on PATH; the guard's abort path is covered by shims")
+    assert Path(resolved).exists()
+    reported = subprocess.run(
+        [resolved, "-c", 'import sys; print("%d.%d" % sys.version_info[:2])'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    want = tuple(int(p) for p in floor.split("."))
+    got = tuple(int(p) for p in reported.split("."))
+    assert got >= want, f"resolved {resolved} is {reported}, below requires-python >={floor}"
