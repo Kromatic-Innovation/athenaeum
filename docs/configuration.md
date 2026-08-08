@@ -454,13 +454,19 @@ Constraints and semantics:
   `claude-cli` provider probes for its binary before any work and exits rc 1
   with a clear message if it is absent — it never silently no-ops. (A logged-OUT
   CLI still surfaces per-file at call time.)
-- **Rate limits / timeouts degrade gracefully.** A subscription rate-limit, a
-  transient CLI error, or a subprocess timeout maps to
-  `_retry.TransientAPIError`. Unlike the api backend's SDK transients this is
-  NOT retried in-run — it is caught downstream as a give-up and the affected
-  file is **deferred to the next run**; the single-machine run lock + resume
-  make that pickup safe. (Under sustained rate-limiting the CLI backend defers
-  files a nightly run would otherwise complete — acceptable at nightly cadence.)
+- **Rate limits degrade gracefully, and are now retried in-run (athenaeum#782).**
+  A subscription rate-limit or other transient CLI error (subprocess exit
+  code + stderr, or the JSON envelope's `is_error`/`subtype`) is recognized by
+  `with_retry` the same way as the `api` backend's SDK transients — bounded
+  exponential backoff, then the SAME give-up as before once retries are
+  exhausted: `_retry.TransientAPIError`, caught downstream as a give-up, the
+  affected file **deferred to the next run**, single-machine run lock + resume
+  making that pickup safe. A **subprocess timeout** is the one exception: it
+  still maps directly to `_retry.TransientAPIError` and is NOT retried in-run
+  (see the CLI timeout row above) — retrying a call that already burned its
+  full `ATHENAEUM_CLAUDE_CLI_TIMEOUT` budget would multiply an already
+  generous per-call timeout across `max_attempts`, so a timeout still defers
+  straight to the next run.
 - **Cost is subscription-covered ($0).** Token COUNTS from the CLI JSON
   envelope are still recorded per model in the run's `TokenUsage` and appear in
   the run summary, but `estimated_cost_usd` reports **$0** — the subscription

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from athenaeum._retry import TransientAPIError
+from athenaeum._retry import TransientAPIError, TransientError
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import TokenUsage, cache_usage_counts
 from athenaeum.provider import (
@@ -375,9 +375,14 @@ class TestClaudeCliErrors:
             )
 
     def test_nonzero_exit_rate_limit_maps_transient(self, monkeypatch):
+        # Issue athenaeum#782: a rate-limit failure raises TransientError (the
+        # "please retry me" request signal), not TransientAPIError (the
+        # give-up type raised by with_retry once retries are exhausted) — so
+        # a call wrapped in with_retry actually gets retried in-run. See
+        # tests/test_retry_registry.py for the with_retry integration.
         _stub_run(monkeypatch, returncode=1, stderr="Error: rate limit exceeded (429)")
         client = ClaudeCliClient()
-        with pytest.raises(TransientAPIError):
+        with pytest.raises(TransientError):
             client.messages.create(
                 model="m", system="s", messages=[{"role": "user", "content": "u"}]
             )
@@ -416,6 +421,8 @@ class TestClaudeCliErrors:
         assert "[redacted-email]" in msg
 
     def test_envelope_is_error_retryable_maps_transient(self, monkeypatch):
+        # Issue athenaeum#782: see test_nonzero_exit_rate_limit_maps_transient
+        # above — same TransientError-not-TransientAPIError rationale.
         _stub_run(
             monkeypatch,
             stdout=_envelope(
@@ -426,7 +433,7 @@ class TestClaudeCliErrors:
             ),
         )
         client = ClaudeCliClient()
-        with pytest.raises(TransientAPIError):
+        with pytest.raises(TransientError):
             client.messages.create(
                 model="m", system="s", messages=[{"role": "user", "content": "u"}]
             )
