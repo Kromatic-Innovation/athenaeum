@@ -38,12 +38,19 @@ Known constraints (implemented here / at the call sites, documented in
   still recorded in :class:`~athenaeum.models.TokenUsage` (tagged by model), but
   ``estimated_cost_usd`` reports ``$0`` for a subscription run (the caller sets
   :attr:`TokenUsage.subscription_covered`).
-* **Rate-limit / transient CLI failures map to
-  :class:`athenaeum._retry.TransientAPIError`.** ``with_retry`` catches only the
-  Anthropic SDK transient types, NOT this one — so a CLI transient is not
-  retried in-run: it propagates and is caught downstream as a give-up (the
-  affected file is deferred), and the single-machine run-lock + resume make the
-  next run pick it up safely.
+* **Rate-limit / transient CLI failures (subprocess exit code + stderr, or the
+  JSON envelope's ``is_error``/``subtype``, matching ``_looks_retryable``) map
+  to :class:`athenaeum._retry.TransientError`, the same shared "please retry
+  me" currency any backend can raise (issue athenaeum#782).** ``with_retry``
+  now catches it and retries in-run, exactly like the ``api`` backend's SDK
+  transient types; only on exhaustion does it surface downstream as
+  :class:`athenaeum._retry.TransientAPIError` (the give-up type), same as
+  before. A CLI subprocess **timeout** is the one exception: it still maps
+  directly to :class:`~athenaeum._retry.TransientAPIError` (not retried
+  in-run) — a `with_retry` timeout budget of `max_attempts` × up to
+  `ATHENAEUM_CLAUDE_CLI_TIMEOUT` seconds each would multiply an already
+  generous single-call timeout, so this stays a same-run give-up; the
+  single-machine run-lock + resume make the next run pick it up safely.
 
 **Contract:** one factory (:func:`build_llm_client`) hides which backend is
 serving a call site behind the shared ``messages.create(**params) ->
@@ -80,7 +87,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from athenaeum._retry import TransientAPIError
+from athenaeum._retry import TransientAPIError, TransientError
 from athenaeum.outbound_pii import redact_outbound_text
 
 if TYPE_CHECKING:
@@ -881,8 +888,12 @@ class ClaudeCliClient:
         if proc.returncode != 0:
             stderr = (proc.stderr or "").strip()
             if _looks_retryable(stderr, proc.stdout or ""):
-                raise TransientAPIError(
-                    1, RuntimeError(f"claude CLI rate-limited/transient: {stderr}")
+                # Issue athenaeum#782: raise the shared "please retry me"
+                # currency (not TransientAPIError, the give-up type) so
+                # with_retry actually retries this in-run instead of
+                # treating it as an immediate exhaustion.
+                raise TransientError(
+                    f"claude CLI rate-limited/transient: {stderr}"
                 )
             raise RuntimeError(
                 f"claude CLI exited {proc.returncode}: {stderr or '(no stderr)'}"
@@ -922,8 +933,11 @@ class ClaudeCliClient:
         if envelope.get("is_error") or (subtype and subtype != "success"):
             detail = envelope.get("result") or subtype or "unknown error"
             if _looks_retryable(str(detail), subtype, api_error_status):
-                raise TransientAPIError(
-                    1, RuntimeError(f"claude CLI reported transient error: {detail}")
+                # Issue athenaeum#782: same rationale as the exit-code branch
+                # above — TransientError requests a retry; with_retry wraps
+                # it in TransientAPIError only once retries are exhausted.
+                raise TransientError(
+                    f"claude CLI reported transient error: {detail}"
                 )
             raise RuntimeError(f"claude CLI reported error ({subtype}): {detail}")
 
