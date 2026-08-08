@@ -185,19 +185,70 @@ def preflight_provider(provider: str) -> str | None:
 @runtime_checkable
 class LLMUsage(Protocol):
     """The four token counters :func:`~athenaeum.models.cache_usage_counts`
-    reads off ``response.usage`` (issue athenaeum#230)."""
+    reads off ``response.usage`` (issue athenaeum#230).
+
+    ``cache_creation_input_tokens`` / ``cache_read_input_tokens`` are declared
+    as read-only ``@property`` members typed ``int | None`` (issue athenaeum#835):
+    the real ``anthropic.types.Usage``'s corresponding fields are
+    ``Optional[int]`` (``None`` when the request had no cache breakpoints), so
+    a plain non-Optional ``int`` mis-declares the ``api`` backend's actual
+    shape. Properties are needed (not plain ``int | None`` attributes) because
+    a Protocol's plain data attributes are matched INVARIANTLY — that would
+    reject ``_CliUsage``'s plain ``cache_creation_input_tokens: int = 0``
+    field, which satisfies ``int | None`` but not ``== int | None``. Read-only
+    properties are covariant, so ``_CliUsage``'s narrower ``int`` still
+    satisfies the contract. ``input_tokens`` / ``output_tokens`` stay plain
+    ``int`` attributes — the SDK declares those non-Optional too, so no change
+    was needed there.
+
+    :func:`athenaeum.models.cache_usage_counts` already coerces a ``None`` (or
+    any other non-``int``) cache field to ``0`` at the read site, so this is a
+    declaration correction only — no downstream code changed.
+    """
 
     input_tokens: int
     output_tokens: int
-    cache_creation_input_tokens: int
-    cache_read_input_tokens: int
+
+    @property
+    def cache_creation_input_tokens(self) -> int | None: ...
+
+    @property
+    def cache_read_input_tokens(self) -> int | None: ...
+
+
+@runtime_checkable
+class LLMContentBlock(Protocol):
+    """The narrowest surface every ``Message.content`` block exposes (issue
+    athenaeum#835): just the ``type`` discriminator. The real
+    ``anthropic.types.Message.content`` is a 12-member union (``TextBlock``,
+    ``ThinkingBlock``, ``RedactedThinkingBlock``, ``ToolUseBlock``,
+    ``ServerToolUseBlock``, and seven more tool-result/container block
+    types) — most of which carry no ``.text`` attribute at all. A Protocol
+    requiring ``text: str`` on every block (the pre-athenaeum#835 declaration)
+    therefore did not describe what the ``api`` backend can actually return.
+    :func:`response_text` already narrows at READ time via
+    ``getattr(block, "type", None) == "text"`` before ever touching ``.text``
+    (issue athenaeum#578); this Protocol matches that narrowing instead of
+    overclaiming a ``.text`` every block does not have.
+
+    Declared as a read-only ``@property`` (not a plain ``type: str``
+    attribute) for the same covariance reason as :class:`LLMResponse` below:
+    the SDK's block ``type`` fields are ``Literal["text"]`` /
+    ``Literal["thinking"]`` / etc, and a Protocol's plain data attribute is
+    matched INVARIANTLY — a plain ``type: str`` member would reject those
+    ``Literal`` fields (``Literal["text"] != str``). A read-only property is
+    covariant, so ``Literal["text"]`` (a subtype of ``str``) satisfies it.
+    """
+
+    @property
+    def type(self) -> str: ...
 
 
 @runtime_checkable
 class LLMTextBlock(Protocol):
-    """One content block. Callers read the text answer via
-    :func:`response_text` (the first ``type == "text"`` block, skipping any
-    leading thinking blocks — issue athenaeum#578)."""
+    """One TEXT content block — the block :func:`response_text` returns after
+    narrowing a :class:`LLMContentBlock` sequence to the first ``type ==
+    "text"`` entry (issue athenaeum#578)."""
 
     text: str
 
@@ -210,19 +261,23 @@ class LLMResponse(Protocol):
     data attributes are matched INVARIANTLY, which would reject a backend whose
     concrete field type merely *satisfies* the declared type (e.g.
     ``ClaudeCliClient``'s ``content: list[_CliTextBlock]`` against a
-    ``Sequence[LLMTextBlock]`` field). Read-only properties are covariant, so a
+    ``Sequence[LLMContentBlock]`` field). Read-only properties are covariant, so a
     concrete backend satisfies the contract by exposing compatible attributes —
     which is exactly the "must ACTUALLY satisfy" guarantee issue athenaeum#572 requires.
 
-    ``content`` is a sequence of blocks (callers read the text answer via
-    :func:`response_text`, which skips any leading thinking blocks — issue
-    athenaeum#578); ``stop_reason`` is the terminal reason (``"max_tokens"``,
-    ``"end_turn"``, ...) or ``None`` when a backend cannot report it; ``usage``
-    carries the four normalized token counters.
+    ``content`` is a sequence of :class:`LLMContentBlock` — the real
+    ``anthropic`` union's shared ``.type`` discriminator, NOT ``LLMTextBlock``
+    (issue athenaeum#835 corrected this: most of the union's members, e.g.
+    ``ThinkingBlock``/``ToolUseBlock``, have no ``.text``). Callers read the
+    text answer via :func:`response_text`, which narrows to the first ``type
+    == "text"`` block before touching ``.text``, skipping any leading thinking
+    blocks (issue athenaeum#578); ``stop_reason`` is the terminal reason
+    (``"max_tokens"``, ``"end_turn"``, ...) or ``None`` when a backend cannot
+    report it; ``usage`` carries the four normalized token counters.
     """
 
     @property
-    def content(self) -> Sequence[LLMTextBlock]: ...
+    def content(self) -> Sequence[LLMContentBlock]: ...
 
     @property
     def stop_reason(self) -> str | None: ...
@@ -249,13 +304,20 @@ class LLMBackend(Protocol):
     """The declared LLM backend contract (issue athenaeum#572 / epic athenaeum#515).
 
     A backend is anything exposing a ``messages`` facade whose ``create``
-    returns an :class:`LLMResponse`. Both shipping backends satisfy it: the
-    ``api`` backend *is* a real :class:`anthropic.Anthropic`, and
-    :class:`ClaudeCliClient` is the first EXPLICIT implementor — it mirrors the
-    same surface over the ``claude`` subscription CLI. Declaring the contract
-    turns "add a backend" from a rewrite into a registration; a future backend
-    registers by satisfying this Protocol, not by being wired into every call
-    site.
+    returns an :class:`LLMResponse`. :class:`ClaudeCliClient` is the first
+    EXPLICIT implementor — it mirrors the same surface over the ``claude``
+    subscription CLI, and the ``TYPE_CHECKING`` assertion below proves it
+    against this Protocol with no ``# type: ignore`` escape. The ``api``
+    backend *is* a real :class:`anthropic.Anthropic`: as of issue athenaeum#835 the
+    response shape this Protocol family declares (:class:`LLMResponse`,
+    :class:`LLMContentBlock`, :class:`LLMUsage`) matches what that SDK
+    actually returns, but ``build_llm_client`` still types the ``api`` return
+    as ``Any`` rather than :class:`LLMBackend` (see its docstring), so
+    structural conformance is not yet CHECKED for that backend the way it is
+    for :class:`ClaudeCliClient` — that annotation work is issue athenaeum#778's, not
+    this one's. Declaring the contract turns "add a backend" from a rewrite
+    into a registration; a future backend registers by satisfying this
+    Protocol, not by being wired into every call site.
 
     ``messages`` is a read-only ``@property`` for the same covariance reason as
     :class:`LLMResponse` — so a backend whose ``messages`` is a concrete facade
@@ -896,6 +958,47 @@ if TYPE_CHECKING:
     # type checker flags it right here. Never executed — this is a
     # type-checker assertion only.
     _cli_backend_contract: LLMBackend = ClaudeCliClient()
+
+    # Issue athenaeum#835: the corrected ``LLMResponse``/``LLMUsage`` declarations
+    # must ACTUALLY describe what the real ``anthropic`` SDK returns — not
+    # only what :class:`ClaudeCliClient` returns above. ``isinstance(client,
+    # LLMBackend)`` (used at the call sites and in the test suite) is NOT
+    # evidence of this: ``@runtime_checkable`` only checks attribute
+    # PRESENCE, not field types, so it would pass identically whether or not
+    # this fix landed. Binding a realistically-shaped
+    # ``anthropic.types.Message`` — a ``ThinkingBlock`` PRECEDING a
+    # ``TextBlock``, and ``Usage`` with both cache_* fields ``None`` (no
+    # cache breakpoints in the request) — to an ``LLMResponse``-annotated
+    # name is what makes mypy do the real work: pre-athenaeum#835, ``content:
+    # Sequence[LLMTextBlock]`` rejected the ``ThinkingBlock`` (no ``.text``
+    # attribute), and the two cache fields being plain ``int`` rejected
+    # ``Usage``'s ``Optional[int]`` fields — either mismatch alone fails this
+    # assignment (verified against this exact object shape with the
+    # pre-fix declarations restored). Never executed — a type-checker
+    # assertion only.
+    import anthropic.types as _anthropic_types
+
+    _sdk_message_shape: _anthropic_types.Message = _anthropic_types.Message(
+        id="msg_01",
+        content=[
+            _anthropic_types.ThinkingBlock(
+                type="thinking", thinking="reasoning...", signature="sig"
+            ),
+            _anthropic_types.TextBlock(type="text", text="hello", citations=None),
+        ],
+        model="claude-sonnet-4-6",
+        role="assistant",
+        stop_reason="end_turn",
+        stop_sequence=None,
+        type="message",
+        usage=_anthropic_types.Usage(
+            input_tokens=10,
+            output_tokens=5,
+            cache_creation_input_tokens=None,
+            cache_read_input_tokens=None,
+        ),
+    )
+    _sdk_response_conforms: LLMResponse = _sdk_message_shape
 
 
 # ---------------------------------------------------------------------------

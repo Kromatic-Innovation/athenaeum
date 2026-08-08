@@ -18,6 +18,7 @@ from athenaeum.models import TokenUsage, cache_usage_counts
 from athenaeum.provider import (
     ClaudeCliClient,
     LLMBackend,
+    LLMContentBlock,
     LLMMessages,
     LLMResponse,
     LLMTextBlock,
@@ -33,6 +34,7 @@ from athenaeum.provider import (
     resolve_max_tokens,
     resolve_provider,
     resolve_thinking,
+    response_text,
 )
 from athenaeum.tiers import _record_usage
 
@@ -566,6 +568,88 @@ class TestLLMBackendContract:
         )
         assert isinstance(resp, LLMResponse)
         assert extract_json_object(resp.content[0].text) == {"ok": 1}
+
+
+# ---------------------------------------------------------------------------
+# Real-SDK-shape conformance — corrected declarations vs. reality (athenaeum#835)
+#
+# ``isinstance(client, LLMBackend)`` (used throughout ``TestLLMBackendContract``
+# above) is NOT evidence the *shape* is correct: ``@runtime_checkable`` only
+# checks attribute PRESENCE, not field types, so it passes identically before
+# and after this fix. The STATIC proof — binding a realistically-shaped
+# ``anthropic.types.Message`` to an ``LLMResponse``-annotated name so mypy
+# does the real work — lives in ``src/athenaeum/provider.py``'s own
+# ``TYPE_CHECKING`` block (alongside the pre-existing
+# ``_cli_backend_contract: LLMBackend = ClaudeCliClient()`` assertion), NOT
+# here: ``[tool.mypy] files = ["src/athenaeum"]`` in ``pyproject.toml`` means
+# a ``TYPE_CHECKING`` block in ``tests/`` is never actually type-checked by
+# the ``mypy`` gate (nor CI's ``run: mypy`` step), so putting the static
+# proof here would be inert. ``TestRealSDKShapeConformance`` below is the
+# runtime companion: the identically-shaped object also BEHAVES correctly,
+# not just type-checks.
+# ---------------------------------------------------------------------------
+
+
+class TestRealSDKShapeConformance:
+    """Runtime companion to the ``TYPE_CHECKING`` assertion in
+    ``provider.py`` (issue athenaeum#835): the same realistically-shaped
+    ``anthropic.types.Message`` — a ``ThinkingBlock`` preceding the
+    ``TextBlock``, ``Usage`` with both cache_* fields ``None`` — not only
+    satisfies the corrected declarations but behaves correctly when read
+    through them."""
+
+    @staticmethod
+    def _build_message():
+        import anthropic.types as t
+
+        return t.Message(
+            id="msg_01",
+            content=[
+                t.ThinkingBlock(
+                    type="thinking", thinking="reasoning...", signature="sig"
+                ),
+                t.TextBlock(type="text", text="hello", citations=None),
+            ],
+            model="claude-sonnet-4-6-20260101",
+            role="assistant",
+            stop_reason="end_turn",
+            stop_sequence=None,
+            type="message",
+            usage=t.Usage(
+                input_tokens=10,
+                output_tokens=5,
+                cache_creation_input_tokens=None,
+                cache_read_input_tokens=None,
+            ),
+        )
+
+    def test_response_text_skips_leading_thinking_block(self):
+        # Fails-closed at runtime: if content typing regressed to assume
+        # every block is text, this would raise AttributeError instead of
+        # returning the text block past the thinking block (issue athenaeum#578).
+        msg = self._build_message()
+        assert response_text(msg) == "hello"
+
+    def test_cache_usage_counts_coerces_none_cache_fields_to_zero(self):
+        # The real SDK's None cache fields (no cache breakpoints in this
+        # request) already coerce to 0 at the read site (athenaeum#230) — the
+        # retyping to ``int | None`` needed no downstream change.
+        msg = self._build_message()
+        assert cache_usage_counts(msg) == (10, 5, 0, 0)
+
+    def test_real_message_satisfies_the_corrected_protocols_at_runtime(self):
+        msg = self._build_message()
+        assert isinstance(msg, LLMResponse)
+        assert isinstance(msg.usage, LLMUsage)
+        # Every block satisfies the narrow LLMContentBlock (just ``.type``)...
+        assert isinstance(msg.content[0], LLMContentBlock)
+        assert isinstance(msg.content[1], LLMContentBlock)
+        # ...but only the TEXT block satisfies LLMTextBlock (``.text``) — the
+        # ThinkingBlock genuinely has no ``.text`` attribute, which is exactly
+        # the mismatch the pre-athenaeum#835 ``Sequence[LLMTextBlock]`` declaration
+        # papered over.
+        assert not isinstance(msg.content[0], LLMTextBlock)
+        assert isinstance(msg.content[1], LLMTextBlock)
 
 
 # ---------------------------------------------------------------------------
