@@ -117,9 +117,15 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     # ``api`` backend with no ANTHROPIC_API_KEY (offline annotation fallback);
     # returns the subscription CLI client for ``claude-cli``. Fail gracefully
     # (None) on any construction error.
+    # Issue athenaeum#786: routed via the ``resolve`` knob — this command's only LLM
+    # call is ``resolutions.propose_freetext_source_edits`` (knob="resolve"), so
+    # ``llm.providers.resolve`` / ``ATHENAEUM_RESOLVE_LLM_PROVIDER`` now let an
+    # operator pin free-text answer ingestion to a different provider than the
+    # global default. No ``llm.providers.resolve`` key resolves identically to
+    # the pre-athenaeum#786 global-only call (AC6).
     anthropic_client = None
     try:
-        anthropic_client = build_llm_client(cfg)
+        anthropic_client = build_llm_client(cfg, knob="resolve")
     except ProviderConfigError as exc:
         # Issue athenaeum#540 (M14): a provider MISCONFIGURATION (e.g. a typo in the
         # backend name) is raised loudly by build_llm_client precisely so it
@@ -217,9 +223,13 @@ def cmd_reresolve_questions(args: argparse.Namespace) -> int:
     # Issue athenaeum#330: construct via the provider seam (api key -> SDK client;
     # claude-cli -> subscription CLI client; None when the api backend has no
     # key, preserving the offline no-op below).
+    # Issue athenaeum#786: routed via the ``resolve`` knob — ``reresolve_open_questions``
+    # only invokes ``resolutions.propose_resolution`` (knob="resolve"). Same
+    # rationale as ``cmd_ingest_answers`` above; no ``llm.providers.resolve``
+    # key resolves identically to the pre-athenaeum#786 global-only call (AC6).
     anthropic_client = None
     try:
-        anthropic_client = build_llm_client(cfg)
+        anthropic_client = build_llm_client(cfg, knob="resolve")
     except ProviderConfigError as exc:
         # Issue athenaeum#540 (M14): a provider MISCONFIGURATION (e.g. a typo in the
         # backend name) is raised loudly by build_llm_client precisely so it

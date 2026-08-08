@@ -993,6 +993,168 @@ class TestSchemaV3:
 
 
 # ---------------------------------------------------------------------------
+# Per-knob provider routing (issue athenaeum#786) — AC2/AC7: two knobs on
+# DIFFERENT providers in one session, each ledger row carrying the provider
+# that ACTUALLY served it (resolved via provider.resolve_provider(config,
+# knob=...), not hardcoded), and --by-knob showing the split. This is the
+# same "recall sidecar on the subscription while the resolver runs on the
+# metered API" shape the issue's motivation names -- driven through the two
+# real call sites athenaeum#786 wired independently: query_topics.py
+# ("topic") and the ingest-answers/reresolve-questions CLI path
+# ("resolve"), via athenaeum.provider.resolve_provider directly (no live
+# network needed -- resolve_provider is a pure config/env lookup).
+# ---------------------------------------------------------------------------
+
+
+class TestPerKnobProviderRoutingLedger:
+    def _topic_usage(self) -> TokenUsage:
+        u = TokenUsage()
+        u.add(50, 20, 0, 0, model="claude-haiku-4-5-20251001", knob="topic")
+        return u
+
+    def _resolve_usage(self) -> TokenUsage:
+        u = TokenUsage()
+        u.add(2_000, 800, 0, 0, model="claude-opus-4", knob="resolve")
+        return u
+
+    def test_two_knobs_on_different_providers_resolve_independently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.provider import resolve_provider
+
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("ATHENAEUM_TOPIC_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_LLM_PROVIDER", raising=False)
+        config = {
+            "llm": {
+                "provider": "api",  # global default
+                "providers": {"topic": "claude-cli"},  # recall sidecar only
+            }
+        }
+        assert resolve_provider(config, knob="topic") == "claude-cli"
+        assert resolve_provider(config, knob="resolve") == "api"  # inherits global
+
+    def test_ledger_rows_carry_the_actually_served_provider(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: with the ``topic`` knob pinned to claude-cli and every other
+        knob on the global ``api`` default, each command's own ledger row
+        (query_topics's and the resolve CLI path's) is tagged with the
+        provider ITS knob actually resolved to -- mirroring exactly how
+        query_topics.py / answers.py now call
+        ``resolve_provider(config, knob=...)`` before ``record_spend``."""
+        from athenaeum.provider import resolve_provider
+
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("ATHENAEUM_TOPIC_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_LLM_PROVIDER", raising=False)
+        config = {
+            "llm": {"provider": "api", "providers": {"topic": "claude-cli"}}
+        }
+
+        # Mirrors query_topics.extract_topics's own record_spend call.
+        assert spend.record_spend(
+            self._topic_usage(),
+            run_type="query-topics",
+            provider=resolve_provider(config, knob="topic"),
+            config=config,
+        )
+        # Mirrors answers.ingest_answers's own record_spend call.
+        assert spend.record_spend(
+            self._resolve_usage(),
+            run_type="answers",
+            provider=resolve_provider(config, knob="resolve"),
+            config=config,
+        )
+
+        records = spend.read_ledger(ledger)
+        assert len(records) == 2
+        topic_row = next(r for r in records if r["run_type"] == "query-topics")
+        resolve_row = next(r for r in records if r["run_type"] == "answers")
+
+        assert topic_row["provider"] == "claude-cli"
+        assert topic_row["billing_mode"] == spend.BILLING_MODE_SUBSCRIPTION
+        assert topic_row["estimated_cost_usd"] == 0.0
+        assert topic_row["tokens_by_knob"]["topic"]["total"] == 70
+
+        assert resolve_row["provider"] == "anthropic"
+        assert resolve_row["billing_mode"] == spend.BILLING_MODE_API
+        assert resolve_row["estimated_cost_usd"] > 0.0
+        assert resolve_row["tokens_by_knob"]["resolve"]["total"] == 2_800
+
+    def test_by_knob_shows_the_provider_split_ac7(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC7: ``athenaeum spend --by-knob`` (spend.summarize(by_knob=True))
+        shows ``topic`` in the subscription bucket and ``resolve`` in the api
+        bucket -- the split athenaeum#786 makes reachable via per-knob config,
+        requiring NO ledger-schema change (tokens_by_knob + the row-level
+        billing_mode this test's sibling above verifies were already
+        sufficient -- see athenaeum#786's PR for the read-side verification)."""
+        from athenaeum.provider import resolve_provider
+
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("ATHENAEUM_TOPIC_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_LLM_PROVIDER", raising=False)
+        config = {
+            "llm": {"provider": "api", "providers": {"topic": "claude-cli"}}
+        }
+        spend.record_spend(
+            self._topic_usage(),
+            run_type="query-topics",
+            provider=resolve_provider(config, knob="topic"),
+            config=config,
+        )
+        spend.record_spend(
+            self._resolve_usage(),
+            run_type="answers",
+            provider=resolve_provider(config, knob="resolve"),
+            config=config,
+        )
+
+        summary = spend.summarize(spend.read_ledger(ledger), by_knob=True)
+        assert summary["by_knob"]["topic"]["subscription"]["total_tokens"] == 70
+        assert summary["by_knob"]["topic"]["api"]["total_tokens"] == 0
+        assert summary["by_knob"]["resolve"]["api"]["total_tokens"] == 2_800
+        assert summary["by_knob"]["resolve"]["subscription"]["total_tokens"] == 0
+
+        out = spend.format_summary(summary, since_label="7d", by_knob=True)
+        assert "topic" in out
+        assert "resolve" in out
+
+    def test_config_with_no_per_knob_keys_both_knobs_land_on_global_ac6(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: no ``llm.providers`` section -> both knobs resolve to the
+        SAME global provider, and both ledger rows land in the same billing
+        bucket -- exactly the pre-athenaeum#786 single-provider shape."""
+        from athenaeum.provider import resolve_provider
+
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("ATHENAEUM_TOPIC_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("ATHENAEUM_RESOLVE_LLM_PROVIDER", raising=False)
+        config = {"llm": {"provider": "claude-cli"}}
+
+        spend.record_spend(
+            self._topic_usage(),
+            run_type="query-topics",
+            provider=resolve_provider(config, knob="topic"),
+            config=config,
+        )
+        spend.record_spend(
+            self._resolve_usage(),
+            run_type="answers",
+            provider=resolve_provider(config, knob="resolve"),
+            config=config,
+        )
+        records = spend.read_ledger(ledger)
+        assert {r["provider"] for r in records} == {"claude-cli"}
+        assert {r["billing_mode"] for r in records} == {
+            spend.BILLING_MODE_SUBSCRIPTION
+        }
+
+
+# ---------------------------------------------------------------------------
 # query_topics ledger integration — the metered hot path is recorded
 # ---------------------------------------------------------------------------
 
@@ -1037,6 +1199,46 @@ class TestQueryTopicsLedger:
         # ``topic`` knob end to end into the ledger row -- one of the six
         # knobs attributable per the acceptance criterion.
         assert recs[0]["tokens_by_knob"]["topic"]["input"] == 120
+
+    def test_topic_knob_override_writes_a_subscription_row(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#786: with ``llm.providers.topic: claude-cli`` and the
+        GLOBAL default left on ``api``, the real ``extract_topics`` call
+        writes a SUBSCRIPTION ledger row (not an api/dollars one) -- the
+        client construction (test_query_topics.py's sibling test) and the
+        ledger tag are driven by the SAME per-knob resolution, so they can't
+        drift apart."""
+        from athenaeum import provider, query_topics
+        from tests.conftest import FakeLLMClient
+
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("ATHENAEUM_TOPIC_LLM_PROVIDER", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-be-used")
+
+        fake_cli = FakeLLMClient(
+            response=make_llm_response(
+                '["Return Path"]',
+                usage=make_llm_usage(input_tokens=50, output_tokens=10),
+            )
+        )
+        monkeypatch.setattr(provider, "ClaudeCliClient", fake_cli)
+
+        topics = query_topics.extract_topics(
+            "Tell me about Return Path please",
+            config={
+                "llm": {"provider": "api", "providers": {"topic": "claude-cli"}}
+            },
+        )
+        assert topics == ["Return Path"]
+
+        recs = spend.read_ledger(ledger)
+        assert len(recs) == 1
+        assert recs[0]["run_type"] == "query-topics"
+        assert recs[0]["provider"] == "claude-cli"
+        assert recs[0]["billing_mode"] == spend.BILLING_MODE_SUBSCRIPTION
+        assert recs[0]["estimated_cost_usd"] == 0.0
+        assert recs[0]["tokens_by_knob"]["topic"]["input"] == 50
 
 
 # ---------------------------------------------------------------------------

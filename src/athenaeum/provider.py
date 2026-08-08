@@ -74,6 +74,26 @@ but this module never writes the ledger itself).
 :mod:`athenaeum.outbound_pii` (sibling L3) — never L4. ``anthropic`` (the
 ``api`` backend's SDK) is imported lazily inside :func:`build_llm_client` so a
 ``claude-cli``-only deployment need not have it installed.
+
+**Per-knob routing (issue athenaeum#786, scaffolding only — no new backend here).**
+:func:`resolve_provider` and :func:`build_llm_client` both grow an optional
+``knob`` argument so a call site can route to a DIFFERENT provider than the
+run's global ``llm.provider`` default (``llm.providers.<knob>`` yaml /
+``ATHENAEUM_<KNOB>_LLM_PROVIDER`` env — the same env > yaml > default
+precedence as every other knob in this codebase, e.g.
+:func:`resolve_max_tokens`). :class:`LLMClientCache` memoizes clients by
+resolved provider so several knobs sharing one provider construct ONE
+client, not one each. Wired at :mod:`athenaeum.query_topics` (``topic``) and
+the ``ingest-answers`` / ``reresolve-questions`` CLI commands (``resolve``) —
+each already resolves its own provider independently of the shared
+librarian pipeline, so routing them per-knob needed no signature changes
+upstream. **Known limitation, recorded not solved (see
+``docs/configuration.md``):** the librarian's entity/merge pipeline
+(``classify``/``write``/``resolve``/``reasoning_t1``/``reasoning_t2`` inside
+one librarian run) still shares ONE client built from the global provider —
+splitting that internal threading per knob is a tracked follow-up, same
+spirit as the ``classify``-knob-shared-across-three-call-sites limitation
+this issue also documents rather than resolves.
 """
 
 from __future__ import annotations
@@ -114,17 +134,104 @@ class ProviderConfigError(ValueError):
     """Raised when the LLM provider is misconfigured (unknown id, etc.)."""
 
 
-def resolve_provider(config: dict[str, Any] | None) -> str:
-    """Resolve the active LLM provider from env > yaml ``llm.provider`` > api.
+def resolve_provider(
+    config: dict[str, Any] | None,
+    knob: str | None = None,
+    *,
+    default: str | None = None,
+) -> str:
+    """Resolve the active LLM provider for *knob* (issue athenaeum#786), or the
+    run's global default when *knob* is omitted (issue athenaeum#330).
 
-    Issue athenaeum#330. Mirrors :func:`athenaeum.config.resolve_model`'s precedence:
-    the ``ATHENAEUM_LLM_PROVIDER`` env var wins over the yaml ``llm.provider``
-    key so an operator can swap backends for a single run without editing
-    config, and the yaml key is read only when actually set. Values are
-    case-folded and whitespace-trimmed. An unrecognized value raises
-    :class:`ProviderConfigError` (loud — a typo must never silently fall back
-    to a different backend). No seed in ``_DEFAULTS`` (issue athenaeum#231) so the code
-    default stays reachable.
+    Two independent precedence chains, mirroring
+    :func:`athenaeum.config.resolve_model`'s per-knob convention:
+
+    * **Per-knob** (*knob* given): ``ATHENAEUM_<KNOB>_LLM_PROVIDER`` env (knob
+      upper-cased, e.g. ``reasoning_t1`` -> ``ATHENAEUM_REASONING_T1_LLM_PROVIDER``,
+      Trap B) > yaml ``llm.providers.<knob>`` > *default* (if given) > the
+      GLOBAL default below. A knob with neither key set inherits the global
+      default unchanged — this is what makes a config with no
+      ``llm.providers`` section behave byte-identically to pre-athenaeum#786
+      (AC6): every knob falls straight through to the same global resolution
+      every caller used before this function grew a *knob* parameter.
+    * **Global** (*knob* omitted, or unset for the given knob and *default*
+      not given): ``ATHENAEUM_LLM_PROVIDER`` env > yaml ``llm.provider`` >
+      ``"api"`` default — byte-for-byte the pre-athenaeum#786 body, extracted to
+      :func:`_resolve_global_provider` so both chains share one implementation
+      rather than drifting.
+
+    Args:
+        config: resolved athenaeum.yaml dict (or ``None``).
+        knob: optional model-knob string. ``None`` is the pre-athenaeum#786 call
+            shape — *default* is ignored in that case.
+        default: optional explicit fallback used in place of
+            :func:`_resolve_global_provider` when *knob* has no per-knob
+            override. For a caller that already holds an
+            INDEPENDENTLY-resolved global provider (e.g.
+            ``librarian.RunContext.provider``, set once by
+            :func:`_run_preconditions`), passing it as *default* avoids a
+            second, potentially-inconsistent re-resolution of ``config`` —
+            the per-knob override still takes precedence over it exactly as
+            it would over a fresh global resolution.
+
+    Values are case-folded and whitespace-trimmed. An unrecognized value
+    raises :class:`ProviderConfigError` naming the knob (issue athenaeum#786 AC3) —
+    loud, exactly like the global chain's existing behavior — a typo in
+    ``llm.providers.write`` must never silently fall back to a different
+    backend, or to the global provider. No seed in ``_DEFAULTS`` (issue
+    athenaeum#231) so the code default stays reachable.
+
+    **Known limitation (issue athenaeum#786):** this function makes per-knob
+    provider ROUTING possible for any caller that resolves its own knob
+    independently — :mod:`athenaeum.query_topics` (``topic``) and the
+    ``athenaeum ingest-answers`` / ``reresolve-questions`` CLI commands
+    (``resolve``) do. The librarian's entity/merge pipeline
+    (:func:`athenaeum.librarian.run`) still constructs ONE shared client from
+    the GLOBAL provider for the ``classify``/``write``/``resolve``/
+    ``reasoning_t1``/``reasoning_t2`` knobs it serves — a per-knob override
+    for one of THOSE knobs is accepted here (no error, but
+    :func:`athenaeum.librarian._warn_if_knob_provider_override_inert` warns
+    loudly at startup — issue athenaeum#786) and has no effect on which client
+    actually serves a librarian run; wiring that pipeline to construct and
+    thread per-knob clients is a tracked follow-up (mirrors the
+    ``classify``-knob-granularity limitation documented in
+    ``docs/configuration.md``).
+    """
+    if knob:
+        env_var = f"ATHENAEUM_{knob.upper()}_LLM_PROVIDER"
+        raw = os.environ.get(env_var)
+        source = f"env {env_var}"
+        if raw is None or not raw.strip():
+            raw = None
+            if isinstance(config, dict):
+                llm_cfg = config.get("llm")
+                if isinstance(llm_cfg, dict):
+                    providers_cfg = llm_cfg.get("providers")
+                    if isinstance(providers_cfg, dict):
+                        candidate = providers_cfg.get(knob)
+                        if isinstance(candidate, str) and candidate.strip():
+                            raw = candidate
+                            source = f"yaml llm.providers.{knob}"
+        if raw is not None and raw.strip():
+            value = raw.strip().lower()
+            if value not in VALID_PROVIDERS:
+                raise ProviderConfigError(
+                    f"unknown LLM provider {value!r} for knob {knob!r} "
+                    f"(from {source}); valid values are: "
+                    f"{', '.join(VALID_PROVIDERS)}"
+                )
+            return value
+        if default is not None:
+            return default
+    return _resolve_global_provider(config)
+
+
+def _resolve_global_provider(config: dict[str, Any] | None) -> str:
+    """The pre-athenaeum#786 body of :func:`resolve_provider`, unchanged: env
+    ``ATHENAEUM_LLM_PROVIDER`` > yaml ``llm.provider`` > ``"api"`` default.
+
+    Extracted so :func:`resolve_provider`'s per-knob chain can fall through to
+    EXACTLY this logic rather than a second, potentially-drifting copy of it.
     """
     raw = os.environ.get("ATHENAEUM_LLM_PROVIDER")
     source = "env ATHENAEUM_LLM_PROVIDER"
@@ -509,6 +616,60 @@ def capabilities_for(provider: str) -> ProviderCapabilities:
     if provider == "claude-cli":
         return _CLI_CAPABILITIES
     return _API_CAPABILITIES
+
+
+def knob_provider_override_source(
+    config: dict[str, Any] | None, knob: str
+) -> str | None:
+    """Detect (without resolving) an explicit per-knob provider override.
+
+    Returns the source description (``"env ATHENAEUM_<KNOB>_LLM_PROVIDER"`` or
+    ``"yaml llm.providers.<knob>"``) if *knob* has an explicit override set,
+    else ``None``. Does not validate the value or apply precedence — it only
+    answers "did the operator set something for this knob", which is exactly
+    what a caller warning about an INERT override needs (issue athenaeum#786): a
+    per-knob override for a knob whose client construction does not yet
+    route per-knob (see :func:`athenaeum.librarian._run_preconditions`'s
+    ``_warn_if_knob_provider_override_inert``) is accepted by
+    :func:`resolve_provider` (no error) but silently has no effect — mirrors
+    :func:`athenaeum.reasoning_tiers._warn_if_tier_model_knob_inert`'s
+    inert-knob-warning pattern (issue athenaeum#780), guarding against the same
+    silent-no-op failure class athenaeum#782's issue framing names: a misconfiguration
+    where the backend appears to work and the operator has no signal that
+    their override was never applied.
+    """
+    env_var = f"ATHENAEUM_{knob.upper()}_LLM_PROVIDER"
+    raw = os.environ.get(env_var)
+    if raw is not None and raw.strip():
+        return f"env {env_var}"
+    if isinstance(config, dict):
+        llm_cfg = config.get("llm")
+        if isinstance(llm_cfg, dict):
+            providers_cfg = llm_cfg.get("providers")
+            if isinstance(providers_cfg, dict):
+                candidate = providers_cfg.get(knob)
+                if isinstance(candidate, str) and candidate.strip():
+                    return f"yaml llm.providers.{knob}"
+    return None
+
+
+def capabilities_for_knob(
+    config: dict[str, Any] | None, knob: str, *, default: str | None = None
+) -> ProviderCapabilities:
+    """:func:`capabilities_for` resolved through *knob*'s own provider (athenaeum#786 AC4).
+
+    ``capabilities_for_knob(config, "write")`` is exactly
+    ``capabilities_for(resolve_provider(config, knob="write"))`` — a one-call
+    convenience so a caller that needs "what can the knob I'm about to invoke
+    actually honor" (e.g. the batch-mode startup guard, issue athenaeum#786 AC5)
+    does not need to import and chain both functions itself. *default* is
+    forwarded to :func:`resolve_provider` unchanged (see its docstring) for a
+    caller that already holds an independently-resolved global provider.
+    Raises :class:`ProviderConfigError` (naming the knob) the same way
+    :func:`resolve_provider` does on a bad per-knob override — no silent
+    fallback here either.
+    """
+    return capabilities_for(resolve_provider(config, knob=knob, default=default))
 
 
 # ---------------------------------------------------------------------------
@@ -1111,42 +1272,19 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def build_llm_client(
-    config: dict[str, Any] | None,
+def _construct_client(
+    provider: str,
     *,
-    api_key: str | None = None,
-    max_retries: int | None = None,
-    timeout: float | None = None,
+    api_key: str | None,
+    max_retries: int | None,
+    timeout: float | None,
 ) -> Any | None:
-    """Construct the LLM client for the resolved provider (issue athenaeum#330).
+    """Construct a fresh client for *provider* (already-resolved, valid id).
 
-    The returned client satisfies the :class:`LLMBackend` contract (issue athenaeum#572):
-    ``claude-cli`` returns a :class:`ClaudeCliClient` (the first explicit
-    implementor, type-checked against the Protocol above), and ``api`` returns a
-    real :class:`anthropic.Anthropic`, which serves the same
-    ``messages.create`` / ``.content`` / ``.usage`` surface. The annotation
-    stays ``Any`` rather than ``LLMBackend`` so the external SDK client is not
-    forced through a fragile structural-subtype proof of the ``**params``
-    surface; the contract is declared and enforced for our own backend.
-
-    Returns ``None`` when nothing is configured for the ``api`` backend (no
-    ``ANTHROPIC_API_KEY``) so every deterministic offline fallback keeps
-    working unchanged — the ``client is None`` short-circuits in the tiers /
-    contradictions / resolutions / reresolve paths are preserved.
-
-    Args:
-        config: resolved athenaeum.yaml dict (or ``None``).
-        api_key: explicit key for the ``api`` backend; falls back to
-            ``ANTHROPIC_API_KEY``. Ignored by ``claude-cli`` (subscription).
-        max_retries: passed through to ``anthropic.Anthropic`` for the ``api``
-            backend when set (byte-for-byte preserves each call site's value);
-            omitted otherwise so the SDK default applies.
-        timeout: per-call timeout override for the ``claude-cli`` subprocess.
-
-    Returns the backend client, or ``None`` (api backend, no key).
+    Extracted from :func:`build_llm_client` (issue athenaeum#786) so the factory and
+    :class:`LLMClientCache` share one construction body — the cache wraps this
+    with memoization, it never reimplements it.
     """
-    provider = resolve_provider(config)
-
     if provider == "claude-cli":
         return ClaudeCliClient(timeout=timeout)
 
@@ -1166,3 +1304,119 @@ def build_llm_client(
     if timeout is not None:
         kwargs["timeout"] = timeout
     return anthropic.Anthropic(**kwargs)
+
+
+class LLMClientCache:
+    """Memoizes :func:`build_llm_client` results by resolved provider + construction
+    args, so several knobs that resolve to the SAME provider share one client
+    instead of each constructing its own (issue athenaeum#786: *"Construct clients
+    per distinct provider, not per call"*).
+
+    Construct one instance per logical run (e.g. one per librarian run, one
+    per CLI invocation) and pass it to every :func:`build_llm_client` call in
+    that run via ``cache=``. Never shared ACROSS runs/processes — it is a
+    plain in-memory dict with no eviction, sized for "the handful of knobs one
+    run touches", not a long-lived process-wide cache.
+
+    **Trap C:** keyed by ``(provider, api_key, max_retries, timeout)``, not
+    just ``provider`` — two call sites that both resolve to ``"api"`` but pass
+    DIFFERENT ``timeout``/``max_retries``/``api_key`` (e.g. the per-turn
+    ``query_topics`` call site's ``timeout=3.0, max_retries=0`` vs. the
+    librarian's ``max_retries=3``) must NOT collide on one memoized client —
+    that would silently change one call site's retry/timeout behavior to
+    another's. A cache instance is opt-in (``cache=None`` is the default on
+    every existing call site — AC6 byte-identical: unchanged callers still
+    build a fresh client every call, exactly as before athenaeum#786).
+    """
+
+    def __init__(self) -> None:
+        self._clients: dict[tuple[Any, ...], Any] = {}
+
+    def get_or_build(
+        self,
+        config: dict[str, Any] | None,
+        *,
+        knob: str | None = None,
+        api_key: str | None = None,
+        max_retries: int | None = None,
+        timeout: float | None = None,
+    ) -> Any | None:
+        """Resolve *knob*'s provider and return a memoized client for it.
+
+        Equivalent to ``build_llm_client(config, knob=knob, cache=self, ...)``
+        — provided as a method too so a caller holding just the cache object
+        does not need to also import :func:`build_llm_client` separately.
+        """
+        return build_llm_client(
+            config,
+            knob=knob,
+            api_key=api_key,
+            max_retries=max_retries,
+            timeout=timeout,
+            cache=self,
+        )
+
+
+def build_llm_client(
+    config: dict[str, Any] | None,
+    *,
+    knob: str | None = None,
+    api_key: str | None = None,
+    max_retries: int | None = None,
+    timeout: float | None = None,
+    cache: LLMClientCache | None = None,
+) -> Any | None:
+    """Construct the LLM client for the resolved provider (issue athenaeum#330).
+
+    The returned client satisfies the :class:`LLMBackend` contract (issue athenaeum#572):
+    ``claude-cli`` returns a :class:`ClaudeCliClient` (the first explicit
+    implementor, type-checked against the Protocol above), and ``api`` returns a
+    real :class:`anthropic.Anthropic`, which serves the same
+    ``messages.create`` / ``.content`` / ``.usage`` surface. The annotation
+    stays ``Any`` rather than ``LLMBackend`` so the external SDK client is not
+    forced through a fragile structural-subtype proof of the ``**params``
+    surface; the contract is declared and enforced for our own backend.
+
+    Returns ``None`` when nothing is configured for the ``api`` backend (no
+    ``ANTHROPIC_API_KEY``) so every deterministic offline fallback keeps
+    working unchanged — the ``client is None`` short-circuits in the tiers /
+    contradictions / resolutions / reresolve paths are preserved.
+
+    Args:
+        config: resolved athenaeum.yaml dict (or ``None``).
+        knob: optional model-knob string (issue athenaeum#786) — e.g. ``"classify"``,
+            ``"write"``, ``"topic"`` — routed to :func:`resolve_provider` so
+            this call site's client is built for THAT knob's resolved
+            provider (``llm.providers.<knob>`` / ``ATHENAEUM_<KNOB>_LLM_PROVIDER``
+            override the global default). ``None`` (every pre-athenaeum#786 caller)
+            resolves the global provider exactly as before — AC6 byte-identical.
+        api_key: explicit key for the ``api`` backend; falls back to
+            ``ANTHROPIC_API_KEY``. Ignored by ``claude-cli`` (subscription).
+        max_retries: passed through to ``anthropic.Anthropic`` for the ``api``
+            backend when set (byte-for-byte preserves each call site's value);
+            omitted otherwise so the SDK default applies.
+        timeout: per-call timeout override for the ``claude-cli`` subprocess.
+        cache: optional :class:`LLMClientCache` (issue athenaeum#786). When given,
+            memoizes the returned client by ``(provider, api_key, max_retries,
+            timeout)`` so a caller resolving several knobs in one run
+            constructs one client per DISTINCT provider, not one per knob.
+            ``None`` (the default, every pre-athenaeum#786 caller) never memoizes —
+            byte-identical to the pre-athenaeum#786 factory.
+
+    Returns the backend client, or ``None`` (api backend, no key).
+    """
+    provider = resolve_provider(config, knob=knob)
+
+    if cache is not None:
+        cache_key = (provider, api_key, max_retries, timeout)
+        if cache_key in cache._clients:
+            return cache._clients[cache_key]
+        client = _construct_client(
+            provider, api_key=api_key, max_retries=max_retries, timeout=timeout
+        )
+        cache._clients[cache_key] = client
+        return client
+
+    return _construct_client(
+        provider, api_key=api_key, max_retries=max_retries, timeout=timeout
+    )
