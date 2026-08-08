@@ -206,6 +206,43 @@ def test_claude_cli_provider_makes_zero_sdk_calls(
     assert fake_cli.client_kwargs["timeout"] == 3.0
 
 
+def test_topic_knob_override_wins_over_global_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue athenaeum#786: ``llm.providers.topic`` routes the recall extractor to
+    claude-cli even though the GLOBAL default is ``api`` — the flagship
+    example the issue names (recall sidecar on the subscription while the
+    rest of the system stays on a different provider), driven through the
+    real ``extract_topics`` call, not just ``resolve_provider`` in isolation."""
+    monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("ATHENAEUM_TOPIC_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-be-used")
+
+    sdk_constructed = {"count": 0}
+
+    class _ForbiddenSDK:
+        def __init__(self, **_: Any) -> None:
+            sdk_constructed["count"] += 1
+            raise AssertionError("anthropic.Anthropic must not be constructed")
+
+    fake_cli = FakeLLMClient(text='["Return Path"]')
+
+    import anthropic
+
+    from athenaeum import provider
+
+    monkeypatch.setattr(anthropic, "Anthropic", _ForbiddenSDK)
+    monkeypatch.setattr(provider, "ClaudeCliClient", fake_cli)
+
+    topics = query_topics.extract_topics(
+        "quote the block about Return Path verbatim",
+        config={"llm": {"provider": "api", "providers": {"topic": "claude-cli"}}},
+    )
+
+    assert topics == ["Return Path"]
+    assert sdk_constructed["count"] == 0
+
+
 def test_api_backend_preserves_timeout_and_no_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

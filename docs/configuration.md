@@ -475,10 +475,79 @@ Constraints and semantics:
   (`ATHENAEUM_BATCH_MODE` / `librarian.batch_mode` / `--batch-mode`) is a loud
   startup error, not a silent fallback: the Messages Batch API has no CLI
   equivalent. Use `api` for batch runs.
-- **Recall hot path stays on `api`.** The per-turn recall query-topic extractor
-  (`athenaeum.query_topics`, a ~3 s hot-path budget) is intentionally left on
-  the direct Anthropic SDK and gated on `ANTHROPIC_API_KEY`; it is unaffected
-  by `ATHENAEUM_LLM_PROVIDER`.
+- **The recall hot path routes through the same provider seam** as everything
+  else (`athenaeum.query_topics`, a ~3 s hot-path budget) — it is affected by
+  `ATHENAEUM_LLM_PROVIDER` / `llm.provider` like any other knob, and (athenaeum#786)
+  can be pinned to a DIFFERENT provider via its own `topic` knob — see
+  "Per-knob provider routing" below.
+
+### Per-knob provider routing (athenaeum#786)
+
+`llm.provider` / `ATHENAEUM_LLM_PROVIDER` above set the **global default**
+provider. Each of the six model knobs (`classify`, `write`, `resolve`,
+`topic`, `reasoning_t1`, `reasoning_t2` — the single source of truth is
+`prompt_registry._META_ROWS`) can override that default independently:
+
+| Override | Env var | YAML key |
+|---|---|---|
+| Per-knob provider | `ATHENAEUM_<KNOB>_LLM_PROVIDER` — the six concrete names: `ATHENAEUM_CLASSIFY_LLM_PROVIDER`, `ATHENAEUM_WRITE_LLM_PROVIDER`, `ATHENAEUM_RESOLVE_LLM_PROVIDER`, `ATHENAEUM_TOPIC_LLM_PROVIDER`, `ATHENAEUM_REASONING_T1_LLM_PROVIDER`, `ATHENAEUM_REASONING_T2_LLM_PROVIDER` | `llm.providers.<knob>` |
+
+Precedence, per knob: `ATHENAEUM_<KNOB>_LLM_PROVIDER` env > `llm.providers.<knob>`
+yaml > the global default (`ATHENAEUM_LLM_PROVIDER` env > `llm.provider` yaml >
+`api`). A knob with neither override set inherits the global default
+unchanged — a config with no `llm.providers` section behaves byte-identically
+to a pre-athenaeum#786 install. An unrecognized value in a per-knob key is a hard
+error naming the knob (no silent fallback), exactly like the global key.
+
+Example — pin the recall sidecar to the Claude subscription while everything
+else stays on the metered API:
+
+```yaml
+llm:
+  provider: api          # global default
+  providers:
+    topic: claude-cli     # recall query-topic extraction only
+```
+
+**Which knobs are ACTUALLY routed today (scaffolding, athenaeum#786):**
+
+- **Routed (fully honored):** `topic` (`athenaeum.query_topics`, the recall
+  sidecar) and `resolve` **only via** the `athenaeum ingest-answers` /
+  `athenaeum reresolve-questions` CLI commands. Both resolve their own
+  provider independently and construct their own client — a per-knob
+  override is fully honored, including in the spend ledger (`athenaeum spend
+  --by-knob` shows the provider split, since each of these commands writes
+  its own ledger row tagged with the provider that actually served it).
+- **Accepted but NOT yet routed (warned, not silent):** `classify`, `write`,
+  `resolve` (within an `athenaeum run` librarian run — distinct from the
+  `resolve` knob's CLI-command path above, which IS routed), `reasoning_t1`,
+  and `reasoning_t2`. The librarian's (`athenaeum run`) entity/merge pipeline
+  serves all five through ONE client built from the **global** provider. A
+  `llm.providers.<knob>` override for one of these five is accepted (no
+  error) but currently has **no effect** on which client serves a librarian
+  run — threading per-knob clients through that pipeline is tracked in
+  athenaeum#841. This is not silent: at startup, `_run_preconditions` logs a
+  WARNING naming the knob, the override's source, and that it has no effect
+  yet (issue athenaeum#786, mirroring the `reasoning_tiers`
+  inert-model-knob-warning pattern from athenaeum#780) — a config with no per-knob
+  override anywhere logs nothing. The batch-mode startup guard (below) still
+  validates a `classify`/`write` override correctly regardless (loudly
+  rejecting an incompatible one before the run starts, since batch mode +
+  `claude-cli` is invalid no matter which client construction catches up
+  later).
+- **Known limitation — knob granularity, not functional-area granularity.**
+  The `classify` knob is shared by `tiers.classify` (the librarian's page
+  classifier), `contradictions.detect_system` (the C4 contradiction
+  detector), and `claim_kind` — routing "the contradiction detector on a
+  different provider than the page classifier" is **not** reachable through
+  `llm.providers.classify` today; it needs the `classify` knob split into
+  separate knobs first, which is a deliberate, separate refactor.
+
+Batch mode (`ATHENAEUM_BATCH_MODE` / `librarian.batch_mode`) is served by the
+`classify` and `write` knobs only (`batch.py`'s two `execute_batch` call
+sites). The startup guard checks BOTH knobs' resolved providers — batch mode
++ `claude-cli` on either one is a loud startup error, matching the
+`claude-cli` provider's existing "Batch mode is API-only" constraint above.
 
 ## Spend ledger and ceiling (athenaeum#378)
 
