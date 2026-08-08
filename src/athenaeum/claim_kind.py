@@ -50,10 +50,14 @@ from athenaeum.models import (
     render_frontmatter,
 )
 from athenaeum.prompt_safety import data_only_clause, defang_tag, fence_untrusted
-from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
+from athenaeum.provider import (
+    LLMBackend,
+    resolve_max_tokens,
+    resolve_thinking,
+    response_text,
+)
 
 if TYPE_CHECKING:
-    import anthropic
     from anthropic.types import MessageParam, ThinkingConfigParam
 
 log = logging.getLogger(__name__)
@@ -126,7 +130,7 @@ def _snippet(text: str) -> str:
 
 def classify_claim_kind(
     text: str,
-    client: "anthropic.Anthropic | None",
+    client: "LLMBackend | None",
     config: dict[str, Any] | None = None,
     usage: TokenUsage | None = None,
 ) -> str:
@@ -253,7 +257,7 @@ def classify_claim_kind(
 
 def stamp_claim_kind(
     path: Path,
-    client: "anthropic.Anthropic | None",
+    client: "LLMBackend | None",
     config: dict[str, Any] | None = None,
     usage: TokenUsage | None = None,
 ) -> str:

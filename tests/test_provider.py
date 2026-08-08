@@ -16,6 +16,7 @@ from athenaeum._retry import TransientAPIError
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import TokenUsage, cache_usage_counts
 from athenaeum.provider import (
+    AnthropicBatchClientBackend,
     ClaudeCliClient,
     LLMBackend,
     LLMContentBlock,
@@ -610,7 +611,7 @@ class TestRealSDKShapeConformance:
                 ),
                 t.TextBlock(type="text", text="hello", citations=None),
             ],
-            model="claude-sonnet-4-6-20260101",
+            model="claude-sonnet-4-6",
             role="assistant",
             stop_reason="end_turn",
             stop_sequence=None,
@@ -650,6 +651,75 @@ class TestRealSDKShapeConformance:
         # papered over.
         assert not isinstance(msg.content[0], LLMTextBlock)
         assert isinstance(msg.content[1], LLMTextBlock)
+
+
+# ---------------------------------------------------------------------------
+# Batch hand-off boundary adapter — ``AnthropicBatchClientBackend`` (athenaeum#778)
+#
+# ``batch.py``'s 3 hand-off sites pass a concrete ``anthropic.Anthropic`` into
+# shared tier functions typed against ``LLMBackend``; the SDK's ``.messages``
+# doesn't structurally satisfy ``LLMMessages`` (typed overloads vs ``**params:
+# Any``), so this adapter bridges the gap. The STATIC proof that the adapter
+# satisfies ``LLMBackend`` lives in ``src/athenaeum/provider.py``'s own
+# ``TYPE_CHECKING`` block (``_batch_boundary_contract: LLMBackend =
+# AnthropicBatchClientBackend(anthropic.Anthropic())``), NOT here — same
+# reasoning as ``TestRealSDKShapeConformance`` above:
+# ``isinstance(adapter, LLMBackend)`` would pass whether or not the adapter is
+# actually correct (``@runtime_checkable`` checks attribute PRESENCE only, not
+# signatures), and a ``TYPE_CHECKING`` block placed in ``tests/`` is never
+# type-checked (``[tool.mypy] files = ["src/athenaeum"]`` in ``pyproject.toml``).
+# These tests are the runtime companion: the adapter genuinely DELEGATES (same
+# params in, same response out — no transform) and genuinely NARROWS (no
+# ``.batches`` reachable through it, even though the wrapped client has one).
+# ---------------------------------------------------------------------------
+
+
+class TestBatchBoundaryAdapter:
+    @staticmethod
+    def _fake_sdk_client(response):
+        """Duck-types the ``anthropic.Anthropic`` shape the adapter wraps —
+        a ``.messages.create(**params)`` facade AND a sibling ``.batches``,
+        so the narrowing assertion below proves something (a client with no
+        ``.batches`` at all would prove nothing)."""
+        received = {}
+
+        def _create(**params):
+            received.update(params)
+            return response
+
+        sdk_client = SimpleNamespace(
+            messages=SimpleNamespace(create=_create),
+            batches=SimpleNamespace(create=lambda **_: None),
+        )
+        return sdk_client, received
+
+    def test_create_delegates_params_and_response_unchanged(self):
+        sentinel_response = object()
+        sdk_client, received = self._fake_sdk_client(sentinel_response)
+        adapter = AnthropicBatchClientBackend(sdk_client)
+
+        result = adapter.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=256,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        # Same response object back — no transform.
+        assert result is sentinel_response
+        # Same params the caller passed — no transform.
+        assert received == {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+    def test_adapter_does_not_expose_batches(self):
+        sdk_client, _ = self._fake_sdk_client(response=None)
+        adapter = AnthropicBatchClientBackend(sdk_client)
+
+        assert not hasattr(adapter, "batches")
+        # The narrowing is the adapter's — the wrapped client still has it.
+        assert hasattr(sdk_client, "batches")
 
 
 # ---------------------------------------------------------------------------

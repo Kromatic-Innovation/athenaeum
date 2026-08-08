@@ -58,9 +58,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import anthropic
-
     from athenaeum.models import TokenUsage
+    from athenaeum.provider import LLMBackend
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.fingerprint import (
@@ -623,7 +622,7 @@ def _writeback_source(
     pq: PendingQuestion,
     roots: list[Path],
     *,
-    client: "anthropic.Anthropic | None" = None,
+    client: "LLMBackend | None" = None,
     config: "dict | None" = None,
     usage: "TokenUsage | None" = None,
 ) -> int:
@@ -806,7 +805,7 @@ def ingest_answers(
     pending_path: Path,
     raw_root: Path,
     *,
-    client: "anthropic.Anthropic | None" = None,
+    client: "LLMBackend | None" = None,
     config: "dict | None" = None,
 ) -> int:
     """Parse resolved items from ``pending_path``, write raw intake, archive.
