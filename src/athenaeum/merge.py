@@ -82,7 +82,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from athenaeum import detection_state, spend
 from athenaeum._lint import _strip_self_reference
@@ -150,7 +150,7 @@ from athenaeum.pending_merges import (
     write_pending_merge,
 )
 from athenaeum.progress import PhaseHeartbeat
-from athenaeum.provider import resolve_provider
+from athenaeum.provider import LLMBackend, resolve_provider
 from athenaeum.reasoning_tiers import (
     ReasoningProposal,
     load_authority_manifest_for_pipeline,
@@ -171,9 +171,6 @@ from athenaeum.resolutions import (
     resolve_max_per_run,
 )
 from athenaeum.tiers import tier4_escalate
-
-if TYPE_CHECKING:
-    import anthropic
 
 log = logging.getLogger(__name__)
 
@@ -1192,7 +1189,7 @@ def t1_screen_rejects_merge_proposal(
     member_paths: list[str],
     merge_target_name: str,
     cluster_id: str,
-    client: "anthropic.Anthropic | None",
+    client: "LLMBackend | None",
     usage: TokenUsage | None,
     wiki_root: Path,
     config: dict[str, Any] | None,
@@ -1283,7 +1280,7 @@ def t2_screen_merge_proposal(
     confidence: float,
     write_kind: str,
     cluster_id: str,
-    client: "anthropic.Anthropic | None",
+    client: "LLMBackend | None",
     usage: TokenUsage | None,
     wiki_root: Path,
     config: dict[str, Any] | None,
@@ -1545,7 +1542,7 @@ def merge_clusters_to_wiki(
     auto_memory_files: Iterable[AutoMemoryFile] | None = None,
     config: dict[str, Any] | None = None,
     dry_run: bool = False,
-    client: "anthropic.Anthropic | None" = None,
+    client: "LLMBackend | None" = None,
     usage: TokenUsage | None = None,
     now: datetime | None = None,
     as_of: date | None = None,
