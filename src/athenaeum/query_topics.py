@@ -114,6 +114,13 @@ def extract_topics(
     # ``provider`` is resolved here too so the spend ledger (below, athenaeum#378) records
     # the backend actually used — never a hardcoded ``api`` that would misreport
     # a subscription call as metered dollars.
+    # Issue athenaeum#786: resolved for the ``topic`` knob specifically (``knob="topic"``)
+    # rather than the run's global provider — ``llm.providers.topic`` /
+    # ``ATHENAEUM_TOPIC_LLM_PROVIDER`` let an operator pin the recall sidecar to
+    # the Claude subscription while the rest of the system (librarian, resolver)
+    # stays on a different provider, without editing the global ``llm.provider``.
+    # A config with no ``llm.providers.topic`` key resolves identically to the
+    # pre-athenaeum#786 global-only call (AC6).
     try:
         from athenaeum.provider import (
             build_llm_client,
@@ -123,8 +130,8 @@ def extract_topics(
             response_text,
         )
 
-        provider = resolve_provider(config)
-        client = build_llm_client(config, timeout=timeout, max_retries=0)
+        provider = resolve_provider(config, knob="topic")
+        client = build_llm_client(config, knob="topic", timeout=timeout, max_retries=0)
     except Exception as exc:  # noqa: BLE001 — never raise out of the recall hook
         # Missing SDK, a bad ``llm.provider`` value, etc. — collapse to the
         # regex-extractor fallback, same guarantee the whole module makes.

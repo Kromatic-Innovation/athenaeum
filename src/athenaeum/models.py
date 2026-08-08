@@ -2002,8 +2002,31 @@ def cache_usage_counts(response: object) -> tuple[int, int, int, int]:
     cache_read_input_tokens)``. Missing or non-int fields coerce to 0 so
     callers can log/accumulate without guarding against older SDK shapes
     or test doubles that omit the cache fields.
+
+    **Usage-normalization contract (issue athenaeum#786's implementer note):**
+    every :class:`athenaeum.provider.LLMBackend` response MUST expose a
+    ``.usage`` object carrying these four counters (see
+    :class:`athenaeum.provider.LLMUsage`) — this function is the ONE seam
+    every call site funnels a response through before accumulating into
+    :class:`TokenUsage`, so it is where a backend that normalizes its usage
+    onto the wrong shape (or drops it entirely) is caught, rather than left to
+    each adapter's good behavior. A response with NO ``.usage`` at all reads
+    as $0 / 0 tokens downstream with no error — the same failure class as the
+    Fable/Mythos pricing gap that motivated this note — so that case is
+    flagged loudly here (a coerced-to-zero individual FIELD, e.g. a real SDK
+    response's ``cache_creation_input_tokens=None`` on a no-cache-breakpoint
+    call, is legitimate and stays silent; a missing ``.usage`` object
+    entirely is not).
     """
     usage = getattr(response, "usage", None)
+    if usage is None:
+        log.warning(
+            "cache_usage_counts: response has no .usage attribute — this "
+            "reads as $0/0-tokens downstream; if a backend adapter produced "
+            "this response, it is almost certainly a usage-normalization bug "
+            "(see the LLMUsage contract in athenaeum.provider), not a "
+            "genuinely usage-less call"
+        )
 
     def _count(name: str) -> int:
         value = getattr(usage, name, 0)

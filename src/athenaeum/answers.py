@@ -1019,13 +1019,20 @@ def ingest_answers(
     # Issue athenaeum#378: persist the answers-ingest spend to the durable ledger,
     # tagged with the resolved provider so the free-text proposer's metered
     # (or subscription) usage is answerable from data. Best-effort.
+    # Issue athenaeum#786: resolved via the ``resolve`` knob — this ingest path's only
+    # LLM call is ``resolutions.propose_freetext_source_edits`` (knob="resolve",
+    # threaded through ``_answer_freetext`` above), so tagging the row with the
+    # SAME knob's resolved provider keeps this ledger row accurate when
+    # ``llm.providers.resolve`` differs from the global ``llm.provider``. No
+    # ``llm.providers.resolve`` key resolves identically to the pre-athenaeum#786
+    # global-only call (AC6).
     from athenaeum import spend
     from athenaeum.provider import resolve_provider
 
     spend.record_spend(
         usage,
         run_type="answers",
-        provider=resolve_provider(config),
+        provider=resolve_provider(config, knob="resolve"),
         config=config,
     )
 

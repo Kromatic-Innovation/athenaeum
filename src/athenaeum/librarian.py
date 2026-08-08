@@ -173,7 +173,8 @@ from athenaeum.provider import (
     LLMBackend,
     ProviderConfigError,
     build_llm_client,
-    capabilities_for,
+    capabilities_for_knob,
+    knob_provider_override_source,
     preflight_provider,
     resolve_provider,
 )
@@ -2366,6 +2367,52 @@ def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
     ]
 
 
+#: The five knobs the librarian's entity/merge pipeline serves through ONE
+#: shared client (``ctx.merge_client``, see ``_arm_run_deadline``) — a
+#: ``llm.providers.<knob>`` override for any of these is accepted (no error)
+#: but has NO EFFECT on a librarian run until athenaeum#841 threads
+#: per-knob clients through that pipeline (issue athenaeum#786's documented
+#: known limitation). ``topic`` is deliberately excluded — it IS actually
+#: routed today (:mod:`athenaeum.query_topics` resolves it independently).
+_LIBRARIAN_UNROUTED_KNOBS = ("classify", "write", "resolve", "reasoning_t1", "reasoning_t2")
+
+
+def _warn_if_knob_provider_override_inert(config: dict[str, Any] | None) -> None:
+    """Warn when a per-knob provider override is set but has no effect on a
+    librarian run (issue athenaeum#786).
+
+    Mirrors :func:`athenaeum.reasoning_tiers._warn_if_tier_model_knob_inert`'s
+    inert-knob-warning pattern (issue athenaeum#780): an operator who sets
+    ``llm.providers.write: claude-cli`` (or the equivalent env var) gets a
+    config that LOOKS applied — :func:`athenaeum.provider.resolve_provider`
+    accepts it without error — but the librarian's entity/merge pipeline
+    still serves ``write`` (and ``classify``/``resolve``/``reasoning_t1``/
+    ``reasoning_t2``) through ONE client built from the run's global
+    provider. Silently doing nothing here is exactly the failure class this
+    epic exists to kill (athenaeum#782's framing: the backend appears to work
+    and the operator has no signal their override was never applied). A
+    config with no per-knob override for any of these five knobs logs
+    NOTHING — this is the AC6 byte-identical-by-default case.
+    """
+    for knob in _LIBRARIAN_UNROUTED_KNOBS:
+        source = knob_provider_override_source(config, knob)
+        if source is not None:
+            log.warning(
+                "llm.providers.%s (%s) is set but has NO EFFECT on this "
+                "librarian run: the entity/merge pipeline still serves the "
+                "'%s' knob through the run's single shared client, built "
+                "from the global llm.provider. Per-knob client routing for "
+                "this pipeline is not wired yet (tracked in athenaeum#841); "
+                "llm.providers.topic (query_topics) and llm.providers.resolve "
+                "via the ingest-answers/reresolve-questions CLI commands ARE "
+                "honored today. See docs/configuration.md's \"Per-knob "
+                "provider routing\" section.",
+                knob,
+                source,
+                knob,
+            )
+
+
 def _run_preconditions(ctx: RunContext) -> int | None:
     """Git/config preconditions gate: provider resolution + preflight, the
     ANTHROPIC_API_KEY/wiki-root/.git existence checks. Issue athenaeum#330/#545/#783 seam.
@@ -2381,6 +2428,12 @@ def _run_preconditions(ctx: RunContext) -> int | None:
     except ProviderConfigError as exc:
         log.error("%s", exc)
         return 1
+
+    # Issue athenaeum#786: warn (never error) when a per-knob provider override is
+    # set for a knob this pipeline does not yet route per-knob — see
+    # _warn_if_knob_provider_override_inert's docstring. No-op (no log line)
+    # when no per-knob override is set anywhere (AC6 byte-identical default).
+    _warn_if_knob_provider_override_inert(ctx.config)
 
     # Issue athenaeum#330: fail loudly at startup if the claude-cli binary is missing,
     # instead of silently deferring every file to an rc-0 no-op run.
@@ -2472,12 +2525,38 @@ def _resolve_run_config(ctx: RunContext) -> int | None:
     # provider-id test: reject the combination LOUDLY at startup rather than
     # silently falling back to the api backend or silently dropping the batch
     # request.
-    if ctx.batch_mode and not capabilities_for(ctx.provider).supports_batches:
+    #
+    # Issue athenaeum#786 AC5: checked PER KNOB, not just the run's global
+    # ``ctx.provider`` — determined by reading ``batch.py`` rather than
+    # guessing: ``process_batch_run`` calls ``execute_batch(..., knob=...)``
+    # exactly twice, ``knob="classify"`` for the tier-2 batch and
+    # ``knob="write"`` for the tier-3 batch (no other knob is ever batched).
+    # A per-knob override on EITHER of those two — even though the
+    # librarian's shared client (``ctx.merge_client``, see its construction
+    # below) does not yet route batch calls to a knob-specific client
+    # (documented limitation, ``docs/configuration.md``) — must still reject
+    # loudly here: an operator who sets ``llm.providers.write: claude-cli``
+    # expecting it to be honored must not silently get an "incompatible with
+    # claude-cli" run purely because the GLOBAL default happened to be
+    # ``api``. A config with no ``llm.providers.classify``/``.write`` key
+    # resolves both to ``ctx.provider`` and behaves byte-identically to the
+    # pre-athenaeum#786 single-provider check (AC6).
+    _batch_knobs = ("classify", "write")
+    _batch_incompatible_knobs = [
+        knob
+        for knob in _batch_knobs
+        if not capabilities_for_knob(
+            ctx.config, knob, default=ctx.provider
+        ).supports_batches
+    ]
+    if ctx.batch_mode and _batch_incompatible_knobs:
         log.error(
             "batch mode (ATHENAEUM_BATCH_MODE / librarian.batch_mode / "
-            "--batch-mode) is incompatible with the claude-cli provider: the "
-            "Messages Batch API is Anthropic-endpoint-only. Use provider=api "
-            "for batch runs, or disable batch mode for the subscription backend."
+            "--batch-mode) is incompatible with the claude-cli provider on "
+            "knob(s) %s: the Messages Batch API is Anthropic-endpoint-only. "
+            "Use provider=api (globally or via llm.providers.<knob>) for "
+            "batch runs, or disable batch mode for the subscription backend.",
+            ", ".join(_batch_incompatible_knobs),
         )
         return 1
 
@@ -2583,6 +2662,24 @@ def _arm_run_deadline(ctx: RunContext) -> None:
     # the api backend when the key is unset (detector degrades deterministically);
     # for claude-cli it is the subscription CLI adapter. ``max_retries=3``
     # preserves the pre-athenaeum#330 api-backend construction byte-for-byte.
+    #
+    # Issue athenaeum#786 known limitation (recorded, not solved here — see
+    # ``docs/configuration.md``): this client is built from the run's GLOBAL
+    # provider (no ``knob=``), same as before athenaeum#786. It serves EVERY knob the
+    # entity/merge pipeline touches (``classify`` via tier2_classify/the C4
+    # detector/claim_kind stamping, ``write`` via tier3_create/tier3_merge,
+    # ``resolve`` via reresolve, ``reasoning_t1``/``reasoning_t2`` via the
+    # merge-phase reasoning-tier screen) — a ``llm.providers.<knob>`` override
+    # for any of THOSE five is accepted (no error, but
+    # ``_warn_if_knob_provider_override_inert`` in ``_run_preconditions``
+    # above warns loudly at startup) and has no effect here; only
+    # :mod:`athenaeum.query_topics` (``topic``) and the
+    # ``ingest-answers``/``reresolve-questions`` CLI commands (``resolve``,
+    # via a SEPARATE client built outside this run) are actually per-knob
+    # routed today. Splitting this shared client so each of the five knobs
+    # above gets its own resolved client is tracked in athenaeum#841 — out of
+    # scope for this scaffolding lane (mirrors the classify-knob-granularity
+    # limitation this same issue documents rather than resolves).
     ctx.merge_client = build_llm_client(ctx.config, api_key=ctx.api_key, max_retries=3)
 
     # Issue athenaeum#396: arm the run-level wall-clock deadline. ``run_deadline`` is an

@@ -705,6 +705,49 @@ class TestCacheUsageCounts:
 
         assert cache_usage_counts(object()) == (0, 0, 0, 0)
 
+    def test_missing_usage_attribute_logs_a_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue athenaeum#786 implementer note: a response with NO ``.usage`` at
+        all reads as $0/0-tokens downstream with no error -- the usage-
+        normalization seam flags this loudly (WARNING) rather than leaving
+        it to each backend adapter's good behavior. A legitimate zero-valued
+        (but PRESENT) usage object must stay silent -- see the sibling test
+        below."""
+        import logging
+
+        from athenaeum.models import cache_usage_counts
+
+        with caplog.at_level(logging.WARNING, logger="athenaeum.models"):
+            cache_usage_counts(object())
+        assert any(
+            "no .usage attribute" in rec.message for rec in caplog.records
+        )
+
+    def test_present_but_zero_usage_does_not_warn(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A real response with a PRESENT usage object whose fields are
+        legitimately zero (e.g. no cache breakpoints) must not trip the
+        missing-usage warning -- only a wholesale-absent ``.usage`` should."""
+        import logging
+
+        from athenaeum.models import cache_usage_counts
+
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=0,
+                output_tokens=0,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            )
+        )
+        with caplog.at_level(logging.WARNING, logger="athenaeum.models"):
+            cache_usage_counts(response)
+        assert not any(
+            "no .usage attribute" in rec.message for rec in caplog.records
+        )
+
     def test_missing_cache_fields_default_to_zero(self) -> None:
         from athenaeum.models import cache_usage_counts
 

@@ -37,6 +37,7 @@ from athenaeum.librarian import (
     _run_git_vcs_io,
     _run_preconditions,
     _run_wiki_dedup_phase,
+    _warn_if_knob_provider_override_inert,
 )
 from athenaeum.provider import ProviderConfigError
 
@@ -287,6 +288,124 @@ class TestRunPreconditions:
 
 
 # ---------------------------------------------------------------------------
+# _warn_if_knob_provider_override_inert (issue athenaeum#786)
+#
+# Mirrors tests/test_reasoning_tiers.py::TestInertModelKnobWarning (issue
+# athenaeum#780's precedent this function follows): a per-knob provider override
+# for a knob the librarian pipeline does not yet route per-knob warns loudly
+# (naming the knob) instead of silently doing nothing; a knob that IS routed
+# (``topic``), or no override at all, stays silent.
+# ---------------------------------------------------------------------------
+
+
+class TestWarnIfKnobProviderOverrideInert:
+    def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for knob in (
+            "CLASSIFY",
+            "WRITE",
+            "RESOLVE",
+            "TOPIC",
+            "REASONING_T1",
+            "REASONING_T2",
+        ):
+            monkeypatch.delenv(f"ATHENAEUM_{knob}_LLM_PROVIDER", raising=False)
+
+    def test_warns_for_write_knob_yaml_override(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._clear_env(monkeypatch)
+        config = {"llm": {"providers": {"write": "claude-cli"}}}
+        with caplog.at_level("WARNING", logger="athenaeum.librarian"):
+            _warn_if_knob_provider_override_inert(config)
+        assert len(caplog.records) == 1
+        msg = caplog.records[0].getMessage()
+        assert "write" in msg
+        assert "no effect" in msg.lower()
+        assert "llm.providers.write" in msg
+
+    def test_warns_for_env_override(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("ATHENAEUM_CLASSIFY_LLM_PROVIDER", "claude-cli")
+        with caplog.at_level("WARNING", logger="athenaeum.librarian"):
+            _warn_if_knob_provider_override_inert(None)
+        assert len(caplog.records) == 1
+        msg = caplog.records[0].getMessage()
+        assert "classify" in msg
+        assert "ATHENAEUM_CLASSIFY_LLM_PROVIDER" in msg
+
+    def test_warns_once_per_ineffective_knob_when_several_set(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._clear_env(monkeypatch)
+        config = {
+            "llm": {
+                "providers": {
+                    "classify": "claude-cli",
+                    "write": "claude-cli",
+                    "reasoning_t1": "claude-cli",
+                }
+            }
+        }
+        with caplog.at_level("WARNING", logger="athenaeum.librarian"):
+            _warn_if_knob_provider_override_inert(config)
+        messages = [r.getMessage() for r in caplog.records]
+        assert len(messages) == 3
+        assert any("classify" in m for m in messages)
+        assert any("write" in m for m in messages)
+        assert any("reasoning_t1" in m for m in messages)
+
+    def test_no_warning_for_topic_knob_override(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # ``topic`` IS routed (query_topics resolves it independently) — an
+        # override there must never trigger the ineffective-knob warning.
+        self._clear_env(monkeypatch)
+        config = {"llm": {"providers": {"topic": "claude-cli"}}}
+        with caplog.at_level("WARNING", logger="athenaeum.librarian"):
+            _warn_if_knob_provider_override_inert(config)
+        assert caplog.records == []
+
+    def test_no_warning_when_no_per_knob_keys(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # AC6: a config with no ``llm.providers`` section (and no per-knob
+        # env vars) logs NOTHING — byte-identical to a pre-athenaeum#786 install.
+        self._clear_env(monkeypatch)
+        with caplog.at_level("WARNING", logger="athenaeum.librarian"):
+            _warn_if_knob_provider_override_inert(None)
+            _warn_if_knob_provider_override_inert({})
+            _warn_if_knob_provider_override_inert({"llm": {"provider": "claude-cli"}})
+        assert caplog.records == []
+
+    def test_wired_into_run_preconditions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Integration check: the warning actually fires as part of the real
+        startup gate, not just when called directly."""
+        self._clear_env(monkeypatch)
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        ctx = _make_ctx(
+            tmp_path, knowledge_root=knowledge_root, wiki_root=wiki_root, dry_run=True
+        )
+        ctx.api_key = "sk-test"
+        ctx.config = {"llm": {"providers": {"write": "claude-cli"}}}
+        with (
+            patch("athenaeum.librarian.resolve_provider", return_value="api"),
+            patch("athenaeum.librarian.preflight_provider", return_value=None),
+            caplog.at_level("WARNING", logger="athenaeum.librarian"),
+        ):
+            assert _run_preconditions(ctx) is None
+        assert any(
+            "write" in r.getMessage() and "no effect" in r.getMessage().lower()
+            for r in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
 # _resolve_run_config
 # ---------------------------------------------------------------------------
 
@@ -336,6 +455,53 @@ class TestResolveRunConfig:
         ctx.provider = "api"
         assert _resolve_run_config(ctx) is None
         assert ctx.batch_mode is True
+
+    # -- issue athenaeum#786 AC5: the guard checks the ``classify``/``write``
+    # knobs' OWN resolved providers (batch.py's two execute_batch call
+    # sites), not just ``ctx.provider`` -----------------------------------
+
+    def test_batch_mode_rejected_when_write_knob_overridden_to_claude_cli(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _make_ctx(tmp_path, batch_mode=True)
+        ctx.provider = "api"  # global default supports batching
+        ctx.config = {"llm": {"providers": {"write": "claude-cli"}}}
+        assert _resolve_run_config(ctx) == 1
+
+    def test_batch_mode_rejected_when_classify_knob_overridden_to_claude_cli(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _make_ctx(tmp_path, batch_mode=True)
+        ctx.provider = "api"
+        ctx.config = {"llm": {"providers": {"classify": "claude-cli"}}}
+        assert _resolve_run_config(ctx) == 1
+
+    def test_batch_mode_allowed_when_unrelated_knob_overridden_to_claude_cli(
+        self, tmp_path: Path
+    ) -> None:
+        # ``topic`` is not one of the two knobs the batch path serves — an
+        # override there must not trip the guard.
+        ctx = _make_ctx(tmp_path, batch_mode=True)
+        ctx.provider = "api"
+        ctx.config = {"llm": {"providers": {"topic": "claude-cli"}}}
+        assert _resolve_run_config(ctx) is None
+        assert ctx.batch_mode is True
+
+    def test_batch_mode_no_per_knob_keys_matches_global_byte_identical(
+        self, tmp_path: Path
+    ) -> None:
+        # AC6: a config with no ``llm.providers`` section resolves every knob
+        # to ``ctx.provider`` — same outcome as the pre-athenaeum#786 single-check
+        # guard for both the reject and allow cases.
+        ctx = _make_ctx(tmp_path, batch_mode=True)
+        ctx.provider = "claude-cli"
+        ctx.config = {}
+        assert _resolve_run_config(ctx) == 1
+
+        ctx2 = _make_ctx(tmp_path, batch_mode=True)
+        ctx2.provider = "api"
+        ctx2.config = {}
+        assert _resolve_run_config(ctx2) is None
 
     def test_zero_budget_is_valid_and_does_not_error(self, tmp_path: Path) -> None:
         ctx = _make_ctx(tmp_path, max_api_calls=0)
