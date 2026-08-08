@@ -19,6 +19,7 @@ from athenaeum.provider import (
     AnthropicBatchClientBackend,
     ClaudeCliClient,
     LLMBackend,
+    LLMClientCache,
     LLMContentBlock,
     LLMMessages,
     LLMResponse,
@@ -31,6 +32,7 @@ from athenaeum.provider import (
     _CliUsage,
     build_llm_client,
     capabilities_for,
+    capabilities_for_knob,
     reported_stop_reason,
     resolve_max_tokens,
     resolve_provider,
@@ -134,6 +136,146 @@ class TestResolveProvider:
 
 
 # ---------------------------------------------------------------------------
+# resolve_provider(config, knob=...) — per-knob routing (issue athenaeum#786)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveProviderKnob:
+    """AC1/AC3/AC6/Trap B."""
+
+    def _clear_all_knob_envs(self, monkeypatch):
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        for knob in (
+            "CLASSIFY",
+            "WRITE",
+            "RESOLVE",
+            "TOPIC",
+            "REASONING_T1",
+            "REASONING_T2",
+        ):
+            monkeypatch.delenv(f"ATHENAEUM_{knob}_LLM_PROVIDER", raising=False)
+
+    # -- AC6: no per-knob key anywhere -> identical to the pre-athenaeum#786 call --
+
+    def test_no_knob_arg_is_byte_identical_to_pre_786(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        config = {"llm": {"provider": "claude-cli"}}
+        assert resolve_provider(config) == "claude-cli"
+
+    def test_knob_with_no_override_falls_through_to_global(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        config = {"llm": {"provider": "claude-cli"}}
+        assert resolve_provider(config, knob="write") == "claude-cli"
+        assert resolve_provider(config, knob="write") == resolve_provider(config)
+
+    def test_empty_providers_section_is_byte_identical(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        config = {"llm": {"provider": "api", "providers": {}}}
+        assert resolve_provider(config, knob="classify") == "api"
+
+    # -- AC1: yaml llm.providers.<knob> overrides the global default --------
+
+    def test_yaml_knob_override_wins_over_global_yaml(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        config = {
+            "llm": {"provider": "api", "providers": {"write": "claude-cli"}}
+        }
+        assert resolve_provider(config, knob="write") == "claude-cli"
+        # An unset knob still inherits the global default.
+        assert resolve_provider(config, knob="classify") == "api"
+        assert resolve_provider(config) == "api"
+
+    # -- Trap B: ATHENAEUM_<KNOB>_LLM_PROVIDER env naming, all 6 knobs ------
+
+    @pytest.mark.parametrize(
+        "knob,env_var",
+        [
+            ("classify", "ATHENAEUM_CLASSIFY_LLM_PROVIDER"),
+            ("write", "ATHENAEUM_WRITE_LLM_PROVIDER"),
+            ("resolve", "ATHENAEUM_RESOLVE_LLM_PROVIDER"),
+            ("topic", "ATHENAEUM_TOPIC_LLM_PROVIDER"),
+            ("reasoning_t1", "ATHENAEUM_REASONING_T1_LLM_PROVIDER"),
+            ("reasoning_t2", "ATHENAEUM_REASONING_T2_LLM_PROVIDER"),
+        ],
+    )
+    def test_per_knob_env_var_name_for_all_six_knobs(
+        self, monkeypatch, knob, env_var
+    ):
+        self._clear_all_knob_envs(monkeypatch)
+        monkeypatch.setenv(env_var, "claude-cli")
+        config = {"llm": {"provider": "api"}}
+        assert resolve_provider(config, knob=knob) == "claude-cli"
+        # No OTHER knob is affected by this one env var — a sibling knob
+        # still falls through to the global default.
+        other_knob = "resolve" if knob != "resolve" else "write"
+        assert resolve_provider(config, knob=other_knob) == "api"
+
+    def test_per_knob_env_wins_over_per_knob_yaml(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        monkeypatch.setenv("ATHENAEUM_WRITE_LLM_PROVIDER", "api")
+        config = {
+            "llm": {"provider": "api", "providers": {"write": "claude-cli"}}
+        }
+        assert resolve_provider(config, knob="write") == "api"
+
+    def test_per_knob_env_wins_over_global_env(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")
+        monkeypatch.setenv("ATHENAEUM_WRITE_LLM_PROVIDER", "api")
+        assert resolve_provider(None, knob="write") == "api"
+        # The global chain (no knob) is untouched by the per-knob env var.
+        assert resolve_provider(None) == "claude-cli"
+
+    # -- AC3: unknown provider id in a per-knob key names the knob ----------
+
+    def test_unknown_yaml_knob_value_raises_naming_the_knob(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        config = {"llm": {"providers": {"write": "bedrock"}}}
+        with pytest.raises(ProviderConfigError) as exc_info:
+            resolve_provider(config, knob="write")
+        assert "write" in str(exc_info.value)
+        assert "bedrock" in str(exc_info.value)
+
+    def test_unknown_env_knob_value_raises_naming_the_knob(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        monkeypatch.setenv("ATHENAEUM_CLASSIFY_LLM_PROVIDER", "gpt-cli")
+        with pytest.raises(ProviderConfigError) as exc_info:
+            resolve_provider(None, knob="classify")
+        assert "classify" in str(exc_info.value)
+
+    def test_case_and_whitespace_normalized_for_knob(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        monkeypatch.setenv("ATHENAEUM_TOPIC_LLM_PROVIDER", "  Claude-CLI  ")
+        assert resolve_provider(None, knob="topic") == "claude-cli"
+
+    # -- default= : caller-supplied fallback instead of a fresh global resolve --
+
+    def test_default_param_used_when_no_per_knob_override(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        # config's global provider is "api", but the caller passes an
+        # independently-resolved default of "claude-cli" — default wins over
+        # a fresh _resolve_global_provider(config) recompute.
+        config = {"llm": {"provider": "api"}}
+        assert (
+            resolve_provider(config, knob="write", default="claude-cli")
+            == "claude-cli"
+        )
+
+    def test_per_knob_override_still_wins_over_default(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        config = {"llm": {"providers": {"write": "claude-cli"}}}
+        assert (
+            resolve_provider(config, knob="write", default="api") == "claude-cli"
+        )
+
+    def test_default_ignored_when_knob_is_none(self, monkeypatch):
+        self._clear_all_knob_envs(monkeypatch)
+        # default= only applies to the per-knob chain; with no knob, the
+        # global chain runs unchanged regardless of default=.
+        assert resolve_provider(None, default="claude-cli") == "api"
+
+
+# ---------------------------------------------------------------------------
 # build_llm_client — factory dispatch
 # ---------------------------------------------------------------------------
 
@@ -200,6 +342,118 @@ class TestBuildLLMClient:
         assert isinstance(client, ClaudeCliClient)
         # No SDK client, no ``.messages.batches`` (batch mode is API-only).
         assert not hasattr(client.messages, "batches")
+
+    # -- knob= routing (issue athenaeum#786) ---------------------------------
+
+    def test_knob_routes_to_its_own_per_knob_provider(self, monkeypatch):
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {
+            "llm": {"provider": "api", "providers": {"write": "claude-cli"}}
+        }
+        client = build_llm_client(config, knob="write")
+        assert isinstance(client, ClaudeCliClient)
+
+    def test_knob_with_no_override_matches_pre_786_global_call(self, monkeypatch):
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {"llm": {"provider": "claude-cli"}}
+        assert isinstance(build_llm_client(config, knob="write"), ClaudeCliClient)
+        assert isinstance(build_llm_client(config), ClaudeCliClient)
+
+
+# ---------------------------------------------------------------------------
+# LLMClientCache — memoize per distinct (provider, api_key, max_retries,
+# timeout), never per call (issue athenaeum#786 Trap C)
+# ---------------------------------------------------------------------------
+
+
+class TestLLMClientCache:
+    def test_two_knobs_same_provider_share_one_client(self, monkeypatch):
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {"llm": {"provider": "claude-cli"}}
+        cache = LLMClientCache()
+        classify_client = build_llm_client(config, knob="classify", cache=cache)
+        write_client = build_llm_client(config, knob="write", cache=cache)
+        assert classify_client is write_client
+
+    def test_two_knobs_different_providers_get_different_clients(self, monkeypatch):
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {
+            "llm": {"provider": "api", "providers": {"write": "claude-cli"}}
+        }
+        cache = LLMClientCache()
+        classify_client = build_llm_client(
+            config, knob="classify", api_key="k-1", cache=cache
+        )
+        write_client = build_llm_client(config, knob="write", cache=cache)
+        assert isinstance(write_client, ClaudeCliClient)
+        assert not isinstance(classify_client, ClaudeCliClient)
+        assert classify_client is not write_client
+
+    def test_repeated_call_same_knob_returns_identical_object(self, monkeypatch):
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {"llm": {"provider": "claude-cli"}}
+        cache = LLMClientCache()
+        first = build_llm_client(config, knob="topic", cache=cache)
+        second = build_llm_client(config, knob="topic", cache=cache)
+        assert first is second
+
+    def test_does_not_leak_across_differing_timeout(self, monkeypatch):
+        # Trap C: two call sites resolving to the SAME provider but different
+        # ``timeout`` must not collide on one memoized client.
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {"llm": {"provider": "claude-cli"}}
+        cache = LLMClientCache()
+        default_timeout = build_llm_client(config, knob="write", cache=cache)
+        short_timeout = build_llm_client(
+            config, knob="topic", timeout=3.0, cache=cache
+        )
+        assert default_timeout is not short_timeout
+        assert short_timeout.timeout == 3.0
+
+    def test_does_not_leak_across_differing_max_retries_or_api_key(
+        self, monkeypatch
+    ):
+        # Mirrors query_topics's real shape: max_retries=0, vs. the
+        # librarian's max_retries=3 — must not collide.
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        captured_kwargs: list[dict] = []
+
+        class FakeAnthropic:
+            def __init__(self, **kwargs):
+                captured_kwargs.append(kwargs)
+
+        import anthropic
+
+        monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+        config = {"llm": {"provider": "api"}}
+        cache = LLMClientCache()
+        librarian_client = build_llm_client(
+            config, knob="write", api_key="k", max_retries=3, cache=cache
+        )
+        topic_client = build_llm_client(
+            config, knob="topic", api_key="k", max_retries=0, timeout=3.0, cache=cache
+        )
+        assert librarian_client is not topic_client
+        assert len(captured_kwargs) == 2
+        assert {"api_key": "k", "max_retries": 3} in captured_kwargs
+        assert {"api_key": "k", "max_retries": 0, "timeout": 3.0} in captured_kwargs
+
+    def test_no_cache_arg_never_memoizes_ac6(self, monkeypatch):
+        # AC6: every pre-athenaeum#786 caller passes no cache= — behavior stays a
+        # fresh client per call, exactly as before this issue.
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {"llm": {"provider": "claude-cli"}}
+        first = build_llm_client(config)
+        second = build_llm_client(config)
+        assert first is not second
+
+    def test_get_or_build_method_equivalent_to_module_function(self, monkeypatch):
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {"llm": {"provider": "claude-cli"}}
+        cache = LLMClientCache()
+        via_method = cache.get_or_build(config, knob="write")
+        via_function = build_llm_client(config, knob="write", cache=cache)
+        assert via_method is via_function
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +1026,44 @@ class TestProviderCapabilities:
 
     def test_is_a_provider_capabilities_instance(self):
         assert isinstance(capabilities_for("api"), ProviderCapabilities)
+
+
+class TestCapabilitiesForKnob:
+    """AC4: capability declarations resolve per knob."""
+
+    def test_two_knobs_on_different_providers_report_different_capabilities(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {
+            "llm": {"provider": "api", "providers": {"write": "claude-cli"}}
+        }
+        write_caps = capabilities_for_knob(config, "write")
+        classify_caps = capabilities_for_knob(config, "classify")
+        assert write_caps.supports_batches is False
+        assert classify_caps.supports_batches is True
+        assert write_caps == capabilities_for("claude-cli")
+        assert classify_caps == capabilities_for("api")
+
+    def test_no_override_matches_global_capabilities(self, monkeypatch):
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {"llm": {"provider": "claude-cli"}}
+        assert capabilities_for_knob(config, "resolve") == capabilities_for(
+            "claude-cli"
+        )
+
+    def test_unknown_knob_override_raises_naming_the_knob(self, monkeypatch):
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {"llm": {"providers": {"classify": "bedrock"}}}
+        with pytest.raises(ProviderConfigError) as exc_info:
+            capabilities_for_knob(config, "classify")
+        assert "classify" in str(exc_info.value)
+
+    def test_default_param_forwarded(self, monkeypatch):
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        config = {"llm": {"provider": "api"}}
+        caps = capabilities_for_knob(config, "write", default="claude-cli")
+        assert caps.supports_batches is False
 
 
 # ---------------------------------------------------------------------------
