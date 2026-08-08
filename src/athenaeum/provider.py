@@ -91,7 +91,7 @@ upstream. **Known limitation, recorded not solved (see
 ``docs/configuration.md``):** the librarian's entity/merge pipeline
 (``classify``/``write``/``resolve``/``reasoning_t1``/``reasoning_t2`` inside
 one librarian run) still shares ONE client built from the global provider —
-splitting that internal threading per knob is a tracked follow-up, same
+splitting that internal threading per knob is tracked in athenaeum#841, same
 spirit as the ``classify``-knob-shared-across-three-call-sites limitation
 this issue also documents rather than resolves.
 """
@@ -193,7 +193,7 @@ def resolve_provider(
     :func:`athenaeum.librarian._warn_if_knob_provider_override_inert` warns
     loudly at startup — issue athenaeum#786) and has no effect on which client
     actually serves a librarian run; wiring that pipeline to construct and
-    thread per-knob clients is a tracked follow-up (mirrors the
+    thread per-knob clients is tracked in athenaeum#841 (mirrors the
     ``classify``-knob-granularity limitation documented in
     ``docs/configuration.md``).
     """
