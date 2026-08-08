@@ -83,6 +83,14 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from athenaeum._retry import TransientAPIError
 from athenaeum.outbound_pii import redact_outbound_text
 
+if TYPE_CHECKING:
+    # Type-only: mirrors ``build_llm_client``'s own lazy runtime ``import
+    # anthropic`` (below) — a ``claude-cli``-only deployment need not have the
+    # ``anthropic`` package installed, so this must never execute. It exists
+    # solely so :class:`AnthropicBatchClientBackend` (issue athenaeum#778) can
+    # name ``anthropic.Anthropic`` in an annotation for mypy to resolve.
+    import anthropic
+
 log = logging.getLogger(__name__)
 
 #: Recognized provider ids. ``api`` is the default and wraps the Anthropic SDK
@@ -999,6 +1007,89 @@ if TYPE_CHECKING:
         ),
     )
     _sdk_response_conforms: LLMResponse = _sdk_message_shape
+
+
+# ---------------------------------------------------------------------------
+# Batch hand-off boundary adapter (issue athenaeum#778)
+#
+# ``batch.py``'s 2 direct client params (``execute_batch``, ``process_batch_run``)
+# stay concrete ``anthropic.Anthropic`` — batch mode is API-only by declared
+# capability (``capabilities_for("claude-cli").supports_batches is False``),
+# enforced by the loud startup guard in ``librarian.run_librarian``. But
+# ``process_batch_run`` ALSO hands that same concrete client to 3 shared tier
+# functions (``tier2_reclassify_larger_budget``, ``tier3_merge_full``,
+# ``tier3_merge``) that are typed against :class:`LLMBackend` — and a real
+# ``anthropic.Anthropic`` does NOT structurally satisfy :class:`LLMBackend`
+# under mypy: the SDK's ``client.messages`` is its ``Messages`` resource class
+# (specific typed overloads), not the ``create(self, **params: Any) ->
+# LLMResponse`` shape :class:`LLMMessages` declares. Issue athenaeum#835 fixed the
+# RESPONSE shape (``LLMResponse``/``LLMUsage`` now match what the SDK actually
+# returns) but deliberately left this ``**params: Any`` vs typed-overloads
+# signature gap out of scope, in both athenaeum#835 and here — this adapter exists to
+# bridge exactly that remaining gap at the 3 hand-off call sites, WITHOUT
+# widening the Protocol itself (which would weaken the contract for every
+# future backend, not just this one). Do not delete this as redundant.
+#
+# Two thin layers, mirroring ``ClaudeCliClient``/``_CliMessages`` above: the
+# outer adapter's ``messages`` property returns the inner adapter, whose
+# ``create`` delegates to the real ``client.messages.create(**params)``
+# unchanged (same params in, same response out — no transform, no behavior
+# change). The outer adapter exposes ``.messages`` ONLY, never ``.batches`` —
+# mirroring ``_CliMessages``'s deliberate omission — so batch-only capability
+# cannot leak into the generic :class:`LLMBackend` contract through this seam.
+# ---------------------------------------------------------------------------
+
+
+class _AnthropicMessagesBoundary:
+    """Narrows a real ``anthropic.Anthropic`` client's ``.messages`` facade to
+    :class:`LLMMessages` (issue athenaeum#778).
+
+    The SDK's ``Messages.create`` is a set of specific typed overloads, not
+    :class:`LLMMessages`'s ``create(self, **params: Any) -> LLMResponse`` — so
+    an ``LLMBackend``-typed call site invoking ``client.messages.create(**params)``
+    against the raw SDK object fails to type-check without this wrapper.
+    ``create`` here does nothing but forward the call: same params in, same
+    response out.
+    """
+
+    def __init__(self, anthropic_sdk: anthropic.Anthropic) -> None:
+        self._anthropic_sdk = anthropic_sdk
+
+    def create(self, **params: Any) -> Any:
+        return self._anthropic_sdk.messages.create(**params)
+
+
+class AnthropicBatchClientBackend:
+    """Boundary adapter for ``batch.py``'s 3 hand-off sites (issue athenaeum#778).
+
+    ``process_batch_run`` holds a concrete ``anthropic.Anthropic`` (batch mode
+    is API-only, by design) but passes it into
+    :func:`athenaeum.tiers.tier2_reclassify_larger_budget`,
+    :func:`athenaeum.tiers.tier3_merge_full`, and
+    :func:`athenaeum.tiers.tier3_merge` — all three typed against
+    :class:`LLMBackend`, not the concrete SDK type. Construct one of these at
+    each hand-off instead of passing the raw client.
+
+    Wraps that client's ``.messages`` facade only, via
+    :class:`_AnthropicMessagesBoundary`. ``.batches`` is deliberately absent —
+    mirroring ``_CliMessages``'s same omission — so this generic-contract seam
+    cannot be used to reach batch-only functionality.
+    """
+
+    def __init__(self, anthropic_sdk: anthropic.Anthropic) -> None:
+        self._messages = _AnthropicMessagesBoundary(anthropic_sdk)
+
+    @property
+    def messages(self) -> _AnthropicMessagesBoundary:
+        return self._messages
+
+
+if TYPE_CHECKING:
+    # Issue athenaeum#778: the batch hand-off boundary adapter must ACTUALLY
+    # satisfy LLMBackend — no ``# type: ignore`` escape, same discipline as
+    # the ClaudeCliClient assertion above. Never executed — a type-checker
+    # assertion only.
+    _batch_boundary_contract: LLMBackend = AnthropicBatchClientBackend(anthropic.Anthropic())
 
 
 # ---------------------------------------------------------------------------

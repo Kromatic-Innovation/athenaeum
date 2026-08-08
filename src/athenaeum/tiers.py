@@ -107,6 +107,7 @@ from athenaeum.prompt_safety import (
     fence_untrusted,
 )
 from athenaeum.provider import (
+    LLMBackend,
     ProviderCapabilities,
     capabilities_for,
     reported_stop_reason,
@@ -788,7 +789,7 @@ def tier2_classify(
     valid_types: list[str],
     valid_tags: list[str],
     valid_access: list[str],
-    client: anthropic.Anthropic,
+    client: LLMBackend,
     wiki_root: Path | None = None,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
@@ -1166,7 +1167,7 @@ def tier2_reclassify_larger_budget(
     valid_types: list[str],
     valid_tags: list[str],
     valid_access: list[str],
-    client: anthropic.Anthropic,
+    client: LLMBackend,
     wiki_root: Path | None = None,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
@@ -1504,7 +1505,7 @@ def tier3_create_params(
 def tier3_create(
     action: EntityAction,
     source_ref: str,
-    client: anthropic.Anthropic,
+    client: LLMBackend,
     wiki_root: Path | None = None,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
@@ -1936,7 +1937,7 @@ def tier3_merge(
     action: EntityAction,
     existing_body: str,
     source_ref: str,
-    client: anthropic.Anthropic,
+    client: LLMBackend,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
@@ -1986,7 +1987,7 @@ def tier3_merge_full(
     action: EntityAction,
     existing_body: str,
     source_ref: str,
-    client: anthropic.Anthropic,
+    client: LLMBackend,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
@@ -2103,7 +2104,7 @@ def tier3_write(
     actions: list[EntityAction],
     index: EntityIndex,
     wiki_root: Path,
-    client: anthropic.Anthropic,
+    client: LLMBackend,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
 ) -> tuple[list[WikiEntity], list[str], list[EscalationItem]]:
@@ -3076,7 +3077,7 @@ def _resolve_members_for_block(
 def reresolve_open_questions(
     pending_path: Path,
     *,
-    client: "anthropic.Anthropic | None",
+    client: "LLMBackend | None",
     config: dict[str, Any] | None = None,
     usage: TokenUsage | None = None,
     projects_root: Path | None = None,

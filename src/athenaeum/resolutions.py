@@ -90,12 +90,16 @@ from athenaeum.models import (
     validity_windows_disjoint,
 )
 from athenaeum.prompt_safety import data_only_clause, defang_tag
-from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
+from athenaeum.provider import (
+    LLMBackend,
+    resolve_max_tokens,
+    resolve_thinking,
+    response_text,
+)
 from athenaeum.scoped_claims import ScopeTree, ScopeVerdict, scope_comparison
 from athenaeum.transcript_verify import classify_backfill_claim
 
 if TYPE_CHECKING:
-    import anthropic
     from anthropic.types import MessageParam, TextBlockParam, ThinkingConfigParam
 
 log = logging.getLogger(__name__)
@@ -1672,7 +1676,7 @@ def _parse_response(text: str) -> "ResolutionProposal | MergeProposal":
 def propose_resolution(
     detector_result: ContradictionResult,
     members: list[AutoMemoryFile],
-    client: "anthropic.Anthropic | None",
+    client: "LLMBackend | None",
     config: dict[str, Any] | None = None,
     usage: TokenUsage | None = None,
 ) -> "ResolutionProposal | MergeProposal":
@@ -2798,7 +2802,7 @@ def propose_freetext_source_edits(
     ruling: str,
     sources: "list[tuple[Path, str]]",
     passages: "list[str]",
-    client: "anthropic.Anthropic | None",
+    client: "LLMBackend | None",
     config: "dict | None" = None,
     usage: TokenUsage | None = None,
 ) -> "dict[Path, str]":

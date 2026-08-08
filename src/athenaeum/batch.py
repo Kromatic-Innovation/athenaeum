@@ -91,7 +91,7 @@ from athenaeum.models import (
     parse_frontmatter,
     render_frontmatter,
 )
-from athenaeum.provider import response_text
+from athenaeum.provider import AnthropicBatchClientBackend, response_text
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
@@ -520,7 +520,7 @@ def process_batch_run(
                     valid_types,
                     valid_tags,
                     valid_access,
-                    client,
+                    AnthropicBatchClientBackend(client),
                     wiki_root=wiki_root,
                     usage=usage,
                     config=config,
@@ -804,7 +804,7 @@ def process_batch_run(
                         action,
                         existing_body,
                         st.raw.ref,
-                        client,
+                        AnthropicBatchClientBackend(client),
                         usage=usage,
                         config=config,
                     )
@@ -833,7 +833,7 @@ def process_batch_run(
                     action,
                     existing_body,
                     st.raw.ref,
-                    client,
+                    AnthropicBatchClientBackend(client),
                     usage=usage,
                     config=config,
                 )

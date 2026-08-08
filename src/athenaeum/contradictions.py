@@ -61,10 +61,14 @@ from athenaeum.models import (
     validity_bound_str,
 )
 from athenaeum.prompt_safety import defang_tag, fence_untrusted
-from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
+from athenaeum.provider import (
+    LLMBackend,
+    resolve_max_tokens,
+    resolve_thinking,
+    response_text,
+)
 
 if TYPE_CHECKING:
-    import anthropic
     from anthropic.types import MessageParam, TextBlockParam, ThinkingConfigParam
 
 log = logging.getLogger(__name__)
@@ -393,7 +397,7 @@ def _parse_response(
 
 def detect_contradictions(
     cluster_members: list[AutoMemoryFile],
-    client: "anthropic.Anthropic | None",
+    client: "LLMBackend | None",
     config: dict[str, object] | None = None,
     usage: TokenUsage | None = None,
 ) -> ContradictionResult:
