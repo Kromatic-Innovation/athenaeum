@@ -7,8 +7,23 @@ name: Promote Main
 # develop-main`). It is versioned in code-workspace-config at
 # `templates/promote-main.yml` and synced into each platform repo by
 # `scripts/sync_promote_workflows.py` (mirror of `derive_repo_configs.py`).
-# A CI drift-check (`code-workspace-config/.github/workflows/promote-workflow-drift.yml`)
-# fails the build if a repo's committed copy diverges from this canonical content.
+#
+# THIS COPY IS GENERATED. If you are reading this in a consumer repo, do not
+# hand-edit it — the next sync overwrites any local change with canonical
+# content again. Edit `templates/promote-main.yml` in code-workspace-config
+# instead.
+#
+# Enforcement is PRODUCER-SIDE, in cwc, not in this consumer repo:
+#   - `code-workspace-config/.github/workflows/promote-workflow-drift.yml`
+#     (`--check`) is BLOCKING, but only for cwc's OWN committed copy of this
+#     workflow against `templates/promote-main.yml` — it does not run here and
+#     has no visibility into any consumer repo's copy.
+#   - Fleet-wide conformance (every consumer's committed copy vs. canonical) is
+#     checked by cwc's `fleet-drift-guard.yml` / `scripts/check_fleet_drift.py`
+#     ("property 4", cwc#1889) — currently REPORT-ONLY, not blocking.
+# In short: nothing in THIS repo's CI enforces that this file matches
+# canonical. If it has drifted, cwc's fleet-drift-guard should catch it on its
+# next scheduled run and the fix is a re-sync from cwc, never a local edit.
 #
 # To change the promotion contract, edit THIS template and re-run the sync
 # script — never hand-edit a repo's `.github/workflows/promote-main.yml`.
@@ -72,16 +87,17 @@ on:
         required: false
         default: ''
 
-permissions:
-  contents: write
-  actions: read
-  statuses: read
-  checks: read
+permissions: {}
 
 jobs:
   promote:
     name: Fast-forward Promote develop → main
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      statuses: read
+      checks: read
     outputs:
       promoted_sha: ${{ steps.set_promoted_sha.outputs.promoted_sha }}
     env:
@@ -96,7 +112,7 @@ jobs:
           fetch-depth: 0
 
       - name: Load workflow-bot App credentials from 1Password
-        uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c  # v4.1.1
+        uses: 1password/load-secrets-action@e544b780808654ba8ceba5fb2fe2897103d92ff4  # v5.0.0
         with:
           export-env: true
         env:
@@ -149,10 +165,19 @@ jobs:
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_ENV"
           echo "target_sha=$TARGET_SHA" >> "$GITHUB_ENV"
 
+          # cwc#2283: a duplicate/racing promotion (e.g. `autoPromoteToMain`
+          # firing seconds after an orchestrator's own trigger already landed
+          # the same SHA) is NOT a promotion failure — it is a no-op that
+          # arrived late. Distinguish it from a genuine failure: exit 0 with a
+          # clear "nothing to promote" notice and skip the CI-gate + push
+          # steps below, rather than exiting 1 and reporting a red run for
+          # work that already succeeded.
           if [ "$SOURCE_SHA" = "$TARGET_SHA" ]; then
-            echo "::error::${SOURCE_BRANCH} and ${TARGET_BRANCH} are already at the same SHA. Nothing to promote."
-            exit 1
+            echo "::notice::${SOURCE_BRANCH} and ${TARGET_BRANCH} are already at ${SOURCE_SHA}. Nothing to promote (no-op)."
+            echo "NOTHING_TO_PROMOTE=true" >> "$GITHUB_ENV"
+            exit 0
           fi
+          echo "NOTHING_TO_PROMOTE=false" >> "$GITHUB_ENV"
 
           if ! git merge-base --is-ancestor "$TARGET_SHA" "$SOURCE_SHA"; then
             echo "::error::Fast-forward precondition failed: ${TARGET_BRANCH} is not an ancestor of ${SOURCE_BRANCH}. Open a 'chore: sync ${SOURCE_BRANCH} with ${TARGET_BRANCH}' PR first."
@@ -160,6 +185,7 @@ jobs:
           fi
 
       - name: Enforce to_main gate — CI Required green on source SHA
+        if: env.NOTHING_TO_PROMOTE != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -194,6 +220,7 @@ jobs:
         run: echo "promoted_sha=${source_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Push fast-forward promotion via refs API
+        if: env.NOTHING_TO_PROMOTE != 'true'
         env:
           # App-minted token required because main's branch protection rejects
           # direct ref writes by the default GITHUB_TOKEN with HTTP 422. The
@@ -225,6 +252,11 @@ jobs:
         run: |
           {
             echo "## Main Promotion"
+            if [ "${NOTHING_TO_PROMOTE:-false}" = "true" ]; then
+              echo "- status: no-op — ${SOURCE_BRANCH} and ${TARGET_BRANCH} were already at \`${source_sha}\`. Nothing to promote (cwc#2283)."
+            else
+              echo "- status: promoted"
+            fi
             echo "- repository: \`${GITHUB_REPOSITORY}\`"
             echo "- initiated_by: \`${GITHUB_ACTOR}\`"
             echo "- source_branch: \`${SOURCE_BRANCH}\`"
