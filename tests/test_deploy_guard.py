@@ -629,10 +629,14 @@ def test_resolver_prefers_bare_python3_when_it_already_satisfies(tmp_path: Path)
 
 
 def test_resolver_accepts_a_newer_minor_than_the_floor(tmp_path: Path) -> None:
-    tree = _tree_with_floor(tmp_path, ">=3.13")
-    shims = _shim_dir(tmp_path, {"python3": "3.11", "python3.15": "3.15"})
+    # A floor no real interpreter can meet, so the ONLY satisfying candidate is
+    # the shim — otherwise a genuine pythonX.Y sitting on the runner's PATH
+    # between the floor and the shim wins on the nearest-the-floor rule and the
+    # assertion becomes environment-dependent (it did: CI ships a real 3.13).
+    tree = _tree_with_floor(tmp_path, ">=3.90")
+    shims = _shim_dir(tmp_path, {"python3": "3.11", "python3.95": "3.95"})
     out = _source_and_eval(f"_dg_resolve_python {tree}", {"PATH": _shimmed_path(shims)})
-    assert out == f"{shims}/python3.15"
+    assert out == f"{shims}/python3.95"
 
 
 def test_resolver_fails_when_nothing_satisfies(tmp_path: Path) -> None:
