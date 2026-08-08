@@ -986,7 +986,7 @@ if TYPE_CHECKING:
             ),
             _anthropic_types.TextBlock(type="text", text="hello", citations=None),
         ],
-        model="claude-sonnet-4-6-20260101",
+        model="claude-sonnet-4-6",
         role="assistant",
         stop_reason="end_turn",
         stop_sequence=None,
