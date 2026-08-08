@@ -79,8 +79,15 @@
 #                             ATHENAEUM_GUARD_FF_CMD is accepted as a DEPRECATED
 #                             alias for back-compat with older callers/tests.
 #   ATHENAEUM_GUARD_INSTALL_CMD  venv-refresh command run on drift
-#                             (default: python3 -m venv .venv && .venv/bin/pip
-#                              install -q -e ".[<extras>]")
+#                             (default: <py> -m venv .venv && .venv/bin/pip
+#                              install -q -e ".[<extras>]", where <py> is an
+#                              interpreter that actually satisfies the deploy
+#                              tree's requires-python — see _dg_resolve_python)
+#   ATHENAEUM_GUARD_PYTHON    force the venv-build interpreter (issue athenaeum#832).
+#                             Skips probing; still VERIFIED against
+#                             requires-python, and a chosen interpreter that
+#                             does not satisfy it aborts loudly rather than
+#                             silently falling back.
 #   ATHENAEUM_GUARD_STAMP_CMD    stamp command run after a successful refresh
 #                             (default: python3 <scriptdir>/write_build_sha.py against <dir>)
 #   ATHENAEUM_GUARD_VERSION_CHECK_CMD  metadata-drift check run against the deploy
@@ -148,11 +155,133 @@ _dg_head() { git -C "$1" rev-parse HEAD 2>/dev/null; }
 # True when the deploy worktree has no uncommitted changes.
 _dg_worktree_clean() { [ -z "$(git -C "$1" status --porcelain 2>/dev/null)" ]; }
 
+# --- interpreter selection (issue athenaeum#832) -----------------------------
+# The venv build used to hardcode bare `python3`. That is whatever the machine's
+# $PATH happens to resolve — on the deploy host a pyenv shim to 3.11 — so once
+# pyproject.toml moved to `requires-python = ">=3.13"` (athenaeum#815) every
+# drift-triggered rebuild failed deterministically with
+#   ERROR: Package 'athenaeum' requires a different Python: 3.11.15 not in '>=3.13'
+# leaving the checkout reconciled but the stamp stale. The guard must not assume
+# `python3` is fixed elsewhere on the box — it resolves an interpreter that
+# actually satisfies the DEPLOY TREE'S OWN declared constraint instead.
+
+# The `>=MAJ.MIN` floor declared by <dir>/pyproject.toml's requires-python.
+# Echoes "MAJ.MIN"; non-zero when there is no readable/parseable constraint (in
+# which case the caller keeps the historical bare-`python3` behavior — a tree
+# that declares no floor has none to enforce).
+_dg_requires_python() {
+  local pyproject="$1/pyproject.toml" spec floor
+  [ -f "$pyproject" ] || return 1
+  # The raw requires-python value, e.g. ">=3.13" or ">=3.13,<4.0".
+  spec="$(sed -n 's/^[[:space:]]*requires-python[[:space:]]*=[[:space:]]*["'"'"']\([^"'"'"']*\)["'"'"'].*/\1/p' \
+    "$pyproject" | head -1)"
+  [ -n "$spec" ] || return 1
+  # The `>=` clause, normalized to MAJ.MIN (a bare `>=3` floor means 3.0).
+  floor="$(printf '%s' "$spec" | tr ',' '\n' \
+    | sed -n 's/^[[:space:]]*>=[[:space:]]*\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1.\2/p' | head -1)"
+  if [ -z "$floor" ]; then
+    floor="$(printf '%s' "$spec" | tr ',' '\n' \
+      | sed -n 's/^[[:space:]]*>=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1.0/p' | head -1)"
+  fi
+  [ -n "$floor" ] || return 1
+  printf '%s' "$floor"
+}
+
+# A candidate interpreter's own MAJ.MIN, asked of the interpreter itself rather
+# than inferred from its name — a `python3.13` on $PATH may be a shim for
+# anything, which is the whole failure mode this guards against.
+_dg_python_version() {
+  "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null
+}
+
+# True when interpreter $1 is at or above the MAJ.MIN floor $2.
+_dg_python_satisfies() {
+  local got rmaj rmin gmaj gmin
+  got="$(_dg_python_version "$1")" || return 1
+  case "$got" in [0-9]*.[0-9]*) ;; *) return 1 ;; esac
+  rmaj="${2%%.*}"; rmin="${2#*.}"
+  gmaj="${got%%.*}"; gmin="${got#*.}"
+  [ "$gmaj" -gt "$rmaj" ] && return 0
+  [ "$gmaj" -eq "$rmaj" ] && [ "$gmin" -ge "$rmin" ]
+}
+
+# Interpreters to probe, in preference order: bare `python3` first (so a healthy
+# machine keeps today's exact behavior and cost), then explicitly-versioned
+# names from the floor UPWARD (nearest-the-floor wins — the most conservative
+# satisfying choice, never a bleeding-edge prerelease that merely sorts highest),
+# then bare `python` as a last resort.
+_dg_python_candidates() {
+  local rmaj="${1%%.*}" rmin="${1#*.}" n
+  printf 'python3\n'
+  n="$rmin"
+  while [ "$n" -le $((rmin + 20)) ]; do
+    printf 'python%s.%s\n' "$rmaj" "$n"
+    n=$((n + 1))
+  done
+  printf 'python\n'
+}
+
+# Echo an absolute path to an interpreter satisfying <dir>'s requires-python.
+# Non-zero (and silent) when none is available, so the caller can abort LOUDLY
+# with a recovery hint instead of handing pip an interpreter it will reject.
+_dg_resolve_python() {
+  local dir="${1:-.}" floor cand path
+  floor="$(_dg_requires_python "$dir")" || floor=""
+
+  # An operator's explicit choice is the ONLY candidate when set: silently
+  # probing past it would hide a misconfiguration rather than report it.
+  if [ -n "${ATHENAEUM_GUARD_PYTHON:-}" ]; then
+    path="$(command -v "$ATHENAEUM_GUARD_PYTHON" 2>/dev/null)" || return 1
+    [ -n "$path" ] || return 1
+    if [ -n "$floor" ] && ! _dg_python_satisfies "$path" "$floor"; then
+      return 1
+    fi
+    printf '%s' "$path"
+    return 0
+  fi
+
+  # No declared floor to enforce -> historical behavior, unchanged.
+  if [ -z "$floor" ]; then
+    path="$(command -v python3 2>/dev/null)" || return 1
+    [ -n "$path" ] || return 1
+    printf '%s' "$path"
+    return 0
+  fi
+
+  while IFS= read -r cand; do
+    path="$(command -v "$cand" 2>/dev/null)" || continue
+    [ -n "$path" ] || continue
+    if _dg_python_satisfies "$path" "$floor"; then
+      printf '%s' "$path"
+      return 0
+    fi
+  done <<EOF
+$(_dg_python_candidates "$floor")
+EOF
+  return 1
+}
+
 # The default venv refresh (the "configured for Python" step): (re)build the
 # deploy checkout's own .venv exactly as deploy-sync.sh does. `pip install -e .`
 # is idempotent, and the extras pull the MCP server + vector-search deps.
+#
+# Two differences from the pre-athenaeum#832 command: the interpreter is a
+# RESOLVED absolute path known to satisfy requires-python (never bare `python3`),
+# and an EXISTING .venv built by an interpreter that no longer satisfies the
+# constraint is rebuilt with `--clear` — otherwise `venv` reuses the stale
+# tree and pip fails exactly as before. A satisfying .venv is reused as always,
+# so the common path costs nothing extra. Non-zero when no interpreter
+# satisfies the constraint; the caller aborts loudly.
 _dg_default_install_cmd() {
-  printf 'python3 -m venv .venv && .venv/bin/pip install -q -e ".[%s]"' "$(_dg_extras)"
+  local dir="${1:-.}" py floor clear=""
+  py="$(_dg_resolve_python "$dir")" || return 1
+  floor="$(_dg_requires_python "$dir")" || floor=""
+  if [ -n "$floor" ] && [ -x "$dir/.venv/bin/python" ] \
+    && ! _dg_python_satisfies "$dir/.venv/bin/python" "$floor"; then
+    clear=" --clear"
+  fi
+  printf '"%s" -m venv%s .venv && .venv/bin/pip install -q -e ".[%s]"' \
+    "$py" "$clear" "$(_dg_extras)"
 }
 
 # The default drift reconcile: hard-reset the deploy checkout to origin/<ref>.
@@ -271,7 +400,7 @@ _dg_check() {
 
 # Default mode: perform the sync. Returns 0 (proceed) or 1 (abort loud).
 _dg_sync() {
-  local dir ref refsha head_before marker reconcile install stamp head_after
+  local dir ref refsha head_before marker reconcile install stamp head_after floor
   dir="$(_dg_deploy_dir)"
   ref="$(_dg_ref)"
 
@@ -335,7 +464,23 @@ _dg_sync() {
     return 1
   fi
 
-  install="${ATHENAEUM_GUARD_INSTALL_CMD:-$(_dg_default_install_cmd)}"
+  # Resolve the venv-build interpreter against the DEPLOY TREE's requires-python
+  # (issue athenaeum#832). A machine with no satisfying interpreter aborts here,
+  # LOUDLY and with the constraint named, instead of handing pip a too-old
+  # `python3` and surfacing pip's opaque 'requires a different Python' error
+  # after the checkout has already been reconciled.
+  install="${ATHENAEUM_GUARD_INSTALL_CMD:-}"
+  if [ -z "$install" ]; then
+    if ! install="$(_dg_default_install_cmd "$dir")"; then
+      floor="$(_dg_requires_python "$dir")" || floor=""
+      if [ -n "$floor" ]; then
+        _dg_alert "no Python interpreter satisfying requires-python >=${floor} found on PATH for ${dir} (bare python3 is $(_dg_python_version python3 2>/dev/null || echo absent)). Recovery: install a Python ${floor}+ interpreter, or point the guard at one you already have via ATHENAEUM_GUARD_PYTHON=/path/to/python${floor} (see ATHENAEUM_GUARD_INSTALL_CMD to override the whole command)."
+      else
+        _dg_alert "no usable python3 on PATH to build the venv in ${dir} (and ${dir}/pyproject.toml declares no requires-python floor to probe against). Recovery: install python3, or set ATHENAEUM_GUARD_PYTHON=/path/to/python."
+      fi
+      return 1
+    fi
+  fi
   if ! ( cd "$dir" && eval "$install" ); then
     _dg_alert "venv refresh failed after reconcile to origin/${ref} (cmd: ${install}). Recovery: rebuild the venv by hand (cd ${dir} && ${install}) and confirm the deploy extras resolve."
     return 1
