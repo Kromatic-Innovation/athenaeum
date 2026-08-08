@@ -525,8 +525,8 @@ llm:
   serves all five through ONE client built from the **global** provider. A
   `llm.providers.<knob>` override for one of these five is accepted (no
   error) but currently has **no effect** on which client serves a librarian
-  run — threading per-knob clients through that pipeline is a tracked
-  follow-up. This is not silent: at startup, `_run_preconditions` logs a
+  run — threading per-knob clients through that pipeline is tracked in
+  athenaeum#841. This is not silent: at startup, `_run_preconditions` logs a
   WARNING naming the knob, the override's source, and that it has no effect
   yet (issue athenaeum#786, mirroring the `reasoning_tiers`
   inert-model-knob-warning pattern from athenaeum#780) — a config with no per-knob

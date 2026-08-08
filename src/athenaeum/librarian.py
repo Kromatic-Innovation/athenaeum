@@ -2370,7 +2370,7 @@ def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
 #: The five knobs the librarian's entity/merge pipeline serves through ONE
 #: shared client (``ctx.merge_client``, see ``_arm_run_deadline``) — a
 #: ``llm.providers.<knob>`` override for any of these is accepted (no error)
-#: but has NO EFFECT on a librarian run until a tracked follow-up threads
+#: but has NO EFFECT on a librarian run until athenaeum#841 threads
 #: per-knob clients through that pipeline (issue athenaeum#786's documented
 #: known limitation). ``topic`` is deliberately excluded — it IS actually
 #: routed today (:mod:`athenaeum.query_topics` resolves it independently).
@@ -2402,7 +2402,7 @@ def _warn_if_knob_provider_override_inert(config: dict[str, Any] | None) -> None
                 "librarian run: the entity/merge pipeline still serves the "
                 "'%s' knob through the run's single shared client, built "
                 "from the global llm.provider. Per-knob client routing for "
-                "this pipeline is not wired yet (a tracked follow-up); "
+                "this pipeline is not wired yet (tracked in athenaeum#841); "
                 "llm.providers.topic (query_topics) and llm.providers.resolve "
                 "via the ingest-answers/reresolve-questions CLI commands ARE "
                 "honored today. See docs/configuration.md's \"Per-knob "
@@ -2677,7 +2677,7 @@ def _arm_run_deadline(ctx: RunContext) -> None:
     # ``ingest-answers``/``reresolve-questions`` CLI commands (``resolve``,
     # via a SEPARATE client built outside this run) are actually per-knob
     # routed today. Splitting this shared client so each of the five knobs
-    # above gets its own resolved client is a tracked follow-up — out of
+    # above gets its own resolved client is tracked in athenaeum#841 — out of
     # scope for this scaffolding lane (mirrors the classify-knob-granularity
     # limitation this same issue documents rather than resolves).
     ctx.merge_client = build_llm_client(ctx.config, api_key=ctx.api_key, max_retries=3)
