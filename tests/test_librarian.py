@@ -893,6 +893,262 @@ class TestTier0HandleUpsert:
         assert tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company", "person"]) is None
         assert "x.example" not in (wiki / "person-x.md").read_text()
 
+    # --- athenaeum#845: the eligibility gate's FAILURE branches. The tests above
+    # cover the happy paths plus a single-page cross-type decline; these pin the
+    # AMBIGUOUS-match branch (two same-named entities of DIFFERENT type) and the
+    # remaining missing-condition branches. Every one asserts the actual
+    # contract read off the gate code — clean fallthrough (`None`) with the
+    # page left byte-for-byte unchanged — not merely "does not crash". The
+    # fallthrough matters because a raw that reaches the LLM tiers has its
+    # structured handle block flattened into page-body prose, which is the
+    # exact defect athenaeum#692 shipped a fix for.
+
+    def _two_same_named(self, wiki: Path) -> tuple[Path, Path]:
+        """Two entities both named "X", of different `type`, as separate pages.
+
+        Returns ``(company_page, person_page)``. `EntityIndex._load` walks
+        ``sorted(wiki_root.glob("*.md"))`` and assigns ``_by_name[name.lower()]``
+        unconditionally, so the LAST page in sorted filename order wins the
+        name key outright — the earlier one becomes unreachable by name. These
+        filenames make that ordering explicit: ``company-x.md`` sorts BEFORE
+        ``person-x.md``, so the person page is the winner.
+        """
+        wiki.mkdir(parents=True, exist_ok=True)
+        company = wiki / "company-x.md"
+        company.write_text(
+            "---\nuid: company-x\ntype: company\nname: X\naccess: internal\n"
+            "---\n\n# X\n\nCompany body.\n",
+            encoding="utf-8",
+        )
+        person = wiki / "person-x.md"
+        person.write_text(
+            "---\nuid: person-x\ntype: person\nname: X\naccess: internal\n"
+            "---\n\n# X\n\nPerson body.\n",
+            encoding="utf-8",
+        )
+        return company, person
+
+    def test_ambiguous_name_index_resolves_to_last_sorted_page(
+        self, tmp_path: Path
+    ) -> None:
+        """Two same-named entities collide on one name key; last sorted wins.
+
+        Pinned directly at the index level so the two gate tests below read
+        unambiguously — they assert on WHICH page the seed reaches, and that
+        depends entirely on this collision. `lookup` has no `type` parameter
+        and no ambiguity signal in its return type (`tuple | None`), so the
+        loser is simply not reachable by name.
+        """
+        wiki = tmp_path / "wiki"
+        _company, person = self._two_same_named(wiki)
+
+        resolved = EntityIndex(wiki).lookup("X")
+        assert resolved is not None
+        resolved_uid, resolved_path = resolved
+        assert (resolved_uid, resolved_path) == ("person-x", person)
+
+    def test_ambiguous_name_match_cross_type_declines_and_writes_nothing(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Ambiguous name + seed type != winner's type -> clean fallthrough.
+
+        The seed declares `company` and a company page named "X" DOES exist,
+        but the name key resolves to the person page, so the cross-type guard
+        declines. Note what this pins: the seed cannot reach its correctly-
+        typed page, because resolution is name-first and type is only checked
+        afterwards as a veto. That is the current contract, asserted as-is —
+        athenaeum#845 is explicitly coverage-only, no gate-logic change.
+        """
+        import logging
+
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        company, person = self._two_same_named(wiki)
+        company_before = company.read_text(encoding="utf-8")
+        person_before = person.read_text(encoding="utf-8")
+
+        raw = self._make_raw(
+            tmp_path,
+            "---\ntype: company\nname: X\ndomains:\n  - x.example\n---\n\nseed\n",
+        )
+        with caplog.at_level(logging.WARNING):
+            out = tier0_handle_upsert(
+                raw, EntityIndex(wiki), wiki, ["company", "person"]
+            )
+
+        assert out is None  # falls through to the LLM tiers
+        assert any(
+            "declares type company" in r.getMessage() and "is type person" in r.getMessage()
+            for r in caplog.records
+        ), "cross-type decline must fail loudly, not silently"
+        # NEITHER page is touched — no cross-type write, and no write to the
+        # same-typed page the seed was actually aiming at.
+        assert company.read_text(encoding="utf-8") == company_before
+        assert person.read_text(encoding="utf-8") == person_before
+
+    def test_ambiguous_name_match_upserts_only_the_winning_page(
+        self, tmp_path: Path
+    ) -> None:
+        """Ambiguous name + seed type == winner's type -> upserts the winner only.
+
+        The mirror of the test above: when the seed's type happens to match the
+        page that won the name key, the upsert proceeds normally and the other
+        same-named entity is left untouched. Together the pair document that
+        ambiguity is resolved silently by filename sort order, not by type.
+        """
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        company, person = self._two_same_named(wiki)
+        company_before = company.read_text(encoding="utf-8")
+
+        raw = self._make_raw(
+            tmp_path,
+            # `linkedin_url` is a real SCALAR_HANDLE_KEY; `emails` is NOT a
+            # source handle (see registry.SOURCE_HANDLE_KEYS), so seeding it
+            # would decline on "no populated handles" and never reach the
+            # branch under test.
+            "---\ntype: person\nname: X\n"
+            "linkedin_url: https://linkedin.com/in/x\n---\n\nseed\n",
+        )
+        out = tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company", "person"])
+
+        assert out is not None
+        entity, changed = out
+        assert changed is True
+        assert entity.uid == "person-x"
+        person_text = person.read_text(encoding="utf-8")
+        assert "linkedin.com/in/x" in person_text  # landed as frontmatter...
+        assert "Person body." in person_text  # ...body not flattened
+        # The same-named company entity is untouched.
+        assert company.read_text(encoding="utf-8") == company_before
+
+    def test_missing_condition_branches_fall_through_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        """Each individually-missing eligibility condition declines cleanly.
+
+        One case per gate clause, each asserted to return `None` AND leave the
+        existing page byte-for-byte unchanged. This is a CONTRACT table: it
+        pins the observable outcome (clean fallthrough, nothing written) for
+        every malformed seed shape.
+
+        It is deliberately not the whole story for any single clause. Several
+        shapes here are declined by more than one gate — e.g. an off-allowlist
+        `type: alien` also mismatches the resolved page's type, so the
+        downstream cross-type guard would decline it even if the allowlist gate
+        were deleted. `test_type_allowlist_gate_declines_in_isolation` pins
+        that clause on its own; this table pins the aggregate behaviour.
+        """
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        page = self._existing(wiki)  # uid: company-x, type: company, name: X
+        before = page.read_text(encoding="utf-8")
+        index = EntityIndex(wiki)
+
+        handles = "domains:\n  - x.example\n"
+        cases = {
+            "type not in allowlist": f"---\ntype: alien\nname: X\n{handles}---\n\nseed\n",
+            "type missing": f"---\nname: X\n{handles}---\n\nseed\n",
+            "type empty": f"---\ntype: ''\nname: X\n{handles}---\n\nseed\n",
+            "name missing": f"---\ntype: company\n{handles}---\n\nseed\n",
+            "name empty": f"---\ntype: company\nname: ''\n{handles}---\n\nseed\n",
+            "no populated handles": "---\ntype: company\nname: X\n---\n\nseed\n",
+            "no frontmatter at all": "just prose, no frontmatter\n",
+            "uid declared but unknown to the index": (
+                f"---\nuid: company-nope\ntype: company\nname: X\n{handles}---\n\nseed\n"
+            ),
+        }
+
+        for label, content in cases.items():
+            raw_dir = tmp_path / "raws" / label.replace(" ", "-")
+            raw_dir.mkdir(parents=True)
+            raw_path = raw_dir / "seed.md"
+            raw_path.write_text(content, encoding="utf-8")
+            raw = RawFile(
+                path=raw_path, source="contact-wiki", timestamp="", uuid8=""
+            )
+
+            assert (
+                tier0_handle_upsert(raw, index, wiki, ["company"]) is None
+            ), f"{label}: expected a clean fallthrough to the LLM tiers"
+            assert (
+                page.read_text(encoding="utf-8") == before
+            ), f"{label}: declined but still wrote to the page"
+
+    def test_type_allowlist_gate_declines_in_isolation(self, tmp_path: Path) -> None:
+        """The `type not in valid_types` gate, isolated from every other clause.
+
+        Deliberately NOT the obvious shape. Seeding an off-allowlist type like
+        `alien` against a `company` page proves nothing: the seed's type also
+        mismatches the resolved page's type, so the DOWNSTREAM cross-type guard
+        declines and the assertion passes even with the allowlist gate deleted
+        (verified by mutation — removing the gate left that shape green).
+
+        Here the seed and the existing page are both `company`, so the
+        cross-type guard cannot fire and every other clause is satisfied; the
+        allowlist is narrowed to `["person"]` instead. The ONLY thing that can
+        decline this seed is the allowlist gate — deleting it makes the upsert
+        proceed and this test fail, which is what makes it a regression test.
+        """
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        page = self._existing(wiki)  # type: company
+        before = page.read_text(encoding="utf-8")
+        raw = self._make_raw(
+            tmp_path,
+            "---\ntype: company\nname: X\ndomains:\n  - x.example\n---\n\nseed\n",
+        )
+
+        # Everything else about this seed is eligible; only `company` being
+        # absent from the allowlist stands in the way.
+        assert tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["person"]) is None
+        assert page.read_text(encoding="utf-8") == before
+
+        # Control: widen the allowlist to include `company` and the SAME seed
+        # now upserts — proving the decline above was the allowlist, not some
+        # other unmet condition.
+        out = tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company"])
+        assert out is not None and out[1] is True
+        assert "x.example" in page.read_text(encoding="utf-8")
+
+    def test_uid_less_seed_matching_non_entity_page_declines_loudly(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A name matching a uid-less (non-entity-format) page declines LOUDLY.
+
+        `EntityIndex._load` registers every page's name in `_by_name`, but only
+        a page carrying a `uid` joins `_entity_format_paths`. So a plain note
+        titled "Y" is reachable by name yet is not a source-handle target: the
+        gate must surface it at WARNING and leave it alone, rather than write
+        handle frontmatter onto a non-entity page.
+        """
+        import logging
+
+        from athenaeum.librarian import tier0_handle_upsert
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        note = wiki / "y-note.md"
+        note.write_text(
+            "---\nname: Y\naccess: internal\n---\n\n# Y\n\nA plain note.\n",
+            encoding="utf-8",
+        )
+        before = note.read_text(encoding="utf-8")
+
+        raw = self._make_raw(
+            tmp_path,
+            "---\ntype: company\nname: Y\ndomains:\n  - y.example\n---\n\nseed\n",
+        )
+        with caplog.at_level(logging.WARNING):
+            assert tier0_handle_upsert(raw, EntityIndex(wiki), wiki, ["company"]) is None
+
+        assert any("matched a non-entity page" in r.getMessage() for r in caplog.records)
+        assert note.read_text(encoding="utf-8") == before
+
 
 # ---------------------------------------------------------------------------
 # rebuild_index
