@@ -3012,7 +3012,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
     # summary without a by-hand token-ratio calculation next time.
     _entity_phase_output_before = ctx.usage.output_tokens
     if not ctx.cluster_only:
-        ctx.raw_files = discover_raw_files(ctx.raw_root)
+        ctx.raw_files = discover_raw_files(ctx.raw_root, ctx.config)
         if not ctx.raw_files:
             # An empty entity intake is no longer a whole-run early return
             # (issue athenaeum#461): auto-memory compiles independently of raw
@@ -4066,7 +4066,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
             from athenaeum.drain_advisor import build_advisory
 
             _advisory = build_advisory(
-                backlog=len(discover_raw_files(ctx.raw_root)),
+                backlog=len(discover_raw_files(ctx.raw_root, ctx.config)),
                 ledger_records=spend.read_ledger(spend.resolve_ledger_path(ctx.config)),
                 warn_days=resolve_drain_warn_days(ctx.config),
                 this_run_files=ctx.files_processed_count,

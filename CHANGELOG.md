@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`librarian.non_intake_sources` — exclude a `raw/<source>/` directory from
+  entity intake (athenaeum#843).** `discover_raw_files` globbed every `*.md`
+  and `*.jsonl` under each `raw/<source>/` and treated it as ordinary entity
+  intake, with exactly one hardcoded exception (`answers`, athenaeum#414).
+  There was no operator-controlled way to mark a whole source directory as
+  "not memory content, do not classify" — so any tool that writes its own
+  operational artifacts into `raw/<source>/` (the only tree `remember()`
+  content also uses) silently became nightly LLM-classification load, with no
+  remedy short of another patch to `discover_raw_files`. The live instance:
+  `raw/contact-sync/` holds the contact-sync tool's `sync-*.jsonl` action logs
+  (several multi-MB, one 9.7MB), `dedup-*.log` and state files. Those `.jsonl`
+  logs match the glob and are not batch envelopes, so they entered
+  `tier2_classify` → `tier3_write` as memory content — and `RawFile.content`
+  has no size guard, so a multi-megabyte log was read whole and handed to the
+  classifier. A new `sync-*.jsonl` lands daily, so the backlog grew nightly
+  whether or not the entity phase ever reached it (155 deferred files in that
+  one directory as of 2026-08-08, oldest since 2026-05-10). The new knob is
+  resolved by `config.resolve_non_intake_sources` with the same tolerant
+  contract as the other `librarian.*` list knobs (missing / non-list /
+  non-string members degrade to empty, never raise), and `discover_raw_files`
+  now takes an optional `config` and skips a listed `source_dir.name` before
+  any glob work — the general form of the `answers` skip, which is unchanged.
+  Default-empty: an unconfigured install discovers exactly what it did before.
+  `config` is threaded at all five call sites (`librarian.run` ×2,
+  `_cmd_drain`, `drain`, `status`) so every backlog count agrees on what will
+  actually be processed. Which directories to exclude in a given store stays
+  an operator decision — this ships the mechanism, not a policy.
+
 ### Changed
 
 - **CI Python matrix pinned to 3.13 only; `requires-python` and trove

@@ -145,8 +145,14 @@ def status(knowledge_root: Path) -> StatusInfo:
     wiki_root = knowledge_root / "wiki"
     raw_root = knowledge_root / "raw"
 
-    # Raw files pending
-    raw_files = discover_raw_files(raw_root)
+    # Resolved once and reused (the page-size thresholds below read it too).
+    config = load_config(knowledge_root)
+
+    # Raw files pending. Issue athenaeum#843: pass `config` so an operator's
+    # `librarian.non_intake_sources` exclusions are honoured here too — a
+    # backlog count that included dirs the librarian will never process would
+    # report work that is never going to drain.
+    raw_files = discover_raw_files(raw_root, config)
     raw_pending = len(raw_files)
 
     # Entity counts
@@ -199,7 +205,6 @@ def status(knowledge_root: Path) -> StatusInfo:
 
     # Oversized wiki pages (issue athenaeum#310). Thresholds come from config so an
     # operator can tune them; the scan is warn-only and never mutates anything.
-    config = load_config(knowledge_root)
     warn_bytes = resolve_page_warn_bytes(config)
     flag_bytes = resolve_page_flag_bytes(config)
     pages_warn, pages_flag = scan_page_sizes(wiki_root, warn_bytes, flag_bytes)

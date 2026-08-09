@@ -193,7 +193,7 @@ def run_drain(
     from athenaeum.librarian import run as librarian_run
 
     run_fn = run_fn or librarian_run
-    backlog_fn = backlog_fn or (lambda root: len(discover_raw_files(root)))
+    backlog_fn = backlog_fn or (lambda root: len(discover_raw_files(root, config)))
     ledger_path = ledger_path or spend.resolve_ledger_path(config)
 
     # Issue athenaeum#568 (H1): the cumulative dollar ceiling below is only as trustworthy
