@@ -117,6 +117,100 @@ class TestDiscoverRawFiles:
         assert "sessions" in sources
         assert len(files) == 1
 
+    def test_unconfigured_non_intake_sources_is_unchanged(self, raw_dir: Path) -> None:
+        """Issue athenaeum#843: no config key set => byte-identical to before.
+
+        Pins the default: `config=None`, an empty config, and a config whose
+        `librarian` block omits the key must all return exactly what the
+        pre-athenaeum#843 single-argument call returns.
+        """
+        from athenaeum.librarian import discover_raw_files
+
+        baseline = discover_raw_files(raw_dir)
+        assert len(baseline) == 4  # same corpus the sibling tests assert
+
+        def refs(files: list[RawFile]) -> list[Path]:
+            return sorted(f.path for f in files)
+
+        assert refs(discover_raw_files(raw_dir, None)) == refs(baseline)
+        assert refs(discover_raw_files(raw_dir, {})) == refs(baseline)
+        assert refs(discover_raw_files(raw_dir, {"librarian": {}})) == refs(baseline)
+
+    def test_configured_non_intake_source_is_excluded(self, tmp_path: Path) -> None:
+        """Issue athenaeum#843: a listed source dir drops out of discovery.
+
+        The live case: `raw/contact-sync/` holds the contact-sync tool's own
+        `sync-*.jsonl` action logs and `*.log` files — operational artifacts,
+        not memory content. They match the `*.jsonl` glob and are not batch
+        envelopes, so nothing else excludes them. A sibling genuine source
+        must stay discovered, so the skip is scoped, not a blanket off-switch.
+        """
+        from athenaeum.librarian import discover_raw_files
+
+        raw = tmp_path / "raw"
+        contact_sync = raw / "contact-sync"
+        contact_sync.mkdir(parents=True)
+        sessions = raw / "sessions"
+        sessions.mkdir()
+
+        # Operational artifacts: a .jsonl action log that is NOT a batch
+        # envelope (so the correction-batch check does not exclude it) and a
+        # .md report sitting beside it.
+        (contact_sync / "sync-2026-08-08.jsonl").write_text(
+            '{"action": "dedup", "contact": "a@example.com"}\n'
+        )
+        (contact_sync / "dedup-2026-08-08.md").write_text("Deduped 41 contacts.\n")
+        # A genuine remember()-authored observation in another source.
+        (sessions / "20260712T090000Z-aabbccdd.md").write_text(
+            "Met with a new prospect about lean coaching.\n"
+        )
+
+        config = {"librarian": {"non_intake_sources": ["contact-sync"]}}
+        files = discover_raw_files(raw, config)
+
+        sources = {f.source for f in files}
+        assert "contact-sync" not in sources
+        assert all(f.path.parent.name != "contact-sync" for f in files)
+        # The sibling intake source is untouched — we did not over-skip.
+        assert sources == {"sessions"}
+        assert len(files) == 1
+
+        # Without the config the same tree yields all three files, proving the
+        # exclusion (not some other filter) is what removed them.
+        assert len(discover_raw_files(raw)) == 3
+
+    def test_non_intake_sources_tolerates_malformed_config(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#843: a malformed value degrades to empty, never raises.
+
+        Same tolerance contract as the other `librarian.*` list knobs — an
+        operator typo must not take the nightly run down.
+        """
+        from athenaeum.librarian import discover_raw_files
+
+        raw = tmp_path / "raw"
+        sessions = raw / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "20260712T090000Z-aabbccdd.md").write_text("An observation.\n")
+
+        for bad in (
+            {"librarian": {"non_intake_sources": "sessions"}},  # str, not list
+            {"librarian": {"non_intake_sources": None}},
+            {"librarian": {"non_intake_sources": 7}},
+            {"librarian": "not-a-dict"},
+            {"librarian": {"non_intake_sources": [None, 7, {}]}},  # no str members
+            {"librarian": {"non_intake_sources": ["", "   "]}},  # blank members
+        ):
+            files = discover_raw_files(raw, bad)
+            assert len(files) == 1, f"malformed config changed discovery: {bad!r}"
+
+        # A well-formed list with junk mixed in still honours its string members.
+        files = discover_raw_files(
+            raw, {"librarian": {"non_intake_sources": [None, "sessions", 7]}}
+        )
+        assert files == []
+
     def test_empty_dir(self, tmp_path: Path) -> None:
         from athenaeum.librarian import discover_raw_files
 

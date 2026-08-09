@@ -523,6 +523,38 @@ def resolve_operational_markers(config: dict[str, Any] | None) -> list[str]:
     return []
 
 
+def resolve_non_intake_sources(config: dict[str, Any] | None) -> set[str]:
+    """Resolve `raw/<source>/` dirs excluded from entity intake (issue athenaeum#843).
+
+    A source directory named here is skipped WHOLE by
+    :func:`athenaeum.intake.discover_raw_files` — none of its files become
+    entity intake. This is for a tool that writes its own OPERATIONAL
+    artifacts into ``raw/<source>/`` (the same tree ``remember()``-authored
+    content uses): action logs, launchd logs, state dumps. Those match the
+    ``*.md`` / ``*.jsonl`` glob and are not correction-batch envelopes, so
+    without this knob they enter ``tier2_classify`` → ``tier3_write`` as if
+    they were memory content, and a multi-megabyte log gets read whole and
+    handed to the classifier.
+
+    Generalizes the hardcoded ``source == "answers"`` skip (issue
+    athenaeum#414), which stays as-is: this is a SECOND, operator-controlled
+    mechanism alongside it, so the next occurrence is a config change rather
+    than another patch to ``discover_raw_files``.
+
+    Matched against ``source_dir.name`` exactly (no globbing, no case folding
+    — a directory name on disk is what it is). DEFAULT-EMPTY: a fresh install
+    excludes nothing, so unconfigured discovery is byte-identical to
+    pre-athenaeum#843 behaviour. No seed in ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("non_intake_sources")
+            if isinstance(raw, list):
+                return {s.strip() for s in raw if isinstance(s, str) and s.strip()}
+    return set()
+
+
 def resolve_min_cluster_cohesion(config: dict[str, Any] | None) -> float:
     """Resolve the cluster-cohesion floor from ``librarian.min_cluster_cohesion`` (athenaeum#278).
 
