@@ -46,7 +46,7 @@ import re
 from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from athenaeum._lint import _strip_self_reference
 from athenaeum.atomic_io import atomic_write_text
@@ -54,6 +54,7 @@ from athenaeum.config import (
     load_config,
     resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
+    resolve_non_intake_sources,
     resolve_operational_markers,
 )
 from athenaeum.corrections import parse_batch_envelope
@@ -310,8 +311,18 @@ def _is_claimed_correction_batch(fpath: Path) -> bool:
     return parse_batch_envelope(first_line) is not None
 
 
-def discover_raw_files(raw_root: Path) -> list[RawFile]:
+def discover_raw_files(
+    raw_root: Path, config: dict[str, Any] | None = None
+) -> list[RawFile]:
     """Find all raw intake files, sorted by timestamp.
+
+    Issue athenaeum#843: ``config`` threads the operator's
+    ``librarian.non_intake_sources`` exclusion list (mirrors how
+    :func:`athenaeum.tiers.tier1_programmatic_match` already takes ``config``
+    for its own operator-tuned exclusion list). A source directory named
+    there is skipped WHOLE, before any glob work — the general form of the
+    hardcoded ``answers`` skip below. ``None`` (the default, preserving the
+    pre-athenaeum#843 call signature) excludes nothing.
 
     Issue athenaeum#797 (`docs/field-corrections.md` §3.1): globs `*.jsonl` in
     addition to `*.md` so a correction batch — which lives in this SAME
@@ -329,10 +340,18 @@ def discover_raw_files(raw_root: Path) -> list[RawFile]:
     if not raw_root.exists():
         return files
 
+    non_intake = resolve_non_intake_sources(config)
+
     for source_dir in sorted(raw_root.iterdir()):
         if not source_dir.is_dir():
             continue
         source = source_dir.name
+        # Issue athenaeum#843: an operator-excluded source dir holds a tool's
+        # own operational artifacts, not memory content. Skip it at the source
+        # level like `answers` below — before any glob/regex work, so a
+        # directory of multi-megabyte logs costs one set lookup, not a walk.
+        if source in non_intake:
+            continue
         # Issue athenaeum#414: answer fragments under raw/answers/ are resolution
         # OUTPUT, not new intake. Re-discovering them feeds already-settled
         # rulings back through tier1-2 classification and tier4 contradiction

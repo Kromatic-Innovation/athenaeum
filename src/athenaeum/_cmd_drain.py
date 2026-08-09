@@ -135,7 +135,7 @@ def cmd_drain(args: argparse.Namespace) -> int:
         return 1
 
     # Backlog + up-front cost estimate.
-    backlog = len(discover_raw_files(raw_root))
+    backlog = len(discover_raw_files(raw_root, config))
     if backlog == 0:
         print("Raw backlog is empty — nothing to drain.")
         return 0
