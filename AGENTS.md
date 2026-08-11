@@ -12,6 +12,14 @@
 Athenaeum is an entity-centric long-term memory system for AI agents.
 Published to PyPI; tagged releases ship to real users.
 
+## Strategy tier
+
+**T1.** The relationship substrate the outreach machinery reads.
+
+Band rationale: `code-workspace-config/docs/strategy/portfolio.md`. Canonical
+strategy: `code-workspace-config/docs/strategy/README.md`. Strategy is stated in
+prose there and nowhere else — do not restate or paraphrase it here.
+
 ## Branch policy
 
 - Default branch: `develop`
