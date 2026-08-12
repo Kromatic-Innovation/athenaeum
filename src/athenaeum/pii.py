@@ -1345,11 +1345,120 @@ def detect_hard_bounce_fact(text: str) -> HardBounceFact | None:
 def default_bounce_record_path(contacts_root: Path, identifier: str) -> Path:
     """Per-identifier contact-record path under the (excluded) contacts surface.
 
-    One record per IDENTIFIER (not per person) — the bounce is a fact about
-    the address's own deliverability, independent of whose it is or whether
-    that attribution is even known.
+    The FALLBACK placement, used only when no existing record already lists
+    the address (issue athenaeum#850 — :func:`resolve_contact_record` is asked first).
+    One record per IDENTIFIER, so the bounce is recorded even when nothing on
+    the surface knows whose address it is.
     """
     return Path(contacts_root) / f"contact-{slugify(identifier)}.md"
+
+
+#: List-valued frontmatter fields on a contacts-surface record that hold the
+#: ADDRESSES a person is known by. :func:`resolve_contact_record` scans these
+#: to answer "does a record for this address already exist?" before
+#: :func:`mark_bounced` falls back to minting a slug-keyed record (issue athenaeum#850).
+#: ``emails`` is what the athenaeum#479/#502 migrator writes onto every record it
+#: creates (see :func:`athenaeum.storage_migrate._render_excluded_record`);
+#: ``former_emails`` / ``alt_emails`` are folded INTO ``emails`` by that
+#: migrator but a hand-authored or earlier-migrated record can still carry
+#: them, and they hold the same kind of value — an address this person is
+#: known by — so resolution reads all three.
+CONTACT_IDENTIFIER_FIELDS: tuple[str, ...] = ("emails", "former_emails", "alt_emails")
+
+#: Frontmatter key holding PER-IDENTIFIER valid-time closes on a record that
+#: lists several addresses (issue athenaeum#850). See :func:`mark_bounced` for why a
+#: person record cannot carry the mark as a bare top-level ``valid_until``.
+IDENTIFIER_VALIDITY_FIELD = "identifier_validity"
+
+
+def normalize_identifier(identifier: str) -> str:
+    """Casefold + strip an email identifier for COMPARISON only.
+
+    Never used to rewrite a stored value: an address is recorded exactly as
+    it was observed, and matched case-insensitively (the domain half is
+    case-insensitive per RFC 5321, and no real-world mail store this module
+    talks to treats the local part as case-sensitive either — matching
+    case-sensitively would silently mint a duplicate record for
+    ``Alex@example.org``, which is the very failure athenaeum#850 is about).
+    """
+    return (identifier or "").strip().lower()
+
+
+def identifiers_on_record(meta: dict[str, Any] | None) -> list[str]:
+    """Every address *meta* lists across :data:`CONTACT_IDENTIFIER_FIELDS`.
+
+    Returns the values verbatim (not normalized), in field then list order,
+    skipping non-string and blank entries. A record that lists no address at
+    all — including a slug-keyed bounce record, whose address lives in
+    ``identifier:`` rather than in a list — returns ``[]``.
+    """
+    if not isinstance(meta, dict):
+        return []
+    found: list[str] = []
+    for field_name in CONTACT_IDENTIFIER_FIELDS:
+        value = meta.get(field_name)
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            continue
+        found += [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    return found
+
+
+def record_lists_identifier(meta: dict[str, Any] | None, identifier: str) -> bool:
+    """True when *meta* already lists *identifier* among its addresses."""
+    wanted = normalize_identifier(identifier)
+    if not wanted:
+        return False
+    return any(normalize_identifier(item) == wanted for item in identifiers_on_record(meta))
+
+
+def iter_contact_records(contacts_root: Path) -> list[Path]:
+    """Every ``*.md`` record under the contacts surface, recursively, sorted.
+
+    Sorted so resolution is DETERMINISTIC — the same store always resolves an
+    address to the same record, which is what makes a re-reported bounce a
+    true no-op rather than a coin flip between two records. Missing root
+    yields ``[]`` (never raises), mirroring :func:`iter_corpus_files`. The
+    ``_``-prefixed JSONL ledgers are excluded by the ``*.md`` glob itself.
+    """
+    root = Path(contacts_root)
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.rglob("*.md") if p.is_file())
+
+
+def resolve_contact_record(contacts_root: Path, identifier: str) -> Path | None:
+    """Find the existing record that already lists *identifier*, or ``None``.
+
+    The join athenaeum#850 exists to create: an incoming address is resolved against
+    what the surface ALREADY knows before a new record is minted, so the
+    deliverability fact lands on the record other consumers read rather than
+    on a slug-keyed sibling nothing points at.
+
+    Returns the FIRST match in :func:`iter_contact_records` order when more
+    than one record lists the address. A shared address legitimately maps to
+    several persons (see the observation log's ``identifier -> person`` note
+    in point 4 of the module docstring), so several matches is not an error —
+    but this function deliberately does not guess which is "the" person: it
+    takes the deterministic first and logs the ambiguity, leaving a real
+    resolution to the observation ledger, which models it properly.
+    """
+    matches = [
+        path
+        for path in iter_contact_records(contacts_root)
+        if record_lists_identifier(read_bounce_record(path), identifier)
+    ]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        log.warning(
+            "identifier resolves to %d contact records; annotating the first "
+            "(%s). A shared address is legitimate — see the observation log.",
+            len(matches),
+            matches[0].name,
+        )
+    return matches[0]
 
 
 def read_bounce_record(record_path: Path) -> dict[str, Any]:
@@ -1375,6 +1484,90 @@ def is_bounced(meta: dict[str, Any] | None, as_of: date | None = None) -> bool:
     return valid_until_expired(meta, as_of)
 
 
+def identifier_validity_entries(meta: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The per-identifier valid-time closes on *meta*, or ``[]``.
+
+    Tolerant reader: a missing, non-list or malformed
+    :data:`IDENTIFIER_VALIDITY_FIELD` yields ``[]`` rather than raising, and
+    non-dict list entries are skipped — a hand-edited record must degrade to
+    "no mark recorded", never to a crash in a consumer.
+    """
+    if not isinstance(meta, dict):
+        return []
+    entries = meta.get(IDENTIFIER_VALIDITY_FIELD)
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def is_bounced_identifier(
+    meta: dict[str, Any] | None, identifier: str, as_of: date | None = None
+) -> bool:
+    """True when *identifier* is closed on *meta* — the ADDRESS-level predicate.
+
+    :func:`is_bounced` asks "is this RECORD closed", which is the right
+    question for a slug-keyed record (one record, one address) and the wrong
+    one for a person record listing several addresses — there, a bare
+    top-level ``valid_until`` would say the PERSON expired. This is the
+    predicate a consumer calls when it holds an address (issue athenaeum#850), and it
+    reads both shapes:
+
+    - a per-identifier entry in :data:`IDENTIFIER_VALIDITY_FIELD`, matched
+      case-insensitively; else
+    - the record's own top-level close, but ONLY when the record's
+      ``identifier:`` IS the address asked about — so a slug-keyed record can
+      never answer for a neighbouring address.
+
+    Absent either, ``False`` (never seen ~ not bounced), mirroring
+    :func:`is_bounced`'s open-upper-bound posture.
+    """
+    wanted = normalize_identifier(identifier)
+    if not wanted:
+        return False
+    for entry in identifier_validity_entries(meta):
+        if normalize_identifier(str(entry.get("identifier", ""))) == wanted:
+            return valid_until_expired(entry, as_of)
+    if isinstance(meta, dict) and normalize_identifier(str(meta.get("identifier", ""))) == wanted:
+        return is_bounced(meta, as_of)
+    return False
+
+
+def _merge_identifier_validity(
+    existing_meta: dict[str, Any],
+    identifier: str,
+    *,
+    diagnostic: str,
+    observed_at: str,
+    source: str | dict[str, Any],
+) -> dict[str, Any]:
+    """Upsert one per-identifier close into a copy of *existing_meta*.
+
+    Updates the entry for *identifier* IN PLACE (preserving its position in
+    the list) when one is already there, else appends. Position stability is
+    what makes a re-report of the identical fact compare byte-identical, and
+    keeps a record's history readable in file order.
+    """
+    entry = {
+        "identifier": identifier,
+        "bounce_diagnostic": diagnostic,
+        "observed_at": observed_at,
+        "valid_until": observed_at,
+        "source": source,
+    }
+    merged = dict(existing_meta)
+    wanted = normalize_identifier(identifier)
+    entries = [dict(item) for item in identifier_validity_entries(existing_meta)]
+    for position, item in enumerate(entries):
+        if normalize_identifier(str(item.get("identifier", ""))) == wanted:
+            entries[position] = entry
+            break
+    else:
+        entries.append(entry)
+    merged[IDENTIFIER_VALIDITY_FIELD] = entries
+    merged[PII_FLAG] = True
+    return merged
+
+
 def mark_bounced(
     contacts_root: Path,
     identifier: str,
@@ -1386,6 +1579,32 @@ def mark_bounced(
 ) -> tuple[Path, bool]:
     """Upsert the hard-bounce mark onto *identifier*'s contact record. Idempotent.
 
+    **Resolution (issue athenaeum#850).** The record is found by asking
+    :func:`resolve_contact_record` which EXISTING record already lists this
+    address, and only minting :func:`default_bounce_record_path`'s slug-keyed
+    record when none does. Resolving by slug alone (the original athenaeum#765
+    behaviour) put the mark on a sibling of the person record that already
+    listed the address — so a consumer reading deliverability off the person
+    record got a confident "not bounced" for an address that demonstrably
+    bounced. An explicit *record_path* still overrides both.
+
+    **Shape.** Decided by what the target record IS, not by how it was found:
+
+    - a record that LISTS addresses (:func:`identifiers_on_record` — a person
+      record migrated by athenaeum#479/#502) gets a PER-IDENTIFIER close appended to
+      :data:`IDENTIFIER_VALIDITY_FIELD`. A bare top-level ``valid_until``
+      cannot be used there: the record holds several addresses, so closing
+      the record would assert the whole PERSON expired — a second
+      silent-wrong-answer in place of the one being fixed.
+    - any other record (the slug-keyed fallback, one record = one address)
+      keeps athenaeum#765's top-level fields verbatim, which is what
+      :func:`is_bounced` reads.
+
+    Both shapes are the SAME representation — a valid-time close, athenaeum#308's
+    existing mechanism, per the module docstring's point 5 — differing only in
+    what they are scoped to. Neither introduces a ``bounced``/``deprecated``
+    status enum. :func:`is_bounced_identifier` reads both.
+
     Creates the record if absent; otherwise merges onto the EXISTING
     frontmatter (any other field already on the record survives byte-for-byte
     — this never overwrites the whole file, only sets its own keys) and
@@ -1395,31 +1614,37 @@ def mark_bounced(
     when the merged frontmatter is byte-for-byte identical to what is
     already on disk (the delta gate :func:`athenaeum.librarian.tier0_handle_upsert`
     already uses for the same reason: re-reporting the identical fact must be
-    a true no-op, never a duplicate mark).
-
-    Encodes deliverability as a VALID-TIME close: ``valid_until`` is set to
-    *observed_at* (see the module-docstring's point 5 for why this is not a
-    ``bounced``/``deprecated`` status enum). Re-reporting a LATER bounce
-    (a different *observed_at* / *diagnostic*) updates the same record in
-    place rather than duplicating it.
+    a true no-op, never a duplicate mark). Re-reporting a LATER bounce (a
+    different *observed_at* / *diagnostic*) updates the same record — and,
+    on a person record, the same list entry — in place rather than
+    duplicating it: last-writer-wins.
     """
-    target = (
-        record_path
-        if record_path is not None
-        else default_bounce_record_path(contacts_root, identifier)
-    )
+    target = record_path
+    if target is None:
+        target = resolve_contact_record(contacts_root, identifier) or (
+            default_bounce_record_path(contacts_root, identifier)
+        )
     existing_meta = read_bounce_record(target)
     existing_body = ""
     if target.exists():
         _, existing_body = parse_frontmatter(target.read_text(encoding="utf-8"))
 
-    merged_meta = dict(existing_meta)
-    merged_meta["identifier"] = identifier
-    merged_meta[PII_FLAG] = True
-    merged_meta["bounce_diagnostic"] = diagnostic
-    merged_meta["observed_at"] = observed_at
-    merged_meta["valid_until"] = observed_at
-    merged_meta["source"] = source
+    if identifiers_on_record(existing_meta):
+        merged_meta = _merge_identifier_validity(
+            existing_meta,
+            identifier,
+            diagnostic=diagnostic,
+            observed_at=observed_at,
+            source=source,
+        )
+    else:
+        merged_meta = dict(existing_meta)
+        merged_meta["identifier"] = identifier
+        merged_meta[PII_FLAG] = True
+        merged_meta["bounce_diagnostic"] = diagnostic
+        merged_meta["observed_at"] = observed_at
+        merged_meta["valid_until"] = observed_at
+        merged_meta["source"] = source
 
     if merged_meta == existing_meta:
         return target, False
@@ -1431,6 +1656,122 @@ def mark_bounced(
     )
     atomic_write_text(target, render_frontmatter(merged_meta) + "\n" + body)
     return target, True
+
+
+#: Frontmatter key stamped on a slug-keyed bounce record whose mark has been
+#: folded onto the person record that lists the same address (issue athenaeum#850).
+#: Presence is what makes :func:`find_orphaned_bounce_marks` skip the record on
+#: a re-run, so the repair is idempotent WITHOUT deleting anything — the
+#: original record stays exactly where it was, having only gained a field, per
+#: the "never deleted, only ever gains fields" posture the mark itself has.
+FOLDED_INTO_FIELD = "folded_into"
+
+
+@dataclass(frozen=True)
+class OrphanedBounceMark:
+    """A bounce mark stranded on a slug-keyed record (issue athenaeum#850).
+
+    ``bounce_record`` carries the deliverability fact; ``person_record`` is
+    the record that lists the same ``identifier`` among its addresses and is
+    therefore the one consumers actually read.
+    """
+
+    identifier: str
+    bounce_record: Path
+    person_record: Path
+
+
+@dataclass(frozen=True)
+class BounceFoldReport:
+    """Outcome of :func:`fold_orphaned_bounce_marks` — what was folded, and how many."""
+
+    folded: list[OrphanedBounceMark]
+    dry_run: bool
+
+    @property
+    def count(self) -> int:
+        """How many stranded marks were folded (or would be, under *dry_run*)."""
+        return len(self.folded)
+
+
+def find_orphaned_bounce_marks(contacts_root: Path) -> list[OrphanedBounceMark]:
+    """Find slug-keyed bounce records whose address a person record already lists.
+
+    The repairable population athenaeum#850's resolve-then-annotate fix stops
+    CREATING, reported here so the pairs the previous behaviour already left
+    behind can be folded too. A record qualifies when all of:
+
+    - it carries a top-level ``identifier:`` (the slug-keyed bounce shape —
+      a person record's addresses live in a list, so it never matches);
+    - it carries a bounce mark (a top-level ``valid_until``);
+    - it has not already been folded (:data:`FOLDED_INTO_FIELD` absent); and
+    - some OTHER record lists that identifier among its addresses.
+
+    Pure — reads only. Returns pairs in :func:`iter_contact_records` order.
+    """
+    records = [(path, read_bounce_record(path)) for path in iter_contact_records(contacts_root)]
+    orphaned: list[OrphanedBounceMark] = []
+    for path, meta in records:
+        identifier = str(meta.get("identifier", "") or "").strip()
+        if not identifier or FOLDED_INTO_FIELD in meta or "valid_until" not in meta:
+            continue
+        person = next(
+            (
+                other_path
+                for other_path, other_meta in records
+                if other_path != path and record_lists_identifier(other_meta, identifier)
+            ),
+            None,
+        )
+        if person is not None:
+            orphaned.append(
+                OrphanedBounceMark(
+                    identifier=identifier, bounce_record=path, person_record=person
+                )
+            )
+    return orphaned
+
+
+def fold_orphaned_bounce_marks(
+    contacts_root: Path, *, dry_run: bool = False
+) -> BounceFoldReport:
+    """Fold every stranded mark onto the person record, reporting the count.
+
+    For each pair :func:`find_orphaned_bounce_marks` reports, replays the mark
+    onto the person record through the SAME :func:`mark_bounced` path a live
+    bounce takes (so a folded mark and a freshly-resolved one are byte-identical,
+    rather than two writers drifting apart), then stamps
+    :data:`FOLDED_INTO_FIELD` on the slug-keyed record so a re-run is a no-op.
+
+    Non-destructive by construction: nothing is deleted, and the slug-keyed
+    record keeps its own mark — folding ADDS the fact to the record consumers
+    read, it does not move it. Idempotent: running twice folds nothing the
+    second time. Under *dry_run* nothing is written and the report describes
+    what would have been.
+    """
+    orphaned = find_orphaned_bounce_marks(contacts_root)
+    if dry_run:
+        return BounceFoldReport(folded=orphaned, dry_run=True)
+
+    for pair in orphaned:
+        meta = read_bounce_record(pair.bounce_record)
+        mark_bounced(
+            contacts_root,
+            pair.identifier,
+            diagnostic=str(meta.get("bounce_diagnostic", "") or ""),
+            observed_at=str(meta.get("valid_until", "") or ""),
+            source=meta.get("source", ""),
+            record_path=pair.person_record,
+        )
+        person_meta = read_bounce_record(pair.person_record)
+        stamped = dict(meta)
+        stamped[FOLDED_INTO_FIELD] = str(
+            person_meta.get("uid") or pair.person_record.relative_to(Path(contacts_root))
+        )
+        _, body = parse_frontmatter(pair.bounce_record.read_text(encoding="utf-8"))
+        atomic_write_text(pair.bounce_record, render_frontmatter(stamped) + "\n" + body)
+
+    return BounceFoldReport(folded=orphaned, dry_run=False)
 
 
 __all__ = [
@@ -1477,4 +1818,18 @@ __all__ = [
     "read_bounce_record",
     "is_bounced",
     "mark_bounced",
+    "CONTACT_IDENTIFIER_FIELDS",
+    "IDENTIFIER_VALIDITY_FIELD",
+    "FOLDED_INTO_FIELD",
+    "normalize_identifier",
+    "identifiers_on_record",
+    "record_lists_identifier",
+    "iter_contact_records",
+    "resolve_contact_record",
+    "identifier_validity_entries",
+    "is_bounced_identifier",
+    "OrphanedBounceMark",
+    "BounceFoldReport",
+    "find_orphaned_bounce_marks",
+    "fold_orphaned_bounce_marks",
 ]
