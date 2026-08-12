@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum bounce-divergence` — report bounce-mark divergence across BOTH
+  surfaces, not a count of one (athenaeum#853).** A count of one surface cannot
+  tell a healthy system from a broken one here, and this feature has already
+  been misread twice by exactly that shape of check — once in each direction
+  (a grep of the wiki surface returning 0 where the answer was 189 and being
+  used as corroboration; a grep of the contacts surface for a `bounced:` key
+  that is never written there returning 0 after a fully successful mark). New
+  `athenaeum.bounce_divergence` takes a **store root as a parameter** and
+  emits, for that store: the count of wiki pages carrying `bounced:`, the
+  count of contacts-surface records carrying a mark — identified by the field
+  the mark **actually writes** (`identifier_validity:` or a top-level
+  `valid_until`), never by a `bounced:` key — and the **set difference in both
+  directions**, computed over the `uid` join key athenaeum#852 defines rather
+  than re-derived. Three properties are deliberate. *Empty and unreadable
+  never render identically*: each surface carries a status (`read` / `missing`
+  / `unreadable`) alongside its count, a partially-read surface reports how
+  many paths it could not read, and the CLI exits 2 rather than 0 when a
+  surface could not be read — that conflation is the root of both prior false
+  negatives. *Output is safe to paste into a public issue*: aggregate counts
+  and at most opaque handles (a page `uid`, or a truncated SHA-256 of an
+  address), never an address, a name, or a record path — a contacts-surface
+  filename embeds a slugified address, so paths are withheld too, and no
+  `--verbose` mode exists that could leak detail. *Every number is re-derived
+  at run time* from the store passed in; no figure from athenaeum#849 or
+  athenaeum#853 is hard-coded as an expected value. Items carrying a bounce
+  fact but no join key (a wiki page with no `uid`, a mark on a record with no
+  `uid`) are counted and reported separately rather than hidden, so the report
+  never overstates how much of the store it actually compared. Read-only:
+  nothing writes to either surface.
+
 - **The pii bounce mark and the wiki `bounced:` field consumers read are now
   joined (athenaeum#852).** The two surfaces recorded bounce facts
   independently of one another and shared no key: a wiki page carries a `uid`

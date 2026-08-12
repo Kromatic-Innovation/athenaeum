@@ -170,3 +170,16 @@ Not part of this design: backfilling historical wiki entries into anything
 operation, and any new ledger file. Reporting the divergence between the two
 surfaces is athenaeum#853, which takes its join key and surface definitions
 from this document rather than re-deriving them.
+
+## Reporting the divergence
+
+`athenaeum bounce-divergence --path <store-root>` reports the difference
+between the two surfaces in both directions, over the `uid` join key defined
+above (athenaeum#853). It is read-only, takes the store root as a parameter,
+and its output is safe to paste into a public issue — aggregate counts and
+opaque handles only.
+
+Read its output with the asymmetry above in mind: **an entry on the wiki
+surface with no pii mark is the expected state** for every evidence class the
+Tier-0 gate does not admit, so a non-zero divergence is not by itself a
+defect. What the report defends is a *moving* number.
