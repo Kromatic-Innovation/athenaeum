@@ -92,6 +92,7 @@ from typing import Any, Callable
 from athenaeum import detection_state, spend
 from athenaeum._retry import TransientAPIError
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.bounce_contract import check_tier0_bounce_conformance
 from athenaeum.clusters import (
     cluster_auto_memory_files,
     prune_cluster_rotations,
@@ -165,7 +166,6 @@ from athenaeum.models import (
 from athenaeum.pii import (
     HardBounceFact,
     contacts_surface_root,
-    detect_hard_bounce_fact,
     mark_bounced,
 )
 from athenaeum.progress import PhaseHeartbeat
@@ -837,24 +837,26 @@ def tier0_bounce_mark(
     the PII/contacts surface (:func:`athenaeum.pii.mark_bounced`) unless
     *dry_run*, mirroring :func:`tier0_handle_upsert`'s dry-run posture
     (detect and report, never write).
-    """
-    meta, body = parse_frontmatter(raw.content)
-    if not isinstance(meta, dict):
-        return None
-    observed_at = str(meta.get("observed_at", "") or "").strip()
-    raw_source = meta.get("source")
-    if not observed_at or not raw_source:
-        return None
-    # Frontmatter values arrive untyped; `source` is either the bare shorthand
-    # string or the per-value mapping shape. Anything else is not a source we
-    # can attribute the mark to, so fall through to the reasoning path.
-    if not isinstance(raw_source, (str, dict)):
-        return None
-    source: str | dict[str, Any] = raw_source
 
-    fact = detect_hard_bounce_fact(body)
-    if fact is None:
+    The eligibility decision itself lives in
+    :func:`athenaeum.bounce_contract.check_tier0_bounce_conformance`, which
+    this function calls and then does nothing but write on top of (issue athenaeum#854).
+    That is deliberate: the same decision is published as a read-only
+    conformance check a producer can run BEFORE submitting a batch
+    (``athenaeum bounce-contract``, ``docs/tier0-bounce-note-contract.md``),
+    and sharing one code path is what stops the published contract from
+    drifting away from the gate it describes. Behaviour here is unchanged —
+    a non-conforming note still falls through to Tier 1/2/3 with no error.
+    """
+    check = check_tier0_bounce_conformance(raw.content)
+    if not check.conforms:
         return None
+
+    # `conforms` is exactly the conjunction the eligibility list above states,
+    # so these three are populated together and never None here.
+    fact = check.fact
+    assert fact is not None and check.observed_at is not None and check.source is not None
+    source: str | dict[str, Any] = check.source
 
     if dry_run:
         return fact
@@ -864,7 +866,7 @@ def tier0_bounce_mark(
         contacts_root,
         fact.identifier,
         diagnostic=fact.diagnostic,
-        observed_at=observed_at,
+        observed_at=check.observed_at,
         source=source,
     )
     return fact
