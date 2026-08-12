@@ -221,6 +221,15 @@ deprecation record). Preserve is the safe direction.
 
 ## Q3 — The raw-intake proposal contract
 
+> **Implementable version: [`tier0-bounce-note-contract.md`](tier0-bounce-note-contract.md)
+> (athenaeum#854).** This section states the decision in prose. A producer in
+> another repository implementing against it should read that document
+> instead: it pins every field, where it must appear, what satisfies it, and
+> what happens when it does not — and ships `athenaeum bounce-contract`, a
+> read-only check answering "would Tier 0 recognize this note?" for a
+> candidate note **before** a bulk submission, naming which condition failed.
+> The two are kept in agreement by tests, not by convention.
+
 > **CORRECTED 2026-08-05 (athenaeum#768), and corrected again the same day
 > once athenaeum#765 shipped (PR athenaeum#826).** Three things were wrong in
 > the original text below, replaced entirely rather than annotated in place:
