@@ -103,6 +103,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The hard-bounce mark now annotates the record that already lists the
+  address, instead of minting a duplicate beside it (athenaeum#850).**
+  `pii.mark_bounced` resolved an incoming address to a record by email SLUG
+  alone, so an address that already had a person record on the excluded
+  surface (migrated by athenaeum#427/#437, listing it under `emails:`) got a
+  *second*, slug-keyed record — with the deliverability fact on the one
+  nothing else reads. That is a silent-wrong-answer shape rather than a
+  duplicate-file annoyance: a consumer reading deliverability off the person
+  record got a confident "not bounced" for an address that demonstrably
+  bounced. The mark now asks `pii.resolve_contact_record` which existing
+  record lists the address — across `emails:` / `former_emails:` /
+  `alt_emails:`, case-insensitively and deterministically — and only mints
+  the slug-keyed record when none does. On a person record the close is
+  recorded **per identifier** (a `identifier_validity:` entry carrying
+  `identifier`, `valid_until`, `observed_at`, `bounce_diagnostic`, `source`)
+  rather than as a top-level `valid_until`, because that record holds several
+  addresses and closing it as a whole would assert the *person* expired —
+  trading one silent-wrong-answer for another. Both shapes are the same
+  representation (athenaeum#308's valid-time close, not a new status enum),
+  differing only in scope; new `pii.is_bounced_identifier` is the address-level
+  read predicate that reads either, and never lets a record answer for a
+  neighbouring address. Pairs the old resolution already created are
+  repairable without a destructive step: `pii.fold_orphaned_bounce_marks`
+  finds a slug-keyed record whose identifier some person record lists, replays
+  the mark onto that record through the same `mark_bounced` path a live bounce
+  takes, and reports a count — deleting nothing (the slug-keyed record keeps
+  its own mark and gains a `folded_into:` stamp) and idempotent on a re-run.
+  `docs/deprecated-email-tracking.md` gains the section a verifier actually
+  needs: the mark is a valid-time close, **not** a `bounced:` field, so
+  `grep '^bounced:'` over the contacts surface returns 0 even after a fully
+  successful mark — and the mirror-image error, where the same grep over the
+  wiki surface returned 0 where the correct answer was 189 and was used as
+  corroboration. Both directions are recorded, because neither absence is
+  evidence.
+
 - **`examples/claude-code/` (the installable Claude Code hook kit) now ships
   in the built wheel, not just in git and the sdist (athenaeum#793).** A top-
   level `examples/` lives outside `packages = ["src/athenaeum"]`, so

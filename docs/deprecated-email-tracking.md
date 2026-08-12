@@ -25,6 +25,12 @@ from the plan:
   frontmatter/`sources` shape the shipped `librarian.tier0_bounce_mark`
   requires to recognize it.
 
+> **Verifying a mark?** Go straight to
+> [How to verify a mark — and the two greps that lie](#how-to-verify-a-mark--and-the-two-greps-that-lie-athenaeum850)
+> (athenaeum#850). The mark is a valid-time close, not a `bounced:` field, and
+> both of the obvious greps have already produced confident wrong answers on
+> this feature — in opposite directions.
+
 The implementation issue is athenaeum#765, narrowed to exactly what the
 operator asked for: *"The librarian should process it in the wiki by making
 sure that email in our PII file is marked as bounced. That's all."* It has
@@ -416,6 +422,87 @@ upsert, same as any duplicate report.
 The backfill needs read access to the gcontacts bios, which Voltaire already
 has and this document's scope (athenaeum-side design) does not cross —
 **voltaire#117** tracks it.
+
+---
+
+## How to verify a mark — and the two greps that lie (athenaeum#850)
+
+**Read this before checking whether a bounce was recorded.** Both of the
+obvious greps have already produced confident wrong answers, in opposite
+directions, on this exact feature. Neither is a valid check.
+
+### What the mark actually writes
+
+The mark is a **valid-time close**, not a `bounced:` enum field (Q1). What
+lands on the excluded contacts surface depends on which record the address
+resolves to (athenaeum#850) — these are two scopings of the *same*
+representation, not two mechanisms:
+
+| Record the address resolves to | Where the close lands | Read it with |
+|---|---|---|
+| A **person record** (lists addresses under `emails:` / `former_emails:` / `alt_emails:`) | An entry under `identifier_validity:`, carrying `identifier`, `valid_until`, `observed_at`, `bounce_diagnostic`, `source` | `pii.is_bounced_identifier(meta, address)` |
+| A **slug-keyed record** (`contact-<slug>.md`, minted only when no record lists the address) | Top-level `valid_until` / `bounce_diagnostic` / `observed_at` / `source` | `pii.is_bounced(meta)`, or `is_bounced_identifier` |
+
+A person record is **never** closed as a whole: it holds several addresses,
+so a bare top-level `valid_until` there would assert the *person* expired.
+That is why the per-identifier list exists.
+
+### False negative 1 — grepping the contacts surface for `bounced:`
+
+```bash
+grep -l '^bounced:' <contacts-surface>/*.md    # returns 0 — ALWAYS
+```
+
+This returns nothing **even after a fully successful mark**, because no
+`bounced:` key is ever written there. It is not evidence that the mark
+failed; it is evidence that the grep is looking for a field this design
+deliberately does not have. Verify with `is_bounced_identifier` instead —
+or, if you must use a shell, grep for `identifier_validity:` and
+`valid_until:`.
+
+### False negative 2 — grepping the wiki surface for `bounced:`
+
+The mirror-image error, and the more dangerous one because it *looks*
+corroborating. A verification of a live bounce (maecenas#73, 2026-08-12)
+reported `grep -l '^bounced:' <wiki>/*.md` returning **0** and used it to
+conclude there were no bounce marks in the corpus at all. Re-run against the
+same store on the same day with the same glob, it returned **189**.
+
+The `bounced:` field on wiki pages is real and consumers read it — a `0` from
+that grep means the glob missed (non-recursive `*.md` against a nested tree,
+a shell that did not expand it, the wrong root), not that the surface is
+empty. **Both directions of this grep are unreliable**: one asks a surface
+for a field it never carries, the other misses a field the surface does
+carry. Neither absence is evidence.
+
+### The rule
+
+An **empty result and a failed scan must never be treated as the same
+thing.** Where a check cannot distinguish them, it is not a check. Use the
+read-side predicates (`pii.is_bounced_identifier`, `pii.is_bounced`) rather
+than a text search, and prefer a reporting path that states which surfaces it
+could and could not read.
+
+### Repairing pairs the old resolution already created
+
+Before athenaeum#850, resolution went by email slug alone, so an address that
+already had a person record got a *second*, slug-keyed record — with the
+deliverability fact on the one nothing else reads. `pii.fold_orphaned_bounce_marks`
+finds those pairs and replays the mark onto the person record through the
+same `mark_bounced` path a live bounce takes, reporting a count:
+
+```python
+from athenaeum.pii import contacts_surface_root, fold_orphaned_bounce_marks
+
+contacts_root = contacts_surface_root(knowledge_root, config)
+print(fold_orphaned_bounce_marks(contacts_root, dry_run=True).count)  # inspect
+print(fold_orphaned_bounce_marks(contacts_root).count)                # apply
+```
+
+Non-destructive and idempotent: nothing is deleted, the slug-keyed record
+keeps its own mark and only gains a `folded_into:` stamp, and a second run
+folds nothing. Running it against a live store is an operator step, not part
+of athenaeum#850.
 
 ---
 
