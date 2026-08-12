@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The pii bounce mark and the wiki `bounced:` field consumers read are now
+  joined (athenaeum#852).** The two surfaces recorded bounce facts
+  independently of one another and shared no key: a wiki page carries a `uid`
+  and no address, and the athenaeum#765 slug-keyed bounce record carried an
+  address and no `uid`, so a pii mark could not reach the field consumers
+  actually read. The excluded person record is the only object holding both
+  halves — which is why athenaeum#850 (putting the mark onto that record) is a
+  hard dependency rather than a tidiness fix. New `athenaeum.bounce_join`
+  implements the chain `identifier -> person record -> uid -> wiki page`:
+  `join_identifier` walks it forwards, `deliverability_for_page` walks it
+  backwards from the page a consumer holds, and both stop at the first missing
+  link and report how far they got rather than raising, because a broken chain
+  is the ordinary case on a real store. Per P6 the direction is **read-time**:
+  athenaeum does not write `bounced:` onto wiki pages — that would contradict
+  the standing `wiki-contacts-no-email` principle, add a second writer to a
+  field an external producer already writes, and converge the surfaces by
+  copying. The evidence classes are kept **separate** rather than collapsed
+  into one boolean: `Deliverability.hard_bounced` is the pii mark (`5.x.x`
+  only) and `Deliverability.wiki_verdict` is whatever the wiki field says,
+  verbatim and unclassified. That is what stops a transient `4.x` or a
+  list-verification verdict (`MailboxDoesNotExist`, `DomainHasNullMx`) from
+  being promoted to a hard bounce — even a wiki verdict that *would* match the
+  detector is carried, never re-recognized, because convergence is a join on a
+  shared key and not a re-recognition pass. No new state is recorded on either
+  surface; the join only reads. New `docs/bounce-surface-convergence.md`
+  (linked from `docs/deprecated-email-tracking.md`) states the surfaces, the
+  key, the asymmetry, the direction and the alternative that was rejected, and
+  the re-report contract — including why last-writer-wins is intended for a
+  re-bounce and what first-writer-wins would have cost.
+
 - **`athenaeum bounce-contract` — check a candidate bounce note against the
   Tier-0 gate before submitting it (athenaeum#854).** The deterministic
   hard-bounce gate (`librarian.tier0_bounce_mark`, athenaeum#765) is
