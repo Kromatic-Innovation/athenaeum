@@ -1300,6 +1300,19 @@ class HardBounceFact:
     diagnostic: str
 
 
+def find_hard_bounce_code(text: str) -> str | None:
+    """Return the first ``5.x.x`` hard-failure code in *text*, or ``None``.
+
+    The public half of :data:`_HARD_BOUNCE_CODE_RE`, split out (issue athenaeum#854)
+    so a caller that needs to report *which* Tier-0 condition a candidate note
+    failed — :mod:`athenaeum.bounce_contract` — can ask this question with the
+    SAME predicate :func:`detect_hard_bounce_fact` gates on, rather than
+    re-deriving the code shape and drifting from it.
+    """
+    match = _HARD_BOUNCE_CODE_RE.search(text or "")
+    return match.group(0) if match is not None else None
+
+
 def detect_hard_bounce_fact(text: str) -> HardBounceFact | None:
     """Recognize a hard-bounce fact in free text, or ``None`` — never guesses.
 
@@ -1319,12 +1332,12 @@ def detect_hard_bounce_fact(text: str) -> HardBounceFact | None:
     emails = find_inline_emails(text or "")
     if len(emails) != 1:
         return None
-    match = _HARD_BOUNCE_CODE_RE.search(text or "")
-    if match is None:
+    code = find_hard_bounce_code(text or "")
+    if code is None:
         return None
     diagnostic = next(
-        (line.strip() for line in (text or "").splitlines() if match.group(0) in line),
-        match.group(0),
+        (line.strip() for line in (text or "").splitlines() if code in line),
+        code,
     )
     return HardBounceFact(identifier=emails[0], diagnostic=diagnostic)
 
@@ -1458,6 +1471,7 @@ __all__ = [
     "fold_observations",
     "resolve_identifier",
     "HardBounceFact",
+    "find_hard_bounce_code",
     "detect_hard_bounce_fact",
     "default_bounce_record_path",
     "read_bounce_record",
