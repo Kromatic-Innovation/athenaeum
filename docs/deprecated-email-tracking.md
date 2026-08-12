@@ -25,6 +25,13 @@ from the plan:
   frontmatter/`sources` shape the shipped `librarian.tier0_bounce_mark`
   requires to recognize it.
 
+> **How this mark relates to the wiki `bounced:` field consumers read:**
+> [`bounce-surface-convergence.md`](bounce-surface-convergence.md)
+> (athenaeum#852) — the join key and the full chain from an email identifier
+> to a wiki page, the evidence-class asymmetry between the two surfaces, the
+> read-time direction and why the write direction was not chosen, and the
+> re-report contract.
+
 > **Verifying a mark?** Go straight to
 > [How to verify a mark — and the two greps that lie](#how-to-verify-a-mark--and-the-two-greps-that-lie-athenaeum850)
 > (athenaeum#850). The mark is a valid-time close, not a `bounced:` field, and
