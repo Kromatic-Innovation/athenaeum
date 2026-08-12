@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`athenaeum bounce-contract` — check a candidate bounce note against the
+  Tier-0 gate before submitting it (athenaeum#854).** The deterministic
+  hard-bounce gate (`librarian.tier0_bounce_mark`, athenaeum#765) is
+  deliberately narrow: it fires only when the note's own frontmatter carries a
+  non-empty `observed_at` and `source` and the body holds exactly one
+  email-shaped token plus an RFC 3463 `5.x.x` code. A note missing any of
+  those is **not rejected** — nothing is rejected — it falls through to the
+  Tier 1/2/3 reasoning path and compiles as an ordinary free-text memory. For
+  one note that is the design. At backfill volume it is a contamination
+  vector: a producer emitting a few hundred near-miss notes compiles a few
+  hundred addresses-plus-diagnostics into the corpus and never sees a failure
+  signal. (The near-miss is not hypothetical: a survey of historical bounce
+  evidence found only 13 of 189 entries carrying a `5.x.x` code at all.) Until
+  now the required shape was discoverable only by reading the gate and
+  inferring it — which a producer in another repository cannot depend on. New
+  `docs/tier0-bounce-note-contract.md` documents the shape as an implementable
+  contract, and new `bounce_contract.check_tier0_bounce_conformance` answers
+  "would Tier 0 recognize this?" for a candidate note **without writing
+  anything** — no mark, no intake submission, no store mutation, no network,
+  no LLM call — reporting every unmet condition with a stable machine token
+  (`missing_observed_at`, `missing_source`, `several_email_identifiers`,
+  `missing_hard_bounce_code`, …) rather than a bare boolean, so a producer can
+  fix a batch. Shipped as a CLI (`--text` / `--file` / stdin, `--json`, exit 2
+  on decline) because the consumer is a producer in another repository and the
+  nearest one is TypeScript. Drift between the contract and the gate is
+  prevented structurally, not by convention: `tier0_bounce_mark` now calls the
+  same check for its whole recognition decision and does nothing but write the
+  mark on top of it, the body predicates are the production ones called
+  directly, and tests pin both the check-vs-gate seam (against the real gate
+  in `dry_run`) and the doc-vs-code reason table. No rejection path is added
+  and no runtime behaviour on the intake path changes — a non-conforming note
+  still falls through exactly as before.
 - **`librarian.non_intake_sources` — exclude a `raw/<source>/` directory from
   entity intake (athenaeum#843).** `discover_raw_files` globbed every `*.md`
   and `*.jsonl` under each `raw/<source>/` and treated it as ordinary entity
