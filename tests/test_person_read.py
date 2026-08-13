@@ -227,7 +227,9 @@ class TestUnknownUid:
 
         knowledge = tmp_path / "knowledge"
         (knowledge / "wiki").mkdir(parents=True)
-        args = argparse.Namespace(uid="no-such-uid", include_contact=False, path=knowledge)
+        args = argparse.Namespace(
+            uid="no-such-uid", include_contact=False, usage_class=[], path=knowledge
+        )
 
         rc = cmd_person(args)
 
@@ -309,7 +311,14 @@ class TestCliPersonCommand:
     ) -> tuple[int, str]:
         from athenaeum._cmd_query import cmd_person
 
-        args = argparse.Namespace(uid=uid, include_contact=include_contact, path=knowledge_root)
+        args = argparse.Namespace(
+            uid=uid,
+            include_contact=include_contact,
+            # `--usage-class` defaults to [] in the real parser (issue
+            # athenaeum#866); [] means "no class filter", not "no values".
+            usage_class=[],
+            path=knowledge_root,
+        )
         rc = cmd_person(args)
         return rc, capsys.readouterr().out
 
