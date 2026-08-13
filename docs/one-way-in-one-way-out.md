@@ -67,7 +67,7 @@ a store can occupy:
 | Surface | What lives there | Sanctioned way to read it |
 |---|---|---|
 | **Corpus surface** — the wiki, plus any configured intake roots | Compiled entity pages, the observation ledger | `recall` / the search path, the MCP read tools, `athenaeum query` |
-| **Contact-data surface** — the root the `pii` entity class resolves to, which an operator maps to an excluded-policy adapter (`storage.mapping`) | Contact records held off-corpus (athenaeum#427, athenaeum#437) | The person-read entry point (athenaeum#864), which resolves the surface via `pii.contacts_surface_root` on the caller's behalf |
+| **Contact-data surface** — the root the `pii` entity class resolves to, which an operator maps to an excluded-policy adapter (`storage.mapping`) | Contact records held off-corpus (athenaeum#427, athenaeum#437) | The `read_person` MCP tool, `athenaeum query person --uid ... [--include-contact]`, or `pii.read_person` directly — each resolves the surface via `pii.contacts_surface_root` on the caller's behalf |
 
 **The contact-data surface is the one that needs saying out loud**, because it
 is the one that fails quietly. Holding contact data off-corpus keeps it out of
@@ -84,12 +84,13 @@ So, explicitly:
 > authorized to read every byte it touched. The rule is about *where the seam
 > is*, not about who is on which side of it.
 
-The contact-data surface has exactly one sanctioned entry point: the person-read
-interface (athenaeum#864), which takes a `uid` and an explicit contact-inclusion
-flag and returns the values — resolving the surface root itself, so the caller
-never constructs that path. Only that entry point, and the modules that
-implement it (`pii.py` and the storage adapter layer it delegates to), know the
-surface layout.
+The contact-data surface has exactly one sanctioned entry point: `pii.read_person`
+(athenaeum#864) — exposed to callers as the `read_person` MCP tool and the
+`athenaeum query person --uid ... [--include-contact]` CLI command — which
+takes a `uid` and an explicit contact-inclusion flag and returns the values,
+resolving the surface root itself so the caller never constructs that path.
+Only that entry point, and the modules that implement it (`pii.py` and the
+storage adapter layer it delegates to), know the surface layout.
 
 ## 4. The invariant is not authorization
 
@@ -127,11 +128,13 @@ If you are writing a client against athenaeum:
    if your writer already knows the entity, field and provenance
    ([`docs/field-corrections.md`](field-corrections.md)). Do not write the store.
 2. **To read the corpus:** use `recall` / the MCP read tools / `athenaeum query`.
-3. **To read contact data:** use the person-read entry point (athenaeum#864) with
-   the inclusion flag set. Do not resolve the contact surface yourself, and do
-   not treat a missing value as "no value" unless the response says so — the
-   interface distinguishes *withheld* from *absent* with a redaction marker
-   precisely so a caller cannot silently mistake one for the other.
+3. **To read contact data:** use the `read_person` MCP tool, `athenaeum query
+   person --uid ... [--include-contact]`, or `pii.read_person` (athenaeum#864),
+   with the inclusion flag set. Do not resolve the contact surface yourself,
+   and do not treat a missing value as "no value" unless the response says
+   so — the interface distinguishes *withheld* from *absent* with a
+   redaction marker precisely so a caller cannot silently mistake one for
+   the other.
 4. **If the interface does not do what you need:** that is an issue against the
    interface, not a licence to go around it. A path that works today and is
    unenforced today is still the thing this document exists to rule out.
