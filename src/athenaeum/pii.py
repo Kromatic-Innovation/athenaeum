@@ -99,6 +99,18 @@ Five pieces, in the order the issue settles them:
    deleted, no new ledger file); :func:`is_bounced` is the single read-side
    predicate a consumer (recall, lint) calls to tell present-but-
    non-deliverable apart from absent.
+
+6. **One-call person read** (:func:`read_person`, issue athenaeum#864) — the single
+   sanctioned entry point for reading a person's wiki page together with
+   their contact data. It is the concrete realization of the egress half of
+   the two-path invariant (``docs/one-way-in-one-way-out.md`` §3) for the
+   contact-data surface: it resolves :func:`contacts_surface_root` itself, so
+   a caller supplies only a ``uid`` and a boolean, never a path. With
+   inclusion off (the default), each withheld contact field is reported as a
+   :class:`RedactionMarker` naming the field and that a value exists — never
+   the value — so a caller can tell "redacted" from "absent" instead of both
+   collapsing to the same missing key. Reachable from the MCP server
+   (``read_person`` tool) and ``athenaeum query person``.
 """
 
 from __future__ import annotations
@@ -113,7 +125,13 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.models import parse_frontmatter, render_frontmatter, slugify, valid_until_expired
+from athenaeum.models import (
+    EntityIndex,
+    parse_frontmatter,
+    render_frontmatter,
+    slugify,
+    valid_until_expired,
+)
 from athenaeum.storage import surface_root_for_class
 
 log = logging.getLogger(__name__)
@@ -1774,6 +1792,251 @@ def fold_orphaned_bounce_marks(
     return BounceFoldReport(folded=orphaned, dry_run=False)
 
 
+# ---------------------------------------------------------------------------
+# 6. One-call person read (issue athenaeum#864)
+# ---------------------------------------------------------------------------
+#
+# The egress-half realization of the two-path invariant
+# (``docs/one-way-in-one-way-out.md`` §3) for the contact-data surface:
+# :func:`read_person` is the ONE sanctioned way to read a person's page
+# together with their contact data. It resolves :func:`contacts_surface_root`
+# itself — a caller supplies a ``uid`` and a boolean, never a path — and, with
+# inclusion off, reports each withheld field as a :class:`RedactionMarker`
+# rather than silently omitting it, so "redacted" and "absent" never collapse
+# to the same shape.
+
+#: The union of :data:`CONTACT_FRONTMATTER_FIELDS` and
+#: :data:`CONTACT_IDENTIFIER_FIELDS`, in that stable order — every frontmatter
+#: field on a contacts-surface record that can hold an address or number a
+#: person is reachable by (issue athenaeum#864). A record migrated by an earlier
+#: pass of the athenaeum#479/#502 tooling can still carry ``former_emails`` /
+#: ``alt_emails`` alongside (or instead of) the ``emails`` the current migrator
+#: writes (see :data:`CONTACT_IDENTIFIER_FIELDS`'s docstring) — a person read
+#: that only withheld/returned ``emails``/``phones`` would silently hand a
+#: caller an address through whichever side field it forgot to check, which is
+#: exactly the leak the redaction marker exists to prevent. The two source
+#: tuples share ``"emails"``, so a plain concatenation would iterate it twice
+#: (double-reporting one field's redaction marker, or overwriting-but-not-quite
+#: a caller's ``contact["emails"]`` with an equal value) — ``dict.fromkeys``
+#: dedupes while preserving first-seen order, which is what keeps this the
+#: single ``("emails", "phones", "former_emails", "alt_emails")`` iteration
+#: order :func:`read_person` relies on.
+CONTACT_DATA_FIELDS: tuple[str, ...] = tuple(
+    dict.fromkeys(CONTACT_FRONTMATTER_FIELDS + CONTACT_IDENTIFIER_FIELDS)
+)
+
+
+def resolve_contact_record_for_uid(contacts_root: Path, uid: str) -> Path | None:
+    """Find the existing contact record whose frontmatter ``uid`` equals *uid*.
+
+    The ``uid``-keyed sibling of :func:`resolve_contact_record` (which
+    resolves by ADDRESS instead) — this is how :func:`read_person` finds a
+    person's contact record without the caller ever constructing the surface
+    path itself (issue athenaeum#864). Mirrors :func:`resolve_contact_record`'s
+    discipline exactly:
+
+    - the FIRST match in :func:`iter_contact_records` order when more than one
+      record carries the same ``uid`` — deterministic, so the same store
+      always resolves a person to the same record;
+    - ``log.warning`` (never raise) when more than one record matches;
+    - a missing *contacts_root* yields ``None``, same as
+      :func:`resolve_contact_record`.
+
+    Compares ``str(...).strip()`` on both sides. An empty/blank *uid* never
+    matches anything — otherwise it would match every record with no
+    ``uid:`` field at all, which is never the intent of a uid lookup.
+    """
+    wanted = str(uid).strip()
+    if not wanted:
+        return None
+    matches = [
+        path
+        for path in iter_contact_records(contacts_root)
+        if str(read_bounce_record(path).get("uid", "")).strip() == wanted
+    ]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        log.warning(
+            "uid %r resolves to %d contact records; annotating the first "
+            "(%s). See resolve_contact_record's docstring for the same "
+            "shared-value posture.",
+            wanted,
+            len(matches),
+            matches[0].name,
+        )
+    return matches[0]
+
+
+@dataclass(frozen=True)
+class RedactionMarker:
+    """One withheld contact field on a :class:`PersonRead` (issue athenaeum#864).
+
+    Names the field and that a value EXISTS, without the value itself — the
+    property that lets a caller distinguish "this person has an email on
+    file, withheld" from "this person has no email at all". Without this
+    marker both cases present identically (no ``contact[field]`` key), and a
+    caller reading "no email" cannot tell whether to route around the person
+    or whether they simply were not given the address they need.
+    """
+
+    field: str
+    value_count: int
+    redacted: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-serializable shape (``dict``, all scalar values)."""
+        return {
+            "field": self.field,
+            "value_count": self.value_count,
+            "redacted": self.redacted,
+        }
+
+
+@dataclass(frozen=True)
+class PersonRead:
+    """Result of :func:`read_person` — a person's page plus contact-data view.
+
+    ``contact`` holds real values only when the read was made with
+    ``include_contact=True``; ``redactions`` is non-empty only when contact
+    data was withheld (``include_contact=False``) AND the person's contact
+    record actually carries a non-empty value for at least one field. The
+    four cells (issue athenaeum#864 AC):
+
+    - include off, record present with values: ``contact == {}``,
+      ``redactions`` non-empty.
+    - include off, no record / no values: ``contact == {}``,
+      ``redactions == ()``.
+    - include on, record present with values: ``contact`` holds the values,
+      ``redactions == ()``.
+    - include on, no record / no values: ``contact == {}``,
+      ``redactions == ()``.
+
+    ``contact_record_path`` is ``None`` exactly when no contact record was
+    found — never an error, per the issue's "person whose contact record does
+    not exist returns the page with no redaction markers" criterion.
+    """
+
+    uid: str
+    page_path: Path
+    frontmatter: dict[str, Any]
+    body: str
+    contact: dict[str, list[str]]
+    redactions: tuple[RedactionMarker, ...]
+    contact_included: bool
+    contact_record_path: Path | None
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-serializable dict: paths as ``str``, redactions as a list of dicts."""
+        return {
+            "uid": self.uid,
+            "page_path": str(self.page_path),
+            "frontmatter": self.frontmatter,
+            "body": self.body,
+            "contact": self.contact,
+            "redactions": [marker.to_dict() for marker in self.redactions],
+            "contact_included": self.contact_included,
+            "contact_record_path": (
+                str(self.contact_record_path)
+                if self.contact_record_path is not None
+                else None
+            ),
+        }
+
+
+def read_person(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    *,
+    include_contact: bool = False,
+) -> PersonRead | None:
+    """Read one person's wiki page, with contact data gated by *include_contact*.
+
+    The ONE sanctioned entry point for reading a person's contact data (issue
+    athenaeum#864, ``docs/one-way-in-one-way-out.md`` §3) — the sole caller-facing
+    function that both resolves a person's wiki page AND their contact
+    record. A caller supplies only a ``uid`` and a boolean; this function
+    resolves the contact surface via :func:`contacts_surface_root` and the
+    record within it via :func:`resolve_contact_record_for_uid` itself. That
+    is the load-bearing property: the caller never constructs the surface
+    path.
+
+    Steps:
+
+    1. Resolve the wiki page for *uid* via
+       :class:`athenaeum.models.EntityIndex`. Returns ``None`` when there is
+       no such page — the caller surfaces "person not found"; this is the
+       ONLY ``None`` case.
+    2. Parse the page into ``frontmatter`` + ``body``.
+    3. Resolve the contact surface and the matching record
+       (:func:`resolve_contact_record_for_uid`). A person whose contact
+       record does not exist (or does not resolve) is not an error: the page
+       is still returned, with an empty ``contact`` and no redaction markers.
+    4. Read the record's frontmatter via :func:`read_bounce_record` (the
+       existing generic "read a contact record's frontmatter, or ``{}``"
+       helper — reused here, not duplicated).
+    5. For each field in :data:`CONTACT_DATA_FIELDS` carrying a non-empty
+       value on the record: with *include_contact* True, the values land in
+       ``contact[field]``; with it False, a :class:`RedactionMarker` is
+       appended instead — never both, and never neither for a field that
+       genuinely has a value.
+
+    Args:
+        knowledge_root: Root of the knowledge base (parent of ``wiki/``).
+        config: Resolved ``athenaeum.yaml`` config, passed straight to
+            :func:`contacts_surface_root` so the contact surface resolves
+            exactly as it does for every other consumer of that function.
+        uid: The person's durable identifier.
+        include_contact: Contact-data inclusion flag (issue athenaeum#864). Default
+            ``False`` — excluded. Who may set this flag is deliberately out
+            of scope for this function (deferred, see
+            ``docs/one-way-in-one-way-out.md`` §4); a caller that needs to
+            gate it applies that check BEFORE calling this function (see
+            ``athenaeum.mcp_server.person_read`` for the MCP-surface
+            instance of that gate).
+
+    Returns:
+        A :class:`PersonRead`, or ``None`` when *uid* does not resolve to a
+        wiki page.
+    """
+    page_path = EntityIndex(knowledge_root / "wiki").get_by_uid(uid)
+    if page_path is None:
+        return None
+
+    frontmatter, body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+
+    contacts_root = contacts_surface_root(knowledge_root, config)
+    record_path = resolve_contact_record_for_uid(contacts_root, uid)
+    record_meta = read_bounce_record(record_path) if record_path is not None else {}
+
+    contact: dict[str, list[str]] = {}
+    redactions: list[RedactionMarker] = []
+    for field in CONTACT_DATA_FIELDS:
+        raw = record_meta.get(field)
+        if raw is None:
+            continue
+        values = raw if isinstance(raw, list) else [raw]
+        values = [str(v).strip() for v in values if str(v).strip()]
+        if not values:
+            continue
+        if include_contact:
+            contact[field] = values
+        else:
+            redactions.append(RedactionMarker(field=field, value_count=len(values)))
+
+    return PersonRead(
+        uid=uid,
+        page_path=page_path,
+        frontmatter=frontmatter,
+        body=body,
+        contact=contact,
+        redactions=tuple(redactions),
+        contact_included=include_contact,
+        contact_record_path=record_path,
+    )
+
+
 __all__ = [
     "PII_ENTITY_CLASS",
     "PII_FLAG",
@@ -1832,4 +2095,9 @@ __all__ = [
     "BounceFoldReport",
     "find_orphaned_bounce_marks",
     "fold_orphaned_bounce_marks",
+    "CONTACT_DATA_FIELDS",
+    "resolve_contact_record_for_uid",
+    "RedactionMarker",
+    "PersonRead",
+    "read_person",
 ]

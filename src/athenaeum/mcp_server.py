@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """MCP memory server — read/write gate for an Athenaeum knowledge base.
 
-Registers 11 tools (issue athenaeum#538 — the count was previously under-reported as 2):
+Registers 12 tools (issue athenaeum#538 — the count was previously under-reported as 2;
+issue athenaeum#864 added ``read_person``):
 
   Reads:  recall, list_pending_questions, list_pending_merges,
           list_pending_decisions, list_axiom_audit, scan_retraction_cascade,
-          calibration_summary
+          calibration_summary, read_person
   Writes: remember, resolve_question, resolve_merge, review_audit_item
 
 Audience scoping (issue athenaeum#312, athenaeum#538). ``caller_audience`` is pinned ONCE at
 ``create_server`` time (never a per-tool argument, so a restricted agent cannot
 widen its own scope) and governs the whole process:
 
-  - ``recall`` and every page-content-bearing LIST tool
+  - ``recall`` and every page-content-bearing LIST/READ tool
     (``list_pending_questions`` / ``list_pending_merges`` /
-    ``list_pending_decisions``) apply the SAME fail-closed read predicate — a
-    restricted caller sees only pending items whose source pages they are
-    authorized to read, so no tool returns page content ``recall`` would
-    withhold.
+    ``list_pending_decisions`` / ``read_person``) apply the SAME fail-closed
+    read predicate — a restricted caller sees only pending items (or a
+    person page) whose source pages they are authorized to read, so no tool
+    returns page content ``recall`` would withhold. ``read_person``
+    additionally never returns a contact value for a page it withholds
+    (issue athenaeum#864).
   - The three human-decision-queue mutators (``resolve_question`` /
     ``resolve_merge`` / ``review_audit_item``) fail closed for any restricted
     (non-owner) caller — adjudicating the operator's contradiction/merge queue
@@ -31,16 +34,18 @@ Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from athenaeum.config import resolve_cache_dir
 from athenaeum.killswitch import is_disabled
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
     SOURCE_TYPES,
+    EntityIndex,
     is_page_authorized,
     parse_frontmatter,
     render_frontmatter,
@@ -209,6 +214,79 @@ def recall_search(
         caller_audience,
         config,
     )
+
+
+def person_read(
+    knowledge_root: Path,
+    uid: str,
+    *,
+    include_contact_data: bool = False,
+    caller_audience: set[str] | None = None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """Read one person's page by uid, with contact-data inclusion gated by a flag.
+
+    The MCP-facing wrapper around :func:`athenaeum.pii.read_person` — the ONE
+    sanctioned way this server reads a person's contact data (issue athenaeum#864).
+    Applies the SAME fail-closed audience predicate ``recall`` applies
+    (:func:`athenaeum.models.is_page_authorized`, re-checked against fresh
+    on-disk frontmatter) BEFORE assembling any contact data, so a restricted
+    ``caller_audience`` can never obtain via this function what ``recall``
+    would withhold for the same page — and never receives a contact value at
+    all for a page it is not authorized to read.
+
+    Args:
+        knowledge_root: Root of the knowledge base (parent of ``wiki/``).
+        uid: The person's durable uid.
+        include_contact_data: When ``True``, the actual contact values
+            (:data:`athenaeum.pii.CONTACT_DATA_FIELDS`) are included, read
+            from the surface :func:`athenaeum.pii.contacts_surface_root`
+            resolves — this function never constructs that path itself,
+            ``pii.read_person`` does. Default ``False``: each withheld field
+            carries a redaction marker instead of its value.
+        caller_audience: Read-scope pin (issue athenaeum#312/#538). ``None`` is the
+            owner (no check). A non-None set is checked fail-closed against
+            the resolved page's frontmatter.
+        config: Resolved ``athenaeum.yaml`` config, threaded to
+            :func:`athenaeum.pii.read_person` so the contact surface resolves
+            per the operator's ``storage.mapping``.
+
+    Returns:
+        A JSON string: the module's fail-closed refusal shape
+        (:func:`_forbidden_result`) for an unauthorized restricted caller, a
+        ``{"ok": False, "error": ...}`` message for an unknown uid, or
+        :meth:`athenaeum.pii.PersonRead.to_dict`.
+    """
+    from athenaeum import pii
+
+    wiki_root = knowledge_root / "wiki"
+    page_path = EntityIndex(wiki_root).get_by_uid(uid)
+    if page_path is None:
+        return json.dumps(
+            {"ok": False, "error": f"person not found: uid={uid!r}"}, indent=2
+        )
+
+    # Fail-closed audience check BEFORE any contact data is assembled (issue
+    # athenaeum#864's "must NEVER receive contact values" requirement) — mirrors
+    # `_recall_via_backend`'s Layer C re-check against fresh on-disk
+    # frontmatter rather than trusting a cached/stale value.
+    if caller_audience is not None:
+        try:
+            text = page_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return json.dumps(_forbidden_result(), indent=2)
+        meta, _ = parse_frontmatter(text)
+        if not is_page_authorized(meta, caller_audience):
+            return json.dumps(_forbidden_result(), indent=2)
+
+    result = pii.read_person(
+        knowledge_root, config, uid, include_contact=include_contact_data
+    )
+    if result is None:
+        return json.dumps(
+            {"ok": False, "error": f"person not found: uid={uid!r}"}, indent=2
+        )
+    return json.dumps(result.to_dict(), indent=2)
 
 
 def _resolve_hit_path(
@@ -731,11 +809,13 @@ def create_server(
             behavior. A non-None role set is a RESTRICTED caller and governs the
             whole process, not just ``recall``:
 
-            - Reads: ``recall`` AND the page-content-bearing list tools
+            - Reads: ``recall`` AND the page-content-bearing list/read tools
               (``list_pending_questions`` / ``list_pending_merges`` /
-              ``list_pending_decisions``) apply the same fail-closed predicate,
-              so a restricted caller cannot route around ``recall`` by asking a
-              different tool for the same bytes.
+              ``list_pending_decisions`` / ``read_person``) apply the same
+              fail-closed predicate, so a restricted caller cannot route
+              around ``recall`` by asking a different tool for the same
+              bytes — ``read_person`` never returns a contact value for a
+              page it withholds (issue athenaeum#864).
             - Writes: the three human-decision-queue mutators
               (``resolve_question`` / ``resolve_merge`` / ``review_audit_item``)
               fail closed — adjudicating the operator's queue is owner-only.
@@ -778,7 +858,10 @@ def create_server(
             "`list_pending_merges` / `resolve_merge` to triage resolver-proposed "
             "memory merges (issue athenaeum#169). "
             "Use `list_pending_decisions` for the unified 'human decisions "
-            "needed' queue (questions + merges in one call, issue athenaeum#401)."
+            "needed' queue (questions + merges in one call, issue athenaeum#401). "
+            "Use `read_person` for a one-call person read by uid — it is the "
+            "only sanctioned way to read a person's contact data; do not open "
+            "the contact surface directly (issue athenaeum#864)."
         ),
     )
 
@@ -1025,6 +1108,43 @@ def create_server(
             wiki_root,
             max_sources_per_merge=max_sources_per_merge,
             caller_audience=caller_audience,
+        )
+
+    @mcp.tool()
+    def read_person(uid: str, include_contact_data: bool = False) -> str:
+        """One-call person read by uid, with explicit contact-data inclusion (issue athenaeum#864).
+
+        The ONLY sanctioned way to read a person's contact data — do not open
+        the contact surface directly (``docs/one-way-in-one-way-out.md`` §3).
+        Returns the person's wiki page; with ``include_contact_data`` left at
+        its default ``False``, each withheld contact field is reported as a
+        redaction marker (naming the field and that a value exists, never the
+        value) rather than silently omitted, so a person with a withheld
+        email and a person with no email at all are distinguishable. With
+        ``include_contact_data=True``, the actual values are included, read
+        from the surface ``pii.contacts_surface_root`` resolves — this tool
+        never constructs that path itself.
+
+        Same fail-closed audience scoping as ``recall`` (issue athenaeum#312/#538):
+        a restricted caller never receives page content, or any contact
+        value, for a page it is not authorized to read.
+
+        Args:
+            uid: The person's durable uid.
+            include_contact_data: Set ``True`` to receive the actual contact
+                values instead of redaction markers. Default ``False``.
+
+        Returns:
+            A JSON string (``pii.PersonRead.to_dict()`` shape) — or a
+            fail-closed refusal / not-found message, each JSON-encoded the
+            same way.
+        """
+        return person_read(
+            wiki_root.parent,
+            uid,
+            include_contact_data=include_contact_data,
+            caller_audience=caller_audience,
+            config=config,
         )
 
     @mcp.tool()
