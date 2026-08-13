@@ -177,6 +177,14 @@ safely."_ That's a different job, and it's the one a team actually has.
 To close that gap, Athenaeum makes four specific design choices. Each
 corresponds to one of the failure modes above.
 
+> **Before you write a client, read the one rule they all rest on:
+> [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md).** Every write
+> reaches the knowledge base as raw intake compiled by exactly one writer, and
+> every read reaches a caller through the recall/read interface — no program
+> opens a store directly. That holds for the off-corpus contact-data surface
+> too, which is reachable as a plain filesystem path and is therefore the one
+> most easily read around.
+
 ### 1. Sources are first-class objects (trust but verify)
 
 > _Addresses: memories don't have a source of truth._
