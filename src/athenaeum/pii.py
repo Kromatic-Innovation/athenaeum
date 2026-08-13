@@ -111,6 +111,19 @@ Five pieces, in the order the issue settles them:
    the value — so a caller can tell "redacted" from "absent" instead of both
    collapsing to the same missing key. Reachable from the MCP server
    (``read_person`` tool) and ``athenaeum query person``.
+
+   :func:`read_people` is the BATCH form of the same read (issue athenaeum#877),
+   and the one to reach for whenever more than one uid is resolved in a
+   single process. ``read_person`` rebuilds two O(corpus) indexes per call —
+   the wiki :class:`~athenaeum.models.EntityIndex` and a full
+   :func:`iter_contact_records` scan — which is fine for the occasional
+   single lookup and quadratic-in-practice for a loop: ~28s per uid against
+   the live 16,928-page store, or ~37 hours for the 4,696-person population
+   ``apollo-enrich``'s weekly job resolves. ``read_people`` builds each index
+   exactly once per batch (:func:`build_contact_record_uid_index` is the
+   contacts half) and returns identical values, so the fix is a cost change
+   and not a semantic one. Both entry points share one assembly body
+   (``_person_read_from_indexes``) so they cannot drift.
 """
 
 from __future__ import annotations
@@ -119,7 +132,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import date, datetime, timezone
@@ -2161,6 +2174,68 @@ def resolve_contact_record_for_uid(contacts_root: Path, uid: str) -> Path | None
     return matches[0]
 
 
+def build_contact_record_uid_index(contacts_root: Path) -> dict[str, Path]:
+    """Map every ``uid`` on the contacts surface to its record, in ONE scan.
+
+    The batch-shaped counterpart to :func:`resolve_contact_record_for_uid`
+    (issue athenaeum#877). That function answers one uid and costs a full
+    :func:`iter_contact_records` scan to do it; a caller resolving N uids
+    therefore paid that scan N times — 4,696 uids against the live corpus
+    projected to ~37 hours. This builds the whole ``uid -> record`` mapping
+    in a single pass, so the scan is paid O(1) times for any number of
+    lookups. :func:`read_people` is the caller that exists to use it.
+
+    Resolution discipline is IDENTICAL to
+    :func:`resolve_contact_record_for_uid`, so a batch read never resolves a
+    uid to a different record than a single read would:
+
+    - the FIRST match in :func:`iter_contact_records` order wins (that
+      function sorts, so the same store always yields the same mapping);
+    - ``log.warning`` (never raise) when more than one record carries a uid;
+    - the key is ``str(...).strip()`` of the record's ``uid`` frontmatter,
+      the SAME coercion the single-lookup function compares with. A record
+      with no ``uid`` key, or ``uid: ""``, is skipped — an empty uid must
+      never match anything, mirroring that function's empty-uid guard.
+
+    One consequence of matching that coercion exactly is worth naming,
+    because it looks like a bug in this function and is not: a record whose
+    ``uid:`` is present but VALUELESS parses to YAML null, which
+    ``str()`` renders as the literal ``"None"``, so it indexes under that
+    string. :func:`resolve_contact_record_for_uid` resolves a lookup for
+    ``"None"`` to that same record today — the behavior is pre-existing and
+    is reproduced here deliberately, since a batch read that diverged from a
+    single read on ANY uid would defeat the point of sharing the discipline.
+    Tracked separately rather than quietly changed here (issue athenaeum#877
+    is a cost fix, not a semantics fix).
+
+    A missing *contacts_root* yields ``{}`` (:func:`iter_contact_records`
+    returns ``[]`` for one), never a raise.
+    """
+    index: dict[str, Path] = {}
+    duplicates: dict[str, int] = {}
+    for path in iter_contact_records(contacts_root):
+        uid = str(read_bounce_record(path).get("uid", "")).strip()
+        if not uid:
+            continue
+        if uid in index:
+            # Count rather than warn per occurrence: one line per duplicated
+            # uid, not one per extra record, keeps a corpus-wide scan's log
+            # proportional to the problem instead of to the corpus.
+            duplicates[uid] = duplicates.get(uid, 1) + 1
+            continue
+        index[uid] = path
+    for uid, count in duplicates.items():
+        log.warning(
+            "uid %r resolves to %d contact records; indexing the first "
+            "(%s). See resolve_contact_record's docstring for the same "
+            "shared-value posture.",
+            uid,
+            count,
+            index[uid].name,
+        )
+    return index
+
+
 @dataclass(frozen=True)
 class RedactionMarker:
     """One withheld contact field on a :class:`PersonRead` (issue athenaeum#864).
@@ -2254,6 +2329,84 @@ class PersonRead:
         }
 
 
+def _person_read_from_indexes(
+    uid: str,
+    *,
+    entity_index: EntityIndex,
+    contact_records: Mapping[str, Path],
+    include_contact: bool,
+    wanted_classes: frozenset[str] | None,
+) -> PersonRead | None:
+    """Assemble one :class:`PersonRead` from ALREADY-BUILT indexes.
+
+    The shared body of :func:`read_person` (one uid, indexes built for the
+    call) and :func:`read_people` (N uids, indexes built once) — extracted so
+    the two entry points cannot drift in what they return (issue athenaeum#877).
+    Both index arguments are read-only here; this function builds neither, and
+    so is the only part of the person read that is genuinely O(1) per uid.
+
+    *wanted_classes* is the pre-``frozenset``-ed form of ``read_person``'s
+    ``usage_classes`` — normalized once by the caller rather than per uid,
+    which is the same "pay it once for the batch" property the indexes have.
+    """
+    page_path = entity_index.get_by_uid(uid)
+    if page_path is None:
+        return None
+
+    frontmatter, body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+
+    record_path = contact_records.get(str(uid).strip()) if str(uid).strip() else None
+    record_meta = read_bounce_record(record_path) if record_path is not None else {}
+
+    contact: dict[str, list[str]] = {}
+    classifications: dict[str, list[ContactClassification]] = {}
+    redactions: list[RedactionMarker] = []
+    for field_name in CONTACT_DATA_FIELDS:
+        raw = record_meta.get(field_name)
+        if raw is None:
+            continue
+        values = raw if isinstance(raw, list) else [raw]
+        values = [str(v).strip() for v in values if str(v).strip()]
+        if not values:
+            continue
+        if not include_contact:
+            # Count BEFORE class filtering: the marker reports what the record
+            # holds for this field, and a caller who asked for no contact data
+            # never named a class to filter by (issue athenaeum#866).
+            redactions.append(RedactionMarker(field=field_name, value_count=len(values)))
+            continue
+        classified = [classification_for_value(record_meta, value) for value in values]
+        if wanted_classes is not None:
+            kept = [
+                (value, item)
+                for value, item in zip(values, classified, strict=True)
+                if item.usage_class in wanted_classes
+            ]
+            if not kept:
+                # Every value of this field was filtered out. Drop the field
+                # entirely rather than emitting an empty list, so "this field
+                # has no value of the class you asked for" and "this field has
+                # no value at all" present identically to a caller that must
+                # not see the other class — the whole point of the filter.
+                continue
+            values = [value for value, _ in kept]
+            classified = [item for _, item in kept]
+        contact[field_name] = values
+        classifications[field_name] = classified
+
+    return PersonRead(
+        uid=uid,
+        page_path=page_path,
+        frontmatter=frontmatter,
+        body=body,
+        contact=contact,
+        redactions=tuple(redactions),
+        contact_included=include_contact,
+        contact_record_path=record_path,
+        classifications=classifications,
+    )
+
+
 def read_person(
     knowledge_root: Path,
     config: dict[str, Any] | None,
@@ -2324,65 +2477,129 @@ def read_person(
     Returns:
         A :class:`PersonRead`, or ``None`` when *uid* does not resolve to a
         wiki page.
+
+    Cost:
+        This function builds BOTH indexes it needs — the wiki
+        :class:`~athenaeum.models.EntityIndex` and the contacts-surface
+        ``uid -> record`` mapping — from scratch on every call, because a
+        single read has nothing to amortize them against. Both are
+        O(corpus): together they measured ~28s per call against the live
+        16,928-page store (issue athenaeum#877). **Resolving more than one uid in
+        one process: call :func:`read_people` instead**, which builds each
+        index exactly once for the whole batch and returns identical
+        ``PersonRead`` values.
+    """
+    contacts_root = contacts_surface_root(knowledge_root, config)
+    # Single lookup: resolve just this uid rather than indexing the whole
+    # surface. Same one-scan cost, but it warns only about a collision on the
+    # uid actually asked for — the batch builder's corpus-wide warning would
+    # be noise in a one-uid read.
+    record_path = resolve_contact_record_for_uid(contacts_root, uid)
+    contact_records = {} if record_path is None else {str(uid).strip(): record_path}
+    return _person_read_from_indexes(
+        uid,
+        entity_index=EntityIndex(knowledge_root / "wiki"),
+        contact_records=contact_records,
+        include_contact=include_contact,
+        wanted_classes=frozenset(usage_classes) if usage_classes is not None else None,
+    )
+
+
+def read_people(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uids: Iterable[str],
+    *,
+    include_contact: bool = False,
+    usage_classes: Collection[str] | None = None,
+) -> Iterator[tuple[str, PersonRead | None]]:
+    """Read MANY persons, paying each O(corpus) scan once (issue athenaeum#877).
+
+    The batch counterpart to :func:`read_person`, and the entry point a caller
+    resolving more than one uid in a single process should use. It is the same
+    read — every yielded :class:`PersonRead` is exactly what
+    :func:`read_person` would have returned for that uid, including the
+    redaction/classification semantics and the ``None`` for a uid with no wiki
+    page — differing ONLY in what it costs.
+
+    What it fixes: :func:`read_person` rebuilds two O(corpus) indexes per call
+    (the wiki :class:`~athenaeum.models.EntityIndex`, and a full
+    :func:`iter_contact_records` scan), so N uids cost N full passes over the
+    store. Measured against the live 16,928-page corpus that is ~28s per uid;
+    the 4,696-person population ``apollo-enrich``'s weekly warm-tier job
+    resolves projected to ~37 hours. Here both indexes are built ONCE for the
+    whole batch, so per-uid work is a dict lookup plus reading that person's
+    own two files — the fixed cost is paid once no matter how many uids follow.
+
+    Both halves matter, and fixing only one would not have moved the number:
+    the contacts scan is the half issue athenaeum#877 names, but the
+    ``EntityIndex`` rebuild is the larger share (a bare frontmatter pass over
+    the wiki alone measured 25.2s of the 28.1s).
+
+    Yields:
+        ``(uid, PersonRead | None)`` pairs, in the order *uids* supplies them
+        — ``None`` for a uid that resolves to no wiki page, exactly as
+        :func:`read_person` returns ``None`` for one. Pairs (not a bare
+        sequence of reads) so a caller always knows WHICH uid a result or a
+        ``None`` belongs to; input order (not a dict) so duplicate uids are
+        neither collapsed nor reordered. A caller wanting the mapping can
+        ``dict(read_people(...))``.
+
+    The stream is LAZY on purpose: a :class:`PersonRead` carries the person's
+    full page body, so materializing thousands at once would hold much of the
+    corpus in memory at peak. Consuming this iterator one pair at a time keeps
+    the footprint flat. Two consequences worth knowing: nothing is read — not
+    even the indexes — until the first pair is pulled, and the indexes are
+    built on the FIRST UID rather than at call time, so an empty batch costs
+    nothing rather than one full pass to read zero people.
+
+    The two-path invariant is preserved unchanged
+    (``docs/one-way-in-one-way-out.md`` §3): the caller supplies uids and
+    flags, and THIS function resolves :func:`contacts_surface_root` and the
+    records within it. A caller still never constructs a surface path — which
+    is the property that made a batch entry point the right fix here rather
+    than exporting the index for callers to scan themselves.
+
+    Args:
+        knowledge_root: Root of the knowledge base (parent of ``wiki/``).
+        config: Resolved ``athenaeum.yaml`` config, passed to
+            :func:`contacts_surface_root` exactly as :func:`read_person`
+            passes it.
+        uids: The uids to read, in the order results are wanted. Consumed
+            lazily; an empty iterable yields nothing and reads nothing.
+        include_contact: Contact-data inclusion flag, applied to every uid in
+            the batch — same meaning and same ``False`` default as
+            :func:`read_person`. A batch mixing inclusion states is two calls,
+            deliberately: one flag per call keeps the "who may set this"
+            question (``docs/one-way-in-one-way-out.md`` §4) answerable at one
+            place per call rather than per element.
+        usage_classes: Restrict returned contact values to these usage classes
+            (issue athenaeum#866), same meaning as :func:`read_person`.
+            Normalized once for the whole batch.
     """
     wanted_classes = frozenset(usage_classes) if usage_classes is not None else None
-    page_path = EntityIndex(knowledge_root / "wiki").get_by_uid(uid)
-    if page_path is None:
-        return None
-
-    frontmatter, body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
-
-    contacts_root = contacts_surface_root(knowledge_root, config)
-    record_path = resolve_contact_record_for_uid(contacts_root, uid)
-    record_meta = read_bounce_record(record_path) if record_path is not None else {}
-
-    contact: dict[str, list[str]] = {}
-    classifications: dict[str, list[ContactClassification]] = {}
-    redactions: list[RedactionMarker] = []
-    for field_name in CONTACT_DATA_FIELDS:
-        raw = record_meta.get(field_name)
-        if raw is None:
-            continue
-        values = raw if isinstance(raw, list) else [raw]
-        values = [str(v).strip() for v in values if str(v).strip()]
-        if not values:
-            continue
-        if not include_contact:
-            # Count BEFORE class filtering: the marker reports what the record
-            # holds for this field, and a caller who asked for no contact data
-            # never named a class to filter by (issue athenaeum#866).
-            redactions.append(RedactionMarker(field=field_name, value_count=len(values)))
-            continue
-        classified = [classification_for_value(record_meta, value) for value in values]
-        if wanted_classes is not None:
-            kept = [
-                (value, item)
-                for value, item in zip(values, classified, strict=True)
-                if item.usage_class in wanted_classes
-            ]
-            if not kept:
-                # Every value of this field was filtered out. Drop the field
-                # entirely rather than emitting an empty list, so "this field
-                # has no value of the class you asked for" and "this field has
-                # no value at all" present identically to a caller that must
-                # not see the other class — the whole point of the filter.
-                continue
-            values = [value for value, _ in kept]
-            classified = [item for _, item in kept]
-        contact[field_name] = values
-        classifications[field_name] = classified
-
-    return PersonRead(
-        uid=uid,
-        page_path=page_path,
-        frontmatter=frontmatter,
-        body=body,
-        contact=contact,
-        redactions=tuple(redactions),
-        contact_included=include_contact,
-        contact_record_path=record_path,
-        classifications=classifications,
-    )
+    entity_index: EntityIndex | None = None
+    contact_records: Mapping[str, Path] = {}
+    for uid in uids:
+        if entity_index is None:
+            # Built on the FIRST uid, not at call time: a caller whose
+            # candidate list came back empty (a quiet week for the weekly
+            # enrichment job) then pays nothing at all rather than a full
+            # O(corpus) pass to read zero people.
+            entity_index = EntityIndex(knowledge_root / "wiki")
+            contact_records = build_contact_record_uid_index(
+                contacts_surface_root(knowledge_root, config)
+            )
+        yield (
+            uid,
+            _person_read_from_indexes(
+                uid,
+                entity_index=entity_index,
+                contact_records=contact_records,
+                include_contact=include_contact,
+                wanted_classes=wanted_classes,
+            ),
+        )
 
 
 __all__ = [
@@ -2445,9 +2662,11 @@ __all__ = [
     "fold_orphaned_bounce_marks",
     "CONTACT_DATA_FIELDS",
     "resolve_contact_record_for_uid",
+    "build_contact_record_uid_index",
     "RedactionMarker",
     "PersonRead",
     "read_person",
+    "read_people",
     "CONTACT_CLASSIFICATION_FIELD",
     "USAGE_CLASS_OBSERVED",
     "USAGE_CLASS_PROVIDER",
