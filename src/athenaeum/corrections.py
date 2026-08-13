@@ -85,6 +85,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
+
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
     resolve_corrections_fields,
@@ -94,10 +96,17 @@ from athenaeum.config import (
     resolve_corrections_schema_slots,
     resolve_corrections_sensitive_fields,
 )
-from athenaeum.models import EntityIndex, parse_frontmatter, render_frontmatter
+from athenaeum.models import (
+    EntityIndex,
+    WikiEntity,
+    generate_uid,
+    parse_frontmatter,
+    render_frontmatter,
+    slugify,
+)
 from athenaeum.precedence import source_rank
 from athenaeum.provenance import parse_source
-from athenaeum.registry import SOURCE_HANDLE_KEYS
+from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.storage import surface_root_for_class
 
@@ -315,18 +324,7 @@ def resolve_target(
             return None
         if not isinstance(value, str) or not value.strip():
             return None
-        matches: list[str] = []
-        for candidate_uid, entity in registry_entities.items():
-            if not isinstance(entity, dict):
-                continue
-            handles = entity.get("handles")
-            if not isinstance(handles, dict):
-                continue
-            hv = handles.get(key)
-            if isinstance(hv, list) and value in hv:
-                matches.append(candidate_uid)
-            elif isinstance(hv, str) and hv == value:
-                matches.append(candidate_uid)
+        matches = _handle_matches(registry_entities, key, value)
         if len(matches) != 1:
             return None  # zero or ambiguous — §3.3, raise a tier
         path = index.get_by_uid(matches[0])
@@ -337,6 +335,114 @@ def resolve_target(
         return path
 
     return None
+
+
+def _handle_matches(registry_entities: dict[str, Any], key: str, value: str) -> list[str]:
+    """The registry uids whose ``handles.<key>`` carries *value* — shared by
+    :func:`resolve_target` and :func:`resolve_target_for_apply` so the two
+    can never drift on what "matches" means (issue athenaeum#865)."""
+    matches: list[str] = []
+    for candidate_uid, entity in registry_entities.items():
+        if not isinstance(entity, dict):
+            continue
+        handles = entity.get("handles")
+        if not isinstance(handles, dict):
+            continue
+        hv = handles.get(key)
+        if isinstance(hv, list) and value in hv:
+            matches.append(candidate_uid)
+        elif isinstance(hv, str) and hv == value:
+            matches.append(candidate_uid)
+    return matches
+
+
+@dataclass(frozen=True)
+class TargetResolution:
+    """§3.3 target resolution outcome, extended with the athenaeum#865 create
+    branch. ``kind`` is exactly one of:
+
+    - ``"existing"`` — resolved unambiguously to one existing entity-format
+      page (``path`` set). Identical to what :func:`resolve_target` alone
+      returns; every existing caller of *that* function is untouched.
+    - ``"creatable"`` — a ``{"type", "handle"}`` target whose ``handle``
+      key is a :data:`~athenaeum.registry.SOURCE_HANDLE_KEYS` member, whose
+      ``type`` is a non-blank string, and which resolved to ZERO existing
+      entities. The handle is a stable external key (§3.3's "external
+      systems key on their own identifiers, not on athenaeum uids"), so a
+      zero-match handle is the "this entity does not exist yet, and here is
+      how a later submission finds it" signal — unlike a zero-match
+      ``{"uid"}`` or ``{"type","name"}`` target, which stays unresolvable
+      (a name match alone would manufacture a duplicate per spelling
+      variant; there is nothing to dedupe a later submission against).
+    - ``"unresolvable"`` — everything else: no match on the ``uid``/``name``
+      shapes, an ambiguous (>1) handle match, a handle whose key is not on
+      the allowlist, or a handle target with no/blank declared ``type``
+      (the submitter must declare what to create). The caller raises a
+      tier (§8), exactly as a bare :func:`resolve_target` miss always has.
+    """
+
+    kind: str
+    path: Path | None = None
+    entity_type: str | None = None
+    handle_key: str | None = None
+    handle_value: str | None = None
+
+
+def resolve_target_for_apply(
+    target: Any,
+    *,
+    index: EntityIndex,
+    registry_entities: dict[str, Any],
+) -> TargetResolution:
+    """§3.3 resolution, extended with the athenaeum#865 tier-0 create branch.
+
+    Delegates the "does an existing entity match" question to
+    :func:`resolve_target` unchanged — this function only decides what a
+    ``None`` from that call means: still unresolvable, or creatable.
+    """
+    existing = resolve_target(target, index=index, registry_entities=registry_entities)
+    if existing is not None:
+        return TargetResolution(kind="existing", path=existing)
+
+    if not isinstance(target, dict) or not target:
+        return TargetResolution(kind="unresolvable")
+
+    # Only a handle-shaped target ever creates (AC: "No name-only
+    # creation") — a uid the writer invented, or a bare name match, has no
+    # stable key for a later submission to dedupe against.
+    if target.get("uid") is not None:
+        return TargetResolution(kind="unresolvable")
+    if target.get("name") is not None:
+        return TargetResolution(kind="unresolvable")
+
+    handle = target.get("handle")
+    if not isinstance(handle, dict) or len(handle) != 1:
+        return TargetResolution(kind="unresolvable")
+    (key, value), = handle.items()
+    if key not in SOURCE_HANDLE_KEYS:
+        return TargetResolution(kind="unresolvable")
+    if not isinstance(value, str) or not value.strip():
+        return TargetResolution(kind="unresolvable")
+    value = value.strip()
+
+    matches = _handle_matches(registry_entities, key, value)
+    if matches:
+        # resolve_target already returned None, so this is >1 (ambiguous —
+        # §3.3, raise) or a single match whose page is stale/missing/wrong
+        # format (a registry/wiki inconsistency, not a "safe to create"
+        # signal). Either way, not creatable.
+        return TargetResolution(kind="unresolvable")
+
+    etype = target.get("type")
+    if not isinstance(etype, str) or not etype.strip():
+        return TargetResolution(kind="unresolvable")
+
+    return TargetResolution(
+        kind="creatable",
+        entity_type=etype.strip(),
+        handle_key=key,
+        handle_value=value,
+    )
 
 
 def _cross_type_guard(path: Path, declared_type: str) -> Path | None:
@@ -515,6 +621,57 @@ def _record_as_prose(
     atomic_write_text(entity_path, render_frontmatter(merged_meta) + "\n" + new_body)
 
 
+def _build_created_entity_meta(
+    *,
+    entity_type: str,
+    handle_key: str,
+    handle_value: str,
+    source: Any,
+    today: str,
+) -> dict[str, Any]:
+    """Build the frontmatter dict for a tier-0 create-by-handle (athenaeum#865,
+    the `resolve_target_for_apply` "creatable" branch).
+
+    Mints a fresh ``uid`` via :func:`athenaeum.models.generate_uid` — the
+    same 8-hex-char-uuid4 scheme every other create path in this repo uses
+    (``tiers.tier3_create`` et al.); the caller checks it against the live
+    index before writing, matching those paths' existing (uncollided-in-
+    practice) convention.
+
+    §3.2's record shape carries no ``name`` key, so no name reaches this
+    function — the handle value itself seeds a placeholder ``name``, the
+    minimum the schema requires for the page to exist at all. A later
+    correction whose ``field`` is an allowlisted name-bearing attribute
+    overwrites it through the ordinary apply path, same as any other field.
+
+    Carries the handle key/value in the shape ``docs/source-handles.md``
+    §3 specifies — list-valued for a ``LIST_HANDLE_KEYS`` member, scalar
+    otherwise — which is what lets a later submission resolve to this page
+    instead of creating a second one (AC 3/AC 5). Provenance for the
+    handle value, and a page-level ``source`` default for every other
+    field the record goes on to set, both carry the batch's declared
+    ``source`` verbatim — never a synthetic one (AC 5: "a human can see
+    where it came from").
+    """
+    uid = generate_uid()
+    meta: dict[str, Any] = {
+        "uid": uid,
+        "type": entity_type,
+        "name": handle_value,
+        "access": "internal",
+        "created": today,
+        "updated": today,
+        "source": source,
+    }
+    if handle_key in LIST_HANDLE_KEYS:
+        meta[handle_key] = [handle_value]
+        meta["field_sources"] = {handle_key: [{"value": handle_value, "source": source}]}
+    else:
+        meta[handle_key] = handle_value
+        meta["field_sources"] = {handle_key: source}
+    return meta
+
+
 # ---------------------------------------------------------------------------
 # §4/§5/§6/§7 the tier-0 applier
 # ---------------------------------------------------------------------------
@@ -637,17 +794,90 @@ def process_correction_record(
     if shape not in ("scalar", "list"):
         return _raised(f"unrecognized shape {shape!r} for attribute {field_name!r}")
 
-    entity_path = resolve_target(target, index=index, registry_entities=registry_entities)
-    if entity_path is None:
+    resolution = resolve_target_for_apply(target, index=index, registry_entities=registry_entities)
+    if resolution.kind == "unresolvable":
         return _raised("target resolves to zero or several entities")
 
-    try:
-        existing_text = entity_path.read_text(encoding="utf-8")
-    except OSError:
-        return _raised("target page unreadable")
-    existing_meta, existing_body = parse_frontmatter(existing_text)
-    if not existing_meta:
-        return _raised("target page has no frontmatter")
+    just_created = False
+    if resolution.kind == "existing":
+        entity_path = resolution.path
+        assert entity_path is not None
+        try:
+            existing_text = entity_path.read_text(encoding="utf-8")
+        except OSError:
+            return _raised("target page unreadable")
+        existing_meta, existing_body = parse_frontmatter(existing_text)
+        if not existing_meta:
+            return _raised("target page has no frontmatter")
+    else:  # "creatable" — athenaeum#865
+        # Mint the page now so the ordinary apply path below (schema-slot
+        # routing, sensitivity routing, the §5.1 delta gate) runs for a
+        # create exactly as it does for an update — one path, which is
+        # what makes re-submission idempotent and lets a later batch
+        # update what this one created (AC 2/AC 3).
+        assert resolution.entity_type is not None
+        assert resolution.handle_key is not None
+        assert resolution.handle_value is not None
+        today = date.today().isoformat()
+        created_meta = _build_created_entity_meta(
+            entity_type=resolution.entity_type,
+            handle_key=resolution.handle_key,
+            handle_value=resolution.handle_value,
+            source=source,
+            today=today,
+        )
+        try:
+            validate_wiki_meta(created_meta)
+        except PydanticValidationError as exc:
+            return _raised(
+                f"create violates schema for type {resolution.entity_type!r}: {exc}"
+            )
+
+        uid = str(created_meta["uid"])
+        entity_name0 = str(created_meta["name"])
+        entity_path = index.wiki_root / f"{uid}-{slugify(entity_name0)}.md"
+        if entity_path.exists() or index.get_by_uid(uid) is not None:
+            # A freshly-minted uid colliding with something already on
+            # disk/in the index — vanishingly unlikely (uuid4), but never
+            # overwrite an existing page under a uid this run just minted.
+            return _raised("uid collision constructing new entity")
+
+        if dry_run:
+            existing_meta, existing_body = created_meta, ""
+        else:
+            atomic_write_text(entity_path, render_frontmatter(created_meta) + "\n")
+            # Re-parse the just-written bytes, same discipline every other
+            # create path in this repo follows (batch.py/librarian.py):
+            # downstream code sees exactly the on-disk bytes, not the
+            # in-memory dict that produced them.
+            existing_meta, existing_body = parse_frontmatter(
+                entity_path.read_text(encoding="utf-8")
+            )
+            index.register(
+                WikiEntity(
+                    uid=uid,
+                    type=resolution.entity_type,
+                    name=entity_name0,
+                    created=today,
+                    updated=today,
+                    source=source,
+                )
+            )
+            # Keep the in-run registry view current (issue athenaeum#865): the
+            # snapshot loaded once at the top of a run must reflect a page
+            # created earlier in that SAME run, or a later record keyed on
+            # the same handle would not see it and would create a second
+            # page from the one batch. registry.json on disk is a
+            # separately-compiled artifact (`athenaeum registry`) and is
+            # deliberately NOT rewritten here — see the athenaeum#865
+            # completion report for why.
+            registry_entities[uid] = {
+                "type": resolution.entity_type,
+                "name": entity_name0,
+                "handles": {resolution.handle_key: created_meta[resolution.handle_key]},
+            }
+        just_created = True
+
     entity_name = str(existing_meta.get("name", "") or entity_path.stem)
 
     def _result(
@@ -716,16 +946,48 @@ def process_correction_record(
     if shape == "scalar":
         existing_value = read_meta.get(write_field)
         existing_source = _existing_scalar_source(read_meta, write_field)
-        verdict, reason = decide_verdict(
-            existing_source=existing_source,
-            incoming_source=source,
-            existing_value=existing_value,
-            incoming_value=value,
-            observed_at=observed_at,
-            monotone=monotone,
-            op=op,
-            existing_updated=existing_meta.get("updated"),
-        )
+        if existing_value is None:
+            # §6.2 decides between an incoming claim and an INCUMBENT one; its
+            # every row compares two competing values. An absent field has no
+            # incumbent, so there is nothing to conflict with and the policy
+            # does not apply — the same reading §4 already gives the list path,
+            # where `op: add` of a value not yet present applies outright
+            # ("new value, not a conflict") without consulting rank at all.
+            #
+            # The bug this fixes: §6.2's incumbent-attribution fallback chain
+            # (`field_sources.<field>` -> page-level `source:` -> unsourced) is
+            # the attribution OF THE INCUMBENT VALUE, but the scalar branch
+            # consulted it unconditionally. With no incumbent value the chain
+            # still yielded the page-level `source:`, manufacturing a phantom
+            # incumbent out of the page's own provenance.
+            #
+            # athenaeum#865 is what surfaced it. A page created by the tier-0
+            # create path carries `source: <the submitter>` and
+            # `updated: <today>`, so a second record filling any other field
+            # tied on rank against its own batch's source and then lost the
+            # observed_at tie-break to a today-stamp that every real-world
+            # `observed_at` predates — a batch losing to a page it had itself
+            # created moments earlier, which is what made AC 3 (create and
+            # update are one path) unreachable.
+            #
+            # This narrows when precedence is consulted; it does not reorder
+            # it. A genuine value conflict still takes exactly the §6.2 path it
+            # always did, including "incumbent is `user:` -> defer, always" —
+            # filling a field no one has ever set is not overwriting a
+            # human-stated value, and §6.3's `writers` allowlist still bounds
+            # which attributes a given submitter may touch at all.
+            verdict, reason = "apply", "no incumbent value for this field; not a conflict (§4)"
+        else:
+            verdict, reason = decide_verdict(
+                existing_source=existing_source,
+                incoming_source=source,
+                existing_value=existing_value,
+                incoming_value=value,
+                observed_at=observed_at,
+                monotone=monotone,
+                op=op,
+                existing_updated=existing_meta.get("updated"),
+            )
     elif op == "add":
         existing_list = read_meta.get(write_field)
         already_present = isinstance(existing_list, list) and any(
@@ -759,6 +1021,25 @@ def process_correction_record(
                     "defer",
                     f"incoming rank {incoming_rank} outranked by existing rank {existing_rank}",
                 )
+
+    if just_created and verdict == "noop":
+        # The record's own field/value happens to equal what the create
+        # step already wrote (the common case: the handle key IS the
+        # field being asserted, e.g. field="domains" op="add"
+        # value=<the same domain the target keyed on>). The per-field
+        # delta is genuinely zero, but the ENTITY was just created — that
+        # is not "nothing happened" (§5.1's delta gate is about an
+        # UNCHANGED page, and this page did not exist a moment ago), so
+        # reporting "noop" here would be factually wrong. The base create
+        # write above already carries this field's correct value, so
+        # return directly rather than falling into the "apply" write
+        # branch below — that branch assumes "apply" means "not already
+        # present" (list ops append unconditionally) and would duplicate
+        # the value/field_sources entry the create step just wrote. This
+        # is the only place athenaeum#865 touches decide_verdict's
+        # verdict — a create-vs-update bookkeeping correction, not a
+        # §6.2 precedence change.
+        return _result("applied", "entity created; field already matches the handle-derived value")
 
     if verdict == "noop":
         return _result("noop", reason)

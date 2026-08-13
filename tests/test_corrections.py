@@ -9,10 +9,13 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from athenaeum.corrections import (
     BatchOutcome,
     CorrectionRecordResult,
+    TargetResolution,
     build_ledger_record,
     compute_correction_id,
     decide_verdict,
@@ -23,11 +26,12 @@ from athenaeum.corrections import (
     process_batch_file,
     process_correction_record,
     resolve_target,
+    resolve_target_for_apply,
     retire_batch,
     run_correction_phase,
     write_correction_handoff,
 )
-from athenaeum.models import EntityIndex
+from athenaeum.models import EntityIndex, parse_frontmatter
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -226,6 +230,105 @@ class TestResolveTarget:
 
 
 # ---------------------------------------------------------------------------
+# §3.3 create branch (issue athenaeum#865) -- resolve_target_for_apply's
+# decision table in isolation, before any write path is involved.
+# ---------------------------------------------------------------------------
+
+
+class TestResolveTargetForApply:
+    def test_existing_match_passes_through(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
+        index = EntityIndex(wiki)
+        resolution = resolve_target_for_apply(
+            {"uid": "person-a"}, index=index, registry_entities={}
+        )
+        assert resolution.kind == "existing"
+        assert resolution.path is not None and resolution.path.name == "p.md"
+
+    def test_zero_match_handle_is_creatable(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        index = EntityIndex(wiki)
+        resolution = resolve_target_for_apply(
+            {"type": "company", "handle": {"domains": "acme.example"}},
+            index=index,
+            registry_entities={},
+        )
+        assert resolution == TargetResolution(
+            kind="creatable",
+            entity_type="company",
+            handle_key="domains",
+            handle_value="acme.example",
+        )
+
+    def test_zero_match_uid_stays_unresolvable(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        index = EntityIndex(wiki)
+        resolution = resolve_target_for_apply(
+            {"uid": "no-such"}, index=index, registry_entities={}
+        )
+        assert resolution.kind == "unresolvable"
+
+    def test_zero_match_type_name_stays_unresolvable(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        index = EntityIndex(wiki)
+        resolution = resolve_target_for_apply(
+            {"type": "company", "name": "Acme Inc"}, index=index, registry_entities={}
+        )
+        assert resolution.kind == "unresolvable"
+
+    def test_ambiguous_handle_stays_unresolvable(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "a.md", {"uid": "company-a", "type": "company", "name": "A"})
+        _write_page(wiki, "b.md", {"uid": "company-b", "type": "company", "name": "B"})
+        index = EntityIndex(wiki)
+        registry = {
+            "company-a": {"type": "company", "handles": {"domains": ["acme.example"]}},
+            "company-b": {"type": "company", "handles": {"domains": ["acme.example"]}},
+        }
+        resolution = resolve_target_for_apply(
+            {"type": "company", "handle": {"domains": "acme.example"}},
+            index=index,
+            registry_entities=registry,
+        )
+        assert resolution.kind == "unresolvable"
+
+    def test_missing_type_stays_unresolvable(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        index = EntityIndex(wiki)
+        resolution = resolve_target_for_apply(
+            {"handle": {"domains": "acme.example"}}, index=index, registry_entities={}
+        )
+        assert resolution.kind == "unresolvable"
+
+    def test_blank_type_stays_unresolvable(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        index = EntityIndex(wiki)
+        resolution = resolve_target_for_apply(
+            {"type": "  ", "handle": {"domains": "acme.example"}},
+            index=index,
+            registry_entities={},
+        )
+        assert resolution.kind == "unresolvable"
+
+    def test_handle_key_not_in_allowlist_stays_unresolvable(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        index = EntityIndex(wiki)
+        resolution = resolve_target_for_apply(
+            {"type": "company", "handle": {"not_a_real_key": "x"}},
+            index=index,
+            registry_entities={},
+        )
+        assert resolution.kind == "unresolvable"
+
+
+# ---------------------------------------------------------------------------
 # §6.3 allowlist empty by default
 # ---------------------------------------------------------------------------
 
@@ -353,6 +456,79 @@ class TestScalarSetApplier:
         assert result.disposition == "deferred-lower-precedence"
         assert page.read_text() == before
 
+    def test_absent_field_fills_despite_higher_ranked_page_source(
+        self, tmp_path: Path
+    ) -> None:
+        """§6.2 arbitrates between an incoming claim and an INCUMBENT one. A
+        field no one has ever set has no incumbent, so a lower-ranked source
+        fills it rather than deferring -- the same reading §4 already gives
+        `op: add` on a list ("new value, not a conflict").
+
+        The page-level `source:` here is `user:` (rank 1), which outranks the
+        correction's `api:` (rank 3). That must NOT defer: the page-level
+        source is the attribution of the page's OWN fields, not a standing
+        claim about a field it never carried. Contrast
+        `test_lower_precedence_defers` above, where `user:` attribution sits on
+        the field being written and the correction is correctly refused.
+        """
+        wiki = tmp_path / "wiki"
+        page = _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "source": "user:conv-1",
+            },
+        )
+        result = process_correction_record(
+            self._record(),
+            _envelope(submitter="enrichment-service"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+        assert result.disposition == "applied"
+        assert "current_title: VP Engineering" in page.read_text()
+
+    def test_absent_field_fills_despite_newer_page_updated_stamp(
+        self, tmp_path: Path
+    ) -> None:
+        """The equal-rank branch of the same rule (issue athenaeum#865).
+
+        Equal ranks send §6.2 to its `observed_at` tie-break, which compares
+        against the page's `updated:` stamp. With the page stamped far later
+        than the correction was observed, an absent field would lose that
+        tie-break and defer -- despite there being no incumbent value to lose
+        to. This is the shape that made the tier-0 create path's AC 3 (create
+        and update are one path) unreachable: a freshly created page is always
+        stamped `updated: <today>`, so the batch that created it lost to it.
+        """
+        wiki = tmp_path / "wiki"
+        page = _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "source": "api:enrichment-vendor",  # equal rank to the incoming
+                "updated": "2030-01-01",  # far newer than the record's observed_at
+            },
+        )
+        result = process_correction_record(
+            self._record(),
+            _envelope(submitter="enrichment-service"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+        assert result.disposition == "applied"
+        assert "current_title: VP Engineering" in page.read_text()
+
     def test_unparseable_source_raises_tier_not_rank_9(self, tmp_path: Path) -> None:
         wiki = tmp_path / "wiki"
         _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
@@ -427,6 +603,420 @@ class TestScalarSetApplier:
         )
         assert result.disposition == "raised-tier"
         assert "unknown key" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# §3.3/§4/§5/§7/§8 tier-0 create-by-handle (issue athenaeum#865): a handle
+# target with zero matches creates instead of raising, through the SAME
+# applier path an update takes.
+# ---------------------------------------------------------------------------
+
+
+class TestCreateByHandle:
+    def _envelope(self, **overrides: object) -> dict:
+        return _envelope(submitter="employer-feed", **overrides)
+
+    def test_create_when_absent(self, tmp_path: Path) -> None:
+        """Handle target, zero matches -> entity created, carrying the key
+        and its provenance."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        index = EntityIndex(wiki)
+        registry: dict = {}
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        record = {
+            "record": "correction",
+            "target": {"type": "company", "handle": {"domains": "acme.example"}},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert result.disposition == "applied"
+        pages = list(wiki.glob("*.md"))
+        assert len(pages) == 1
+        meta, _ = parse_frontmatter(pages[0].read_text())
+        assert meta["type"] == "company"
+        assert meta["domains"] == ["acme.example"]
+        assert meta["industry"] == "Software"
+        assert meta["field_sources"]["domains"] == [
+            {"value": "acme.example", "source": "api:apollo"}
+        ]
+        assert meta["field_sources"]["industry"] == "api:apollo"
+        uid = meta["uid"]
+        assert uid  # minted
+        # in-run registry view updated so a later record can resolve to it
+        assert registry[uid]["handles"]["domains"] == ["acme.example"]
+        # AC 5: a human can see where it came from.
+        assert meta["source"] == "api:apollo"
+
+    def test_create_field_equals_handle_key_no_duplicate(self, tmp_path: Path) -> None:
+        """The record's own field IS the handle key (the simplest possible
+        create -- the correction both keys resolution AND asserts the
+        handle value). The entity is still created and reported
+        `applied`, not `noop`, and the value is not duplicated."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        index = EntityIndex(wiki)
+        cfg = _fields_config(domains={"shape": "list", "writers": ["employer-feed"]})
+        record = {
+            "record": "correction",
+            "target": {"type": "company", "handle": {"domains": "acme.example"}},
+            "op": "add",
+            "field": "domains",
+            "value": "acme.example",
+            "source": "script:employer-feed",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "applied"
+        pages = list(wiki.glob("*.md"))
+        assert len(pages) == 1
+        meta, _ = parse_frontmatter(pages[0].read_text())
+        assert meta["domains"] == ["acme.example"]  # not duplicated
+        assert meta["field_sources"]["domains"] == [
+            {"value": "acme.example", "source": "script:employer-feed"}
+        ]
+
+    def test_idempotent_resubmit_same_batch_twice(self, tmp_path: Path) -> None:
+        """AC: submitting the same batch twice yields one entity; the
+        second pass is a delta-gated no-op, byte-for-byte stable."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        registry: dict = {}
+        cfg = _fields_config(industry={"shape": "scalar", "writers": ["employer-feed"]})
+        record = {
+            "record": "correction",
+            "target": {"type": "company", "handle": {"domains": "acme.example"}},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        env = self._envelope()
+
+        first = process_correction_record(
+            record,
+            env,
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert first.disposition == "applied"
+        pages = list(wiki.glob("*.md"))
+        assert len(pages) == 1
+        after_first = pages[0].read_text()
+
+        # Re-submit: a fresh EntityIndex (as a fresh process would build by
+        # re-scanning the wiki tree), the SAME registry view a single
+        # correction-phase run holds (see the athenaeum#865 completion
+        # report for why cross-run staleness of registry.json itself is
+        # out of scope).
+        second = process_correction_record(
+            record,
+            env,
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert second.disposition == "noop"
+        pages_after = list(wiki.glob("*.md"))
+        assert len(pages_after) == 1
+        assert pages_after[0].read_text() == after_first
+
+    def test_update_existing_created_earlier(self, tmp_path: Path) -> None:
+        """AC: a subsequent batch carrying the same key updates the entity
+        created earlier -- create and update are one path."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        registry: dict = {}
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+            employee_count={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        target = {"type": "company", "handle": {"domains": "acme.example"}}
+        env = self._envelope()
+
+        create_record = {
+            "record": "correction",
+            "target": target,
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        first = process_correction_record(
+            create_record,
+            env,
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert first.disposition == "applied"
+        assert len(list(wiki.glob("*.md"))) == 1
+
+        update_record = {
+            "record": "correction",
+            "target": target,
+            "op": "set",
+            "field": "employee_count",
+            "value": "500",
+            "source": "api:apollo",
+            "observed_at": "2026-08-07T00:00:00Z",
+        }
+        second = process_correction_record(
+            update_record,
+            env,
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert second.disposition == "applied"
+        pages = list(wiki.glob("*.md"))
+        assert len(pages) == 1  # still one entity, not a second create
+        meta, _ = parse_frontmatter(pages[0].read_text())
+        assert meta["industry"] == "Software"  # earlier field preserved
+        assert meta["employee_count"] == "500"  # new field applied
+        assert second.entity_path == first.entity_path  # same page, not a new one
+
+    def test_no_key_no_create_uid_target(self, tmp_path: Path) -> None:
+        """AC: no external key, behavior unchanged -- an unresolvable uid
+        target still raises a tier. No name-only creation."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        index = EntityIndex(wiki)
+        cfg = _fields_config(industry={"shape": "scalar", "writers": ["employer-feed"]})
+        record = {
+            "record": "correction",
+            "target": {"uid": "does-not-exist"},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert list(wiki.glob("*.md")) == []
+
+    def test_no_key_no_create_type_name_target(self, tmp_path: Path) -> None:
+        """AC: no name-only creation -- a {type,name} target that resolves
+        to nothing still raises, never creates."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        index = EntityIndex(wiki)
+        cfg = _fields_config(industry={"shape": "scalar", "writers": ["employer-feed"]})
+        record = {
+            "record": "correction",
+            "target": {"type": "company", "name": "Acme Inc"},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert list(wiki.glob("*.md")) == []
+
+    def test_ambiguous_handle_still_raises(self, tmp_path: Path) -> None:
+        """A handle resolving to >1 entity still raises -- creating here
+        would manufacture a duplicate for an entity that already exists."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "a.md", {"uid": "company-a", "type": "company", "name": "A"})
+        _write_page(wiki, "b.md", {"uid": "company-b", "type": "company", "name": "B"})
+        index = EntityIndex(wiki)
+        registry = {
+            "company-a": {"type": "company", "handles": {"domains": ["acme.example"]}},
+            "company-b": {"type": "company", "handles": {"domains": ["acme.example"]}},
+        }
+        cfg = _fields_config(industry={"shape": "scalar", "writers": ["employer-feed"]})
+        record = {
+            "record": "correction",
+            "target": {"type": "company", "handle": {"domains": "acme.example"}},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert len(list(wiki.glob("*.md"))) == 2  # unchanged, no third page
+
+    def test_missing_type_on_handle_target_raises(self, tmp_path: Path) -> None:
+        """A handle target with no declared type cannot create -- the
+        submitter must say what kind of entity to make."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        index = EntityIndex(wiki)
+        cfg = _fields_config(industry={"shape": "scalar", "writers": ["employer-feed"]})
+        record = {
+            "record": "correction",
+            "target": {"handle": {"domains": "acme.example"}},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert list(wiki.glob("*.md")) == []
+
+    def test_schema_invalid_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A create that would violate the schema raises a tier; nothing
+        is written."""
+
+        class _Probe(BaseModel):
+            x: int
+
+        try:
+            _Probe.model_validate({"x": "not-an-int"})
+        except PydanticValidationError as exc:
+            boom = exc
+        else:  # pragma: no cover - defensive
+            raise AssertionError("expected a ValidationError")
+
+        def _always_fail(meta: dict) -> None:
+            raise boom
+
+        monkeypatch.setattr("athenaeum.corrections.validate_wiki_meta", _always_fail)
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        index = EntityIndex(wiki)
+        cfg = _fields_config(industry={"shape": "scalar", "writers": ["employer-feed"]})
+        record = {
+            "record": "correction",
+            "target": {"type": "company", "handle": {"domains": "acme.example"}},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert "schema" in result.reason.lower()
+        assert list(wiki.glob("*.md")) == []
+
+    def test_same_run_second_record_resolves_created_page(self, tmp_path: Path) -> None:
+        """athenaeum#865 same-run hole: the registry snapshot is loaded once
+        per `process_batch_file` call. A second record in the SAME batch,
+        keyed on the same handle as the first, must resolve to the page
+        the first record just created -- not create a second page."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        index = EntityIndex(wiki)
+        env = self._envelope()
+        cfg = _fields_config(
+            domains={"shape": "list", "writers": ["employer-feed"]},
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        lines = [
+            json.dumps(env),
+            json.dumps(
+                {
+                    "record": "correction",
+                    "target": {"type": "company", "handle": {"domains": "acme.example"}},
+                    "op": "add",
+                    "field": "domains",
+                    "value": "acme.example",
+                    "source": "script:employer-feed",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                }
+            ),
+            json.dumps(
+                {
+                    "record": "correction",
+                    "target": {"type": "company", "handle": {"domains": "acme.example"}},
+                    "op": "set",
+                    "field": "industry",
+                    "value": "Software",
+                    "source": "script:employer-feed",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                }
+            ),
+        ]
+        batch_path = tmp_path / "raw" / "employer-feed" / "b.jsonl"
+        batch_path.parent.mkdir(parents=True)
+        batch_path.write_text("\n".join(lines) + "\n")
+
+        outcome = process_batch_file(
+            batch_path,
+            env,
+            "employer-feed",
+            index=index,
+            knowledge_root=tmp_path,
+            config=cfg,
+            registry_entities={},
+        )
+        assert [r.disposition for r in outcome.results] == ["applied", "applied"]
+        pages = list(wiki.glob("*.md"))
+        assert len(pages) == 1  # NOT two pages from one batch
+        meta, _ = parse_frontmatter(pages[0].read_text())
+        assert meta["domains"] == ["acme.example"]
+        assert meta["industry"] == "Software"
 
 
 class TestMixedDispositionBatch:

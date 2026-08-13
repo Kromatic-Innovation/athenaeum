@@ -230,8 +230,42 @@ One of three shapes:
 The handle shape exists because external systems key on their own identifiers — an email
 address, a profile URL, a channel id — not on athenaeum uids.
 
-A target that resolves to zero entities, or ambiguously to several, does **not** fail. It
-is a correction whose entity identity needs reasoning, so it goes up the ladder (§8).
+**A zero-match handle target creates the entity at tier 0 (issue athenaeum#865).** The
+handle is a *stable external key* — the whole reason the shape exists is that the source
+system already has one. A submitter that names a handle and finds nothing is not
+guessing at identity; it is reporting a fact the corpus does not have a page for yet
+("this domain belongs to a company we haven't seen before"). Creating deterministically
+on that signal is safe in a way that creating on a bare name never is: the same key
+resolves to the same page on every subsequent submission, so there is exactly one create
+per real-world entity, never one per spelling variant.
+
+The submitter also declares `type` on the target (required for a create — there is
+nothing else to validate a new page's schema against); the created page is validated
+against that type's schema (`schemas.py`) before it is written, and a create that would
+violate it raises a tier instead, same as any other non-conformance. The page carries a
+freshly minted `uid`, the handle key/value that keyed the create (in the
+`docs/source-handles.md` §3 frontmatter shape — list-valued for a `LIST_HANDLE_KEYS`
+member, scalar otherwise), and `field_sources` provenance for the handle carrying the
+batch's declared `source`. That handle is what makes the next submission carrying the
+same key resolve to this page as an **update** rather than create a second one — creation
+and update are one path (§4/§7's applier), not two: the applier mints and writes the page
+only when there is no existing match, then runs the record's own `op`/`field`/`value`
+through the exact same conflict-and-write logic an update would. No `name` reaches this
+path (§3.2's record shape has none), so the handle value itself seeds a placeholder name
+until a later correction sets a real one.
+
+A `{"uid": "…"}` or `{"type": "…", "name": "…"}` target that resolves to zero entities
+does **not** create — those shapes have no stable key to dedupe a later submission
+against, so creating on a name match alone would manufacture a duplicate for every
+spelling variant. It stays a correction whose entity identity needs reasoning, and goes
+up the ladder (§8), exactly as before.
+
+A handle target resolving *ambiguously* to several entities also still raises — creating
+here would manufacture a duplicate for an entity that already exists under one of those
+matches; ambiguity is exactly what reasoning is for, not what tier 0 should guess at. And
+a handle target with no (or blank) declared `type` cannot create either: the submitter
+must say what kind of entity to make, since there is nothing else to validate the create
+against.
 
 ---
 
@@ -439,6 +473,23 @@ For a correction with source `S_in` against the incumbent attribution `S_cur` (f
 `op: add` is evaluated **per value**, against that value's own co-indexed attribution —
 adding a backlink to a list whose other entries came from a human is not a conflict.
 
+**The table above arbitrates conflicts, so it is consulted only when there is an
+incumbent value to conflict with.** A `set` against a field the page does not carry
+applies outright, whatever the page-level `source:` outranks — filling a field no one has
+ever set is not overwriting a human-stated value. The incumbent-attribution fallback
+chain (`field_sources.<field>` → page-level `source:` → `unsourced`) describes the
+attribution *of the incumbent value*; with no such value there is nothing for it to
+describe, and consulting it anyway manufactures a phantom incumbent out of the page's own
+provenance. This is the same reading §4 already gives the list path, where `op: add` of a
+value not yet present applies without consulting rank at all.
+
+*(Issue athenaeum#865 surfaced this: a page created by the tier-0 create path carries
+`source: <the submitter>` and `updated: <today>`, so a second record filling any other
+field tied on rank against its own batch's source and then lost the `observed_at`
+tie-break to a today-stamp every real-world `observed_at` predates — a batch losing to a
+page it had itself created moments earlier. The `writers` allowlist in §6.3 still bounds
+which attributes a given submitter may touch at all.)*
+
 ### 6.3 The attribute allowlist and the suppression rule
 
 A correction may only propose an attribute on the allowlist, declared in config (§10.3)
@@ -508,7 +559,8 @@ schema design onto every writer — precisely the per-consumer coupling §1.1 re
 | Unknown key, bad `op`/attribute combination, missing required key | Record is non-conformant → reasoning tier, carrying its own text as the claim. |
 | Unparseable `source` | Reasoning tier. **Not** a fail-open downgrade to rank 9 — in Lane A a bad source costs an attribution, but here the source is the authorization to write, so a rank-9 default would still beat an unsourced incumbent. Reasoning decides instead. |
 | Attribute not on the allowlist, or writer not permitted | Reasoning tier. The allowlist bounds what may be written *cheaply*, not what may be reported. |
-| Target resolves to nothing, or ambiguously | Reasoning tier — entity resolution is exactly what tiers 1-2 exist for. |
+| `{"uid"}` or `{"type","name"}` target resolves to nothing; any target resolves ambiguously (>1) | Reasoning tier — entity resolution is exactly what tiers 1-2 exist for. |
+| `{"type","handle"}` target resolves to nothing | **Creates the entity at tier 0** (§3.3, issue athenaeum#865) — a stable external key with no match is not an identity question for reasoning, it is new information. Falls through to reasoning instead only if `type` is missing/blank or the constructed page fails schema validation. |
 
 A fallthrough is not a failure and never fails a batch: conformant records in the same
 batch apply normally, and the ledger counts the rest as `raised-tier`.
