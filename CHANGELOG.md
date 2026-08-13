@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`pii.read_people` — read N persons paying the store's O(corpus) scans
+  ONCE, not once per uid (athenaeum#877).** `read_person` rebuilds two
+  full-corpus indexes on every call — the wiki `EntityIndex` and a complete
+  `iter_contact_records()` scan — which is unremarkable for the occasional
+  single lookup and quadratic in practice for a loop: ~28s per uid against the
+  live 16,928-page store, or ~37 hours for the 4,696-person population
+  `apollo-enrich`'s weekly warm-tier job resolves, before a single provider
+  API call. `read_people(knowledge_root, config, uids, *, include_contact=...,
+  usage_classes=...)` builds each index exactly once per batch and streams
+  `(uid, PersonRead | None)` pairs. Measured on a synthetic corpus of the same
+  shape (16,928 pages / 4,696 candidates): **3.05 hours projected → 3.3
+  seconds actual**, 0.71ms per uid after the fixed cost. Both O(corpus) halves
+  had to go: the contacts scan is the one the issue names, but the
+  `EntityIndex` rebuild is the larger share (a bare frontmatter pass over the
+  wiki measured 25.2s of the 28.1s), so fixing only the named half would have
+  left ~33 of the 37 hours in place. **This is a cost change, not a semantic
+  one** — `read_people` returns exactly what `read_person` returns for each
+  uid, including redaction markers, usage-class filtering and `None` for an
+  unresolved uid, and both entry points share one assembly body so they cannot
+  drift; parity is asserted directly in `tests/test_person_read_batch.py`.
+  `read_person` itself is deliberately unchanged in cost and behavior — a
+  single read has nothing to amortize — so the loop-shaped caller is what
+  moves. Two smaller properties fall out: the indexes are built on the FIRST
+  uid rather than at call time, so an empty batch (a quiet week for the weekly
+  job) costs nothing rather than one full pass to read zero people; and the
+  stream is lazy, so a 4,696-uid run never holds thousands of full page bodies
+  in memory at once. The two-path invariant is untouched
+  (`docs/one-way-in-one-way-out.md` §3, updated): `read_people` resolves
+  `contacts_surface_root` itself, so a caller still supplies only uids and
+  flags and never constructs a surface path — keeping the batch shape *inside*
+  the seam is precisely what stops a caller from routing around an interface
+  too slow for its real workload. New `pii.build_contact_record_uid_index`
+  builds the `uid -> record` mapping in one pass, holding the same
+  first-match-wins/warn-never-raise discipline as
+  `resolve_contact_record_for_uid` so a batch read never resolves a uid to a
+  different record than a single read would.
+
 ## [0.18.0] - 2026-08-13
 
 ### Added

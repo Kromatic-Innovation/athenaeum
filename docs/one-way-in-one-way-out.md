@@ -67,7 +67,7 @@ a store can occupy:
 | Surface | What lives there | Sanctioned way to read it |
 |---|---|---|
 | **Corpus surface** — the wiki, plus any configured intake roots | Compiled entity pages, the observation ledger | `recall` / the search path, the MCP read tools, `athenaeum query` |
-| **Contact-data surface** — the root the `pii` entity class resolves to, which an operator maps to an excluded-policy adapter (`storage.mapping`) | Contact records held off-corpus (athenaeum#427, athenaeum#437) | The `read_person` MCP tool, `athenaeum query person --uid ... [--include-contact]`, or `pii.read_person` directly — each resolves the surface via `pii.contacts_surface_root` on the caller's behalf |
+| **Contact-data surface** — the root the `pii` entity class resolves to, which an operator maps to an excluded-policy adapter (`storage.mapping`) | Contact records held off-corpus (athenaeum#427, athenaeum#437) | The `read_person` MCP tool, `athenaeum query person --uid ... [--include-contact]`, or `pii.read_person` directly (`pii.read_people` for many uids at once, athenaeum#877) — each resolves the surface via `pii.contacts_surface_root` on the caller's behalf |
 
 **The contact-data surface is the one that needs saying out loud**, because it
 is the one that fails quietly. Holding contact data off-corpus keeps it out of
@@ -91,6 +91,19 @@ takes a `uid` and an explicit contact-inclusion flag and returns the values,
 resolving the surface root itself so the caller never constructs that path.
 Only that entry point, and the modules that implement it (`pii.py` and the
 storage adapter layer it delegates to), know the surface layout.
+
+`pii.read_people` (athenaeum#877) is the **batch form of that same entry
+point**, not a second one: it takes many uids, returns exactly what
+`read_person` returns for each, and resolves the surface root itself in the
+identical way. It exists because the single-call shape cost a full pass over
+the store *per uid* — ~28s each against the live corpus, ~37 hours for the
+4,696 people the weekly enrichment job resolves — which is the kind of number
+that makes a caller reach for the surface directly and go around the seam.
+That is the load-bearing point for this document: **a seam that is far too
+slow for a real workload is one a caller will eventually route around**, so
+keeping the batch shape *inside* the interface is what keeps the invariant
+true in practice rather than only on paper. It is item 4 of §5's checklist
+taken up rather than worked around.
 
 ## 4. The invariant is not authorization
 
@@ -130,7 +143,11 @@ If you are writing a client against athenaeum:
 2. **To read the corpus:** use `recall` / the MCP read tools / `athenaeum query`.
 3. **To read contact data:** use the `read_person` MCP tool, `athenaeum query
    person --uid ... [--include-contact]`, or `pii.read_person` (athenaeum#864),
-   with the inclusion flag set. Do not resolve the contact surface yourself,
+   with the inclusion flag set. **Resolving more than one uid in one process:
+   use `pii.read_people` (athenaeum#877)**, which pays the store's O(corpus)
+   scans once for the whole batch instead of once per uid — a loop over
+   `read_person` is the shape that measured ~37 hours for one weekly job.
+   Do not resolve the contact surface yourself,
    and do not treat a missing value as "no value" unless the response says
    so — the interface distinguishes *withheld* from *absent* with a
    redaction marker precisely so a caller cannot silently mistake one for
