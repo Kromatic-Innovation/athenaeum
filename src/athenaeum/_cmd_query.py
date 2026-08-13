@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum {recall,people,query-topics,stopwords,test-mcp}`` — read-only query tools.
+"""``athenaeum {recall,people,person,query-topics,stopwords,test-mcp}`` — read-only query tools.
 
-Five subcommands grouped here because each is a shell-accessible, read-only
+Six subcommands grouped here because each is a shell-accessible, read-only
 query or diagnostic over the compiled wiki / search stack, used by validation
 harnesses, hooks, and operator debugging — none mutates the knowledge base.
 
@@ -17,6 +17,7 @@ cost down.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -127,6 +128,38 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         help="Output shape (default: table).",
     )
     people_parser.set_defaults(func=cmd_people)
+
+    # person command — one-call person read by uid (issue athenaeum#864). Distinct
+    # from `people` above: `people` filters/lists many type:person wikis by
+    # frontmatter; `person` reads exactly ONE person's page (+ optional
+    # contact data) by uid, and is the shell-accessible surface for
+    # `athenaeum.pii.read_person` — the only sanctioned way to read a
+    # person's contact data (`docs/one-way-in-one-way-out.md` §3).
+    person_parser = subparsers.add_parser(
+        "person",
+        help="One-call read of a SINGLE person's page by uid, with an explicit "
+        "--include-contact flag (default off). Not `people` (which filters/lists "
+        "many person wikis by frontmatter) — this reads exactly one person, "
+        "and is the only sanctioned way to read their contact data.",
+    )
+    person_parser.add_argument(
+        "--uid",
+        required=True,
+        help="The person's durable uid.",
+    )
+    person_parser.add_argument(
+        "--include-contact",
+        action="store_true",
+        help="Include the actual contact values (default: off — withheld "
+        "fields carry a redaction marker instead).",
+    )
+    person_parser.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    person_parser.set_defaults(func=cmd_person)
 
     # query-topics command — LLM-based topic extraction for hook query rewriting
     query_topics_parser = subparsers.add_parser(
@@ -509,6 +542,36 @@ def cmd_people(args: argparse.Namespace) -> int:
             f"{r['last_touch']}"
         )
     print(f"\n{len(rows)} match(es)")
+    return 0
+
+
+def cmd_person(args: argparse.Namespace) -> int:
+    """One-call person read by uid — shell surface for ``pii.read_person`` (issue athenaeum#864).
+
+    Prints a single JSON object to stdout: ``pii.PersonRead.to_dict()``.
+    With ``--include-contact`` unset (default), withheld contact fields carry
+    a redaction marker (field name + that a value exists) instead of the
+    value; a person with no contact record at all prints the page with no
+    redaction markers — not an error. Loads ``athenaeum.yaml`` the same way
+    the sibling commands do, so the contact surface resolves per the
+    operator's ``storage.mapping``.
+
+    An unknown uid prints an error to stderr and returns exit code 1.
+    """
+    from athenaeum.config import load_config
+    from athenaeum.pii import read_person
+
+    knowledge_root = args.path.expanduser().resolve()
+    config = load_config(knowledge_root)
+
+    result = read_person(
+        knowledge_root, config, args.uid, include_contact=args.include_contact
+    )
+    if result is None:
+        print(f"Error: no person found for uid={args.uid!r}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result.to_dict(), indent=2))
     return 0
 
 
