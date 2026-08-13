@@ -529,6 +529,25 @@ router corrects it. A submitter cannot opt out by being specific.
 
 The sensitivity classification is deployment configuration, not a constant in this repo.
 
+**A contact value also carries a usage classification** (issue athenaeum#866): whether it
+was *observed in prior communication* or *supplied by a data provider*, plus the
+provenance of that claim, per VALUE rather than per record. Storing and syncing an
+address to an address book is permitted for either; using one to initiate contact is
+permitted only for the observed class, and an unclassified legacy value is never
+silently treated as usable. The marker lives in the store (`athenaeum.pii` —
+`classify_contact_value` writes it, `is_outreach_eligible` is the predicate a consumer
+calls), so it binds every writer rather than each consumer re-implementing it. See
+`docs/security-posture.md` §2.3 for the permission table and the no-downgrade rule.
+
+Note the current boundary: the sensitivity routing above writes a correction's PII-bound
+value to the surface as a `{uid}.json` record, while the classification machinery reads
+and writes the markdown contact records the bounce/contact tooling uses. **Routing a
+contact-value correction through `classify_contact_value` so a correction can carry its
+own usage class is therefore not yet wired** — it needs those two record shapes
+reconciled first, which athenaeum#866 deliberately left alone. Until then, a
+correction-written contact value reads back as `unclassified` — which is the safe
+direction (not outreach-eligible), not a silent grant.
+
 ### 7.2 Schema evolution
 
 A correction may name an attribute the deployment's schema has no slot for. That is not
