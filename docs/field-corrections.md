@@ -34,6 +34,12 @@ MAY use to arrive with its work already done.**
 > **Conformance sets how deep in the tier ladder a submission enters. It never sets
 > whether it enters.**
 
+> **This is the ingress half of the system-wide two-path invariant** — *one path
+> in, one path out* — stated canonically in
+> [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md). That page owns
+> the rule (including the egress half); this section owns what conformance does
+> to a submission's entry tier once it is on the sanctioned path.
+
 Athenaeum's pipeline is a cost ladder — cheap mechanical processing first, then simple
 reasoning, then expensive reasoning, then a human. The librarian accepts all input; what
 varies is how much reasoning that input costs to absorb.

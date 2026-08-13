@@ -23,6 +23,16 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 
 ## 2. What this library does and doesn't do
 
+> **Read-scoping is one enforcement of the two-path invariant, not the whole of
+> it.** The system-wide rule — *one path in, one path out*: every write enters as
+> raw intake compiled by a single writer, and every read leaves through the
+> recall/read interface, with no caller opening a store directly — is stated
+> canonically in [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md).
+> This section (and §2.1) documents how far that egress half is currently
+> *enforced* over the MCP tool surface. Surfaces it does not cover — notably the
+> off-corpus contact-data surface — are still governed by the invariant even
+> though nothing today refuses a caller that goes around it.
+
 | Surface | Present? | Notes |
 |---|---|---|
 | User-facing service | **No** | Athenaeum is a library, run by consumers in their own processes. |
@@ -33,6 +43,12 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 | Intake-side secret/PII screening (athenaeum#320) | **Shipped** | `remember()`'s write path calls `athenaeum.screening.screen_intake` (`src/athenaeum/mcp_server.py:553`, screener defined at `src/athenaeum/screening.py:212`) to classify sensitive content and resolve the read-time `access:` label BEFORE the single append-only write. Opt-in via a `screening` config resolved by `athenaeum.config.resolve_screening`; `None` (default) preserves prior unscreened behavior. |
 
 ### 2.1 MCP tool audience scoping (athenaeum#312 → athenaeum#538)
+
+> Scope note: this section decides *who* may read what **across the 11 MCP
+> tools**. It does not, and is not meant to, establish that the MCP surface is
+> the only way to reach a store — that is the egress half of the invariant in
+> [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md), which this
+> scoping enforces for one surface among several.
 
 `caller_audience` (§2, row "Read-scoping of recall") is pinned **once** by the
 operator at `athenaeum serve` time and governs the **whole** MCP process, not
