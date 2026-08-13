@@ -119,7 +119,9 @@ import json
 import logging
 import os
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1388,6 +1390,74 @@ CONTACT_IDENTIFIER_FIELDS: tuple[str, ...] = ("emails", "former_emails", "alt_em
 #: person record cannot carry the mark as a bare top-level ``valid_until``.
 IDENTIFIER_VALIDITY_FIELD = "identifier_validity"
 
+#: Frontmatter key holding PER-VALUE provenance + usage classification on a
+#: contact record (issue athenaeum#866). Deliberately the same shape as
+#: :data:`IDENTIFIER_VALIDITY_FIELD` — a list of dicts keyed by
+#: ``identifier`` — because it answers the same *kind* of question ("what do
+#: we know about THIS address, not this record") and a record listing several
+#: addresses cannot carry either mark as a bare top-level field without
+#: asserting it of the person.
+CONTACT_CLASSIFICATION_FIELD = "contact_classification"
+
+#: Usage class: the address was seen in real communication with this person —
+#: they wrote to us from it, or we have corresponded with it before. Evidence
+#: of use, which is what makes outreach to it a continuation rather than an
+#: initiation.
+USAGE_CLASS_OBSERVED = "observed"
+
+#: Usage class: the address was supplied by a data provider / vendor. Storable
+#: and syncable to an address book, NOT eligible for outreach absent prior
+#: communication — the distinction issue athenaeum#866 exists to make
+#: representable.
+USAGE_CLASS_PROVIDER = "provider"
+
+#: Usage class for a value carrying no classification entry at all — every
+#: contact value written before issue athenaeum#866. NOT a synonym for
+#: "usable": an unclassified value is one whose provenance was never recorded,
+#: so nothing is known about how it was obtained. It is reported as
+#: ``unclassified`` and is NOT outreach-eligible (AC: "never silently
+#: defaulted to usable").
+USAGE_CLASS_UNCLASSIFIED = "unclassified"
+
+#: Every usage class, most-authoritative first. Order is load-bearing: it IS
+#: the no-downgrade ladder :func:`_classification_outranks` reads.
+USAGE_CLASSES: tuple[str, ...] = (
+    USAGE_CLASS_OBSERVED,
+    USAGE_CLASS_PROVIDER,
+    USAGE_CLASS_UNCLASSIFIED,
+)
+
+#: The usage classes a value may be used to INITIATE contact from. Only
+#: :data:`USAGE_CLASS_OBSERVED` qualifies — address-book population and
+#: outreach eligibility are different permissions (issue athenaeum#866), and
+#: this tuple is the machine-readable statement of the narrower one. Storage
+#: and address-book sync are gated by neither: every class may be stored.
+OUTREACH_ELIGIBLE_CLASSES: tuple[str, ...] = (USAGE_CLASS_OBSERVED,)
+
+
+def _classification_rank(usage_class: str) -> int:
+    """Position of *usage_class* in :data:`USAGE_CLASSES`; unknown ranks last.
+
+    An unrecognized class read off a hand-edited record must never outrank a
+    known one — it sorts with ``unclassified``, the weakest position, so a
+    typo can neither win a no-downgrade comparison nor confer eligibility.
+    """
+    try:
+        return USAGE_CLASSES.index(usage_class)
+    except ValueError:
+        return len(USAGE_CLASSES)
+
+
+def _classification_outranks(incoming: str, existing: str) -> bool:
+    """True when *incoming* is a strictly stronger claim than *existing*.
+
+    "Evidence of use outranks purchase" (issue athenaeum#866): ``observed``
+    beats ``provider`` beats ``unclassified``. Equal classes do NOT outrank —
+    a re-assertion of the same class refreshes provenance in place rather than
+    counting as a change, which is what keeps a repeated write idempotent.
+    """
+    return _classification_rank(incoming) < _classification_rank(existing)
+
 
 def normalize_identifier(identifier: str) -> str:
     """Casefold + strip an email identifier for COMPARISON only.
@@ -1548,6 +1618,229 @@ def is_bounced_identifier(
     if isinstance(meta, dict) and normalize_identifier(str(meta.get("identifier", ""))) == wanted:
         return is_bounced(meta, as_of)
     return False
+
+
+@dataclass(frozen=True)
+class ContactClassification:
+    """How one contact value was obtained, and what it may be used for.
+
+    The per-VALUE unit issue athenaeum#866 introduces: an address obtained
+    from a data vendor and an address someone used to write to you are
+    different facts with different permissions, and before this they were
+    stored identically. ``usage_class`` is the permission-bearing half;
+    ``source``/``observed_at`` are the provenance that justifies it (which
+    system asserted this, and when).
+
+    A value with no stored entry is reported as
+    :data:`USAGE_CLASS_UNCLASSIFIED` with ``source``/``observed_at`` of
+    ``None`` — the "we never recorded how this was obtained" case, which is
+    distinct from (and never silently promoted to) either real class.
+    """
+
+    identifier: str
+    usage_class: str
+    source: str | dict[str, Any] | None = None
+    observed_at: str | None = None
+
+    @property
+    def outreach_eligible(self) -> bool:
+        """True when this value may be used to INITIATE contact.
+
+        Only :data:`OUTREACH_ELIGIBLE_CLASSES` qualifies. Storage and
+        address-book population are NOT gated by this — they are a different,
+        broader permission (issue athenaeum#866).
+        """
+        return self.usage_class in OUTREACH_ELIGIBLE_CLASSES
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-serializable shape, mirroring :meth:`RedactionMarker.to_dict`."""
+        return {
+            "identifier": self.identifier,
+            "usage_class": self.usage_class,
+            "source": self.source,
+            "observed_at": self.observed_at,
+            "outreach_eligible": self.outreach_eligible,
+        }
+
+
+def contact_classification_entries(meta: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The per-value classification entries on *meta*, or ``[]``.
+
+    Tolerant reader, exactly mirroring :func:`identifier_validity_entries`: a
+    missing, non-list or malformed :data:`CONTACT_CLASSIFICATION_FIELD` yields
+    ``[]`` rather than raising, and non-dict entries are skipped. A
+    hand-edited record must degrade to "no classification recorded" — which
+    reads as ``unclassified``, and therefore NOT outreach-eligible — never to
+    a crash in a consumer.
+    """
+    if not isinstance(meta, dict):
+        return []
+    entries = meta.get(CONTACT_CLASSIFICATION_FIELD)
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def classification_for_value(
+    meta: dict[str, Any] | None, identifier: str
+) -> ContactClassification:
+    """The classification recorded for *identifier* on *meta*.
+
+    Always returns a :class:`ContactClassification` — never ``None``. A value
+    with no stored entry comes back as :data:`USAGE_CLASS_UNCLASSIFIED` with
+    no provenance, which is the AC's "existing contact records without the
+    marker are treated as unclassified and reported as such, never silently
+    defaulted to usable": the caller receives a positive statement that the
+    provenance is unknown, and :attr:`~ContactClassification.outreach_eligible`
+    is ``False`` for it.
+
+    Matches case-insensitively via :func:`normalize_identifier`, the same
+    comparison :func:`is_bounced_identifier` uses — a classification that
+    missed ``Alex@example.org`` because it was stored as ``alex@example.org``
+    would silently read as unclassified, losing a permission that was in fact
+    recorded.
+    """
+    wanted = normalize_identifier(identifier)
+    if wanted:
+        for entry in contact_classification_entries(meta):
+            if normalize_identifier(str(entry.get("identifier", ""))) == wanted:
+                usage_class = str(entry.get("usage_class", "") or "").strip()
+                return ContactClassification(
+                    identifier=identifier,
+                    usage_class=usage_class or USAGE_CLASS_UNCLASSIFIED,
+                    source=entry.get("source"),
+                    observed_at=(
+                        str(entry["observed_at"])
+                        if entry.get("observed_at") is not None
+                        else None
+                    ),
+                )
+    return ContactClassification(
+        identifier=identifier, usage_class=USAGE_CLASS_UNCLASSIFIED
+    )
+
+
+def is_outreach_eligible(meta: dict[str, Any] | None, identifier: str) -> bool:
+    """True when *identifier* may be used to INITIATE contact (issue athenaeum#866).
+
+    The single predicate a consumer calls, in the shape of
+    :func:`is_pii_flagged` / :func:`is_bounced_identifier` — so the outreach
+    rule lives in the store and is not reimplemented (and eventually not
+    implemented) per consumer. False for a provider-supplied value, false for
+    an unclassified one, false for an address the record has never heard of.
+
+    Deliberately does NOT consult bounce state: "may we initiate contact with
+    this address" and "is this address still deliverable" are separate
+    questions with separate predicates (:func:`is_bounced_identifier`). A
+    caller about to send needs BOTH — this one does not silently answer the
+    other, which would make a bounced-but-observed address read as sendable.
+    """
+    return classification_for_value(meta, identifier).outreach_eligible
+
+
+def _merge_contact_classification(
+    existing_meta: dict[str, Any],
+    identifier: str,
+    *,
+    usage_class: str,
+    source: str | dict[str, Any],
+    observed_at: str,
+) -> dict[str, Any]:
+    """Upsert one per-value classification into a copy of *existing_meta*.
+
+    Mirrors :func:`_merge_identifier_validity`'s discipline — in-place update
+    preserving list position (so a re-assertion compares byte-identical and a
+    record's history stays readable in file order), append otherwise.
+
+    **Enforces the no-downgrade rule (issue athenaeum#866).** A ``provider``
+    assertion of an address already recorded ``observed`` leaves the entry
+    untouched, provenance included: evidence of use outranks purchase, and the
+    observed provenance is precisely what justifies the surviving permission,
+    so overwriting it with the vendor's would keep the class while destroying
+    its basis. An UPGRADE (``provider`` -> ``observed``, or either over
+    ``unclassified``) applies and takes the new provenance with it. A
+    re-assertion of the SAME class refreshes provenance in place — that is a
+    fresher statement of the same fact, not a downgrade.
+
+    This is the store enforcing the rule for every writer, rather than each
+    writer enforcing it for itself: the marker is the authority (issue
+    athenaeum#866's motivation), so a consumer-side check is defense in depth,
+    never the mechanism.
+    """
+    merged = dict(existing_meta)
+    wanted = normalize_identifier(identifier)
+    entries = [dict(item) for item in contact_classification_entries(existing_meta)]
+    entry = {
+        "identifier": identifier,
+        "usage_class": usage_class,
+        "source": source,
+        "observed_at": observed_at,
+    }
+    for position, item in enumerate(entries):
+        if normalize_identifier(str(item.get("identifier", ""))) != wanted:
+            continue
+        current = str(item.get("usage_class", "") or USAGE_CLASS_UNCLASSIFIED)
+        if _classification_outranks(current, usage_class):
+            return merged  # no-downgrade: the stronger existing claim stands
+        entries[position] = entry
+        break
+    else:
+        entries.append(entry)
+    merged[CONTACT_CLASSIFICATION_FIELD] = entries
+    merged[PII_FLAG] = True
+    return merged
+
+
+def classify_contact_value(
+    contacts_root: Path,
+    identifier: str,
+    *,
+    usage_class: str,
+    source: str | dict[str, Any],
+    observed_at: str,
+) -> Path | None:
+    """Record how *identifier* was obtained, on the record that already lists it.
+
+    The writer half of issue athenaeum#866, shaped like :func:`mark_bounced`:
+    resolves the existing record via :func:`resolve_contact_record`, merges the
+    classification onto its frontmatter under
+    :data:`CONTACT_CLASSIFICATION_FIELD`, and writes atomically. Returns the
+    record path, or ``None`` when no record lists the address.
+
+    Unlike :func:`mark_bounced` this never MINTS a record: a classification is
+    a statement about a value the store already holds, and minting one here
+    would let a provider assertion conjure a contact record for an address the
+    store had deliberately never been given. Re-asserting an identical
+    classification rewrites identical bytes (idempotent), and a downgrade is
+    refused in :func:`_merge_contact_classification` — in both cases the file
+    is left byte-identical.
+
+    Raises:
+        ValueError: if *usage_class* is not one of :data:`USAGE_CLASSES`.
+            A misspelled class must fail loudly at the WRITE, where the caller
+            can see it — silently storing an unrecognized class would read
+            back as ``unclassified`` and quietly strip a permission.
+    """
+    if usage_class not in USAGE_CLASSES:
+        raise ValueError(
+            f"unknown usage_class {usage_class!r}; expected one of {list(USAGE_CLASSES)}"
+        )
+    record_path = resolve_contact_record(contacts_root, identifier)
+    if record_path is None:
+        return None
+    existing_text = record_path.read_text(encoding="utf-8")
+    existing_meta, existing_body = parse_frontmatter(existing_text)
+    merged = _merge_contact_classification(
+        existing_meta if isinstance(existing_meta, dict) else {},
+        identifier,
+        usage_class=usage_class,
+        source=source,
+        observed_at=observed_at,
+    )
+    new_text = render_frontmatter(merged) + "\n" + existing_body
+    if new_text != existing_text:
+        atomic_write_text(record_path, new_text)
+    return record_path
 
 
 def _merge_identifier_validity(
@@ -1915,6 +2208,13 @@ class PersonRead:
     ``contact_record_path`` is ``None`` exactly when no contact record was
     found — never an error, per the issue's "person whose contact record does
     not exist returns the page with no redaction markers" criterion.
+
+    ``classifications`` (issue athenaeum#866) carries the usage classification
+    of every value present in ``contact``, keyed by field and co-indexed with
+    it — ``classifications[field][i]`` classifies ``contact[field][i]``, so a
+    caller receiving an address always knows which kind it is and never has to
+    make a second call to find out. It is empty exactly when ``contact`` is: a
+    redacted read exposes no values, so it classifies none.
     """
 
     uid: str
@@ -1925,6 +2225,12 @@ class PersonRead:
     redactions: tuple[RedactionMarker, ...]
     contact_included: bool
     contact_record_path: Path | None
+    # `dataclass_field`, not `field` — two long-standing functions in this
+    # module use `field` as a loop variable, and importing the bare name would
+    # shadow them (ruff F402).
+    classifications: dict[str, list[ContactClassification]] = dataclass_field(
+        default_factory=dict
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable dict: paths as ``str``, redactions as a list of dicts."""
@@ -1941,6 +2247,10 @@ class PersonRead:
                 if self.contact_record_path is not None
                 else None
             ),
+            "classifications": {
+                name: [item.to_dict() for item in values]
+                for name, values in self.classifications.items()
+            },
         }
 
 
@@ -1950,6 +2260,7 @@ def read_person(
     uid: str,
     *,
     include_contact: bool = False,
+    usage_classes: Collection[str] | None = None,
 ) -> PersonRead | None:
     """Read one person's wiki page, with contact data gated by *include_contact*.
 
@@ -1978,9 +2289,12 @@ def read_person(
        helper — reused here, not duplicated).
     5. For each field in :data:`CONTACT_DATA_FIELDS` carrying a non-empty
        value on the record: with *include_contact* True, the values land in
-       ``contact[field]``; with it False, a :class:`RedactionMarker` is
-       appended instead — never both, and never neither for a field that
-       genuinely has a value.
+       ``contact[field]`` and their classifications in
+       ``classifications[field]``, co-indexed; with it False, a
+       :class:`RedactionMarker` is appended instead — never both, and never
+       neither for a field that genuinely has a value.
+    6. With *usage_classes* given, values whose class is not in it are
+       dropped from ``contact`` (issue athenaeum#866).
 
     Args:
         knowledge_root: Root of the knowledge base (parent of ``wiki/``).
@@ -1995,11 +2309,23 @@ def read_person(
             gate it applies that check BEFORE calling this function (see
             ``athenaeum.mcp_server.person_read`` for the MCP-surface
             instance of that gate).
+        usage_classes: Restrict returned contact values to these usage
+            classes (issue athenaeum#866) — e.g.
+            ``usage_classes=OUTREACH_ELIGIBLE_CLASSES`` for a caller that must
+            not receive a provider-sourced address by accident. ``None`` (the
+            default) returns every value, each carrying its classification, so
+            an existing caller's results are unchanged. Only meaningful with
+            *include_contact* True; a redacted read exposes no values to
+            filter. Pass an explicitly empty collection to receive no contact
+            values at all — that is a caller asking for nothing, not a request
+            for everything, so it is honoured literally rather than treated as
+            ``None``.
 
     Returns:
         A :class:`PersonRead`, or ``None`` when *uid* does not resolve to a
         wiki page.
     """
+    wanted_classes = frozenset(usage_classes) if usage_classes is not None else None
     page_path = EntityIndex(knowledge_root / "wiki").get_by_uid(uid)
     if page_path is None:
         return None
@@ -2011,19 +2337,40 @@ def read_person(
     record_meta = read_bounce_record(record_path) if record_path is not None else {}
 
     contact: dict[str, list[str]] = {}
+    classifications: dict[str, list[ContactClassification]] = {}
     redactions: list[RedactionMarker] = []
-    for field in CONTACT_DATA_FIELDS:
-        raw = record_meta.get(field)
+    for field_name in CONTACT_DATA_FIELDS:
+        raw = record_meta.get(field_name)
         if raw is None:
             continue
         values = raw if isinstance(raw, list) else [raw]
         values = [str(v).strip() for v in values if str(v).strip()]
         if not values:
             continue
-        if include_contact:
-            contact[field] = values
-        else:
-            redactions.append(RedactionMarker(field=field, value_count=len(values)))
+        if not include_contact:
+            # Count BEFORE class filtering: the marker reports what the record
+            # holds for this field, and a caller who asked for no contact data
+            # never named a class to filter by (issue athenaeum#866).
+            redactions.append(RedactionMarker(field=field_name, value_count=len(values)))
+            continue
+        classified = [classification_for_value(record_meta, value) for value in values]
+        if wanted_classes is not None:
+            kept = [
+                (value, item)
+                for value, item in zip(values, classified, strict=True)
+                if item.usage_class in wanted_classes
+            ]
+            if not kept:
+                # Every value of this field was filtered out. Drop the field
+                # entirely rather than emitting an empty list, so "this field
+                # has no value of the class you asked for" and "this field has
+                # no value at all" present identically to a caller that must
+                # not see the other class — the whole point of the filter.
+                continue
+            values = [value for value, _ in kept]
+            classified = [item for _, item in kept]
+        contact[field_name] = values
+        classifications[field_name] = classified
 
     return PersonRead(
         uid=uid,
@@ -2034,6 +2381,7 @@ def read_person(
         redactions=tuple(redactions),
         contact_included=include_contact,
         contact_record_path=record_path,
+        classifications=classifications,
     )
 
 
@@ -2100,4 +2448,15 @@ __all__ = [
     "RedactionMarker",
     "PersonRead",
     "read_person",
+    "CONTACT_CLASSIFICATION_FIELD",
+    "USAGE_CLASS_OBSERVED",
+    "USAGE_CLASS_PROVIDER",
+    "USAGE_CLASS_UNCLASSIFIED",
+    "USAGE_CLASSES",
+    "OUTREACH_ELIGIBLE_CLASSES",
+    "ContactClassification",
+    "contact_classification_entries",
+    "classification_for_value",
+    "is_outreach_eligible",
+    "classify_contact_value",
 ]

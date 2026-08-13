@@ -45,6 +45,11 @@ def _numeric_frontmatter_value(value: object) -> int | float | str:
 
 def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
     """Register ``recall``, ``people``, ``query-topics``, ``stopwords``, ``test-mcp``."""
+    # Local, not module-level: keeps this module's import cost off `cli.py`'s
+    # top-level path (see the module docstring's factoring rule). Needed here
+    # because `--usage-class` pins its `choices` to the canonical tuple rather
+    # than transcribing the class names, which would drift.
+    from athenaeum.pii import USAGE_CLASSES
 
     # test-mcp command — smoke-test the MCP memory setup without a session
     test_mcp_parser = subparsers.add_parser(
@@ -152,6 +157,18 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Include the actual contact values (default: off — withheld "
         "fields carry a redaction marker instead).",
+    )
+    person_parser.add_argument(
+        "--usage-class",
+        action="append",
+        choices=list(USAGE_CLASSES),
+        default=[],
+        metavar="CLASS",
+        help="Return only contact values of this usage class (repeatable; "
+        f"one of {', '.join(USAGE_CLASSES)}). Default: every value, each "
+        "carrying its class. `--usage-class observed` is the "
+        "outreach-eligible set — address-book population and outreach "
+        "eligibility are different permissions (issue athenaeum#866).",
     )
     person_parser.add_argument(
         "--path",
@@ -556,6 +573,11 @@ def cmd_person(args: argparse.Namespace) -> int:
     the sibling commands do, so the contact surface resolves per the
     operator's ``storage.mapping``.
 
+    Every returned contact value carries its usage classification (issue
+    athenaeum#866) under ``classifications``, co-indexed with ``contact``.
+    ``--usage-class`` (repeatable) returns only values of the named classes —
+    ``--usage-class observed`` is the outreach-eligible set.
+
     An unknown uid prints an error to stderr and returns exit code 1.
     """
     from athenaeum.config import load_config
@@ -565,7 +587,11 @@ def cmd_person(args: argparse.Namespace) -> int:
     config = load_config(knowledge_root)
 
     result = read_person(
-        knowledge_root, config, args.uid, include_contact=args.include_contact
+        knowledge_root,
+        config,
+        args.uid,
+        include_contact=args.include_contact,
+        usage_classes=args.usage_class or None,
     )
     if result is None:
         print(f"Error: no person found for uid={args.uid!r}", file=sys.stderr)

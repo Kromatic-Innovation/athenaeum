@@ -103,6 +103,51 @@ covered what leaves the process on that path and what comes back.
   down" half of L6: the redaction module is called by nothing on the egress path
   **on purpose**, not by oversight.
 
+### 2.3 Contact-value provenance and permitted use (athenaeum#866)
+
+**Stored and syncable is not the same as usable for outreach.** An address
+obtained from a data vendor and an address someone used to write to you are
+different facts with different permissions, and before this they were stored
+identically. The distinction is *not* "is this private" — both are, and both
+carry `pii: true`. It is **"may this be used to initiate contact"**.
+
+Each contact value therefore carries its own provenance (which system asserted
+it, and when) and a usage classification, at the level of the **individual
+value** rather than the record — a person's record commonly lists one address
+of each kind, so a record-level marker cannot express it:
+
+| `usage_class` | Meaning | Address-book population | Outreach |
+|---|---|---|---|
+| `observed` | Seen in prior communication with this person | permitted | **permitted** |
+| `provider` | Supplied by a data vendor | permitted | **not permitted** |
+| `unclassified` | Written before the marker existed — provenance unknown | permitted | **not permitted** |
+
+Two rules make this hold up:
+
+- **No downgrade.** A `provider` assertion of an address already recorded
+  `observed` is refused — evidence of use outranks purchase. The observed
+  provenance is preserved along with the class, because it is precisely what
+  justifies the surviving permission. The upgrade direction (`provider` →
+  `observed`, on real communication) is allowed.
+- **Unclassified is never silently usable.** A legacy value is reported *as*
+  `unclassified` — a positive statement that the provenance is unknown — and is
+  not outreach-eligible. Absence of a marker never reads as permission.
+
+**The marker is the authority, and it lives in the store** (`athenaeum.pii`),
+not in each consumer: there will be more than one consumer, and a rule
+reimplemented per consumer is a rule that eventually is not implemented. The
+read interface (`pii.read_person`, the `read_person` MCP tool, `athenaeum
+person`) returns every value with its classification attached, and accepts a
+`usage_classes` filter so a caller that must not see provider-sourced
+addresses cannot receive one by accident. `pii.is_outreach_eligible` is the
+single predicate a consumer calls. A consumer-side check is still wanted as
+defense in depth — it is never the mechanism.
+
+Deliberately **not** answered here: *who* may request which class
+(authorization, deferred with athenaeum#864's same question), and whether an
+address is still deliverable — that is `is_bounced_identifier`, a separate
+question with a separate predicate. A caller about to send needs both.
+
 ## 3. Dependency-upgrade policy
 
 This repo follows the Kromatic maintenance-posture playbook, with one critical adaptation: **the package's own upper-bound caps in `pyproject.toml` define what Dependabot can propose at all.** Auto-merge eligibility is layered on top of those caps.

@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Collection
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -221,6 +222,7 @@ def person_read(
     uid: str,
     *,
     include_contact_data: bool = False,
+    usage_classes: Collection[str] | None = None,
     caller_audience: set[str] | None = None,
     config: dict[str, Any] | None = None,
 ) -> str:
@@ -244,6 +246,14 @@ def person_read(
             resolves — this function never constructs that path itself,
             ``pii.read_person`` does. Default ``False``: each withheld field
             carries a redaction marker instead of its value.
+        usage_classes: Restrict returned contact values to these usage classes
+            (issue athenaeum#866) — e.g.
+            :data:`athenaeum.pii.OUTREACH_ELIGIBLE_CLASSES` for a caller that
+            must not receive a provider-sourced address. ``None`` returns every
+            value, each carrying its classification in the result's
+            ``classifications``. Independent of ``caller_audience``: that gates
+            whether the caller may read the PAGE, this gates which KIND of
+            contact value the answer may contain.
         caller_audience: Read-scope pin (issue athenaeum#312/#538). ``None`` is the
             owner (no check). A non-None set is checked fail-closed against
             the resolved page's frontmatter.
@@ -280,7 +290,11 @@ def person_read(
             return json.dumps(_forbidden_result(), indent=2)
 
     result = pii.read_person(
-        knowledge_root, config, uid, include_contact=include_contact_data
+        knowledge_root,
+        config,
+        uid,
+        include_contact=include_contact_data,
+        usage_classes=usage_classes,
     )
     if result is None:
         return json.dumps(
@@ -1111,7 +1125,11 @@ def create_server(
         )
 
     @mcp.tool()
-    def read_person(uid: str, include_contact_data: bool = False) -> str:
+    def read_person(
+        uid: str,
+        include_contact_data: bool = False,
+        usage_classes: list[str] | None = None,
+    ) -> str:
         """One-call person read by uid, with explicit contact-data inclusion (issue athenaeum#864).
 
         The ONLY sanctioned way to read a person's contact data — do not open
@@ -1129,10 +1147,23 @@ def create_server(
         a restricted caller never receives page content, or any contact
         value, for a page it is not authorized to read.
 
+        Every returned contact value carries its usage classification (issue
+        athenaeum#866) in the result's ``classifications``, co-indexed with
+        ``contact``: ``observed`` (seen in prior communication with this
+        person), ``provider`` (supplied by a data vendor) or ``unclassified``
+        (obtained before the marker existed — provenance unknown). Storing and
+        syncing an address to an address book is permitted for every class;
+        using one to INITIATE contact is permitted only for ``observed``.
+        ``unclassified`` is never treated as usable.
+
         Args:
             uid: The person's durable uid.
             include_contact_data: Set ``True`` to receive the actual contact
                 values instead of redaction markers. Default ``False``.
+            usage_classes: Return only contact values of these usage classes,
+                e.g. ``["observed"]`` for a caller that must not receive a
+                provider-sourced address by accident (issue athenaeum#866).
+                Default ``None`` — every value, each carrying its class.
 
         Returns:
             A JSON string (``pii.PersonRead.to_dict()`` shape) — or a
@@ -1143,6 +1174,7 @@ def create_server(
             wiki_root.parent,
             uid,
             include_contact_data=include_contact_data,
+            usage_classes=usage_classes,
             caller_audience=caller_audience,
             config=config,
         )
