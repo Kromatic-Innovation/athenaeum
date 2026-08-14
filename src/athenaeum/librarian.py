@@ -2737,13 +2737,16 @@ def _arm_run_deadline(ctx: RunContext) -> None:
 
     # Issue athenaeum#530 (H2): surface truncation/deferral to callers (e.g. ingest())
     # so a max_files-truncated OR budget/deadline-deferred run — which still
-    # exits 0 — is not mistaken for a fully-drained one. ``ingest`` gates its
-    # stamp on these: a run that left files uncompiled must never stamp them as
-    # seen, or the next ingest takes the false no-op fast path and those notes
-    # are silently never compiled and never recallable. Defaults are seeded here
-    # (before the merge-only / cluster-only early returns, which cannot truncate)
-    # and overwritten with the true figures by ``ctx.export_run_stats()`` once
-    # the entity phase has run.
+    # exits 0 — is not mistaken for a fully-drained one. A run that left files
+    # uncompiled must never stamp them as seen, or the next ingest takes the
+    # false no-op fast path and those notes are silently never compiled and
+    # never recallable. Issue athenaeum#895 moved that invariant from a whole-run gate
+    # to a per-file stamp set, so ``ingest`` now reports these counts rather than
+    # gating the whole stamp on them; the figures stay exported for the run
+    # summary and for any consumer that needs the truncation shape. Defaults are
+    # seeded here (before the merge-only / cluster-only early returns, which
+    # cannot truncate) and overwritten with the true figures by
+    # ``ctx.export_run_stats()`` once the entity phase has run.
     if ctx.out_run_stats is not None:
         ctx.out_run_stats.setdefault("beyond_window", 0)
         ctx.out_run_stats.setdefault("deferred_refs", [])
@@ -4783,6 +4786,14 @@ def ingest(
     forwarded verbatim, e.g. ``install_signal_handlers=True`` from the CLI).
     On a nonzero compile the stamp manifest is left UNTOUCHED so the next run
     retries; a ``dry_run`` never stamps.
+
+    Issue athenaeum#895: the stamp advances PER FILE. A clean run records a content
+    hash for exactly the raw files it drained from the intake queue (compiled or
+    retired), merged into the existing stamp; a file that was discovered but not
+    compiled — beyond the ``max_files`` window, deferred, failed, stuck — is
+    never stamped and stays discoverable for the next run. A truncated run
+    therefore makes real, durable progress instead of leaving the stamp frozen
+    behind a steady backlog.
     """
     start = time.monotonic()
     if config is None:
@@ -4900,37 +4911,68 @@ def ingest(
     )
 
     after_all = _raw_hash_snapshot(raw_root, knowledge_root)
-    compiled = len(set(before_all) - set(after_all))
-
-    # Stamp the pre-compile snapshot ONLY on a clean, COMPLETE, non-dry run:
-    # everything we just processed is now "seen". Consumed (deleted) files stay
-    # recorded — harmless, and it keeps a re-run with no new intake a fast
-    # no-op. Files that appeared mid-run are absent here, so they correctly
-    # surface as ``added`` next run.
+    # Issue athenaeum#895: the per-file drained set. A raw file that was present before
+    # the compile and is gone after it is one this run actually PROCESSED — the
+    # entity loop unlinks each file it compiles, and the move-then-retire pass
+    # (athenaeum#261) ``git rm``s each atom it retires. Everything still on disk was
+    # NOT processed: beyond the ``max_files`` window, deferred by a
+    # budget/deadline trip, failed, or skipped as stuck (athenaeum#663).
     #
-    # Issue athenaeum#530 (H2): a ``max_files``-truncated run still exits 0, but the
-    # pre-compile snapshot (``before_all``) includes the ``beyond_window``
-    # remainder that was NEVER compiled. Stamping it would make the next ingest
-    # take the no-op fast path and silently drop those notes forever. So gate
-    # the stamp on a fully-drained run: no beyond-window remainder AND no
-    # in-window deferrals. A failed compile (nonzero) already leaves the stamp
-    # untouched; this extends the same "leave it for retry" guarantee to the
-    # degraded exit-0 case the authors guarded the adjacent path against but
-    # missed here.
+    # "Left the intake queue" is deliberately the signal, rather than any
+    # phase-level report of what a run believed it compiled: it is the observable
+    # ground truth, and it can only ever UNDER-approximate the processed set. A
+    # file this misses stays on disk, stays discoverable, and is retried next run
+    # — the athenaeum#530 invariant (never stamp a file that was not compiled) can
+    # therefore not be violated by a mis-report upstream.
+    processed = set(before_all) - set(after_all)
+    compiled = len(processed)
+
+    # Stamp per file, on a clean non-dry run: every file this run drained is now
+    # "seen", merged into the existing stamp so previously-consumed files stay
+    # recorded (harmless, and it keeps a re-run with no new intake a fast no-op).
+    # Files that appeared mid-run are absent from ``before_all``, so they
+    # correctly surface as ``added`` next run.
+    #
+    # Issue athenaeum#530 (H2) established the invariant this enforces: a
+    # ``max_files``-truncated run still exits 0, but ``before_all`` includes the
+    # ``beyond_window`` remainder that was NEVER compiled — stamping it would
+    # make the next ingest take the no-op fast path and silently drop those notes
+    # forever. athenaeum#530 expressed that per RUN (stamp nothing unless the whole
+    # backlog drained), which never advances the stamp while a steady backlog
+    # sits above ``max_files``: every run rediscovers the same head and the
+    # SessionEnd change-gate re-triggers on work that was already compiled.
+    # athenaeum#895 keeps the invariant and moves it to where it belongs — per FILE.
+    # A truncated run stamps exactly its compiled subset; the remainder stays
+    # unstamped and is picked up next run. A failed compile (nonzero) still
+    # leaves the stamp entirely untouched.
     beyond_window = int(run_stats.get("beyond_window", 0) or 0)
     run_deferred = run_stats.get("deferred_refs") or []
-    fully_drained = beyond_window == 0 and not run_deferred
-    if exit_code == 0 and not dry_run and fully_drained:
-        _write_ingest_manifest(manifest_path, before_all, stats=before_all_stats)
-    elif exit_code == 0 and not dry_run and not fully_drained:
-        log.info(
-            "ingest: run left %d file(s) uncompiled (beyond_window=%d, "
-            "deferred=%d) — leaving the stamp manifest untouched so the next "
-            "ingest retries the backlog instead of a false no-op (issue athenaeum#530)",
-            beyond_window + len(run_deferred),
-            beyond_window,
-            len(run_deferred),
-        )
+    remaining = len(before_all) - len(processed)
+    if exit_code == 0 and not dry_run:
+        stamp = dict(stored or {})
+        stamp_stats = dict(stored_stats)
+        for rel in processed:
+            stamp[rel] = before_all[rel]
+            if rel in before_all_stats:
+                stamp_stats[rel] = before_all_stats[rel]
+        # A stat row without a matching hash row is inert for the athenaeum#370
+        # pre-filter (which requires both); drop it rather than persist it.
+        stamp_stats = {k: v for k, v in stamp_stats.items() if k in stamp}
+        # Nothing drained and a stamp already exists → the stamp is unchanged;
+        # skip the rewrite. With no stamp at all, write even an empty one so the
+        # "a prior successful ingest exists" signal is recorded exactly as before.
+        if processed or stored is None:
+            _write_ingest_manifest(manifest_path, stamp, stats=stamp_stats)
+        if remaining:
+            log.info(
+                "ingest: stamped %d compiled file(s); %d file(s) left uncompiled "
+                "(beyond_window=%d, deferred=%d) and stay unstamped so the next "
+                "ingest picks up the remainder (issue athenaeum#895)",
+                len(processed),
+                remaining,
+                beyond_window,
+                len(run_deferred),
+            )
 
     return IngestResult(
         mode=mode,

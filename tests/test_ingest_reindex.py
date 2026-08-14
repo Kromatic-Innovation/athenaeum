@@ -227,8 +227,14 @@ class TestIngestEngineTier0:
         # part of the intake was compiled. The OLD code stamped the pre-compile
         # snapshot of ALL discovered files, so the next ingest took the false
         # no-op fast path and the beyond-window remainder was silently never
-        # compiled. The stamp must be withheld until the backlog is fully
-        # drained — and the very next ingest must then drain it.
+        # compiled. The uncompiled remainder must NOT be stamped — and the very
+        # next ingest must then drain it.
+        #
+        # Issue athenaeum#895 keeps that invariant and narrows it from "stamp nothing
+        # unless the whole backlog drained" to "stamp exactly what drained": the
+        # manifest now exists after a truncated run, carrying the compiled file
+        # ONLY. The uncompiled file being absent from it is the athenaeum#530
+        # guarantee, stated per file.
         from athenaeum.librarian import ingest
 
         root = _seed_knowledge_root(tmp_path)
@@ -248,12 +254,18 @@ class TestIngestEngineTier0:
         # Exactly one file was consumed; one remains uncompiled in the intake.
         remaining = list((root / "raw" / "sessions").glob("2024*.md"))
         assert len(remaining) == 1
-        # H2: the truncated exit-0 run must NOT stamp — otherwise the next
-        # ingest false-no-ops and the remaining note is lost forever.
-        assert not (cache / "ingest-manifest.json").exists()
+        # H2: the file the run did NOT compile must never be stamped — otherwise
+        # the next ingest false-no-ops and the remaining note is lost forever.
+        stamped = json.loads(
+            (cache / "ingest-manifest.json").read_text(encoding="utf-8")
+        )["hashes"]
+        left_rel = remaining[0].relative_to(root).as_posix()
+        assert left_rel not in stamped
+        # ...and the file it DID compile is stamped (athenaeum#895: real progress).
+        assert len(stamped) == 1
 
-        # The next ingest must actually pick up the remainder (no false no-op),
-        # compile it, and only THEN stamp the now fully-drained intake.
+        # The next ingest must actually pick up the remainder (no false no-op)
+        # and compile it, leaving the intake drained and fully stamped.
         second = ingest(
             raw_root=root / "raw",
             wiki_root=root / "wiki",
@@ -309,6 +321,227 @@ class TestIngestEngineTier0:
         assert owner.noop is False
         assert owner.new_or_changed == 1
         assert owner.session == "sess-XYZ"
+
+
+# ---------------------------------------------------------------------------
+# per-file ingest stamping (issue athenaeum#895)
+# ---------------------------------------------------------------------------
+
+
+def _stamp(cache: Path) -> dict[str, str]:
+    """The stamp manifest's ``relpath -> hash`` map ({} when never written)."""
+    path = cache / "ingest-manifest.json"
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))["hashes"]
+
+
+def _pending(root: Path) -> set[str]:
+    """Raw intake still on disk, as knowledge-root-relative posix paths."""
+    return {
+        p.relative_to(root).as_posix()
+        for p in (root / "raw" / "sessions").glob("2024*.md")
+    }
+
+
+class TestIngestPerFileStamping:
+    """Issue athenaeum#895: the stamp advances PER FILE, not all-or-nothing.
+
+    athenaeum#530 withheld the stamp entirely unless a run drained the whole backlog.
+    Under a steady backlog above ``max_files`` that condition never holds, so
+    the stamp froze and every SessionEnd rediscovered the same work. These
+    tests pin the replacement: a run stamps exactly the files it drained, the
+    remainder stays unstamped and discoverable, and successive runs make real
+    progress — while keeping athenaeum#530's invariant that a file which was not
+    compiled is never stamped.
+    """
+
+    def test_truncated_run_stamps_only_the_files_it_compiled(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        from athenaeum.librarian import ingest
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aaaaaaaa")
+        _write_tier0_raw(root, "p-0002", "Bob", "20240410T130000Z", "bbbbbbbb")
+        _write_tier0_raw(root, "p-0003", "Cleo", "20240410T140000Z", "cccccccc")
+        discovered = _pending(root)
+        cache = tmp_path / "cache"
+
+        result = ingest(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            incremental=True,
+            cache_dir=cache,
+            max_files=2,  # two compiled, one left beyond the window
+        )
+
+        assert result.exit_code == 0
+        assert result.compiled == 2
+        stamped, left = set(_stamp(cache)), _pending(root)
+        # The stamp holds exactly the compiled subset...
+        assert len(stamped) == 2
+        assert stamped == discovered - left
+        # ...and nothing that was left uncompiled (the athenaeum#530 invariant, per file).
+        assert not (stamped & left)
+        # Nothing discovered was dropped: every file is stamped or still pending.
+        assert stamped | left == discovered
+
+    def test_next_run_skips_the_stamped_subset_and_takes_the_remainder(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        from athenaeum.librarian import ingest
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aaaaaaaa")
+        _write_tier0_raw(root, "p-0002", "Bob", "20240410T130000Z", "bbbbbbbb")
+        cache = tmp_path / "cache"
+        kwargs = {
+            "raw_root": root / "raw",
+            "wiki_root": root / "wiki",
+            "knowledge_root": root,
+            "incremental": True,
+            "cache_dir": cache,
+        }
+
+        first = ingest(**kwargs, max_files=1)
+        assert first.compiled == 1
+        first_stamped = set(_stamp(cache))
+        remainder = _pending(root)
+        assert len(remainder) == 1
+
+        second = ingest(**kwargs)
+        # The remainder is seen as new work (no false no-op) and is compiled...
+        assert second.noop is False
+        assert second.new_or_changed == 1
+        assert second.compiled == 1
+        assert not _pending(root)
+        # ...and the stamp GREW rather than being rewritten from scratch: the
+        # first run's file is still recorded, so it is not recompiled again.
+        assert set(_stamp(cache)) == first_stamped | remainder
+
+        third = ingest(**kwargs)
+        assert third.noop is True
+        assert third.compiled == 0
+
+    def test_successive_truncated_runs_drain_a_backlog(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """The athenaeum#895 regression: under a backlog the stamp never advanced.
+
+        With ``max_files`` below the pending count on every run, the athenaeum#530 gate
+        was never satisfied, so each run rediscovered the same head forever.
+        """
+        from athenaeum.librarian import ingest
+
+        root = _seed_knowledge_root(tmp_path)
+        for n, (uid, name, uuid8) in enumerate(
+            [
+                ("p-0001", "Alice", "aaaaaaaa"),
+                ("p-0002", "Bob", "bbbbbbbb"),
+                ("p-0003", "Cleo", "cccccccc"),
+            ]
+        ):
+            _write_tier0_raw(root, uid, name, f"2024041{n}T120000Z", uuid8)
+        discovered = _pending(root)
+        cache = tmp_path / "cache"
+
+        for expected_stamped in (1, 2, 3):
+            result = ingest(
+                raw_root=root / "raw",
+                wiki_root=root / "wiki",
+                knowledge_root=root,
+                incremental=True,
+                cache_dir=cache,
+                max_files=1,
+            )
+            assert result.exit_code == 0
+            assert result.compiled == 1
+            stamped, left = set(_stamp(cache)), _pending(root)
+            # Monotonic progress, and the athenaeum#530 invariant holds every round.
+            assert len(stamped) == expected_stamped
+            assert not (stamped & left)
+            assert stamped | left == discovered
+
+        assert not _pending(root)
+
+    def test_discovered_but_uncompiled_file_is_never_stamped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A clean exit-0 run that consumed nothing stamps nothing (athenaeum#530).
+
+        The compile is stubbed to succeed without touching the intake — the
+        shape of a run whose files were all deferred, failed, or skipped as
+        stuck (athenaeum#663). The file must stay discoverable for the next run.
+        """
+        import athenaeum.librarian as lib
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aaaaaaaa")
+        cache = tmp_path / "cache"
+        monkeypatch.setattr(lib, "run", lambda *a, **k: 0)
+
+        result = lib.ingest(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            incremental=True,
+            cache_dir=cache,
+        )
+        assert result.exit_code == 0
+        assert result.compiled == 0
+        assert _stamp(cache) == {}
+        # Still on disk → still discoverable, and still new work next run.
+        assert len(_pending(root)) == 1
+
+        again = lib.ingest(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            incremental=True,
+            cache_dir=cache,
+        )
+        assert again.noop is False
+        assert again.new_or_changed == 1
+
+    def test_v1_manifest_from_the_old_code_still_loads_and_is_extended(
+        self, tmp_path: Path, mock_anthropic: MagicMock
+    ) -> None:
+        """Read back-compat: a v1 stamp (no ``stats``) loads and is merged into."""
+        from athenaeum.librarian import ingest
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aaaaaaaa")
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        # A stamp in the pre-athenaeum#370 shape, naming a file consumed long ago.
+        (cache / "ingest-manifest.json").write_text(
+            json.dumps(
+                {"version": 1, "hashes": {"raw/sessions/20230101T000000Z-old.md": "d0"}}
+            )
+        )
+
+        result = ingest(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            incremental=True,
+            cache_dir=cache,
+        )
+
+        assert result.exit_code == 0
+        assert result.compiled == 1
+        stamped = _stamp(cache)
+        # The historical entry survives; the newly compiled file is added.
+        assert stamped["raw/sessions/20230101T000000Z-old.md"] == "d0"
+        assert len(stamped) == 2
+        payload = json.loads(
+            (cache / "ingest-manifest.json").read_text(encoding="utf-8")
+        )
+        # Upgraded to v2 with stats, and no stat row for a name with no hash row.
+        assert payload["version"] == 2
+        assert set(payload["stats"]) <= set(payload["hashes"])
 
 
 # ---------------------------------------------------------------------------
