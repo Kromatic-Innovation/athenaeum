@@ -42,6 +42,11 @@ def test_entity_budget_tripped_emitted_after_a_share_yield(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
     monkeypatch.delenv("ATHENAEUM_ENTITY_RUNTIME_SHARE", raising=False)
+    # Issue athenaeum#898: isolate this entity-share test from the new per-file
+    # wall-clock bound — the fake clock jump below (simulating time passing
+    # between iterations) lands INSIDE file 1's process_one call from the new
+    # bound's perspective. See the identical note in test_librarian_deadline.py.
+    monkeypatch.setenv("ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS", "999999")
 
     clock = _FakeClock(start=0.0)
     monkeypatch.setattr("athenaeum.librarian.time.monotonic", clock.monotonic)
