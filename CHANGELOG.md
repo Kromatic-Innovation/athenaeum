@@ -382,6 +382,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The handle-shaped `recall` path silently dropped `usage_classes`,
+  returning every usage class instead of the requested subset (athenaeum#907
+  follow-up; found by Sentry Seer on athenaeum#919).** Both `recall` entry
+  points accept `usage_classes` to restrict which excluded contact values
+  come back, and the similarity-search path already threaded it to
+  `pii.assemble_excluded_read` — but `identity_resolution.resolve_handle_query`
+  never received it, so a handle-shaped query (a bare address, or a registry
+  handle framed as a question) with `usage_classes` set returned values of
+  every class regardless. `resolve_handle_query` now takes a keyword-only
+  `usage_classes` and threads it through `_finish` /
+  `_assemble_contact_values` to `pii.assemble_excluded_read`, exactly
+  mirroring the similarity-search path; both entry points
+  (`athenaeum.mcp_server.recall_search` and `athenaeum._cmd_query.cmd_recall`)
+  pass their existing value through. The filter narrows WITHIN the
+  athenaeum#885 excluded-value join and cannot widen it, and does not perturb
+  the `with_pii=False` redaction-marker path.
 - **A graceful internal deadline stop no longer collides with a hard external
   kill on the same exit code (athenaeum#897).** `run()` returned `124` for BOTH
   its own wall-clock deadline trip AND a delivered SIGTERM/SIGINT — a
