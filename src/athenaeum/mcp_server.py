@@ -336,6 +336,35 @@ def person_read(
     )
 
 
+#: Whether the ``read_person`` MCP tool has already logged its deprecation
+#: notice in this process (issue athenaeum#887). A ONE-TIME line, not per call: an
+#: agent session may call the tool many times, and a notice repeated on every
+#: call is noise a reader learns to skip — which is how a deprecation goes
+#: unnoticed. Module-level rather than per-server so a process that builds more
+#: than one server still says it once.
+_READ_PERSON_TOOL_NOTICE_LOGGED = False
+
+#: The migration notice both retained person-shaped SURFACES emit (the MCP tool
+#: and the CLI command). Deliberately distinct from ``pii``'s
+#: ``DeprecationWarning`` text: this one addresses a tool/command caller, who
+#: cannot act on a Python function name.
+READ_PERSON_SURFACE_DEPRECATION = (
+    "`read_person` is deprecated (athenaeum#887) and will be removed in a future "
+    "release (athenaeum#888). Use `recall` with `with_pii=True` when searching, "
+    "or `read_entity` when you already have a uid — both answer for any entity "
+    "class. Behaviour and output are unchanged for now."
+)
+
+
+def _log_read_person_tool_deprecation() -> None:
+    """Emit the ``read_person`` tool's deprecation notice at most once per process."""
+    global _READ_PERSON_TOOL_NOTICE_LOGGED
+    if _READ_PERSON_TOOL_NOTICE_LOGGED:
+        return
+    _READ_PERSON_TOOL_NOTICE_LOGGED = True
+    log.warning("%s", READ_PERSON_SURFACE_DEPRECATION)
+
+
 def entity_read(
     knowledge_root: Path,
     uid: str,
@@ -1403,6 +1432,12 @@ def create_server(
     ) -> str:
         """One-call person read by uid, with explicit contact-data inclusion (issue athenaeum#864).
 
+        DEPRECATED (issue athenaeum#887) — use ``read_entity``, or ``recall`` with
+        ``with_pii=True``; both answer for any entity class. This tool keeps
+        working identically and is not removed here (removal is
+        athenaeum#888); it logs a one-time server-side notice per process, and
+        its JSON output is untouched.
+
         The person-shaped form of ``read_entity``, which it delegates to with
         the class fixed to ``person`` (issue athenaeum#886). Its behaviour, arguments
         and output are unchanged; ``read_entity`` and ``recall(with_pii=True)``
@@ -1447,6 +1482,11 @@ def create_server(
             fail-closed refusal / not-found message, each JSON-encoded the
             same way.
         """
+        # Issue athenaeum#887: a ONE-TIME log line, never anything in the returned
+        # payload — the return value is a JSON string a caller parses, and a
+        # notice inside it would be a breaking output change dressed up as a
+        # deprecation.
+        _log_read_person_tool_deprecation()
         return person_read(
             wiki_root.parent,
             uid,

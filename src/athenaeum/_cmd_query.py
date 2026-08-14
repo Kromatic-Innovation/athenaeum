@@ -144,15 +144,15 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
     # person command — one-call person read by uid (issue athenaeum#864). Distinct
     # from `people` above: `people` filters/lists many type:person wikis by
     # frontmatter; `person` reads exactly ONE person's page (+ optional
-    # contact data) by uid, and is the shell-accessible surface for
-    # `athenaeum.pii.read_person` — the only sanctioned way to read a
-    # person's contact data (`docs/one-way-in-one-way-out.md` §3).
+    # contact data) by uid. DEPRECATED as of athenaeum#887 in favour of the
+    # class-generic `entity` command below and `recall --with-pii`; retained,
+    # unchanged, until athenaeum#888 removes it.
     person_parser = subparsers.add_parser(
         "person",
-        help="One-call read of a SINGLE person's page by uid, with an explicit "
+        help="DEPRECATED (athenaeum#887; use `entity` or `recall --with-pii`). "
+        "One-call read of a SINGLE person's page by uid, with an explicit "
         "--include-contact flag (default off). Not `people` (which filters/lists "
-        "many person wikis by frontmatter) — this reads exactly one person, "
-        "and is the only sanctioned way to read their contact data.",
+        "many person wikis by frontmatter) — this reads exactly one person.",
     )
     person_parser.add_argument(
         "--uid",
@@ -737,9 +737,16 @@ def cmd_people(args: argparse.Namespace) -> int:
 
 
 def cmd_person(args: argparse.Namespace) -> int:
-    """One-call person read by uid — shell surface for ``pii.read_person`` (issue athenaeum#864).
+    """One-call person read by uid — the person-shaped read surface (issue athenaeum#864).
 
-    Prints a single JSON object to stdout: ``pii.PersonRead.to_dict()``.
+    DEPRECATED (issue athenaeum#887) — use ``athenaeum query entity``, or
+    ``athenaeum recall --with-pii``; both answer for any entity class. This
+    command keeps working identically and is not removed here (removal is
+    athenaeum#888). It prints a one-line migration notice to **stderr**, never
+    to stdout: stdout is a JSON object a script parses, and a notice there
+    would be a breaking output change dressed up as a deprecation.
+
+    Prints a single JSON object to stdout: ``pii.EntityRead.to_dict()``.
     With ``--include-contact`` unset (default), withheld contact fields carry
     a redaction marker (field name + that a value exists) instead of the
     value; a person with no contact record at all prints the page with no
@@ -759,6 +766,14 @@ def cmd_person(args: argparse.Namespace) -> int:
     byte-identical stdout is asserted by test, including a
     ``--usage-class``-filtered case.
     """
+    from athenaeum.mcp_server import READ_PERSON_SURFACE_DEPRECATION
+
+    print(
+        f"[deprecated] {READ_PERSON_SURFACE_DEPRECATION} "
+        "(shell: `athenaeum query entity --uid ... --class person "
+        "[--include-excluded]`, or `athenaeum recall --with-pii`)",
+        file=sys.stderr,
+    )
     return _read_entity_to_stdout(
         args.path,
         args.uid,

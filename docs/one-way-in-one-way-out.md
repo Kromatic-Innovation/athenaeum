@@ -126,9 +126,13 @@ item 4 of §5's checklist taken up rather than worked around.
 
 `pii.read_person` / `read_people` (athenaeum#864, athenaeum#877) — and the
 `read_person` MCP tool and `athenaeum query person --uid ... [--include-contact]`
-CLI command — keep working identically, as person-fixed wrappers over the
-generic read. They are retained, not deprecated by this section; `apollo-enrich`'s
-weekly job calls `read_people` today.
+CLI command — are **deprecated wrappers** (athenaeum#887), kept for backward
+compatibility and not the sanctioned entry point any more. They keep working
+identically: the Python functions emit a `DeprecationWarning`, the MCP tool logs
+a one-time notice, and the CLI command prints one to stderr, but no behaviour or
+output changed. `apollo-enrich`'s weekly job calls `read_people` today, which is
+precisely why they are deprecated rather than deleted — removal is athenaeum#888,
+gated on a real deprecation window and on known consumers having migrated.
 
 ## 4. The invariant is not authorization
 
@@ -182,10 +186,13 @@ If you are writing a client against athenaeum:
 
    The person-shaped entry points — the `read_person` MCP tool, `athenaeum
    query person --uid ... [--include-contact]`, and `pii.read_person` /
-   `read_people` (athenaeum#864, athenaeum#877) — are **retained wrappers** over
-   that same read. They keep working identically and are not going away
-   without a separate decision; new integrations should prefer the generic
-   path, which answers for every entity class rather than one.
+   `read_people` (athenaeum#864, athenaeum#877) — are **deprecated wrappers**
+   over that same read (athenaeum#887). They keep working identically, and each
+   surface now says so: a `DeprecationWarning` from the Python functions, a
+   one-time log line from the MCP tool, a stderr notice from the CLI command.
+   **A new integration should use the generic path**, which answers for every
+   entity class rather than one; an existing one has a deprecation window, not
+   a broken call (removal is athenaeum#888).
 
    Whichever you use: do not resolve an excluded surface yourself, and do not
    treat a missing value as "no value" unless the response says so — the

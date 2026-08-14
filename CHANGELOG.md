@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`pii.read_person` / `read_people` — deprecated in favour of
+  `recall(with_pii=True)` and the generic entity read (athenaeum#887).** Now
+  that athenaeum#885 and athenaeum#886 have shipped the general replacement, the
+  person-shaped entry points are marked deprecated: both emit a
+  `DeprecationWarning` (`stacklevel=2`, so it points at the CALLER's line —
+  otherwise it names `pii.py` and tells a consumer nothing about which of
+  their call sites to migrate) naming the replacement and the removal issue.
+  The `read_person` MCP tool logs a ONE-TIME notice per process, and
+  `athenaeum query person` prints one to **stderr** — never to stdout, which
+  is a JSON object a script parses and where a notice would be a breaking
+  output change dressed up as a deprecation. `docs/one-way-in-one-way-out.md`
+  §3/§5 and `docs/recall-architecture.md` now document them as deprecated
+  wrappers rather than the sanctioned entry point.
+
+  **This changes zero behaviour** — both functions keep working identically,
+  including `read_people`'s laziness and its positional calling convention,
+  and every existing result is unchanged (asserted against the generic path
+  rather than assumed). One implementation detail was required to make the
+  warning honest: `read_people` is no longer a generator function. A
+  `warnings.warn` inside a generator body does not run until the generator is
+  first advanced, so a caller that built the iterator and passed it elsewhere —
+  or never consumed it — would have got the warning at a confusing point or
+  not at all. It now warns at CALL time and RETURNS `read_entities`' generator,
+  which preserves laziness exactly: nothing is read, not even the indexes,
+  until the first pair is pulled.
+
+  Actual removal is a separate, later issue (athenaeum#888), gated on a real
+  deprecation window and on known consumers having migrated — **not** on this
+  one closing. `read_person`/`read_people` are documented public API that this
+  repo's own history proves is depended on (apollo-enrich#37/#49 followed the
+  documented path, and apollo-enrich's weekly job calls `read_people` today);
+  deleting a documented public function the same day its replacement lands is
+  the identical mistake in reverse — a caller finds the path broken with no
+  warning, exactly the silent failure `docs/one-way-in-one-way-out.md` exists
+  to prevent on the read side. Per the version-bump policy this issue is a
+  **patch** (a warning, no behaviour change); the removal will be a breaking
+  change and must bump **minor** at minimum, with a `### Removed` entry.
+
 ### Added
 
 - **The generic excluded read reaches MCP and the shell (athenaeum#886).** After
