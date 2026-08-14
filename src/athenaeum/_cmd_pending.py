@@ -87,6 +87,17 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
 
     See :func:`athenaeum.answers.ingest_answers` for the semantics.
 
+    Issue athenaeum#908: BEFORE the legacy question-answer pass, this now also
+    applies every pending decision-answer file under ``raw/answers/`` — the
+    uniform intake path ``resolve_question`` / ``resolve_merge`` /
+    ``review_audit_item`` defer to (see
+    :func:`athenaeum.decision_answers.apply_decision_answers`). That step is
+    purely mechanical (no LLM client, ever); for ``decision_type: question``
+    it only flips the block's checkbox, so the LEGACY ``ingest_answers`` pass
+    immediately below it — unchanged — is what actually completes the
+    write-back/archival for a question answered this way, in the SAME
+    run-locked tick.
+
     Builds the LLM client via the provider seam (``build_llm_client``, athenaeum#330)
     and passes it to ``ingest_answers`` so free-text answers can use the
     LLM-backed proposer (issue athenaeum#210): a ``claude-cli`` subscription client, or
@@ -96,6 +107,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     """
     from athenaeum.answers import ingest_answers
     from athenaeum.config import load_config
+    from athenaeum.decision_answers import apply_decision_answers
     from athenaeum.provider import ProviderConfigError, build_llm_client
 
     target = args.path.expanduser().resolve()
@@ -144,6 +156,12 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     if isinstance(lock, int):
         return lock
     try:
+        # Issue athenaeum#908: apply pending decision-answer files FIRST, in the same
+        # locked tick — deterministic, no LLM call. For a `question` answer
+        # this only flips the checkbox; the ingest_answers() pass right
+        # below completes the write-back/archival for it, unchanged.
+        wiki_root = target / "wiki"
+        decision_report = apply_decision_answers(wiki_root, raw_root, config=cfg)
         count = ingest_answers(
             pending_path, raw_root, client=anthropic_client, config=cfg
         )
@@ -156,6 +174,11 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     finally:
         lock.release()
 
+    if decision_report.applied or decision_report.skipped:
+        print(
+            f"Applied {decision_report.applied} decision answer(s), "
+            f"{decision_report.skipped} skipped (see log)."
+        )
     print(f"Ingested {count} answered question(s).")
     return 0
 

@@ -1285,14 +1285,18 @@ def create_server(
 
     @mcp.tool()
     def resolve_question(id: str, answer: str) -> dict:
-        """Flip a pending question to answered and write the answer body.
+        """Record an answer to a pending question (issue athenaeum#908: deferred apply).
 
-        Locates the block by id, flips ``- [ ]`` -> ``- [x]``, and inserts
-        the answer text beneath the checkbox. This is a write to the
-        primary file only — archival to ``_pending_questions_archive.md``
-        and conversion to a raw intake file both happen on the next
-        ``athenaeum ingest-answers`` run (keeping this tool's write path
-        small and auditable).
+        Validates ``id`` against the CURRENT state of
+        ``_pending_questions.md`` (unknown / already-answered id fails
+        immediately, nothing is written), then writes the answer as a
+        decision-answer file under ``raw/answers/`` — the same conformant
+        raw-intake record :mod:`athenaeum.decision_answers` uses for merges
+        and audit reviews. The actual checkbox flip, source write-back, and
+        archival happen deterministically (no LLM call) on the next
+        ``athenaeum ingest-answers`` tick, exactly as the pre-existing
+        question-answer flow already deferred archival — this just moves
+        the mutation itself to that same tick.
 
         Args:
             id: The id returned by ``list_pending_questions``.
@@ -1303,16 +1307,22 @@ def create_server(
 
             - ``ok`` (bool)
             - ``error_code`` (str | None): one of ``id_not_found``,
-              ``already_answered``, ``file_missing``, ``invalid_answer``
-              on failure; ``None`` on success.
+              ``already_answered``, ``file_missing`` on failure; ``None``
+              on success.
             - ``message`` (str): human-readable status.
-            - ``resolved_block`` (str | None): the rewritten block on
-              success; ``None`` on failure.
+            - ``deferred`` (bool): ``True`` on success — the answer is
+              recorded but NOT YET applied; state changes on the next
+              ``ingest-answers`` tick.
+            - ``answer_file`` (str | None): path to the written
+              decision-answer file on success; ``None`` on failure.
+            - ``decision_id`` (str | None): echoes ``id`` on success.
+            - ``resolved_block`` (None): kept for shape back-compat; no
+              longer populated since the block isn't rewritten here.
 
             For backward compatibility the dict also includes legacy
             aliases ``block`` (= ``resolved_block``) and ``error``
             (= ``message`` on failure). New callers should prefer
-            ``error_code`` + ``message`` + ``resolved_block``.
+            ``error_code`` + ``message`` + ``deferred``.
         """
         # Issue athenaeum#538: adjudicating the human-decision queue is owner-only.
         if caller_audience is not None:
@@ -1320,23 +1330,41 @@ def create_server(
         if is_disabled("capture", cache_dir=cache_dir):
             return _kill_switch_result()
 
-        from athenaeum.answers import resolve_by_id
+        from athenaeum.decision_answers import preflight_question, write_decision_answer
 
-        result = resolve_by_id(
-            pending_path=wiki_root / "_pending_questions.md",
-            question_id=id,
-            answer=answer,
+        pending_path = wiki_root / "_pending_questions.md"
+        ok, error_code, message = preflight_question(pending_path, id)
+        if not ok:
+            return {
+                "ok": False,
+                "error_code": error_code,
+                "message": message,
+                "deferred": False,
+                "answer_file": None,
+                "decision_id": None,
+                "resolved_block": None,
+                # legacy aliases:
+                "block": None,
+                "error": message,
+            }
+
+        answer_path = write_decision_answer(
+            raw_root, decision_id=id, decision_type="question", verdict=answer
         )
-        # Surface the structured keys explicitly so consumers see them at
-        # the top of the dict even when legacy aliases are also present.
+        message = (
+            "answer recorded; applied on the next `athenaeum ingest-answers` tick"
+        )
         return {
-            "ok": result["ok"],
-            "error_code": result.get("error_code"),
-            "message": result.get("message", ""),
-            "resolved_block": result.get("resolved_block"),
+            "ok": True,
+            "error_code": None,
+            "message": message,
+            "deferred": True,
+            "answer_file": str(answer_path),
+            "decision_id": id,
+            "resolved_block": None,
             # legacy aliases:
-            "block": result.get("block"),
-            "error": result.get("error"),
+            "block": None,
+            "error": None,
         }
 
     @mcp.tool()
@@ -1649,7 +1677,23 @@ def create_server(
 
     @mcp.tool()
     def review_audit_item(id: str, human_verdict: str, note: str = "") -> dict:
-        """Record a human's confirm/overturn of a sampled audit item (athenaeum#438).
+        """Record a human's confirm/overturn of a sampled audit item (athenaeum#438,
+        deferred apply per athenaeum#908).
+
+        Validates ``id`` against the CURRENT calibration ledger (unknown /
+        already-reviewed id fails immediately, nothing is written), then
+        writes the review as a decision-answer file under ``raw/answers/``
+        — the same conformant raw-intake record used for question answers
+        and merge decisions. The actual ledger append (via
+        :func:`athenaeum.calibration.record_audit_review`) happens
+        deterministically (no LLM call) on the next ``athenaeum
+        ingest-answers`` tick.
+
+        NOTE: ``athenaeum calibration review`` (the CLI twin of this tool)
+        still calls ``record_audit_review`` directly and immediately —
+        athenaeum#908's AC4 names only the three MCP mutators, so this CLI path
+        was deliberately left un-deferred. The end state is identical,
+        just immediate rather than deferred.
 
         Args:
             id: The audit item id (from ``list_pending_decisions``, ``type:
@@ -1660,8 +1704,14 @@ def create_server(
                 no merge is executed or unwound).
             note: Optional free-text note on the review.
 
-        Returns the review record (including ``overturned``). Errors if the id
-        is unknown or already reviewed.
+        Returns:
+            A dict with ``ok``, ``error_code`` (``id_not_found`` /
+            ``already_resolved`` on failure; ``None`` on success),
+            ``deferred`` (``True`` on success), ``answer_file``,
+            ``decision_id``, and ``error`` (legacy alias, failure only).
+            Unlike before athenaeum#908, a success response no longer includes the
+            review record itself (``overturned`` etc.) — that is only known
+            once the next ``ingest-answers`` tick applies the answer.
         """
         # Issue athenaeum#538: adjudicating the human-decision queue is owner-only.
         if caller_audience is not None:
@@ -1681,18 +1731,53 @@ def create_server(
                 "error": "tier auditing not enabled",
             }
 
-        from athenaeum.calibration import record_audit_review
+        from athenaeum.decision_answers import preflight_audit, write_decision_answer
 
-        try:
-            return record_audit_review(
-                wiki_root, audit_id=id, human_verdict=human_verdict, note=note
-            )
-        except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
+        ok, error_code, message = preflight_audit(wiki_root, id)
+        if not ok:
+            return {
+                "ok": False,
+                "error_code": error_code,
+                "message": message,
+                "deferred": False,
+                "answer_file": None,
+                "decision_id": None,
+                "error": message,
+            }
+
+        answer_path = write_decision_answer(
+            raw_root,
+            decision_id=id,
+            decision_type="audit",
+            verdict=human_verdict,
+            note=note,
+        )
+        message = (
+            "review recorded; applied on the next `athenaeum ingest-answers` tick"
+        )
+        return {
+            "ok": True,
+            "error_code": None,
+            "message": message,
+            "deferred": True,
+            "answer_file": str(answer_path),
+            "decision_id": id,
+            "error": None,
+        }
 
     @mcp.tool()
     def resolve_merge(id: str, decision: str, note: str = "") -> dict:
-        """Approve or reject a pending merge proposal (issue athenaeum#169, athenaeum#425).
+        """Record approve/reject on a pending merge (issue athenaeum#908: deferred apply).
+
+        Validates ``decision`` and ``id`` against the CURRENT state of
+        ``_pending_merges.md`` (invalid decision / unknown / already-
+        resolved id fails immediately, nothing is written), then writes the
+        decision as a decision-answer file under ``raw/answers/`` — the
+        same conformant raw-intake record used for question answers and
+        audit reviews. The actual merge apply — the write-kind dispatch,
+        checkbox flip, wikilink rewrite, source deletes, vector purge, and
+        provenance record described below — happens deterministically (no
+        LLM call) on the next ``athenaeum ingest-answers`` tick.
 
         Args:
             id: The id returned by ``list_pending_merges``.
@@ -1714,16 +1799,28 @@ def create_server(
             note: Optional human note attached to the decision block.
 
         Returns:
-            A dict with ``ok``, ``error_code``, ``message``,
-            ``resolved_block``. A successful ``fold-into-existing``
-            approve additionally includes ``folded_sources`` (deleted
-            source paths), ``aliases_added``, and ``links_rewritten``.
+            A dict with:
+
+            - ``ok`` (bool)
+            - ``error_code`` (str | None): one of ``invalid_decision``,
+              ``id_not_found``, ``already_resolved``, ``file_missing`` on
+              failure; ``None`` on success.
+            - ``deferred`` (bool): ``True`` on success — the decision is
+              recorded but NOT YET applied; the merge is written on the
+              next ``ingest-answers`` tick, so ``folded_sources`` /
+              ``aliases_added`` / ``links_rewritten`` are NOT available
+              here (they were previously returned synchronously; this is
+              the documented deferral trade-off).
+            - ``answer_file`` (str | None): path to the written
+              decision-answer file on success; ``None`` on failure.
+            - ``decision_id`` (str | None): echoes ``id`` on success.
+            - ``resolved_block`` (None): kept for shape back-compat.
 
             For backward compatibility the dict also includes legacy
             aliases ``block`` (= ``resolved_block``) and ``error``
             (= ``message`` on failure), mirroring ``resolve_question``.
             New callers should prefer ``error_code`` + ``message`` +
-            ``resolved_block``.
+            ``deferred``.
         """
         # Issue athenaeum#538: adjudicating the human-decision queue is owner-only.
         if caller_audience is not None:
@@ -1731,42 +1828,45 @@ def create_server(
         if is_disabled("capture", cache_dir=cache_dir):
             return _kill_switch_result()
 
-        from athenaeum.pending_merges import resolve_merge as _resolve_merge
+        from athenaeum.decision_answers import preflight_merge, write_decision_answer
 
-        if decision not in ("approve", "reject"):
+        merges_path = wiki_root / "_pending_merges.md"
+        ok, error_code, message = preflight_merge(merges_path, id, decision)
+        if not ok:
             return {
                 "ok": False,
-                "error_code": "invalid_decision",
-                "message": (
-                    f"decision must be 'approve' or 'reject', got {decision!r}"
-                ),
+                "error_code": error_code,
+                "message": message,
+                "deferred": False,
+                "answer_file": None,
+                "decision_id": None,
                 "resolved_block": None,
                 # legacy aliases:
                 "block": None,
-                "error": (f"decision must be 'approve' or 'reject', got {decision!r}"),
+                "error": message,
             }
-        result = _resolve_merge(
-            wiki_root / "_pending_merges.md",
-            merge_id=id,
-            decision=decision,  # type: ignore[arg-type]
+
+        answer_path = write_decision_answer(
+            raw_root,
+            decision_id=id,
+            decision_type="merge",
+            verdict=decision,
             note=note,
-            wiki_root=wiki_root,
-            cache_dir=cache_dir,
-            search_backend=search_backend,
         )
-        response = {
-            "ok": result["ok"],
-            "error_code": result.get("error_code"),
-            "message": result.get("message", ""),
-            "resolved_block": result.get("resolved_block"),
+        message = (
+            "decision recorded; applied on the next `athenaeum ingest-answers` tick"
+        )
+        return {
+            "ok": True,
+            "error_code": None,
+            "message": message,
+            "deferred": True,
+            "answer_file": str(answer_path),
+            "decision_id": id,
+            "resolved_block": None,
             # legacy aliases:
-            "block": result.get("resolved_block"),
-            "error": (result.get("message", "") if not result.get("ok") else None),
+            "block": None,
+            "error": None,
         }
-        # Issue athenaeum#425: present only on a fold-into-existing approve.
-        for key in ("folded_sources", "aliases_added", "links_rewritten"):
-            if key in result:
-                response[key] = result[key]
-        return response
 
     return mcp
