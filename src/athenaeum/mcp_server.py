@@ -265,6 +265,7 @@ def recall_search(
         caller_audience=caller_audience,
         config=config,
         with_pii=with_pii,
+        usage_classes=usage_classes,
     )
     if handle_resolution is not None:
         return json.dumps(handle_resolution.to_dict(), indent=2, sort_keys=True)
