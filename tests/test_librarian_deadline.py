@@ -179,6 +179,15 @@ def test_entity_loop_deadline_defers_and_exits_75(
     root = _seed_knowledge_root(tmp_path, n_files=3)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+    # Issue athenaeum#898: this test's fake clock jumps 5000s INSIDE the first
+    # file's process_one call (see _writing_process_one_factory's docstring
+    # — it simulates time passing between iterations, but from the new
+    # per-file wall-clock bound's perspective it looks like file 1 itself
+    # took 5000s). Raise the per-file bound out of the way so this
+    # RUN-level deadline test exercises only what it names, not the
+    # unrelated per-file bound — mirrors the existing
+    # ATHENAEUM_MAX_API_CALLS isolation above.
+    monkeypatch.setenv("ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS", "999999")
 
     clock = _FakeClock(start=0.0)
     monkeypatch.setattr("athenaeum.librarian.time.monotonic", clock.monotonic)
@@ -882,6 +891,10 @@ def test_derived_max_runtime_trips_graceful_stop_and_exits_75(
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
     monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", "1000")
     monkeypatch.delenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", raising=False)
+    # Issue athenaeum#898: isolate this run-level-deadline test from the new
+    # per-file wall-clock bound — see the identical note on
+    # test_entity_loop_deadline_defers_and_exits_75 above.
+    monkeypatch.setenv("ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS", "999999")
 
     derived = session_end_max_runtime(None)
     assert derived < 1000

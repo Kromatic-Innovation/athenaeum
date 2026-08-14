@@ -771,6 +771,10 @@ class TestSessionEndDerivedDeadlineGracefulStop:
         monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
         monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", "1000")
         monkeypatch.delenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", raising=False)
+        # Issue athenaeum#898: isolate this run-level-deadline test from the new
+        # per-file wall-clock bound — see the identical note in
+        # test_librarian_deadline.py::test_entity_loop_deadline_defers_and_exits_75.
+        monkeypatch.setenv("ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS", "999999")
 
         derived = session_end_max_runtime({})  # outer=1000, default margin -> 880
         assert derived < 1000

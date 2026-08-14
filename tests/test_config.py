@@ -98,6 +98,176 @@ class TestResolvePageFlagBytes:
         assert "page_flag_bytes" not in _DEFAULTS.get("librarian", {})
 
 
+class TestResolveRawFileMaxBytes:
+    """Issue athenaeum#898: the per-raw-file byte bound resolver."""
+
+    def test_default(self) -> None:
+        from athenaeum.config import resolve_raw_file_max_bytes
+
+        assert resolve_raw_file_max_bytes(None) == 5 * 1024 * 1024
+        assert resolve_raw_file_max_bytes({}) == 5 * 1024 * 1024
+        assert resolve_raw_file_max_bytes({"librarian": {}}) == 5 * 1024 * 1024
+
+    def test_yaml_value_wins(self) -> None:
+        from athenaeum.config import resolve_raw_file_max_bytes
+
+        assert (
+            resolve_raw_file_max_bytes({"librarian": {"raw_file_max_bytes": 1000}})
+            == 1000
+        )
+
+    def test_bool_and_bad_and_nonpositive_fall_through(self) -> None:
+        from athenaeum.config import resolve_raw_file_max_bytes
+
+        default = 5 * 1024 * 1024
+        assert (
+            resolve_raw_file_max_bytes({"librarian": {"raw_file_max_bytes": True}})
+            == default
+        )
+        assert (
+            resolve_raw_file_max_bytes({"librarian": {"raw_file_max_bytes": "abc"}})
+            == default
+        )
+        assert (
+            resolve_raw_file_max_bytes({"librarian": {"raw_file_max_bytes": 0}})
+            == default
+        )
+        assert (
+            resolve_raw_file_max_bytes({"librarian": {"raw_file_max_bytes": -5}})
+            == default
+        )
+
+    def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from athenaeum.config import resolve_raw_file_max_bytes
+
+        monkeypatch.setenv("ATHENAEUM_RAW_FILE_MAX_BYTES", "2048")
+        assert (
+            resolve_raw_file_max_bytes({"librarian": {"raw_file_max_bytes": 1000}})
+            == 2048
+        )
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "raw_file_max_bytes" not in _DEFAULTS.get("librarian", {})
+
+
+class TestResolveRawFileMaxApiCalls:
+    """Issue athenaeum#898: the per-raw-file LLM-call bound resolver."""
+
+    def test_default(self) -> None:
+        from athenaeum.config import resolve_raw_file_max_api_calls
+
+        assert resolve_raw_file_max_api_calls(None) == 8
+        assert resolve_raw_file_max_api_calls({}) == 8
+        assert resolve_raw_file_max_api_calls({"librarian": {}}) == 8
+
+    def test_yaml_value_wins(self) -> None:
+        from athenaeum.config import resolve_raw_file_max_api_calls
+
+        assert (
+            resolve_raw_file_max_api_calls(
+                {"librarian": {"raw_file_max_api_calls": 3}}
+            )
+            == 3
+        )
+
+    def test_bool_and_bad_and_nonpositive_fall_through(self) -> None:
+        from athenaeum.config import resolve_raw_file_max_api_calls
+
+        assert (
+            resolve_raw_file_max_api_calls(
+                {"librarian": {"raw_file_max_api_calls": True}}
+            )
+            == 8
+        )
+        assert (
+            resolve_raw_file_max_api_calls(
+                {"librarian": {"raw_file_max_api_calls": "abc"}}
+            )
+            == 8
+        )
+        assert (
+            resolve_raw_file_max_api_calls({"librarian": {"raw_file_max_api_calls": 0}})
+            == 8
+        )
+
+    def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from athenaeum.config import resolve_raw_file_max_api_calls
+
+        monkeypatch.setenv("ATHENAEUM_RAW_FILE_MAX_API_CALLS", "20")
+        assert (
+            resolve_raw_file_max_api_calls(
+                {"librarian": {"raw_file_max_api_calls": 3}}
+            )
+            == 20
+        )
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "raw_file_max_api_calls" not in _DEFAULTS.get("librarian", {})
+
+
+class TestResolveRawFileMaxRuntimeSeconds:
+    """Issue athenaeum#898: the per-raw-file wall-clock bound resolver."""
+
+    def test_default(self) -> None:
+        from athenaeum.config import resolve_raw_file_max_runtime_seconds
+
+        assert resolve_raw_file_max_runtime_seconds(None) == 120
+        assert resolve_raw_file_max_runtime_seconds({}) == 120
+        assert resolve_raw_file_max_runtime_seconds({"librarian": {}}) == 120
+
+    def test_yaml_value_wins(self) -> None:
+        from athenaeum.config import resolve_raw_file_max_runtime_seconds
+
+        assert (
+            resolve_raw_file_max_runtime_seconds(
+                {"librarian": {"raw_file_max_runtime_seconds": 60}}
+            )
+            == 60
+        )
+
+    def test_bool_and_bad_and_nonpositive_fall_through(self) -> None:
+        from athenaeum.config import resolve_raw_file_max_runtime_seconds
+
+        assert (
+            resolve_raw_file_max_runtime_seconds(
+                {"librarian": {"raw_file_max_runtime_seconds": True}}
+            )
+            == 120
+        )
+        assert (
+            resolve_raw_file_max_runtime_seconds(
+                {"librarian": {"raw_file_max_runtime_seconds": "abc"}}
+            )
+            == 120
+        )
+        assert (
+            resolve_raw_file_max_runtime_seconds(
+                {"librarian": {"raw_file_max_runtime_seconds": 0}}
+            )
+            == 120
+        )
+
+    def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from athenaeum.config import resolve_raw_file_max_runtime_seconds
+
+        monkeypatch.setenv("ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS", "30")
+        assert (
+            resolve_raw_file_max_runtime_seconds(
+                {"librarian": {"raw_file_max_runtime_seconds": 60}}
+            )
+            == 30
+        )
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "raw_file_max_runtime_seconds" not in _DEFAULTS.get("librarian", {})
+
+
 class TestResolveAudience:
     """Serve-time read-scope resolution, CLI > env > yaml > None (issue athenaeum#312)."""
 
