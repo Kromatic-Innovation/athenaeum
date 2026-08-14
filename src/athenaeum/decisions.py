@@ -30,8 +30,9 @@ raw wiki files.
 
 Layering: L4 domain/pipeline module. Aggregates OTHER L4 modules
 (:mod:`athenaeum.answers`, :mod:`athenaeum.calibration`,
-:mod:`athenaeum.pending_merges`, :mod:`athenaeum.retraction_cascade`) into one
-unified view and may import L3 services (``models``) freely. Factoring rule:
+:mod:`athenaeum.pending_merges`, :mod:`athenaeum.quarantine`,
+:mod:`athenaeum.retraction_cascade`) into one unified view and may import L3
+services (``models``) freely. Factoring rule:
 this module only READS and re-shapes the three underlying queues into a
 common item shape — it owns no queue's storage format or mutation path;
 resolving/writing back to a given queue stays the owning module's job (e.g.
@@ -48,6 +49,7 @@ from athenaeum.answers import PendingQuestion, parse_pending_questions
 from athenaeum.calibration import list_pending_audit
 from athenaeum.models import parse_frontmatter
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
+from athenaeum.quarantine import list_pending_quarantine
 from athenaeum.retraction_cascade import read_retraction_reviews
 
 # Keys the resolver appends to a pending-question block tail (issue athenaeum#126),
@@ -329,6 +331,47 @@ def audit_to_decision(rec: dict) -> dict:
     }
 
 
+def quarantine_to_decision(rec: dict) -> dict:
+    """Convert a quarantine ledger record to a unified decision dict (issue athenaeum#898).
+
+    A ``type: "quarantine"`` item: a raw intake file was moved out of the
+    discovery set after exceeding one of its per-file bounds (byte size, LLM
+    call count, or wall-clock — see ``rec["bound"]``) on ``rec["violations"]``
+    consecutive runs. ``confidence`` is ``None`` — there is no similarity
+    score behind a resource-bound trip, it is a hard measured fact, mirroring
+    :func:`retraction_to_decision` / :func:`audit_to_decision`. Reviewing
+    this item (:func:`athenaeum.quarantine.release_quarantine`) is the ONLY
+    way to return the file to the discovery set (AC 6) — there is no
+    automatic un-quarantine path.
+    """
+    ref = rec.get("ref", "")
+    bound = rec.get("bound", "")
+    detail = rec.get("detail", "")
+    violations = rec.get("violations", 0)
+    detail_tail = f" ({_one_line(detail)})" if detail else ""
+    summary = (
+        f'Raw intake file "{ref}" was quarantined after exceeding its {bound} '
+        f"bound on {violations} consecutive run(s){detail_tail} — release it "
+        "to return it to the discovery set, or leave it quarantined."
+    )
+    return {
+        "type": "quarantine",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "ref": ref,
+            "source": rec.get("source"),
+            "bound": bound,
+            "detail": detail,
+            "violations": violations,
+            "quarantine_path": rec.get("quarantine_path"),
+            "original_path": rec.get("original_path"),
+        },
+    }
+
+
 def list_pending_merges_rich(merges_path: Path) -> list[dict]:
     """Unresolved merges as decidable dicts (title + gist + question)."""
     return [
@@ -364,11 +407,12 @@ def list_pending_decisions(
     the same fail-closed predicate ``recall`` applies. A question is withheld
     unless its ``source`` memory authorizes; a merge unless EVERY source page
     authorizes (checked over the FULL source set, before the athenaeum#431 render cap);
-    and ``retraction`` / ``audit`` calibration items — which reference pages by
-    slug/proposal-id rather than a readable source path — are withheld
-    wholesale from a restricted caller (adjudicating them is owner-only, mirror-
-    ing the write-side guard on ``review_audit_item``). Owner (``None``, the
-    default) sees everything, preserving existing behavior.
+    and ``retraction`` / ``audit`` / ``quarantine`` items — which reference pages
+    or raw-intake files by slug/proposal-id/ref rather than a readable
+    compiled-wiki source path — are withheld wholesale from a restricted
+    caller (adjudicating them is owner-only, mirroring the write-side guard
+    on ``review_audit_item``). Owner (``None``, the default) sees everything,
+    preserving existing behavior.
     """
     from athenaeum.models import all_sources_authorized, is_page_authorized_at
 
@@ -387,12 +431,17 @@ def list_pending_decisions(
         and all_sources_authorized(pm.sources, caller_audience, base=knowledge_root)
     ]
     if caller_audience is None:
-        # Retraction/audit calibration items are owner-only for a restricted
+        # Retraction/audit/quarantine items are owner-only for a restricted
         # caller (no readable source-page path to authorize against, athenaeum#538).
         decisions += [
             retraction_to_decision(rec) for rec in read_retraction_reviews(wiki_root)
         ]
         decisions += [audit_to_decision(rec) for rec in list_pending_audit(wiki_root)]
+        # Issue athenaeum#898: quarantined raw-intake files awaiting an operator's
+        # release/leave-quarantined decision (AC 4/5).
+        decisions += [
+            quarantine_to_decision(rec) for rec in list_pending_quarantine(wiki_root)
+        ]
     decisions.sort(key=lambda d: d["created_at"] or "")
     return decisions
 
