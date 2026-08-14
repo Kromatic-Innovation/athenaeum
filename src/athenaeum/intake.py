@@ -56,6 +56,7 @@ from athenaeum.config import (
     resolve_extra_intake_roots,
     resolve_non_intake_sources,
     resolve_operational_markers,
+    resolve_raw_file_max_bytes,
 )
 from athenaeum.corrections import parse_batch_envelope
 from athenaeum.ephemeral import classify_ephemeral
@@ -335,12 +336,20 @@ def discover_raw_files(
     below exactly like a `.md` file. This is deliberate: a malformed batch
     must still reach ordinary intake (reasoning classifies its raw text),
     never disappear.
+
+    Issue athenaeum#898: every returned :class:`RawFile` carries
+    ``max_content_bytes`` resolved from ``config`` via
+    :func:`athenaeum.config.resolve_raw_file_max_bytes` (env > yaml >
+    default), so a first read of ``.content`` anywhere downstream enforces
+    the per-file byte bound uniformly — this is the ONE place that resolves
+    it, not a per-call-site knob.
     """
     files: list[RawFile] = []
     if not raw_root.exists():
         return files
 
     non_intake = resolve_non_intake_sources(config)
+    raw_file_max_bytes = resolve_raw_file_max_bytes(config)
 
     for source_dir in sorted(raw_root.iterdir()):
         if not source_dir.is_dir():
@@ -382,6 +391,7 @@ def discover_raw_files(
                         source=source,
                         timestamp=m.group(1),
                         uuid8=m.group(2),
+                        max_content_bytes=raw_file_max_bytes,
                     )
                 )
             else:
@@ -391,6 +401,7 @@ def discover_raw_files(
                         source=source,
                         timestamp="",
                         uuid8="",
+                        max_content_bytes=raw_file_max_bytes,
                     )
                 )
     return files
