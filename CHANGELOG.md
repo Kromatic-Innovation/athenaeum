@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unified decision resolution as intake (athenaeum#908).** `list_pending_decisions`
+  already joins questions/merges/retractions/audits/quarantine into one
+  outbound queue; the path back IN was still per-type. New module
+  `athenaeum.decision_answers` extends the existing `raw/answers/*.md`
+  raw-intake convention with `decision_id` / `decision_type`
+  (`question`/`merge`/`audit`/`proposed-rule`, required) / `verdict` /
+  `note` fields, and applies pending decision-answer files
+  deterministically at tier 0 — no LLM call, ever — dispatching per type
+  to `answers.resolve_by_id`, `pending_merges.resolve_merge`, or
+  `calibration.record_audit_review`. Wired into the existing `athenaeum
+  ingest-answers` run-locked tick (not a new CLI command): decision
+  answers apply first, then the legacy question-answer pass completes the
+  write-back/archival for any question answered this way. Applying is
+  fail-soft and idempotent by construction — an unknown id, an
+  already-resolved id, an invalid verdict, or a schema-malformed answer
+  file is logged and skipped (never deleted, so it stays its own audit
+  trail) without corrupting state or halting the rest of the batch, and
+  since each underlying resolver already refuses to re-mutate an id it
+  has settled, no separate "applied" bookkeeping is needed for
+  idempotency. A record with no `decision_id` (the pre-existing
+  `pending_question_answer` provenance format) parses exactly as before —
+  hard back-compat requirement. `proposed-rule` is REGISTERED (the format
+  round-trips) but has no store yet: it fails closed with a structured,
+  logged `decision_type_unavailable` outcome and zero state mutation,
+  referencing athenaeum#905 (open, blocked by athenaeum#901/athenaeum#903) rather than
+  inventing that store here. See
+  [`docs/contradiction-detection.md`](docs/contradiction-detection.md#decision-answer-files-unified-decision-resolution-as-intake-athenaeum908)
+  for the full format and dispatch table.
+
+### Changed
+
+- **BEHAVIOR CHANGE (athenaeum#908): `resolve_question` / `resolve_merge` /
+  `review_audit_item` now defer their state mutation.** Each MCP tool
+  still validates the id against CURRENT state immediately (unknown id,
+  already-resolved id, or invalid verdict/decision still fails right away
+  with the same `error_code` as before, and nothing is written on that
+  path), but a successful call now writes a decision-answer file instead
+  of mutating `_pending_questions.md` / `_pending_merges.md` / the
+  calibration ledger directly. The actual state change happens on the
+  next `athenaeum ingest-answers` tick. A successful response now
+  includes `deferred: true`, `answer_file`, and `decision_id` so a caller
+  can tell the difference; `resolve_merge`'s response no longer carries
+  `folded_sources` / `aliases_added` / `links_rewritten` synchronously
+  (those only exist once the next tick applies the fold). `athenaeum
+  calibration review` (the CLI twin of `review_audit_item`) is a
+  deliberate exception — it still calls `record_audit_review` directly
+  and immediately; athenaeum#908 named only the three MCP mutators.
+
+### Added
+
 - **Per-file size/cost bound + quarantine for poison raw-intake files (athenaeum#898).**
   A single pathological raw file could silently own the entire nightly entity
   budget: `RawFile.content` read a whole file with no size guard (athenaeum#843
