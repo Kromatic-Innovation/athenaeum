@@ -2241,6 +2241,49 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     return adapters
 
 
+def resolve_excluded_fields_config(
+    config: dict[str, Any] | None,
+) -> dict[str, tuple[str, ...]]:
+    """Resolve ``storage.excluded_fields`` — surface class → data-field names (athenaeum#883).
+
+    The explicit operator override at the top of
+    :func:`athenaeum.pii.resolve_excluded_fields`'s resolution order: it names
+    which frontmatter fields on an excluded record of a given SURFACE class
+    (the ``storage.mapping`` key, e.g. ``pii`` — not a wiki page's ``type:``)
+    hold data rather than the record's own bookkeeping.
+
+    Returns an EMPTY dict when unset — the code default that leaves ``pii`` on
+    its built-in :data:`athenaeum.pii.CONTACT_DATA_FIELDS` allowlist and every
+    other class on the denylist-complement, so an unconfigured base is
+    byte-identical (``resolve_storage_mapping``'s precedent: no seed in
+    ``_DEFAULTS``, so this default stays reachable).
+
+    A class mapped to an EMPTY list is honoured literally as "this class has no
+    data fields" — that is an operator saying so, which is a different
+    statement from not configuring the class at all, and collapsing the two
+    would make the override unable to express it. Non-string keys, non-list
+    values, and blank/non-string field names are dropped defensively.
+    """
+    if not isinstance(config, dict):
+        return {}
+    storage_cfg = config.get("storage") or {}
+    if not isinstance(storage_cfg, dict):
+        return {}
+    raw = storage_cfg.get("excluded_fields")
+    if not isinstance(raw, dict):
+        return {}
+    resolved: dict[str, tuple[str, ...]] = {}
+    for surface_class, fields in raw.items():
+        if not isinstance(surface_class, str) or not surface_class.strip():
+            continue
+        if not isinstance(fields, list):
+            continue
+        resolved[surface_class.strip()] = tuple(
+            name.strip() for name in fields if isinstance(name, str) and name.strip()
+        )
+    return resolved
+
+
 # ---------------------------------------------------------------------------
 # Field corrections (issue athenaeum#797, docs/field-corrections.md §10.3)
 # ---------------------------------------------------------------------------

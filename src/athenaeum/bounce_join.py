@@ -197,6 +197,19 @@ def join_identifier(
     ``pii_marked`` is :func:`athenaeum.pii.is_bounced_identifier` on whichever
     record was resolved — the ADDRESS-level predicate, so a person record
     listing several addresses answers only for the one asked about.
+
+    **Cost (issue athenaeum#883).** This deliberately keeps the UNINDEXED
+    :func:`~athenaeum.pii.resolve_contact_record` call. That issue moved the
+    callers that have a natural batch scope onto a shared
+    :class:`~athenaeum.pii.ExcludedRecordIndex` — the librarian's compile loop
+    builds one for its whole ``ctx.raw_files`` pass — but this function is a
+    single-identifier entry point with no batch above it (it has no in-tree
+    caller at all; it is the joined-chain question a consumer asks about ONE
+    address). Building an index to answer one lookup is strictly slower than
+    the scan it replaces, so the honest choice here is to keep the scan. A
+    future batch-shaped caller should build the index at ITS loop level and
+    resolve through :meth:`~athenaeum.pii.ExcludedRecordIndex.by_identifier`
+    directly, exactly as the compile loop does.
     """
     person = resolve_contact_record(contacts_root, identifier)
     if person is None:
