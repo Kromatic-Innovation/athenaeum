@@ -81,6 +81,7 @@ caller re-derives it.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -315,6 +316,7 @@ def _assemble_contact_values(
     *,
     config: dict[str, Any] | None,
     with_pii: bool,
+    usage_classes: Collection[str] | None,
 ) -> tuple[tuple[ContactValueFact, ...], tuple[RedactionMarker, ...]]:
     """``(contact_values, redactions)`` for a page that survived both Layer-C drops.
 
@@ -331,6 +333,13 @@ def _assemble_contact_values(
     in ``contact_values`` and an empty ``redactions``; ``with_pii=False``
     returns an empty ``contact_values`` and the field-level redaction markers
     — never both, and never neither when the record holds values.
+
+    *usage_classes* (athenaeum#907 follow-up) restricts which classes'
+    values ``assemble_excluded_read`` returns — it filters WITHIN the join,
+    the same way it already does for the similarity-search path
+    (:func:`athenaeum.mcp_server._excluded_block_for_hit`). It cannot widen
+    anything and never perturbs the ``with_pii=False`` redaction-marker path,
+    since that branch returns before *usage_classes* would apply.
     """
     from athenaeum import pii
     from athenaeum.storage import is_excluded
@@ -351,6 +360,7 @@ def _assemble_contact_values(
         surface_class=surface_class,
         config=config,
         include_excluded=with_pii,
+        usage_classes=usage_classes,
     )
 
     if not with_pii:
@@ -436,6 +446,7 @@ def _finish(
     caller_audience: set[str] | None,
     config: dict[str, Any] | None,
     with_pii: bool,
+    usage_classes: Collection[str] | None,
 ) -> HandleResolution:
     """Turn a resolved/unresolved walk outcome into the full response (D5/D6).
 
@@ -483,6 +494,7 @@ def _finish(
         page_type,
         config=config,
         with_pii=with_pii,
+        usage_classes=usage_classes,
     )
 
     display_name_raw = page_fm.get("name")
@@ -509,6 +521,7 @@ def resolve_handle_query(
     caller_audience: set[str] | None = None,
     config: dict[str, Any] | None = None,
     with_pii: bool = False,
+    usage_classes: Collection[str] | None = None,
 ) -> HandleResolution | None:
     """The one entry point both ``recall`` implementations call (D7).
 
@@ -533,6 +546,14 @@ def resolve_handle_query(
         with_pii: Whether to include real excluded values (with their facts)
             in the response, or their field-level redaction markers instead.
             Same flag, same semantics, as ``recall(with_pii=...)``.
+        usage_classes: Restrict resolved excluded values to these usage
+            classes (issue athenaeum#866/#907), threaded to the join exactly
+            as the similarity-search path already accepts it (see
+            :func:`athenaeum.mcp_server.recall_search`'s ``usage_classes``
+            doc). ``None`` (default) returns every value. Only meaningful with
+            *with_pii* — it filters WITHIN the excluded-value join and never
+            widens it, and never perturbs the ``with_pii=False``
+            redaction-marker path.
     """
     from athenaeum import corrections
 
@@ -550,6 +571,7 @@ def resolve_handle_query(
             caller_audience=caller_audience,
             config=config,
             with_pii=with_pii,
+            usage_classes=usage_classes,
         )
 
     stripped = _strip_interrogative_framing(query)
@@ -572,4 +594,5 @@ def resolve_handle_query(
         caller_audience=caller_audience,
         config=config,
         with_pii=with_pii,
+        usage_classes=usage_classes,
     )
