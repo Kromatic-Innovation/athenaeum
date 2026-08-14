@@ -162,6 +162,49 @@ The corresponding parked policy questions: egress refusal and conditional
 redaction on the outbound-LLM path (athenaeum#428), and who may set the
 contact-inclusion flag (athenaeum#864, out of scope there for the same reason).
 
+### 4.1 The librarian is not an exception — it is the implementation
+
+The correction applier resolves contact identifiers through `athenaeum.pii`,
+never by opening the excluded surface itself (athenaeum#884). When a correction
+arrives targeting `{"type": "person", "handle": {"email": "…"}}`, the applier
+asks `pii` for the surface root, for the records listing that address, and for
+the `uid` on a record — the same seam every other reader goes through. It gets
+no privileged path because it is inside the library; being inside is not a
+licence, it is where the rule is *implemented*.
+
+That matters because the librarian is the one component that plausibly could
+justify an exception — it already writes the store, and it is the natural place
+for "just read the directory" to look harmless. If the component that owns the
+store reaches around the interface, the interface is decoration.
+
+### 4.2 May an external system read the excluded surface? (the athenaeum#858 answer)
+
+**No — and it does not need to.**
+
+The question was raised concretely: may voltaire read `excluded/` directly to
+correlate an email address to a person? The answer recorded here is the
+operator's, ratified 2026-08-13 on athenaeum#858/#859:
+
+- **It may not.** An external system reading the excluded surface directly is
+  the defect §3 describes, not a shortcut — for every reason this document
+  gives, and additionally because a second correlation path is one more thing
+  to keep in sync with the first.
+- **It does not need to.** Two things removed the need. The correction applier
+  resolves the address to a person *inside* the librarian (§4.1), so a writer
+  submits the `{"type": "person", "handle": {"email": …}}` target shape it
+  already emits and never needs the uid, the correlation, or any
+  contact-surface access at all. And for a caller that genuinely needs excluded
+  FIELDS rather than identity, §3's one read path answers for any entity class.
+- **A zero-match address still does not create a page.** The resolution is
+  identity resolution, not entity creation — see
+  [`docs/field-corrections.md`](field-corrections.md) §8's carve-out for why
+  that distinction is load-bearing given the volume of addresses an ordinary
+  intake path sees.
+
+What stays open is the narrower authorization question of §4 — *who* may
+receive contact values once they have crossed the seam — not *where* the seam
+is. That is athenaeum#864, and nothing here resolves it.
+
 ## 5. What this means for a new integrator
 
 If you are writing a client against athenaeum:

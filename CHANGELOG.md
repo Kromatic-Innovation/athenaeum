@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A person email handle resolves to a uid at tier 0, through the PII surface
+  (athenaeum#884).** A `{"type": "person", "handle": {"email": "…"}}` correction
+  target now resolves by reverse-lookup — `email → contact record → record uid
+  → wiki page` — inside the correction applier, with no LLM call, so **no
+  external system ever needs to read the excluded surface to correlate an
+  address to a person**. This implements the answers recorded on
+  athenaeum#858/#859 (operator, 2026-08-13): the alternative was a uid-only
+  reverse-lookup read API that a caller would hit before submitting; putting
+  the resolution inside the librarian instead means the caller never needs the
+  uid, no new caller gains contact-surface access, and there is one resolution
+  path rather than two to keep in sync. voltaire's shipped writer already emits
+  this exact target shape and needs no change.
+
+  `email` is deliberately **not** a `SOURCE_HANDLE_KEYS` member and must never
+  become one: `registry.json` is compiled from wiki frontmatter, and the
+  athenaeum#502/#507 migrator preserves only `DURABLE_IDENTIFIER_FIELDS` and
+  explicitly folds `alt_emails` onto the excluded record — so an address seeded
+  as a registry handle is migrated off the page on the next `storage
+  migrate-pii` run and its registry entry evaporates. Every step of the
+  resolution goes through `athenaeum.pii` (new `resolve_contact_records`, the
+  all-matches sibling of `resolve_contact_record`, and `uid_on_record`); the
+  applier never constructs a contacts-surface path itself. **The librarian is
+  not an exception to the one-way-out rule, it is an implementation of it** —
+  `docs/one-way-in-one-way-out.md` gains a section saying so, and another
+  recording the athenaeum#858 answer durably in the docs rather than only in an
+  issue comment.
+
+  All-matches rather than first-match is the point: `resolve_contact_record`
+  returns the deterministic first and logs the ambiguity, which is right for
+  `mark_bounced` (a deliverability fact must land somewhere, and a shared
+  address is legitimate) and wrong for identity resolution, where quietly
+  picking one of several people is exactly the guess this layer must refuse.
+  Several **distinct** persons raises a tier; several records carrying the SAME
+  uid do not, since that is one person described twice. `ExcludedRecordIndex`
+  grows the matching `all_by_identifier` accessor — a different read of
+  athenaeum#883's index, not a second scan.
+
+  **A zero-match email handle raises a tier and NEVER creates**, notwithstanding
+  athenaeum#865's tier-0 create branch. voltaire's ordinary conversation-intake
+  path emits this target shape for every triaged correspondent with no
+  significance gate in front of it, so a create-capable email handle would
+  auto-create a person page per correspondent — cold senders and sales
+  sequences included — which is the "write everything and let the librarian
+  decide" firehose the operator rejected. The guard is written **explicitly**
+  rather than left to rest on `email` being absent from `SOURCE_HANDLE_KEYS`,
+  so a future widening of that tuple cannot silently open the create branch;
+  a test pins that too.
+
+  Beyond the four cases the issue enumerates (matched / zero-match / ambiguous
+  / cross-type), the **orphan-uid** branch its acceptance-criteria amendment
+  adds is handled and distinguishable: a record whose uid has no wiki page (a
+  measured ~47 of 12,960 records) raises a tier, never creates, never crashes,
+  and records `email-handle-orphan-uid` rather than `email-handle-no-match`.
+  Zero-match means *the address is unknown*; orphan-uid means *the address is
+  known and its person page is missing* — a store-consistency signal worth
+  surfacing rather than filing away as an unknown address. Since both are
+  `raised-tier` (a closed §5.3 vocabulary this does not reopen), the
+  distinction is carried by a new machine-readable `reason` on
+  `TargetResolution`, `None` for every pre-existing outcome.
+
 ### Deprecated
 
 - **`pii.read_person` / `read_people` — deprecated in favour of
