@@ -132,6 +132,7 @@ import json
 import logging
 import os
 import re
+import warnings
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -2880,6 +2881,19 @@ def _entity_read_from_indexes(
     )
 
 
+#: The message both deprecated person-shaped entry points carry (issue
+#: athenaeum#887). One constant, not two strings, so the two functions cannot
+#: drift in what they tell a caller to migrate to.
+_READ_PERSON_DEPRECATION = (
+    "pii.{name} is deprecated (athenaeum#887) and will be removed in a future "
+    "release (athenaeum#888). Use recall(with_pii=True) to resolve excluded "
+    "fields for a hit you found by searching, or pii.{replacement} "
+    "(surface_class='pii') to read by uid — both work for any entity class, "
+    "not only persons. Behaviour is unchanged for now: this warning is the "
+    "only difference."
+)
+
+
 def read_person(
     knowledge_root: Path,
     config: dict[str, Any] | None,
@@ -2889,6 +2903,14 @@ def read_person(
     usage_classes: Collection[str] | None = None,
 ) -> PersonRead | None:
     """Read one person's wiki page, with contact data gated by *include_contact*.
+
+    .. deprecated:: athenaeum#887
+       Use :func:`read_entity` (or ``recall(with_pii=True)``) instead — both
+       answer for any entity class rather than only persons. This function
+       keeps working IDENTICALLY and is not removed here; removal is
+       athenaeum#888, gated on a real deprecation window and on known consumers
+       having migrated. Everything the rest of this docstring says about
+       behaviour is still accurate.
 
     The ONE sanctioned entry point for reading a person's contact data (issue
     athenaeum#864, ``docs/one-way-in-one-way-out.md`` §3) — the sole caller-facing
@@ -2969,6 +2991,11 @@ def read_person(
     :class:`EntityRead` — so the person read and the generic read are the same
     type by construction, not two types held in parity by test.
     """
+    warnings.warn(
+        _READ_PERSON_DEPRECATION.format(name="read_person", replacement="read_entity"),
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return read_entity(
         knowledge_root,
         config,
@@ -3130,6 +3157,13 @@ def read_people(
 ) -> Iterator[tuple[str, PersonRead | None]]:
     """Read MANY persons, paying each O(corpus) scan once (issue athenaeum#877).
 
+    .. deprecated:: athenaeum#887
+       Use :func:`read_entities` (or ``recall(with_pii=True)``) instead — the
+       same batch read, for any entity class. This function keeps working
+       IDENTICALLY, including its laziness and its positional calling
+       convention, and is not removed here; removal is athenaeum#888. Everything
+       the rest of this docstring says about behaviour is still accurate.
+
     The batch counterpart to :func:`read_person`, and the entry point a caller
     resolving more than one uid in a single process should use. It is the same
     read — every yielded :class:`PersonRead` is exactly what
@@ -3199,8 +3233,24 @@ def read_people(
     ``read_people(knowledge_root, config, uids, include_contact=True)`` is
     load-bearing (it is ``apollo-enrich``'s exact call shape, the only external
     consumer) and neither becomes keyword-only nor reorders.
+
+    Note this is deliberately NOT a generator function (issue athenaeum#887): it
+    warns and then RETURNS :func:`read_entities`' generator, rather than
+    ``yield from``-ing it. A ``warnings.warn`` inside a generator body does not
+    run until the generator is first advanced, so a caller that constructed the
+    iterator and passed it elsewhere — or never consumed it — would get the
+    warning at a confusing point or not at all. Returning the inner generator
+    warns at CALL time while preserving laziness exactly: nothing is read, not
+    even the indexes, until the first pair is pulled.
     """
-    yield from read_entities(
+    warnings.warn(
+        _READ_PERSON_DEPRECATION.format(
+            name="read_people", replacement="read_entities"
+        ),
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return read_entities(
         knowledge_root,
         config,
         uids,
