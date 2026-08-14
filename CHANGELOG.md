@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`recall(with_pii=True)` — resolve excluded fields for any entity class
+  through the read you are already making (athenaeum#885).** Excluded-field
+  access used to be expressible only as "call `read_person` with a uid you
+  already have". A caller who found an entity through `recall` and wanted that
+  entity's excluded fields had to make a second, differently-shaped call — and
+  only if the entity happened to be a person. That is the shape that makes
+  callers reach past the seam:
+  `docs/one-way-in-one-way-out.md` §3 already recorded one agent session
+  reading the excluded surface directly because nothing said otherwise and no
+  alternative existed. `recall_search` / `_recall_via_backend` now take
+  `with_pii` (default `False`) plus an optional `usage_classes` threaded to the
+  join exactly as `read_entity` accepts it, so a caller that must not receive a
+  provider-sourced address (`docs/security-posture.md` §2.3) can filter here
+  too. **The default path is byte-identical and free** — with the flag unset,
+  ZERO excluded-surface scans are performed. New config key
+  `storage.excluded_read_mapping` maps a page `type:` onto the surface class
+  whose record holds its excluded fields: identity by default, with the single
+  shipped non-identity entry `person: pii`, operator-overridable. The join is
+  gated by `storage.is_excluded(surface_class, config)` *before* it is
+  attempted — a page class whose mapped surface class is NOT excluded (every
+  class on a base that maps only `pii: excluded`) performs no join and returns
+  nothing, never an error, and critically never scans the wiki root as if it
+  were an excluded surface. One index per call, shared across all `top_k` hits;
+  a hit with no `uid` performs no join and produces no marker.
+  `docs/one-way-in-one-way-out.md` §3 is rewritten as one path — table *and*
+  prose — and `docs/recall-architecture.md`'s load-bearing-invariants table
+  gains the layering statement.
+
+  **How it layers with audience scoping (athenaeum#312/#538) — unchanged.**
+  `with_pii` touches only Layer C. Layer A (index build) is untouched: excluded
+  values are never indexed and never become searchable, only resolvable on a
+  hit the corpus already produced. Layer B (the in-query predicate) is
+  untouched: the flag is not a search-time predicate and never widens the
+  candidate set — it cannot make an excluded page become a hit. At Layer C the
+  join runs strictly AFTER (1) the fail-closed `is_page_authorized` re-check
+  and (2) the athenaeum#532 `recallable` drop, so a hit either removes never
+  triggers an excluded-surface lookup at all — a restricted caller cannot use
+  the flag to probe whether a record exists behind a page it may not read. Both
+  orderings are asserted by test. Authorization is deliberately unchanged and
+  identical to `person_read`'s: the audience check decides whether the hit
+  exists, and for a hit that survives it the flag yields values. Who may SET
+  the flag remains the deferred athenaeum#864 question.
+
+  The join reuses athenaeum#883's public, `EntityIndex`-free assembly seam and
+  never `read_entity`/`read_entities`: the render loop already holds the hit's
+  fresh frontmatter from its own Layer-C re-read, so building an `EntityIndex`
+  there would be a defect rather than an optimization detail — 25.2s of the
+  measured 28.1s per-call cost IS that construction. Asserted by test, by
+  monkeypatching `EntityIndex` to raise on the `with_pii=True` path.
 - **`pii.read_entity` / `read_entities` — the excluded-record read, for ANY
   entity class (athenaeum#883).** The excluded/redacted read path was
   entity-shaped only by accident of how it was built: two things were
