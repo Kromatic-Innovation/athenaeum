@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Recall identity resolution: handle-shaped queries answer by exact reverse
+  lookup (athenaeum#907).** A handle-shaped query — a bare address, or a
+  registry handle framed as a question ("who is this address?", "is this
+  address still current?") — now answers by exact reverse lookup instead of
+  similarity search, via the new `athenaeum.identity_resolution` module.
+  Detection is deliberately conservative (exactly one email-shaped token, or
+  the whole query with a small closed set of interrogative framing stripped
+  exactly matching a `registry.json` handle value); any other query falls
+  through to the existing search pipeline byte-identically. The response is a
+  JSON document carrying the person's `uid`, `display_name`, `entity_class`,
+  and per-value fact fields — usage/provenance classification, bounce
+  history, validity dates — never an eligibility, permission, or action
+  predicate of any kind (access control remains a separate, deferred question,
+  athenaeum#864). Excluded values are gated by `with_pii` exactly as
+  elsewhere in `recall`, with the excluded-surface lookup running strictly
+  after the same audience and `recallable` drops (athenaeum#885/#532) —
+  either drop performs zero excluded-surface scans. Wired through both
+  `recall` entry points: the MCP `recall` tool and `athenaeum recall`.
+
 - **Per-file size/cost bound + quarantine for poison raw-intake files (athenaeum#898).**
   A single pathological raw file could silently own the entire nightly entity
   budget: `RawFile.content` read a whole file with no size guard (athenaeum#843

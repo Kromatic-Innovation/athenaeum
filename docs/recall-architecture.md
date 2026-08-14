@@ -121,6 +121,37 @@ contradiction-flagged pair — with no signal that the fact is disputed — is t
 exact failure this header prevents. The `Status:` line is the reader's cue to
 consult the pending-question queue before trusting the snippet.
 
+## Handle-shaped queries — exact reverse lookup, not similarity search (athenaeum#907)
+
+A query that is **handle-shaped** — a bare address (`alex@example.org`), or a
+registry handle framed as a question ("who owns kromatic.example?", "is this
+address still current?") — never reaches the FTS5/vector/keyword pipeline
+above. `athenaeum.identity_resolution.resolve_handle_query` answers it by
+exact reverse lookup instead, and both `recall` entry points
+(`mcp_server.recall_search`, `athenaeum recall` / `_cmd_query.cmd_recall`)
+call that one resolver rather than each re-deriving it.
+
+Detection is deliberately conservative: exactly one email-shaped token in the
+query, or the whole query (framing stripped) exactly matching an existing
+`registry.json` handle value. Anything else is not handle-shaped and falls
+through to the pipeline above completely unchanged — same output as if this
+feature did not exist.
+
+The response is a JSON document (`json.dumps(..., indent=2, sort_keys=True)`,
+nothing else) carrying the person's `uid`, `display_name`, `entity_class`, and
+per-value fact fields — usage/provenance classification, bounce history,
+validity dates. Excluded values are gated by `with_pii` exactly as they are
+elsewhere in `recall`, and the excluded-surface lookup runs strictly after the
+same audience and `recallable` drops documented below.
+
+**Facts only, never an eligibility predicate.** This is a boundary, not an
+implementation detail: the response never carries `outreach_eligible` or
+anything shaped like "may this address be used to contact them" — that
+decision is the caller's own policy, applied over the facts this module
+returns. Access control (who may set `with_pii`, or call `recall` at all) is
+a separate, deferred question (athenaeum#864); this module implements
+neither.
+
 ## Load-bearing invariants
 
 Do not simplify any of these without reading this page and the related commit history. Every one of them is a **silent failure mode** — no exception, no log, just degraded recall quality. The "What breaks" column is what forces a future reviewer to think twice before deleting the guard.
