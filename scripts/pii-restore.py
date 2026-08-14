@@ -221,7 +221,7 @@ def main() -> int:
     # Skip pathologically large files (merge-proposal logs, not person/entity
     # pages) -- difflib.SequenceMatcher(autojunk=False) is a character-level
     # diff and hangs for hours on multi-MB text (_pending_merges_archive.md is
-    # 22MB). #691's own worked examples are all normal person pages; these
+    # 22MB). athenaeum#691's own worked examples are all normal person pages; these
     # logs were never in scope.
     SIZE_LIMIT = 500_000
     skipped_large: list[str] = []
