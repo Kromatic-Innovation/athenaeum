@@ -271,11 +271,130 @@ def load_registry(knowledge_root: Path) -> dict[str, Any]:
     return entities if isinstance(entities, dict) else {}
 
 
+#: The handle key resolved through the PII/contacts surface rather than
+#: through ``registry.json`` (issue athenaeum#884).
+#:
+#: It is deliberately NOT a :data:`~athenaeum.registry.SOURCE_HANDLE_KEYS`
+#: member and must never become one. ``registry.json`` is compiled from WIKI
+#: frontmatter, and the athenaeum#502/#507 migrator scans every frontmatter value,
+#: preserves only ``DURABLE_IDENTIFIER_FIELDS``, and explicitly folds
+#: ``alt_emails`` onto the excluded record — so an email seeded as a registry
+#: handle is migrated off the page on the next ``storage migrate-pii`` run and
+#: its registry entry evaporates. The address lives on the PII surface by
+#: design (athenaeum#427/#437), which is why the resolution has to read it there.
+EMAIL_HANDLE_KEY = "email"
+
+
+@dataclass(frozen=True)
+class EmailHandleResolution:
+    """Outcome of resolving an ``email`` handle through the PII surface.
+
+    ``path`` is set only for ``kind == "resolved"``. ``reason`` is a stable,
+    machine-readable token recorded alongside the ``raised-tier`` disposition
+    so the ledger can tell these apart — the amendment on athenaeum#884 is
+    explicit that an orphan uid must not be conflated with an ordinary
+    zero-match: **zero-match means the address is unknown; orphan-uid means
+    the address is known and its person page is missing.** The second is a
+    store-consistency signal worth surfacing rather than swallowing, and both
+    look identical if all you record is "raised a tier".
+
+    The disposition itself stays ``raised-tier`` for every non-resolved kind —
+    :data:`DISPOSITIONS` is a closed §5.3 vocabulary, and every one of these
+    genuinely does raise a tier. What differs is the reason, not the outcome.
+    """
+
+    kind: str
+    path: Path | None = None
+    reason: str | None = None
+
+
+def _resolve_email_handle(
+    value: str,
+    declared_type: str | None,
+    *,
+    index: EntityIndex,
+    knowledge_root: Path | None,
+    config: dict[str, Any] | None,
+    excluded_index: Any | None = None,
+) -> EmailHandleResolution:
+    """Resolve ``email -> contact record -> uid -> wiki page`` (issue athenaeum#884).
+
+    The tier-0, LLM-free half of the operator's decision on athenaeum#858/#859: put
+    the resolution inside the librarian rather than exposing a reverse-lookup
+    read API, so the caller never needs the uid and no new caller gains
+    contact-surface access.
+
+    **Every step goes through :mod:`athenaeum.pii`.** This function never
+    constructs a contacts-surface path itself
+    (``docs/one-way-in-one-way-out.md`` §3) — it asks ``pii`` for the surface
+    root, for the matching records, and for the uid on a record. The librarian
+    is not an exception to the one-way-out rule; it is an implementation of it.
+
+    Ambiguity is deduped by UID, not by record: several records carrying the
+    SAME uid are one person described twice, not an ambiguous address, and
+    raising a tier for that would send a resolvable case to reasoning. Several
+    DISTINCT uids is the genuine "which person is this?" question, and that is
+    the one routed up.
+    """
+    from athenaeum import pii
+
+    if knowledge_root is None:
+        # No knowledge root supplied means this caller cannot reach the
+        # excluded surface at all. Unresolvable, exactly as before this branch
+        # existed — never an error, and never a create.
+        return EmailHandleResolution(kind="unresolvable", reason="email-handle-unavailable")
+
+    contacts_root = pii.contacts_surface_root(knowledge_root, config)
+    records = pii.resolve_contact_records(contacts_root, value, index=excluded_index)
+    if not records:
+        return EmailHandleResolution(kind="unresolvable", reason="email-handle-no-match")
+
+    uids: list[str] = []
+    for record in records:
+        uid = pii.uid_on_record(record)
+        if uid is not None and uid not in uids:
+            uids.append(uid)
+
+    if not uids:
+        # The address is known but no record carries a uid — nothing to join
+        # to a page. Distinct from both zero-match and orphan-uid.
+        return EmailHandleResolution(
+            kind="unresolvable", reason="email-handle-record-without-uid"
+        )
+    if len(uids) > 1:
+        return EmailHandleResolution(
+            kind="unresolvable", reason="email-handle-ambiguous"
+        )
+
+    path = index.get_by_uid(uids[0])
+    if path is None or not path.exists() or not index.has_entity_format(path):
+        # The measured orphan population (roughly 47 of 12,960 records on the
+        # 2026-08-12 snapshot): the address IS known, and its person page is
+        # missing. Raise a tier, never create, never crash — and say WHY, so a
+        # store-consistency problem is not filed away as "unknown address".
+        return EmailHandleResolution(
+            kind="unresolvable", reason="email-handle-orphan-uid"
+        )
+
+    if declared_type:
+        guarded = _cross_type_guard(path, declared_type)
+        if guarded is None:
+            return EmailHandleResolution(
+                kind="unresolvable", reason="email-handle-cross-type"
+            )
+        path = guarded
+
+    return EmailHandleResolution(kind="resolved", path=path)
+
+
 def resolve_target(
     target: Any,
     *,
     index: EntityIndex,
     registry_entities: dict[str, Any],
+    knowledge_root: Path | None = None,
+    config: dict[str, Any] | None = None,
+    excluded_index: Any | None = None,
 ) -> Path | None:
     """Resolve a §3.3 target shape to an existing entity-format page path.
 
@@ -283,6 +402,21 @@ def resolve_target(
     exactly one existing entity-format page — a target resolving to zero or
     several entities is deliberately not a failure at this layer; the
     caller raises a tier (§8), it never rejects.
+
+    Args:
+        knowledge_root: Root of the knowledge base. Required only to resolve
+            an ``email`` handle, which joins through the PII surface rather
+            than ``registry.json`` (issue athenaeum#884). Optional and defaulting
+            to ``None`` so every existing caller is untouched: without it an
+            email handle simply does not resolve, which is exactly what
+            happened before this branch existed.
+        config: Resolved ``athenaeum.yaml``, passed to
+            :func:`athenaeum.pii.contacts_surface_root` so the surface
+            resolves per the operator's ``storage.mapping``.
+        excluded_index: An already-built
+            :class:`~athenaeum.pii.ExcludedRecordIndex` to resolve through,
+            so a batch of corrections pays the surface scan once rather than
+            once per record.
     """
     if not isinstance(target, dict) or not target:
         return None
@@ -320,6 +454,23 @@ def resolve_target(
         if len(handle) != 1:
             return None  # ambiguous handle shape
         (key, value), = handle.items()
+        if key == EMAIL_HANDLE_KEY:
+            # Issue athenaeum#884: an email handle resolves through the PII
+            # surface, NOT through registry.json — see EMAIL_HANDLE_KEY for
+            # why it cannot be a registry handle key. Checked BEFORE the
+            # SOURCE_HANDLE_KEYS allowlist below, which it is deliberately
+            # not a member of.
+            if not isinstance(value, str) or not value.strip():
+                return None
+            etype_str = etype.strip() if isinstance(etype, str) and etype.strip() else None
+            return _resolve_email_handle(
+                value.strip(),
+                etype_str,
+                index=index,
+                knowledge_root=knowledge_root,
+                config=config,
+                excluded_index=excluded_index,
+            ).path
         if key not in SOURCE_HANDLE_KEYS:
             return None
         if not isinstance(value, str) or not value.strip():
@@ -386,6 +537,14 @@ class TargetResolution:
     entity_type: str | None = None
     handle_key: str | None = None
     handle_value: str | None = None
+    #: Machine-readable detail recorded alongside the disposition (issue
+    #: athenaeum#884). ``None`` for every pre-existing outcome, so nothing that
+    #: reads this dataclass today sees a change. Set for the ``email`` handle
+    #: branch so an orphan uid ("the address is known, its page is missing")
+    #: is distinguishable in the ledger from an ordinary zero-match ("the
+    #: address is unknown") — both raise a tier, and only the reason tells
+    #: them apart.
+    reason: str | None = None
 
 
 def resolve_target_for_apply(
@@ -393,14 +552,42 @@ def resolve_target_for_apply(
     *,
     index: EntityIndex,
     registry_entities: dict[str, Any],
+    knowledge_root: Path | None = None,
+    config: dict[str, Any] | None = None,
+    excluded_index: Any | None = None,
 ) -> TargetResolution:
     """§3.3 resolution, extended with the athenaeum#865 tier-0 create branch.
 
     Delegates the "does an existing entity match" question to
     :func:`resolve_target` unchanged — this function only decides what a
     ``None`` from that call means: still unresolvable, or creatable.
+
+    **The ``email``-handle carve-out (issue athenaeum#884) is load-bearing.** A
+    zero-match ``handle: {email}`` target must NEVER enter athenaeum#865's tier-0
+    create branch; it raises a tier per the ordinary §8 fallthrough. voltaire's
+    *ordinary* conversation-intake path emits this target shape for every
+    triaged correspondent with no significance gate in front of it, so a
+    create-capable email handle would auto-create a person page per
+    correspondent — cold senders and sales sequences included — which is
+    exactly the "write everything and let the librarian decide" firehose the
+    operator rejected. The guard below is written EXPLICITLY rather than left
+    to rest on ``email`` being absent from ``SOURCE_HANDLE_KEYS``: that
+    absence is load-bearing for a different reason (see
+    :data:`EMAIL_HANDLE_KEY`), and a future widening of that tuple must not
+    silently open the create branch to every address voltaire has ever seen.
+
+    ``knowledge_root`` / ``config`` / ``excluded_index`` are threaded to
+    :func:`resolve_target` — see its docstring; all three are optional and
+    every existing caller is unaffected.
     """
-    existing = resolve_target(target, index=index, registry_entities=registry_entities)
+    existing = resolve_target(
+        target,
+        index=index,
+        registry_entities=registry_entities,
+        knowledge_root=knowledge_root,
+        config=config,
+        excluded_index=excluded_index,
+    )
     if existing is not None:
         return TargetResolution(kind="existing", path=existing)
 
@@ -419,6 +606,21 @@ def resolve_target_for_apply(
     if not isinstance(handle, dict) or len(handle) != 1:
         return TargetResolution(kind="unresolvable")
     (key, value), = handle.items()
+    if key == EMAIL_HANDLE_KEY:
+        # THE CARVE-OUT (issue athenaeum#884). Never creatable, notwithstanding
+        # athenaeum#865 — see this function's docstring for why. Re-run the
+        # resolution to recover WHICH non-resolving case this was, so the
+        # ledger can tell an orphan uid from an unknown address.
+        etype = target.get("type")
+        outcome = _resolve_email_handle(
+            value.strip() if isinstance(value, str) else "",
+            etype.strip() if isinstance(etype, str) and etype.strip() else None,
+            index=index,
+            knowledge_root=knowledge_root,
+            config=config,
+            excluded_index=excluded_index,
+        )
+        return TargetResolution(kind="unresolvable", reason=outcome.reason)
     if key not in SOURCE_HANDLE_KEYS:
         return TargetResolution(kind="unresolvable")
     if not isinstance(value, str) or not value.strip():

@@ -226,9 +226,55 @@ One of three shapes:
 | `{"uid": "…"}` | `EntityIndex.get_by_uid`. Unambiguous; preferred. |
 | `{"type": "…", "name": "…"}` | `EntityIndex.lookup`, with the cross-type and entity-format guards `tier0_handle_upsert` already applies. |
 | `{"type": "…", "handle": {"<key>": "<value>"}}` | Resolved through `registry.json` ([`docs/source-handles.md`](source-handles.md)). `<key>` must be a `SOURCE_HANDLE_KEYS` member. |
+| `{"type": "person", "handle": {"email": "…"}}` | Resolved through the **PII/contacts surface**, not `registry.json` — see below (issue athenaeum#884). |
 
 The handle shape exists because external systems key on their own identifiers — an email
 address, a profile URL, a channel id — not on athenaeum uids.
+
+#### The `email` handle resolves through `pii.py` (issue athenaeum#884)
+
+`email` is deliberately **not** a `SOURCE_HANDLE_KEYS` member and must never become one.
+`registry.json` is compiled from **wiki** frontmatter, and `alt_emails` — which is a
+member — cannot stand in: the athenaeum#502/#507 migrator scans every frontmatter value,
+preserves only `DURABLE_IDENTIFIER_FIELDS`, and explicitly folds `alt_emails` onto the
+excluded record. An address seeded as a registry handle is therefore migrated off the
+page on the next `storage migrate-pii` run and its registry entry evaporates. The address
+lives on the PII surface by design (athenaeum#427/#437), so the resolution has to read it
+there.
+
+So an `email` handle resolves at **tier 0, with no LLM call**, by walking
+`email → contact record → record uid → wiki page`, entirely through `athenaeum.pii`:
+`contacts_surface_root` for the surface, `resolve_contact_records` for the matches,
+`uid_on_record` for the join key. **The applier never constructs a contacts-surface path
+itself** (§3 of [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md)) — the
+librarian is not an exception to the one-way-out rule, it is an implementation of it.
+
+Resolution is by `pii.resolve_contact_records` (all matches), *not*
+`pii.resolve_contact_record` (first match, logs on ambiguity). First-match-wins is the
+right posture for `mark_bounced` — a deliverability fact must land somewhere and a shared
+address is legitimate — and the wrong one here, where quietly picking one of several
+people an address might belong to is exactly the guess this layer must refuse to make.
+
+Five outcomes, and only one of them resolves:
+
+| Outcome | Disposition | Recorded reason |
+|---|---|---|
+| Exactly one person owns the address | resolves at tier 0 | — |
+| Several **distinct** persons own it | `raised-tier` | `email-handle-ambiguous` |
+| No record lists it | `raised-tier`, **never creates** (§8) | `email-handle-no-match` |
+| A record lists it but carries no `uid` | `raised-tier` | `email-handle-record-without-uid` |
+| A record lists it, its `uid` has **no wiki page** | `raised-tier` | `email-handle-orphan-uid` |
+| The resolved page is of a different `type` | `raised-tier` | `email-handle-cross-type` |
+
+Two of those deserve a note. **Ambiguity is deduped by uid, not by record**: several
+records carrying the same `uid` are one person described twice, not an ambiguous address,
+and raising a tier for that would send a perfectly resolvable case to reasoning. And
+**orphan-uid is not a zero-match**: zero-match means *the address is unknown*; orphan-uid
+means *the address is known and its person page is missing* (a measured population — 47
+of 12,960 records on the 2026-08-12 snapshot — carry a uid with no matching wiki file).
+Both raise a tier, so the disposition alone cannot tell them apart; the recorded reason
+can. The second is a store-consistency signal worth surfacing rather than filing away as
+"unknown address".
 
 **A zero-match handle target creates the entity at tier 0 (issue athenaeum#865).** The
 handle is a *stable external key* — the whole reason the shape exists is that the source
@@ -580,9 +626,30 @@ schema design onto every writer — precisely the per-consumer coupling §1.1 re
 | Attribute not on the allowlist, or writer not permitted | Reasoning tier. The allowlist bounds what may be written *cheaply*, not what may be reported. |
 | `{"uid"}` or `{"type","name"}` target resolves to nothing; any target resolves ambiguously (>1) | Reasoning tier — entity resolution is exactly what tiers 1-2 exist for. |
 | `{"type","handle"}` target resolves to nothing | **Creates the entity at tier 0** (§3.3, issue athenaeum#865) — a stable external key with no match is not an identity question for reasoning, it is new information. Falls through to reasoning instead only if `type` is missing/blank or the constructed page fails schema validation. |
+| `{"type","handle":{"email"}}` target resolves to nothing | **Reasoning tier — NEVER creates.** The carve-out below (issue athenaeum#884). |
 
 A fallthrough is not a failure and never fails a batch: conformant records in the same
 batch apply normally, and the ledger counts the rest as `raised-tier`.
+
+**The `email`-handle carve-out from the create branch (issue athenaeum#884).** A zero-match
+`handle: {email}` target is the ONE handle shape that does not create. It raises a tier
+per the ordinary fallthrough above, notwithstanding athenaeum#865.
+
+The reason is a volume argument, not a purity one. voltaire's *ordinary*
+conversation-intake path emits this exact target shape for every triaged correspondent,
+with **no significance gate in front of it**. A create-capable email handle would
+therefore auto-create a person page per correspondent — cold senders, sales sequences,
+one-off notifications included — which is precisely the "write everything and let the
+librarian decide" firehose the operator rejected on 2026-08-12. The properties that make
+a zero-match `domains` handle safe to create on (a stable key, one create per real-world
+entity) are all true of an email address too; what differs is that nothing upstream is
+deciding whether this person is worth a page.
+
+This exception is written down here rather than left implicit because it is invisible in
+the code path otherwise: `email` is not a `SOURCE_HANDLE_KEYS` member, so the create
+branch already declines it *incidentally*. The applier therefore also guards it
+**explicitly**, so that a future widening of `SOURCE_HANDLE_KEYS` cannot silently open
+the create branch to every address voltaire has ever seen.
 
 ### 8.1 How a tier raise actually happens
 

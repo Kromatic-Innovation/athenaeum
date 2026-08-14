@@ -1727,11 +1727,24 @@ class ExcludedRecordIndex:
 
     def by_identifier(self, identifier: str) -> Path | None:
         """The first record listing *identifier*, or ``None`` — first-wins."""
-        paths = self._all_by_identifier(identifier)
+        paths = self.all_by_identifier(identifier)
         return paths[0] if paths else None
 
-    def _all_by_identifier(self, identifier: str) -> list[Path]:
-        """Every record listing *identifier*, in scan order (may be empty)."""
+    def all_by_identifier(self, identifier: str) -> list[Path]:
+        """EVERY record listing *identifier*, in scan order (may be empty).
+
+        The all-matches read athenaeum#884 needs, and the reason this index was
+        committed to retaining every match for a key internally rather than
+        only the first: an all-matches lookup is a different ACCESSOR on the
+        same index, not a second scan.
+
+        Why both exist rather than one: first-match-wins is the right posture
+        for :func:`mark_bounced` (a deliverability fact has to land SOMEWHERE,
+        deterministically, and a shared address is legitimate) and the WRONG
+        posture for identity resolution (silently picking one of several
+        people an address might belong to is exactly the guess the correction
+        applier must refuse). Same data, two questions.
+        """
         key = normalize_identifier(identifier)
         if not key:
             return []
@@ -1813,6 +1826,61 @@ def resolve_contact_record(
             matches[0].name,
         )
     return matches[0]
+
+
+def resolve_contact_records(
+    contacts_root: Path,
+    identifier: str,
+    *,
+    index: "ExcludedRecordIndex | None" = None,
+) -> list[Path]:
+    """EVERY record listing *identifier*, in :func:`iter_contact_records` order.
+
+    The all-matches sibling of :func:`resolve_contact_record` (issue
+    athenaeum#884). That function returns the deterministic FIRST match and logs
+    the ambiguity — the right posture for :func:`mark_bounced`, where a
+    deliverability fact must land somewhere and a shared address is
+    legitimate, and the wrong posture for IDENTITY resolution, where quietly
+    picking one of several people an address might belong to is precisely the
+    guess a caller must refuse to make. This function hands the ambiguity back
+    to the caller instead of resolving it.
+
+    An empty/blank identifier, or a missing root, yields ``[]`` — never a
+    raise, mirroring its sibling.
+
+    Args:
+        index: An already-built :class:`ExcludedRecordIndex` to answer from,
+            instead of a fresh scan. When supplied this is
+            :meth:`ExcludedRecordIndex.all_by_identifier` — a different read of
+            an index the caller already has, not a second scan of the surface.
+    """
+    if index is not None:
+        return index.all_by_identifier(identifier)
+    if not normalize_identifier(identifier):
+        return []
+    return [
+        path
+        for path in iter_contact_records(contacts_root)
+        if record_lists_identifier(read_bounce_record(path), identifier)
+    ]
+
+
+def uid_on_record(record_path: Path) -> str | None:
+    """The ``uid`` an excluded record carries, or ``None`` (issue athenaeum#884).
+
+    The `record -> uid` half of the ``identifier -> record -> uid -> wiki
+    page`` chain, kept in this module because this module is the only one that
+    knows the surface layout (``docs/one-way-in-one-way-out.md`` §3) — a
+    caller doing its own ``read_bounce_record(...).get("uid")`` would be
+    reaching past that seam for one field.
+
+    Coerces with ``str(...).strip()`` exactly as
+    :func:`resolve_contact_record_for_uid` compares, so a uid resolved here
+    and a uid looked up there always mean the same string. A record with no
+    ``uid``, or a blank one, yields ``None``.
+    """
+    uid = str(read_bounce_record(record_path).get("uid", "")).strip()
+    return uid or None
 
 
 def read_bounce_record(record_path: Path) -> dict[str, Any]:
@@ -3312,6 +3380,8 @@ __all__ = [
     "record_lists_identifier",
     "iter_contact_records",
     "resolve_contact_record",
+    "resolve_contact_records",
+    "uid_on_record",
     "identifier_validity_entries",
     "is_bounced_identifier",
     "OrphanedBounceMark",
