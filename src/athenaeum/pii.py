@@ -191,6 +191,45 @@ def excluded_surface_root(
     return surface_root_for_class(entity_class, config, knowledge_root)
 
 
+#: Built-in page-class → surface-class table (issue athenaeum#885). The default is
+#: IDENTITY — every wiki ``type:`` joins a same-named surface — with exactly
+#: one shipped non-identity entry: a ``type: person`` page's excluded record
+#: lives on the ``pii`` surface, which is the whole reason the page class and
+#: the surface class cannot be collapsed into one name. Operator-overridable
+#: via ``storage.excluded_read_mapping``.
+DEFAULT_EXCLUDED_READ_MAPPING: dict[str, str] = {"person": PII_ENTITY_CLASS}
+
+
+def surface_class_for_page_class(
+    page_class: str | None,
+    config: dict[str, Any] | None,
+) -> str:
+    """The surface class whose excluded record holds *page_class*'s excluded fields.
+
+    Resolution: the operator's ``storage.excluded_read_mapping`` first, then
+    :data:`DEFAULT_EXCLUDED_READ_MAPPING`, then IDENTITY (the page class joins a
+    same-named surface). An operator entry wins over the built-in, so
+    ``person`` can be pointed elsewhere — or back at identity — without a code
+    change.
+
+    Answering this question is NOT the same as deciding a join should happen.
+    A page class whose mapped surface class is not actually excluded (every
+    class on a base that maps only ``pii: excluded``) resolves fine here and
+    must then be refused by :func:`athenaeum.storage.is_excluded` at the call
+    site — otherwise a read would scan the WIKI ROOT as if it were an excluded
+    surface. This function maps; the gate decides.
+    """
+    cls = (page_class or "").strip()
+    if not cls:
+        return ""
+    from athenaeum.config import resolve_excluded_read_mapping
+
+    configured = resolve_excluded_read_mapping(config)
+    if cls in configured:
+        return configured[cls]
+    return DEFAULT_EXCLUDED_READ_MAPPING.get(cls, cls)
+
+
 def contacts_surface_root(
     knowledge_root: Path,
     config: dict[str, Any] | None,

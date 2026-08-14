@@ -109,7 +109,35 @@ storage:
   # wiki page's `type:`. Unset = the built-in policy below.
   excluded_fields:
     pii: [emails, phones, former_emails, alt_emails]
+
+  # Optionally remap a wiki page `type:` onto the SURFACE class whose excluded
+  # record holds that page's excluded fields (athenaeum#885). Unset = identity
+  # for every class, plus the one shipped non-identity entry `person: pii`.
+  excluded_read_mapping:
+    person: pii
 ```
+
+### Page class vs surface class
+
+`mapping` and `excluded_read_mapping` are different tables and the difference
+is load-bearing. `mapping` routes an entity class onto a storage *adapter*.
+`excluded_read_mapping` answers a narrower question a read has to ask: given a
+hit whose page says `type: person`, which excluded surface holds that person's
+withheld fields? The answer is `pii` — the page class and the surface class are
+two different names for that entity, and collapsing them would make `person`
+the surface name, which it is not.
+
+Absent config the mapping is identity (a `type: vendor` page joins a `vendor`
+surface) with the single shipped exception `person: pii`. An operator entry
+wins over the built-in, so `person` can be pointed elsewhere — or back at
+identity — without a code change.
+
+Resolving a page class to a surface class is **not** the same as deciding a
+join should happen. A class whose mapped surface class is not actually excluded
+resolves to the default wiki adapter, and joining there would read the corpus
+back as though it were the excluded store. `storage.is_excluded` gates every
+join for exactly that reason: a non-excluded class performs no join and returns
+nothing, never an error.
 
 ### Which fields on an excluded record are data
 
