@@ -11,7 +11,8 @@ detected at all, not merely detected slowly.
 This suite covers the reserve that fixes it: the entity phase stops CLAIMING
 new files once its share of `max_runtime` is spent, defers the remainder
 (resumable, exactly like the athenaeum#220 budget trip), and — the load-bearing part —
-lets the run continue into the auto-memory / C4 block instead of exiting 124.
+lets the run continue into the auto-memory / C4 block instead of exiting
+EXIT_GRACEFUL_PARTIAL (75, issue athenaeum#897; was 124 before that split).
 
 All Anthropic calls are mocked; no live API, no network.
 """
@@ -25,6 +26,7 @@ import pytest
 
 from athenaeum.librarian import (
     DEFAULT_ENTITY_RUNTIME_SHARE,
+    EXIT_GRACEFUL_PARTIAL,
     librarian_entity_runtime_share,
     run,
 )
@@ -115,7 +117,8 @@ def test_entity_share_defers_intake_but_run_continues_into_automemory(
     Entity spends its share, stops claiming files — and the auto-memory / C4
     block STILL RUNS. Contrast `test_461_entity_deadline_trip_skips_automemory
     _block` in the deadline suite: a run-deadline trip skips that block and
-    exits 124, which is precisely the starvation the reserve prevents.
+    exits EXIT_GRACEFUL_PARTIAL (75), which is precisely the starvation the
+    reserve prevents.
     """
     root = _seed_knowledge_root(tmp_path, n_files=3)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -145,7 +148,8 @@ def test_entity_share_defers_intake_but_run_continues_into_automemory(
         max_runtime=1000,
     )
 
-    # NOT 124: the run is healthy and finished its downstream phases.
+    # NOT EXIT_GRACEFUL_PARTIAL (75): the run is healthy and finished its
+    # downstream phases.
     assert rc == 0
     assert compile_calls, (
         "the auto-memory / C4 block must run after an entity-share yield — "
@@ -174,8 +178,9 @@ def test_run_deadline_trip_still_wins_over_entity_share(
     """A run that blew the REAL deadline reports that, not the softer yield.
 
     The share check sits after the run-deadline check, so when the clock is
-    past both, the more severe condition is the one recorded — exit 124 and a
-    deadline-labelled manifest, exactly as before athenaeum#440.
+    past both, the more severe condition is the one recorded — exit
+    EXIT_GRACEFUL_PARTIAL (75) and a deadline-labelled manifest, exactly as
+    before athenaeum#440 (and, for the exit code itself, athenaeum#897).
     """
     root = _seed_knowledge_root(tmp_path, n_files=3)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -201,7 +206,7 @@ def test_run_deadline_trip_still_wins_over_entity_share(
         max_runtime=1000,
     )
 
-    assert rc == 124
+    assert rc == EXIT_GRACEFUL_PARTIAL
     manifest = (root / "wiki" / "_deferred_work.md").read_text(encoding="utf-8")
     assert "wall-clock deadline exceeded" in manifest
     assert "yielded to the C4 detector" not in manifest

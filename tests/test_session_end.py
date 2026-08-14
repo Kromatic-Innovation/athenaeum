@@ -747,16 +747,22 @@ class TestSessionEndDerivedDeadlineGracefulStop:
     `KNOWLEDGE_REBUILD_TIMEOUT` minus margin) must exit through the SAME
     graceful-stop path the nightly run uses (issue athenaeum#396/athenaeum#337): partial
     progress committed, remaining raw left on disk for the next run, and a
-    resumable 124 exit — instead of running unbounded until the wrapper's
-    external `timeout --signal=TERM` kills it. Drives `session_end()`
-    end-to-end with the SAME FakeClock + writing-`process_one` harness
-    `test_librarian_deadline.py` uses for the equivalent `run()`-level test
-    (`test_entity_loop_deadline_defers_and_exits_124`)."""
+    resumable EXIT_GRACEFUL_PARTIAL (75, issue athenaeum#897) exit — instead of
+    running unbounded until the wrapper's external `timeout --signal=TERM`
+    kills it (that external-kill path keeps exit code 124, unchanged by
+    athenaeum#897). Drives `session_end()` end-to-end with the SAME FakeClock +
+    writing-`process_one` harness `test_librarian_deadline.py` uses for the
+    equivalent `run()`-level test
+    (`test_entity_loop_deadline_defers_and_exits_75`)."""
 
     def test_derived_deadline_trips_graceful_stop_partial_commit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from athenaeum.librarian import session_end, session_end_max_runtime
+        from athenaeum.librarian import (
+            EXIT_GRACEFUL_PARTIAL,
+            session_end,
+            session_end_max_runtime,
+        )
 
         # Same fixture shape (freeform, non-tier0 raw — routes through the
         # real entity loop) as the run()-level deadline test.
@@ -791,9 +797,9 @@ class TestSessionEndDerivedDeadlineGracefulStop:
             max_api_calls=100,
         )
 
-        # Resumable non-zero exit (coreutils `timeout` convention), propagated
+        # Resumable graceful-partial exit (issue athenaeum#897), propagated
         # through IngestResult.exit_code -> SessionEndResult.exit_code.
-        assert result.exit_code == 124
+        assert result.exit_code == EXIT_GRACEFUL_PARTIAL
         # A half-compiled wiki is never indexed (session_end's change-gate).
         assert result.reindexed is False
         # Partial progress committed; nothing left uncommitted.

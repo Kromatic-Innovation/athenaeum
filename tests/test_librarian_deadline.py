@@ -10,10 +10,13 @@ until externally killed. This suite covers the internal deadline that fixes it:
   value disables the deadline entirely (the explicit unbounded escape hatch).
 - The per-file entity loop, on trip, defers the remaining intake, commits the
   partial progress, writes a deadline-labelled deferred manifest, and returns
-  124 (matching coreutils `timeout` and the athenaeum#337 interrupt path) — resumable.
+  `EXIT_GRACEFUL_PARTIAL` (75, issue athenaeum#897) — resumable. Distinct from the
+  `EXIT_EXTERNAL_KILL` (124) coreutils `timeout` uses and the athenaeum#337
+  interrupt path returns on a delivered signal — this internal check never
+  returns 124.
 - The merge pass (the phase the incident wedged in) checks the deadline at its
   per-cluster loop and raises `RunDeadlineExceeded`, which `run()` catches to
-  commit partial + return 124.
+  commit partial + return `EXIT_GRACEFUL_PARTIAL` (75).
 - A disabled deadline (max_runtime <= 0) never trips.
 
 All Anthropic calls are mocked; no live API, no network.
@@ -31,6 +34,7 @@ from athenaeum.librarian import (
     DEFAULT_MAX_RUNTIME,
     DEFAULT_SESSION_END_OUTER_TIMEOUT,
     DEFAULT_SESSION_END_RUNTIME_MARGIN,
+    EXIT_GRACEFUL_PARTIAL,
     librarian_max_runtime,
     run,
     session_end_max_runtime,
@@ -169,7 +173,7 @@ class TestResolveMaxRuntime:
 # ---------------------------------------------------------------------------
 
 
-def test_entity_loop_deadline_defers_and_exits_124(
+def test_entity_loop_deadline_defers_and_exits_75(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _seed_knowledge_root(tmp_path, n_files=3)
@@ -198,8 +202,9 @@ def test_entity_loop_deadline_defers_and_exits_124(
         max_runtime=1000,
     )
 
-    # Resumable non-zero exit (coreutils `timeout` convention).
-    assert rc == 124
+    # Resumable graceful-partial exit (issue athenaeum#897) — athenaeum's own
+    # internal deadline check, never the external-kill 124.
+    assert rc == EXIT_GRACEFUL_PARTIAL
     # Partial progress committed; nothing left uncommitted.
     assert _porcelain(root) == ""
     assert _last_subject(root).startswith("librarian: processed 1 file(s)")
@@ -277,7 +282,7 @@ def test_merge_pass_raises_on_past_deadline(
     assert excinfo.value.phase == "C3 cluster merge"
 
 
-def test_wiki_dedup_phase_boundary_deadline_exits_124(
+def test_wiki_dedup_phase_boundary_deadline_exits_75(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The athenaeum#290 wiki-dedup pass is a listed wedge site. It swallows its own
@@ -306,16 +311,17 @@ def test_wiki_dedup_phase_boundary_deadline_exits_124(
         max_runtime=1000,
     )
 
-    assert rc == 124
+    assert rc == EXIT_GRACEFUL_PARTIAL
     assert _porcelain(root) == ""
     assert "athenaeum#290 wiki-dedup" in _last_subject(root)
 
 
-def test_run_catches_merge_deadline_and_exits_124(
+def test_run_catches_merge_deadline_and_exits_75(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """run() wraps the post-compile phase: a RunDeadlineExceeded from the merge
-    pass is caught, partial progress is committed, and the run exits 124."""
+    pass is caught, partial progress is committed, and the run exits
+    EXIT_GRACEFUL_PARTIAL (75)."""
     # Issue athenaeum#461: the entity phase now runs BEFORE the auto-memory block, so
     # an empty entity intake (n_files=0) isolates this test's actual target
     # (the auto-memory/merge deadline-catch) from the entity loop — a
@@ -354,7 +360,7 @@ def test_run_catches_merge_deadline_and_exits_124(
         max_runtime=3600,
     )
 
-    assert rc == 124
+    assert rc == EXIT_GRACEFUL_PARTIAL
     assert _porcelain(root) == ""
     subject = _last_subject(root)
     assert subject.startswith("librarian: partial run (deadline 3600s exceeded during")
@@ -366,13 +372,14 @@ def test_run_catches_merge_deadline_and_exits_124(
 # ---------------------------------------------------------------------------
 
 
-def test_461_entity_runs_first_then_automemory_deadline_trips_124(
+def test_461_entity_runs_first_then_automemory_deadline_trips_75(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC1: entity intake is compiled FIRST; a deadline that only trips
-    during the (later) auto-memory phase still exits 124 with the
-    auto-memory phase name — proving the entity phase got to run before the
-    shared deadline was spent, which is the whole point of the athenaeum#461 reorder.
+    during the (later) auto-memory phase still exits EXIT_GRACEFUL_PARTIAL
+    (75) with the auto-memory phase name — proving the entity phase got to
+    run before the shared deadline was spent, which is the whole point of
+    the athenaeum#461 reorder.
     """
     root = _seed_knowledge_root(tmp_path, n_files=2)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -429,7 +436,7 @@ def test_461_entity_runs_first_then_automemory_deadline_trips_124(
     assert remaining == [], "entity intake must be fully consumed, not deferred"
 
     # The trip happened in the auto-memory phase, after entity succeeded.
-    assert rc == 124
+    assert rc == EXIT_GRACEFUL_PARTIAL
     subject = _last_subject(root)
     assert subject.startswith("librarian: partial run (deadline 1000s exceeded during")
     assert "C4 contradiction detector / resolver" in subject
@@ -439,9 +446,9 @@ def test_461_entity_deadline_trip_skips_automemory_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC2: a deadline trip DURING the entity phase skips the auto-memory
-    block entirely (gated on ``not deadline_tripped``) and exits 124 —
-    proving `_compile_auto_memory` is never invoked once the entity loop has
-    already spent the shared deadline.
+    block entirely (gated on ``not deadline_tripped``) and exits
+    EXIT_GRACEFUL_PARTIAL (75) — proving `_compile_auto_memory` is never
+    invoked once the entity loop has already spent the shared deadline.
     """
     root = _seed_knowledge_root(tmp_path, n_files=3)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -485,7 +492,7 @@ def test_461_entity_deadline_trip_skips_automemory_block(
         max_runtime=1000,
     )
 
-    assert rc == 124
+    assert rc == EXIT_GRACEFUL_PARTIAL
     assert compile_calls == [], "auto-memory compile must be skipped after an entity deadline trip"
     # Only the first file was processed; the deadline trip deferred the rest.
     assert (root / "wiki" / "entity-1.md").exists()
@@ -536,10 +543,11 @@ def test_cli_max_runtime_defaults_to_none(
 # ---------------------------------------------------------------------------
 # Issue athenaeum#761 — the phase-boundary / C4 deadline exit must push too
 #
-# `stop_on_deadline` returned 124 to run()'s caller BEFORE _run_finalize_phase,
-# so the post-run push (librarian.push_after_run) never fired on the phase-
-# boundary / C4 path — 26 commits stranded on one machine over three days.
-# The fix pushes from inside stop_on_deadline, right after the partial commit.
+# `stop_on_deadline` returned EXIT_GRACEFUL_PARTIAL (75, formerly 124 before
+# athenaeum#897) to run()'s caller BEFORE _run_finalize_phase, so the post-run
+# push (librarian.push_after_run) never fired on the phase-boundary / C4 path
+# — 26 commits stranded on one machine over three days. The fix pushes from
+# inside stop_on_deadline, right after the partial commit.
 # ---------------------------------------------------------------------------
 
 
@@ -562,7 +570,7 @@ def _spy_git_push(
 def _trip_c4_deadline(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Wire the auto-memory/merge (C4) phase to write partial progress and then
     raise ``RunDeadlineExceeded`` — the exact phase-boundary path
-    ``test_run_catches_merge_deadline_and_exits_124`` drives, factored out."""
+    ``test_run_catches_merge_deadline_and_exits_75`` drives, factored out."""
     monkeypatch.setattr(
         "athenaeum.librarian.discover_auto_memory_files",
         lambda *_a, **_k: [SimpleNamespace(origin_scope="scope-a")],
@@ -597,7 +605,7 @@ def test_761_phase_boundary_deadline_pushes_after_partial_commit(
         push_after_run=True,
     )
 
-    assert rc == 124
+    assert rc == EXIT_GRACEFUL_PARTIAL
     assert _porcelain(root) == ""
     # The partial-progress commit moved HEAD, so the push fires — exactly once.
     assert len(calls) == 1, "phase-boundary deadline path must push the partial commit"
@@ -636,7 +644,7 @@ def test_761_entity_loop_deadline_pushes_exactly_once(
         push_after_run=True,
     )
 
-    assert rc == 124
+    assert rc == EXIT_GRACEFUL_PARTIAL
     assert len(calls) == 1, "entity-loop deadline path must push exactly once, not twice"
 
 
@@ -668,15 +676,16 @@ def test_761_dry_run_deadline_never_pushes(
         push_after_run=True,
     )
 
-    assert rc == 124
+    assert rc == EXIT_GRACEFUL_PARTIAL
     assert calls == [], "--dry-run must never push, even on the deadline path"
 
 
-def test_761_deadline_push_failure_keeps_124(
+def test_761_deadline_push_failure_keeps_75(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A push failure on the deadline path is non-fatal — the 124 exit code is
-    unchanged (mirrors the finalize-phase push contract)."""
+    """A push failure on the deadline path is non-fatal — the
+    EXIT_GRACEFUL_PARTIAL (75) exit code is unchanged (mirrors the
+    finalize-phase push contract)."""
     root = _seed_knowledge_root(tmp_path, n_files=0)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
@@ -692,7 +701,9 @@ def test_761_deadline_push_failure_keeps_124(
         push_after_run=True,
     )
 
-    assert rc == 124, "a failed push must not change the 124 deadline exit code"
+    assert rc == EXIT_GRACEFUL_PARTIAL, (
+        "a failed push must not change the EXIT_GRACEFUL_PARTIAL deadline exit code"
+    )
     assert len(calls) == 1
 
 
@@ -854,16 +865,17 @@ class TestSessionEndMaxRuntimeInvariant:
 # ---------------------------------------------------------------------------
 
 
-def test_derived_max_runtime_trips_graceful_stop_and_exits_124(
+def test_derived_max_runtime_trips_graceful_stop_and_exits_75(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The value `session_end_max_runtime()` derives is a real, usable
     `max_runtime` — fed straight into `run()`, an entity-loop deadline trip
     with it behaves EXACTLY like the existing
-    `test_entity_loop_deadline_defers_and_exits_124` case above: graceful
-    stop, partial progress committed, deferred intake left on disk, 124
-    exit. (The SessionEnd-composition-level equivalent of this test — via
-    `session_end()` rather than `run()` directly — lives in
+    `test_entity_loop_deadline_defers_and_exits_75` case above: graceful
+    stop, partial progress committed, deferred intake left on disk,
+    EXIT_GRACEFUL_PARTIAL (75) exit. (The SessionEnd-composition-level
+    equivalent of this test — via `session_end()` rather than `run()`
+    directly — lives in
     `test_session_end.py::TestSessionEndDerivedDeadlineGracefulStop`.)"""
     root = _seed_knowledge_root(tmp_path, n_files=3)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -893,7 +905,7 @@ def test_derived_max_runtime_trips_graceful_stop_and_exits_124(
         max_runtime=derived,
     )
 
-    assert rc == 124
+    assert rc == EXIT_GRACEFUL_PARTIAL
     assert _porcelain(root) == ""
     assert _last_subject(root).startswith("librarian: processed 1 file(s)")
     assert (root / "wiki" / "entity-1.md").exists()
