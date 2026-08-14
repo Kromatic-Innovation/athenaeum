@@ -20,10 +20,15 @@ name: Promote Main
 #     has no visibility into any consumer repo's copy.
 #   - Fleet-wide conformance (every consumer's committed copy vs. canonical) is
 #     checked by cwc's `fleet-drift-guard.yml` / `scripts/check_fleet_drift.py`
-#     ("property 4", cwc#1889) — currently REPORT-ONLY, not blocking.
+#     ("property 4", cwc#1889) — BLOCKING as of cwc#2015. A diverged consumer
+#     copy FAILS cwc's fleet drift guard; it is no longer merely reported.
 # In short: nothing in THIS repo's CI enforces that this file matches
-# canonical. If it has drifted, cwc's fleet-drift-guard should catch it on its
-# next scheduled run and the fix is a re-sync from cwc, never a local edit.
+# canonical, but drift is NOT invisible — cwc's fleet-drift-guard fails on its
+# next scheduled (or `templates/**`-triggered) run, and the fix is a re-sync
+# from cwc, never a local edit. The one-flag rollback lever is
+# `check_fleet_drift.py --skip-template-conformance`; a deliberate divergence
+# is declared as a `driftGuard.templateDeviations` waiver in
+# `docs/project-registry.yaml` in cwc, never as a local edit here.
 #
 # To change the promotion contract, edit THIS template and re-run the sync
 # script — never hand-edit a repo's `.github/workflows/promote-main.yml`.
