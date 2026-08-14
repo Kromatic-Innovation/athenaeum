@@ -103,7 +103,38 @@ storage:
         embedded: false
         recallable: false
         merge_eligible: false
+
+  # Optionally name which frontmatter fields on an EXCLUDED record hold data
+  # (athenaeum#883). Keyed by SURFACE class — the `mapping` key above, not a
+  # wiki page's `type:`. Unset = the built-in policy below.
+  excluded_fields:
+    pii: [emails, phones, former_emails, alt_emails]
 ```
+
+### Which fields on an excluded record are data
+
+An excluded record carries both data and its own bookkeeping (`uid`, `type`,
+`pii`, the bounce/classification marks). A read of that record has to know
+which is which. `storage.excluded_fields` names it explicitly per surface
+class; absent an entry, the default resolves in two branches:
+
+- **`pii`** keeps its built-in allowlist (`emails`, `phones`, `former_emails`,
+  `alt_emails`) verbatim, so a person read is byte-identical to what it was
+  before the read became class-generic.
+- **Any other class** defaults to *every frontmatter field on the record minus
+  a bookkeeping denylist* (`uid`, `type`, `pii`, `identifier`,
+  `identifier_validity`, `contact_classification`, `folded_into`, `source`,
+  `observed_at`, `valid_until`, `bounce_diagnostic`).
+
+The denylist-complement is deliberate for the unknown class. An allowlist for a
+class nobody has enumerated makes the redaction marker **dishonest by
+omission**: a field the allowlist forgot is reported neither as a value nor as a
+marker, so "withheld" and "absent" collapse into the same shape — precisely the
+failure the marker exists to prevent. The complement is honest by construction,
+and its failure direction is only noise (a bookkeeping key surfaced as a field),
+never a silent hole. An explicitly empty list is honoured literally as "this
+class has no data fields", which is a different statement from not configuring
+the class at all.
 
 ### Fail-closed policy defaults
 

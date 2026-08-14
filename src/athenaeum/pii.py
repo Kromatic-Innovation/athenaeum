@@ -163,21 +163,46 @@ log = logging.getLogger(__name__)
 PII_ENTITY_CLASS = "pii"
 
 
+def excluded_surface_root(
+    entity_class: str,
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+) -> Path:
+    """Resolve the on-disk root for ANY surface class (issue athenaeum#883).
+
+    The class-parameterized generalization of :func:`contacts_surface_root`,
+    which hardcoded :data:`PII_ENTITY_CLASS`. It delegates to
+    :func:`athenaeum.storage.surface_root_for_class` exactly as that function
+    always has — the adapter layer was already fully class-parameterized
+    (athenaeum#427/#429); the caller simply never got to say which class.
+
+    *entity_class* is the **surface class** — the ``storage.mapping`` key,
+    e.g. ``"pii"`` — and NOT the wiki page's ``type:``. The distinction is
+    load-bearing: a person page is ``type: person`` while its excluded record
+    lives on the ``pii`` surface. This function is TOLD the surface class and
+    never guesses; mapping a page class onto a surface class is a separate
+    concern (issue athenaeum#885's ``storage.excluded_read_mapping``).
+
+    Absent any ``storage.mapping`` entry for *entity_class*, this resolves to
+    the default wiki surface — a no-op convenience, not a silent leak. The
+    operator must explicitly map a class to the ``excluded`` adapter for this
+    root to land outside the corpus.
+    """
+    return surface_root_for_class(entity_class, config, knowledge_root)
+
+
 def contacts_surface_root(
     knowledge_root: Path,
     config: dict[str, Any] | None,
 ) -> Path:
     """Resolve the on-disk root for the ``pii`` entity class.
 
-    Delegates entirely to :func:`athenaeum.storage.surface_root_for_class` —
-    no hardcoded ``contacts/`` path here. Absent any ``storage.mapping``
-    entry for ``pii``, this resolves to the default wiki surface (so calling
-    this with an unconfigured knowledge base is a no-op convenience, not a
-    silent PII leak — the operator must explicitly map ``pii`` to the
-    ``excluded`` adapter, exactly as ``athenaeum.yaml``'s shipped example
-    comment shows, for this root to actually land outside the corpus).
+    A one-line wrapper over :func:`excluded_surface_root` passing
+    :data:`PII_ENTITY_CLASS`. Kept (not deleted) because it is the shape every
+    existing caller in this repo and in ``apollo-enrich`` already calls; the
+    generalization added a parameter, it did not move the entry point.
     """
-    return surface_root_for_class(PII_ENTITY_CLASS, config, knowledge_root)
+    return excluded_surface_root(PII_ENTITY_CLASS, knowledge_root, config)
 
 
 def is_pii_class_excluded(config: dict[str, Any] | None) -> bool:
@@ -1529,7 +1554,183 @@ def iter_contact_records(contacts_root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*.md") if p.is_file())
 
 
-def resolve_contact_record(contacts_root: Path, identifier: str) -> Path | None:
+class ExcludedRecordIndex:
+    """Every record on one excluded surface, indexed by ``uid`` AND by address.
+
+    Built by a SINGLE :func:`iter_contact_records` pass (issue athenaeum#883), so a
+    caller resolving N records pays the O(corpus) scan once rather than N
+    times. It is the by-ADDRESS sibling of the by-uid fix athenaeum#877/#879 already
+    landed: :func:`resolve_contact_record` still paid a full scan **per call**,
+    and it has three callers — :func:`athenaeum.bounce_join.join_identifier`,
+    :func:`classify_contact_value`, and :func:`mark_bounced` (reached from
+    ``librarian``'s compile loop via ``tier0_bounce_mark``) — each paying it
+    independently.
+
+    **Resolution discipline is IDENTICAL to the unindexed functions**, so
+    moving a caller onto the index never changes WHICH record it resolves:
+
+    - the FIRST match in :func:`iter_contact_records` order wins (that
+      function sorts, so the same store always yields the same mapping);
+    - ``log.warning`` (never raise) when a key resolves to several records;
+    - keys are ``str(...).strip()``-coerced exactly as
+      :func:`resolve_contact_record_for_uid` compares them, and addresses are
+      :func:`normalize_identifier`-keyed exactly as
+      :func:`record_lists_identifier` compares them;
+    - a missing root yields an EMPTY index, never a raise.
+
+    **Staleness (issue athenaeum#850).** :func:`mark_bounced` MINTS a record when
+    resolution returns ``None``, and merges new identifiers onto existing
+    records. A long-lived index that is never invalidated would answer a
+    stale ``None`` for the second lookup of one address in a batch and mint a
+    DUPLICATE record — athenaeum#850's exact failure, reintroduced. So this index
+    takes :class:`~athenaeum.models.EntityIndex`'s architectural answer: a
+    ONE-SHOT load, plus an explicit :meth:`register` that the WRITER calls
+    after every write. (The analogy is architectural, not a signature match —
+    ``EntityIndex.register`` takes a page object; this takes a path.) Nothing
+    else invalidates it: after the load, only ``register`` mutates it, which
+    is what makes resolution stable across a batch of interleaved writes.
+
+    **The load is LAZY** — deferred to the first lookup rather than done in
+    ``__init__``, the same shape :func:`read_entities` uses for its indexes and
+    for the same reason. The compile loop constructs one of these per run
+    ABOVE ``process_one``, but only a conforming hard-bounce note ever
+    resolves through it — "a handful per compile run, not the full candidate
+    population". An eager load would charge every run an O(corpus) scan to
+    answer zero lookups, turning a cost fix into a cost regression for the
+    common case. One-shot and lazy are not in tension: the scan still happens
+    at most once per index.
+
+    ``by_identifier`` retains ALL matches for a key internally and exposes
+    first-match-wins as the default read, so an all-matches accessor is a
+    different read of the same index rather than a second scan (issue
+    athenaeum#884 adds exactly that).
+    """
+
+    def __init__(self, contacts_root: Path) -> None:
+        self.contacts_root = Path(contacts_root)
+        self._by_uid: dict[str, list[Path]] = {}
+        self._by_identifier: dict[str, list[Path]] = {}
+        self._loaded = False
+
+    def _ensure_loaded(self) -> None:
+        """Scan the surface once, on first use. Idempotent."""
+        if self._loaded:
+            return
+        # Set BEFORE indexing so a re-entrant call (a log handler that reads
+        # the index, say) cannot trigger a second scan mid-load.
+        self._loaded = True
+        for path in iter_contact_records(self.contacts_root):
+            self._index_record(path)
+        self._warn_collisions()
+
+    def _index_record(self, path: Path) -> None:
+        """Add one record's uid and every address it lists to both maps.
+
+        Append-only per key: the first path seen for a key stays first, which
+        is what makes first-match-wins survive a mid-batch :meth:`register`.
+        """
+        meta = read_bounce_record(path)
+        uid = str(meta.get("uid", "")).strip()
+        if uid:
+            self._append(self._by_uid, uid, path)
+        for identifier in identifiers_on_record(meta):
+            key = normalize_identifier(identifier)
+            if key:
+                self._append(self._by_identifier, key, path)
+        # A slug-keyed bounce record carries its address in `identifier:`
+        # rather than in a list, so `identifiers_on_record` returns [] for it
+        # (documented there). `record_lists_identifier` agrees — it reads the
+        # same helper — so indexing it here would resolve an address the
+        # unindexed function does not, which is the one divergence this class
+        # must never have.
+
+    @staticmethod
+    def _append(target: dict[str, list[Path]], key: str, path: Path) -> None:
+        paths = target.setdefault(key, [])
+        if path not in paths:
+            paths.append(path)
+
+    def _warn_collisions(self) -> None:
+        """One line per collided key — proportional to the problem, not the corpus."""
+        for uid, paths in self._by_uid.items():
+            if len(paths) > 1:
+                log.warning(
+                    "uid %r resolves to %d contact records; indexing the first "
+                    "(%s). See resolve_contact_record's docstring for the same "
+                    "shared-value posture.",
+                    uid,
+                    len(paths),
+                    paths[0].name,
+                )
+        for identifier, paths in self._by_identifier.items():
+            if len(paths) > 1:
+                log.warning(
+                    "identifier resolves to %d contact records; annotating the "
+                    "first (%s). A shared address is legitimate — see the "
+                    "observation log.",
+                    len(paths),
+                    paths[0].name,
+                )
+
+    def by_uid(self, uid: str) -> Path | None:
+        """The record whose frontmatter ``uid`` equals *uid*, or ``None``.
+
+        An empty/blank *uid* never matches — otherwise it would match every
+        record carrying no ``uid:`` at all, which is never a lookup's intent.
+        """
+        wanted = str(uid).strip()
+        if not wanted:
+            return None
+        self._ensure_loaded()
+        paths = self._by_uid.get(wanted)
+        return paths[0] if paths else None
+
+    def by_identifier(self, identifier: str) -> Path | None:
+        """The first record listing *identifier*, or ``None`` — first-wins."""
+        paths = self._all_by_identifier(identifier)
+        return paths[0] if paths else None
+
+    def _all_by_identifier(self, identifier: str) -> list[Path]:
+        """Every record listing *identifier*, in scan order (may be empty)."""
+        key = normalize_identifier(identifier)
+        if not key:
+            return []
+        self._ensure_loaded()
+        return list(self._by_identifier.get(key, ()))
+
+    def uid_map(self) -> dict[str, Path]:
+        """``uid -> first record`` — the shape :func:`build_contact_record_uid_index` returns."""
+        self._ensure_loaded()
+        return {uid: paths[0] for uid, paths in self._by_uid.items() if paths}
+
+    def register(self, path: Path) -> None:
+        """Re-index *path* WHOLESALE after a write — uid and its full address list.
+
+        Wholesale, not a single-key insert, because :func:`mark_bounced` both
+        mints new records and MERGES new identifiers onto existing ones: an
+        insert keyed only on the address just written would miss the merge
+        case and leave the index disagreeing with disk.
+
+        Registering never changes which record an already-indexed key resolves
+        to — :meth:`_index_record` appends — so batch resolution stays stable
+        no matter how writes interleave with reads. Re-registering the same
+        path is idempotent.
+
+        Loads first, deliberately: registering into a not-yet-loaded index
+        would place the just-written record FIRST for its keys, ahead of
+        records already on disk, and first-wins would then resolve differently
+        depending on whether a write happened before the first read.
+        """
+        self._ensure_loaded()
+        self._index_record(Path(path))
+
+
+def resolve_contact_record(
+    contacts_root: Path,
+    identifier: str,
+    *,
+    index: "ExcludedRecordIndex | None" = None,
+) -> Path | None:
     """Find the existing record that already lists *identifier*, or ``None``.
 
     The join athenaeum#850 exists to create: an incoming address is resolved against
@@ -1544,7 +1745,19 @@ def resolve_contact_record(contacts_root: Path, identifier: str) -> Path | None:
     but this function deliberately does not guess which is "the" person: it
     takes the deterministic first and logs the ambiguity, leaving a real
     resolution to the observation ledger, which models it properly.
+
+    Args:
+        index: An already-built :class:`ExcludedRecordIndex` over
+            *contacts_root* to answer from, instead of paying a fresh
+            :func:`iter_contact_records` scan (issue athenaeum#883). Optional and
+            defaulting to ``None`` so every existing caller keeps today's
+            behaviour AND today's cost exactly — a caller with no natural
+            batch scope has nothing to amortize an index against, and
+            supplying one it built itself for a single lookup would be
+            strictly slower. Resolution is identical either way.
     """
+    if index is not None:
+        return index.by_identifier(identifier)
     matches = [
         path
         for path in iter_contact_records(contacts_root)
@@ -1811,6 +2024,7 @@ def classify_contact_value(
     usage_class: str,
     source: str | dict[str, Any],
     observed_at: str,
+    index: "ExcludedRecordIndex | None" = None,
 ) -> Path | None:
     """Record how *identifier* was obtained, on the record that already lists it.
 
@@ -1828,6 +2042,17 @@ def classify_contact_value(
     refused in :func:`_merge_contact_classification` — in both cases the file
     is left byte-identical.
 
+    Args:
+        index: An already-built :class:`ExcludedRecordIndex` to resolve
+            through instead of a fresh scan (issue athenaeum#883). Optional, and
+            unindexed by default: this function has no in-tree caller with a
+            natural batch scope to amortize an index against, so it gains the
+            parameter for symmetry with :func:`mark_bounced` rather than a new
+            default. Unlike ``mark_bounced`` it never MINTS, so it never has
+            to :meth:`~ExcludedRecordIndex.register` anything back — a
+            classification only ever rewrites a record the index already holds,
+            and rewriting cannot change which addresses that record lists.
+
     Raises:
         ValueError: if *usage_class* is not one of :data:`USAGE_CLASSES`.
             A misspelled class must fail loudly at the WRITE, where the caller
@@ -1838,7 +2063,7 @@ def classify_contact_value(
         raise ValueError(
             f"unknown usage_class {usage_class!r}; expected one of {list(USAGE_CLASSES)}"
         )
-    record_path = resolve_contact_record(contacts_root, identifier)
+    record_path = resolve_contact_record(contacts_root, identifier, index=index)
     if record_path is None:
         return None
     existing_text = record_path.read_text(encoding="utf-8")
@@ -1900,6 +2125,7 @@ def mark_bounced(
     observed_at: str,
     source: str | dict[str, Any],
     record_path: Path | None = None,
+    index: "ExcludedRecordIndex | None" = None,
 ) -> tuple[Path, bool]:
     """Upsert the hard-bounce mark onto *identifier*'s contact record. Idempotent.
 
@@ -1942,10 +2168,21 @@ def mark_bounced(
     different *observed_at* / *diagnostic*) updates the same record — and,
     on a person record, the same list entry — in place rather than
     duplicating it: last-writer-wins.
+
+    Args:
+        index: An already-built :class:`ExcludedRecordIndex` to resolve
+            through, and to KEEP CURRENT (issue athenaeum#883). When supplied,
+            resolution is answered from the index and the written record is
+            :meth:`~ExcludedRecordIndex.register`-ed back onto it before
+            returning — so a second call for the same address in one batch
+            resolves to the record the first call just minted, instead of
+            answering a stale ``None`` and minting a duplicate (athenaeum#850's
+            exact failure). When omitted, behaviour and cost are exactly as
+            before: a fresh scan per call, and no staleness surface at all.
     """
     target = record_path
     if target is None:
-        target = resolve_contact_record(contacts_root, identifier) or (
+        target = resolve_contact_record(contacts_root, identifier, index=index) or (
             default_bounce_record_path(contacts_root, identifier)
         )
     existing_meta = read_bounce_record(target)
@@ -1979,6 +2216,11 @@ def mark_bounced(
         "deleted.\n"
     )
     atomic_write_text(target, render_frontmatter(merged_meta) + "\n" + body)
+    if index is not None:
+        # Register AFTER the write, so the re-read sees the merged frontmatter
+        # — this is both the mint case (a record the index had never seen) and
+        # the merge case (an existing record that just gained an identifier).
+        index.register(target)
     return target, True
 
 
@@ -2132,6 +2374,85 @@ CONTACT_DATA_FIELDS: tuple[str, ...] = tuple(
 )
 
 
+#: Frontmatter keys on an excluded record that are BOOKKEEPING — the record's
+#: own machinery — and are therefore never reported as data fields by the
+#: denylist-complement default in :func:`resolve_excluded_fields` (issue
+#: athenaeum#883). Every one of these is written by this module about a record or
+#: about one of its values, not by an observer about the entity:
+#: ``uid``/``type`` are the join and the class; ``pii`` is the flag; the rest
+#: are :func:`mark_bounced`'s and :func:`classify_contact_value`'s own marks.
+#:
+#: ``contact_classification`` sits here deliberately: it is metadata ABOUT a
+#: field (which usage class each value carries), not a contact field itself.
+#: It is CONSULTED to classify returned values and never returned as one.
+EXCLUDED_RECORD_BOOKKEEPING_FIELDS: frozenset[str] = frozenset(
+    {
+        "uid",
+        "type",
+        PII_FLAG,
+        "identifier",
+        IDENTIFIER_VALIDITY_FIELD,
+        CONTACT_CLASSIFICATION_FIELD,
+        FOLDED_INTO_FIELD,
+        "source",
+        "observed_at",
+        "valid_until",
+        "bounce_diagnostic",
+    }
+)
+
+
+def resolve_excluded_fields(
+    surface_class: str,
+    config: dict[str, Any] | None,
+    record_meta: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Which frontmatter fields on an excluded record are DATA, for *surface_class*.
+
+    The per-surface-class field policy that replaces the fixed
+    :data:`CONTACT_DATA_FIELDS` allowlist (issue athenaeum#883), resolved in this
+    order:
+
+    1. explicit operator config — ``storage.excluded_fields.<surface_class>``,
+       a list of frontmatter field names (see
+       :func:`athenaeum.config.resolve_excluded_fields_config`);
+    2. surface class ``pii`` — the built-in default stays
+       :data:`CONTACT_DATA_FIELDS` VERBATIM, so a person read is byte-identical
+       to what it returned before this function existed;
+    3. any other surface class — every frontmatter field on the record MINUS
+       :data:`EXCLUDED_RECORD_BOOKKEEPING_FIELDS`.
+
+    **Why a denylist-complement and not an allowlist for the unknown class.**
+    An allowlist for a class nobody has enumerated makes the redaction marker
+    *dishonest by omission*: a field the allowlist forgot is reported neither
+    as a value nor as a marker, so "withheld" and "absent" collapse into the
+    same shape — precisely the failure :class:`RedactionMarker` exists to
+    prevent. A denylist-complement is honest by construction, and its failure
+    direction is only noise (a bookkeeping key surfaced as a field), never a
+    silent hole. Noise is visible and correctable; a hole is neither.
+
+    Rule 3 reads the record, so the returned tuple is per-record for an
+    unconfigured class — a record with no fields yields ``()``. Field order is
+    the record's own frontmatter order, which keeps a read's field iteration
+    stable for a given record. Rules 1 and 2 return the configured/built-in
+    order and ignore *record_meta* entirely.
+    """
+    from athenaeum.config import resolve_excluded_fields_config
+
+    configured = resolve_excluded_fields_config(config).get(surface_class)
+    if configured is not None:
+        return tuple(configured)
+    if surface_class == PII_ENTITY_CLASS:
+        return CONTACT_DATA_FIELDS
+    if not isinstance(record_meta, Mapping):
+        return ()
+    return tuple(
+        str(name)
+        for name in record_meta
+        if str(name) not in EXCLUDED_RECORD_BOOKKEEPING_FIELDS
+    )
+
+
 def resolve_contact_record_for_uid(contacts_root: Path, uid: str) -> Path | None:
     """Find the existing contact record whose frontmatter ``uid`` equals *uid*.
 
@@ -2262,8 +2583,19 @@ class RedactionMarker:
 
 
 @dataclass(frozen=True)
-class PersonRead:
-    """Result of :func:`read_person` — a person's page plus contact-data view.
+class EntityRead:
+    """Result of :func:`read_entity` — an entity's page plus excluded-data view.
+
+    Renamed field-for-field from ``PersonRead`` (issue athenaeum#883), which
+    remains as an alias. Nothing about the shape changed: the rename is what
+    makes the person read and the generic read the SAME type by construction
+    rather than two types kept in parity by test.
+
+    The ``contact`` / ``contact_included`` / ``contact_record_path`` field
+    names stay as-is on the generic type. Renaming them would change the JSON
+    keys live consumers already read (``to_dict`` is the MCP and CLI payload),
+    which is a breaking change this generalization has no reason to make. An
+    accepted naming wart; renaming the payload keys is a separate decision.
 
     ``contact`` holds real values only when the read was made with
     ``include_contact=True``; ``redactions`` is non-empty only when contact
@@ -2329,39 +2661,93 @@ class PersonRead:
         }
 
 
-def _person_read_from_indexes(
-    uid: str,
+#: The name this type carried before issue athenaeum#883 generalized the read past
+#: persons. Kept as a true ALIAS, not a subclass or a parallel dataclass, so
+#: ``read_person`` and ``read_entity`` return the identical type and parity
+#: between them is by construction rather than by test. Every existing
+#: annotation, ``isinstance`` check and import of ``PersonRead`` keeps working.
+PersonRead = EntityRead
+
+
+def assemble_excluded_read(
+    page_path: Path,
+    page_frontmatter: Mapping[str, Any],
+    record_meta: dict[str, Any] | None,
     *,
-    entity_index: EntityIndex,
-    contact_records: Mapping[str, Path],
-    include_contact: bool,
-    wanted_classes: frozenset[str] | None,
-) -> PersonRead | None:
-    """Assemble one :class:`PersonRead` from ALREADY-BUILT indexes.
+    surface_class: str,
+    config: dict[str, Any] | None = None,
+    include_excluded: bool = False,
+    usage_classes: Collection[str] | None = None,
+) -> tuple[
+    dict[str, list[str]],
+    tuple[RedactionMarker, ...],
+    dict[str, list[ContactClassification]],
+]:
+    """Assemble ``(fields, redactions, classifications)`` from RESOLVED inputs.
 
-    The shared body of :func:`read_person` (one uid, indexes built for the
-    call) and :func:`read_people` (N uids, indexes built once) — extracted so
-    the two entry points cannot drift in what they return (issue athenaeum#877).
-    Both index arguments are read-only here; this function builds neither, and
-    so is the only part of the person read that is genuinely O(1) per uid.
+    The marker/field logic that used to be private inside
+    ``_person_read_from_indexes``, made public and — critically —
+    :class:`~athenaeum.models.EntityIndex`-FREE (issue athenaeum#883). That function
+    required an ``EntityIndex`` it needed only to find the page; this half of
+    the work needs no index at all, just the already-resolved page and the
+    matched excluded record's frontmatter.
 
-    *wanted_classes* is the pre-``frozenset``-ed form of ``read_person``'s
-    ``usage_classes`` — normalized once by the caller rather than per uid,
-    which is the same "pay it once for the batch" property the indexes have.
+    That is the seam ``recall`` needs (issue athenaeum#885): recall already holds the
+    hit's fresh frontmatter from its own Layer-C re-read, and must not pay to
+    rebuild an ``EntityIndex`` to reach this logic — 25.2s of the measured
+    28.1s single-call cost is ``EntityIndex`` construction, not the contacts
+    scan. :func:`read_entity` and :func:`read_entities` are callers of this
+    function, not the only way to reach it.
+
+    Args:
+        page_path: The entity's already-resolved wiki page. Not read here —
+            the caller has already parsed it — but part of the call contract
+            so the assembly seam takes a COMPLETE resolved read, and so a
+            uid disagreement between the page and the record it was joined to
+            can be reported against a concrete file.
+        page_frontmatter: That page's parsed frontmatter, likewise already in
+            the caller's hand. Consulted only for the uid cross-check.
+        record_meta: The matched excluded record's frontmatter, or ``None``
+            when no record matched — which is not an error: the entity simply
+            has no excluded data, and the read returns three empty containers.
+        surface_class: The **surface class** (``storage.mapping`` key, e.g.
+            ``"pii"``) whose field policy applies — never a page ``type:``.
+        config: Resolved ``athenaeum.yaml``, for the
+            ``storage.excluded_fields`` override.
+        include_excluded: When ``False``, every non-empty field yields a
+            :class:`RedactionMarker` instead of its values.
+        usage_classes: Restrict returned values to these usage classes (issue
+            athenaeum#866). ``None`` returns every value. Only meaningful with
+            *include_excluded* — a redacted read exposes no values to filter.
+
+    Returns:
+        ``(fields, redactions, classifications)`` — the three payload pieces
+        of an :class:`EntityRead`, with the same four-cell semantics that type
+        documents.
     """
-    page_path = entity_index.get_by_uid(uid)
-    if page_path is None:
-        return None
+    if not record_meta:
+        return {}, (), {}
 
-    frontmatter, body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+    record_uid = str(record_meta.get("uid", "")).strip()
+    page_uid = str(page_frontmatter.get("uid", "")).strip() if page_frontmatter else ""
+    if record_uid and page_uid and record_uid != page_uid:
+        # Never raises: the join is the caller's, and a mismatch is a
+        # store-consistency signal, not a reason to deny a read. Loud because
+        # returning one entity's excluded values on another's page is the
+        # worst failure this module has.
+        log.warning(
+            "excluded record uid %r does not match page uid %r (%s); "
+            "assembling the read as joined by the caller.",
+            record_uid,
+            page_uid,
+            page_path.name,
+        )
 
-    record_path = contact_records.get(str(uid).strip()) if str(uid).strip() else None
-    record_meta = read_bounce_record(record_path) if record_path is not None else {}
-
-    contact: dict[str, list[str]] = {}
+    wanted_classes = frozenset(usage_classes) if usage_classes is not None else None
+    fields: dict[str, list[str]] = {}
     classifications: dict[str, list[ContactClassification]] = {}
     redactions: list[RedactionMarker] = []
-    for field_name in CONTACT_DATA_FIELDS:
+    for field_name in resolve_excluded_fields(surface_class, config, record_meta):
         raw = record_meta.get(field_name)
         if raw is None:
             continue
@@ -2369,9 +2755,9 @@ def _person_read_from_indexes(
         values = [str(v).strip() for v in values if str(v).strip()]
         if not values:
             continue
-        if not include_contact:
+        if not include_excluded:
             # Count BEFORE class filtering: the marker reports what the record
-            # holds for this field, and a caller who asked for no contact data
+            # holds for this field, and a caller who asked for no excluded data
             # never named a class to filter by (issue athenaeum#866).
             redactions.append(RedactionMarker(field=field_name, value_count=len(values)))
             continue
@@ -2391,17 +2777,65 @@ def _person_read_from_indexes(
                 continue
             values = [value for value, _ in kept]
             classified = [item for _, item in kept]
-        contact[field_name] = values
+        fields[field_name] = values
         classifications[field_name] = classified
 
-    return PersonRead(
+    return fields, tuple(redactions), classifications
+
+
+def _entity_read_from_indexes(
+    uid: str,
+    *,
+    entity_index: EntityIndex,
+    contact_records: Mapping[str, Path],
+    include_excluded: bool,
+    wanted_classes: frozenset[str] | None,
+    surface_class: str,
+    config: dict[str, Any] | None,
+) -> EntityRead | None:
+    """Assemble one :class:`EntityRead` from ALREADY-BUILT indexes.
+
+    The shared body of :func:`read_entity` (one uid, indexes built for the
+    call) and :func:`read_entities` (N uids, indexes built once) — extracted so
+    the two entry points cannot drift in what they return (issue athenaeum#877).
+    Both index arguments are read-only here; this function builds neither, and
+    so is the only part of the read that is genuinely O(1) per uid.
+
+    *wanted_classes* is the pre-``frozenset``-ed form of ``usage_classes`` —
+    normalized once by the caller rather than per uid, which is the same "pay
+    it once for the batch" property the indexes have.
+
+    The field/marker work itself is :func:`assemble_excluded_read`'s; this
+    function is only the index-shaped half (page lookup, record lookup) that
+    a caller holding a resolved page — ``recall`` — must be able to skip.
+    """
+    page_path = entity_index.get_by_uid(uid)
+    if page_path is None:
+        return None
+
+    frontmatter, body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+
+    record_path = contact_records.get(str(uid).strip()) if str(uid).strip() else None
+    record_meta = read_bounce_record(record_path) if record_path is not None else {}
+
+    fields, redactions, classifications = assemble_excluded_read(
+        page_path,
+        frontmatter,
+        record_meta,
+        surface_class=surface_class,
+        config=config,
+        include_excluded=include_excluded,
+        usage_classes=wanted_classes,
+    )
+
+    return EntityRead(
         uid=uid,
         page_path=page_path,
         frontmatter=frontmatter,
         body=body,
-        contact=contact,
-        redactions=tuple(redactions),
-        contact_included=include_contact,
+        contact=fields,
+        redactions=redactions,
+        contact_included=include_excluded,
         contact_record_path=record_path,
         classifications=classifications,
     )
@@ -2488,21 +2922,163 @@ def read_person(
         one process: call :func:`read_people` instead**, which builds each
         index exactly once for the whole batch and returns identical
         ``PersonRead`` values.
+
+    Since issue athenaeum#883 this is a thin wrapper over :func:`read_entity` with
+    the surface class fixed to :data:`PII_ENTITY_CLASS` and ``include_contact``
+    mapped to ``include_excluded``. Its signature, defaults, return value and
+    JSON shape are unchanged, and ``PersonRead`` is now an alias of
+    :class:`EntityRead` — so the person read and the generic read are the same
+    type by construction, not two types held in parity by test.
     """
-    contacts_root = contacts_surface_root(knowledge_root, config)
+    return read_entity(
+        knowledge_root,
+        config,
+        uid,
+        surface_class=PII_ENTITY_CLASS,
+        include_excluded=include_contact,
+        usage_classes=usage_classes,
+    )
+
+
+def read_entity(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    *,
+    surface_class: str,
+    include_excluded: bool = False,
+    usage_classes: Collection[str] | None = None,
+) -> EntityRead | None:
+    """Read one entity's wiki page, with excluded data gated by *include_excluded*.
+
+    The entity-class-generic form of :func:`read_person` (issue athenaeum#883), and
+    the primitive that function is now a wrapper over. It resolves an entity of
+    ANY wiki ``type:`` through :class:`~athenaeum.models.EntityIndex` (which
+    has always indexed every type by uid, not just persons) and joins it to the
+    excluded record for *surface_class* — so the read that was person-shaped by
+    accident of how it was built now works for any class the operator has
+    routed to an excluded surface.
+
+    Semantics are :func:`read_person`'s, unchanged, with two generalizations:
+    the surface is *surface_class*'s rather than always ``pii``'s, and which
+    frontmatter fields count as data comes from
+    :func:`resolve_excluded_fields`'s per-class policy rather than the fixed
+    :data:`CONTACT_DATA_FIELDS` allowlist. The four inclusion/record cells, the
+    :class:`RedactionMarker` per withheld non-empty field, and the co-indexed
+    ``classifications`` map are all identical — see :class:`EntityRead`.
+
+    Args:
+        knowledge_root: Root of the knowledge base (parent of ``wiki/``).
+        config: Resolved ``athenaeum.yaml``.
+        uid: The entity's durable identifier.
+        surface_class: The **surface class** (``storage.mapping`` key) whose
+            excluded surface this entity's record lives on — NOT the page's
+            ``type:``. A ``type: person`` page's record lives on the ``pii``
+            surface, which is why the two names cannot be collapsed. This
+            function is told the surface class and never guesses; mapping a
+            page class onto one is issue athenaeum#885's job. Required, with no
+            default: a generic read that quietly fell back to ``pii`` would
+            join an entity of any class to the person surface and report the
+            result as authoritative.
+        include_excluded: Inclusion flag, default ``False``. Who may set it
+            remains the deferred athenaeum#864 question — this function neither
+            widens nor narrows it.
+        usage_classes: Restrict returned values to these usage classes
+            (issue athenaeum#866), exactly as :func:`read_person`.
+
+    Returns:
+        An :class:`EntityRead`, or ``None`` when *uid* resolves to no wiki
+        page — the only ``None`` case. An entity with no excluded record is
+        NOT one: the page is returned with empty data and no markers.
+
+    Cost:
+        Builds both O(corpus) indexes per call, as :func:`read_person` always
+        has (~28s against the live 16,928-page store, of which 25.2s is
+        ``EntityIndex``). **Resolving more than one uid: use
+        :func:`read_entities`.** A caller that already HAS the page and its
+        frontmatter — ``recall`` — should call
+        :func:`assemble_excluded_read` directly and build no index at all.
+    """
+    contacts_root = excluded_surface_root(surface_class, knowledge_root, config)
     # Single lookup: resolve just this uid rather than indexing the whole
     # surface. Same one-scan cost, but it warns only about a collision on the
     # uid actually asked for — the batch builder's corpus-wide warning would
     # be noise in a one-uid read.
     record_path = resolve_contact_record_for_uid(contacts_root, uid)
     contact_records = {} if record_path is None else {str(uid).strip(): record_path}
-    return _person_read_from_indexes(
+    return _entity_read_from_indexes(
         uid,
         entity_index=EntityIndex(knowledge_root / "wiki"),
         contact_records=contact_records,
-        include_contact=include_contact,
+        include_excluded=include_excluded,
         wanted_classes=frozenset(usage_classes) if usage_classes is not None else None,
+        surface_class=surface_class,
+        config=config,
     )
+
+
+def read_entities(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uids: Iterable[str],
+    *,
+    surface_class: str,
+    include_excluded: bool = False,
+    usage_classes: Collection[str] | None = None,
+) -> Iterator[tuple[str, EntityRead | None]]:
+    """Read MANY entities, paying each O(corpus) scan once (issues athenaeum#877/#883).
+
+    The batch counterpart to :func:`read_entity`, and the primitive
+    :func:`read_people` is now a wrapper over. Every yielded
+    :class:`EntityRead` is exactly what :func:`read_entity` would have returned
+    for that uid — the batch differs ONLY in what it costs.
+
+    Both O(corpus) indexes (the wiki :class:`~athenaeum.models.EntityIndex` and
+    the surface's ``uid -> record`` mapping) are built exactly ONCE for the
+    whole batch, lazily on the FIRST uid rather than at call time — so an empty
+    batch costs nothing rather than one full pass to read zero entities. The
+    stream is lazy for the same reason it always was: an
+    :class:`EntityRead` carries the entity's full page body, so materializing
+    thousands at once would hold much of the corpus in memory at peak.
+
+    Yields:
+        ``(uid, EntityRead | None)`` pairs in the order *uids* supplies them —
+        ``None`` for a uid resolving to no wiki page. Pairs (not a bare
+        sequence) so a caller always knows WHICH uid a result belongs to;
+        input order (not a dict) so duplicate uids are neither collapsed nor
+        reordered.
+
+    The two-path invariant is preserved (``docs/one-way-in-one-way-out.md``
+    §3): the caller supplies uids and flags, and THIS function resolves the
+    surface root and the records within it. A caller still never constructs a
+    surface path — which is what made a batch entry point the right fix rather
+    than exporting the index for callers to scan themselves.
+    """
+    wanted_classes = frozenset(usage_classes) if usage_classes is not None else None
+    entity_index: EntityIndex | None = None
+    contact_records: Mapping[str, Path] = {}
+    for uid in uids:
+        if entity_index is None:
+            # Built on the FIRST uid, not at call time: a caller whose
+            # candidate list came back empty (a quiet week for the weekly
+            # enrichment job) then pays nothing at all rather than a full
+            # O(corpus) pass to read zero entities.
+            entity_index = EntityIndex(knowledge_root / "wiki")
+            contact_records = build_contact_record_uid_index(
+                excluded_surface_root(surface_class, knowledge_root, config)
+            )
+        yield (
+            uid,
+            _entity_read_from_indexes(
+                uid,
+                entity_index=entity_index,
+                contact_records=contact_records,
+                include_excluded=include_excluded,
+                wanted_classes=wanted_classes,
+                surface_class=surface_class,
+                config=config,
+            ),
+        )
 
 
 def read_people(
@@ -2576,30 +3152,23 @@ def read_people(
         usage_classes: Restrict returned contact values to these usage classes
             (issue athenaeum#866), same meaning as :func:`read_person`.
             Normalized once for the whole batch.
+
+    Since issue athenaeum#883 this is a thin wrapper over :func:`read_entities` with
+    the surface class fixed to :data:`PII_ENTITY_CLASS`. Its signature,
+    defaults, laziness, yielded pairs and JSON shape are unchanged — in
+    particular the POSITIONAL calling convention
+    ``read_people(knowledge_root, config, uids, include_contact=True)`` is
+    load-bearing (it is ``apollo-enrich``'s exact call shape, the only external
+    consumer) and neither becomes keyword-only nor reorders.
     """
-    wanted_classes = frozenset(usage_classes) if usage_classes is not None else None
-    entity_index: EntityIndex | None = None
-    contact_records: Mapping[str, Path] = {}
-    for uid in uids:
-        if entity_index is None:
-            # Built on the FIRST uid, not at call time: a caller whose
-            # candidate list came back empty (a quiet week for the weekly
-            # enrichment job) then pays nothing at all rather than a full
-            # O(corpus) pass to read zero people.
-            entity_index = EntityIndex(knowledge_root / "wiki")
-            contact_records = build_contact_record_uid_index(
-                contacts_surface_root(knowledge_root, config)
-            )
-        yield (
-            uid,
-            _person_read_from_indexes(
-                uid,
-                entity_index=entity_index,
-                contact_records=contact_records,
-                include_contact=include_contact,
-                wanted_classes=wanted_classes,
-            ),
-        )
+    yield from read_entities(
+        knowledge_root,
+        config,
+        uids,
+        surface_class=PII_ENTITY_CLASS,
+        include_excluded=include_contact,
+        usage_classes=usage_classes,
+    )
 
 
 __all__ = [
@@ -2661,10 +3230,18 @@ __all__ = [
     "find_orphaned_bounce_marks",
     "fold_orphaned_bounce_marks",
     "CONTACT_DATA_FIELDS",
+    "EXCLUDED_RECORD_BOOKKEEPING_FIELDS",
+    "ExcludedRecordIndex",
+    "excluded_surface_root",
+    "resolve_excluded_fields",
+    "assemble_excluded_read",
     "resolve_contact_record_for_uid",
     "build_contact_record_uid_index",
     "RedactionMarker",
+    "EntityRead",
     "PersonRead",
+    "read_entity",
+    "read_entities",
     "read_person",
     "read_people",
     "CONTACT_CLASSIFICATION_FIELD",
