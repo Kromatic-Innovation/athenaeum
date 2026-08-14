@@ -2241,6 +2241,42 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     return adapters
 
 
+def resolve_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str, str]:
+    """Resolve ``storage.excluded_read_mapping`` — page ``type:`` → surface class (athenaeum#885).
+
+    The operator override for the mapping ``recall`` consults to know WHICH
+    excluded surface a hit joins to. It is a different table from
+    ``storage.mapping``: that one maps a class onto a storage ADAPTER, this one
+    maps a wiki page's ``type:`` onto the SURFACE CLASS whose excluded record
+    holds that page's excluded fields. The two names are distinct and the
+    distinction is load-bearing — a page is ``type: person`` while its record
+    lives on the ``pii`` surface.
+
+    Returns an EMPTY dict when unset. The identity default plus the single
+    shipped non-identity entry (``person: pii``) lives in
+    :data:`athenaeum.pii.DEFAULT_EXCLUDED_READ_MAPPING`, not here, so this
+    resolver reports only what the OPERATOR configured —
+    ``resolve_storage_mapping``'s precedent. Non-string keys/values and blank
+    entries are dropped defensively.
+    """
+    if not isinstance(config, dict):
+        return {}
+    storage_cfg = config.get("storage") or {}
+    if not isinstance(storage_cfg, dict):
+        return {}
+    raw = storage_cfg.get("excluded_read_mapping")
+    if not isinstance(raw, dict):
+        return {}
+    mapping: dict[str, str] = {}
+    for page_class, surface_class in raw.items():
+        if not isinstance(page_class, str) or not page_class.strip():
+            continue
+        if not isinstance(surface_class, str) or not surface_class.strip():
+            continue
+        mapping[page_class.strip()] = surface_class.strip()
+    return mapping
+
+
 def resolve_excluded_fields_config(
     config: dict[str, Any] | None,
 ) -> dict[str, tuple[str, ...]]:

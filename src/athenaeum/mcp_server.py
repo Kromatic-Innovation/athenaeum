@@ -54,7 +54,12 @@ from athenaeum.models import (
 )
 from athenaeum.provenance import resolve_remember_extras, resolve_remember_sources
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
-from athenaeum.storage import is_recallable, storage_policy_configured, write_raw_intake
+from athenaeum.storage import (
+    is_excluded,
+    is_recallable,
+    storage_policy_configured,
+    write_raw_intake,
+)
 
 if TYPE_CHECKING:
     # Issue athenaeum#550: resolves the forward reference on ``create_server``'s return
@@ -62,6 +67,11 @@ if TYPE_CHECKING:
     # import stays lazy (inside create_server) so athenaeum works without the
     # optional ``mcp`` extra installed.
     from fastmcp import FastMCP
+
+    # Issue athenaeum#885: annotation-only. The `pii` import stays lazy at every
+    # call site in this module (the existing convention here), so this never
+    # pulls the module in at import time.
+    from athenaeum.pii import ExcludedRecordIndex
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +175,8 @@ def recall_search(
     extra_roots: list[Path] | None = None,
     caller_audience: set[str] | None = None,
     config: dict[str, object] | None = None,
+    with_pii: bool = False,
+    usage_classes: Collection[str] | None = None,
 ) -> str:
     """Search the knowledge wiki for pages relevant to *query*.
 
@@ -193,6 +205,34 @@ def recall_search(
             audience predicate uses. ``None`` (default) skips the check —
             today's behavior — and is a no-op for the default configuration
             (every class maps to the all-true wiki surface).
+        with_pii: Resolve each surviving hit's EXCLUDED fields and render them
+            with the hit (issue athenaeum#885). Default ``False``, and the default
+            path is byte-identical and free: with the flag unset, ZERO
+            excluded-surface scans are performed and the output is exactly what
+            it was before this parameter existed.
+
+            This is strictly a RENDER-layer join, never a search-time
+            predicate. It cannot widen the candidate set and cannot make an
+            excluded page become a hit — excluded values are never indexed and
+            are not searchable, only resolvable on a hit the corpus already
+            produced. It is applied AFTER the fail-closed audience drop and
+            AFTER the athenaeum#532 ``recallable`` drop, so a hit either of those
+            removes never triggers an excluded-surface lookup at all and a
+            restricted caller cannot use the flag to probe whether a record
+            exists for a page it may not read.
+
+            Authorization is deliberately unchanged: the rule is identical to
+            :func:`person_read`'s — the audience check decides whether the hit
+            exists at all, and for a hit that survives it the flag yields
+            values. Who may SET the flag remains the deferred athenaeum#864
+            question; this parameter neither widens nor narrows it.
+        usage_classes: Restrict resolved excluded values to these usage classes
+            (issue athenaeum#866), threaded to the join exactly as
+            :func:`athenaeum.pii.read_entity` accepts it. ``None`` (default)
+            returns every value. Only meaningful with *with_pii* — the flag is
+            not usage-class-blind, so a caller that must not receive a
+            provider-sourced address (``docs/security-posture.md`` §2.3) can
+            filter it here the same way ``read_person``'s callers already can.
 
     Returns a formatted string of matching wiki pages with relevance scores
     and content snippets.
@@ -214,6 +254,8 @@ def recall_search(
         extra_roots or [],
         caller_audience,
         config,
+        with_pii=with_pii,
+        usage_classes=usage_classes,
     )
 
 
@@ -422,6 +464,91 @@ def _recall_metadata_lines(fm: dict[str, object]) -> list[str]:
     return lines
 
 
+def _excluded_block_for_hit(
+    page_path: Path | None,
+    fm: dict[str, object],
+    *,
+    wiki_root: Path,
+    config: dict[str, object] | None,
+    indexes: dict[str, ExcludedRecordIndex],
+    usage_classes: Collection[str] | None,
+) -> str:
+    """Render one hit's excluded fields (or their redaction markers), or ``""``.
+
+    The ``with_pii`` join (issue athenaeum#885). Called ONLY for a hit that has
+    already survived both Layer-C drops, and only when the caller asked for it.
+
+    It reuses athenaeum#883's public, ``EntityIndex``-free assembly seam
+    (:func:`athenaeum.pii.assemble_excluded_read`) and never
+    ``read_entity``/``read_entities``: this function already HOLDS the hit's
+    fresh frontmatter from the Layer-C re-read, so building an ``EntityIndex``
+    to reach the same logic would be a defect, not an optimization detail —
+    25.2s of the measured 28.1s per-call cost IS that construction.
+
+    Returns the empty string — never an error — for every case where there is
+    nothing to say: no readable page, no ``uid`` on the hit, a page class whose
+    mapped surface class is not actually excluded, or no matching record.
+    """
+    from athenaeum import pii
+
+    if page_path is None:
+        return ""
+
+    uid = str(fm.get("uid") or "").strip()
+    if not uid:
+        # A hit with no uid has nothing to join ON. Not an error, and it must
+        # produce no redaction marker either — there is no record to be
+        # withholding, so a marker would assert something false.
+        return ""
+
+    surface_class = pii.surface_class_for_page_class(str(fm.get("type") or ""), config)
+    if not surface_class:
+        return ""
+
+    # THE GATE, before any join is attempted: a page class whose mapped surface
+    # class is not excluded (every class on a base that maps only
+    # `pii: excluded`) resolves to the DEFAULT WIKI ADAPTER. Joining there would
+    # scan the wiki root as if it were an excluded surface — reading the corpus
+    # back as though it were the excluded store. Return nothing instead; never
+    # an error.
+    if not is_excluded(surface_class, config):
+        return ""
+
+    knowledge_root = wiki_root.parent
+    index = indexes.get(surface_class)
+    if index is None:
+        index = pii.ExcludedRecordIndex(
+            pii.excluded_surface_root(surface_class, knowledge_root, config)
+        )
+        indexes[surface_class] = index
+
+    record_path = index.by_uid(uid)
+    if record_path is None:
+        return ""
+
+    fields, redactions, _ = pii.assemble_excluded_read(
+        page_path,
+        fm,
+        pii.read_bounce_record(record_path),
+        surface_class=surface_class,
+        config=config,
+        include_excluded=True,
+        usage_classes=usage_classes,
+    )
+
+    lines: list[str] = []
+    for field_name, values in fields.items():
+        lines.append(f"**{field_name}:** {', '.join(values)}")
+    for marker in redactions:
+        # Withheld and absent must never collapse to the same shape: a field
+        # the caller did not receive is reported AS withheld, with how many
+        # values exist, rather than simply not appearing.
+        lines.append(f"**{marker.field}:** [redacted — {marker.value_count} value(s) on file]")
+    if not lines:
+        return ""
+    return "".join(f"{line}\n" for line in lines)
+
+
 def _recall_via_backend(
     wiki_root: Path,
     query: str,
@@ -431,8 +558,30 @@ def _recall_via_backend(
     extra_roots: list[Path],
     caller_audience: set[str] | None = None,
     config: dict[str, object] | None = None,
+    *,
+    with_pii: bool = False,
+    usage_classes: Collection[str] | None = None,
 ) -> str:
-    """Delegate recall to a registered search backend, then format results."""
+    """Delegate recall to a registered search backend, then format results.
+
+    **How ``with_pii`` layers with audience scoping (issues athenaeum#312/#538).**
+    The three existing layers are untouched and the flag touches only the third:
+
+    - **Layer A (index build)** — untouched. Excluded surfaces are kept out of
+      the index two ways, neither of them ``is_embedded``: structurally (the
+      excluded root is never in the scanned path set at all) and, as a
+      belt-and-suspenders drop, by ``is_pii_flagged`` at build. ``with_pii``
+      must NEVER put an excluded value into the FTS5 or vector store —
+      excluded fields are not searchable, only resolvable on a hit the corpus
+      already produced.
+    - **Layer B (in-query predicate)** — untouched. ``with_pii`` is not a
+      search-time predicate and never widens the candidate set.
+    - **Layer C (render, here)** — where the join happens, strictly AFTER (1)
+      the ``readable``/:func:`is_page_authorized` fail-closed drop and (2) the
+      athenaeum#532 ``recallable`` drop. A hit dropped by either never triggers an
+      excluded-surface lookup, so a restricted caller cannot use the flag to
+      probe the existence of a record on a page it may not read.
+    """
     from athenaeum.search import DegradedIndexError, get_backend
 
     try:
@@ -484,6 +633,12 @@ def _recall_via_backend(
     # `athenaeum.push_metrics` module docstring). Kept separate from `blocks`
     # itself so instrumentation can never influence what is rendered.
     _pushed_hits: list[tuple[str, dict[str, object], str]] = []
+    # Issue athenaeum#885: ONE index per surface class for the WHOLE call, shared
+    # across all top_k hits — never one scan per hit. Keyed by surface class
+    # because different hits can map to different excluded surfaces. Each index
+    # loads lazily on its first lookup, so a class no hit resolves to costs
+    # nothing, and a call with `with_pii` unset never touches this at all.
+    excluded_indexes: dict[str, ExcludedRecordIndex] = {}
     for filename, name, score in hits:
         page_path, display_prefix = _resolve_hit_path(
             filename,
@@ -528,6 +683,20 @@ def _recall_via_backend(
             if not is_recallable(page_type, config):
                 continue
 
+        # Issue athenaeum#885: the excluded-field join, LAST — after both drops
+        # above. Skipped entirely (and costing zero scans) when `with_pii` is
+        # unset, which is what keeps the default path byte-identical.
+        excluded_block = ""
+        if with_pii:
+            excluded_block = _excluded_block_for_hit(
+                page_path,
+                fm,
+                wiki_root=wiki_root,
+                config=config,
+                indexes=excluded_indexes,
+                usage_classes=usage_classes,
+            )
+
         if isinstance(tags, list):
             tags = ", ".join(tags)
         snip = _snippet(body, tokens) if body else ""
@@ -542,7 +711,7 @@ def _recall_via_backend(
             f"{display_name} (score: {score:.1f})\n"
             f"**Path:** {display_prefix}\n"
             f"**Tags:** {tags}\n"
-            f"{meta_block}\n"
+            f"{meta_block}{excluded_block}\n"
             f"{snip}\n"
         )
         _pushed_hits.append((filename, fm, snip))

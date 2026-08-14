@@ -61,15 +61,21 @@ The two failure modes this half rules out:
 
 ## 3. The egress half — everything leaves through the read interface
 
-Every read goes through the recall/read interface. That covers **both** surfaces
-a store can occupy:
+Every read goes through the recall/read interface — **one path, not two**.
 
-| Surface | What lives there | Sanctioned way to read it |
+A store occupies two kinds of surface, and it is tempting to describe them as
+two entry points. That framing was this document's own, and it was the problem:
+an interface that answers "find me things" and an interface that answers "give
+me this person's withheld fields" are two shapes a caller has to know about, and
+a caller who has one and needs the other reaches past the seam. So the surfaces
+are still two; the way in is one.
+
+| Surface | What lives there | How a read reaches it |
 |---|---|---|
 | **Corpus surface** — the wiki, plus any configured intake roots | Compiled entity pages, the observation ledger | `recall` / the search path, the MCP read tools, `athenaeum query` |
-| **Contact-data surface** — the root the `pii` entity class resolves to, which an operator maps to an excluded-policy adapter (`storage.mapping`) | Contact records held off-corpus (athenaeum#427, athenaeum#437) | The `read_person` MCP tool, `athenaeum query person --uid ... [--include-contact]`, or `pii.read_person` directly (`pii.read_people` for many uids at once, athenaeum#877) — each resolves the surface via `pii.contacts_surface_root` on the caller's behalf |
+| **Excluded surfaces** — the roots that entity classes mapped to an excluded-policy adapter resolve to (`storage.mapping`); `pii` is the one this repo ships | Records held off-corpus (athenaeum#427, athenaeum#437) — contact data for a person, and, since athenaeum#883, whatever an operator routes off-corpus for any other class | **The same `recall`**, with its excluded-field parameter set (athenaeum#885) — the read a caller is already making, resolving the excluded record for the hit it already has. `pii.read_entity` / `read_entities` read one by uid when the caller has no query. Each resolves the surface root on the caller's behalf |
 
-**The contact-data surface is the one that needs saying out loud**, because it
+**The excluded surface is the one that needs saying out loud**, because it
 is the one that fails quietly. Holding contact data off-corpus keeps it out of
 recall *by construction* — a scanner never reaches it. But "outside the corpus"
 is not "unreachable": it is an ordinary directory on disk, and nothing about
@@ -84,26 +90,45 @@ So, explicitly:
 > authorized to read every byte it touched. The rule is about *where the seam
 > is*, not about who is on which side of it.
 
-The contact-data surface has exactly one sanctioned entry point: `pii.read_person`
-(athenaeum#864) — exposed to callers as the `read_person` MCP tool and the
-`athenaeum query person --uid ... [--include-contact]` CLI command — which
-takes a `uid` and an explicit contact-inclusion flag and returns the values,
-resolving the surface root itself so the caller never constructs that path.
-Only that entry point, and the modules that implement it (`pii.py` and the
-storage adapter layer it delegates to), know the surface layout.
+Excluded fields are resolved through **the read the caller is already making**.
+`recall`'s excluded-field parameter (athenaeum#885) takes a hit the corpus
+already produced and attaches that entity's excluded record to it — for any
+entity class, not only persons. Only `pii.py` and the storage-adapter layer it
+delegates to know the surface layout; a caller supplies a query and a flag and
+never constructs a path.
 
-`pii.read_people` (athenaeum#877) is the **batch form of that same entry
-point**, not a second one: it takes many uids, returns exactly what
-`read_person` returns for each, and resolves the surface root itself in the
-identical way. It exists because the single-call shape cost a full pass over
+Three properties make that one path rather than a second one:
+
+- **It cannot widen what you can see.** The flag is a *render-layer join*, not
+  a search predicate. Excluded values are never indexed and are not searchable;
+  they are only resolvable on a hit that was already authorized and already
+  ranked. The join runs strictly after the fail-closed audience check and after
+  the athenaeum#532 `recallable` drop, so a hit either of those removes never
+  triggers an excluded lookup at all — the flag cannot be used to probe whether
+  a record exists behind a page you may not read.
+- **It is free when unused.** With the flag unset, recall performs zero
+  excluded-surface scans and returns byte-identical output.
+- **Withheld never looks like absent.** A field you did not receive comes back
+  as a redaction marker naming the field and how many values exist — the
+  distinction the whole surface exists to preserve.
+
+`pii.read_entity` / `read_entities` (athenaeum#883) remain for the caller who
+has a uid and no query — the by-uid form of the same read, resolving the same
+surface root the same way. `read_entities` is the batch form and exists for a
+reason this document cares about: the single-call shape cost a full pass over
 the store *per uid* — ~28s each against the live corpus, ~37 hours for the
 4,696 people the weekly enrichment job resolves — which is the kind of number
 that makes a caller reach for the surface directly and go around the seam.
-That is the load-bearing point for this document: **a seam that is far too
-slow for a real workload is one a caller will eventually route around**, so
-keeping the batch shape *inside* the interface is what keeps the invariant
-true in practice rather than only on paper. It is item 4 of §5's checklist
-taken up rather than worked around.
+**A seam that is far too slow for a real workload is one a caller will
+eventually route around**, so keeping the batch shape *inside* the interface is
+what keeps the invariant true in practice rather than only on paper. It is
+item 4 of §5's checklist taken up rather than worked around.
+
+`pii.read_person` / `read_people` (athenaeum#864, athenaeum#877) — and the
+`read_person` MCP tool and `athenaeum query person --uid ... [--include-contact]`
+CLI command — keep working identically, as person-fixed wrappers over the
+generic read. They are retained, not deprecated by this section; `apollo-enrich`'s
+weekly job calls `read_people` today.
 
 ## 4. The invariant is not authorization
 
