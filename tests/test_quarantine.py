@@ -120,6 +120,45 @@ class TestQuarantineFile:
         assert (raw_root / record["original_path"]).parent.exists()
         assert (wiki_root / record["quarantine_path"]).exists()
 
+    def test_ledger_record_written_before_the_move_survives_a_move_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Code-review finding (athenaeum#898): the ledger write and the physical
+        move are two separate steps, not atomic. If the move raises (disk
+        full, permission error), the CHOSEN failure mode must be a ledger
+        record pointing at a file still in its original place — detectable
+        (visible to anyone reading the ledger) — never an orphaned file
+        moved with no record (invisible, findable only by a manual
+        filesystem search). This is what justifies writing the ledger
+        record FIRST, before shutil.move.
+        """
+        raw_root, wiki_root, raw = _make_tree(tmp_path)
+
+        def _boom(*args, **kwargs):
+            raise OSError("simulated disk-full mid-move")
+
+        monkeypatch.setattr("athenaeum.quarantine.shutil.move", _boom)
+
+        with pytest.raises(OSError, match="simulated disk-full"):
+            quarantine_file(
+                raw,
+                wiki_root=wiki_root,
+                raw_root=raw_root,
+                bound="bytes",
+                detail="d",
+                violations=2,
+            )
+
+        # The ledger record landed anyway (detectable) ...
+        ledger = read_quarantine_ledger(wiki_root)
+        assert len(ledger) == 1
+        assert ledger[0]["ref"] == raw.ref
+        # ... and the file was never moved (still exactly where it was).
+        assert raw.path.exists()
+        assert raw.path.read_text(encoding="utf-8") == "Some content.\n"
+        moved = wiki_root / ledger[0]["quarantine_path"]
+        assert not moved.exists()
+
 
 # ---------------------------------------------------------------------------
 # read_quarantine_ledger — tolerant reader

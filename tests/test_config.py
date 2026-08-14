@@ -203,6 +203,11 @@ class TestResolveRawFileMaxApiCalls:
             == 20
         )
 
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "raw_file_max_api_calls" not in _DEFAULTS.get("librarian", {})
+
 
 class TestResolveRawFileMaxRuntimeSeconds:
     """Issue athenaeum#898: the per-raw-file wall-clock bound resolver."""
@@ -256,6 +261,11 @@ class TestResolveRawFileMaxRuntimeSeconds:
             )
             == 30
         )
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "raw_file_max_runtime_seconds" not in _DEFAULTS.get("librarian", {})
 
 
 class TestResolveAudience:
