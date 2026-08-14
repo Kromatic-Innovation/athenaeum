@@ -55,6 +55,15 @@ from athenaeum.pii import (
     resolve_excluded_fields,
 )
 
+# Issue athenaeum#887: this module exercises the DEPRECATED person-shaped entry
+# points on purpose — they are the behaviour/parity tests that must keep
+# passing unchanged until athenaeum#888 actually removes them, which is exactly
+# what "deprecated, not changed" means. The specific warning is filtered here
+# so the suite stays readable; it is NOT filtered globally, and that it fires
+# at all (with the right message, at the caller's line, at CALL time for the
+# lazy batch form) is asserted directly in tests/test_read_person_deprecation.py.
+pytestmark = pytest.mark.filterwarnings("ignore:pii.read_p:DeprecationWarning")
+
 EXCLUDED_CONFIG = {"storage": {"mapping": {"pii": "excluded"}}}
 
 #: A second excluded surface for a NON-person class — the shape the whole
