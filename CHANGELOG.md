@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`pii.read_entity` / `read_entities` — the excluded-record read, for ANY
+  entity class (athenaeum#883).** The excluded/redacted read path was
+  entity-shaped only by accident of how it was built: two things were
+  hardcoded and both were narrow. `contacts_surface_root()` always resolved
+  the `pii` class, even though the `storage.surface_root_for_class` layer it
+  delegates to has been fully class-parameterized since athenaeum#429 — the
+  caller simply never got to say which class. And `CONTACT_DATA_FIELDS` was a
+  fixed four-name allowlist, so an excluded record for any non-person class
+  read back as if it had no fields at all. Everything else was already
+  generic (`EntityIndex` indexes every entity type by uid; the record join is
+  uid-keyed; `RedactionMarker` is field-generic), so this is a
+  parameterization, not a schema migration — there is no pointer-field
+  frontmatter contract to invent. New `excluded_surface_root(entity_class,
+  knowledge_root, config)` takes the **surface class** (the `storage.mapping`
+  key, e.g. `pii`) — deliberately NOT the wiki page's `type:`, since a person
+  page is `type: person` while its record lives on the `pii` surface; these
+  functions are told the surface class and never guess. New
+  `resolve_excluded_fields` replaces the fixed allowlist with a per-class
+  policy: explicit `storage.excluded_fields.<surface_class>` config first,
+  then `pii`'s built-in `CONTACT_DATA_FIELDS` verbatim, then — for any other
+  class — every frontmatter field on the record minus a bookkeeping denylist.
+  That last default is the deliberate choice: an allowlist for a class nobody
+  has enumerated makes the redaction marker **dishonest by omission** (a
+  forgotten field is reported neither as a value nor as a marker, collapsing
+  "withheld" into "absent" — the exact failure the marker exists to prevent),
+  whereas a denylist-complement fails only toward noise, never toward a silent
+  hole. `PersonRead` is renamed `EntityRead` field-for-field with
+  `PersonRead = EntityRead` kept as a true alias, so `read_person` and
+  `read_entity` return the identical type and parity is by construction rather
+  than by test; the `contact` / `contact_included` / `contact_record_path`
+  payload keys keep their names, since renaming them would change JSON live
+  consumers already read. **`read_person` / `read_people` are unchanged** —
+  they become thin wrappers passing `surface_class="pii"`, with identical
+  signatures, defaults, laziness, return values and JSON shape, and
+  `read_people`'s positional convention (`apollo-enrich`'s exact call shape)
+  neither reorders nor becomes keyword-only.
+- **`pii.assemble_excluded_read` — the field/marker logic, without an
+  `EntityIndex` (athenaeum#883).** The assembly that was private inside
+  `_person_read_from_indexes` (which required an `EntityIndex` it needed only
+  to find the page) is now public and takes an already-resolved page path +
+  frontmatter + the matched record's frontmatter directly, returning
+  `(fields, redactions, classifications)`. `read_entity`/`read_entities` are
+  callers of it, not the only way to reach it. This is the seam a caller that
+  already HOLDS the page — `recall`, next in this chain — needs: rebuilding an
+  `EntityIndex` there would be a defect, not an optimization detail, since
+  25.2s of the measured 28.1s single-call cost IS the `EntityIndex`
+  construction.
+
+### Fixed
+
+- **`pii.resolve_contact_record` is answerable from an index, and no longer
+  goes stale mid-batch (athenaeum#883).** athenaeum#877/#879 fixed the by-uid
+  batch path; the by-ADDRESS sibling still paid a full `iter_contact_records`
+  scan **per call**, across three callers (`bounce_join.join_identifier`,
+  `classify_contact_value`, and `mark_bounced` via the librarian's compile
+  loop), each paying it independently. New `ExcludedRecordIndex` builds
+  `by_uid` + `by_identifier` in ONE pass, holding the existing discipline
+  exactly — deterministic first-match-in-sorted-order wins, `log.warning`
+  (never raise) on collision, missing root yields an empty index, identical
+  `str(...).strip()` coercion — so moving a caller onto it can never resolve
+  to a different record than the unindexed function would. The librarian's
+  compile loop builds ONE index for its whole `ctx.raw_files` pass and threads
+  it down through `process_one`'s new `excluded_index=` parameter to
+  `tier0_bounce_mark` and `mark_bounced`; building it inside
+  `tier0_bounce_mark` would rebuild it once per raw file and defeat the fix.
+  The index's load is lazy (first lookup, not construction) so a compile run
+  with no conforming bounce note pays nothing at all. Every new `index=`
+  parameter is optional and defaults to `None`, so every existing caller keeps
+  today's behaviour *and* today's cost. `join_identifier` deliberately keeps
+  the unindexed call and says why: it is a single-identifier entry point with
+  no batch above it, and building an index to answer one lookup is strictly
+  slower than the scan it replaces.
+- **A batch of hard-bounce marks can no longer mint a duplicate record
+  (athenaeum#850 regression guard).** `mark_bounced` MINTS a record when
+  resolution returns `None` and merges new identifiers onto existing ones, so
+  any process-lifetime index that is never invalidated would answer a stale
+  `None` on the second lookup of one address in a batch — reintroducing
+  athenaeum#850's exact failure. `ExcludedRecordIndex` takes `EntityIndex`'s
+  architectural answer instead of leaving it as a documented hazard: a one-shot
+  load plus an explicit `register(path)` the WRITER calls after every write.
+  `register` re-indexes the record **wholesale** (re-reading its uid and its
+  full identifier list) because a single-key insert would miss the merge case,
+  and it appends rather than prepends, so registering can never change which
+  record an already-indexed identifier resolves to — batch resolution stays
+  stable regardless of how writes interleave with reads. Both properties are
+  pinned by test, alongside the two-marks-one-batch-one-record regression.
+
 ## [0.18.1] - 2026-08-13
 
 ### Added

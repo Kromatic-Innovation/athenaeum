@@ -164,6 +164,7 @@ from athenaeum.models import (
     render_frontmatter,
 )
 from athenaeum.pii import (
+    ExcludedRecordIndex,
     HardBounceFact,
     contacts_surface_root,
     mark_bounced,
@@ -811,6 +812,7 @@ def tier0_bounce_mark(
     wiki_root: Path,
     config: dict[str, object] | None = None,
     dry_run: bool = False,
+    excluded_index: ExcludedRecordIndex | None = None,
 ) -> HardBounceFact | None:
     """Deterministically recognize + mark a hard-bounce fact, LLM-free (issue athenaeum#765).
 
@@ -847,6 +849,16 @@ def tier0_bounce_mark(
     and sharing one code path is what stops the published contract from
     drifting away from the gate it describes. Behaviour here is unchanged —
     a non-conforming note still falls through to Tier 1/2/3 with no error.
+
+    Args:
+        excluded_index: The batch's shared
+            :class:`~athenaeum.pii.ExcludedRecordIndex`, threaded straight
+            through to :func:`~athenaeum.pii.mark_bounced` (issue athenaeum#883).
+            It is built ONCE at the ``ctx.raw_files`` compile-loop level and
+            passed DOWN — never built here, which would rebuild it once per
+            raw file and defeat the fix entirely. ``None`` (every existing
+            caller, and every test calling this directly) keeps today's
+            unindexed per-call scan and today's behaviour exactly.
     """
     check = check_tier0_bounce_conformance(raw.content)
     if not check.conforms:
@@ -868,6 +880,7 @@ def tier0_bounce_mark(
         diagnostic=fact.diagnostic,
         observed_at=check.observed_at,
         source=source,
+        index=excluded_index,
     )
     return fact
 
@@ -883,12 +896,21 @@ def process_one(
     dry_run: bool = False,
     usage: TokenUsage | None = None,
     config: dict[str, object] | None = None,
+    excluded_index: ExcludedRecordIndex | None = None,
 ) -> ProcessingResult:
     """Process a single raw file through all tiers.
 
     ``config`` is the resolved athenaeum.yaml dict (issue athenaeum#232) — it routes
     the ``models:`` section to the Tier 2/3 calls. ``None`` (legacy/test
     callers) keeps env > code-default model resolution.
+
+    ``excluded_index`` is the compile run's shared
+    :class:`~athenaeum.pii.ExcludedRecordIndex` (issue athenaeum#883). This function
+    does not use it itself — it only threads it to :func:`tier0_bounce_mark`,
+    which is the one tier that writes to an excluded surface. It is built once
+    for the whole ``ctx.raw_files`` loop ABOVE this function, so the
+    O(corpus) contacts scan is paid once per run rather than once per
+    conforming bounce note. ``None`` keeps the unindexed per-call behaviour.
     """
     result = ProcessingResult(raw_file=raw)
 
@@ -957,7 +979,9 @@ def process_one(
     # docstring — anything that does not conform (ambiguous identifier, a
     # 4.x code, missing observed_at/source) falls through to Tier 1/2/3
     # completely unchanged.
-    bounce_fact = tier0_bounce_mark(raw, wiki_root, config=config, dry_run=dry_run)
+    bounce_fact = tier0_bounce_mark(
+        raw, wiki_root, config=config, dry_run=dry_run, excluded_index=excluded_index
+    )
     if bounce_fact is not None:
         log.info(
             "  T0 bounce-mark: %s marked non-deliverable on the contacts surface",
@@ -3199,6 +3223,18 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         interval_s=entity_heartbeat_interval,
                     )
                     entity_heartbeat.start()
+                    # Issue athenaeum#883: ONE index over the excluded/contacts surface
+                    # for the whole batch, built HERE — above process_one — and
+                    # threaded down through it to tier0_bounce_mark. Building it
+                    # inside tier0_bounce_mark instead would rebuild the O(corpus)
+                    # scan once per raw file and defeat the fix; building it here
+                    # pays it once per run. It is also what keeps a second bounce
+                    # note for the same address in one batch from resolving a stale
+                    # `None` and minting a duplicate record (athenaeum#850) —
+                    # `mark_bounced` registers each record it writes back onto it.
+                    excluded_index = ExcludedRecordIndex(
+                        contacts_surface_root(ctx.wiki_root.parent, ctx.config)
+                    )
                     for i, raw in enumerate(ctx.raw_files):
                         # Issue athenaeum#526 (H10): heartbeat at every per-file boundary
                         # so a long healthy entity phase keeps the lock's
@@ -3335,6 +3371,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 dry_run=ctx.dry_run,
                                 usage=ctx.usage,
                                 config=ctx.config,
+                                excluded_index=excluded_index,
                             )
                         except TransientAPIError as exc:
                             # Issue athenaeum#193: the Anthropic API was overloaded
