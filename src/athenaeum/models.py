@@ -1089,6 +1089,31 @@ class RawFileTooLargeError(Exception):
         )
 
 
+class RawFileOverBudgetError(Exception):
+    """Raised by :func:`athenaeum.librarian.process_one` when a raw file's
+    LLM-call count or wall-clock spend crosses its per-file bound
+    (issue athenaeum#898).
+
+    Raised AFTER this file's LLM calls complete (:func:`athenaeum.tiers.tier3_derive_actions`
+    returns) but BEFORE any of this file's disk writes start — no wiki page
+    is created, no existing page is updated, no escalation is written. This
+    is what makes "the over-bound result is discarded" true rather than
+    aspirational: checking the bound only AFTER ``process_one`` returned (the
+    pre-athenaeum#898-review shape) was too late — ``tier3_write``'s update flush and
+    ``process_one``'s own create-write loop had both already landed on disk
+    by then, so "discarding" only skipped the run's create/update bookkeeping
+    and the raw-file unlink, never the writes themselves; the raw file was
+    then reprocessed next run against a wiki that already contained its
+    output. ``bound`` is ``"llm_calls"`` or ``"wall_clock"``.
+    """
+
+    def __init__(self, ref: str, *, bound: str, detail: str) -> None:
+        self.ref = ref
+        self.bound = bound
+        self.detail = detail
+        super().__init__(f"{ref}: over its {bound} bound — {detail}")
+
+
 @dataclass
 class RawFile:
     """A raw intake file from raw/{source}/{timestamp}-{uuid8}.md."""
