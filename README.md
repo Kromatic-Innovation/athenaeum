@@ -38,6 +38,10 @@ from running it on our own operations live in
 post: [What We Learned Running Our Own Operations on Agentic
 Memory](https://kromatic.com/blog/agentic-memory-in-production/).
 
+The system's purpose and operating principles — the north star every design
+decision is checked against — are stated canonically in
+[**docs/north-star.md**](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/north-star.md).
+
 ## Key features and why they're built this way
 
 ### The librarian compiles raw intake into a wiki — it doesn't store verbatim
