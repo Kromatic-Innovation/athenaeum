@@ -51,9 +51,14 @@ ResolutionProposal (winner? action? rationale? confidence? precedence?)
      ▼
 user accepts / overrides / defers
      │
-     │  resolve_question MCP tool
+     │  resolve_question MCP tool  (writes a decision-answer file, athenaeum#908)
      ▼
-answer ingested back into raw/  (next librarian run archives [x] entries)
+raw/answers/{ISO-TS}-question-{id}.md
+     │
+     │  athenaeum ingest-answers  (tier 0 — deterministic, no LLM call)
+     ▼
+answer applied: [x] mark flipped, then ingested back into raw/, source
+written back, block archived
 ```
 
 Stage-by-stage:
@@ -66,7 +71,20 @@ Stage-by-stage:
 | Resolve | `athenaeum.resolutions` | Opus per detection (capped) | `ResolutionProposal` |
 | Escalate | `athenaeum.tiers.tier4_escalate` | none | block in `_pending_questions.md` |
 | Surface | `athenaeum questions` CLI + hook | none | SessionStart prompt |
-| Resolve | `resolve-questions` skill + `resolve_question` MCP | none | `[x]` mark + answer ingested |
+| Record | `resolve-questions` skill + `resolve_question` MCP | none | decision-answer file under `raw/answers/` (deferred, athenaeum#908) |
+| Apply | `athenaeum ingest-answers` (tier 0) | none — no LLM call | `[x]` mark + answer ingested + archived |
+
+Issue athenaeum#908: `resolve_question` no longer flips the checkbox itself. It
+validates the id against the CURRENT state of `_pending_questions.md`
+(unknown / already-answered fails immediately, nothing written) and then
+writes a **decision-answer file** — the same conformant raw-intake record
+covered in "Decision-answer files" below. The actual checkbox flip, source
+write-back, fingerprint recording, and archival all happen deterministically
+on the next `athenaeum ingest-answers` run, in the same run-locked pass that
+already did the archival step. This is a **behavior change**: a caller that
+previously treated a successful `resolve_question` response as "the state
+already changed" must now wait for the next tick — the response's
+`deferred: true` field and `answer_file` path make this explicit.
 
 Each stage degrades gracefully when its successor is unavailable. No
 `ANTHROPIC_API_KEY` → detector returns `detected=False` with rationale
@@ -383,7 +401,88 @@ date -u -v+24H +%FT%TZ > ~/.cache/athenaeum/pending-questions-snoozed-until
 ```
 
 Resolved (`[x]`) entries are archived by `athenaeum ingest-answers` on the
-next librarian run; the skill does not handle archival.
+next librarian run; the skill does not handle archival. Issue athenaeum#908: as
+of this change the checkbox flip itself is also deferred to that same
+`ingest-answers` run — see "Decision-answer files" below.
+
+### Decision-answer files (unified decision resolution as intake, athenaeum#908)
+
+`athenaeum.decisions.list_pending_decisions` already joins five decision
+types (`question`, `merge`, `retraction`, `audit`, `quarantine`) into one
+outbound queue (`athenaeum decisions` / `list_pending_decisions` MCP). The
+path back IN used to be per-type: three MCP tools each mutated their own
+store directly. **Decision-answer files** make the inbound path uniform,
+extending the existing `raw/answers/*.md` raw-intake convention with the
+fields needed to name which decision an answer resolves:
+
+```yaml
+---
+source: decision_answer
+decision_id: 3f2a9c1d0e4b
+decision_type: question   # question | merge | audit | proposed-rule
+verdict: "keep_a: the 2026 recap was a down-round, not a change of stage."
+note: ""                  # optional
+resolved_at: 2026-08-14T20:00:00Z
+---
+```
+
+- **`decision_id`** — the id from `list_pending_decisions`. The live id
+  spaces (question ids from `answers._make_id`, merge ids from
+  `pending_merges._make_id`) are same-length sha1 prefixes from UNRELATED
+  key spaces with no cross-type uniqueness check anywhere.
+- **`decision_type`** is REQUIRED — because the id spaces above can
+  collide, an id alone cannot tell the applier which store to look in.
+- **`verdict`** is the per-type decision token: for `question` the answer
+  body (as today); for `merge`, `approve` or `reject`; for `audit`, the
+  human verdict compared against the tier's original verdict.
+
+A record with **no `decision_id`** is a legacy `pending_question_answer`
+provenance file (the pre-athenaeum#908 output of `ingest_answers` — an audit
+trail, never an input) or anything else that happens to live in
+`raw/answers/`. It parses exactly as it always has; the decision-answer
+applier leaves it untouched.
+
+**Applying is tier 0**: `athenaeum ingest-answers` applies every pending
+decision-answer file (`athenaeum.decision_answers.apply_decision_answers`)
+in the same run-locked pass that already ran the legacy question-answer
+ingest — deterministically, with **no LLM call, ever**. Dispatch per
+`decision_type`:
+
+| `decision_type` | Applier | Effect |
+|---|---|---|
+| `question` | `athenaeum.answers.resolve_by_id` | flips the checkbox; the legacy `ingest_answers` pass immediately after completes the write-back + archival |
+| `merge` | `athenaeum.pending_merges.resolve_merge` | the full approve/reject apply (wiki write, wikilink rewrite, source deletes, provenance) |
+| `audit` | `athenaeum.calibration.record_audit_review` | appends the review record to the calibration ledger |
+| `proposed-rule` | — | **fails closed**: a structured, logged `decision_type_unavailable` outcome, zero state mutation. There is no rule-proposal store yet — that is athenaeum#905's scope (open, blocked by athenaeum#901/athenaeum#903). The type is registered (the answer-file schema round-trips) so athenaeum#905 has a slot to land in, but this slice does not invent the store. |
+
+**Fail-soft, idempotent, no bookkeeping needed**: an unknown decision id, an
+already-resolved decision id, an invalid verdict, or a schema-malformed
+answer file is logged and skipped — the file is **never deleted** (it stays
+as its own audit trail) and the rest of the batch is unaffected. Re-applying
+an already-applied file on a later tick is simply another "already
+resolved" skip, because each underlying resolver (`resolve_by_id`,
+`resolve_merge`, `record_audit_review`) already refuses to re-mutate an
+id it has already settled — no separate "applied" ledger is needed.
+
+**The three mutator MCP tools are now thin conveniences.** `resolve_question`
+/ `resolve_merge` / `review_audit_item` each validate the id against
+CURRENT state first (so an unknown id, an already-resolved id, or an
+invalid verdict/decision still fails immediately with the same
+`error_code` contract as before, and nothing is written on that path), then
+write a decision-answer file instead of mutating state directly. A
+successful response now includes `deferred: true`, `answer_file` (the
+path written), and `decision_id` — the state change itself happens on the
+next `ingest-answers` tick, not synchronously. `resolve_merge`'s response
+in particular no longer carries `folded_sources` / `aliases_added` /
+`links_rewritten` on success, since the fold hasn't happened yet — those
+appear (via the same wiki-visible state) only after the next tick applies
+the file.
+
+**One deliberate divergence**: `athenaeum calibration review` (the CLI
+twin of `review_audit_item`) still calls `record_audit_review` directly
+and immediately. athenaeum#908's scope named only the three MCP mutators; the CLI
+path was left un-deferred on purpose. The end state is identical either
+way, just immediate rather than deferred.
 
 ### Voltaire briefing surface (Tristan-specific)
 

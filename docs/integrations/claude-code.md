@@ -225,9 +225,12 @@ the rest. Five steps, all existing code:
    `wiki/_pending_questions.md` and carry a `contradictions_detected: true`
    marker on the wiki entry.
 5. **Answer escalations.** Unresolved contradictions and ambiguities wait
-   in `wiki/_pending_questions.md`. You resolve them by editing the file or
-   via the `resolve_question` MCP tool; `athenaeum ingest-answers` then
-   folds the resolution back into the wiki.
+   in `wiki/_pending_questions.md`. You resolve them by editing the file
+   directly, or via the `resolve_question` MCP tool (which records the
+   answer as a decision-answer file under `raw/answers/`, see
+   [`docs/contradiction-detection.md`](../contradiction-detection.md#decision-answer-files-unified-decision-resolution-as-intake-athenaeum908));
+   `athenaeum ingest-answers` then applies it deterministically and folds
+   the resolution back into the wiki.
 
 All five steps run from a single `athenaeum run`. You can inspect any stage
 in isolation with `--cluster-only` or `--merge-only`.
