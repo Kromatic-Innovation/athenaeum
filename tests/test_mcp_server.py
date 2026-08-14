@@ -960,7 +960,7 @@ class TestCLIServe:
 
 
 class TestAllMcpToolWrappers:
-    """Invoke all 12 registered MCP tool wrappers through ``tool.fn()``."""
+    """Invoke all 13 registered MCP tool wrappers through ``tool.fn()``."""
 
     # One valid-args invocation per registered tool. Read tools take no args;
     # the write tools are called with a nonexistent id so a single call
@@ -969,6 +969,8 @@ class TestAllMcpToolWrappers:
     # trivial success, so it gets real content. ``read_person`` (issue athenaeum#864)
     # is called with an unknown uid against an empty wiki — a JSON-string
     # not-found message, exercising marshalling without a seeded person page.
+    # ``read_entity`` (issue athenaeum#886) is the generic form of the same read
+    # and is invoked the same way, with its required entity class supplied.
     _INVOKE = {
         "recall": lambda fn: fn("anything at all"),
         "remember": lambda fn: fn("a note worth remembering", source="test-session"),
@@ -982,6 +984,7 @@ class TestAllMcpToolWrappers:
         "review_audit_item": lambda fn: fn("no-such-id", "confirm"),
         "resolve_merge": lambda fn: fn("no-such-id", "reject"),
         "read_person": lambda fn: fn("no-such-uid"),
+        "read_entity": lambda fn: fn("no-such-uid", "person"),
     }
     _EXPECTED_TYPE = {
         "recall": str,
@@ -996,6 +999,7 @@ class TestAllMcpToolWrappers:
         "scan_retraction_cascade": dict,
         "calibration_summary": dict,
         "read_person": str,
+        "read_entity": str,
     }
 
     def _server(self, tmp_path: Path, *, cache_dir: Path | None = None):
@@ -1036,7 +1040,7 @@ class TestAllMcpToolWrappers:
             f"registered-only={registered - set(self._INVOKE)}, "
             f"map-only={set(self._INVOKE) - registered}"
         )
-        assert len(registered) == 12
+        assert len(registered) == 13
 
     @pytest.mark.parametrize("name", sorted(_INVOKE))
     def test_wrapper_marshals_args_and_returns_declared_type(
