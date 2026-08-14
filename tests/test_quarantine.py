@@ -237,3 +237,60 @@ class TestReleaseQuarantine:
         release = release_quarantine(wiki_root, raw_root, quarantine_id=record["id"])
         assert release["kind"] == RELEASE_KIND
         assert list_pending_quarantine(wiki_root) == []
+
+
+# ---------------------------------------------------------------------------
+# Recall-leak regression (code-review finding, athenaeum#898): quarantine's
+# whole point is that a file pulled out of compile for being poison must
+# not be served back as an answer. wiki/_quarantine/<source>/<name>.md kept
+# its ORIGINAL basename, and every RECURSIVE wiki_root walk in
+# athenaeum.search filtered only the leaf FILENAME for an underscore
+# prefix — so a quarantined file sailed straight through unfiltered and
+# was served as a keyword-recall hit. Fixed via
+# athenaeum.search._wiki_relpath_excluded (checks every path SEGMENT, not
+# just the filename).
+# ---------------------------------------------------------------------------
+
+
+class TestQuarantinedContentInvisibleToKeywordRecall:
+    def test_quarantined_file_does_not_appear_in_keyword_query_results(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.search import KeywordBackend
+
+        wiki_root = tmp_path / "wiki"
+        (wiki_root / "_quarantine" / "contacts").mkdir(parents=True)
+        (wiki_root / "alice.md").write_text(
+            "---\ntype: person\n---\n\nAlice likes zebrafish.\n", encoding="utf-8"
+        )
+        (wiki_root / "_quarantine" / "contacts" / "poison.md").write_text(
+            "---\ntype: person\n---\n\nPoison record mentions zebrafish too.\n",
+            encoding="utf-8",
+        )
+
+        hits = KeywordBackend().query(
+            "zebrafish", tmp_path / "cache", n=10, wiki_root=wiki_root
+        )
+        names = [h[0] for h in hits]
+        assert names == ["alice.md"], (
+            "a quarantined file was returned as a recall hit — the exact "
+            "inversion of AC 4 ('moves the file out of the discovery set') "
+            "that matters most"
+        )
+
+    def test_quarantined_file_excluded_from_keyword_backend_count(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.search import KeywordBackend
+
+        wiki_root = tmp_path / "wiki"
+        (wiki_root / "_quarantine" / "contacts").mkdir(parents=True)
+        (wiki_root / "alice.md").write_text(
+            "---\ntype: person\n---\n\nAlice.\n", encoding="utf-8"
+        )
+        (wiki_root / "_quarantine" / "contacts" / "poison.md").write_text(
+            "---\ntype: person\n---\n\nPoison.\n", encoding="utf-8"
+        )
+
+        count = KeywordBackend().build_index(wiki_root, tmp_path / "cache")
+        assert count == 1
