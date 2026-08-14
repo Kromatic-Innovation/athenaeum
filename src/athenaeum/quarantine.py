@@ -192,6 +192,21 @@ def quarantine_file(
 
     Returns the appended record (also the shape :func:`list_pending_quarantine`
     and :func:`athenaeum.decisions.quarantine_to_decision` consume).
+
+    Ordering (code-review finding, athenaeum#898): the ledger record is written
+    **before** the file is moved, deliberately. If the move raises partway
+    (disk-full, permission error, or the SIGTERM this run's per-file loop
+    installs a handler for) after the ledger write already landed, the
+    failure mode is a ledger entry pointing at a file that is still in its
+    original place — DETECTABLE (the caller can log it, and the record is
+    visible to anyone reading the ledger or ``list_pending_quarantine``) —
+    rather than the reverse ordering's failure mode, a file silently moved
+    with no ledger record at all: invisible to AC 4/5's listing surface,
+    findable only by a manual filesystem search. Neither ordering makes the
+    two-step sequence atomic; this one fails toward visibility. The caller
+    (the entity loop in ``librarian.py``) wraps this call in a try/except so
+    a raised exception here does not crash the run — it logs and leaves the
+    file's bound-violation ledger entry retry-eligible for the next run.
     """
     wiki_root = Path(wiki_root)
     raw_root = Path(raw_root)
@@ -205,8 +220,6 @@ def quarantine_file(
 
     quarantine_dir = wiki_root / QUARANTINE_DIR_NAME
     quarantine_path = quarantine_dir / original_relpath
-    quarantine_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(raw.path), str(quarantine_path))
 
     created_at = _now_iso()
     record = {
@@ -226,6 +239,10 @@ def quarantine_file(
         ledger_path if ledger_path is not None else default_quarantine_ledger_path(wiki_root)
     )
     _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
+
+    quarantine_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(raw.path), str(quarantine_path))
+
     log.info(
         "athenaeum#898: quarantined %s -> %s (bound=%s violations=%d)",
         raw.ref,
