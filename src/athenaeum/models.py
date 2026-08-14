@@ -1067,6 +1067,28 @@ def render_frontmatter(meta: dict[str, object]) -> str:
 # --- Data classes ---
 
 
+class RawFileTooLargeError(Exception):
+    """Raised by :attr:`RawFile.content` when the file exceeds its per-file
+    byte bound (issue athenaeum#898).
+
+    Checked via ``stat()`` BEFORE any bytes are read into memory, so a
+    pathological multi-megabyte artifact costs one syscall to reject, not a
+    full read plus however many LLM calls it would otherwise have driven —
+    the concrete failure this bound exists to prevent (one 9.7MB dry-run
+    artifact accounted for 93% of timed entity-phase LLM calls for roughly
+    three months before it was retired). ``size``/``limit`` are both in
+    bytes.
+    """
+
+    def __init__(self, ref: str, size: int, limit: int) -> None:
+        self.ref = ref
+        self.size = size
+        self.limit = limit
+        super().__init__(
+            f"{ref}: {size:,} bytes exceeds the {limit:,}-byte per-file limit"
+        )
+
+
 @dataclass
 class RawFile:
     """A raw intake file from raw/{source}/{timestamp}-{uuid8}.md."""
@@ -1076,10 +1098,29 @@ class RawFile:
     timestamp: str
     uuid8: str
     _content: str | None = field(default=None, repr=False)
+    # Issue athenaeum#898: per-file byte bound, enforced by `content` below.
+    # `None` (the default) preserves pre-athenaeum#898 behaviour verbatim —
+    # unbounded reads — for every caller that constructs a `RawFile` directly
+    # (most of the test suite, and any future in-process caller) rather than
+    # through `athenaeum.intake.discover_raw_files`, which is the one place
+    # that resolves and sets this from `librarian.raw_file_max_bytes`
+    # (:func:`athenaeum.config.resolve_raw_file_max_bytes`).
+    max_content_bytes: int | None = None
 
     @property
     def content(self) -> str:
         if self._content is None:
+            if self.max_content_bytes is not None:
+                try:
+                    size = self.path.stat().st_size
+                except OSError:
+                    size = None
+                # A stat() failure (e.g. the file vanished between discovery
+                # and read) falls through to the read below, which raises its
+                # own OSError — fail-open on the BOUND check specifically,
+                # never silent about a missing/unreadable file.
+                if size is not None and size > self.max_content_bytes:
+                    raise RawFileTooLargeError(self.ref, size, self.max_content_bytes)
             self._content = self.path.read_text(encoding="utf-8")
         return self._content
 
