@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The generic excluded read reaches MCP and the shell (athenaeum#886).** After
+  athenaeum#883/#885 the generic path existed in Python, but a caller reaching
+  athenaeum over MCP or the CLI could still only ask the person-shaped
+  question — the same asymmetry that produced the original problem, since an
+  interface that answers one entity type well and every other type not at all
+  is one that callers route around. The `recall` MCP tool and `athenaeum
+  recall` gain `with_pii` (plus `--usage-class` on the CLI, matching `query
+  person`'s existing flag). A new `read_entity` MCP tool and `athenaeum query
+  entity --uid ... [--class ...] [--include-excluded] [--usage-class ...]`
+  read any entity class by uid, printing the same JSON object shape `query
+  person` prints today. **`read_person` and `athenaeum query person` are
+  kept**, unchanged in name, arguments, defaults, output and exit codes, and
+  become thin wrappers over the generic path — parity is asserted by test
+  across all four inclusion/record cells AND for a `usage_classes`-filtered
+  case, with byte-identical stdout on the CLI side. The generic tool carries
+  ALL of `uid`, the entity class, `include_excluded` **and** `usage_classes`:
+  dropping the last would not have been a smaller version of the same tool, it
+  would have silently removed a filter `docs/security-posture.md` §2.3 depends
+  on. `mcp_server.person_read`'s fail-closed audience check applies
+  identically on the generic path — the same check, so a restricted caller
+  cannot obtain via one tool what the other refuses.
+
+  `athenaeum recall --with-pii` is **not** a bare flag addition:
+  `_cmd_query.cmd_recall` is a second implementation of the same layer
+  ordering (it constructs its own backend and its own `is_page_authorized` /
+  `storage_policy_configured` / `is_recallable` drops rather than calling
+  `recall_search`), so athenaeum#885's layer-ordering guarantees are re-derived
+  in that function — the join is placed after the audience drop, the
+  athenaeum#308 temporal drop and the `recallable` drop — and asserted by that
+  command's OWN layer-ordering tests, which athenaeum#885's do not cover.
+  `athenaeum query people` (the separate multi-flag listing command) is
+  deliberately untouched, and a test pins that it grew no excluded-field flag.
+  `docs/one-way-in-one-way-out.md` §5's integrator checklist now points at the
+  one read path in its two shapes; `docs/security-posture.md` §2, §2.1 and
+  §2.3 are updated so the audience-scoping AND usage-class descriptions still
+  match the tool inventory.
 - **`recall(with_pii=True)` — resolve excluded fields for any entity class
   through the read you are already making (athenaeum#885).** Excluded-field
   access used to be expressible only as "call `read_person` with a uid you
