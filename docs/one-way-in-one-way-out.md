@@ -166,17 +166,31 @@ If you are writing a client against athenaeum:
    if your writer already knows the entity, field and provenance
    ([`docs/field-corrections.md`](field-corrections.md)). Do not write the store.
 2. **To read the corpus:** use `recall` / the MCP read tools / `athenaeum query`.
-3. **To read contact data:** use the `read_person` MCP tool, `athenaeum query
-   person --uid ... [--include-contact]`, or `pii.read_person` (athenaeum#864),
-   with the inclusion flag set. **Resolving more than one uid in one process:
-   use `pii.read_people` (athenaeum#877)**, which pays the store's O(corpus)
-   scans once for the whole batch instead of once per uid — a loop over
-   `read_person` is the shape that measured ~37 hours for one weekly job.
-   Do not resolve the contact surface yourself,
-   and do not treat a missing value as "no value" unless the response says
-   so — the interface distinguishes *withheld* from *absent* with a
-   redaction marker precisely so a caller cannot silently mistake one for
-   the other.
+3. **To read excluded fields** — a person's contact data, or whatever else the
+   operator routes off-corpus for any other entity class — use **the one read
+   path**, in whichever of its two shapes matches what you already have:
+
+   - **Searching?** `recall` with the excluded-field flag set: the `recall` MCP
+     tool's `with_pii=True`, or `athenaeum recall --with-pii` (athenaeum#885,
+     athenaeum#886). This is the read you were already making.
+   - **Holding a uid?** The `read_entity` MCP tool, `athenaeum query entity
+     --uid ... --class ... [--include-excluded]`, or `pii.read_entity`
+     (athenaeum#883, athenaeum#886). **Resolving more than one uid in one
+     process: use `pii.read_entities`**, which pays the store's O(corpus) scans
+     once for the whole batch instead of once per uid — a loop over the
+     single-uid form is the shape that measured ~37 hours for one weekly job.
+
+   The person-shaped entry points — the `read_person` MCP tool, `athenaeum
+   query person --uid ... [--include-contact]`, and `pii.read_person` /
+   `read_people` (athenaeum#864, athenaeum#877) — are **retained wrappers** over
+   that same read. They keep working identically and are not going away
+   without a separate decision; new integrations should prefer the generic
+   path, which answers for every entity class rather than one.
+
+   Whichever you use: do not resolve an excluded surface yourself, and do not
+   treat a missing value as "no value" unless the response says so — the
+   interface distinguishes *withheld* from *absent* with a redaction marker
+   precisely so a caller cannot silently mistake one for the other.
 4. **If the interface does not do what you need:** that is an issue against the
    interface, not a licence to go around it. A path that works today and is
    unenforced today is still the thing this document exists to rule out.

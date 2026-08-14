@@ -20,9 +20,16 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from athenaeum._cli_shared import _iso_date
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
+
+if TYPE_CHECKING:
+    # Annotation-only (issue athenaeum#886): every `pii` import in this module stays
+    # local to its function, per the module docstring's factoring rule, so this
+    # never lands on `cli.py`'s top-level import path.
+    from athenaeum.pii import ExcludedRecordIndex
 
 
 def _numeric_frontmatter_value(value: object) -> int | float | str:
@@ -178,6 +185,52 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
     )
     person_parser.set_defaults(func=cmd_person)
 
+    # entity command (issue athenaeum#886) — the generic form of `person`, reading
+    # ANY entity class's excluded record. `person` delegates to the same body.
+    entity_parser = subparsers.add_parser(
+        "entity",
+        help="One-call read of a SINGLE entity's page by uid, for any entity "
+        "class, with an explicit --include-excluded flag (default off). The "
+        "generic form of `person`; prints the same JSON object shape.",
+    )
+    entity_parser.add_argument(
+        "--uid",
+        required=True,
+        help="The entity's durable uid.",
+    )
+    entity_parser.add_argument(
+        "--class",
+        dest="entity_class",
+        default="person",
+        help="The page's `type:` (person, vendor, …). Selects which excluded "
+        "SURFACE is read — a `person` page's record lives on the `pii` "
+        "surface — while the page itself is resolved by uid whatever its "
+        "type. Default: person.",
+    )
+    entity_parser.add_argument(
+        "--include-excluded",
+        action="store_true",
+        help="Include the actual excluded values (default: off — withheld "
+        "fields carry a redaction marker instead).",
+    )
+    entity_parser.add_argument(
+        "--usage-class",
+        action="append",
+        choices=list(USAGE_CLASSES),
+        default=[],
+        metavar="CLASS",
+        help="Return only values of this usage class (repeatable; one of "
+        f"{', '.join(USAGE_CLASSES)}). Default: every value, each carrying "
+        "its class.",
+    )
+    entity_parser.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    entity_parser.set_defaults(func=cmd_entity)
+
     # query-topics command — LLM-based topic extraction for hook query rewriting
     query_topics_parser = subparsers.add_parser(
         "query-topics",
@@ -264,6 +317,29 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "Exercises the identical filter path as `serve --audience`.",
     )
     recall_parser.add_argument(
+        "--with-pii",
+        dest="with_pii",
+        action="store_true",
+        help="Issue athenaeum#885/#886: also resolve each matching entity's EXCLUDED "
+        "fields — contact data for a person, and whatever else the operator "
+        "routes off-corpus for any other class. Appended to each hit line as "
+        "tab-separated `field=value` pairs; a withheld field appears as "
+        "`field=[redacted:N]` so withheld never looks like absent. Default off, "
+        "and free when off: no excluded surface is scanned at all. The join "
+        "runs strictly AFTER the audience and recallable filters, so it can "
+        "never widen what this command returns.",
+    )
+    recall_parser.add_argument(
+        "--usage-class",
+        action="append",
+        choices=list(USAGE_CLASSES),
+        default=[],
+        metavar="CLASS",
+        help="With --with-pii, return only excluded values of this usage class "
+        f"(repeatable; one of {', '.join(USAGE_CLASSES)}). Matches "
+        "`query person --usage-class`. Default: every value.",
+    )
+    recall_parser.add_argument(
         "--as-of",
         dest="as_of",
         type=_iso_date,
@@ -289,6 +365,19 @@ def cmd_recall(args: argparse.Namespace) -> int:
     session. Reads ``search_backend`` + extra intake roots from
     ``athenaeum.yaml`` the same way ``serve`` and ``rebuild-index`` do,
     so results match what the MCP ``recall`` tool would return.
+
+    **``--with-pii`` (issues athenaeum#885/#886) re-derives the layer ordering
+    HERE, deliberately.** This function is a SECOND implementation of the same
+    read: it constructs its own backend and its own ``is_page_authorized`` /
+    ``storage_policy_configured`` / ``is_recallable`` drops rather than calling
+    ``mcp_server.recall_search``. So the flag is not plumbing over athenaeum#885's
+    change — the guarantee that the excluded join happens strictly AFTER every
+    filter has to hold in this function's own control flow, and is asserted by
+    this command's own layer-ordering tests rather than by athenaeum#885's
+    (which do not cover this code path at all). The join is placed after the
+    audience drop, the athenaeum#308 temporal drop and the athenaeum#532
+    ``recallable`` drop — immediately before the line is printed, which is the
+    only position from which it cannot widen the output.
     """
     from athenaeum.config import (
         load_config,
@@ -365,6 +454,11 @@ def cmd_recall(args: argparse.Namespace) -> int:
 
     from athenaeum.mcp_server import _resolve_hit_path
 
+    # Issues athenaeum#885/#886: ONE index per surface class for the whole
+    # command, shared across every hit — never one scan per hit. Each loads
+    # lazily, so a class no hit resolves to costs nothing and a run without
+    # --with-pii never touches this at all.
+    excluded_indexes: dict[str, ExcludedRecordIndex] = {}
     for filename, _name, score in hits:
         page_path, _display = _resolve_hit_path(filename, wiki_root, extra_roots)
         preview = ""
@@ -397,9 +491,89 @@ def cmd_recall(args: argparse.Namespace) -> int:
             not readable or not is_recallable(str(fm.get("type") or ""), cfg)
         ):
             continue
-        print(f"{score:.2f}\t{filename}\t{preview}")
+        # Issues athenaeum#885/#886: the excluded-field join, LAST — after the
+        # audience drop, the as-of temporal drop and the `recallable` drop
+        # above. This position is the guarantee: a hit any filter removed has
+        # already `continue`d, so it never reaches an excluded-surface lookup
+        # and the flag can never be used to probe for a record behind a page
+        # this caller may not read. Skipped entirely (zero scans) when unset.
+        excluded_suffix = ""
+        if getattr(args, "with_pii", False):
+            excluded_suffix = _excluded_suffix_for_hit(
+                page_path,
+                fm,
+                knowledge_root=knowledge_root,
+                config=cfg,
+                indexes=excluded_indexes,
+                usage_classes=getattr(args, "usage_class", None) or None,
+            )
+        print(f"{score:.2f}\t{filename}\t{preview}{excluded_suffix}")
 
     return 0
+
+
+def _excluded_suffix_for_hit(
+    page_path: Path | None,
+    fm: dict[str, object],
+    *,
+    knowledge_root: Path,
+    config: dict[str, object] | None,
+    indexes: dict[str, "ExcludedRecordIndex"],
+    usage_classes: list[str] | None,
+) -> str:
+    """One hit's excluded fields as tab-separated ``field=value`` pairs, or ``""``.
+
+    The CLI rendering of the same join the MCP ``recall`` tool performs
+    (issues athenaeum#885/#886), reusing athenaeum#883's public, ``EntityIndex``-free
+    assembly seam — this caller already holds the hit's fresh frontmatter, so
+    rebuilding an ``EntityIndex`` here would be a defect, not an optimization
+    detail.
+
+    Returns the empty string — never an error — whenever there is nothing to
+    say: no readable page, no ``uid``, a page class whose mapped surface class
+    is not actually excluded, or no matching record. A WITHHELD field renders
+    as ``field=[redacted:N]`` rather than vanishing, so withheld and absent
+    stay distinguishable on the shell surface too.
+    """
+    from athenaeum import pii
+    from athenaeum.storage import is_excluded
+
+    if page_path is None:
+        return ""
+    uid = str(fm.get("uid") or "").strip()
+    if not uid:
+        return ""
+
+    surface_class = pii.surface_class_for_page_class(str(fm.get("type") or ""), config)
+    # The gate, before any join: a class whose mapped surface is NOT excluded
+    # resolves to the default wiki adapter, and joining there would scan the
+    # wiki root as if it were the excluded store.
+    if not surface_class or not is_excluded(surface_class, config):
+        return ""
+
+    index = indexes.get(surface_class)
+    if index is None:
+        index = pii.ExcludedRecordIndex(
+            pii.excluded_surface_root(surface_class, knowledge_root, config)
+        )
+        indexes[surface_class] = index
+
+    record_path = index.by_uid(uid)
+    if record_path is None:
+        return ""
+
+    fields, redactions, _ = pii.assemble_excluded_read(
+        page_path,
+        fm,
+        pii.read_bounce_record(record_path),
+        surface_class=surface_class,
+        config=config,
+        include_excluded=True,
+        usage_classes=usage_classes,
+    )
+    parts = [f"{name}={','.join(values)}" for name, values in fields.items()]
+    parts += [f"{m.field}=[redacted:{m.value_count}]" for m in redactions]
+    return "".join(f"\t{part}" for part in parts)
 
 
 def cmd_people(args: argparse.Namespace) -> int:
@@ -579,22 +753,80 @@ def cmd_person(args: argparse.Namespace) -> int:
     ``--usage-class observed`` is the outreach-eligible set.
 
     An unknown uid prints an error to stderr and returns exit code 1.
+
+    Since issue athenaeum#886 this DELEGATES to :func:`cmd_entity` with the class
+    fixed to ``person``. Its flags, stdout and exit codes are unchanged —
+    byte-identical stdout is asserted by test, including a
+    ``--usage-class``-filtered case.
+    """
+    return _read_entity_to_stdout(
+        args.path,
+        args.uid,
+        page_class="person",
+        include_excluded=args.include_contact,
+        usage_classes=args.usage_class or None,
+        not_found_label="person",
+    )
+
+
+def cmd_entity(args: argparse.Namespace) -> int:
+    """One-call entity read by uid, for ANY entity class (issue athenaeum#886).
+
+    The generic form of :func:`cmd_person`, printing the SAME JSON object shape
+    (``pii.EntityRead.to_dict()``) to stdout. With ``--include-excluded`` unset
+    (the default), withheld fields carry a redaction marker instead of the
+    value; an entity with no excluded record at all prints the page with no
+    markers — not an error.
+
+    ``--class`` names the page's ``type:`` and selects which excluded SURFACE
+    is read (a ``person`` page's record lives on the ``pii`` surface); the page
+    itself is resolved by uid whatever its type. It defaults to ``person`` so
+    the command is useful without knowing the mapping.
+
+    An unknown uid prints an error to stderr and returns exit code 1.
+    """
+    return _read_entity_to_stdout(
+        args.path,
+        args.uid,
+        page_class=args.entity_class,
+        include_excluded=args.include_excluded,
+        usage_classes=args.usage_class or None,
+        not_found_label="entity",
+    )
+
+
+def _read_entity_to_stdout(
+    path: Path,
+    uid: str,
+    *,
+    page_class: str,
+    include_excluded: bool,
+    usage_classes: list[str] | None,
+    not_found_label: str,
+) -> int:
+    """Shared body of ``query person`` and ``query entity`` (issue athenaeum#886).
+
+    Extracted so the two commands cannot drift in what they print: the person
+    command is the generic one with the class fixed, and the only difference
+    between them is the noun in the not-found message — presentation, never
+    behaviour.
     """
     from athenaeum.config import load_config
-    from athenaeum.pii import read_person
+    from athenaeum.pii import read_entity, surface_class_for_page_class
 
-    knowledge_root = args.path.expanduser().resolve()
+    knowledge_root = path.expanduser().resolve()
     config = load_config(knowledge_root)
 
-    result = read_person(
+    result = read_entity(
         knowledge_root,
         config,
-        args.uid,
-        include_contact=args.include_contact,
-        usage_classes=args.usage_class or None,
+        uid,
+        surface_class=surface_class_for_page_class(page_class, config),
+        include_excluded=include_excluded,
+        usage_classes=usage_classes,
     )
     if result is None:
-        print(f"Error: no person found for uid={args.uid!r}", file=sys.stderr)
+        print(f"Error: no {not_found_label} found for uid={uid!r}", file=sys.stderr)
         return 1
 
     print(json.dumps(result.to_dict(), indent=2))
