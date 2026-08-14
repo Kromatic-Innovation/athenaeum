@@ -12,6 +12,11 @@ One test class per acceptance criterion / case group:
 - ``TestWithPiiGatingAndLayerOrdering`` — AC4. Values only under `with_pii`;
   the join runs strictly after the audience filter and the `recallable`
   drop, and either drop performs ZERO excluded-surface scans.
+- ``TestUsageClassesFilterOnHandlePath`` — regression for the athenaeum#907
+  follow-up: ``usage_classes`` restricts which classes' values come back on
+  the handle-shaped path exactly as it already does on the similarity-search
+  path, defaults to every class, and never perturbs the ``with_pii=False``
+  redaction path.
 - ``TestNoActionPredicate`` — AC5. No eligibility/permission/action predicate
   of any kind, in any resolution outcome.
 - ``TestParseableWithoutNaturalLanguage`` — AC6. Pure JSON, no prose wrapper.
@@ -428,6 +433,141 @@ class TestWithPiiGatingAndLayerOrdering:
 
         assert payload["resolved"] is True
         assert payload["contact_values"][0]["identifier"] == "alex@example.org"
+
+
+class TestUsageClassesFilterOnHandlePath:
+    """Regression for the athenaeum#907 follow-up (Sentry Seer finding on
+    athenaeum#919): both `recall` entry points accept `usage_classes` to restrict
+    which excluded contact values come back, but the handle-shaped branch
+    never threaded it to `pii.assemble_excluded_read` — a caller asking for
+    one usage class silently received every class instead. `resolve_handle_query`
+    must filter identically to the similarity-search path (AC4's join is
+    unaffected: this only narrows WITHIN it, never widens it)."""
+
+    def _write_two_class_record(self, knowledge: Path) -> None:
+        _write_page(knowledge / "wiki", "alex", name="Alex Widget")
+        _write_record(
+            pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
+            "alex-contact.md",
+            uid="alex",
+            fields=(
+                "emails:\n"
+                "  - alex@example.org\n"
+                "  - alex@provider.example\n"
+                "contact_classification:\n"
+                "  - identifier: alex@example.org\n"
+                "    usage_class: observed\n"
+                "    source: voltaire:inbox\n"
+                "    observed_at: '2026-06-01'\n"
+                "  - identifier: alex@provider.example\n"
+                "    usage_class: provider\n"
+                "    source: clearbit\n"
+                "    observed_at: '2026-06-02'\n"
+            ),
+        )
+
+    def test_restricting_to_one_usage_class_withholds_the_other(self, tmp_path: Path) -> None:
+        knowledge = tmp_path / "knowledge"
+        self._write_two_class_record(knowledge)
+
+        payload = json.loads(
+            recall_search(
+                knowledge / "wiki",
+                "alex@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=True,
+                usage_classes=["observed"],
+            )
+        )
+
+        classes = {entry["usage_class"] for entry in payload["contact_values"]}
+        assert classes == {"observed"}
+
+    def test_usage_classes_none_returns_every_class(self, tmp_path: Path) -> None:
+        knowledge = tmp_path / "knowledge"
+        self._write_two_class_record(knowledge)
+
+        payload = json.loads(
+            recall_search(
+                knowledge / "wiki",
+                "alex@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=True,
+                usage_classes=None,
+            )
+        )
+
+        classes = {entry["usage_class"] for entry in payload["contact_values"]}
+        assert classes == {"observed", "provider"}
+
+    def test_filter_does_not_perturb_the_with_pii_false_redaction_path(
+        self, tmp_path: Path
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        self._write_two_class_record(knowledge)
+
+        filtered = json.loads(
+            recall_search(
+                knowledge / "wiki",
+                "alex@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=False,
+                usage_classes=["observed"],
+            )
+        )
+        unfiltered = json.loads(
+            recall_search(
+                knowledge / "wiki",
+                "alex@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=False,
+                usage_classes=None,
+            )
+        )
+
+        assert filtered == unfiltered
+        assert filtered["contact_values"] == []
+        assert filtered["redactions"] == [{"field": "emails", "value_count": 2, "redacted": True}]
+
+    def test_cli_entry_point_honors_the_repeatable_usage_class_flag(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        self._write_two_class_record(knowledge)
+        _write_athenaeum_yaml(knowledge, EXCLUDED_CONFIG)
+
+        rc = cmd_recall(
+            _recall_args(knowledge, "alex@example.org", with_pii=True, usage_class=["observed"])
+        )
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        classes = {entry["usage_class"] for entry in payload["contact_values"]}
+        assert classes == {"observed"}
+
+    def test_mcp_and_cli_agree_under_the_filter(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        self._write_two_class_record(knowledge)
+        _write_athenaeum_yaml(knowledge, EXCLUDED_CONFIG)
+
+        mcp_payload = json.loads(
+            recall_search(
+                knowledge / "wiki",
+                "alex@example.org",
+                config=EXCLUDED_CONFIG,
+                with_pii=True,
+                usage_classes=["observed"],
+            )
+        )
+        rc = cmd_recall(
+            _recall_args(knowledge, "alex@example.org", with_pii=True, usage_class=["observed"])
+        )
+        cli_payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert cli_payload == mcp_payload
 
 
 class TestNoActionPredicate:
