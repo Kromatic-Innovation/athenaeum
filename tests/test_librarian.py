@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from athenaeum.models import EntityIndex, RawFile
+from athenaeum.models import EntityIndex, RawFile, RawFileTooLargeError
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -211,6 +211,26 @@ class TestDiscoverRawFiles:
         )
         assert files == []
 
+    def test_max_content_bytes_defaults_resolved_onto_every_file(
+        self, raw_dir: Path
+    ) -> None:
+        """Issue athenaeum#898: discover_raw_files is the ONE place that resolves
+        the byte bound (env > yaml > default) and sets it on every RawFile it
+        returns, so a first ``.content`` read anywhere downstream is bounded
+        uniformly."""
+        from athenaeum.librarian import discover_raw_files
+
+        files = discover_raw_files(raw_dir)
+        assert files  # sanity: the fixture is non-empty
+        assert all(f.max_content_bytes == 5 * 1024 * 1024 for f in files)
+
+    def test_max_content_bytes_honours_config(self, raw_dir: Path) -> None:
+        from athenaeum.librarian import discover_raw_files
+
+        files = discover_raw_files(raw_dir, {"librarian": {"raw_file_max_bytes": 10}})
+        assert files
+        assert all(f.max_content_bytes == 10 for f in files)
+
     def test_empty_dir(self, tmp_path: Path) -> None:
         from athenaeum.librarian import discover_raw_files
 
@@ -401,6 +421,46 @@ class TestRawFileContent:
             uuid8="aabb0011",
         )
         assert raw.ref == "sessions/20240406T120000Z-aabb0011.md"
+
+    def test_unbounded_by_default(self, tmp_path: Path) -> None:
+        """Issue athenaeum#898: ``max_content_bytes=None`` (the default for a
+        directly-constructed RawFile, e.g. every test double in this suite
+        that predates athenaeum#898) preserves pre-athenaeum#898 behaviour verbatim —
+        a large file reads fine with no bound applied."""
+        big = tmp_path / "big.md"
+        big.write_text("x" * 10_000, encoding="utf-8")
+        raw = RawFile(path=big, source="sessions", timestamp="", uuid8="")
+        assert raw.max_content_bytes is None
+        assert len(raw.content) == 10_000
+
+    def test_byte_bound_raises_before_reading(self, tmp_path: Path) -> None:
+        """Issue athenaeum#898 AC 1: a file over its bound is refused — checked
+        via ``stat()``, so no read is attempted (the concrete failure this
+        bound exists to prevent: reading a 9.7MB poison file whole)."""
+        big = tmp_path / "big.md"
+        big.write_text("x" * 1000, encoding="utf-8")
+        raw = RawFile(
+            path=big, source="sessions", timestamp="", uuid8="", max_content_bytes=100
+        )
+        with pytest.raises(RawFileTooLargeError) as excinfo:
+            _ = raw.content
+        assert excinfo.value.size == 1000
+        assert excinfo.value.limit == 100
+        assert excinfo.value.ref == raw.ref
+        # Never read into memory — _content stays unset on the raised path.
+        assert raw._content is None
+
+    def test_byte_bound_within_limit_reads_normally(self, tmp_path: Path) -> None:
+        small = tmp_path / "small.md"
+        small.write_text("hello", encoding="utf-8")
+        raw = RawFile(
+            path=small,
+            source="sessions",
+            timestamp="",
+            uuid8="",
+            max_content_bytes=100,
+        )
+        assert raw.content == "hello"
 
 
 # ---------------------------------------------------------------------------
