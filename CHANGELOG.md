@@ -276,6 +276,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A graceful internal deadline stop no longer collides with a hard external
+  kill on the same exit code (athenaeum#897).** `run()` returned `124` for BOTH
+  its own wall-clock deadline trip AND a delivered SIGTERM/SIGINT — a
+  consumer keyed on `rc == 124` (e.g. the SessionEnd wrapper) could not tell
+  a clean, resumable, partial-progress run apart from a hard kill without
+  parsing log text. New `EXIT_GRACEFUL_PARTIAL = 75` (BSD `EX_TEMPFAIL`
+  semantics: partial progress committed, resumable) is now returned by every
+  internal deadline-check path — `RunContext.stop_on_deadline`, the
+  entity-loop `deadline_tripped` finalize branch, and every
+  `RunDeadlineExceeded` catch site. `EXIT_EXTERNAL_KILL = 124` is unchanged
+  and now reserved exclusively for the opt-in SIGTERM/SIGINT handler
+  (`_commit_partial_and_exit`), matching coreutils `timeout`(1) semantics —
+  athenaeum's own checks never return it. Both constants live in
+  `src/athenaeum/librarian.py`; the full contract is documented in the new
+  `docs/exit-codes.md`, linked from `docs/configuration.md` and the README
+  docs index. **Two of the issue's acceptance criteria — the SessionEnd
+  wrapper's own handling of the two codes and its `INGEST_DEGRADED` signal —
+  live in `scripts/hooks/knowledge-rebuild-index.sh` in a different repo
+  (`Kromatic-Innovation/code-workspace-config`) and are relocated to
+  cwc#2556; until that lands the wrapper does not yet recognise `75` and
+  falls through to its generic non-zero-rc handling instead of a dedicated
+  resumable-partial path (no data loss — partial progress is still committed
+  and the run is still resumable).**
 - **SessionEnd's inner deadline is derived from the outer kill timer, so the
   graceful-stop path can actually win the race (athenaeum#896).** `cmd_session_end`
   passed no `max_runtime`, so the inner deadline fell through to

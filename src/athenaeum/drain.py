@@ -189,7 +189,7 @@ def run_drain(
     *run_fn* / *backlog_fn* are injectable seams for testing; they default to
     :func:`athenaeum.librarian.run` and a live ``discover_raw_files`` count.
     """
-    from athenaeum.librarian import discover_raw_files
+    from athenaeum.librarian import EXIT_GRACEFUL_PARTIAL, discover_raw_files
     from athenaeum.librarian import run as librarian_run
 
     run_fn = run_fn or librarian_run
@@ -271,10 +271,16 @@ def run_drain(
                 new_backlog,
             )
             return 1
-        if rc not in (0, 124):
+        if rc not in (0, EXIT_GRACEFUL_PARTIAL):
             # A window that still made progress but exited nonzero (e.g. some
             # files failed): log it and keep draining — the zero-progress guard
             # above terminates the loop once only-undrainable files remain.
+            # Issue athenaeum#897: this drain loop forces max_runtime=0 and
+            # install_signal_handlers=False on every window, so neither
+            # EXIT_GRACEFUL_PARTIAL nor EXIT_EXTERNAL_KILL (124) can actually
+            # be returned here today — kept for defensive parity with
+            # `run()`'s general exit-code contract (docs/exit-codes.md) should
+            # a future caller thread those flags through.
             log.warning(
                 "athenaeum drain: window %d run exited %d but made progress "
                 "(%d → %d); continuing.",

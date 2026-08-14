@@ -3,16 +3,18 @@
 
 Pure observability: `run()` emits ONE machine-greppable `librarian-run-summary`
 line at the end of every exit path (the clean finalize AND every `_stop_on_deadline`
-124 trip) covering the phases that actually ran, with wall-clock seconds, LLM
-call counts (detector/resolver/entity-tier), and work counts per phase.
+EXIT_GRACEFUL_PARTIAL/75 trip, issue athenaeum#897) covering the phases that
+actually ran, with wall-clock seconds, LLM call counts
+(detector/resolver/entity-tier), and work counts per phase.
 
 This suite covers:
 
 1. The summary line appears on a clean run and carries the expected phase
    tokens (`entity secs=`, `auto-memory ... detector_haiku=`/`resolver_opus=`).
-2. The summary line appears on a 124 (deadline) exit, covering only the
-   phases that ran before the trip — reusing the `_FakeClock` / stubbed-slow-
-   compile pattern from `tests/test_librarian_deadline.py`.
+2. The summary line appears on a 75 (EXIT_GRACEFUL_PARTIAL deadline) exit,
+   covering only the phases that ran before the trip — reusing the
+   `_FakeClock` / stubbed-slow-compile pattern from
+   `tests/test_librarian_deadline.py`.
 3. The merge detector/resolver counts are threaded correctly from
    `merge_clusters_to_wiki`'s new `out_stats` param up through the summary
    line (both a focused `out_stats` unit test and an end-to-end check via a
@@ -34,7 +36,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from athenaeum.librarian import _render_run_summary, run
+from athenaeum.librarian import EXIT_GRACEFUL_PARTIAL, _render_run_summary, run
 from athenaeum.merge import RunDeadlineExceeded, merge_clusters_to_wiki
 
 # ---------------------------------------------------------------------------
@@ -306,7 +308,8 @@ class TestCleanRunSummary:
 
 
 # ---------------------------------------------------------------------------
-# 2. 124 (deadline) exit: summary covers only the phases that ran
+# 2. 75 (EXIT_GRACEFUL_PARTIAL deadline) exit: summary covers only the
+#    phases that ran
 # ---------------------------------------------------------------------------
 
 
@@ -344,9 +347,9 @@ class TestDeadlineExitSummary:
             max_runtime=1000,
         )
 
-        assert rc == 124
+        assert rc == EXIT_GRACEFUL_PARTIAL
         lines = _summary_lines(caplog)
-        assert len(lines) == 1, "exactly one summary line must be emitted on a 124 exit"
+        assert len(lines) == 1, "exactly one summary line must be emitted on a 75 exit"
         line = lines[0]
         assert "wiki-dedup secs=" in line
         # Assert on the phase SEGMENT, not a bare "entity" substring: issue athenaeum#567
@@ -405,7 +408,7 @@ class TestDeadlineExitSummary:
             max_runtime=1000,
         )
 
-        assert rc == 124
+        assert rc == EXIT_GRACEFUL_PARTIAL
         assert compile_calls == [], "auto-memory must never run once entity trips"
         lines = _summary_lines(caplog)
         assert len(lines) == 1
@@ -420,7 +423,7 @@ class TestDeadlineExitSummary:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Mirrors test_run_catches_merge_deadline_and_exits_124: entity
+        """Mirrors test_run_catches_merge_deadline_and_exits_75: entity
         completes cleanly (empty intake), then the auto-memory compile trips
         RunDeadlineExceeded. The summary must show BOTH `entity` (it ran, as
         a no-op) and `auto-memory` (it started and partially ran)."""
@@ -450,7 +453,7 @@ class TestDeadlineExitSummary:
             max_runtime=3600,
         )
 
-        assert rc == 124
+        assert rc == EXIT_GRACEFUL_PARTIAL
         lines = _summary_lines(caplog)
         assert len(lines) == 1
         line = lines[0]

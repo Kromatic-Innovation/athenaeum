@@ -73,10 +73,13 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "Run-level wall-clock deadline in seconds (issue athenaeum#396). On trip "
             "the run commits partial progress, releases the lock, and exits "
-            "124 (resumable) — bounding the WHOLE run incl. the post-compile "
-            "phases, not just the per-file loop. Default: ATHENAEUM_MAX_RUNTIME "
-            "env, then athenaeum.yaml librarian.max_runtime, then 3600. Pass "
-            "0 (or a negative value) to disable the deadline (unbounded run)."
+            "75 (EXIT_GRACEFUL_PARTIAL, resumable; issue athenaeum#897 — 124 is "
+            "reserved for an external kill, e.g. coreutils timeout, and is never "
+            "returned by this internal check) — bounding the WHOLE run incl. the "
+            "post-compile phases, not just the per-file loop. Default: "
+            "ATHENAEUM_MAX_RUNTIME env, then athenaeum.yaml librarian.max_runtime, "
+            "then 3600. Pass 0 (or a negative value) to disable the deadline "
+            "(unbounded run). Full exit-code contract: docs/exit-codes.md."
         ),
     )
     run_parser.add_argument(

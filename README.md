@@ -912,6 +912,7 @@ specific piece:
 - [`docs/storage-adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/storage-adapter-contract.md) — the storage extension point.
 - [`docs/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/adapter-contract.md) — writing a custom intake adapter.
 - [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md) — every env var, yaml key, and CLI flag, with defaults and precedence.
+- [`docs/exit-codes.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/exit-codes.md) — `athenaeum run`'s exit-code contract (`0` / `1` / `75` graceful-partial / `124` external-kill).
 
 ## Getting help
 

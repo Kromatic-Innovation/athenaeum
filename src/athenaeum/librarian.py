@@ -242,6 +242,31 @@ DEFAULT_MAX_FILES = 50
 # resolved value <= 0 disables the deadline (explicit opt-out escape hatch).
 DEFAULT_MAX_RUNTIME = 3600  # 1 hour
 
+# Issue athenaeum#897: distinct exit codes for a graceful internal stop vs a hard
+# external kill, so the SessionEnd wrapper (and any other rc-reading caller)
+# can tell "clean, resumable, partial-progress run" apart from "the process
+# was killed" without parsing log text. Full contract/table: docs/exit-codes.md.
+#
+# EX_TEMPFAIL (BSD sysexits.h, /usr/include/sysexits.h on most systems) —
+# "temporary failure; user is invited to retry". `run()` returns this when
+# ITS OWN wall-clock deadline (`stop_on_deadline` / `ctx.deadline_tripped`)
+# trips: partial progress is already committed, the deferred intake is left
+# on disk, and the next run picks it up. This is the ONLY code an athenaeum
+# internal check returns for a deadline trip — never 124.
+EXIT_GRACEFUL_PARTIAL = 75
+
+# Reserved for the EXTERNAL killer — matches coreutils `timeout`(1), which
+# itself exits 124 when it SIGTERMs (then, after a grace period, SIGKILLs) a
+# child that overran its wall clock. athenaeum's own signal handler
+# (`_commit_partial_and_exit`, installed opt-in via `install_signal_handlers`)
+# does its own best-effort partial-progress commit before calling
+# ``sys.exit(EXIT_EXTERNAL_KILL)`` — but the STOP REQUEST there originates
+# OUTSIDE athenaeum's own deadline logic (a delivered SIGTERM/SIGINT), so it
+# keeps this code rather than EXIT_GRACEFUL_PARTIAL. athenaeum's own
+# `run()`/`stop_on_deadline` code paths must NEVER return this value
+# themselves (issue athenaeum#897 AC2) — only the signal handler does.
+EXIT_EXTERNAL_KILL = 124
+
 # SessionEnd path outer kill timeout + inner-runtime derivation (issue
 # athenaeum#896). The SessionEnd wrapper that invokes ``athenaeum session-end``
 # (``code-workspace-config/scripts/hooks/knowledge-rebuild-index.sh`` — a
@@ -2352,8 +2377,9 @@ class RunContext:
     deadline_tripped: bool = False
     # Issue athenaeum#440: the entity phase stopped on its OWN runtime share rather than
     # on the run deadline. Deliberately distinct from ``deadline_tripped``:
-    # that flag skips the auto-memory block and exits 124, which is the exact
-    # starvation this reserve exists to prevent. An entity-budget stop is a
+    # that flag skips the auto-memory block and exits EXIT_GRACEFUL_PARTIAL
+    # (75, issue athenaeum#897), which is the exact starvation this reserve
+    # exists to prevent. An entity-budget stop is a
     # athenaeum#220-style deferral — remaining intake is resumable, the run continues
     # into C2-C4, and it exits 0 unless a LATER phase trips the real deadline.
     entity_budget_tripped: bool = False
@@ -2448,10 +2474,13 @@ class RunContext:
         )
 
     def stop_on_deadline(self, phase: str) -> int:
-        """Commit partial progress and return 124 when the deadline trips in
-        a pre-entity phase — mirrors the athenaeum#337 interrupt-checkpoint path
-        (greppable partial commit, exit 124, resumable). The deferred intake /
-        un-run phases are picked up by the next run.
+        """Commit partial progress and return EXIT_GRACEFUL_PARTIAL (75) when
+        the deadline trips in a pre-entity phase — mirrors the athenaeum#337
+        interrupt-checkpoint path's partial-commit shape, but keeps its OWN
+        distinct exit code (issue athenaeum#897): a greppable partial commit,
+        exit 75, resumable — never 124, which is reserved for an external
+        kill. The deferred intake / un-run phases are picked up by the next
+        run.
 
         The run-lock's ``flock`` is dropped by the CLI caller's ``finally`` on
         return (:meth:`RunLock.release`). Note "released" means only that the
@@ -2495,10 +2524,11 @@ class RunContext:
                 head_at_start=self.head_at_start,
             )
         # Issue athenaeum#464: emit the per-phase summary for whatever ran BEFORE the
-        # trip — the 124 exit paths are exactly the case the athenaeum#440 profiling
-        # epic most needs visibility into (a run that stopped early).
+        # trip — the EXIT_GRACEFUL_PARTIAL exit paths are exactly the case the
+        # athenaeum#440 profiling epic most needs visibility into (a run that
+        # stopped early).
         self.emit_run_summary()
-        return 124
+        return EXIT_GRACEFUL_PARTIAL
 
 
 def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
@@ -3018,9 +3048,9 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
     rather than aborting the run: this pass is diagnostic (it only appends
     human-reviewed proposals), not load-bearing for the rest of the pipeline.
 
-    Returns 124 (via ``ctx.stop_on_deadline``) to short-circuit ``run()``
-    when the deadline trips immediately after this phase, or ``None`` to
-    continue.
+    Returns EXIT_GRACEFUL_PARTIAL (75, via ``ctx.stop_on_deadline``) to
+    short-circuit ``run()`` when the deadline trips immediately after this
+    phase, or ``None`` to continue.
     """
     if ctx.wiki_root.is_dir():
         _wiki_dedup_start = time.monotonic()
@@ -3236,7 +3266,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             # a misleading "pre-processing snapshot" message. Install a
             # SIGTERM/SIGINT handler for the writing phase that commits the
             # partial progress with a distinct, greppable message and exits
-            # 124 (matching coreutils `timeout`). A normally-completing run
+            # EXIT_EXTERNAL_KILL (124, matching coreutils `timeout`). This
+            # stays 124, NOT EXIT_GRACEFUL_PARTIAL (issue athenaeum#897): the
+            # stop request here originates from a delivered signal — an
+            # external kill — even though athenaeum makes a best effort to
+            # commit gracefully in response. A normally-completing run
             # restores the handlers right after the terminal commit and
             # commits exactly once, unchanged. Opt-in (CLI-only via
             # `install_signal_handlers`) so in-process callers (the MCP
@@ -3275,7 +3309,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     f"file(s), {ctx.total_created}C {ctx.total_updated}U "
                     f"{ctx.total_escalated}E {len(ctx.failed_files)}F)",
                 )
-                sys.exit(124)
+                sys.exit(EXIT_EXTERNAL_KILL)
 
             if ctx.install_signal_handlers and not ctx.dry_run:
                 try:
@@ -3431,8 +3465,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # per-file boundary. Mirrors the budget-exhaustion
                         # path — defer the remaining intake and record it in
                         # the manifest — but marks the run as
-                        # deadline-tripped so it exits 124 (resumable), not
-                        # 0. Placed BEFORE the file's LLM work so a run
+                        # deadline-tripped so it exits EXIT_GRACEFUL_PARTIAL
+                        # (75, issue athenaeum#897, resumable), not 0.
+                        # Placed BEFORE the file's LLM work so a run
                         # already past the deadline does not start another
                         # (potentially slow) file.
                         if not ctx.dry_run and ctx.deadline_exceeded():
@@ -4097,9 +4132,10 @@ def _run_finalize_phase(ctx: RunContext) -> int:
     terminal return-code selection. Issue athenaeum#461/#378/#284/#310/#481/#464/
     athenaeum#470/#396/#227 seam.
 
-    This is the LAST phase; every remaining ``run()`` return code (124 for a
-    deadline trip, 1 for failed files, 1 for ``strict_budget``, else 0) is
-    decided here, in the same precedence order as the original inline code.
+    This is the LAST phase; every remaining ``run()`` return code
+    (EXIT_GRACEFUL_PARTIAL/75 for a deadline trip, 1 for failed files, 1 for
+    ``strict_budget``, else 0) is decided here, in the same precedence order
+    as the original inline code.
     """
     # Resolved to a concrete bool by ``_resolve_run_config`` before any phase
     # runs (athenaeum#546: narrows ``bool | None`` — never fires for a valid run).
@@ -4227,8 +4263,9 @@ def _run_finalize_phase(ctx: RunContext) -> int:
             log.warning("pending-merge revalidation advisor failed (non-fatal): %s", exc)
 
     # Issue athenaeum#464: normal finalize path — every return below this point
-    # (the entity-loop deadline_tripped 124, the failed-files 1, the
-    # strict-budget 1, and the clean 0) shares this one emit. `_emit_run_summary`
+    # (the entity-loop deadline_tripped EXIT_GRACEFUL_PARTIAL/75, the
+    # failed-files 1, the strict-budget 1, and the clean 0) shares this one
+    # emit. `_emit_run_summary`
     # is idempotent (`_summary_emitted` guard), so this is safe even though
     # `_stop_on_deadline` above already emits on its own early-return paths —
     # those paths `return` before reaching here, so in practice this only ever
@@ -4264,11 +4301,13 @@ def _run_finalize_phase(ctx: RunContext) -> int:
 
     # Issue athenaeum#396: the entity loop hit the wall-clock deadline and deferred the
     # remaining intake. The partial progress is committed (terminal commit
-    # above) and the deferred files are picked up by the next run — exit 124
-    # (matching coreutils `timeout` and the athenaeum#337 interrupt path) so the trip is
-    # a distinct, resumable non-zero signal rather than a silent success. Takes
-    # precedence over the failed-files / strict-budget codes below: a deadline
-    # trip is the more actionable signal.
+    # above) and the deferred files are picked up by the next run — exit
+    # EXIT_GRACEFUL_PARTIAL (75, issue athenaeum#897) so the trip is a distinct,
+    # resumable non-zero signal rather than a silent success, and distinct from
+    # EXIT_EXTERNAL_KILL (124), which is reserved for a delivered external
+    # kill signal (`_commit_partial_and_exit` above), never athenaeum's own
+    # deadline check. Takes precedence over the failed-files / strict-budget
+    # codes below: a deadline trip is the more actionable signal.
     # Issue athenaeum#530 (H2): export the final truncation/deferral figures before ANY
     # of the entity-phase exit paths so a caller (ingest) can tell a fully
     # drained run from a partial one regardless of exit code.
@@ -4276,10 +4315,12 @@ def _run_finalize_phase(ctx: RunContext) -> int:
 
     if ctx.deadline_tripped:
         log.warning(
-            "librarian: run stopped at the wall-clock deadline — exiting 124 "
-            "(partial progress committed, remaining intake resumable next run)"
+            "librarian: run stopped at the wall-clock deadline — exiting %d "
+            "(EXIT_GRACEFUL_PARTIAL, partial progress committed, remaining "
+            "intake resumable next run)",
+            EXIT_GRACEFUL_PARTIAL,
         )
-        return 124
+        return EXIT_GRACEFUL_PARTIAL
 
     if ctx.failed_files:
         log.warning("Failed files (will retry next run): %s", ", ".join(ctx.failed_files))
@@ -4319,7 +4360,9 @@ def run(
     heartbeat: Callable[[], None] | None = None,
     out_run_stats: dict[str, Any] | None = None,
 ) -> int:
-    """Run the librarian pipeline. Returns 0 on success, 1 on error.
+    """Run the librarian pipeline. Returns 0 on success, 1 on error,
+    EXIT_GRACEFUL_PARTIAL (75) on its own internal deadline trip (issue
+    athenaeum#897; full exit-code contract: docs/exit-codes.md).
 
     When ``cluster_only`` is True, only the C2 auto-memory discovery +
     clustering pass runs; the entity tier pipeline is skipped entirely.
@@ -4345,8 +4388,10 @@ def run(
     phases (C4 contradiction detector, athenaeum#290 wiki-dedup, C3 merge/resolver)
     AND the per-file entity loop — checked at file/cluster/phase boundaries.
     On trip the run commits partial progress, releases the lock (via the CLI
-    caller's ``finally``), and exits ``124`` (matching coreutils ``timeout``
-    and the athenaeum#337 interrupt-checkpoint path) — resumable: the deferred intake
+    caller's ``finally``), and exits ``EXIT_GRACEFUL_PARTIAL`` (75, issue
+    athenaeum#897 — distinct from ``EXIT_EXTERNAL_KILL``/124, which coreutils
+    ``timeout`` uses and which is reserved for a delivered external kill
+    signal, never this internal check) — resumable: the deferred intake
     and any un-run phases are picked up by the next run. A resolved value of
     ``<= 0`` disables the deadline entirely (unbounded run, the escape hatch).
 
