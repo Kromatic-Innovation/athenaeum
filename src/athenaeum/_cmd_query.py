@@ -378,6 +378,13 @@ def cmd_recall(args: argparse.Namespace) -> int:
     audience drop, the athenaeum#308 temporal drop and the athenaeum#532
     ``recallable`` drop — immediately before the line is printed, which is the
     only position from which it cannot widen the output.
+
+    **A handle-shaped query (issue athenaeum#907) prints one JSON document
+    instead of tab-separated lines** — the same
+    ``athenaeum.identity_resolution.resolve_handle_query`` call the MCP
+    ``recall`` tool makes, so the two entry points never drift. Detection is a
+    complete no-op for an ordinary query: the tab-separated output below is
+    unaffected by this branch existing.
     """
     from athenaeum.config import (
         load_config,
@@ -409,6 +416,26 @@ def cmd_recall(args: argparse.Namespace) -> int:
     # Issue athenaeum#532: enforce the storage-adapter ``recallable`` policy at render
     # only when a non-default storage policy is configured (strict no-op else).
     enforce_recallable = storage_policy_configured(cfg)
+
+    # Issue athenaeum#907: a handle-shaped query answers by exact reverse
+    # lookup, printed as one JSON document, rather than being sent through the
+    # backend below. `resolve_handle_query` is a complete no-op — no lookup at
+    # all — for a non-handle-shaped query, so the fallthrough below is
+    # byte-identical to before this branch existed. Both `recall` entry
+    # points (this one and the MCP tool) call the SAME resolver.
+    from athenaeum import identity_resolution
+
+    handle_resolution = identity_resolution.resolve_handle_query(
+        knowledge_root,
+        wiki_root,
+        args.query,
+        caller_audience=caller_audience,
+        config=cfg,
+        with_pii=getattr(args, "with_pii", False),
+    )
+    if handle_resolution is not None:
+        print(json.dumps(handle_resolution.to_dict(), indent=2, sort_keys=True))
+        return 0
 
     try:
         backend = get_backend(backend_name)

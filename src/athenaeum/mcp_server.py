@@ -251,6 +251,24 @@ def recall_search(
     if not wiki_root.is_dir():
         return f"Wiki directory not found at {wiki_root}."
 
+    # Issue athenaeum#907: a handle-shaped query (an address, or a registry
+    # handle framed as a question) answers by exact reverse lookup rather than
+    # similarity search. `resolve_handle_query` is a complete no-op \u2014 no
+    # lookup of any kind \u2014 when the query is not handle-shaped, so an ordinary
+    # query's output below is untouched by this branch existing.
+    from athenaeum import identity_resolution
+
+    handle_resolution = identity_resolution.resolve_handle_query(
+        wiki_root.parent,
+        wiki_root,
+        query,
+        caller_audience=caller_audience,
+        config=config,
+        with_pii=with_pii,
+    )
+    if handle_resolution is not None:
+        return json.dumps(handle_resolution.to_dict(), indent=2, sort_keys=True)
+
     if not tokenize_keyword_query(query):
         return "Query too short \u2014 provide at least one keyword (2+ characters)."
 
@@ -1176,6 +1194,15 @@ def create_server(
           higher is better.
         - ``vector``: chromadb embeddings over a pre-built index; distance
           scores, lower is better.
+
+        A handle-shaped query (an address, or a registry handle framed as a
+        question — "who is this address?", "is this address still current?")
+        answers by exact reverse lookup instead (issue athenaeum#907): a JSON
+        document with the person's ``uid``, display name, entity class, and
+        per-value fact fields (usage/provenance classification, bounce
+        history, validity dates) — facts only, never an eligibility or action
+        predicate. An ordinary query is unaffected; detection is deliberately
+        conservative.
 
         Args:
             query: Search query string (keywords, names, topics — or natural
