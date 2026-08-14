@@ -432,6 +432,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
         caller_audience=caller_audience,
         config=cfg,
         with_pii=getattr(args, "with_pii", False),
+        usage_classes=getattr(args, "usage_class", None) or None,
     )
     if handle_resolution is not None:
         print(json.dumps(handle_resolution.to_dict(), indent=2, sort_keys=True))
