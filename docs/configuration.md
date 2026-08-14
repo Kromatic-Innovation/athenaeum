@@ -173,6 +173,23 @@ coordination (use `librarian.push_after_run` + a single scheduler host for
 multi-machine setups). On non-POSIX platforms without `fcntl`, the lock
 degrades gracefully: a warning is logged and the command runs unlocked.
 
+## SessionEnd budget derivation (`athenaeum session-end`, athenaeum#896)
+
+`cmd_session_end` never falls through to the `athenaeum run` defaults above
+for its own `max_runtime`/`max_files`/`max_api_calls` — it resolves an
+INNER deadline derived from the SessionEnd wrapper's OUTER kill timeout, and
+passes fixed, session-scoped-incremental-sized budget caps. Before athenaeum#896 the
+inner deadline fell through to `DEFAULT_MAX_RUNTIME` (3600s) — 4x the
+wrapper's 900s outer default — so a budget-tripped run was always externally
+`SIGTERM`'d instead of exiting through the graceful-stop path.
+
+| Knob | CLI flag | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|---|
+| Outer kill timeout | — | `KNOWLEDGE_REBUILD_TIMEOUT` | — | `900` | The SessionEnd wrapper's own external `timeout --signal=TERM` value — read from `code-workspace-config/scripts/hooks/knowledge-rebuild-index.sh` (a **different repo**, not this one). `session_end_outer_timeout()` reads the SAME env var with the SAME default so it is the single definition both the wrapper and the derivation share, rather than a constant duplicated in two repos that can drift apart. No YAML key: the wrapper that owns this value lives outside athenaeum's config. |
+| Inner-runtime margin | — | `ATHENAEUM_SESSION_END_RUNTIME_MARGIN` | `librarian.session_end_runtime_margin` | `120` | Slack (seconds) subtracted from the outer timeout to get the inner `max_runtime` — time reserved for the graceful-stop commit itself plus CLI startup/lock-acquire overhead. `session_end_max_runtime()` derives `inner = outer - margin`, clamped so the result is always strictly positive and strictly less than a configured outer of `2` or more (a floor of half the outer, minimum 1s, prevents a non-positive result when the margin exceeds the outer). An outer `< 2` (including `<= 0`, meaning the wrapper's own `timeout` is disabled) has no external race to protect and falls back to the `athenaeum run` `DEFAULT_MAX_RUNTIME` (3600s) instead. |
+| Per-run file cap | — | — | — | `20` (`SESSION_END_MAX_FILES`) | Fixed `max_files` `cmd_session_end` passes explicitly, well under the nightly `DEFAULT_MAX_FILES` (50) — SessionEnd is scoped to one session's incremental raw intake, not a whole night's backlog. |
+| Per-run API call cap | — | — | — | `100` (`SESSION_END_MAX_API_CALLS`) | Fixed `max_api_calls` `cmd_session_end` passes explicitly, well under the nightly `DEFAULT_MAX_API_CALLS` (800), for the same session-scoped-incremental reason. |
+
 ## Backlog drain (`athenaeum drain`, athenaeum#470)
 
 When the raw-intake backlog outgrows the nightly caps, `athenaeum run`'s

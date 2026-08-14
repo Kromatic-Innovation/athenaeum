@@ -33,6 +33,22 @@ import pytest
 
 from athenaeum.cli import EXIT_LOCK_HELD, main
 
+# Issue athenaeum#896: reuse the deadline suite's FakeClock + writing-`process_one`
+# harness verbatim (same convention `test_librarian_heartbeat.py` follows) for
+# the derived-inner-deadline graceful-stop test below, rather than inventing a
+# new one. Aliased to avoid colliding with this file's own tier0-oriented
+# `_seed_knowledge_root` (no wiki/_schema — process_one is stubbed, so schema
+# validity is irrelevant here, exactly as in the deadline suite).
+from tests.test_librarian_deadline import (
+    _FakeClock,
+    _last_subject,
+    _porcelain,
+    _writing_process_one_factory,
+)
+from tests.test_librarian_deadline import (
+    _seed_knowledge_root as _entity_seed_knowledge_root,
+)
+
 # ---------------------------------------------------------------------------
 # fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -655,3 +671,135 @@ class TestSessionEndReferenceDetermination:
 
         assert result.exit_code == 0
         assert result.session == "sess-no-transcript"
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#896 — derived inner budgets wired into cmd_session_end
+# ---------------------------------------------------------------------------
+
+
+class TestSessionEndCLIDerivedBudgets:
+    """`cmd_session_end` (the CLI wrapper over `session_end`, registered as
+    the ``session-end`` subcommand) must resolve its inner `max_runtime` from
+    the outer SessionEnd wrapper timeout instead of falling through to the
+    nightly-run `DEFAULT_MAX_RUNTIME`, and pass explicit, session-scoped-sized
+    `max_files`/`max_api_calls` instead of the nightly-run defaults."""
+
+    def test_cli_passes_derived_runtime_and_explicit_budgets(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import athenaeum.librarian as lib
+        from athenaeum.config import load_config
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        # A small, explicit outer value so the derived inner is distinctive
+        # (not coincidentally equal to DEFAULT_MAX_RUNTIME).
+        monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", "300")
+        monkeypatch.delenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", raising=False)
+        expected_max_runtime = lib.session_end_max_runtime(load_config(root))
+        assert expected_max_runtime != lib.DEFAULT_MAX_RUNTIME
+        assert expected_max_runtime < 300
+
+        captured: dict[str, object] = {}
+        real_session_end = lib.session_end
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return real_session_end(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(lib, "session_end", _spy)
+
+        # No raw intake seeded. With no prior ingest-manifest stamp, `ingest`
+        # still calls through to `run()` on this FIRST invocation (the
+        # noop-skip only fires once a stamp exists) — `mock_anthropic` covers
+        # the resulting startup gate. This test targets the CLI→session_end
+        # kwarg wiring, not the compile itself.
+        rc = main(
+            [
+                "session-end",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+                "--backend",
+                "fts5",
+            ]
+        )
+
+        assert rc == 0
+        assert captured["max_runtime"] == expected_max_runtime
+        assert captured["max_files"] == lib.SESSION_END_MAX_FILES
+        assert captured["max_api_calls"] == lib.SESSION_END_MAX_API_CALLS
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#896 — derived inner deadline trips the graceful-stop path
+# ---------------------------------------------------------------------------
+
+
+class TestSessionEndDerivedDeadlineGracefulStop:
+    """A SessionEnd run that trips its DERIVED inner deadline (outer
+    `KNOWLEDGE_REBUILD_TIMEOUT` minus margin) must exit through the SAME
+    graceful-stop path the nightly run uses (issue athenaeum#396/athenaeum#337): partial
+    progress committed, remaining raw left on disk for the next run, and a
+    resumable 124 exit — instead of running unbounded until the wrapper's
+    external `timeout --signal=TERM` kills it. Drives `session_end()`
+    end-to-end with the SAME FakeClock + writing-`process_one` harness
+    `test_librarian_deadline.py` uses for the equivalent `run()`-level test
+    (`test_entity_loop_deadline_defers_and_exits_124`)."""
+
+    def test_derived_deadline_trips_graceful_stop_partial_commit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.librarian import session_end, session_end_max_runtime
+
+        # Same fixture shape (freeform, non-tier0 raw — routes through the
+        # real entity loop) as the run()-level deadline test.
+        root = _entity_seed_knowledge_root(tmp_path, n_files=3)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+        monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", "1000")
+        monkeypatch.delenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", raising=False)
+
+        derived = session_end_max_runtime({})  # outer=1000, default margin -> 880
+        assert derived < 1000
+
+        clock = _FakeClock(start=0.0)
+        monkeypatch.setattr("athenaeum.librarian.time.monotonic", clock.monotonic)
+
+        def _bump() -> None:
+            clock.now = derived + 5000.0
+
+        monkeypatch.setattr(
+            "athenaeum.librarian.process_one",
+            _writing_process_one_factory(root / "wiki", bump_clock=_bump, bump_after=1),
+        )
+
+        cache = tmp_path / "cache"
+        result = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            cache_dir=cache,
+            backend="fts5",
+            max_runtime=derived,
+            max_api_calls=100,
+        )
+
+        # Resumable non-zero exit (coreutils `timeout` convention), propagated
+        # through IngestResult.exit_code -> SessionEndResult.exit_code.
+        assert result.exit_code == 124
+        # A half-compiled wiki is never indexed (session_end's change-gate).
+        assert result.reindexed is False
+        # Partial progress committed; nothing left uncommitted.
+        assert _porcelain(root) == ""
+        assert _last_subject(root).startswith("librarian: processed 1 file(s)")
+        assert (root / "wiki" / "entity-1.md").exists()
+        assert not (root / "wiki" / "entity-2.md").exists()
+        remaining = sorted((root / "raw" / "sessions").glob("2024041*.md"))
+        assert len(remaining) == 2, "deferred intake must remain on disk for the next run"

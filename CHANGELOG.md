@@ -276,6 +276,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SessionEnd's inner deadline is derived from the outer kill timer, so the
+  graceful-stop path can actually win the race (athenaeum#896).** `cmd_session_end`
+  passed no `max_runtime`, so the inner deadline fell through to
+  `DEFAULT_MAX_RUNTIME` (3600s) — four times the SessionEnd wrapper's 900s
+  outer `timeout --signal=TERM` — so every budget-tripped SessionEnd run was
+  externally SIGTERM'd instead of exiting through the athenaeum#337/athenaeum#396
+  graceful-stop path (partial-progress commit, resumable deferred intake). New
+  `session_end_max_runtime()` derives `inner = outer - margin` from
+  `KNOWLEDGE_REBUILD_TIMEOUT` (the SAME env var, same 900s default, the
+  wrapper script — `code-workspace-config/scripts/hooks/knowledge-rebuild-index.sh`,
+  a different repo — reads for its own `timeout` wrap, so the env var is the
+  single definition both sides read), clamped so the result is always
+  strictly positive and strictly less than a configured outer of 2 or more.
+  `cmd_session_end` also now passes explicit, session-scoped-incremental-sized
+  `max_files`/`max_api_calls` (`SESSION_END_MAX_FILES` = 20,
+  `SESSION_END_MAX_API_CALLS` = 100) instead of the nightly-run defaults (50 /
+  800). Mirrors the nightly path's existing outer-minus-margin derivation
+  shape (cron-fleet#95) applied to the SessionEnd wrapper's own outer value;
+  the nightly path's own derivation is unchanged.
 - **`pii.resolve_contact_record` is answerable from an index, and no longer
   goes stale mid-batch (athenaeum#883).** athenaeum#877/#879 fixed the by-uid
   batch path; the by-ADDRESS sibling still paid a full `iter_contact_records`

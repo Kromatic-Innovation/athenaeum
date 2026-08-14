@@ -598,7 +598,13 @@ def cmd_session_end(args: argparse.Namespace) -> int:
     import json
 
     from athenaeum.config import load_config
-    from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, session_end
+    from athenaeum.librarian import (
+        DEFAULT_KNOWLEDGE_ROOT,
+        SESSION_END_MAX_API_CALLS,
+        SESSION_END_MAX_FILES,
+        session_end,
+        session_end_max_runtime,
+    )
 
     configure_logging(verbose=getattr(args, "verbose", False))
 
@@ -641,6 +647,14 @@ def cmd_session_end(args: argparse.Namespace) -> int:
         lock = _acquire_or_exit(knowledge_root, args, cfg)
         if isinstance(lock, int):
             return lock
+    # Issue athenaeum#896: derive the INNER wall-clock deadline from the
+    # SessionEnd wrapper's OUTER kill timeout (``KNOWLEDGE_REBUILD_TIMEOUT``,
+    # default 900s) instead of falling through to the nightly-run
+    # ``DEFAULT_MAX_RUNTIME`` (3600s) — 4x the outer default, which meant the
+    # graceful-stop path could never win the race against the wrapper's
+    # external ``timeout``. ``max_files``/``max_api_calls`` are likewise
+    # explicit, session-scoped-incremental-sized caps rather than the
+    # nightly-run defaults (see the constants' docstrings in librarian.py).
     try:
         result = session_end(
             raw_root=raw_root,
@@ -653,6 +667,9 @@ def cmd_session_end(args: argparse.Namespace) -> int:
             backend=args.backend,
             dry_run=args.dry_run,
             install_signal_handlers=not args.dry_run,
+            max_runtime=session_end_max_runtime(cfg),
+            max_files=SESSION_END_MAX_FILES,
+            max_api_calls=SESSION_END_MAX_API_CALLS,
         )
     except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
         print(

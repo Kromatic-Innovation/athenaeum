@@ -27,7 +27,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from athenaeum.librarian import DEFAULT_MAX_RUNTIME, librarian_max_runtime, run
+from athenaeum.librarian import (
+    DEFAULT_MAX_RUNTIME,
+    DEFAULT_SESSION_END_OUTER_TIMEOUT,
+    DEFAULT_SESSION_END_RUNTIME_MARGIN,
+    librarian_max_runtime,
+    run,
+    session_end_max_runtime,
+    session_end_outer_timeout,
+    session_end_runtime_margin,
+)
 from athenaeum.merge import RunDeadlineExceeded, merge_clusters_to_wiki
 
 # ---------------------------------------------------------------------------
@@ -710,3 +719,184 @@ def test_761_skipped_push_emits_log_line(
     assert any(
         "post-run push skipped: no new commits" in r.message for r in caplog.records
     ), "a skipped opted-in push must emit a log line"
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#896 — SessionEnd's inner budget derived from the outer kill timer
+# ---------------------------------------------------------------------------
+
+
+class TestSessionEndOuterTimeout:
+    def test_default_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("KNOWLEDGE_REBUILD_TIMEOUT", raising=False)
+        assert session_end_outer_timeout(None) == DEFAULT_SESSION_END_OUTER_TIMEOUT
+
+    def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The SAME env var the SessionEnd wrapper script
+        # (code-workspace-config/scripts/hooks/knowledge-rebuild-index.sh,
+        # not in this repo) reads for its own `timeout` wrap — this is the
+        # "single definition both the wrapper and the derivation read".
+        monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", "600")
+        assert session_end_outer_timeout(None) == 600
+
+    def test_non_numeric_env_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", "not-a-number")
+        assert session_end_outer_timeout(None) == DEFAULT_SESSION_END_OUTER_TIMEOUT
+
+
+class TestSessionEndRuntimeMargin:
+    def test_default_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", raising=False)
+        assert session_end_runtime_margin(None) == DEFAULT_SESSION_END_RUNTIME_MARGIN
+        assert session_end_runtime_margin({}) == DEFAULT_SESSION_END_RUNTIME_MARGIN
+
+    def test_yaml_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", raising=False)
+        assert (
+            session_end_runtime_margin({"librarian": {"session_end_runtime_margin": 30}})
+            == 30
+        )
+
+    def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", "45")
+        assert (
+            session_end_runtime_margin({"librarian": {"session_end_runtime_margin": 30}})
+            == 45
+        )
+
+    def test_negative_env_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", "-5")
+        assert session_end_runtime_margin(None) == DEFAULT_SESSION_END_RUNTIME_MARGIN
+
+    def test_bool_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", raising=False)
+        assert (
+            session_end_runtime_margin({"librarian": {"session_end_runtime_margin": True}})
+            == DEFAULT_SESSION_END_RUNTIME_MARGIN
+        )
+
+
+class TestSessionEndMaxRuntimeInvariant:
+    """AC: the derived inner runtime is ALWAYS strictly less than the
+    configured outer timeout, for a range of configured outer values —
+    including small ones, per the athenaeum#896 clamp requirement."""
+
+    @pytest.mark.parametrize(
+        "outer",
+        [2, 3, 5, 10, 30, 60, 119, 121, 300, 900, 1800, 3600, 86400, 1_000_000],
+    )
+    def test_inner_always_strictly_less_than_outer(
+        self, outer: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", str(outer))
+        monkeypatch.delenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", raising=False)
+        inner = session_end_max_runtime(None)
+        assert inner > 0, f"outer={outer}: derived inner must be strictly positive"
+        assert inner < outer, f"outer={outer}: derived inner must be < outer"
+
+    @pytest.mark.parametrize("margin", [0, 1, 60, 120, 500, 10_000])
+    def test_inner_always_strictly_less_than_outer_across_margins(
+        self, margin: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The invariant must hold for a range of MARGIN values too — including
+        a margin that would (before clamping) exceed the outer timeout."""
+        monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", "900")
+        monkeypatch.setenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", str(margin))
+        inner = session_end_max_runtime(None)
+        assert 0 < inner < 900
+
+    def test_default_outer_and_margin_yields_expected_inner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("KNOWLEDGE_REBUILD_TIMEOUT", raising=False)
+        monkeypatch.delenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", raising=False)
+        assert session_end_max_runtime(None) == (
+            DEFAULT_SESSION_END_OUTER_TIMEOUT - DEFAULT_SESSION_END_RUNTIME_MARGIN
+        )
+
+    def test_much_smaller_than_nightly_default_max_runtime(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bug this issue fixes: before athenaeum#896, the inner deadline fell
+        through to DEFAULT_MAX_RUNTIME (3600s) — 4x the 900s outer default —
+        so the graceful-stop path could never win the race. The derived
+        value must be comfortably under the outer default, not just under
+        DEFAULT_MAX_RUNTIME (which 900 alone already satisfies)."""
+        monkeypatch.delenv("KNOWLEDGE_REBUILD_TIMEOUT", raising=False)
+        monkeypatch.delenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", raising=False)
+        inner = session_end_max_runtime(None)
+        assert inner < DEFAULT_MAX_RUNTIME
+        assert inner < DEFAULT_SESSION_END_OUTER_TIMEOUT
+
+    def test_outer_disabled_falls_back_to_nightly_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resolved outer <= 0 means the wrapper's own `timeout` is disabled
+        (coreutils `timeout 0` never kills) — no external race to protect
+        against, so this is exempt from the strict-invariant range above and
+        falls back to DEFAULT_MAX_RUNTIME rather than deriving from a
+        non-positive outer."""
+        monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", "0")
+        assert session_end_max_runtime(None) == DEFAULT_MAX_RUNTIME
+        monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", "-30")
+        assert session_end_max_runtime(None) == DEFAULT_MAX_RUNTIME
+
+    def test_never_negative_for_any_outer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Clamp sensibly rather than going negative — for EVERY outer value,
+        including pathologically tiny ones, the result is never negative."""
+        for outer in (-100, -1, 0, 1, 2, 3):
+            monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", str(outer))
+            assert session_end_max_runtime(None) >= 0
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#896 — derived deadline trips the SAME graceful-stop path
+# ---------------------------------------------------------------------------
+
+
+def test_derived_max_runtime_trips_graceful_stop_and_exits_124(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The value `session_end_max_runtime()` derives is a real, usable
+    `max_runtime` — fed straight into `run()`, an entity-loop deadline trip
+    with it behaves EXACTLY like the existing
+    `test_entity_loop_deadline_defers_and_exits_124` case above: graceful
+    stop, partial progress committed, deferred intake left on disk, 124
+    exit. (The SessionEnd-composition-level equivalent of this test — via
+    `session_end()` rather than `run()` directly — lives in
+    `test_session_end.py::TestSessionEndDerivedDeadlineGracefulStop`.)"""
+    root = _seed_knowledge_root(tmp_path, n_files=3)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+    monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+    monkeypatch.setenv("KNOWLEDGE_REBUILD_TIMEOUT", "1000")
+    monkeypatch.delenv("ATHENAEUM_SESSION_END_RUNTIME_MARGIN", raising=False)
+
+    derived = session_end_max_runtime(None)
+    assert derived < 1000
+
+    clock = _FakeClock(start=0.0)
+    monkeypatch.setattr("athenaeum.librarian.time.monotonic", clock.monotonic)
+
+    def _bump() -> None:
+        clock.now = derived + 5000.0
+
+    monkeypatch.setattr(
+        "athenaeum.librarian.process_one",
+        _writing_process_one_factory(root / "wiki", bump_clock=_bump, bump_after=1),
+    )
+
+    rc = run(
+        raw_root=root / "raw",
+        wiki_root=root / "wiki",
+        knowledge_root=root,
+        max_api_calls=100,
+        max_runtime=derived,
+    )
+
+    assert rc == 124
+    assert _porcelain(root) == ""
+    assert _last_subject(root).startswith("librarian: processed 1 file(s)")
+    assert (root / "wiki" / "entity-1.md").exists()
+    assert not (root / "wiki" / "entity-2.md").exists()
+    remaining = sorted((root / "raw" / "sessions").glob("2024041*.md"))
+    assert len(remaining) == 2, "deferred intake must remain on disk for the next run"
