@@ -157,6 +157,7 @@ from athenaeum.models import (
     EscalationItem,
     ProcessingResult,
     RawFile,
+    RawFileOverBudgetError,
     RawFileTooLargeError,
     TokenUsage,
     WikiEntity,
@@ -192,7 +193,7 @@ from athenaeum.tiers import (
     schema_fragment_state,
     tier1_programmatic_match,
     tier2_classify,
-    tier3_write,
+    tier3_derive_actions,
     tier4_escalate,
 )
 
@@ -997,6 +998,11 @@ def process_one(
     usage: TokenUsage | None = None,
     config: dict[str, object] | None = None,
     excluded_index: ExcludedRecordIndex | None = None,
+    *,
+    max_api_calls_for_file: int | None = None,
+    max_runtime_for_file: float | None = None,
+    calls_before_file: int = 0,
+    started_at_file: float | None = None,
 ) -> ProcessingResult:
     """Process a single raw file through all tiers.
 
@@ -1011,6 +1017,20 @@ def process_one(
     for the whole ``ctx.raw_files`` loop ABOVE this function, so the
     O(corpus) contacts scan is paid once per run rather than once per
     conforming bounce note. ``None`` keeps the unindexed per-call behaviour.
+
+    ``max_api_calls_for_file`` / ``max_runtime_for_file`` / ``calls_before_file`` /
+    ``started_at_file`` (issue athenaeum#898) are this file's per-file LLM-call and
+    wall-clock bound, checked AFTER Tier 3's LLM-call phase
+    (:func:`tier3_derive_actions`) completes but BEFORE any of this file's
+    writes start — see :class:`~athenaeum.models.RawFileOverBudgetError`'s
+    docstring for why the check has to sit exactly there.
+    ``max_api_calls_for_file=None`` / ``max_runtime_for_file=None`` (the
+    default, and what every caller other than the entity-loop passes)
+    disables the respective check — unbounded, matching pre-athenaeum#898
+    behaviour. ``calls_before_file`` is ``usage.api_calls`` and
+    ``started_at_file`` is ``time.monotonic()``, both snapshotted by the
+    caller at the moment THIS file started, so the deltas measured here are
+    this file's own spend, not the phase's running total.
     """
     result = ProcessingResult(raw_file=raw)
 
@@ -1202,9 +1222,9 @@ def process_one(
         log.info("  No actions needed for %s", raw.ref)
         return result
 
-    # --- Tier 3: Content writing ---
+    # --- Tier 3: LLM-call phase (issue athenaeum#898: writes NOTHING yet) ---
     assert client is not None, "client required for non-dry-run"
-    new_entities, updated_uids, escalations = tier3_write(
+    new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
         raw,
         actions,
         index,
@@ -1213,6 +1233,45 @@ def process_one(
         usage=usage,
         config=config,
     )
+
+    # Issue athenaeum#898: the per-file LLM-call / wall-clock bound, checked HERE
+    # — after every LLM call this file will make (Tier 2 classify + Tier 3's
+    # create/merge calls above), before ANY of this file's writes start.
+    # ``pending_updates`` has not been flushed and ``new_entities`` has not
+    # been written, so raising here means the file's result really is
+    # discarded — no wiki page created, no existing page updated, no
+    # escalation written, and (since nothing changed) the raw file is left
+    # on disk for the entity loop's over-bound handling to leave alone,
+    # exactly like a processing failure. See RawFileOverBudgetError's
+    # docstring for why a POST-`process_one` check (the pre-review shape)
+    # could not make this guarantee: by the time control returned to the
+    # caller, tier3_write's own update flush and this function's create-write
+    # loop below had both already run.
+    if max_api_calls_for_file is not None and usage is not None:
+        _calls_used_for_file = usage.api_calls - calls_before_file
+        if _calls_used_for_file > max_api_calls_for_file:
+            raise RawFileOverBudgetError(
+                raw.ref,
+                bound="llm_calls",
+                detail=(
+                    f"{_calls_used_for_file} call(s) > "
+                    f"{max_api_calls_for_file}-call limit"
+                ),
+            )
+    if max_runtime_for_file is not None and started_at_file is not None:
+        _elapsed_for_file = time.monotonic() - started_at_file
+        if _elapsed_for_file > max_runtime_for_file:
+            raise RawFileOverBudgetError(
+                raw.ref,
+                bound="wall_clock",
+                detail=f"{_elapsed_for_file:.1f}s > {max_runtime_for_file}s limit",
+            )
+
+    # All LLM calls succeeded AND this file is within its per-file budget —
+    # apply the Tier 3 update writes atomically (mirrors tier3_write's own
+    # flush step, which this function deliberately bypasses above).
+    for _update_path, _update_content in pending_updates:
+        atomic_write_text(_update_path, _update_content)
 
     for entity in new_entities:
         page_path = wiki_root / entity.filename
@@ -2160,29 +2219,49 @@ def _surface_newly_stuck(ctx: "RunContext", raw: Any, entry: dict[str, Any]) -> 
 # ---------------------------------------------------------------------------
 
 
-def _quarantine_content_hash(raw: Any) -> str:
+def _quarantine_content_hash(raw: Any, *, bound: str) -> str:
     """Stable short "did this file change" fingerprint (athenaeum#898 quarantine-ledger key).
 
-    Deliberately DOES NOT read ``raw.content`` the way :func:`_stuck_content_hash`
-    does. A file large enough to cross the byte bound is EXACTLY the file
-    this fingerprint must never read in full — doing so would defeat the
-    whole point of the bound (and, worse, every oversized file's content
-    read would raise :class:`~athenaeum.models.RawFileTooLargeError` and
-    fall back to hashing the empty string, collapsing every distinct
-    oversized file onto the SAME ledger key on a read failure — silently
-    wrong, not merely wasteful). Instead fingerprints ``(size, mtime_ns)``
-    from a single ``stat()`` call: cheap, stable across runs for genuinely
-    unchanged content, and still changes when the file is edited — even to a
-    still-oversized replacement, which a content-read hash could not
-    distinguish once both reads fail identically. Falls back to hashing the
-    empty string only when even ``stat()`` fails (e.g. the file vanished
-    between discovery and this call) — fail-open, never fail-quarantine.
+    ``bound`` selects the fingerprint strategy — the two bound categories
+    have opposite constraints:
+
+    - ``"bytes"``: deliberately does NOT read ``raw.content`` the way
+      :func:`_stuck_content_hash` does. A file large enough to cross the
+      byte bound is EXACTLY the file this fingerprint must never read in
+      full — doing so would defeat the whole point of the bound (and,
+      worse, every oversized file's content read would raise
+      :class:`~athenaeum.models.RawFileTooLargeError` and fall back to
+      hashing the empty string, collapsing every distinct oversized file
+      onto the SAME ledger key). Fingerprints ``(size, mtime_ns)`` from a
+      single ``stat()`` call instead: cheap, and still changes when the
+      file is edited, even to a still-oversized replacement.
+    - ``"llm_calls"`` / ``"wall_clock"``: uses the FULL content hash
+      (mirrors :func:`_stuck_content_hash` exactly) — a file that violates
+      either of these bounds was, by construction, already read in full by
+      ``process_one`` to spend those calls / that wall-clock, so hashing it
+      here costs nothing additional. A stat-based fingerprint would be
+      actively WRONG for these two: anything that re-provisions the raw
+      checkout without preserving mtimes (a fresh clone, ``rsync`` without
+      ``-t``, a tar extract, a backup restore) changes ``(size, mtime_ns)``
+      for byte-IDENTICAL content and silently resets the violation count —
+      a genuinely pathological file would then never cross the consecutive
+      threshold in exactly the cron-style redeploy this repo targets.
+
+    Falls back to hashing the empty string on any read/stat failure (e.g.
+    the file vanished between discovery and this call) — fail-open, never
+    fail-quarantine.
     """
-    try:
-        st = raw.path.stat()
-        payload = f"{st.st_size}:{st.st_mtime_ns}"
-    except OSError:
-        payload = ""
+    if bound == "bytes":
+        try:
+            st = raw.path.stat()
+            payload = f"{st.st_size}:{st.st_mtime_ns}"
+        except OSError:
+            payload = ""
+    else:
+        try:
+            payload = raw.content
+        except Exception:  # noqa: BLE001 — an unreadable raw resets, not compounds
+            payload = ""
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
@@ -2249,7 +2328,7 @@ def _record_bound_violation(
     contract parity with the sibling ledger.
     """
     key = raw.ref
-    content_hash = _quarantine_content_hash(raw)
+    content_hash = _quarantine_content_hash(raw, bound=bound)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     entry = ledger.get(key)
     if not isinstance(entry, dict) or entry.get("hash") != content_hash:
@@ -2268,27 +2347,56 @@ def _record_bound_violation(
 
 def _quarantine_and_surface(
     ctx: "RunContext", raw: Any, entry: dict[str, Any], *, bound: str, detail: str
-) -> None:
+) -> bool:
     """Physically quarantine *raw* after it crossed the violation threshold (athenaeum#898).
 
-    Calls :func:`athenaeum.quarantine.quarantine_file` (moves the file out of
-    the discovery set, appends the audit-ledger record, and is the source
-    :func:`athenaeum.decisions.quarantine_to_decision` renders — AC 4/5),
-    appends a machine-detectable record to ``ctx.quarantined_files``
+    Calls :func:`athenaeum.quarantine.quarantine_file` (writes the
+    audit-ledger record, then moves the file out of the discovery set — see
+    that function's docstring for why the ledger write goes first — and is
+    the source :func:`athenaeum.decisions.quarantine_to_decision` renders —
+    AC 4/5), appends a machine-detectable record to ``ctx.quarantined_files``
     (exported to ``out_run_stats["quarantined_files"]``, mirroring
     ``ctx.stuck_files``), and emits the greppable :data:`QUARANTINE_FILE_PREFIX`
     WARNING naming the file and the bound it exceeded — the athenaeum#663
     ``_surface_newly_stuck`` shape, one step heavier (a physical move + a
     pending decision instead of a skip-in-place log line).
+
+    Code-review finding (athenaeum#898): a bare, unguarded call here meant a
+    disk-full/permission error — or the SIGTERM this run's per-file loop
+    installs a handler for — landing mid-quarantine either killed the whole
+    nightly run (contradicting this codebase's stated fail-open philosophy)
+    or left ``entry`` popped from the caller's candidate ledger with no
+    audit trail. This now catches any exception from the quarantine attempt,
+    logs it loudly, and resets ``entry["escalated"] = False`` **in place**
+    (``entry`` is the SAME dict object the caller's ledger holds, so this
+    mutation is visible to it) so a FUTURE run's :func:`_record_bound_violation`
+    call is eligible to cross the threshold and retry, rather than the
+    consecutive count climbing forever with the crossing permanently
+    consumed. Returns ``True`` on success (the caller pops the now-terminal
+    candidate entry) or ``False`` on failure (the caller leaves it in place,
+    retry-eligible).
     """
-    record = _quarantine_file(
-        raw,
-        wiki_root=ctx.wiki_root,
-        raw_root=ctx.raw_root,
-        bound=bound,
-        detail=detail,
-        violations=int(entry.get("violations", 0)),
-    )
+    try:
+        record = _quarantine_file(
+            raw,
+            wiki_root=ctx.wiki_root,
+            raw_root=ctx.raw_root,
+            bound=bound,
+            detail=detail,
+            violations=int(entry.get("violations", 0)),
+        )
+    except Exception:
+        log.exception(
+            "athenaeum#898: failed to quarantine %s (bound=%s, violations=%d) — "
+            "leaving it a pending candidate so the next run retries rather "
+            "than losing track of it silently",
+            raw.ref,
+            bound,
+            int(entry.get("violations", 0)),
+        )
+        entry["escalated"] = False
+        return False
+
     ctx.quarantined_files.append(record)
     log.warning(
         "%s: %s exceeded its %s bound on %d consecutive run(s) (%s) — QUARANTINED; "
@@ -2300,6 +2408,7 @@ def _quarantine_and_surface(
         int(entry.get("violations", 0)),
         detail,
     )
+    return True
 
 
 def _clear_stale_deferred_manifest(wiki_root: Path) -> None:
@@ -3777,10 +3886,13 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 break
 
                         log.info("Processing: %s", raw.ref)
-                        # Issue athenaeum#898: snapshot THIS file's starting cost so the
-                        # per-file LLM-call/wall-clock bound (checked below, after
-                        # process_one returns) measures only what THIS file spent,
-                        # not the phase's running total.
+                        # Issue athenaeum#898: snapshot THIS file's starting cost and pass
+                        # it (plus the resolved bounds) straight into process_one,
+                        # which checks them itself — AFTER this file's LLM calls,
+                        # BEFORE any of this file's writes (see
+                        # RawFileOverBudgetError's docstring). dry_run never
+                        # reaches that check (process_one returns earlier), so
+                        # passing real bound values here is harmless either way.
                         _file_calls_before = ctx.usage.api_calls
                         _file_start = time.monotonic()
                         try:
@@ -3796,6 +3908,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 usage=ctx.usage,
                                 config=ctx.config,
                                 excluded_index=excluded_index,
+                                max_api_calls_for_file=raw_file_max_api_calls,
+                                max_runtime_for_file=raw_file_max_runtime_seconds,
+                                calls_before_file=_file_calls_before,
+                                started_at_file=_file_start,
                             )
                         except RawFileTooLargeError as exc:
                             # Issue athenaeum#898: the per-file BYTE bound (checked by
@@ -3820,10 +3936,42 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     detail=str(exc),
                                     threshold=quarantine_threshold,
                                 )
-                                if _crossed is not None:
-                                    _quarantine_and_surface(
-                                        ctx, raw, _crossed, bound="bytes", detail=str(exc)
-                                    )
+                                if _crossed is not None and _quarantine_and_surface(
+                                    ctx, raw, _crossed, bound="bytes", detail=str(exc)
+                                ):
+                                    quarantine_candidates.pop(raw.ref, None)
+                            continue
+                        except RawFileOverBudgetError as exc:
+                            # Issue athenaeum#898: the per-file LLM-call / wall-clock
+                            # bound, raised by process_one itself AFTER this
+                            # file's LLM calls but BEFORE any of its writes
+                            # (see RawFileOverBudgetError's docstring) — so
+                            # unlike a bare post-hoc check, no wiki page was
+                            # created or updated and no escalation was
+                            # written for this file this run. The raw file is
+                            # untouched on disk (never unlinked on this
+                            # path), so it is re-discovered next run and can
+                            # accumulate a consecutive-violation count exactly
+                            # like a processing failure would.
+                            log.warning(
+                                "%s ref=%s reason=%s-over-bound: %s",
+                                ENTITY_FILE_FAILURE_PREFIX,
+                                raw.ref,
+                                exc.bound,
+                                exc.detail,
+                            )
+                            entity_heartbeat.tick(raw.ref, error=1)
+                            if not ctx.dry_run:
+                                _crossed = _record_bound_violation(
+                                    quarantine_candidates,
+                                    raw,
+                                    bound=exc.bound,
+                                    detail=exc.detail,
+                                    threshold=quarantine_threshold,
+                                )
+                                if _crossed is not None and _quarantine_and_surface(
+                                    ctx, raw, _crossed, bound=exc.bound, detail=exc.detail
+                                ):
                                     quarantine_candidates.pop(raw.ref, None)
                             continue
                         except TransientAPIError as exc:
@@ -3906,62 +4054,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     _surface_newly_stuck(ctx, raw, _crossed)
                             continue
 
-                        # Issue athenaeum#898: the per-file LLM-call / wall-clock bound,
-                        # checked AFTER process_one returns successfully (a live
-                        # mid-compile circuit breaker would need threading a
-                        # per-file budget through every tiers.py call site — out
-                        # of scope here; this measures what the file's own
-                        # process_one invocation actually spent, the same
-                        # after-the-fact shape the run-level checks above use).
-                        # An over-bound file's result is NOT applied: the raw
-                        # file is left on disk (not deleted, not counted
-                        # created/updated) so it can be re-discovered and
-                        # accumulate a consecutive-violation count next run,
-                        # exactly like a processing failure would.
-                        if not ctx.dry_run:
-                            _file_calls_used = ctx.usage.api_calls - _file_calls_before
-                            _file_elapsed = time.monotonic() - _file_start
-                            _over_bound: str | None = None
-                            _over_detail = ""
-                            if _file_calls_used > raw_file_max_api_calls:
-                                _over_bound = "llm_calls"
-                                _over_detail = (
-                                    f"{_file_calls_used} call(s) > "
-                                    f"{raw_file_max_api_calls}-call limit"
-                                )
-                            elif _file_elapsed > raw_file_max_runtime_seconds:
-                                _over_bound = "wall_clock"
-                                _over_detail = (
-                                    f"{_file_elapsed:.1f}s > "
-                                    f"{raw_file_max_runtime_seconds}s limit"
-                                )
-                            if _over_bound is not None:
-                                log.warning(
-                                    "%s ref=%s reason=%s-over-bound: %s",
-                                    ENTITY_FILE_FAILURE_PREFIX,
-                                    raw.ref,
-                                    _over_bound,
-                                    _over_detail,
-                                )
-                                entity_heartbeat.tick(raw.ref, error=1)
-                                _crossed = _record_bound_violation(
-                                    quarantine_candidates,
-                                    raw,
-                                    bound=_over_bound,
-                                    detail=_over_detail,
-                                    threshold=quarantine_threshold,
-                                )
-                                if _crossed is not None:
-                                    _quarantine_and_surface(
-                                        ctx,
-                                        raw,
-                                        _crossed,
-                                        bound=_over_bound,
-                                        detail=_over_detail,
-                                    )
-                                    quarantine_candidates.pop(raw.ref, None)
-                                continue
-
+                        # Issue athenaeum#898: reaching here means process_one returned
+                        # normally — it already checked (and would have raised
+                        # RawFileOverBudgetError, caught above, if this file
+                        # were over its LLM-call/wall-clock bound) BEFORE
+                        # writing anything. No post-hoc bound check is needed
+                        # or possible here: the writes already happened, so
+                        # "discarding" after the fact could no longer be true
+                        # (a lesson from the pre-review shape of this code —
+                        # see RawFileOverBudgetError's docstring).
                         ctx.total_created += len(result.created)
                         ctx.total_updated += len(result.updated)
                         ctx.total_escalated += len(result.escalated)
