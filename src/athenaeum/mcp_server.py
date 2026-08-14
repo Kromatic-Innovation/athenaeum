@@ -1,13 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """MCP memory server — read/write gate for an Athenaeum knowledge base.
 
-Registers 12 tools (issue athenaeum#538 — the count was previously under-reported as 2;
-issue athenaeum#864 added ``read_person``):
+Registers 13 tools (issue athenaeum#538 — the count was previously under-reported as 2;
+issue athenaeum#864 added ``read_person``; issue athenaeum#886 added ``read_entity``):
 
   Reads:  recall, list_pending_questions, list_pending_merges,
           list_pending_decisions, list_axiom_audit, scan_retraction_cascade,
-          calibration_summary, read_person
+          calibration_summary, read_entity, read_person
   Writes: remember, resolve_question, resolve_merge, review_audit_item
+
+Excluded/withheld fields (a person's contact data, and whatever else the
+operator routes off-corpus) are read through ONE path, in two shapes of the
+same read: ``recall(with_pii=True)`` when searching, ``read_entity`` when the
+caller already holds a uid. ``read_person`` is retained as the person-shaped
+wrapper over ``read_entity`` — same behaviour, same output.
 
 Audience scoping (issue athenaeum#312, athenaeum#538). ``caller_audience`` is pinned ONCE at
 ``create_server`` time (never a per-tool argument, so a restricted agent cannot
@@ -15,12 +21,15 @@ widen its own scope) and governs the whole process:
 
   - ``recall`` and every page-content-bearing LIST/READ tool
     (``list_pending_questions`` / ``list_pending_merges`` /
-    ``list_pending_decisions`` / ``read_person``) apply the SAME fail-closed
-    read predicate — a restricted caller sees only pending items (or a
-    person page) whose source pages they are authorized to read, so no tool
-    returns page content ``recall`` would withhold. ``read_person``
-    additionally never returns a contact value for a page it withholds
-    (issue athenaeum#864).
+    ``list_pending_decisions`` / ``read_entity`` / ``read_person``) apply the
+    SAME fail-closed read predicate — a restricted caller sees only pending
+    items (or an entity page) whose source pages they are authorized to read,
+    so no tool returns page content ``recall`` would withhold. ``read_entity``
+    and ``read_person`` additionally never return an excluded value for a page
+    they withhold, and the check is the same one on both paths (issues
+    athenaeum#864, athenaeum#886). ``recall``'s ``with_pii`` join runs strictly
+    AFTER that predicate, so it can never be used to probe whether a record
+    exists behind a page the caller may not read (issue athenaeum#885).
   - The three human-decision-queue mutators (``resolve_question`` /
     ``resolve_merge`` / ``review_audit_item``) fail closed for any restricted
     (non-owner) caller — adjudicating the operator's contradiction/merge queue
@@ -270,8 +279,14 @@ def person_read(
 ) -> str:
     """Read one person's page by uid, with contact-data inclusion gated by a flag.
 
-    The MCP-facing wrapper around :func:`athenaeum.pii.read_person` — the ONE
-    sanctioned way this server reads a person's contact data (issue athenaeum#864).
+    Since issue athenaeum#886 this is a thin wrapper over :func:`entity_read` with
+    the page class fixed to ``person``. Its name, arguments, defaults and JSON
+    output are unchanged — including the ``person not found: uid=...`` wording.
+    The generic read is the one path (``docs/one-way-in-one-way-out.md`` §3);
+    this stays as the person-shaped entry point callers already hold.
+
+    Formerly the MCP-facing wrapper around :func:`athenaeum.pii.read_person`
+    (issue athenaeum#864).
     Applies the SAME fail-closed audience predicate ``recall`` applies
     (:func:`athenaeum.models.is_page_authorized`, re-checked against fresh
     on-disk frontmatter) BEFORE assembling any contact data, so a restricted
@@ -309,16 +324,83 @@ def person_read(
         ``{"ok": False, "error": ...}`` message for an unknown uid, or
         :meth:`athenaeum.pii.PersonRead.to_dict`.
     """
+    return entity_read(
+        knowledge_root,
+        uid,
+        page_class="person",
+        include_excluded=include_contact_data,
+        usage_classes=usage_classes,
+        caller_audience=caller_audience,
+        config=config,
+        not_found_label="person",
+    )
+
+
+def entity_read(
+    knowledge_root: Path,
+    uid: str,
+    *,
+    page_class: str,
+    include_excluded: bool = False,
+    usage_classes: Collection[str] | None = None,
+    caller_audience: set[str] | None = None,
+    config: dict[str, Any] | None = None,
+    not_found_label: str = "entity",
+) -> str:
+    """Read one entity's page by uid, with excluded-field inclusion gated by a flag.
+
+    The MCP-facing wrapper around :func:`athenaeum.pii.read_entity` (issue
+    athenaeum#886) and the generalization of :func:`person_read`, which is now a
+    thin wrapper over this function with the class fixed to ``person``.
+
+    It applies the SAME fail-closed audience predicate ``recall`` applies
+    (:func:`athenaeum.models.is_page_authorized`, re-checked against fresh
+    on-disk frontmatter) BEFORE assembling any excluded data — identically on
+    this generic path and on the person path, so a restricted caller can never
+    obtain via either tool what ``recall`` would withhold for the same page,
+    whichever one it calls.
+
+    Args:
+        knowledge_root: Root of the knowledge base (parent of ``wiki/``).
+        uid: The entity's durable uid.
+        page_class: The wiki page ``type:`` (``person``, ``vendor``, …). It is
+            mapped to the SURFACE class holding that entity's excluded record
+            via :func:`athenaeum.pii.surface_class_for_page_class`, so callers
+            of this interface speak in the class they can see on the page and
+            never have to know the surface name. Note this argument selects the
+            SURFACE, not the page: the page itself is resolved by uid through
+            ``EntityIndex``, whatever its ``type:``.
+        include_excluded: When ``True``, the actual excluded values are
+            included; default ``False`` withholds each behind a redaction
+            marker. Who may set it remains the deferred athenaeum#864 question.
+        usage_classes: Restrict returned values to these usage classes
+            (issue athenaeum#866). ``None`` returns every value.
+        caller_audience: Read-scope pin (issues athenaeum#312/#538). ``None`` is the
+            owner (no check). A non-None set is checked fail-closed against the
+            resolved page's fresh frontmatter.
+        config: Resolved ``athenaeum.yaml``, threaded through so the excluded
+            surface resolves per the operator's ``storage.mapping``.
+        not_found_label: The noun used in the not-found message, so
+            :func:`person_read` keeps its exact existing wording
+            (``person not found: uid=...``) while the generic tool says
+            ``entity``. Presentation only — never a behavioural difference.
+
+    Returns:
+        A JSON string: the module's fail-closed refusal shape
+        (:func:`_forbidden_result`) for an unauthorized restricted caller, a
+        ``{"ok": False, "error": ...}`` message for an unknown uid, or
+        :meth:`athenaeum.pii.EntityRead.to_dict`.
+    """
     from athenaeum import pii
 
     wiki_root = knowledge_root / "wiki"
     page_path = EntityIndex(wiki_root).get_by_uid(uid)
     if page_path is None:
         return json.dumps(
-            {"ok": False, "error": f"person not found: uid={uid!r}"}, indent=2
+            {"ok": False, "error": f"{not_found_label} not found: uid={uid!r}"}, indent=2
         )
 
-    # Fail-closed audience check BEFORE any contact data is assembled (issue
+    # Fail-closed audience check BEFORE any excluded data is assembled (issue
     # athenaeum#864's "must NEVER receive contact values" requirement) — mirrors
     # `_recall_via_backend`'s Layer C re-check against fresh on-disk
     # frontmatter rather than trusting a cached/stale value.
@@ -331,16 +413,17 @@ def person_read(
         if not is_page_authorized(meta, caller_audience):
             return json.dumps(_forbidden_result(), indent=2)
 
-    result = pii.read_person(
+    result = pii.read_entity(
         knowledge_root,
         config,
         uid,
-        include_contact=include_contact_data,
+        surface_class=pii.surface_class_for_page_class(page_class, config),
+        include_excluded=include_excluded,
         usage_classes=usage_classes,
     )
     if result is None:
         return json.dumps(
-            {"ok": False, "error": f"person not found: uid={uid!r}"}, indent=2
+            {"ok": False, "error": f"{not_found_label} not found: uid={uid!r}"}, indent=2
         )
     return json.dumps(result.to_dict(), indent=2)
 
@@ -1042,14 +1125,18 @@ def create_server(
             "memory merges (issue athenaeum#169). "
             "Use `list_pending_decisions` for the unified 'human decisions "
             "needed' queue (questions + merges in one call, issue athenaeum#401). "
-            "Use `read_person` for a one-call person read by uid — it is the "
-            "only sanctioned way to read a person's contact data; do not open "
-            "the contact surface directly (issue athenaeum#864)."
+            "Excluded/withheld fields — a person's contact data, and whatever "
+            "else the operator routes off-corpus — are read through ONE path: "
+            "`recall` with `with_pii=True` when you are searching, or "
+            "`read_entity` when you already have a uid. `read_person` is the "
+            "person-shaped wrapper over the same read, retained. Never open an "
+            "excluded surface directly (issues athenaeum#864, athenaeum#883, "
+            "athenaeum#885, athenaeum#886)."
         ),
     )
 
     @mcp.tool()
-    def recall(query: str, top_k: int = 5) -> str:
+    def recall(query: str, top_k: int = 5, with_pii: bool = False) -> str:
         """Search the knowledge wiki for pages relevant to a query.
 
         Dispatches to the configured search backend:
@@ -1065,6 +1152,20 @@ def create_server(
             query: Search query string (keywords, names, topics — or natural
                 language for semantic recall under the vector backend).
             top_k: Maximum number of results to return (default 5).
+            with_pii: Also resolve each matching entity's EXCLUDED fields —
+                contact data for a person, and whatever the operator routes
+                off-corpus for any other entity class (issue athenaeum#885). This is
+                the sanctioned way to read excluded data for a hit you found
+                here; do not open an excluded surface directly
+                (``docs/one-way-in-one-way-out.md`` §3). Default ``False``, and
+                free when unset: no excluded surface is scanned at all.
+
+                It cannot widen what you can see. Excluded values are never
+                indexed and are not searchable — the flag attaches a record to
+                a hit the corpus already produced and already authorized, after
+                every audience and policy filter. A field you do not receive
+                comes back as a redaction marker naming the field and how many
+                values exist, never as silence.
 
         Returns:
             Matching wiki pages with relevance scores and content snippets.
@@ -1078,6 +1179,7 @@ def create_server(
             extra_roots=extra_roots,
             caller_audience=caller_audience,
             config=config,
+            with_pii=with_pii,
         )
 
     @mcp.tool()
@@ -1301,8 +1403,14 @@ def create_server(
     ) -> str:
         """One-call person read by uid, with explicit contact-data inclusion (issue athenaeum#864).
 
-        The ONLY sanctioned way to read a person's contact data — do not open
-        the contact surface directly (``docs/one-way-in-one-way-out.md`` §3).
+        The person-shaped form of ``read_entity``, which it delegates to with
+        the class fixed to ``person`` (issue athenaeum#886). Its behaviour, arguments
+        and output are unchanged; ``read_entity`` and ``recall(with_pii=True)``
+        are the general path, and this is retained for callers that already
+        hold it.
+
+        Either way, do not open the contact surface directly
+        (``docs/one-way-in-one-way-out.md`` §3).
         Returns the person's wiki page; with ``include_contact_data`` left at
         its default ``False``, each withheld contact field is reported as a
         redaction marker (naming the field and that a value exists, never the
@@ -1343,6 +1451,70 @@ def create_server(
             wiki_root.parent,
             uid,
             include_contact_data=include_contact_data,
+            usage_classes=usage_classes,
+            caller_audience=caller_audience,
+            config=config,
+        )
+
+    @mcp.tool()
+    def read_entity(
+        uid: str,
+        entity_class: str,
+        include_excluded: bool = False,
+        usage_classes: list[str] | None = None,
+    ) -> str:
+        """One-call entity read by uid, for ANY entity class (issue athenaeum#886).
+
+        The generic form of ``read_person`` and the sanctioned way to read an
+        entity's EXCLUDED fields when you already have its uid — do not open an
+        excluded surface directly (``docs/one-way-in-one-way-out.md`` §3). Use
+        ``recall(with_pii=True)`` instead when you are searching rather than
+        resolving a uid you already hold; both reach the same read.
+
+        Returns the entity's wiki page; with ``include_excluded`` left at its
+        default ``False``, each withheld field is reported as a redaction
+        marker (naming the field and that a value exists, never the value)
+        rather than silently omitted — so an entity with a withheld field and
+        an entity with no such field at all stay distinguishable. With
+        ``include_excluded=True``, the actual values are included, read from
+        whichever surface the class resolves to; this tool never constructs
+        that path itself.
+
+        Same fail-closed audience scoping as ``recall`` (issues
+        athenaeum#312/#538): a restricted caller never receives page content, or
+        any excluded value, for a page it is not authorized to read.
+
+        Every returned value carries its usage classification (issue
+        athenaeum#866) in the result's ``classifications``, co-indexed with the
+        values: ``observed`` (seen in prior communication), ``provider``
+        (supplied by a data vendor) or ``unclassified`` (obtained before the
+        marker existed — provenance unknown). Storing and syncing a contact
+        value is permitted for every class; using one to INITIATE contact is
+        permitted only for ``observed``. ``unclassified`` is never usable.
+
+        Args:
+            uid: The entity's durable uid.
+            entity_class: The page's ``type:`` — ``person``, ``vendor``, … It
+                selects which excluded SURFACE is read (a ``person`` page's
+                record lives on the ``pii`` surface); the page itself is
+                resolved by uid whatever its type.
+            include_excluded: Set ``True`` to receive the actual values
+                instead of redaction markers. Default ``False``.
+            usage_classes: Return only values of these usage classes, e.g.
+                ``["observed"]`` for a caller that must not receive a
+                provider-sourced address by accident (issue athenaeum#866).
+                Default ``None`` — every value, each carrying its class.
+
+        Returns:
+            A JSON string (``pii.EntityRead.to_dict()`` shape) — or a
+            fail-closed refusal / not-found message, each JSON-encoded the
+            same way.
+        """
+        return entity_read(
+            wiki_root.parent,
+            uid,
+            page_class=entity_class,
+            include_excluded=include_excluded,
             usage_classes=usage_classes,
             caller_audience=caller_audience,
             config=config,

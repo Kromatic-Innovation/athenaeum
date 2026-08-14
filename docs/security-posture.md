@@ -29,9 +29,15 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 > recall/read interface, with no caller opening a store directly — is stated
 > canonically in [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md).
 > This section (and §2.1) documents how far that egress half is currently
-> *enforced* over the MCP tool surface. Surfaces it does not cover — notably the
-> off-corpus contact-data surface — are still governed by the invariant even
-> though nothing today refuses a caller that goes around it.
+> *enforced* over the MCP tool surface. Surfaces it does not cover are still
+> governed by the invariant even though nothing today refuses a caller that
+> goes around it. Since athenaeum#883/#885/#886 the off-corpus excluded surfaces
+> (the contact-data surface, and whatever else an operator routes off-corpus)
+> are reachable *through* the interface for every entity class — via
+> `recall(with_pii=True)` or the generic `read_entity` — so going around them
+> is no longer the only way to answer a question. That closes the gap that
+> produced the direct read this invariant was written after; it does not add an
+> access control, which remains the deferred athenaeum#864 question.
 
 | Surface | Present? | Notes |
 |---|---|---|
@@ -44,7 +50,7 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 
 ### 2.1 MCP tool audience scoping (athenaeum#312 → athenaeum#538)
 
-> Scope note: this section decides *who* may read what **across the 11 MCP
+> Scope note: this section decides *who* may read what **across the 13 MCP
 > tools**. It does not, and is not meant to, establish that the MCP surface is
 > the only way to reach a store — that is the egress half of the invariant in
 > [`docs/one-way-in-one-way-out.md`](one-way-in-one-way-out.md), which this
@@ -53,13 +59,13 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 `caller_audience` (§2, row "Read-scoping of recall") is pinned **once** by the
 operator at `athenaeum serve` time and governs the **whole** MCP process, not
 just `recall`. Issue athenaeum#538 closed the gap where `recall` was the only one of the
-11 registered tools that applied it — a restricted caller could read the same
+then-11 registered tools that applied it — a restricted caller could read the same
 bytes from a different tool, or mutate the operator's decision queue unchecked.
 The decided model (this is the "write it down" outcome athenaeum#538 asked for):
 
 | Tool group | Tools | Restricted (`caller_audience != None`) behavior |
 |---|---|---|
-| Scoped reads | `recall`, `list_pending_questions`, `list_pending_merges`, `list_pending_decisions`, `read_person` | Fail-closed by the SAME predicate `recall` uses (`is_page_authorized`): an item is withheld unless the caller is authorized for **every** source page behind it. A restricted caller can never obtain page content `recall` would refuse. `read_person` additionally never returns a contact value for a page it withholds — the authorization check runs before contact data is assembled (issue athenaeum#864). |
+| Scoped reads | `recall`, `list_pending_questions`, `list_pending_merges`, `list_pending_decisions`, `read_entity`, `read_person` | Fail-closed by the SAME predicate `recall` uses (`is_page_authorized`): an item is withheld unless the caller is authorized for **every** source page behind it. A restricted caller can never obtain page content `recall` would refuse. `read_entity` and `read_person` additionally never return an excluded value for a page they withhold — the authorization check runs before any excluded data is assembled, and it is the SAME check on both paths, so the generic tool cannot be used to obtain what the person-shaped one refuses (issues athenaeum#864, athenaeum#886). `recall`'s `with_pii` join likewise runs strictly AFTER that predicate, so it can never be used to probe whether a record exists behind a page the caller may not read (issue athenaeum#885). |
 | Owner-only writes | `resolve_question`, `resolve_merge`, `review_audit_item` | **Fail closed** — adjudicating the operator's contradiction/merge/calibration queue is an owner action. `list_pending_decisions` likewise withholds the `retraction`/`audit` calibration items (no readable source-page path to authorize against). |
 | Intentionally open | `remember` | **Not** audience-scoped. Intake is write-only and compiles through the read-time screening path (athenaeum#320); a restricted secondary agent contributing raw memories is the intended use. It cannot read anything back it isn't authorized for. |
 | Metadata reads | `list_axiom_audit`, `scan_retraction_cascade`, `calibration_summary` | Not page-content bearing (governance history, provenance flags, tier counts). Left unscoped; revisit if any starts echoing page bodies. |
@@ -136,10 +142,18 @@ Two rules make this hold up:
 **The marker is the authority, and it lives in the store** (`athenaeum.pii`),
 not in each consumer: there will be more than one consumer, and a rule
 reimplemented per consumer is a rule that eventually is not implemented. The
-read interface (`pii.read_person`, the `read_person` MCP tool, `athenaeum
-person`) returns every value with its classification attached, and accepts a
-`usage_classes` filter so a caller that must not see provider-sourced
-addresses cannot receive one by accident. `pii.is_outreach_eligible` is the
+read interface returns every value with its classification attached, and
+accepts a `usage_classes` filter so a caller that must not see
+provider-sourced addresses cannot receive one by accident. **Every surface
+carries that filter**, which is what keeps the rule from being escapable by
+choosing a different entry point: `pii.read_entity` / `read_entities` and
+`pii.read_person` / `read_people`; the `read_entity` and `read_person` MCP
+tools (both take `usage_classes`); `recall`'s `with_pii` join (which threads
+`usage_classes` to the same assembly); and, on the shell, `athenaeum query
+entity --usage-class`, `athenaeum query person --usage-class` and `athenaeum
+recall --with-pii --usage-class`. A generic tool that had dropped the filter
+would not have been a smaller version of the same tool — it would have been a
+way around this section. `pii.is_outreach_eligible` is the
 single predicate a consumer calls. A consumer-side check is still wanted as
 defense in depth — it is never the mechanism.
 
