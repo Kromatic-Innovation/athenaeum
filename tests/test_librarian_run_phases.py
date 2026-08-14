@@ -148,6 +148,9 @@ class TestRunContext:
             "failed_files": ["c.md"],
             # Issue athenaeum#663: stuck files exported as machine-detectable run state.
             "stuck_files": [{"ref": "d.md", "failures": 3, "action": "update:X", "error": "E"}],
+            # Issue athenaeum#898: quarantined files exported as machine-detectable
+            # run state, mirroring stuck_files above (empty here — none set).
+            "quarantined_files": [],
             # Issue athenaeum#669: the entity-share yield (athenaeum#440) as
             # machine-detectable state.
             "entity_budget_tripped": True,

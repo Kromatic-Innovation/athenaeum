@@ -121,6 +121,8 @@ from athenaeum.config import (
     resolve_push_after_run,
     resolve_push_branch,
     resolve_push_remote,
+    resolve_raw_file_max_api_calls,
+    resolve_raw_file_max_runtime_seconds,
     resolve_retire,
 )
 from athenaeum.config import resolve_cache_dir as _resolve_cache_dir_config
@@ -155,6 +157,8 @@ from athenaeum.models import (
     EscalationItem,
     ProcessingResult,
     RawFile,
+    RawFileOverBudgetError,
+    RawFileTooLargeError,
     TokenUsage,
     WikiEntity,
     configure_model_rates,
@@ -179,6 +183,7 @@ from athenaeum.provider import (
     preflight_provider,
     resolve_provider,
 )
+from athenaeum.quarantine import quarantine_file as _quarantine_file
 from athenaeum.registry import collect_handles
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
@@ -188,7 +193,7 @@ from athenaeum.tiers import (
     schema_fragment_state,
     tier1_programmatic_match,
     tier2_classify,
-    tier3_write,
+    tier3_derive_actions,
     tier4_escalate,
 )
 
@@ -370,6 +375,35 @@ STUCK_FILE_PREFIX = "librarian-stuck-file"
 # captured at any level the operator's log sweep captured. This line carries
 # both the file path and the exception type/message at a WARNING level.
 ENTITY_FILE_FAILURE_PREFIX = "librarian-entity-file-failure"
+
+# Issue athenaeum#898: a persistent, cross-run ledger of raw files whose PER-FILE
+# byte/LLM-call/wall-clock BOUND has been exceeded on the same content N
+# consecutive runs. Mirrors STUCK_MANIFEST_NAME's shape exactly (ref +
+# content-hash keying, consecutive count, fail-open on corrupt/missing) but
+# is a DELIBERATELY SEPARATE ledger from it: a bound violation is a measured
+# resource fact (bytes read, calls spent, wall-clock spent), not a
+# processing EXCEPTION, and its disposition on crossing the threshold is
+# QUARANTINE (the file is physically moved out of the discovery set — see
+# :mod:`athenaeum.quarantine`) rather than the athenaeum#663 stuck-file skip-in-place.
+# Written under wiki_root beside the deferred/stuck manifests; the `_` prefix
+# + `.json` suffix keep it out of `rebuild_index` exactly like
+# STUCK_MANIFEST_NAME. Removed when empty.
+QUARANTINE_CANDIDATE_MANIFEST_NAME = "_quarantine_candidates.json"
+
+# Consecutive-bound-violation count at which a raw file is quarantined.
+# Resolved via :func:`librarian_quarantine_threshold` (env > yaml > this
+# default). Deliberately lower than DEFAULT_STUCK_FILE_THRESHOLD (issue
+# athenaeum#898 AC 3 calls for a default of 2): a bound violation is a resource
+# fact the run already measured directly, not an inferred-from-an-exception
+# failure, so it warrants a shorter leash before the file is pulled from the
+# discovery set entirely.
+DEFAULT_QUARANTINE_THRESHOLD = 2
+
+# Stable, machine-greppable prefix for the WARNING emitted when a raw file is
+# quarantined (crossed DEFAULT_QUARANTINE_THRESHOLD consecutive bound
+# violations). Mirrors STUCK_FILE_PREFIX's role for athenaeum#663 — a log-scraper /
+# watchdog can grep this without parsing prose.
+QUARANTINE_FILE_PREFIX = "librarian-quarantine-file"
 
 # Fallback valid values if schema files are missing
 FALLBACK_TYPES = [
@@ -964,6 +998,11 @@ def process_one(
     usage: TokenUsage | None = None,
     config: dict[str, object] | None = None,
     excluded_index: ExcludedRecordIndex | None = None,
+    *,
+    max_api_calls_for_file: int | None = None,
+    max_runtime_for_file: float | None = None,
+    calls_before_file: int = 0,
+    started_at_file: float | None = None,
 ) -> ProcessingResult:
     """Process a single raw file through all tiers.
 
@@ -978,6 +1017,20 @@ def process_one(
     for the whole ``ctx.raw_files`` loop ABOVE this function, so the
     O(corpus) contacts scan is paid once per run rather than once per
     conforming bounce note. ``None`` keeps the unindexed per-call behaviour.
+
+    ``max_api_calls_for_file`` / ``max_runtime_for_file`` / ``calls_before_file`` /
+    ``started_at_file`` (issue athenaeum#898) are this file's per-file LLM-call and
+    wall-clock bound, checked AFTER Tier 3's LLM-call phase
+    (:func:`tier3_derive_actions`) completes but BEFORE any of this file's
+    writes start — see :class:`~athenaeum.models.RawFileOverBudgetError`'s
+    docstring for why the check has to sit exactly there.
+    ``max_api_calls_for_file=None`` / ``max_runtime_for_file=None`` (the
+    default, and what every caller other than the entity-loop passes)
+    disables the respective check — unbounded, matching pre-athenaeum#898
+    behaviour. ``calls_before_file`` is ``usage.api_calls`` and
+    ``started_at_file`` is ``time.monotonic()``, both snapshotted by the
+    caller at the moment THIS file started, so the deltas measured here are
+    this file's own spend, not the phase's running total.
     """
     result = ProcessingResult(raw_file=raw)
 
@@ -1169,9 +1222,9 @@ def process_one(
         log.info("  No actions needed for %s", raw.ref)
         return result
 
-    # --- Tier 3: Content writing ---
+    # --- Tier 3: LLM-call phase (issue athenaeum#898: writes NOTHING yet) ---
     assert client is not None, "client required for non-dry-run"
-    new_entities, updated_uids, escalations = tier3_write(
+    new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
         raw,
         actions,
         index,
@@ -1180,6 +1233,45 @@ def process_one(
         usage=usage,
         config=config,
     )
+
+    # Issue athenaeum#898: the per-file LLM-call / wall-clock bound, checked HERE
+    # — after every LLM call this file will make (Tier 2 classify + Tier 3's
+    # create/merge calls above), before ANY of this file's writes start.
+    # ``pending_updates`` has not been flushed and ``new_entities`` has not
+    # been written, so raising here means the file's result really is
+    # discarded — no wiki page created, no existing page updated, no
+    # escalation written, and (since nothing changed) the raw file is left
+    # on disk for the entity loop's over-bound handling to leave alone,
+    # exactly like a processing failure. See RawFileOverBudgetError's
+    # docstring for why a POST-`process_one` check (the pre-review shape)
+    # could not make this guarantee: by the time control returned to the
+    # caller, tier3_write's own update flush and this function's create-write
+    # loop below had both already run.
+    if max_api_calls_for_file is not None and usage is not None:
+        _calls_used_for_file = usage.api_calls - calls_before_file
+        if _calls_used_for_file > max_api_calls_for_file:
+            raise RawFileOverBudgetError(
+                raw.ref,
+                bound="llm_calls",
+                detail=(
+                    f"{_calls_used_for_file} call(s) > "
+                    f"{max_api_calls_for_file}-call limit"
+                ),
+            )
+    if max_runtime_for_file is not None and started_at_file is not None:
+        _elapsed_for_file = time.monotonic() - started_at_file
+        if _elapsed_for_file > max_runtime_for_file:
+            raise RawFileOverBudgetError(
+                raw.ref,
+                bound="wall_clock",
+                detail=f"{_elapsed_for_file:.1f}s > {max_runtime_for_file}s limit",
+            )
+
+    # All LLM calls succeeded AND this file is within its per-file budget —
+    # apply the Tier 3 update writes atomically (mirrors tier3_write's own
+    # flush step, which this function deliberately bypasses above).
+    for _update_path, _update_content in pending_updates:
+        atomic_write_text(_update_path, _update_content)
 
     for entity in new_entities:
         page_path = wiki_root / entity.filename
@@ -1966,6 +2058,40 @@ def librarian_stuck_file_threshold(config: dict[str, object] | None = None) -> i
     return DEFAULT_STUCK_FILE_THRESHOLD
 
 
+def librarian_quarantine_threshold(config: dict[str, object] | None = None) -> int:
+    """Resolve the consecutive-bound-violation threshold before quarantine (athenaeum#898).
+
+    Mirrors :func:`librarian_stuck_file_threshold` (athenaeum#663) exactly: the
+    ``ATHENAEUM_QUARANTINE_THRESHOLD`` env override wins over the yaml
+    ``librarian.quarantine_threshold`` key so a cron deployment can tune it on
+    a single run. A file that has exceeded ANY of its per-file bounds (byte
+    size, LLM-call count, wall-clock — see :mod:`athenaeum.quarantine`) this
+    many CONSECUTIVE runs on the same content is quarantined — physically
+    moved out of the discovery set — rather than retried again. Must be
+    ``>= 1`` (a threshold below 1 would quarantine a file on its very first
+    over-bound run, defeating the "N runs running" contract, issue athenaeum#898 AC 3);
+    non-numeric, non-positive, or bool values fall back to
+    :data:`DEFAULT_QUARANTINE_THRESHOLD`.
+    """
+    env = os.environ.get("ATHENAEUM_QUARANTINE_THRESHOLD")
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 1:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict):
+            raw = cfg.get("quarantine_threshold")
+            # bool is an int subclass — `quarantine_threshold: yes` in yaml must
+            # not silently become a threshold of 1.
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_QUARANTINE_THRESHOLD
+
+
 def _stuck_content_hash(raw: Any) -> str:
     """Stable short hash of a raw file's content (athenaeum#663 stuck-file ledger key).
 
@@ -2083,6 +2209,206 @@ def _surface_newly_stuck(ctx: "RunContext", raw: Any, entry: dict[str, Any]) -> 
         entry.get("last_action") or "unknown",
         entry.get("last_error") or "unknown",
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#898: per-file bound-violation ledger + quarantine. Mirrors the
+# athenaeum#663 stuck-file ledger's shape (content-hash-keyed, consecutive count,
+# fail-open, escalate-once) but is tracked in its own manifest — see
+# QUARANTINE_CANDIDATE_MANIFEST_NAME's module-level comment for why.
+# ---------------------------------------------------------------------------
+
+
+def _quarantine_content_hash(raw: Any, *, bound: str) -> str:
+    """Stable short "did this file change" fingerprint (athenaeum#898 quarantine-ledger key).
+
+    ``bound`` selects the fingerprint strategy — the two bound categories
+    have opposite constraints:
+
+    - ``"bytes"``: deliberately does NOT read ``raw.content`` the way
+      :func:`_stuck_content_hash` does. A file large enough to cross the
+      byte bound is EXACTLY the file this fingerprint must never read in
+      full — doing so would defeat the whole point of the bound (and,
+      worse, every oversized file's content read would raise
+      :class:`~athenaeum.models.RawFileTooLargeError` and fall back to
+      hashing the empty string, collapsing every distinct oversized file
+      onto the SAME ledger key). Fingerprints ``(size, mtime_ns)`` from a
+      single ``stat()`` call instead: cheap, and still changes when the
+      file is edited, even to a still-oversized replacement.
+    - ``"llm_calls"`` / ``"wall_clock"``: uses the FULL content hash
+      (mirrors :func:`_stuck_content_hash` exactly) — a file that violates
+      either of these bounds was, by construction, already read in full by
+      ``process_one`` to spend those calls / that wall-clock, so hashing it
+      here costs nothing additional. A stat-based fingerprint would be
+      actively WRONG for these two: anything that re-provisions the raw
+      checkout without preserving mtimes (a fresh clone, ``rsync`` without
+      ``-t``, a tar extract, a backup restore) changes ``(size, mtime_ns)``
+      for byte-IDENTICAL content and silently resets the violation count —
+      a genuinely pathological file would then never cross the consecutive
+      threshold in exactly the cron-style redeploy this repo targets.
+
+    Falls back to hashing the empty string on any read/stat failure (e.g.
+    the file vanished between discovery and this call) — fail-open, never
+    fail-quarantine.
+    """
+    if bound == "bytes":
+        try:
+            st = raw.path.stat()
+            payload = f"{st.st_size}:{st.st_mtime_ns}"
+        except OSError:
+            payload = ""
+    else:
+        try:
+            payload = raw.content
+        except Exception:  # noqa: BLE001 — an unreadable raw resets, not compounds
+            payload = ""
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_quarantine_candidates(wiki_root: Path) -> dict[str, dict[str, Any]]:
+    """Load the persistent bound-violation ledger (athenaeum#898). Missing/corrupt → empty.
+
+    Mirrors :func:`_load_stuck_ledger`: a corrupt ledger must never wedge a
+    run — a parse error is treated as "no violations known", so at worst a
+    genuinely-over-bound file gets one more run before it quarantines."""
+    path = wiki_root / QUARANTINE_CANDIDATE_MANIFEST_NAME
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, dict):
+        return {}
+    return {
+        ref: entry
+        for ref, entry in files.items()
+        if isinstance(entry, dict) and isinstance(entry.get("violations"), int)
+    }
+
+
+def _write_quarantine_candidates(
+    wiki_root: Path, ledger: dict[str, dict[str, Any]]
+) -> None:
+    """Persist the bound-violation ledger (athenaeum#898), or remove it when empty.
+
+    Mirrors :func:`_write_stuck_ledger`: written beside the deferred/stuck
+    manifests under wiki_root so it rides the run's git snapshot. An empty
+    ledger removes the file so a recovered corpus leaves no stale record."""
+    path = wiki_root / QUARANTINE_CANDIDATE_MANIFEST_NAME
+    if not ledger:
+        if path.exists():
+            path.unlink()
+        return
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = {"updated": now, "files": ledger}
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _record_bound_violation(
+    ledger: dict[str, dict[str, Any]],
+    raw: Any,
+    *,
+    bound: str,
+    detail: str,
+    threshold: int,
+) -> dict[str, Any] | None:
+    """Increment a raw file's consecutive-bound-violation count (athenaeum#898).
+
+    Mirrors :func:`_record_stuck_failure`'s contract exactly: keyed by
+    ``raw.ref`` + content hash (a content change resets the count), returns
+    the entry ONLY on the violation that CROSSES the threshold for the first
+    time (so the caller quarantines exactly once), else ``None``. Unlike the
+    stuck-file ledger's ``escalated`` flag — which keeps a stuck entry around
+    so a later run recognizes "already over, skip in place" — this ledger's
+    caller REMOVES the entry immediately on crossing (the file is physically
+    quarantined, not left in place), so ``escalated`` here is a defensive
+    idempotency guard rather than load-bearing steady-state, kept for
+    contract parity with the sibling ledger.
+    """
+    key = raw.ref
+    content_hash = _quarantine_content_hash(raw, bound=bound)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry = ledger.get(key)
+    if not isinstance(entry, dict) or entry.get("hash") != content_hash:
+        # New file, or the content changed since the last violation — fresh count.
+        entry = {"hash": content_hash, "violations": 0, "first_violated": now, "escalated": False}
+    entry["violations"] = int(entry.get("violations", 0)) + 1
+    entry["last_violated"] = now
+    entry["last_bound"] = bound
+    entry["last_detail"] = detail
+    ledger[key] = entry
+    if entry["violations"] >= threshold and not entry.get("escalated"):
+        entry["escalated"] = True
+        return entry
+    return None
+
+
+def _quarantine_and_surface(
+    ctx: "RunContext", raw: Any, entry: dict[str, Any], *, bound: str, detail: str
+) -> bool:
+    """Physically quarantine *raw* after it crossed the violation threshold (athenaeum#898).
+
+    Calls :func:`athenaeum.quarantine.quarantine_file` (writes the
+    audit-ledger record, then moves the file out of the discovery set — see
+    that function's docstring for why the ledger write goes first — and is
+    the source :func:`athenaeum.decisions.quarantine_to_decision` renders —
+    AC 4/5), appends a machine-detectable record to ``ctx.quarantined_files``
+    (exported to ``out_run_stats["quarantined_files"]``, mirroring
+    ``ctx.stuck_files``), and emits the greppable :data:`QUARANTINE_FILE_PREFIX`
+    WARNING naming the file and the bound it exceeded — the athenaeum#663
+    ``_surface_newly_stuck`` shape, one step heavier (a physical move + a
+    pending decision instead of a skip-in-place log line).
+
+    Code-review finding (athenaeum#898): a bare, unguarded call here meant a
+    disk-full/permission error — or the SIGTERM this run's per-file loop
+    installs a handler for — landing mid-quarantine either killed the whole
+    nightly run (contradicting this codebase's stated fail-open philosophy)
+    or left ``entry`` popped from the caller's candidate ledger with no
+    audit trail. This now catches any exception from the quarantine attempt,
+    logs it loudly, and resets ``entry["escalated"] = False`` **in place**
+    (``entry`` is the SAME dict object the caller's ledger holds, so this
+    mutation is visible to it) so a FUTURE run's :func:`_record_bound_violation`
+    call is eligible to cross the threshold and retry, rather than the
+    consecutive count climbing forever with the crossing permanently
+    consumed. Returns ``True`` on success (the caller pops the now-terminal
+    candidate entry) or ``False`` on failure (the caller leaves it in place,
+    retry-eligible).
+    """
+    try:
+        record = _quarantine_file(
+            raw,
+            wiki_root=ctx.wiki_root,
+            raw_root=ctx.raw_root,
+            bound=bound,
+            detail=detail,
+            violations=int(entry.get("violations", 0)),
+        )
+    except Exception:
+        log.exception(
+            "athenaeum#898: failed to quarantine %s (bound=%s, violations=%d) — "
+            "leaving it a pending candidate so the next run retries rather "
+            "than losing track of it silently",
+            raw.ref,
+            bound,
+            int(entry.get("violations", 0)),
+        )
+        entry["escalated"] = False
+        return False
+
+    ctx.quarantined_files.append(record)
+    log.warning(
+        "%s: %s exceeded its %s bound on %d consecutive run(s) (%s) — QUARANTINED; "
+        "moved out of the discovery set and a pending decision was created to "
+        "review it (issue athenaeum#898)",
+        QUARANTINE_FILE_PREFIX,
+        raw.ref,
+        bound,
+        int(entry.get("violations", 0)),
+        detail,
+    )
+    return True
 
 
 def _clear_stale_deferred_manifest(wiki_root: Path) -> None:
@@ -2391,6 +2717,13 @@ class RunContext:
     # ``out_run_stats["stuck_files"]`` and counted in the entity run-profile so
     # a permanently-failing file is machine-detectable, not merely logged.
     stuck_files: list[dict[str, Any]] = field(default_factory=list)
+    # Issue athenaeum#898: raw files QUARANTINED this run — moved out of the
+    # discovery set after crossing the consecutive bound-violation threshold.
+    # Each entry is the :func:`athenaeum.quarantine.quarantine_file` ledger
+    # record. Exported to ``out_run_stats["quarantined_files"]``, mirroring
+    # ``stuck_files`` — a materially heavier disposition than "stuck", so it
+    # is a separate list, not folded into it.
+    quarantined_files: list[dict[str, Any]] = field(default_factory=list)
 
     # --- auto-memory / retire handoff -------------------------------------
     merged_entries: list = field(default_factory=list)
@@ -2425,6 +2758,9 @@ class RunContext:
             # so a consumer can distinguish a permanent no-progress loop from a
             # one-off failure without parsing log text.
             self.out_run_stats["stuck_files"] = list(self.stuck_files)
+            # Issue athenaeum#898: quarantined files (moved out of the discovery set
+            # this run) as machine-detectable state, mirroring stuck_files above.
+            self.out_run_stats["quarantined_files"] = list(self.quarantined_files)
             # Issue athenaeum#669: surface the entity-phase share yield (athenaeum#440) as
             # machine-detectable run state. cron-fleet#94 detects a capped run by
             # DURATION (`LIBRARIAN_CAP_DEADLINE`), which the athenaeum#440 yield made inert
@@ -3387,6 +3723,18 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # run state, rather than retried identically forever.
                     stuck_ledger = _load_stuck_ledger(ctx.wiki_root)
                     stuck_threshold = librarian_stuck_file_threshold(ctx.config)
+                    # Issue athenaeum#898: the persistent bound-violation ledger (mirrors
+                    # the stuck-file ledger's shape, tracked separately — see
+                    # QUARANTINE_CANDIDATE_MANIFEST_NAME's module comment). A raw
+                    # file that exceeds its per-file byte/LLM-call/wall-clock bound
+                    # on ``quarantine_threshold`` consecutive runs is quarantined
+                    # below: physically moved out of the discovery set.
+                    quarantine_candidates = _load_quarantine_candidates(ctx.wiki_root)
+                    quarantine_threshold = librarian_quarantine_threshold(ctx.config)
+                    raw_file_max_api_calls = resolve_raw_file_max_api_calls(ctx.config)
+                    raw_file_max_runtime_seconds = resolve_raw_file_max_runtime_seconds(
+                        ctx.config
+                    )
                     # Issue athenaeum#800: the entity phase was the one dark zone left
                     # with ZERO heartbeat coverage — a nightly run that spent 85% of
                     # its window here (2,918s of 3,446s, run 631aaade) emitted no
@@ -3538,6 +3886,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 break
 
                         log.info("Processing: %s", raw.ref)
+                        # Issue athenaeum#898: snapshot THIS file's starting cost and pass
+                        # it (plus the resolved bounds) straight into process_one,
+                        # which checks them itself — AFTER this file's LLM calls,
+                        # BEFORE any of this file's writes (see
+                        # RawFileOverBudgetError's docstring). dry_run never
+                        # reaches that check (process_one returns earlier), so
+                        # passing real bound values here is harmless either way.
+                        _file_calls_before = ctx.usage.api_calls
+                        _file_start = time.monotonic()
                         try:
                             result = process_one(
                                 raw,
@@ -3551,7 +3908,72 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 usage=ctx.usage,
                                 config=ctx.config,
                                 excluded_index=excluded_index,
+                                max_api_calls_for_file=raw_file_max_api_calls,
+                                max_runtime_for_file=raw_file_max_runtime_seconds,
+                                calls_before_file=_file_calls_before,
+                                started_at_file=_file_start,
                             )
+                        except RawFileTooLargeError as exc:
+                            # Issue athenaeum#898: the per-file BYTE bound (checked by
+                            # RawFile.content, raised before any bytes are read or
+                            # any LLM call is spent). A distinct category from a
+                            # processing FAILURE — this is a measured resource
+                            # fact, not an exception from tier1-3 — so it is
+                            # counted against the quarantine ledger, never the
+                            # athenaeum#663 stuck-file ledger.
+                            log.warning(
+                                "%s ref=%s reason=bytes-over-bound: %s",
+                                ENTITY_FILE_FAILURE_PREFIX,
+                                raw.ref,
+                                exc,
+                            )
+                            entity_heartbeat.tick(raw.ref, error=1)
+                            if not ctx.dry_run:
+                                _crossed = _record_bound_violation(
+                                    quarantine_candidates,
+                                    raw,
+                                    bound="bytes",
+                                    detail=str(exc),
+                                    threshold=quarantine_threshold,
+                                )
+                                if _crossed is not None and _quarantine_and_surface(
+                                    ctx, raw, _crossed, bound="bytes", detail=str(exc)
+                                ):
+                                    quarantine_candidates.pop(raw.ref, None)
+                            continue
+                        except RawFileOverBudgetError as exc:
+                            # Issue athenaeum#898: the per-file LLM-call / wall-clock
+                            # bound, raised by process_one itself AFTER this
+                            # file's LLM calls but BEFORE any of its writes
+                            # (see RawFileOverBudgetError's docstring) — so
+                            # unlike a bare post-hoc check, no wiki page was
+                            # created or updated and no escalation was
+                            # written for this file this run. The raw file is
+                            # untouched on disk (never unlinked on this
+                            # path), so it is re-discovered next run and can
+                            # accumulate a consecutive-violation count exactly
+                            # like a processing failure would.
+                            log.warning(
+                                "%s ref=%s reason=%s-over-bound: %s",
+                                ENTITY_FILE_FAILURE_PREFIX,
+                                raw.ref,
+                                exc.bound,
+                                exc.detail,
+                            )
+                            entity_heartbeat.tick(raw.ref, error=1)
+                            if not ctx.dry_run:
+                                _crossed = _record_bound_violation(
+                                    quarantine_candidates,
+                                    raw,
+                                    bound=exc.bound,
+                                    detail=exc.detail,
+                                    threshold=quarantine_threshold,
+                                )
+                                if _crossed is not None and _quarantine_and_surface(
+                                    ctx, raw, _crossed, bound=exc.bound, detail=exc.detail
+                                ):
+                                    quarantine_candidates.pop(raw.ref, None)
+                            continue
                         except TransientAPIError as exc:
                             # Issue athenaeum#193: the Anthropic API was overloaded
                             # (429/529) and the bounded retry was exhausted.
@@ -3632,6 +4054,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     _surface_newly_stuck(ctx, raw, _crossed)
                             continue
 
+                        # Issue athenaeum#898: reaching here means process_one returned
+                        # normally — it already checked (and would have raised
+                        # RawFileOverBudgetError, caught above, if this file
+                        # were over its LLM-call/wall-clock bound) BEFORE
+                        # writing anything. No post-hoc bound check is needed
+                        # or possible here: the writes already happened, so
+                        # "discarding" after the fact could no longer be true
+                        # (a lesson from the pre-review shape of this code —
+                        # see RawFileOverBudgetError's docstring).
                         ctx.total_created += len(result.created)
                         ctx.total_updated += len(result.updated)
                         ctx.total_escalated += len(result.escalated)
@@ -3661,12 +4092,17 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             # failure history so a future failure starts a fresh
                             # consecutive count rather than inheriting a stale one.
                             stuck_ledger.pop(raw.ref, None)
+                            # Issue athenaeum#898: same reset for the bound-violation
+                            # ledger — a run that completed within bounds clears
+                            # any prior violation streak.
+                            quarantine_candidates.pop(raw.ref, None)
 
                     entity_heartbeat.done()  # issue athenaeum#800
                     # Issue athenaeum#663: persist the updated stuck-file ledger (or remove
                     # it when empty). Durable cross-run state, committed with the
                     # run's git snapshot exactly like the deferred manifest.
                     if not ctx.dry_run:
+                        _write_quarantine_candidates(ctx.wiki_root, quarantine_candidates)
                         _write_stuck_ledger(ctx.wiki_root, stuck_ledger)
 
                 # Issue athenaeum#220: a budget-tripped run must be visibly DEGRADED,
@@ -3785,6 +4221,14 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # rendered when non-zero, so a clean run's summary line is
                     # unchanged, but a permanent no-progress loop shows "stuck=N".
                     **({"stuck": len(ctx.stuck_files)} if ctx.stuck_files else {}),
+                    # athenaeum#898: files QUARANTINED this run (moved out of the
+                    # discovery set after crossing the consecutive bound-violation
+                    # threshold). Only rendered when non-zero, mirroring "stuck=N".
+                    **(
+                        {"quarantined": len(ctx.quarantined_files)}
+                        if ctx.quarantined_files
+                        else {}
+                    ),
                     # athenaeum#669: the entity phase yielded its window share (athenaeum#440).
                     # Rendered only when it happened, so a clean run's summary
                     # line is unchanged, but a consumer sees the yield alongside

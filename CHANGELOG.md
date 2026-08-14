@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-file size/cost bound + quarantine for poison raw-intake files (athenaeum#898).**
+  A single pathological raw file could silently own the entire nightly entity
+  budget: `RawFile.content` read a whole file with no size guard (athenaeum#843
+  documented this and scoped the guard out), and a file that exhausted the
+  phase budget was deferred and retried on the next run indefinitely (athenaeum#800
+  documented failed files retrying nightly with no escape). Measured
+  consequence: one 9.7MB dry-run artifact accounted for 93% of timed
+  entity-phase LLM calls for roughly three months before it was retired.
+  Three per-file bounds are now enforced: a **byte bound** at `RawFile.content`
+  itself (`RawFileTooLargeError`, checked via `stat()` so an oversized file
+  costs one syscall to reject, never a full read — `librarian.raw_file_max_bytes`,
+  default 5 MiB), and a **LLM-call bound** plus a **wall-clock bound**, both
+  checked by the entity phase runner after each file's `process_one` call
+  completes (`librarian.raw_file_max_api_calls` default 8,
+  `librarian.raw_file_max_runtime_seconds` default 120). A file that exceeds
+  ANY bound on `librarian.quarantine_threshold` (default 2) consecutive runs
+  on the same content is **quarantined**: physically moved from
+  `raw/<source>/` to `wiki/_quarantine/<source>/` (so it drops out of
+  `discover_raw_files`'s discovery set with no change to that function),
+  recorded in a new append-only audit ledger (`wiki/_quarantine.jsonl`, new
+  `athenaeum.quarantine` module — mirrors the `athenaeum.calibration` /
+  `athenaeum.retraction_cascade` JSONL-ledger house style), and surfaced as a
+  `type: "quarantine"` item in `athenaeum decisions` / `list_pending_decisions`
+  via the new `quarantine_to_decision` mapper. Quarantine is reversible ONLY
+  by an operator decision (`athenaeum.quarantine.release_quarantine`) — there
+  is no automatic un-quarantine path. The consecutive-violation counting
+  mirrors the athenaeum#663 stuck-file ledger's shape exactly (content-hash-keyed,
+  so an edited file starts a fresh count; corrupt/missing ledger fails open)
+  but is tracked in its own manifest (`wiki/_quarantine_candidates.json`) —
+  a bound violation is a measured resource fact, not a processing exception,
+  and quarantine's disposition (physical removal) is materially heavier than
+  the stuck-file skip-in-place. The consecutive-count hash deliberately
+  fingerprints `(size, mtime)` via a single `stat()` rather than reading full
+  content the way the stuck-file ledger does — reading a file large enough to
+  violate the byte bound just to hash it would defeat the bound's own
+  cost-avoidance purpose.
+
 - **A person email handle resolves to a uid at tier 0, through the PII surface
   (athenaeum#884).** A `{"type": "person", "handle": {"email": "…"}}` correction
   target now resolves by reverse-lookup — `email → contact record → record uid

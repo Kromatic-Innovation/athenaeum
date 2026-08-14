@@ -289,11 +289,35 @@ def _extract_frontmatter_fields(text: str) -> tuple[str, str, str, str]:
     return name, tags, aliases, description
 
 
+def _wiki_relpath_excluded(rel: Path) -> bool:
+    """True when *rel* (a path relative to ``wiki_root``) is excluded from
+    recall/indexing by the underscore-prefix convention.
+
+    Issue athenaeum#898: the documented convention below ("underscore-prefixed
+    files are excluded") was, in every RECURSIVE ``wiki_root`` walk, actually
+    implemented as "underscore-prefixed *filenames* are excluded" — a check
+    on ``path.name`` only. That is exactly right for a FLAT scan (there are
+    no subdirectories to miss), but ``wiki_root`` also holds operational
+    subdirectories now: quarantine (``wiki/_quarantine/<source>/<name>.md``,
+    athenaeum#898) moves a raw file OUT of compile after it repeatedly exceeded a
+    per-file bound, but the file keeps its ORIGINAL basename — so a
+    filename-only check let it sail straight through a recursive walk
+    unfiltered, meaning a file quarantined *for being poison* stopped being
+    compiled but STARTED being served as a recall hit (inverting the whole
+    point of quarantine). This checks every path SEGMENT, not just the leaf
+    filename, so any current or future ``_``-prefixed operational
+    subdirectory under ``wiki_root`` is covered by the same one rule.
+    """
+    return any(part.startswith("_") for part in rel.parts)
+
+
 def _iter_wiki_entries(wiki_root: Path) -> Iterable[tuple[str, Path]]:
     """Yield ``(filename, full_path)`` for wiki markdown pages.
 
     Wiki is a flat shallow scan — underscore-prefixed files are excluded
-    (``_index.md``, ``_pending_questions.md``, etc.).
+    (``_index.md``, ``_pending_questions.md``, etc.). Flat, so this never
+    needs :func:`_wiki_relpath_excluded`'s directory-segment check — there
+    are no subdirectories to walk into in the first place.
     """
     try:
         names = sorted(os.listdir(wiki_root))
@@ -1708,10 +1732,14 @@ class KeywordBackend:
         # keyword results the same as every backend, at the recall render layer
         # (``mcp_server._recall_via_backend``).
         del config
+        # Issue athenaeum#898: directory-segment-aware exclusion (not just
+        # p.name) — see _wiki_relpath_excluded's docstring for why a
+        # filename-only check missed wiki/_quarantine/... entirely.
         count = sum(
             1
             for p in wiki_root.rglob("*.md")
-            if not p.name.startswith("_") and p.name not in _INTAKE_SKIP_NAMES
+            if not _wiki_relpath_excluded(p.relative_to(wiki_root))
+            and p.name not in _INTAKE_SKIP_NAMES
         )
         if extra_roots:
             for root in extra_roots:
@@ -1751,12 +1779,16 @@ class KeywordBackend:
         excluded = exclude or set()
         scored: list[tuple[float, str, str]] = []
         for md_file in wiki_root.rglob("*.md"):
-            if md_file.name.startswith("_"):
-                continue
             try:
-                rel = md_file.relative_to(wiki_root).as_posix()
+                rel_path = md_file.relative_to(wiki_root)
             except ValueError:
-                rel = md_file.name
+                rel_path = Path(md_file.name)
+            # Issue athenaeum#898: directory-segment-aware exclusion (not just
+            # md_file.name) — see _wiki_relpath_excluded's docstring for why
+            # a filename-only check missed wiki/_quarantine/... entirely.
+            if _wiki_relpath_excluded(rel_path):
+                continue
+            rel = rel_path.as_posix()
             if rel in excluded:
                 continue
             try:

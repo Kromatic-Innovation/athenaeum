@@ -1235,6 +1235,62 @@ def resolve_page_flag_bytes(config: dict[str, Any] | None) -> int:
     )
 
 
+def resolve_raw_file_max_bytes(config: dict[str, Any] | None) -> int:
+    """Resolve the per-raw-file byte bound in bytes (issue athenaeum#898).
+
+    Precedence: ``ATHENAEUM_RAW_FILE_MAX_BYTES`` env > ``librarian.raw_file_max_bytes``
+    yaml > ``5242880`` (5 MiB). Enforced by :attr:`athenaeum.models.RawFile.content`
+    — a raw intake file over this is refused BEFORE it is read into memory or
+    handed to the classifier (:class:`~athenaeum.models.RawFileTooLargeError`).
+    The default sits comfortably below the 9.7MB dry-run artifact that
+    motivated this bound (it accounted for 93% of timed entity-phase LLM
+    calls for roughly three months) while staying generous for a legitimately
+    large note or document dump — ordinary `remember()`-authored intake is KB-
+    sized. See :func:`_resolve_positive_int_knob` for the coercion contract.
+    """
+    return _resolve_positive_int_knob(
+        config, "raw_file_max_bytes", "ATHENAEUM_RAW_FILE_MAX_BYTES", 5 * 1024 * 1024
+    )
+
+
+def resolve_raw_file_max_api_calls(config: dict[str, Any] | None) -> int:
+    """Resolve the per-raw-file LLM-call bound (issue athenaeum#898).
+
+    Precedence: ``ATHENAEUM_RAW_FILE_MAX_API_CALLS`` env >
+    ``librarian.raw_file_max_api_calls`` yaml > ``8``. Checked by the entity
+    phase runner (:mod:`athenaeum.librarian`) after each raw file's
+    ``process_one`` call completes — the number of LLM calls THAT ONE FILE
+    consumed (``usage.api_calls`` before vs. after) is compared against this
+    bound. An ordinary file costs roughly 1-3 calls (tier-2 classify plus one
+    tier-3 action or two); ``8`` leaves generous headroom above that while
+    still catching a file whose action set loops. See
+    :func:`_resolve_positive_int_knob` for the coercion contract.
+    """
+    return _resolve_positive_int_knob(
+        config, "raw_file_max_api_calls", "ATHENAEUM_RAW_FILE_MAX_API_CALLS", 8
+    )
+
+
+def resolve_raw_file_max_runtime_seconds(config: dict[str, Any] | None) -> int:
+    """Resolve the per-raw-file wall-clock bound in seconds (issue athenaeum#898).
+
+    Precedence: ``ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS`` env >
+    ``librarian.raw_file_max_runtime_seconds`` yaml > ``120``. Checked
+    alongside :func:`resolve_raw_file_max_api_calls` — the wall-clock spent
+    inside ONE file's ``process_one`` call, compared against this bound.
+    ``120`` seconds is generous for a single file's tier-2/tier-3 round
+    trip(s) under normal conditions while still catching a file that hangs
+    or loops. See :func:`_resolve_positive_int_knob` for the coercion
+    contract.
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "raw_file_max_runtime_seconds",
+        "ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS",
+        120,
+    )
+
+
 def resolve_merge_body_preview_chars(config: dict[str, Any] | None) -> int:
     """Resolve the ``list_pending_merges`` draft-body preview cap (issue athenaeum#431).
 
