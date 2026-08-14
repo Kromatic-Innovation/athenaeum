@@ -242,6 +242,48 @@ DEFAULT_MAX_FILES = 50
 # resolved value <= 0 disables the deadline (explicit opt-out escape hatch).
 DEFAULT_MAX_RUNTIME = 3600  # 1 hour
 
+# SessionEnd path outer kill timeout + inner-runtime derivation (issue
+# athenaeum#896). The SessionEnd wrapper that invokes ``athenaeum session-end``
+# (``code-workspace-config/scripts/hooks/knowledge-rebuild-index.sh`` — a
+# DIFFERENT repo, not importable/editable from here) kills the process
+# externally after ``KNOWLEDGE_REBUILD_TIMEOUT`` seconds
+# (``timeout --signal=TERM``). Before this issue, ``cmd_session_end`` passed
+# no ``max_runtime``, so the INNER deadline resolved to ``DEFAULT_MAX_RUNTIME``
+# (3600s) — four times the wrapper's 900s outer default — so the
+# graceful-stop path (partial-progress commit, issue athenaeum#337/athenaeum#396) could
+# never win the race: every budget-tripped SessionEnd run was externally
+# SIGTERM'd instead of exiting cleanly through ``_stop_on_deadline``.
+#
+# ``KNOWLEDGE_REBUILD_TIMEOUT`` is read by BOTH sides — the wrapper script's
+# own ``REBUILD_TIMEOUT`` (out of this repo's reach) and
+# :func:`session_end_outer_timeout` below — so the env var IS the single
+# definition the issue's acceptance criteria require: set it once and both
+# the external kill and this derivation move together.
+DEFAULT_SESSION_END_OUTER_TIMEOUT = 900  # matches the wrapper's REBUILD_TIMEOUT default
+
+# Slack subtracted from the outer timeout to get the inner deadline: time
+# reserved for the graceful-stop commit itself (``git_snapshot``, deferred
+# manifest write) plus the CLI's own startup/lock-acquire overhead to
+# complete AFTER the inner deadline trips but BEFORE the outer kill would
+# land. 120s comfortably covers both on the small, session-scoped diffs this
+# path handles. Precedence: ``ATHENAEUM_SESSION_END_RUNTIME_MARGIN`` (env) >
+# ``librarian.session_end_runtime_margin`` (yaml) > this default. Resolved
+# by :func:`session_end_runtime_margin` below.
+DEFAULT_SESSION_END_RUNTIME_MARGIN = 120
+
+# Per-run caps ``cmd_session_end`` passes explicitly (issue athenaeum#896) instead of
+# falling through to the nightly-run defaults (``DEFAULT_MAX_FILES`` = 50,
+# ``DEFAULT_MAX_API_CALLS`` = 800). SessionEnd is INCREMENTAL and
+# SESSION-scoped (``session=`` narrows ``ingest``'s new/changed detection to
+# one ``originSessionId``) — a single session's raw intake is a handful of
+# files, not a whole night's backlog, so the nightly-sized windows are far
+# more headroom than this path ever needs and would let a runaway run spend
+# most of the (now much shorter, athenaeum#896) inner deadline before either cap
+# bites. Kept conservative: generous enough for a genuinely busy session,
+# small enough that the caps — not just the deadline — bound a runaway run.
+SESSION_END_MAX_FILES = 20
+SESSION_END_MAX_API_CALLS = 100
+
 # Fraction of ``max_runtime`` the ENTITY phase may spend claiming new files
 # (issue athenaeum#440). ``run_deadline`` is a single run-level budget shared by every
 # phase, and the entity loop only stops when that WHOLE budget is gone — so a
@@ -1700,6 +1742,105 @@ def librarian_max_runtime(config: dict[str, object] | None = None) -> int:
             if isinstance(raw, int) and not isinstance(raw, bool):
                 return raw
     return DEFAULT_MAX_RUNTIME
+
+
+def session_end_outer_timeout(config: dict[str, object] | None = None) -> int:
+    """Resolve the SessionEnd wrapper's OUTER kill timeout (issue athenaeum#896).
+
+    Reads ``KNOWLEDGE_REBUILD_TIMEOUT`` — the SAME env var, with the SAME
+    900s default, that the wrapper script
+    (``code-workspace-config/scripts/hooks/knowledge-rebuild-index.sh``, a
+    DIFFERENT repo, not importable from here) reads for its own
+    ``timeout --signal=TERM "$REBUILD_TIMEOUT"`` wrap. That shared env var —
+    not a constant duplicated in both repos — is this issue's "single
+    definition both the wrapper and the derivation read": set it once and
+    both the external kill and :func:`session_end_max_runtime` below move
+    together.
+
+    ``config`` is accepted for signature parity with the other
+    ``librarian_*``/``session_end_*`` resolvers but is currently unused — the
+    outer timeout has no YAML key, only the env var the wrapper also reads.
+    A non-numeric env value falls back to
+    :data:`DEFAULT_SESSION_END_OUTER_TIMEOUT`.
+    """
+    del config  # unused — see docstring
+    env = os.environ.get("KNOWLEDGE_REBUILD_TIMEOUT")
+    if env is not None:
+        try:
+            return int(env)
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_SESSION_END_OUTER_TIMEOUT
+
+
+def session_end_runtime_margin(config: dict[str, object] | None = None) -> int:
+    """Resolve the margin subtracted from the outer timeout (issue athenaeum#896).
+
+    Precedence mirrors the other resolvers:
+    ``ATHENAEUM_SESSION_END_RUNTIME_MARGIN`` (env) >
+    ``librarian.session_end_runtime_margin`` (yaml) >
+    :data:`DEFAULT_SESSION_END_RUNTIME_MARGIN`. A negative or non-numeric
+    value is rejected (falls through to the next source) — unlike
+    ``max_runtime`` itself, a negative margin has no valid meaning here.
+    """
+    env = os.environ.get("ATHENAEUM_SESSION_END_RUNTIME_MARGIN")
+    if env is not None:
+        try:
+            value = int(env)
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if config is not None:
+        cfg = config.get("librarian") if isinstance(config, dict) else None
+        if isinstance(cfg, dict):
+            raw = cfg.get("session_end_runtime_margin")
+            # bool is an int subclass — `session_end_runtime_margin: yes` in
+            # yaml must not silently become a 1-second margin.
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                return raw
+    return DEFAULT_SESSION_END_RUNTIME_MARGIN
+
+
+def session_end_max_runtime(config: dict[str, object] | None = None) -> int:
+    """Derive SessionEnd's INNER ``max_runtime`` from the OUTER kill timeout.
+
+    Issue athenaeum#896: before this, ``cmd_session_end`` passed no ``max_runtime``,
+    so the inner deadline fell through to :data:`DEFAULT_MAX_RUNTIME` (3600s)
+    — four times the wrapper's 900s outer default — so the graceful-stop
+    path could never win the race against the wrapper's external
+    ``timeout``. This mirrors the nightly path's existing
+    outer-minus-margin shape (cron-fleet#95) applied to the SessionEnd
+    wrapper's own outer value.
+
+    ``inner = outer - margin``, clamped so the result is ALWAYS strictly
+    positive and ALWAYS strictly less than ``outer`` for every ``outer >=
+    2``: a flat subtraction alone could drive the candidate to zero or
+    negative when the configured outer is small (or the margin is
+    oversized), so the floor falls back to half of ``outer`` (rounded down,
+    minimum 1s) rather than going non-positive, and a final clamp caps the
+    result at ``outer - 1``.
+
+    A resolved ``outer < 2`` — including ``<= 0``, meaning the wrapper's own
+    ``timeout`` is DISABLED (coreutils ``timeout 0`` never kills) — has no
+    external race to protect against and no meaningful margin to derive
+    from (no strictly-positive integer is both ``> 0`` and ``< 1``): this
+    falls back to :data:`DEFAULT_MAX_RUNTIME` rather than deriving a
+    near-zero deadline from a pathological configuration. Callers that need
+    the invariant to hold should not configure an outer timeout below 2s —
+    a realistic wrapper deadline is always far larger.
+
+    Out of scope (issue athenaeum#896): the nightly path computes its own inner
+    runtime from ITS OWN outer scheduler value and margin — untouched here.
+    """
+    outer = session_end_outer_timeout(config)
+    if outer < 2:
+        return DEFAULT_MAX_RUNTIME
+    margin = session_end_runtime_margin(config)
+    candidate = outer - margin
+    floor = max(1, outer // 2)
+    inner = candidate if candidate >= floor else floor
+    return min(inner, outer - 1)
 
 
 def librarian_entity_runtime_share(config: dict[str, object] | None = None) -> float:
