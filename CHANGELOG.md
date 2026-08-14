@@ -69,6 +69,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distinction is carried by a new machine-readable `reason` on
   `TargetResolution`, `None` for every pre-existing outcome.
 
+### Changed
+
+- **The ingest stamp advances per file, not all-or-nothing (athenaeum#895).**
+  `librarian.ingest` now records a content hash for exactly the raw files a run
+  drained from the intake queue — compiled by the entity loop, or retired by
+  the move-then-retire pass — merged into the existing stamp. A run truncated
+  by `max_files` stamps its compiled subset and leaves the remainder unstamped;
+  the next run skips the stamped subset and picks up the rest.
+
+  athenaeum#530 established the invariant that a file which was not compiled
+  must never be stamped (stamping it makes the next ingest take the no-op fast
+  path, and those notes are silently never compiled and never recallable), but
+  expressed it as a single whole-run boolean: stamp nothing unless the run
+  drained the whole backlog. With a steady backlog above `max_files` that
+  condition never holds, so the stamp never advanced and every SessionEnd
+  rediscovered the same head — measured at 86 SessionEnd runs producing 26
+  compiled files over 7 days with no stamp movement. The invariant is per file,
+  and this enforces it per file: a truncated run makes real, durable progress
+  while the uncompiled remainder stays unstamped and discoverable.
+
+  "Left the intake queue" is deliberately the signal, rather than a phase-level
+  report of what a run believed it compiled: it is observable ground truth and
+  can only ever under-approximate the drained set, so a mis-report upstream
+  cannot cause an uncompiled file to be stamped. One consequence worth naming:
+  a file that failed or was skipped as stuck (athenaeum#663) is no longer
+  stamped by an otherwise-clean run, so it is retried instead of being recorded
+  as seen and never compiled again. The manifest format is unchanged and reads
+  back-compatibly — a manifest written by the old code loads and is extended in
+  place.
+
 ### Deprecated
 
 - **`pii.read_person` / `read_people` — deprecated in favour of
