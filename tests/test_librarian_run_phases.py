@@ -31,6 +31,7 @@ from athenaeum.librarian import (
     DEFAULT_MAX_API_CALLS,
     DEFAULT_MAX_FILES,
     DEFAULT_MAX_RUNTIME,
+    EXIT_GRACEFUL_PARTIAL,
     RunContext,
     _arm_run_deadline,
     _resolve_run_config,
@@ -691,7 +692,7 @@ class TestRunWikiDedupPhase:
         ctx.max_runtime = 60
         with patch("athenaeum.wiki_dedupe.propose_wiki_page_merges"):
             result = _run_wiki_dedup_phase(ctx)
-        assert result == 124
+        assert result == EXIT_GRACEFUL_PARTIAL
         assert ctx.summary_emitted is True
 
     def test_deadline_not_exceeded_returns_none(self, tmp_path: Path) -> None:

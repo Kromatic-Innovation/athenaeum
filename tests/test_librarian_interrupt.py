@@ -20,6 +20,12 @@ Covers each acceptance criterion:
   server, tests) keep their own signal handling.
 
 All Anthropic calls are mocked; no live API, no network.
+
+Post-athenaeum#897: this signal-driven exit is the ONE remaining path that
+returns 124 (`EXIT_EXTERNAL_KILL`) — athenaeum's own internal deadline check
+(`tests/test_librarian_deadline.py`) now returns a distinct 75
+(`EXIT_GRACEFUL_PARTIAL`) instead. See docs/exit-codes.md for the full
+contract.
 """
 
 from __future__ import annotations

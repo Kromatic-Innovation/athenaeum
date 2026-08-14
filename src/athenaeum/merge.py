@@ -1689,7 +1689,8 @@ def merge_clusters_to_wiki(
         # Issue athenaeum#396: wall-clock deadline check at the C3 cluster-merge
         # boundary. Cheap (a monotonic read) and only active when the run
         # armed a deadline; keeps a stalled/slow merge pass from running past
-        # the run-level cap. Raised so run() commits partial + exits 124.
+        # the run-level cap. Raised so run() commits partial + exits
+        # EXIT_GRACEFUL_PARTIAL (75, issue athenaeum#897).
         if deadline is not None and time.monotonic() >= deadline:
             raise RunDeadlineExceeded("C3 cluster merge")
         entry = merge_cluster_row(
