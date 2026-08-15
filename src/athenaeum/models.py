@@ -1619,6 +1619,107 @@ def _sampling_params_rejected(model: str | None) -> bool | None:
     return best
 
 
+# Model-level prompt-caching capability (issue athenaeum#927). Records the MINIMUM
+# cacheable prefix length, in tokens. A ``cache_control`` breakpoint on a prefix
+# shorter than this is accepted by the API and then silently ignored — no error,
+# no warning, and ``cache_creation_input_tokens`` stays 0 forever. That silence is
+# exactly what let athenaeum#790's detector breakpoint ship INERT and go unnoticed
+# through two days of metered runs: a 630-token prefix marked cacheable, sent to a
+# model whose floor is 4,096.
+#
+# The threshold is per-model and NOT monotonic across generations — the Claude 5
+# tier halved it to 512 while Opus 4.6/4.5 and Haiku 4.5 sit at 4,096 — so it can
+# be neither approximated by "newer is lower" nor collapsed to one constant. A
+# prompt that caches on Opus 5 silently does not cache on Haiku 4.5.
+#
+# Verified 2026-08-15 against the ``claude-api`` skill (the source of truth for
+# model facts, per hestia#1055); it agrees with the per-model figures already
+# recorded in prose at ``resolutions.py``'s athenaeum#230 breakpoint comment.
+# Keyed by the same longest-prefix ``startswith`` style as the rate table and
+# _SAMPLING_PARAMS_REJECTED_PREFIXES above; maintain the three tables together.
+_MIN_CACHEABLE_PREFIX_TOKENS: dict[str, int] = {
+    # Claude 5 tier — 512.
+    "claude-opus-5": 512,
+    "claude-fable-5": 512,
+    "claude-mythos-5": 512,
+    # 1,024 tier.
+    "claude-opus-4-8": 1024,
+    "claude-opus-4-1": 1024,
+    "claude-opus-4-0": 1024,
+    "claude-sonnet-5": 1024,
+    "claude-sonnet-4-6": 1024,
+    "claude-sonnet-4-5": 1024,
+    "claude-sonnet-4-0": 1024,
+    # 2,048 tier.
+    "claude-opus-4-7": 2048,
+    "claude-mythos-preview": 2048,
+    "claude-3-5-haiku": 2048,
+    # 4,096 tier — note Haiku 4.5 is the HIGHEST floor in the table, not the
+    # lowest: the cheapest model is the hardest one to cache a short prefix on.
+    "claude-opus-4-6": 4096,
+    "claude-opus-4-5": 4096,
+    "claude-haiku-4-5": 4096,
+    # Family-level fallbacks, mirroring the short prefixes the rate table carries
+    # so the two stay total over the same set of ids. Where a family spans more
+    # than one floor, the fallback records the HIGHEST (most conservative) of
+    # them: an id that only matches the family prefix is one we cannot pin to a
+    # generation, and over-stating the floor can only refuse to certify a
+    # breakpoint that would have worked, never certify one that is inert.
+    # claude-opus-4 spans 1,024 (4.0/4.1/4.8) to 4,096 (4.5/4.6) -> 4,096.
+    "claude-opus-4": 4096,
+    # claude-sonnet-4 is 1,024 across 4.0/4.5/4.6 -> no ambiguity.
+    "claude-sonnet-4": 1024,
+    # claude-haiku-4 has exactly one member, Haiku 4.5.
+    "claude-haiku-4": 4096,
+}
+
+
+def min_cacheable_prefix_tokens(model: str | None) -> int | None:
+    """Minimum cacheable prefix length in tokens for *model* (longest-prefix
+    match), or ``None`` if *model* matches no recorded prefix (issue athenaeum#927).
+
+    ``None`` means UNKNOWN, never "no minimum" — a caller deciding whether to set
+    a ``cache_control`` breakpoint must treat an unknown model as un-assertable
+    rather than assuming the breakpoint will engage. Silence is the whole failure
+    mode this table exists to make checkable.
+    """
+    if not model:
+        return None
+    best: int | None = None
+    best_len = -1
+    for prefix, minimum in _MIN_CACHEABLE_PREFIX_TOKENS.items():
+        if model.startswith(prefix) and len(prefix) > best_len:
+            best, best_len = minimum, len(prefix)
+    return best
+
+
+#: Characters per token used by :func:`estimate_prompt_tokens`. Deliberately an
+#: OVER-estimate of density so dividing by it yields a conservative LOWER bound on
+#: the true token count. Calibrated against the two live ``count_tokens``
+#: measurements recorded in issue athenaeum#927: ``_RESOLVE_SYSTEM`` is 11,728 chars /
+#: 4,395 tokens (2.67 chars/token) and ``_DETECT_SYSTEM`` is 2,344 chars / 630
+#: tokens (3.72). Both are denser than 4.0, so chars/4 under-counts both — which
+#: is the direction that keeps :func:`estimate_prompt_tokens` honest.
+_CHARS_PER_TOKEN_LOWER_BOUND = 4.0
+
+
+def estimate_prompt_tokens(text: str) -> int:
+    """A conservative LOWER bound on the token count of *text* (issue athenaeum#927).
+
+    Exists so the minimum-cacheable-prefix property can be asserted offline, in a
+    unit test, with no API key and no network call — the alternative (a live
+    ``count_tokens`` request per prompt) is precisely the kind of check that does
+    not run in CI and so does not catch the next inert breakpoint.
+
+    Because the result under-counts, ``estimate_prompt_tokens(p) >= minimum``
+    proves the real prefix clears *minimum*; the converse does NOT hold, so a
+    prompt failing this bound is "not provably cacheable", not "provably
+    uncacheable". That asymmetry is deliberate: it can only refuse to certify a
+    breakpoint that would in fact have worked, never certify one that is inert.
+    """
+    return int(len(text) / _CHARS_PER_TOKEN_LOWER_BOUND)
+
+
 @dataclass
 class TokenUsage:
     """Accumulated API token usage for a pipeline run."""
