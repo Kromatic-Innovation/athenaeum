@@ -59,7 +59,7 @@ _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never s
   [`docs/contradiction-detection.md`](docs/contradiction-detection.md#decision-answer-files-unified-decision-resolution-as-intake-athenaeum908)
   for the full format and dispatch table.
 
-- **The #691 PII-restore script is now a tracked, tested repo script instead
+- **The athenaeum#691 PII-restore script is now a tracked, tested repo script instead
   of an untracked hand-patched file (athenaeum#844).** The script that
   mutates the live PII-bearing `~/knowledge` wiki lived untracked at
   `~/Desktop/athenaeum-691-restore_pii.py` and had been hand-patched twice
