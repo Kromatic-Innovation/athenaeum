@@ -23,6 +23,7 @@ drive_folder_ids: []
 mural_board_ids: []
 handles_verified: ""
 apollo_organization_id: ""
+google_resource_name: ""
 tags: []
 # `source:` records where THIS wiki page came from. Scalar form is
 # `<type>:<ref>` (e.g. `manual:alice` or `linkedin:export-2026-04`).

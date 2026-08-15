@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example shape rule (issue athenaeum#902) -- NOT loaded automatically. Copy this
+# file (or a variant) into <knowledge-root>/rules/ to activate it;
+# `athenaeum init --with-rules` does that copy for you.
+#
+# Recognises a contact-sync no-op. The 2026-08-14 intake-architecture review
+# measured that 91% of daily contact-sync records are `skip_*` no-ops: the
+# PRODUCER itself already concluded that nothing happened. Handing those to
+# the reasoning tiers spends a language model re-deriving "nothing changed"
+# from a record that says so in its own payload.
+#
+# Disposition is `drop` (athenaeum#903): an AUDITED discard, not a deletion. The
+# raw file's content is committed before it is removed, so every dropped
+# record stays recoverable from git history, and the run's audit ledger
+# carries the per-rule count. Nothing is silently lost.
+#
+# Ships in "observe" mode: review wiki/_shape_rules_applied.jsonl after a few
+# runs -- confirm the drop count matches your expected skip volume, and that
+# nothing you wanted compiled is landing here -- before flipping this rule's
+# own copy to `mode: live`. See docs/shape-rules.md for the rule-schema
+# reference.
+
+version: 1
+name: example-contact-sync-skip
+mode: observe
+
+match:
+  source: contact-sync
+  format: jsonl
+  fields:
+    kind:
+      # A `skip_*` payload: the producer looked and found no change.
+      glob: "skip_*"
+
+disposition: drop

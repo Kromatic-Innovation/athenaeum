@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example shape rule (issue athenaeum#902) -- NOT loaded automatically. Copy this
+# file (or a variant) into <knowledge-root>/rules/ to activate it;
+# `athenaeum init --with-rules` does that copy for you.
+#
+# Recognises a contact-sync UPDATE that removed an email address, and compiles
+# it into a conformant field correction.
+#
+# The removed address is the SET DIFFERENCE of the record's before and after
+# email lists -- computed by the closed-vocabulary `set_diff` function
+# (docs/shape-rules.md §4.1), never by a template or any evaluated
+# expression. Expressed as a `remove` operation on `alt_emails`.
+#
+# ROUTING IS NOT THIS RULE'S DECISION. `docs/field-corrections.md` §7 is
+# explicit that a correction's target/field is a PROPOSAL: the librarian
+# resolves where the fact actually belongs, and §7.1's sensitivity routing
+# sends a fact bearing on a contact identifier to the PII/excluded-value
+# surface regardless of what this file names. That routing is deployment
+# configuration and existing code -- this rule neither configures nor
+# bypasses it, and a submitter cannot opt out by being specific.
+#
+# NOTE the deliberate absence: there is no create rule here. Contact-sync
+# records stay UPDATE-ONLY -- a sync record never auto-creates a person, on
+# the same volume argument as the email-handle create carve-out in
+# `docs/field-corrections.md` §8. A record whose person is unknown falls
+# through to the reasoning tiers rather than manufacturing an entity.
+#
+# Ships in "observe" mode: review wiki/_shape_rules_applied.jsonl before
+# flipping this rule's own copy to `mode: live`.
+
+version: 1
+name: example-contact-sync-email-removal
+mode: observe
+
+match:
+  source: contact-sync
+  format: jsonl
+  fields:
+    kind:
+      glob: "update_*"
+
+disposition: emit
+correction:
+  # Resolved deterministically through registry.json via the
+  # `google_resource_name` source handle (issue athenaeum#902) -- no reasoning
+  # needed to find the person this record is about.
+  target:
+    type: person
+    handle:
+      google_resource_name: "$resource_name"
+  op: remove
+  field: alt_emails
+  value:
+    fn: set_diff
+    args:
+      - "$emails_before"
+      - "$emails_after"
+  source: "script:example-contact-sync"
+  observed_at: "$observed_at"
+  note: "email removed upstream in contact-sync; compiled as a set difference"
