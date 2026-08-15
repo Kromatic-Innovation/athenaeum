@@ -361,6 +361,22 @@ def test_partial_registry_includes_only_handled_entities(tmp_path: Path) -> None
     }
 
 
+def test_registry_includes_apollo_organization_id_handle(tmp_path: Path) -> None:
+    """A company page carrying `apollo_organization_id` (issue athenaeum#874)
+    appears in ``registry.json`` under ``handles``, exactly like any other
+    scalar handle key."""
+    wiki = tmp_path / "wiki"
+    _write_entity(wiki, "acme.md", uid="company-acme", name="Acme",
+                  extra={"apollo_organization_id": "5f1a2b3c"})
+    registry = build_registry(wiki)
+    assert registry["entity_count"] == 1
+    assert registry["entities"]["company-acme"] == {
+        "type": "company",
+        "name": "Acme",
+        "handles": {"apollo_organization_id": "5f1a2b3c"},
+    }
+
+
 def test_registry_is_deterministic_and_uid_sorted(tmp_path: Path) -> None:
     wiki = tmp_path / "wiki"
     _write_entity(wiki, "z.md", uid="company-z", extra={"domains": ["z.example"]})
