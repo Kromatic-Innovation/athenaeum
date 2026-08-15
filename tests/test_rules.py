@@ -21,7 +21,7 @@ import yaml
 from pydantic import ValidationError as PydanticValidationError
 
 from athenaeum.corrections import find_correction_batches
-from athenaeum.init import copy_example_rules
+from athenaeum.init import _RULE_EXAMPLE_FILES, copy_example_rules
 from athenaeum.intake import discover_raw_files
 from athenaeum.models import RawFile
 from athenaeum.rules import (
@@ -925,7 +925,14 @@ class TestPackagedExamples:
         dest = tmp_path / "rules"
         written, skipped = copy_example_rules(dest)
         assert skipped == []
-        assert set(written) == {"contact-bounce.yaml", "unrecognized-export-fallthrough.yaml"}
+        # The whole DECLARED packaged set is copied — tracked against the
+        # constant rather than a frozen literal so a new example (athenaeum#902's
+        # contact-sync ruleset, and later slices) does not silently fail this.
+        assert set(written) == set(_RULE_EXAMPLE_FILES)
+        # ...and the athenaeum#901 originals are still among them.
+        assert {"contact-bounce.yaml", "unrecognized-export-fallthrough.yaml"} <= set(
+            written
+        )
         for fname in written:
             assert (dest / fname).exists()
 
@@ -934,20 +941,20 @@ class TestPackagedExamples:
         copy_example_rules(dest)
         written, skipped = copy_example_rules(dest)
         assert written == []
-        assert len(skipped) == 2
+        assert len(skipped) == len(_RULE_EXAMPLE_FILES)
 
     def test_copy_example_rules_force_overwrites(self, tmp_path: Path) -> None:
         dest = tmp_path / "rules"
         copy_example_rules(dest)
         written, skipped = copy_example_rules(dest, force=True)
-        assert len(written) == 2
+        assert len(written) == len(_RULE_EXAMPLE_FILES)
         assert skipped == []
 
     def test_copied_examples_are_schema_valid_and_load(self, tmp_path: Path) -> None:
         copy_example_rules(tmp_path / "rules")
         rules, errors = load_rules(tmp_path)
         assert errors == []
-        assert len(rules) == 2
+        assert len(rules) == len(_RULE_EXAMPLE_FILES)
         for rule in rules:
             # Every packaged example ships in observe mode (docs/shape-rules.md §5/§7).
             assert rule.mode == "observe"

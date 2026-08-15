@@ -63,6 +63,10 @@ _TEMPLATE_FILES = [
 # `athenaeum.rule_examples`'s module docstring.
 _RULE_EXAMPLE_FILES = [
     "contact-bounce.yaml",
+    # Issue athenaeum#902: the default contact-sync ruleset. Packaged EXAMPLES the
+    # installer copies in, never engine defaults -- both ship `mode: observe`.
+    "contact-sync-email-removal.yaml",
+    "contact-sync-skip.yaml",
     "unrecognized-export-fallthrough.yaml",
 ]
 
