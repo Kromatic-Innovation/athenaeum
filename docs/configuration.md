@@ -143,6 +143,22 @@ The deterministic, LLM-free field-correction fast path documented in
 | Escalations per run | `ATHENAEUM_CORRECTIONS_MAX_ESCALATIONS_PER_RUN` | `librarian.corrections.max_escalations_per_run` | `50` | §10.2: flood guard on how many NEW `_pending_questions.md` entries this phase files in one run (a writer with a systematic disagreement could otherwise fill the human queue). Escalations already open (deduped by `correction_id`) do not count against the cap. On hitting the cap the phase keeps applying/deferring normally and emits one summary line naming the submitter + attribute with the highest suppressed count. |
 | Phase runtime share | `ATHENAEUM_CORRECTIONS_RUNTIME_SHARE` | `librarian.corrections.runtime_share` | `0.05` | Fraction of `librarian.max_runtime` this phase may spend, mirroring `entity_runtime_share`'s mechanism. Checked at BATCH boundaries only (never mid-batch). Records that raise a tier (§8) join the ordinary intake queue and are subject to the entity phase's budget instead — they cost what reasoning costs, not what this phase's share allows. |
 
+### Shape-rule engine (`librarian.shape_rules.*`, athenaeum#901)
+
+Declarative YAML rules (`<knowledge_root>/rules/*.yaml`, see
+[`shape-rules.md`](shape-rules.md)) that recognise a foreign record shape and
+compile it into a field-correction batch — consumed unchanged by the field
+corrections machinery above. Runs as its own phase inside `athenaeum run`,
+immediately before the field-correction phase (so a compiled batch is visible
+to that phase's scan in the same run), and makes zero LLM calls. There is no
+`fields`/`sensitive_fields`/`schema_slots`-style dict knob here — every rule
+is its own self-contained YAML file, not a config-table entry.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Records per run | `ATHENAEUM_SHAPE_RULES_MAX_RECORDS_PER_RUN` | `librarian.shape_rules.max_records_per_run` | `50000` | Run-level cap on candidate raw files the engine evaluates against rules, mirroring `librarian.corrections.max_records_per_run`. Files beyond the cap are untouched and retried next run. |
+| Phase runtime share | `ATHENAEUM_SHAPE_RULES_RUNTIME_SHARE` | `librarian.shape_rules.runtime_share` | `0.05` | Fraction of `librarian.max_runtime` this phase may spend, mirroring `librarian.corrections.runtime_share`'s mechanism exactly (own budget — an overrun in one deterministic phase never starves the other). Checked at FILE boundaries only (never mid-file). |
+
 ### Run lock (single-machine concurrency guard, athenaeum#309)
 
 Every **mutating** command acquires an exclusive advisory
