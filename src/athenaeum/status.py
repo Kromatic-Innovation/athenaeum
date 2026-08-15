@@ -30,6 +30,14 @@ leaf: ``status.py`` now function-locally imports it from ``drain_advisor`` (a
 low leaf that imports none of these three), so it no longer reaches up into the
 ``drain`` orchestrator. The full-graph SCC is now empty and
 ``tests/test_import_graph_acyclic.py`` pins the baseline at ``[]``.
+
+Issue athenaeum#899's zero-yield counter reads :mod:`athenaeum.zero_yield` (a small L2
+leaf that owns the persisted-state sidecar only) at TOP level rather than
+reading it via ``librarian.py`` — the same "hoist the shared bit to a leaf
+both sides import" shape as ``discover_raw_files`` above, and for the same
+reason: ``status.py`` importing ``librarian.py`` would reopen the
+``{librarian, drain, status}`` cycle this docstring just finished describing
+the dissolution of.
 """
 
 from __future__ import annotations
@@ -41,12 +49,14 @@ from typing import TypedDict, cast
 
 from athenaeum.config import (
     load_config,
+    resolve_cache_dir,
     resolve_page_flag_bytes,
     resolve_page_warn_bytes,
 )
 from athenaeum.intake import discover_raw_files
 from athenaeum.models import parse_frontmatter
 from athenaeum.tiers import schema_fragment_state
+from athenaeum.zero_yield import load_state as load_zero_yield_state
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +93,13 @@ class StatusInfo(TypedDict):
     # bytes are in play between runs, the same attribution the run-summary line
     # records; a fragment matching its bundled default has ``is_default=True``.
     schema_fragments: dict[str, tuple[str, bool]]
+    # Issue athenaeum#899: the persisted CONSECUTIVE zero-yield run count — how many
+    # runs in a row, up to and including the most recently finalized one,
+    # spent LLM calls, committed zero files, and made no progress against the
+    # deferred set. ``0`` when the most recent run was not zero-yield (or no
+    # run has ever finalized). Read directly from :mod:`athenaeum.zero_yield`'s
+    # sidecar, the same persisted state the librarian finalize phase writes.
+    zero_yield_consecutive: int
 
 
 def scan_page_sizes(
@@ -238,6 +255,17 @@ def status(knowledge_root: Path) -> StatusInfo:
     # attribution the librarian run-summary line records.
     schema_fragments = schema_fragment_state(wiki_root)
 
+    # Issue athenaeum#899: the persisted consecutive-zero-yield run count. Read-only
+    # (this module never writes the sidecar — the librarian finalize phase
+    # does); :func:`athenaeum.zero_yield.load_state` already fails open to
+    # ``0`` on a missing/corrupt sidecar, so no additional try/except is
+    # needed here. Lives under the CACHE dir, not ``wiki_root`` (see
+    # :mod:`athenaeum.zero_yield`'s module docstring for why) — resolved the
+    # same way the librarian finalize phase resolves it (``cache_dir=None``:
+    # ``ATHENAEUM_CACHE_DIR`` env, else the packaged default), so the read
+    # and write sides always agree on the same file.
+    zero_yield_consecutive = load_zero_yield_state(resolve_cache_dir())["consecutive"]
+
     return {
         "raw_pending": raw_pending,
         "entity_count": entity_count,
@@ -249,6 +277,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "pages_flag": pages_flag,
         "drain_advisory": drain_advisory,
         "schema_fragments": schema_fragments,
+        "zero_yield_consecutive": zero_yield_consecutive,
     }
 
 
@@ -271,6 +300,16 @@ def format_status(info: StatusInfo) -> str:
     drain_advisory = info.get("drain_advisory")
     if drain_advisory:
         lines.append(f"Backlog drain:        {drain_advisory}")
+
+    # Issue athenaeum#899: consecutive-zero-yield alarm. Use ``.get`` so pre-athenaeum#899
+    # status dicts (missing the key) still format cleanly; shown only when
+    # non-zero (mirrors the drain-advisory "only when actionable" pattern
+    # above) so a healthy operator's status output stays quiet.
+    zero_yield_consecutive = info.get("zero_yield_consecutive", 0)
+    if zero_yield_consecutive:
+        lines.append(
+            f"Zero-yield runs:      {zero_yield_consecutive} consecutive"
+        )
 
     # Issue athenaeum#310: oversized-page summary. Use ``.get`` so pre-athenaeum#310 status
     # dicts (missing these keys) still format cleanly.
