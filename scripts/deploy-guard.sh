@@ -79,10 +79,14 @@
 #                             ATHENAEUM_GUARD_FF_CMD is accepted as a DEPRECATED
 #                             alias for back-compat with older callers/tests.
 #   ATHENAEUM_GUARD_INSTALL_CMD  venv-refresh command run on drift
-#                             (default: <py> -m venv .venv && .venv/bin/pip
-#                              install -q -e ".[<extras>]", where <py> is an
-#                              interpreter that actually satisfies the deploy
-#                              tree's requires-python — see _dg_resolve_python)
+#                             (default: <py> -m venv .venv && .venv/bin/python
+#                              -m pip install -q -e ".[<extras>]", where <py>
+#                              is an interpreter that actually satisfies the
+#                              deploy tree's requires-python — see
+#                              _dg_resolve_python; routed through the venv's
+#                              own python rather than bare .venv/bin/pip for
+#                              the same single-interpreter reason as
+#                              ATHENAEUM_GUARD_METADATA_REFRESH_CMD, athenaeum#894)
 #   ATHENAEUM_GUARD_PYTHON    force the venv-build interpreter (issue athenaeum#832).
 #                             Skips probing; still VERIFIED against
 #                             requires-python, and a chosen interpreter that
@@ -95,7 +99,11 @@
 #                             undetermined). Default:
 #                             <dir>/.venv/bin/python -m athenaeum.deploy_check --check <dir>
 #   ATHENAEUM_GUARD_METADATA_REFRESH_CMD  metadata-only editable reinstall run on
-#                             drift (default: <dir>/.venv/bin/pip install -q -e . --no-deps)
+#                             drift (default: <dir>/.venv/bin/python -m pip
+#                             install -q -e . --no-deps — routed through the
+#                             venv's OWN python, never bare .venv/bin/pip, so
+#                             it can never target a different interpreter tree
+#                             than the version-check reads; see athenaeum#894)
 #   ATHENAEUM_DEPLOY_EXTRAS   pip extras for the default install (default: mcp,vector —
 #                             what the MCP server + librarian's vector search need;
 #                             matches deploy-sync.sh)
@@ -280,7 +288,12 @@ _dg_default_install_cmd() {
     && ! _dg_python_satisfies "$dir/.venv/bin/python" "$floor"; then
     clear=" --clear"
   fi
-  printf '"%s" -m venv%s .venv && .venv/bin/pip install -q -e ".[%s]"' \
+  # `.venv/bin/python -m pip`, never bare `.venv/bin/pip` (issue athenaeum#894
+  # AC2b): a freshly built venv's own pip normally matches its own python, but
+  # routing through the interpreter here closes the same class of split this
+  # guard's OTHER pip invocation (_dg_default_metadata_refresh_cmd) had to
+  # close, so no path is left able to reintroduce it.
+  printf '"%s" -m venv%s .venv && .venv/bin/python -m pip install -q -e ".[%s]"' \
     "$py" "$clear" "$(_dg_extras)"
 }
 
@@ -317,8 +330,61 @@ _dg_default_version_check_cmd() {
 
 # The metadata-only editable reinstall: refreshes .dist-info WITHOUT touching
 # the dependency tree (--no-deps), so a version bump is picked up cheaply.
+#
+# Routed through `.venv/bin/python -m pip`, NOT bare `.venv/bin/pip` (issue
+# athenaeum#894 AC2). A venv can end up with `bin/python` and `bin/pip` bound
+# to DIFFERENT interpreters (a stray second Python layered onto the venv after
+# it was created); `_dg_default_version_check_cmd` above always reads through
+# `.venv/bin/python`, so a refresh that writes through a differently-resolved
+# `bin/pip` can land in a site-packages tree the check never sees -- metadata
+# "still drifted after refresh", forever, no matter how many times the refresh
+# reruns. `python -m pip` cannot diverge from `python`: it is always the same
+# interpreter's own pip, so check and refresh are pinned together regardless
+# of what `bin/pip` happens to resolve to.
 _dg_default_metadata_refresh_cmd() {
-  printf '"%s/.venv/bin/pip" install -q -e . --no-deps' "$1"
+  printf '"%s/.venv/bin/python" -m pip install -q -e . --no-deps' "$1"
+}
+
+# --- multi-tree detection (issue athenaeum#894) -----------------------------
+# Even with the refresh above pinned to `python -m pip`, a venv can ALREADY
+# carry a stray extra Python tree (e.g. an operator's manual `python3.14 -m
+# venv`/pip run against a checkout whose `pyvenv.cfg` declares 3.13) from
+# before this fix landed, or from tooling outside the guard's control. That
+# condition explains "still drifted after refresh" far better than a generic
+# drift message, so name it explicitly rather than leaving the operator to
+# rediscover the incident by hand.
+#
+# Two independent signals, either sufficient on its own:
+#   1. more than one lib/python*/ tree under the venv
+#   2. bin/python and bin/pip report DIFFERENT interpreter versions
+# Echoes a human-readable reason and returns 0 when found. Silent non-zero
+# when the venv looks single-tree, or does not exist yet (nothing to detect
+# before a venv has been built) -- the caller falls back to the generic
+# message in that case.
+_dg_venv_multi_tree_reason() {
+  local dir="${1:-.}" venv trees pyver pipver
+  venv="$dir/.venv"
+  [ -d "$venv" ] || return 1
+
+  trees="$(cd "$venv" && ls -d lib/python*/ 2>/dev/null)"
+  if [ "$(printf '%s\n' "$trees" | grep -c .)" -gt 1 ]; then
+    printf 'multiple Python trees under %s/lib (%s)' \
+      "$venv" "$(printf '%s' "$trees" | tr '\n' ' ' | sed 's/ *$//')"
+    return 0
+  fi
+
+  if [ -x "$venv/bin/python" ] && [ -x "$venv/bin/pip" ]; then
+    pyver="$(_dg_python_version "$venv/bin/python")"
+    pipver="$("$venv/bin/pip" --version 2>/dev/null \
+      | sed -n 's/.*(python \([0-9][0-9]*\.[0-9][0-9]*\)).*/\1/p')"
+    if [ -n "$pyver" ] && [ -n "$pipver" ] && [ "$pyver" != "$pipver" ]; then
+      printf 'bin/python (%s) and bin/pip (%s) resolve to different interpreters under %s' \
+        "$pyver" "$pipver" "$venv"
+      return 0
+    fi
+  fi
+
+  return 1
 }
 
 # Reconcile the editable install's metadata to the tree's declared version.
@@ -329,7 +395,7 @@ _dg_default_metadata_refresh_cmd() {
 # redeploy — the standalone `python -m athenaeum.deploy_check` surface still
 # reports it. Returns 0 (ok/warned) or 1 (loud abort).
 _dg_reconcile_metadata() {
-  local dir="$1" check refresh rc
+  local dir="$1" check refresh rc reason
   check="${ATHENAEUM_GUARD_VERSION_CHECK_CMD:-$(_dg_default_version_check_cmd "$dir")}"
   ( cd "$dir" && eval "$check" ) >/dev/null 2>&1
   rc=$?
@@ -338,19 +404,27 @@ _dg_reconcile_metadata() {
   fi
   if [ "$rc" -ne 10 ]; then
     # Undetermined (20) or unrunnable: loud, but do not block the redeploy.
-    echo "deploy-guard: WARN version-check could not confirm metadata (rc=${rc}) in ${dir} — run '(cd ${dir} && .venv/bin/pip install -e .)' to seed the check; leaving metadata as-is" >&2
+    echo "deploy-guard: WARN version-check could not confirm metadata (rc=${rc}) in ${dir} — run '(cd ${dir} && .venv/bin/python -m pip install -e .)' to seed the check; leaving metadata as-is" >&2
     return 0
   fi
   echo "deploy-guard: metadata drift (installed != pyproject) — refreshing editable install metadata in ${dir}" >&2
   refresh="${ATHENAEUM_GUARD_METADATA_REFRESH_CMD:-$(_dg_default_metadata_refresh_cmd "$dir")}"
   if ! ( cd "$dir" && eval "$refresh" ) >/dev/null 2>&1; then
-    _dg_alert "metadata refresh failed in ${dir} (cmd: ${refresh}). Recovery: refresh by hand (cd ${dir} && ${refresh}) and confirm 'athenaeum --version' matches pyproject.toml."
+    _dg_alert "metadata refresh failed in ${dir} (cmd: ${refresh}). Recovery: refresh by hand (cd ${dir} && ${refresh}) and re-run the version check ((cd ${dir} && ${check})) to confirm it reports in-sync."
     return 1
   fi
   ( cd "$dir" && eval "$check" ) >/dev/null 2>&1
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    _dg_alert "metadata still drifted after refresh in ${dir} (version-check rc=${rc}). Recovery: (cd ${dir} && .venv/bin/pip install -e . --no-deps) and check 'athenaeum --version'."
+    # AC3: name the multi-tree condition explicitly when it explains the
+    # failure, instead of a generic drift message + a recovery command that
+    # provably cannot fix it (athenaeum#894 — the incident this guards
+    # against: "recovery succeeds, the very next check fails identically").
+    if reason="$(_dg_venv_multi_tree_reason "$dir")"; then
+      _dg_alert "metadata still drifted after refresh in ${dir} (version-check rc=${rc}) -- CAUSE: ${reason}. The version-check and the refresh are reading/writing DIFFERENT interpreter trees, so re-running the refresh cannot clear this no matter how many times you try. Recovery: rebuild ${dir}/.venv clean on a single interpreter (athenaeum#924) -- a metadata-only reinstall will not fix a multi-tree venv."
+    else
+      _dg_alert "metadata still drifted after refresh in ${dir} (version-check rc=${rc}). Recovery: (cd ${dir} && .venv/bin/python -m pip install -e . --no-deps) and re-run the version check ((cd ${dir} && ${check})); if it drifts again, suspect a multi-tree venv (more than one lib/python*/ under .venv, or bin/python and bin/pip resolving to different interpreters)."
+    fi
     return 1
   fi
   echo "deploy-guard: metadata refreshed — installed version now matches pyproject in ${dir}" >&2

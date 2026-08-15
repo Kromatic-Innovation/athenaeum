@@ -52,6 +52,7 @@ LIST_HANDLE_KEYS: tuple[str, ...] = (
 SCALAR_HANDLE_KEYS: tuple[str, ...] = (
     "linkedin_url",
     "handles_verified",
+    "apollo_organization_id",
 )
 
 #: All source-handle keys, in canonical (template) order. This is the
