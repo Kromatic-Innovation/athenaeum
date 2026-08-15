@@ -5,7 +5,7 @@ All notable changes to Athenaeum are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.19.0] - 2026-08-15
 
 ### Added
 
@@ -57,26 +57,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [`docs/contradiction-detection.md`](docs/contradiction-detection.md#decision-answer-files-unified-decision-resolution-as-intake-athenaeum908)
   for the full format and dispatch table.
 
-### Changed
-
-- **BEHAVIOR CHANGE (athenaeum#908): `resolve_question` / `resolve_merge` /
-  `review_audit_item` now defer their state mutation.** Each MCP tool
-  still validates the id against CURRENT state immediately (unknown id,
-  already-resolved id, or invalid verdict/decision still fails right away
-  with the same `error_code` as before, and nothing is written on that
-  path), but a successful call now writes a decision-answer file instead
-  of mutating `_pending_questions.md` / `_pending_merges.md` / the
-  calibration ledger directly. The actual state change happens on the
-  next `athenaeum ingest-answers` tick. A successful response now
-  includes `deferred: true`, `answer_file`, and `decision_id` so a caller
-  can tell the difference; `resolve_merge`'s response no longer carries
-  `folded_sources` / `aliases_added` / `links_rewritten` synchronously
-  (those only exist once the next tick applies the fold). `athenaeum
-  calibration review` (the CLI twin of `review_audit_item`) is a
-  deliberate exception — it still calls `record_audit_review` directly
-  and immediately; athenaeum#908 named only the three MCP mutators.
-
-### Added
+- **The #691 PII-restore script is now a tracked, tested repo script instead
+  of an untracked hand-patched file (athenaeum#844).** The script that
+  mutates the live PII-bearing `~/knowledge` wiki lived untracked at
+  `~/Desktop/athenaeum-691-restore_pii.py` and had been hand-patched twice
+  across separate sessions with no changelog, no review, and no pointer from
+  the issue it serves; its `classify()` safe/unsafe boundary — the only thing
+  preventing over-restoration of real client PII — had zero test coverage.
+  Relocated into the repo verbatim except for one deliberate change: the
+  operator-specific half of `SAFE_EMAIL_EXACT` moves out of source and into
+  live config (`pii.restore.safe_email_exact` in `athenaeum.yaml`), since this
+  repo is public and the hardcoded set contained a real address — a script
+  whose job is keeping contact data out of a published corpus must not itself
+  publish one. Generic entries (`git@github.com`, `root@example.com`) remain
+  code defaults; a missing or malformed config block fails CLOSED to those
+  defaults, since an address absent from the allowlist stays redacted, the
+  safe direction under this codebase's over-restoring-is-worse-than-under-
+  restoring rule. `classify()`'s logic is unchanged; the resolved allowlist
+  was verified byte-identical to the previous hardcoded set.
 
 - **Per-file size/cost bound + quarantine for poison raw-intake files (athenaeum#898).**
   A single pathological raw file could silently own the entire nightly entity
@@ -174,78 +172,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `raised-tier` (a closed §5.3 vocabulary this does not reopen), the
   distinction is carried by a new machine-readable `reason` on
   `TargetResolution`, `None` for every pre-existing outcome.
-
-### Changed
-
-- **The ingest stamp advances per file, not all-or-nothing (athenaeum#895).**
-  `librarian.ingest` now records a content hash for exactly the raw files a run
-  drained from the intake queue — compiled by the entity loop, or retired by
-  the move-then-retire pass — merged into the existing stamp. A run truncated
-  by `max_files` stamps its compiled subset and leaves the remainder unstamped;
-  the next run skips the stamped subset and picks up the rest.
-
-  athenaeum#530 established the invariant that a file which was not compiled
-  must never be stamped (stamping it makes the next ingest take the no-op fast
-  path, and those notes are silently never compiled and never recallable), but
-  expressed it as a single whole-run boolean: stamp nothing unless the run
-  drained the whole backlog. With a steady backlog above `max_files` that
-  condition never holds, so the stamp never advanced and every SessionEnd
-  rediscovered the same head — measured at 86 SessionEnd runs producing 26
-  compiled files over 7 days with no stamp movement. The invariant is per file,
-  and this enforces it per file: a truncated run makes real, durable progress
-  while the uncompiled remainder stays unstamped and discoverable.
-
-  "Left the intake queue" is deliberately the signal, rather than a phase-level
-  report of what a run believed it compiled: it is observable ground truth and
-  can only ever under-approximate the drained set, so a mis-report upstream
-  cannot cause an uncompiled file to be stamped. One consequence worth naming:
-  a file that failed or was skipped as stuck (athenaeum#663) is no longer
-  stamped by an otherwise-clean run, so it is retried instead of being recorded
-  as seen and never compiled again. The manifest format is unchanged and reads
-  back-compatibly — a manifest written by the old code loads and is extended in
-  place.
-
-### Deprecated
-
-- **`pii.read_person` / `read_people` — deprecated in favour of
-  `recall(with_pii=True)` and the generic entity read (athenaeum#887).** Now
-  that athenaeum#885 and athenaeum#886 have shipped the general replacement, the
-  person-shaped entry points are marked deprecated: both emit a
-  `DeprecationWarning` (`stacklevel=2`, so it points at the CALLER's line —
-  otherwise it names `pii.py` and tells a consumer nothing about which of
-  their call sites to migrate) naming the replacement and the removal issue.
-  The `read_person` MCP tool logs a ONE-TIME notice per process, and
-  `athenaeum query person` prints one to **stderr** — never to stdout, which
-  is a JSON object a script parses and where a notice would be a breaking
-  output change dressed up as a deprecation. `docs/one-way-in-one-way-out.md`
-  §3/§5 and `docs/recall-architecture.md` now document them as deprecated
-  wrappers rather than the sanctioned entry point.
-
-  **This changes zero behaviour** — both functions keep working identically,
-  including `read_people`'s laziness and its positional calling convention,
-  and every existing result is unchanged (asserted against the generic path
-  rather than assumed). One implementation detail was required to make the
-  warning honest: `read_people` is no longer a generator function. A
-  `warnings.warn` inside a generator body does not run until the generator is
-  first advanced, so a caller that built the iterator and passed it elsewhere —
-  or never consumed it — would have got the warning at a confusing point or
-  not at all. It now warns at CALL time and RETURNS `read_entities`' generator,
-  which preserves laziness exactly: nothing is read, not even the indexes,
-  until the first pair is pulled.
-
-  Actual removal is a separate, later issue (athenaeum#888), gated on a real
-  deprecation window and on known consumers having migrated — **not** on this
-  one closing. `read_person`/`read_people` are documented public API that this
-  repo's own history proves is depended on (apollo-enrich#37/#49 followed the
-  documented path, and apollo-enrich's weekly job calls `read_people` today);
-  deleting a documented public function the same day its replacement lands is
-  the identical mistake in reverse — a caller finds the path broken with no
-  warning, exactly the silent failure `docs/one-way-in-one-way-out.md` exists
-  to prevent on the read side. Per the version-bump policy this issue is a
-  **patch** (a warning, no behaviour change); the removal will be a breaking
-  change and must bump **minor** at minimum, with a `### Removed` entry.
-
-### Added
 
 - **The generic excluded read reaches MCP and the shell (athenaeum#886).** After
   athenaeum#883/#885 the generic path existed in Python, but a caller reaching
@@ -379,6 +305,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EntityIndex` there would be a defect, not an optimization detail, since
   25.2s of the measured 28.1s single-call cost IS the `EntityIndex`
   construction.
+
+### Changed
+
+- **BEHAVIOR CHANGE (athenaeum#908): `resolve_question` / `resolve_merge` /
+  `review_audit_item` now defer their state mutation.** Each MCP tool
+  still validates the id against CURRENT state immediately (unknown id,
+  already-resolved id, or invalid verdict/decision still fails right away
+  with the same `error_code` as before, and nothing is written on that
+  path), but a successful call now writes a decision-answer file instead
+  of mutating `_pending_questions.md` / `_pending_merges.md` / the
+  calibration ledger directly. The actual state change happens on the
+  next `athenaeum ingest-answers` tick. A successful response now
+  includes `deferred: true`, `answer_file`, and `decision_id` so a caller
+  can tell the difference; `resolve_merge`'s response no longer carries
+  `folded_sources` / `aliases_added` / `links_rewritten` synchronously
+  (those only exist once the next tick applies the fold). `athenaeum
+  calibration review` (the CLI twin of `review_audit_item`) is a
+  deliberate exception — it still calls `record_audit_review` directly
+  and immediately; athenaeum#908 named only the three MCP mutators.
+
+- **The ingest stamp advances per file, not all-or-nothing (athenaeum#895).**
+  `librarian.ingest` now records a content hash for exactly the raw files a run
+  drained from the intake queue — compiled by the entity loop, or retired by
+  the move-then-retire pass — merged into the existing stamp. A run truncated
+  by `max_files` stamps its compiled subset and leaves the remainder unstamped;
+  the next run skips the stamped subset and picks up the rest.
+
+  athenaeum#530 established the invariant that a file which was not compiled
+  must never be stamped (stamping it makes the next ingest take the no-op fast
+  path, and those notes are silently never compiled and never recallable), but
+  expressed it as a single whole-run boolean: stamp nothing unless the run
+  drained the whole backlog. With a steady backlog above `max_files` that
+  condition never holds, so the stamp never advanced and every SessionEnd
+  rediscovered the same head — measured at 86 SessionEnd runs producing 26
+  compiled files over 7 days with no stamp movement. The invariant is per file,
+  and this enforces it per file: a truncated run makes real, durable progress
+  while the uncompiled remainder stays unstamped and discoverable.
+
+  "Left the intake queue" is deliberately the signal, rather than a phase-level
+  report of what a run believed it compiled: it is observable ground truth and
+  can only ever under-approximate the drained set, so a mis-report upstream
+  cannot cause an uncompiled file to be stamped. One consequence worth naming:
+  a file that failed or was skipped as stuck (athenaeum#663) is no longer
+  stamped by an otherwise-clean run, so it is retried instead of being recorded
+  as seen and never compiled again. The manifest format is unchanged and reads
+  back-compatibly — a manifest written by the old code loads and is extended in
+  place.
+
+### Deprecated
+
+- **`pii.read_person` / `read_people` — deprecated in favour of
+  `recall(with_pii=True)` and the generic entity read (athenaeum#887).** Now
+  that athenaeum#885 and athenaeum#886 have shipped the general replacement, the
+  person-shaped entry points are marked deprecated: both emit a
+  `DeprecationWarning` (`stacklevel=2`, so it points at the CALLER's line —
+  otherwise it names `pii.py` and tells a consumer nothing about which of
+  their call sites to migrate) naming the replacement and the removal issue.
+  The `read_person` MCP tool logs a ONE-TIME notice per process, and
+  `athenaeum query person` prints one to **stderr** — never to stdout, which
+  is a JSON object a script parses and where a notice would be a breaking
+  output change dressed up as a deprecation. `docs/one-way-in-one-way-out.md`
+  §3/§5 and `docs/recall-architecture.md` now document them as deprecated
+  wrappers rather than the sanctioned entry point.
+
+  **This changes zero behaviour** — both functions keep working identically,
+  including `read_people`'s laziness and its positional calling convention,
+  and every existing result is unchanged (asserted against the generic path
+  rather than assumed). One implementation detail was required to make the
+  warning honest: `read_people` is no longer a generator function. A
+  `warnings.warn` inside a generator body does not run until the generator is
+  first advanced, so a caller that built the iterator and passed it elsewhere —
+  or never consumed it — would have got the warning at a confusing point or
+  not at all. It now warns at CALL time and RETURNS `read_entities`' generator,
+  which preserves laziness exactly: nothing is read, not even the indexes,
+  until the first pair is pulled.
+
+  Actual removal is a separate, later issue (athenaeum#888), gated on a real
+  deprecation window and on known consumers having migrated — **not** on this
+  one closing. `read_person`/`read_people` are documented public API that this
+  repo's own history proves is depended on (apollo-enrich#37/#49 followed the
+  documented path, and apollo-enrich's weekly job calls `read_people` today);
+  deleting a documented public function the same day its replacement lands is
+  the identical mistake in reverse — a caller finds the path broken with no
+  warning, exactly the silent failure `docs/one-way-in-one-way-out.md` exists
+  to prevent on the read side. Per the version-bump policy this issue is a
+  **patch** (a warning, no behaviour change); the removal will be a breaking
+  change and must bump **minor** at minimum, with a `### Removed` entry.
 
 ### Fixed
 
