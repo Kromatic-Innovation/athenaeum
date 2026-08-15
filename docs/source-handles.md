@@ -52,6 +52,7 @@ entity with none populated simply does not appear in the registry.
 | `mural_board_ids` | `list[str]` | Mural board ids associated with the entity. |
 | `handles_verified` | `str` (date) | ISO date the handle set was last human-verified. |
 | `apollo_organization_id` | `str` | Apollo's organization id for the company (issue athenaeum#874). |
+| `google_resource_name` | `str` | Google People API resource name (`people/c123…`) for a contact-sync record (issue athenaeum#902). An opaque provider id, not a contact identifier — so unlike `email` it is a registry handle, not PII. |
 
 The canonical key list and their list/scalar split live in one place —
 `SOURCE_HANDLE_KEYS` (`LIST_HANDLE_KEYS` + `SCALAR_HANDLE_KEYS`) in

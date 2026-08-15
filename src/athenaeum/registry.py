@@ -53,6 +53,17 @@ SCALAR_HANDLE_KEYS: tuple[str, ...] = (
     "linkedin_url",
     "handles_verified",
     "apollo_organization_id",
+    # Issue athenaeum#902: Google People API resource name (`people/c123...`) for a
+    # contact-sync record. Registered here — the same seeding path
+    # `apollo_organization_id` (athenaeum#874) uses — so `collect_handles` picks it
+    # up from frontmatter and contact-sync records resolve their target person
+    # deterministically through registry.json instead of by reasoning. 89% of
+    # resource names recur day over day, so the registry warms almost at once.
+    #
+    # Unlike `email` (see `corrections.EMAIL_HANDLE_KEY`), a resource name is an
+    # opaque provider id, not a contact identifier: it is not PII, so it belongs
+    # in the registry rather than on the PII surface.
+    "google_resource_name",
 )
 
 #: All source-handle keys, in canonical (template) order. This is the
