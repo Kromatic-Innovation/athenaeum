@@ -27,6 +27,7 @@ from athenaeum.config import (
     resolve_spend_max_tokens_per_run,
     resolve_spend_max_usd_per_day,
     resolve_spend_max_usd_per_run,
+    resolve_spend_warning_threshold_pct,
     resolve_spend_weekly_token_limit,
 )
 from athenaeum.models import TokenUsage
@@ -484,6 +485,200 @@ class TestCeiling:
 
 
 # ---------------------------------------------------------------------------
+# Spend headroom + the warning that fires before a ceiling trips (athenaeum#926)
+# ---------------------------------------------------------------------------
+
+
+class TestHeadroom:
+    """A run at 99% of a cap and a run at 1% must stop reading identically
+    (issue athenaeum#926's whole point) — these pin the boundaries in both
+    directions, plus the unset-ceiling and which-cap-names-itself contracts.
+
+    Every test injects ``ledger_path=ledger`` explicitly (on top of the
+    ``ledger`` fixture's env-var isolation) — this is regression class
+    athenaeum#776: the ledger writer/reader must never touch the operator's live
+    ``~/.cache/athenaeum/spend.jsonl``.
+    """
+
+    #: 1 input token == $1 exactly, so test dollar figures are exact integers
+    #: instead of an approximation of real per-model pricing.
+    _RATE = {"warn-test-model": (1_000_000.0, 0.0)}
+
+    def _usage(self, dollars: int) -> TokenUsage:
+        from athenaeum.models import configure_model_rates
+
+        configure_model_rates(self._RATE)
+        u = TokenUsage()
+        u.add(dollars, 0, 0, 0, model="warn-test-model")
+        return u
+
+    # -- spend_headroom() itself -------------------------------------------
+
+    def test_headroom_reports_remaining_and_fraction_for_configured_cap(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "100")
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", raising=False)
+        headroom = spend.spend_headroom(self._usage(40), ledger_path=ledger)
+        slot = headroom["per_run"]
+        assert slot["configured"] is True
+        assert slot["cap_usd"] == 100.0
+        assert slot["consumed_usd"] == pytest.approx(40.0)
+        assert slot["remaining_usd"] == pytest.approx(60.0)
+        assert slot["fraction_consumed"] == pytest.approx(0.40)
+
+    def test_headroom_unset_cap_is_a_distinct_value_not_zero(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", raising=False)
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", raising=False)
+        headroom = spend.spend_headroom(self._usage(9999), ledger_path=ledger)
+        for slot in (headroom["per_run"], headroom["per_day"]):
+            assert slot["configured"] is False
+            assert slot["cap_usd"] is None
+            # Distinct from 0.0 -- an unset ceiling is not an exhausted one,
+            # and a 0.0 fraction/remaining would be indistinguishable from a
+            # configured-but-fully-untouched cap.
+            assert slot["remaining_usd"] is None
+            assert slot["fraction_consumed"] is None
+
+    # -- boundaries, both directions (issue athenaeum#926 AC4) --------------
+
+    def test_just_below_threshold_is_silent(
+        self,
+        ledger: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "100")
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", raising=False)
+        caplog.set_level(logging.WARNING, logger="athenaeum.spend")
+        usage = self._usage(74)  # 74% < the default 75% threshold
+        assert spend.spend_headroom_warning(usage, ledger_path=ledger) is None
+        assert spend.ceiling_tripped(usage, provider="api", ledger_path=ledger) is None
+        assert "headroom" not in caplog.text
+
+    def test_between_warning_and_ceiling_warns_but_does_not_trip(
+        self,
+        ledger: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "100")
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", raising=False)
+        caplog.set_level(logging.WARNING, logger="athenaeum.spend")
+        usage = self._usage(80)  # 80%: at/above warning threshold, below ceiling
+        warning = spend.spend_headroom_warning(usage, ledger_path=ledger)
+        assert warning is not None
+        assert "per-run" in warning
+        assert spend.ceiling_tripped(usage, provider="api", ledger_path=ledger) is None
+        assert "headroom" in caplog.text
+
+    def test_at_the_ceiling_trips_and_still_warns(
+        self,
+        ledger: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "100")
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", raising=False)
+        caplog.set_level(logging.WARNING, logger="athenaeum.spend")
+        usage = self._usage(100)  # exactly at the ceiling
+        reason = spend.ceiling_tripped(usage, provider="api", ledger_path=ledger)
+        assert reason is not None  # trips ...
+        assert "per-run" in reason
+        assert "headroom" in caplog.text  # ... and still warns, not only trips
+
+    def test_unset_ceiling_does_not_warn(
+        self,
+        ledger: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", raising=False)
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", raising=False)
+        caplog.set_level(logging.WARNING, logger="athenaeum.spend")
+        usage = self._usage(999_999)  # huge spend, but no ceiling configured
+        assert spend.spend_headroom_warning(usage, ledger_path=ledger) is None
+        assert spend.ceiling_tripped(usage, provider="api", ledger_path=ledger) is None
+        assert "headroom" not in caplog.text
+
+    # -- the warning names WHICH cap, and by how much (issue athenaeum#926 AC3) --
+
+    def test_warning_names_per_run_cap_and_amounts(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "100")
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", raising=False)
+        warning = spend.spend_headroom_warning(self._usage(90), ledger_path=ledger)
+        assert warning is not None
+        assert "per-run" in warning
+        assert "per-day" not in warning
+        assert "$90.00" in warning
+        assert "$100.00" in warning
+        assert "$10.00 remaining" in warning
+
+    def test_warning_names_per_day_cap_separately_from_per_run(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", raising=False)
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", "100")
+        warning = spend.spend_headroom_warning(self._usage(80), ledger_path=ledger)
+        assert warning is not None
+        assert "per-day" in warning
+        assert "per-run" not in warning
+
+    def test_both_caps_near_threshold_names_both(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "100")
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", "100")
+        warning = spend.spend_headroom_warning(self._usage(90), ledger_path=ledger)
+        assert warning is not None
+        assert "per-run" in warning
+        assert "per-day" in warning
+
+    # -- configurable threshold -----------------------------------------
+
+    def test_custom_warning_threshold_via_env(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "100")
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", raising=False)
+        usage = self._usage(60)  # silent at the default 75%, warns at 50%
+        monkeypatch.delenv("ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT", raising=False)
+        assert spend.spend_headroom_warning(usage, ledger_path=ledger) is None
+        monkeypatch.setenv("ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT", "50")
+        assert spend.spend_headroom_warning(usage, ledger_path=ledger) is not None
+
+    def test_day_headroom_counts_prior_ledger_spend(
+        self, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-07-15T01:00:00Z",
+                    "provider": "anthropic",
+                    "total_tokens": 100,
+                    "estimated_cost_usd": 70.0,
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", raising=False)
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_DAY", "100")
+        headroom = spend.spend_headroom(self._usage(10), ledger_path=ledger, now=now)
+        slot = headroom["per_day"]
+        assert slot["consumed_usd"] == pytest.approx(80.0)  # 70 prior + 10 this run
+        assert slot["fraction_consumed"] == pytest.approx(0.80)
+        warning = spend.spend_headroom_warning(self._usage(10), ledger_path=ledger, now=now)
+        assert warning is not None
+        assert "per-day" in warning
+
+
+# ---------------------------------------------------------------------------
 # Weekly subscription token limit + max-percent-per-day (issue athenaeum#785)
 # ---------------------------------------------------------------------------
 
@@ -646,6 +841,38 @@ class TestConfigResolvers:
         assert resolve_spend_max_pct_per_day({"spend": {"max_pct_per_day": True}}) is None
         assert resolve_spend_max_pct_per_day({"spend": {"max_pct_per_day": 0}}) is None
         assert resolve_spend_max_pct_per_day({"spend": {"max_pct_per_day": -5}}) is None
+
+    def test_warning_threshold_defaults_to_75(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT", raising=False)
+        assert resolve_spend_warning_threshold_pct(None) == 75.0
+
+    def test_warning_threshold_yaml_and_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT", raising=False)
+        assert (
+            resolve_spend_warning_threshold_pct({"spend": {"warning_threshold_pct": 60}}) == 60
+        )
+        monkeypatch.setenv("ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT", "90")
+        assert (
+            resolve_spend_warning_threshold_pct({"spend": {"warning_threshold_pct": 60}}) == 90
+        )
+
+    def test_warning_threshold_rejects_bool_and_nonpositive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT", raising=False)
+        # bool must not coerce to 1; zero/negative fall through to the default,
+        # never a threshold that would warn on a run that spent nothing.
+        assert (
+            resolve_spend_warning_threshold_pct({"spend": {"warning_threshold_pct": True}})
+            == 75.0
+        )
+        assert (
+            resolve_spend_warning_threshold_pct({"spend": {"warning_threshold_pct": 0}}) == 75.0
+        )
+        assert (
+            resolve_spend_warning_threshold_pct({"spend": {"warning_threshold_pct": -5}})
+            == 75.0
+        )
 
 
 # ---------------------------------------------------------------------------
