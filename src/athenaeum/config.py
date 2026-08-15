@@ -60,7 +60,7 @@ import copy
 import logging
 import os
 from collections.abc import Callable, Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, TypeVar
 
 import yaml
@@ -553,6 +553,67 @@ def resolve_non_intake_sources(config: dict[str, Any] | None) -> set[str]:
             if isinstance(raw, list):
                 return {s.strip() for s in raw if isinstance(s, str) and s.strip()}
     return set()
+
+
+def resolve_preserved_log_dir(config: dict[str, Any] | None) -> str | None:
+    """Resolve the preserved-log area from ``librarian.preserved_log_dir`` (issue athenaeum#837).
+
+    A **preserved log is a source document, not intake.** The operator names a
+    folder under the knowledge root here — e.g. ``preserved_log_dir: logs`` —
+    and declares that its contents are artifacts to be kept whole, referenced
+    as provenance, and never compiled into wiki prose. The `preserve`
+    disposition (:mod:`athenaeum.rules`) MOVES a matching raw file into it.
+
+    Why a directory OUTSIDE ``raw/`` rather than another flag on a file that
+    stays put. `retain` (athenaeum#903) already covers "mark it exempt where it
+    lies", and that is the weaker guarantee: the file remains in the intake
+    tree, so every future mechanism that walks ``raw/`` must remember to
+    consult the exempt manifest, and a manifest that fails open (by design —
+    see :mod:`athenaeum.compiled_exempt`) silently re-offers it. Moving the
+    file makes the guarantee structural instead of advisory: a preserved log
+    is not skipped by discovery, it is *not discoverable*, because
+    :func:`athenaeum.intake.discover_raw_files` only ever walks ``raw/``.
+
+    Returns the operator's value as a **relative POSIX path string**, or
+    ``None`` when unset or unusable. Rejected (with a ``log.warning``, never a
+    raise — an unusable value must not take the nightly run down): an absolute
+    path, and any value escaping the knowledge root via ``..``. Both would
+    write outside the knowledge git repo, which is precisely where a preserved
+    artifact must not go — outside the repo it is neither versioned nor
+    recoverable, and the whole point of preservation is that the artifact
+    survives.
+
+    DEFAULT-NONE: a fresh install has no preserved area, so a `preserve` rule
+    is inert until an operator configures one (the feature is opt-in twice
+    over — the area AND a rule). No seed in ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    if not isinstance(config, dict):
+        return None
+    cfg = config.get("librarian")
+    if not isinstance(cfg, dict):
+        return None
+    raw = cfg.get("preserved_log_dir")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    candidate = raw.strip()
+    if PurePosixPath(candidate).is_absolute() or Path(candidate).is_absolute():
+        logger.warning(
+            "librarian.preserved_log_dir %r is an absolute path — a preserved "
+            "log must live inside the knowledge git repo to be versioned and "
+            "recoverable. Ignoring (issue athenaeum#837).",
+            candidate,
+        )
+        return None
+    parts = PurePosixPath(candidate).parts
+    if any(p == ".." for p in parts):
+        logger.warning(
+            "librarian.preserved_log_dir %r escapes the knowledge root via "
+            "'..' — ignoring (issue athenaeum#837).",
+            candidate,
+        )
+        return None
+    normalized = PurePosixPath(candidate).as_posix().strip("/")
+    return normalized or None
 
 
 def resolve_min_cluster_cohesion(config: dict[str, Any] | None) -> float:
