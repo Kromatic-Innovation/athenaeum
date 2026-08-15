@@ -368,10 +368,15 @@ class TestWorkedExampleEndToEnd:
         # The entity page named by the correction is untouched.
         assert page.read_text() == page_before
 
-        # The fact landed on the PII surface instead.
-        surface_file = root / "excluded" / "person-alex.json"
+        # The fact landed on the PII surface instead -- as the SAME markdown
+        # contact-record shape `classify_contact_value`/`iter_contact_records`
+        # read and write (issue athenaeum#872), not a parallel `{uid}.json`.
+        from athenaeum.models import parse_frontmatter
+
+        surface_file = root / "excluded" / "person-alex.md"
         assert surface_file.exists()
-        assert json.loads(surface_file.read_text())["bounced"] == "2026-08-06"
+        surface_meta, _ = parse_frontmatter(surface_file.read_text())
+        assert surface_meta["bounced"] == "2026-08-06"
 
         ledger = wiki / "_corrections_applied.jsonl"
         record = json.loads(ledger.read_text().splitlines()[0])
