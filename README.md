@@ -268,7 +268,7 @@ Example round-trip:
 
 ## Installation
 
-Requires Python 3.11+.
+Requires Python 3.13+.
 
 ```bash
 pip install athenaeum

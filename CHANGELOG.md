@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.19.0] - 2026-08-15
 
+_Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never shipped to PyPI; the last published release was v0.18.1._
+
 ### Added
 
 - **Recall identity resolution: handle-shaped queries answer by exact reverse
@@ -74,7 +76,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defaults, since an address absent from the allowlist stays redacted, the
   safe direction under this codebase's over-restoring-is-worse-than-under-
   restoring rule. `classify()`'s logic is unchanged; the resolved allowlist
-  was verified byte-identical to the previous hardcoded set.
+  was verified byte-identical to the previous hardcoded set. This relocation
+  does not yet add an automated test for `classify()`'s safe/unsafe boundary
+  — verification here was manual (byte-identical allowlist, a real address
+  still classifying as `None`, and a clean `--limit 40` dry run against the
+  live wiki) rather than a `tests/` regression test; that gap is tracked
+  separately and not closed by this entry.
+
+- **`docs/north-star.md`** — canonical statement of the project's purpose and
+  operating principles, linked from the README.
 
 - **Per-file size/cost bound + quarantine for poison raw-intake files (athenaeum#898).**
   A single pathological raw file could silently own the entire nightly entity
