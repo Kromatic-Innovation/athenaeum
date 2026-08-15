@@ -463,24 +463,32 @@ def detect_contradictions(
                         config,
                     ),
                 ),
-                # Prompt-caching breakpoint (issue athenaeum#790): the detector system
-                # prompt is constant across every detector call in a run (86 calls
-                # in the athenaeum#764 drain run) and does not vary by cluster, so
-                # it is the stable prefix worth marking cacheable. Mirrors the
-                # resolver's breakpoint (issue athenaeum#230, resolutions.py
-                # `_RESOLVE_SYSTEM`) — set unconditionally at the call site; the
-                # `api` backend preserves it and the `claude-cli` backend strips
-                # it, per `ProviderCapabilities.honors_cache_control`
-                # (athenaeum#573).
+                # DELIBERATELY UNCACHED (issue athenaeum#927). athenaeum#790 marked
+                # `_DETECT_SYSTEM` with a `cache_control` breakpoint on correct
+                # reasoning — it IS the stable prefix here, constant across every
+                # detector call in a run (86 calls in the athenaeum#764 drain run)
+                # and invariant across clusters — but the breakpoint could never
+                # engage and was removed here.
+                #
+                # `_DETECT_SYSTEM` is 630 tokens (live `count_tokens`, athenaeum#927).
+                # The detector runs on the `classify` knob, i.e. Haiku 4.5, whose
+                # minimum cacheable prefix is 4,096 tokens — the HIGHEST floor of
+                # any current model (`models._MIN_CACHEABLE_PREFIX_TOKENS`). An
+                # under-length breakpoint is not an error: the API accepts it and
+                # ignores it, so the marking reported success while
+                # `cache_creation_input_tokens` stayed 0 across six metered runs.
+                #
+                # Padding the prompt to 4,096 tokens to make it cacheable would add
+                # ~3,500 tokens to every call to save ~90% on 630 — strictly worse.
+                # The breakpoint is therefore removed rather than reinstated: a
+                # marking that cannot engage must not remain in the source implying
+                # that it does. Restore it only if this call site's model moves to a
+                # tier whose floor is below the prefix length — which
+                # `tests/test_cache_control_minimums.py` checks mechanically, so
+                # that judgement is not left to a future reader's arithmetic.
                 system=cast(
                     "list[TextBlockParam]",
-                    [
-                        {
-                            "type": "text",
-                            "text": _DETECT_SYSTEM,
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ],
+                    [{"type": "text", "text": _DETECT_SYSTEM}],
                 ),
                 messages=cast(
                     "list[MessageParam]", [{"role": "user", "content": user_msg}]

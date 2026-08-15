@@ -645,6 +645,39 @@ def _hc_consequence_merge(cross_ref: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Prompt caching: the four entity-phase system prompts are DELIBERATELY UNCACHED
+# (issue athenaeum#927)
+# ---------------------------------------------------------------------------
+#
+# None of CLASSIFY / CREATE / MERGE / MERGE_FULL carries a `cache_control`
+# breakpoint, and that is a decision recorded here rather than an omission.
+#
+# The entity phase dominates athenaeum's token volume, so it reads as the obvious
+# place to cache. It is not, for two independent reasons:
+#
+# 1. The system prompts are far too short to be cacheable. Measured as a
+#    conservative lower bound (`models.estimate_prompt_tokens`): CLASSIFY ~439
+#    tokens, CREATE ~246, MERGE ~742, MERGE_FULL ~378. CLASSIFY runs on the
+#    `classify` knob (Haiku 4.5, floor 4,096); the three write-knob prompts run
+#    on Sonnet 5 (floor 1,024). Every one is below its model's minimum, so a
+#    breakpoint here would be accepted and then silently ignored — the exact
+#    inert-marking failure athenaeum#790 shipped in the detector and athenaeum#927
+#    removed. Reaching Haiku's 4,096-token floor would mean padding CLASSIFY with
+#    ~3,650 tokens of filler on every call to cache 439: a large net LOSS.
+#
+# 2. The volume is not in the prefix. What makes the entity phase expensive is the
+#    per-call USER message — the raw observation, the existing page body echoed
+#    for a merge, the fenced source document. That content differs on every call
+#    by construction, so it is not a stable prefix and is not cacheable at any
+#    prompt length. Caching cannot address entity-phase cost; reducing what is
+#    echoed into the user message (athenaeum#469's patch-mode merge, which stopped
+#    reproducing whole pages) is the lever that does.
+#
+# Revisit only if a call site's model moves to a tier whose floor drops below the
+# prompt length — `tests/test_cache_control_minimums.py` asserts the property
+# mechanically against the model each prompt is ACTUALLY sent to, so this comment
+# cannot quietly go stale.
 CLASSIFY_SYSTEM = (
     """You are a knowledge librarian assistant. You analyze raw observation text
 and extract structured entity information.

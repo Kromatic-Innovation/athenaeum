@@ -65,38 +65,56 @@ class PromptMeta:
     constant: str  # constant name in that module, e.g. "CLASSIFY_SYSTEM"
     knob: str  # model knob string passed to config.resolve_model(...)
     max_tokens: int  # output-token budget at the call site
+    #: Whether the call site sets a ``cache_control`` breakpoint on this prompt
+    #: (issue athenaeum#927). Declared here so the minimum-cacheable-prefix property
+    #: can be checked against the model the knob above actually resolves to —
+    #: an under-length breakpoint is silently ignored by the API, so nothing
+    #: else would notice it going inert. See
+    #: ``tests/test_cache_control_minimums.py``.
+    cacheable: bool
 
 
 # Single source of truth: (registry name, home-module constant, model knob,
 # max_tokens). The module is derived from the name's first segment, so the name,
 # the constant, and the call-site knobs/budgets are recorded exactly once. Knob
 # and max_tokens were read from each prompt's live call site (see docs/prompts.md).
-_META_ROWS: list[tuple[str, str, str, int]] = [
-    ("tiers.classify_system", "CLASSIFY_SYSTEM", "classify", 4096),
-    ("tiers.classify_user_template", "CLASSIFY_USER_TEMPLATE", "classify", 4096),
+#
+# ``cacheable`` (issue athenaeum#927) is the LAST element: whether the call site marks
+# this prompt with a ``cache_control`` breakpoint. Exactly one prompt does today —
+# ``resolutions.resolve_system``, the only one long enough to clear its model's
+# minimum cacheable prefix. Flipping a row to ``True`` without the prefix clearing
+# that minimum fails ``tests/test_cache_control_minimums.py`` rather than shipping
+# a breakpoint the API accepts and silently ignores.
+_META_ROWS: list[tuple[str, str, str, int, bool]] = [
+    ("tiers.classify_system", "CLASSIFY_SYSTEM", "classify", 4096, False),
+    ("tiers.classify_user_template", "CLASSIFY_USER_TEMPLATE", "classify", 4096, False),
     # write-knob budgets re-baselined by issue athenaeum#578 (Sonnet-5-bound + adaptive
     # thinking headroom): create/merge_patch 2048 -> 6144, merge_full 8192 -> 12288.
-    ("tiers.create_system", "CREATE_SYSTEM", "write", 6144),
-    ("tiers.create_template", "CREATE_TEMPLATE", "write", 6144),
-    ("tiers.merge_system", "MERGE_SYSTEM", "write", 6144),
-    ("tiers.merge_system_full", "MERGE_SYSTEM_FULL", "write", 12288),
-    ("tiers.merge_template", "MERGE_TEMPLATE", "write", 6144),
-    ("tiers.merge_template_full", "MERGE_TEMPLATE_FULL", "write", 12288),
-    ("contradictions.detect_system", "_DETECT_SYSTEM", "classify", 1024),
+    ("tiers.create_system", "CREATE_SYSTEM", "write", 6144, False),
+    ("tiers.create_template", "CREATE_TEMPLATE", "write", 6144, False),
+    ("tiers.merge_system", "MERGE_SYSTEM", "write", 6144, False),
+    ("tiers.merge_system_full", "MERGE_SYSTEM_FULL", "write", 12288, False),
+    ("tiers.merge_template", "MERGE_TEMPLATE", "write", 6144, False),
+    ("tiers.merge_template_full", "MERGE_TEMPLATE_FULL", "write", 12288, False),
+    # athenaeum#927: breakpoint REMOVED — 630 tokens against Haiku 4.5's 4,096-token
+    # floor never engaged. See the call site in contradictions.py.
+    ("contradictions.detect_system", "_DETECT_SYSTEM", "classify", 1024, False),
     # resolve-knob budgets re-baselined by issue athenaeum#578 (Opus-5-bound adaptive
     # thinking headroom): resolve 1024 -> 8192, freetext_edit 4096 -> 8192.
-    ("resolutions.resolve_system", "_RESOLVE_SYSTEM", "resolve", 8192),
-    ("resolutions.freetext_edit_system", "_FREETEXT_EDIT_SYSTEM", "resolve", 8192),
-    ("claim_kind.claim_kind_system", "CLAIM_KIND_SYSTEM", "classify", 64),
-    ("query_topics.system_prompt", "_SYSTEM_PROMPT", "topic", 256),
-    ("query_topics.user_template", "_USER_TEMPLATE", "topic", 256),
-    ("reasoning_tiers.t1_system_prompt", "T1_SYSTEM_PROMPT", "reasoning_t1", 256),
-    ("reasoning_tiers.t2_system_prompt", "T2_SYSTEM_PROMPT", "reasoning_t2", 4096),
+    ("resolutions.resolve_system", "_RESOLVE_SYSTEM", "resolve", 8192, True),
+    ("resolutions.freetext_edit_system", "_FREETEXT_EDIT_SYSTEM", "resolve", 8192, False),
+    ("claim_kind.claim_kind_system", "CLAIM_KIND_SYSTEM", "classify", 64, False),
+    ("query_topics.system_prompt", "_SYSTEM_PROMPT", "topic", 256, False),
+    ("query_topics.user_template", "_USER_TEMPLATE", "topic", 256, False),
+    ("reasoning_tiers.t1_system_prompt", "T1_SYSTEM_PROMPT", "reasoning_t1", 256, False),
+    ("reasoning_tiers.t2_system_prompt", "T2_SYSTEM_PROMPT", "reasoning_t2", 4096, False),
 ]
 
 PROMPT_META: dict[str, PromptMeta] = {
-    name: PromptMeta("athenaeum." + name.split(".", 1)[0], constant, knob, max_tokens)
-    for name, constant, knob, max_tokens in _META_ROWS
+    name: PromptMeta(
+        "athenaeum." + name.split(".", 1)[0], constant, knob, max_tokens, cacheable
+    )
+    for name, constant, knob, max_tokens, cacheable in _META_ROWS
 }
 
 #: The distinct model knobs, derived from ``_META_ROWS`` (issue athenaeum#781) rather
@@ -104,7 +122,7 @@ PROMPT_META: dict[str, PromptMeta] = {
 #: per-knob attribution (:mod:`athenaeum.spend`, ``athenaeum spend --by-knob``)
 #: and its tests key off of, so the knob set cannot drift from the prompts
 #: that actually define it. Sorted for stable iteration/display order.
-KNOBS: tuple[str, ...] = tuple(sorted({knob for _, _, knob, _ in _META_ROWS}))
+KNOBS: tuple[str, ...] = tuple(sorted({knob for _, _, knob, _, _ in _META_ROWS}))
 
 
 def _resolve(meta: PromptMeta) -> str:
