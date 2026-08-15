@@ -50,6 +50,7 @@ from typing import Any, cast
 
 from athenaeum._lint import _strip_self_reference
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.compiled_exempt import load_exempt
 from athenaeum.config import (
     load_config,
     resolve_ephemeral_scopes,
@@ -350,6 +351,13 @@ def discover_raw_files(
 
     non_intake = resolve_non_intake_sources(config)
     raw_file_max_bytes = resolve_raw_file_max_bytes(config)
+    # Issue athenaeum#903: a `retain`-dispositioned file is a long-lived SOURCE
+    # DOCUMENT, marked compiled-exempt in the manifest under the knowledge root.
+    # Filtering here — inside discovery itself rather than at any one call site
+    # — is what makes "skipped by discovery on EVERY subsequent run" true for
+    # the entity loop, the drain backlog count and `status` alike, without
+    # touching a single caller. Fails open to an empty set.
+    exempt_refs = load_exempt(raw_root.parent)
 
     for source_dir in sorted(raw_root.iterdir()):
         if not source_dir.is_dir():
@@ -374,6 +382,12 @@ def discover_raw_files(
         )
         for fpath in candidates:
             if fpath.name == ".gitkeep":
+                continue
+            # Issue athenaeum#903 (`retain`): compiled-exempt — a preserved source
+            # document. Still on disk, never offered to the tiers again. The key
+            # is ``RawFile.ref`` (``source/filename``), the same identifier the
+            # audit ledger uses.
+            if exempt_refs and f"{source}/{fpath.name}" in exempt_refs:
                 continue
             if fpath.suffix.lower() == ".jsonl" and _is_claimed_correction_batch(
                 fpath
