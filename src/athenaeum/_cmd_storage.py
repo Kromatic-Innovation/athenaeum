@@ -40,7 +40,13 @@ from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
-from athenaeum.pii import is_pii_class_excluded, scan_corpus_pii
+from athenaeum.pii import (
+    PII_ALLOWLIST_FILENAME,
+    adjudicate_corpus_pii,
+    is_pii_class_excluded,
+    load_pii_allowlist,
+    scan_corpus_pii,
+)
 from athenaeum.storage_migrate import (
     NameEmailRenameReport,
     PiiMigrationPlan,
@@ -219,6 +225,20 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--json",
         action="store_true",
         help="Emit machine-readable JSON findings instead of plain text.",
+    )
+    lint_p.add_argument(
+        "--allowlist",
+        type=Path,
+        default=None,
+        help=(
+            "Adjudicated allowlist of values that are NOT PII (service "
+            "accounts, tagged test addresses, example-domain placeholders, "
+            "identifier/timestamp digit runs the phone axis misreads). Each "
+            "entry needs a non-empty reason. Default: "
+            f"<knowledge-root>/wiki/{PII_ALLOWLIST_FILENAME}. A missing file "
+            "means nothing is adjudicated. The allowlist is excluded from its "
+            "own scan (issue athenaeum#936, unblocking athenaeum#437)."
+        ),
     )
 
 
@@ -578,10 +598,33 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
     inline email/phone token. Exits :data:`EXIT_PII_FOUND` (2) when any is
     found so a body-text email cannot silently regrow after the sweep, ``0``
     when the corpus is clean.
+
+    athenaeum#936 adds adjudication (unblocking athenaeum#437): a finding whose
+    value carries a reasoned entry in the allowlist is reported as adjudicated
+    residue and does NOT fail the gate, while an unexplained finding fails
+    exactly as before — a value is never tolerated by OMISSION. The allowlist
+    is excluded from its own scan, without which exit 0 is unreachable (the
+    artifact is by construction a list of verbatim contact values).
     """
     knowledge_root = _resolve_knowledge_root(args)
     wiki_root = knowledge_root / "wiki"
-    findings = scan_corpus_pii(wiki_root)
+    allowlist_path = getattr(args, "allowlist", None) or (
+        wiki_root / PII_ALLOWLIST_FILENAME
+    )
+    entries, errors = load_pii_allowlist(allowlist_path)
+    # Self-exclusion: scanning the allowlist would make every adjudicated value
+    # a fresh finding and put exit 0 permanently out of reach.
+    findings = scan_corpus_pii(wiki_root, exclude=[allowlist_path])
+    result = adjudicate_corpus_pii(findings, entries, errors=errors)
+
+    for err in result.errors:
+        print(f"warning: allowlist entry ignored -- {err}", file=sys.stderr)
+    for entry in result.stale:
+        print(
+            f"warning: stale allowlist entry (matches nothing in the corpus): "
+            f"{entry.value!r} -- {entry.reason}",
+            file=sys.stderr,
+        )
 
     if args.json:
         import json
@@ -589,25 +632,40 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
         payload = [
             {
                 "path": str(f.path),
-                "emails": f.emails,
-                "phones": f.phones,
+                # Back-compat: `emails`/`phones` remain the UNEXPLAINED tokens,
+                # i.e. exactly what the gate fails on, as before athenaeum#936.
+                "emails": f.unexplained_emails,
+                "phones": f.unexplained_phones,
+                "allowlisted": f.allowlisted,
+                "adjudicated": f.is_adjudicated,
             }
-            for f in findings
+            for f in result.findings
         ]
         sys.stdout.write(json.dumps(payload) + "\n")
-        return EXIT_PII_FOUND if findings else 0
+        return 0 if result.is_clean else EXIT_PII_FOUND
 
-    if not findings:
-        print(f"0 inline PII findings under {wiki_root}")
+    # With nothing adjudicated the output is verbatim what it was before
+    # athenaeum#936 ("a missing allowlist means behaviour is unchanged from
+    # today"); the two-population wording appears only once there IS residue to
+    # distinguish, so the common case reads no differently for its operators.
+    adjudicated = result.adjudicated_count
+    qualifier = "unexplained " if adjudicated else ""
+    residue = f" ({adjudicated} adjudicated residue)" if adjudicated else ""
+
+    if result.is_clean:
+        print(f"0 {qualifier}inline PII findings under {wiki_root}{residue}")
         return 0
 
-    n = sum(len(f.emails) + len(f.phones) for f in findings)
-    print(f"{n} inline PII finding(s) in {len(findings)} file(s) under {wiki_root}:")
-    for f in findings:
+    unexplained_files = [f for f in result.findings if not f.is_adjudicated]
+    print(
+        f"{result.unexplained_count} {qualifier}inline PII finding(s) in "
+        f"{len(unexplained_files)} file(s) under {wiki_root}{residue}:"
+    )
+    for f in unexplained_files:
         parts: list[str] = []
-        if f.emails:
-            parts.append(f"emails={f.emails}")
-        if f.phones:
-            parts.append(f"phones={f.phones}")
+        if f.unexplained_emails:
+            parts.append(f"emails={f.unexplained_emails}")
+        if f.unexplained_phones:
+            parts.append(f"phones={f.unexplained_phones}")
         print(f"  {f.path}: {'; '.join(parts)}")
     return EXIT_PII_FOUND
