@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example shape rule (issue athenaeum#901) -- NOT loaded automatically. Copy
+# this file (or a variant) into <knowledge-root>/rules/ to activate it;
+# `athenaeum init --with-rules` does that copy for you.
+#
+# Recognises a delivery-status monitor's bounce record --
+# docs/field-corrections.md §11.1's worked example -- and compiles it into a
+# conformant field correction. Ships in "observe" mode: review
+# wiki/_shape_rules_applied.jsonl after a few runs before flipping this
+# rule's own copy to `mode: live`. See docs/shape-rules.md for the full
+# rule-schema reference.
+
+version: 1
+name: example-contact-bounce
+mode: observe
+
+match:
+  source: delivery-monitor
+  format: jsonl
+  fields:
+    status:
+      exact: bounced
+
+disposition: emit
+correction:
+  target:
+    type: person
+    handle:
+      email: "$email"
+  op: set
+  field: bounced
+  value: "$status_date"
+  source: "script:example-contact-bounce"
+  observed_at: "$observed_at"
+  note: "auto-compiled from a delivery-status monitor record"

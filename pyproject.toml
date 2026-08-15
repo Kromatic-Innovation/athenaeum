@@ -98,6 +98,12 @@ include = [
     "src/athenaeum/py.typed",
     "src/athenaeum/schema/**/*.md",
     "src/athenaeum/templates/**/*.md",
+    # Packaged shape-rule examples (issue athenaeum#901) -- copied into
+    # <knowledge-root>/rules/ by `athenaeum init --with-rules`, never
+    # hardcoded engine defaults. Same force-inclusion rationale as the two
+    # entries above: a bundled resource an operator opts into at runtime
+    # must actually ship in the wheel, not just in git.
+    "src/athenaeum/rule_examples/**/*.yaml",
 ]
 
 # Ship the bundled skills/ directory (adapter-authoring, issue athenaeum#419) INSIDE the
