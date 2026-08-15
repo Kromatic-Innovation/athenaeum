@@ -1,0 +1,18 @@
+{
+  "description": "Synthetic run shape encoding the pattern athenaeum#899 names from the 2026-08-14 intake-architecture review: a SessionEnd run that hits its wall-clock deadline having spent several LLM calls (the review's own range was 5-14 per run) and committed zero files, deferring the exact same raw-file refs it deferred the previous run (no progress against the deferral set). Committed in-repo per athenaeum#899's Plan step 4 -- no host log archive is read by the tests that replay this fixture.",
+  "api_calls": 9,
+  "raw_file_refs": [
+    "sessions/20260810T221500Z-aa11bb22.md",
+    "sessions/20260810T221600Z-cc33dd44.md"
+  ],
+  "deferred_refs": [
+    "sessions/20260810T221500Z-aa11bb22.md",
+    "sessions/20260810T221600Z-cc33dd44.md"
+  ],
+  "failed_refs": [],
+  "previous_deferred_refs": [
+    "sessions/20260810T221500Z-aa11bb22.md",
+    "sessions/20260810T221600Z-cc33dd44.md"
+  ],
+  "previous_consecutive": 2
+}

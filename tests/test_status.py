@@ -93,6 +93,36 @@ class TestStatus:
         assert info["entity_count"] == 0
         assert info["pending_questions"] == 0
 
+    def test_status_zero_yield_defaults_to_zero(self, tmp_path: Path) -> None:
+        # Issue athenaeum#899: no librarian run has ever finalized against this
+        # knowledge base -- no ``zero_yield_state.json`` cache-dir sidecar
+        # exists, and the read-side (:func:`athenaeum.zero_yield.load_state`)
+        # fails open to ``0`` rather than raising.
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        info = status(root)
+        assert info["zero_yield_consecutive"] == 0
+
+    def test_status_surfaces_persisted_zero_yield_count(self, tmp_path: Path) -> None:
+        # Issue athenaeum#899 AC 4: the consecutive-zero-yield count the
+        # librarian finalize phase persisted is surfaced in ``athenaeum
+        # status`` -- exercised here via the SAME sidecar-writing function
+        # the finalize phase calls, without driving a full librarian run.
+        # Written under the CACHE dir (redirected to a per-test tmp dir by
+        # the ``_isolate_cache_dir`` autouse fixture), not the knowledge
+        # root -- see ``athenaeum.zero_yield``'s module docstring for why.
+        from athenaeum.config import resolve_cache_dir
+        from athenaeum.zero_yield import write_state
+
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        write_state(resolve_cache_dir(), consecutive=4, deferred_refs=["a.md"])
+
+        info = status(root)
+        assert info["zero_yield_consecutive"] == 4
+
     def test_format_status(self) -> None:
         info = {
             "raw_pending": 3,
@@ -107,6 +137,40 @@ class TestStatus:
         assert "Wiki entities:        10" in output
         assert "person: 5" in output
         assert "Pending questions:    1" in output
+
+    def test_format_status_includes_zero_yield_line(self) -> None:
+        info = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+            "zero_yield_consecutive": 5,
+        }
+        output = format_status(info)
+        assert "Zero-yield runs:      5 consecutive" in output
+
+    def test_format_status_omits_zero_yield_line_when_healthy(self) -> None:
+        # Issue athenaeum#899: a healthy run (count 0, or the key altogether
+        # absent on a pre-athenaeum#899 status dict) must not clutter status
+        # output -- mirrors the drain-advisory "only when actionable" rule.
+        info = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+            "zero_yield_consecutive": 0,
+        }
+        output = format_status(info)
+        assert "Zero-yield" not in output
+
+        # And the pre-athenaeum#899 dict (key absent entirely) still formats cleanly.
+        del info["zero_yield_consecutive"]
+        output = format_status(info)  # type: ignore[arg-type]
+        assert "Zero-yield" not in output
 
     def test_cli_status(self, tmp_path: Path) -> None:
         from athenaeum.cli import main
