@@ -340,16 +340,23 @@ class TestPromptBuilding:
         for name in ("alpha.md", "bravo.md", "charlie.md"):
             assert name in user_content
 
-    def test_detector_call_carries_cache_control_breakpoint(
+    def test_detector_call_carries_no_cache_control_breakpoint(
         self, tmp_path: Path
     ) -> None:
-        """Issue athenaeum#790: the detector system prompt is sent as a cacheable block.
+        """Issue athenaeum#927 supersedes athenaeum#790: the breakpoint is REMOVED.
 
-        The detector system prompt is constant across every call in a run, so
-        it is marked with an ephemeral ``cache_control`` breakpoint (mirroring
-        the resolver's pre-existing breakpoint, issue athenaeum#230) so prompt
-        caching engages on the ``api`` backend whenever the configured model's
-        minimum cacheable prefix allows it.
+        athenaeum#790 added an ephemeral ``cache_control`` breakpoint here and this
+        test asserted it. The breakpoint could never engage: ``_DETECT_SYSTEM`` is
+        630 tokens and the detector runs on the ``classify`` knob (Haiku 4.5),
+        whose minimum cacheable prefix is 4,096 tokens. An under-length breakpoint
+        is accepted by the API and silently ignored, so athenaeum#790's test passed
+        for two days of metered runs while the marking did nothing — it asserted
+        the REQUEST carried the block, which was never in doubt, rather than that
+        the block could take effect.
+
+        The system prompt is still sent as a single text block; only the inert
+        marking is gone. ``tests/test_cache_control_minimums.py`` now asserts the
+        property athenaeum#790's test could not.
         """
         import athenaeum.contradictions as contradictions_mod
 
@@ -369,7 +376,7 @@ class TestPromptBuilding:
         block = system[0]
         assert block["type"] == "text"
         assert block["text"] == contradictions_mod._DETECT_SYSTEM
-        assert block["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in block
 
 
 # ---------------------------------------------------------------------------
