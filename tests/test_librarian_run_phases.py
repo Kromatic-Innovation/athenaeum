@@ -156,6 +156,11 @@ class TestRunContext:
             "entity_budget_tripped": True,
             "entity_files_claimed": 5,
             "entity_files_deferred": 2,
+            # Issue athenaeum#899: the zero-yield alarm's verdict, exported
+            # alongside the other run-state flags. ``None`` here — the
+            # predicate is only evaluated by ``_run_finalize_phase``, which
+            # this unit test never calls.
+            "zero_yield": None,
         }
 
     def test_mutation_through_context_is_visible_to_next_phase(

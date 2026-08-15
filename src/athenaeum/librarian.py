@@ -89,7 +89,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from athenaeum import detection_state, spend
+from athenaeum import detection_state, spend, zero_yield
 from athenaeum._retry import TransientAPIError
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.bounce_contract import check_tier0_bounce_conformance
@@ -404,6 +404,18 @@ DEFAULT_QUARANTINE_THRESHOLD = 2
 # violations). Mirrors STUCK_FILE_PREFIX's role for athenaeum#663 — a log-scraper /
 # watchdog can grep this without parsing prose.
 QUARANTINE_FILE_PREFIX = "librarian-quarantine-file"
+
+# Stable, machine-greppable prefix for the WARNING emitted when a run trips
+# the zero-yield predicate at finalize (issue athenaeum#899): it spent at least one
+# LLM call, committed zero files, and made no progress against the previous
+# run's deferred set. Mirrors STUCK_FILE_PREFIX / QUARANTINE_FILE_PREFIX's
+# role — a silent, months-long waste pattern (406 of 856 all-time runs
+# processed zero files) is otherwise visible only by reading log archives
+# after the fact; this line makes it a signal the operator sees the next
+# morning. See :mod:`athenaeum.zero_yield` for the persisted cross-run state
+# (consecutive count + previous-run deferred set) this predicate reads and
+# updates.
+ZERO_YIELD_PREFIX = "librarian-zero-yield"
 
 # Fallback valid values if schema files are missing
 FALLBACK_TYPES = [
@@ -2574,6 +2586,7 @@ def _render_run_summary(
     *,
     schema_fragments: "dict[str, tuple[str, bool]] | None" = None,
     prompt_manifest_hash: "str | None" = None,
+    zero_yield_consecutive: "int | None" = None,
 ) -> str:
     """Render the accumulated per-phase *profile* into ONE greppable line.
 
@@ -2588,7 +2601,7 @@ def _render_run_summary(
 
         librarian-run-summary total_secs=12.3 \
             schema_fragments=observation-filter:default,_entity-template:a1b2c3d4 \
-            prompt_manifest=9f8e7d6c | wiki-dedup secs=0.1 | \
+            prompt_manifest=9f8e7d6c zero_yield=0 | wiki-dedup secs=0.1 | \
             entity secs=4.2 calls=6 created=2 updated=1 escalated=0 files=3 | \
             auto-memory secs=7.8 detector_haiku=4 resolver_opus=1 \
             sweep_pairs=0 clusters_merged=2 escalations=0 | retire secs=0.1 | \
@@ -2603,6 +2616,17 @@ def _render_run_summary(
     omitted when their argument is ``None`` (the pure formatting default), so
     the pre-athenaeum#567 head and the direct unit-test callers are byte-unchanged. No
     phase logic, ordering, or exit code is affected.
+
+    ``zero_yield_consecutive`` (issue athenaeum#899) is the run's zero-yield counter:
+    the CONSECUTIVE zero-yield run count as of this run, persisted by
+    :mod:`athenaeum.zero_yield` — ``0`` when this run was NOT zero-yield
+    (calls spent, files committed, or the deferral set made progress), and
+    the running streak length when it was. Rendered only when its argument
+    is not ``None`` (the finalize phase always passes a concrete value; the
+    early deadline-trip exit paths that call :meth:`RunContext.emit_run_summary`
+    before finalize runs never evaluate the predicate, so it stays omitted
+    there — same "omit on ``None``" contract as the two attribution fields
+    above).
     """
     total_secs = sum(secs for _phase, secs, _fields in profile)
     head = f"{RUN_SUMMARY_PREFIX} total_secs={total_secs:.3f}"
@@ -2612,6 +2636,8 @@ def _render_run_summary(
         )
     if prompt_manifest_hash is not None:
         head += f" prompt_manifest={prompt_manifest_hash}"
+    if zero_yield_consecutive is not None:
+        head += f" zero_yield={zero_yield_consecutive}"
     parts = [head]
     for phase, secs, fields in profile:
         tokens = " ".join(f"{k}={v}" for k, v in fields.items())
@@ -2730,6 +2756,15 @@ class RunContext:
 
     # --- finalize-phase handoff --------------------------------------------
     files_processed_count: int = 0
+    # Issue athenaeum#899: the zero-yield predicate's verdict for THIS run and the
+    # persisted consecutive-zero-yield count as of this run (post-update).
+    # Both stay ``None`` until ``_run_finalize_phase`` evaluates the
+    # predicate — never on the early deadline-trip exit paths (their
+    # ``emit_run_summary`` call happens BEFORE finalize runs, so the
+    # zero-yield fields are correctly absent from that summary line, per the
+    # issue's Plan: the predicate lives in the finalize path only).
+    zero_yield_tripped: bool | None = None
+    zero_yield_consecutive: int | None = None
 
     def deadline_exceeded(self) -> bool:
         return self.run_deadline is not None and time.monotonic() >= self.run_deadline
@@ -2776,6 +2811,13 @@ class RunContext:
             self.out_run_stats["entity_budget_tripped"] = self.entity_budget_tripped
             self.out_run_stats["entity_files_claimed"] = self.processed_count
             self.out_run_stats["entity_files_deferred"] = len(self.deferred_refs)
+            # Issue athenaeum#899: the zero-yield alarm's verdict, machine-detectable
+            # alongside the other run-state flags above rather than requiring a
+            # consumer to parse the WARNING text or the run-summary line.
+            # ``None`` (not yet evaluated — e.g. an early deadline-trip exit,
+            # or dry-run) is exported as-is rather than coerced to ``False``,
+            # so a consumer can tell "not zero-yield" from "not evaluated".
+            self.out_run_stats["zero_yield"] = self.zero_yield_tripped
 
     def emit_run_summary(self) -> None:
         if self.summary_emitted:
@@ -2806,6 +2848,7 @@ class RunContext:
                 self.run_profile,
                 schema_fragments=frag_state,
                 prompt_manifest_hash=manifest_hash,
+                zero_yield_consecutive=self.zero_yield_consecutive,
             ),
         )
 
@@ -4569,6 +4612,42 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#899: the zero-yield alarm. athenaeum#669 (closed) emits entity-share
+# yield as run state and cron-fleet#94 (closed) bounds the fleet-level cap exemption,
+# but neither answers the plain question a run-level detector needs to: did
+# THIS run spend calls and commit nothing? See :mod:`athenaeum.zero_yield` for
+# the persisted cross-run state (consecutive count + previous-run deferred
+# set) this predicate reads and updates.
+# ---------------------------------------------------------------------------
+
+
+def _zero_yield_tripped(ctx: "RunContext", previous_deferred_refs: "list[str]") -> bool:
+    """Evaluate the zero-yield predicate at finalize (issue athenaeum#899 AC 1).
+
+    True exactly when all three hold:
+
+    1. The run spent at least one LLM call (``ctx.usage.api_calls > 0`` — a
+       run with nothing to do that made zero calls is idle, not wasteful).
+    2. The run committed zero files (``ctx.files_processed_count == 0`` — the
+       same figure the athenaeum#470 spend-ledger write and backlog-drain advisor
+       already use as "files actually drained this run").
+    3. The run made no progress against the PREVIOUS run's deferred set: no
+       ref that was deferred last run left the deferred set this run. An
+       idle run (nothing to defer, before or after) trivially satisfies this
+       third condition too, but condition 1 already excludes it — an idle
+       run makes no LLM calls.
+    """
+    if ctx.usage.api_calls <= 0:
+        return False
+    if ctx.files_processed_count != 0:
+        return False
+    previously_deferred = set(previous_deferred_refs)
+    currently_deferred = set(ctx.deferred_refs)
+    resolved_since_last_run = previously_deferred - currently_deferred
+    return not resolved_since_last_run
+
+
 def _run_finalize_phase(ctx: RunContext) -> int:
     """Finalize: run-level spend summary + athenaeum#378 ledger write, post-run push,
     the athenaeum#310 page-size guardrail, the athenaeum#481 pending-merge revalidation
@@ -4637,6 +4716,45 @@ def _run_finalize_phase(ctx: RunContext) -> int:
                     ctx.usage.api_calls,
                     ctx.usage.total_tokens,
                 )
+
+        # Issue athenaeum#899: the zero-yield alarm. Evaluated here — after
+        # ``files_processed_count`` and ``deferred_refs`` are final for the
+        # whole run, and gated on ``not ctx.dry_run`` exactly like the spend
+        # recording above, because a dry-run never unlinks a processed raw
+        # file (see the entity phase's ``if not ctx.dry_run: raw.path.unlink()``),
+        # so ``files_processed_count`` would read misleadingly non-zero for a
+        # dry-run that "would have" committed files — the predicate would
+        # either never fire or fire on every dry-run depending on backlog
+        # shape, neither of which is a meaningful signal. Persisted under the
+        # CACHE dir, not ``wiki_root`` — see :mod:`athenaeum.zero_yield`'s
+        # docstring for why: the entity phase's own ``git_snapshot`` commit
+        # has already happened by the time finalize runs, so a write under
+        # the knowledge repo here would leave an uncommitted straggler file
+        # every run.
+        _zy_cache_dir = _resolve_cache_dir(None)
+        _zy_previous = zero_yield.load_state(_zy_cache_dir)
+        ctx.zero_yield_tripped = _zero_yield_tripped(
+            ctx, _zy_previous["deferred_refs"]
+        )
+        ctx.zero_yield_consecutive = (
+            _zy_previous["consecutive"] + 1 if ctx.zero_yield_tripped else 0
+        )
+        zero_yield.write_state(
+            _zy_cache_dir,
+            consecutive=ctx.zero_yield_consecutive,
+            deferred_refs=list(ctx.deferred_refs),
+        )
+        if ctx.zero_yield_tripped:
+            _zy_total_secs = sum(secs for _phase, secs, _fields in ctx.run_profile)
+            log.warning(
+                "%s: run spent %d LLM call(s) over %.1fs and committed %d "
+                "file(s) — %d consecutive zero-yield run(s) (issue athenaeum#899)",
+                ZERO_YIELD_PREFIX,
+                ctx.usage.api_calls,
+                _zy_total_secs,
+                ctx.files_processed_count,
+                ctx.zero_yield_consecutive,
+            )
 
     _maybe_push_after_run(
         ctx.knowledge_root,
