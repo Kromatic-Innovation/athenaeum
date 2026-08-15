@@ -124,6 +124,7 @@ from athenaeum.config import (
     resolve_raw_file_max_api_calls,
     resolve_raw_file_max_runtime_seconds,
     resolve_retire,
+    resolve_shape_rules_runtime_share,
 )
 from athenaeum.config import resolve_cache_dir as _resolve_cache_dir_config
 from athenaeum.corrections import (
@@ -185,6 +186,7 @@ from athenaeum.provider import (
 )
 from athenaeum.quarantine import quarantine_file as _quarantine_file
 from athenaeum.registry import collect_handles
+from athenaeum.rules import run_shape_rule_phase
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
@@ -2677,6 +2679,9 @@ class RunContext:
     # Issue athenaeum#797: run-summary disposition counts from
     # ``_run_correction_phase`` (``None`` until that phase runs).
     corrections_summary: dict[str, Any] | None = None
+    # Issue athenaeum#901: run-summary disposition counts from
+    # ``_run_shape_rule_phase`` (``None`` until that phase runs).
+    shape_rules_summary: dict[str, Any] | None = None
     # Issue athenaeum#440: absolute monotonic instant after which the entity phase stops
     # CLAIMING new files, reserving the remainder of ``run_deadline`` for the
     # phases downstream of it (auto-memory C2/C3 and the C4 contradiction
@@ -3258,6 +3263,74 @@ def _arm_run_deadline(ctx: RunContext) -> None:
         ctx.out_run_stats.setdefault("beyond_window", 0)
         ctx.out_run_stats.setdefault("deferred_refs", [])
         ctx.out_run_stats.setdefault("failed_files", [])
+
+
+def _run_shape_rule_phase(ctx: RunContext) -> None:
+    """Shape-rule engine (issue athenaeum#901, `docs/field-corrections.md`).
+
+    Runs in the SAME deterministic phase slot as, and immediately BEFORE,
+    :func:`_run_correction_phase` — ordering is load-bearing: a rule that
+    fires `emit` writes a correction batch into the ordinary `raw/<source>/`
+    tree (:func:`athenaeum.rules.write_correction_batch`), and that batch
+    must be visible to `_run_correction_phase`'s own fresh
+    `find_correction_batches` walk of `raw_root` LATER IN THIS SAME RUN —
+    never only "next run". Running after would defer every compiled batch
+    by a full run for no reason; the deterministic slot exists precisely so
+    neither phase waits on the (LLM-bearing) entity tiers.
+
+    Carries its OWN runtime share
+    (:func:`~athenaeum.config.resolve_shape_rules_runtime_share`, default
+    5%) derived from ``ctx.run_deadline``, mirroring
+    :func:`_run_correction_phase`'s own share exactly — a distinct budget
+    so an overrun in one deterministic phase cannot starve the other.
+    Checked at FILE boundaries only (never mid-file,
+    `athenaeum.rules.run_shape_rule_phase`'s ``deadline_check``).
+
+    Makes ZERO LLM calls — every write this phase performs (correction
+    batch write, ledger append, raw-file git-retirement) is mechanical, same
+    invariant `_run_correction_phase` asserts for itself.
+    """
+    _shape_rules_share = resolve_shape_rules_runtime_share(ctx.config)
+    shape_rules_deadline: float | None = None
+    if (
+        ctx.run_deadline is not None
+        and _shape_rules_share > 0.0
+        and ctx.max_runtime is not None
+    ):
+        shape_rules_deadline = time.monotonic() + _shape_rules_share * ctx.max_runtime
+
+    def _deadline_check() -> bool:
+        return shape_rules_deadline is not None and time.monotonic() >= shape_rules_deadline
+
+    _shape_rules_calls_before = ctx.usage.api_calls
+    summary = run_shape_rule_phase(
+        raw_root=ctx.raw_root,
+        wiki_root=ctx.wiki_root,
+        knowledge_root=ctx.knowledge_root,
+        config=ctx.config,
+        deadline_check=_deadline_check,
+        dry_run=ctx.dry_run,
+    )
+    assert ctx.usage.api_calls == _shape_rules_calls_before, (
+        "shape-rule phase must make zero LLM calls (issue athenaeum#901) -- "
+        f"api_calls moved from {_shape_rules_calls_before} to {ctx.usage.api_calls}"
+    )
+    ctx.shape_rules_summary = summary
+    if summary["rules_skipped_malformed"]:
+        log.warning(
+            "shape-rules: %d malformed rule(s) skipped this run -- see prior "
+            "error log lines for each",
+            summary["rules_skipped_malformed"],
+        )
+    if summary["files_matched"]:
+        log.info(
+            "shape-rules: %d rule(s) loaded, %d/%d candidate file(s) matched, "
+            "dispositions=%s",
+            summary["rules_loaded"],
+            summary["files_matched"],
+            summary["files_evaluated"],
+            summary["dispositions"],
+        )
 
 
 def _run_correction_phase(ctx: RunContext) -> None:
@@ -4960,6 +5033,14 @@ def run(
     # Phase: build the shared LLM client, seed `usage`, arm the run-level
     # wall-clock deadline.
     _arm_run_deadline(ctx)
+
+    # Phase: shape-rule engine (issue athenaeum#901) -- deterministic, LLM-free,
+    # own runtime share. Ordered BEFORE the field-correction phase (next):
+    # a rule's `emit` disposition compiles a foreign record into a
+    # correction batch written into raw/<source>/, and that batch must be
+    # visible to the correction phase's OWN fresh raw_root walk later in
+    # THIS SAME RUN -- see `_run_shape_rule_phase`'s docstring.
+    _run_shape_rule_phase(ctx)
 
     # Phase: field-correction fast path (issue athenaeum#797) -- deterministic,
     # LLM-free, own runtime share. Ordered here (after the deadline is armed,
