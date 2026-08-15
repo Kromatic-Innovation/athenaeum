@@ -55,6 +55,17 @@ _TEMPLATE_FILES = [
     "source.md",
 ]
 
+# Example shape rules shipped with the wheel (issue athenaeum#901). Copied
+# into `<knowledge_root>/rules/` only when the user passes
+# `athenaeum init --with-rules` — the shape-rule engine
+# (:mod:`athenaeum.rules`) never loads from this subpackage directly and
+# never ships a rule as an engine default; see
+# `athenaeum.rule_examples`'s module docstring.
+_RULE_EXAMPLE_FILES = [
+    "contact-bounce.yaml",
+    "unrecognized-export-fallthrough.yaml",
+]
+
 # Standard subdirectories created during init
 _SUBDIRS = [
     "raw",
@@ -159,6 +170,32 @@ def copy_templates(dest: Path, *, force: bool = False) -> tuple[list[str], list[
             skipped.append(fname)
             continue
         source = template_pkg / fname
+        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        written.append(fname)
+    return written, skipped
+
+
+def copy_example_rules(dest: Path, *, force: bool = False) -> tuple[list[str], list[str]]:
+    """Copy bundled EXAMPLE shape rules into *dest* (issue athenaeum#901).
+
+    Returns ``(written, skipped)`` lists of filenames. Without ``force``,
+    pre-existing destination files are skipped (not overwritten). With
+    ``force``, existing files are overwritten. Mirrors :func:`copy_templates`
+    exactly — same opt-in-copy shape, same idempotence contract. Every
+    copied example ships ``mode: observe`` (`docs/shape-rules.md` §5); this
+    function only copies bytes, it never activates anything.
+    """
+    dest = dest.expanduser().resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    rules_pkg = importlib.resources.files("athenaeum.rule_examples")
+    written: list[str] = []
+    skipped: list[str] = []
+    for fname in _RULE_EXAMPLE_FILES:
+        target = dest / fname
+        if target.exists() and not force:
+            skipped.append(fname)
+            continue
+        source = rules_pkg / fname
         target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
         written.append(fname)
     return written, skipped
