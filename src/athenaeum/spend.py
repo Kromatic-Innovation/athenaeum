@@ -917,6 +917,147 @@ def spend_today(
     return {"subscription_tokens": float(tokens), "api_usd": usd}
 
 
+# ---------------------------------------------------------------------------
+# Spend headroom (issue athenaeum#926) — warn BEFORE a ceiling trips
+# ---------------------------------------------------------------------------
+
+
+def _headroom_slot(cap_usd: float | None, consumed_usd: float) -> dict[str, Any]:
+    """Build one headroom slot (per-run or per-day).
+
+    ``configured=False`` (cap unset) reports ``remaining_usd`` and
+    ``fraction_consumed`` as ``None`` — a DISTINCT value from ``0``, so an
+    unset ceiling can never be mistaken for one sitting at 0% (or, worse,
+    read as fully exhausted by a caller that treats a missing fraction as 1.0
+    or a missing remaining as 0.0). ``consumed_usd`` is always a real number
+    (it is simply "what this run/day has spent"), regardless of whether a cap
+    is configured to compare it against.
+    """
+    if cap_usd is None:
+        return {
+            "configured": False,
+            "cap_usd": None,
+            "consumed_usd": consumed_usd,
+            "remaining_usd": None,
+            "fraction_consumed": None,
+        }
+    return {
+        "configured": True,
+        "cap_usd": cap_usd,
+        "consumed_usd": consumed_usd,
+        # Not clamped at 0 — a negative remaining figure is the amount OVER
+        # the cap, which the warning/trip messages want to name.
+        "remaining_usd": cap_usd - consumed_usd,
+        "fraction_consumed": consumed_usd / cap_usd,
+    }
+
+
+def spend_headroom(
+    usage: "TokenUsage",
+    *,
+    config: dict[str, Any] | None = None,
+    ledger_path: Path | None = None,
+    cache_dir: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Report remaining headroom against the metered API dollar ceilings (athenaeum#926).
+
+    ``ceiling_tripped`` answers "did a ceiling breach?" and, below the
+    threshold, reports nothing at all — the gap this closes (see the issue's
+    "The gap, precisely" section, which quotes exactly the two dollar checks
+    this mirrors: ``usage.estimated_cost_usd >= run_cap_usd`` and
+    ``prior + usage >= day_cap_usd``). This function reports the SAME two
+    figures — remaining dollars and fraction consumed — for BOTH the per-run
+    and per-day API dollar caps, independently of whether either one has
+    tripped, so a run at 74% and a run at 1% stop reading identically.
+
+    Returns ``{"per_run": <slot>, "per_day": <slot>}``, each slot built by
+    :func:`_headroom_slot`. Scoped to the metered ``anthropic``/API dollar
+    ceilings (:func:`athenaeum.config.resolve_spend_max_usd_per_run` /
+    :func:`resolve_spend_max_usd_per_day`) — the pair the issue's motivation
+    and gap sections are entirely about; the subscription TOKEN ceilings
+    already have no such gap (:func:`ceiling_tripped`'s token branch is
+    unconditional in the sense that this issue does not extend to it, and
+    ``usage.estimated_cost_usd`` is ``0.0`` by construction on a
+    subscription-covered run, so a subscription run's dollar headroom simply
+    reads as ~0% consumed rather than something misleading).
+
+    A pure computation over its inputs plus one ledger READ (never a write) —
+    mirrors :func:`ceiling_tripped`'s own use of :func:`spend_today` for the
+    per-day figure, so "prior spend today" is computed identically in both
+    places.
+    """
+    from athenaeum.config import resolve_spend_max_usd_per_day, resolve_spend_max_usd_per_run
+
+    run_cap_usd = resolve_spend_max_usd_per_run(config)
+    day_cap_usd = resolve_spend_max_usd_per_day(config)
+
+    consumed_run = usage.estimated_cost_usd
+    target = ledger_path or resolve_ledger_path(config, cache_dir=cache_dir)
+    prior_today = spend_today(target, now=now)["api_usd"]
+    consumed_day = prior_today + consumed_run
+
+    return {
+        "per_run": _headroom_slot(run_cap_usd, consumed_run),
+        "per_day": _headroom_slot(day_cap_usd, consumed_day),
+    }
+
+
+def spend_headroom_warning(
+    usage: "TokenUsage",
+    *,
+    config: dict[str, Any] | None = None,
+    ledger_path: Path | None = None,
+    cache_dir: Path | None = None,
+    now: datetime | None = None,
+) -> str | None:
+    """Human-readable warning when a run ends close to an API dollar cap (athenaeum#926).
+
+    "Close" means at or above
+    :func:`athenaeum.config.resolve_spend_warning_threshold_pct` (default 75%)
+    of fraction consumed, computed via :func:`spend_headroom`. Checked for
+    BOTH caps independently and named separately in the message — a per-run
+    warning and a per-day warning call for different operator actions (the
+    former means slow down THIS run's prompting, the latter means the day's
+    budget is running out regardless of any one run), so folding them into a
+    single undifferentiated message would lose the actionable distinction.
+
+    Fires regardless of whether the ceiling actually trips: at or past 100%
+    this still returns a message (the trip itself, and the decision to stop,
+    stay :func:`ceiling_tripped`'s job — this is only the human-visible
+    signal that headroom is running out, which today has no signal at all
+    below the trip line).
+
+    Returns ``None`` when neither cap is configured (an unset ceiling never
+    warns — see :func:`_headroom_slot`) or both configured caps are below the
+    threshold.
+    """
+    from athenaeum.config import resolve_spend_warning_threshold_pct
+
+    threshold_fraction = resolve_spend_warning_threshold_pct(config) / 100.0
+    headroom = spend_headroom(
+        usage, config=config, ledger_path=ledger_path, cache_dir=cache_dir, now=now
+    )
+
+    parts: list[str] = []
+    for cap_key, label in (("per_run", "per-run"), ("per_day", "per-day")):
+        slot = headroom[cap_key]
+        if not slot["configured"]:
+            continue
+        fraction = slot["fraction_consumed"]
+        if fraction is None or fraction < threshold_fraction:
+            continue
+        parts.append(
+            f"{label} API dollar cap at {fraction * 100:.0f}% "
+            f"(${slot['consumed_usd']:.2f}/${slot['cap_usd']:.2f} spent, "
+            f"${slot['remaining_usd']:.2f} remaining)"
+        )
+
+    if not parts:
+        return None
+    return "spend headroom warning: " + "; ".join(parts)
+
+
 def ceiling_tripped(
     usage: "TokenUsage",
     *,
@@ -938,6 +1079,15 @@ def ceiling_tripped(
     the absolute per-day token ceiling above and never touches the API branch.
     Returns ``None`` when no ceiling is configured or none is breached — a
     ceiling is strictly opt-in.
+
+    Issue athenaeum#926: on the metered API path, this is also the SAME path a
+    headroom warning is surfaced on — every caller that checks for a trip
+    (``librarian.py``, ``merge.py``, ``batch.py``) already funnels through
+    here, so a warning logged from inside this function reaches all of them
+    for free, using the exact log stream a trip's own ``log.error`` already
+    goes to. The warning check runs BEFORE the trip checks below and does not
+    gate on their outcome, so a run at or past the ceiling both trips AND
+    still logs the warning (never a trip with no warning).
     """
     from athenaeum.config import (
         resolve_spend_max_pct_per_day,
@@ -995,6 +1145,21 @@ def ceiling_tripped(
         return None
 
     # Metered API path — dollars.
+    #
+    # Issue athenaeum#926: check headroom BEFORE the trip checks below, and log
+    # unconditionally on the outcome — never gated on whether a trip follows —
+    # so a run that ends past the ceiling still gets the warning, not only the
+    # trip. Best-effort: a warning must never break the run it measures, same
+    # contract as the rest of this module's ledger I/O.
+    try:
+        _warning = spend_headroom_warning(
+            usage, config=config, ledger_path=ledger_path, cache_dir=cache_dir, now=now
+        )
+        if _warning is not None:
+            log.warning("%s", _warning)
+    except Exception as exc:  # noqa: BLE001 — a warning must never break the run
+        log.debug("spend headroom warning check failed (%s): %s", type(exc).__name__, exc)
+
     run_cap_usd = resolve_spend_max_usd_per_run(config)
     if run_cap_usd is not None and usage.estimated_cost_usd >= run_cap_usd:
         return (

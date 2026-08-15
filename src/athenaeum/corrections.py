@@ -18,7 +18,9 @@ Layering: L2 primitive, same tier as :mod:`athenaeum.intake`. Imports only
 leaf/service modules — :mod:`athenaeum.models`, :mod:`athenaeum.provenance`,
 :mod:`athenaeum.precedence`, :mod:`athenaeum.registry`,
 :mod:`athenaeum.schemas`, :mod:`athenaeum.atomic_io`, :mod:`athenaeum.config`,
-:mod:`athenaeum.storage`. Must never import :mod:`athenaeum.intake`,
+:mod:`athenaeum.storage`, and (function-local, per call site — see
+:func:`_resolve_email_handle` and the §7.1 sensitivity-routing helpers)
+:mod:`athenaeum.pii`. Must never import :mod:`athenaeum.intake`,
 :mod:`athenaeum.librarian`, :mod:`athenaeum.merge`, or :mod:`athenaeum.tiers`
 — `intake.py` imports :func:`parse_batch_envelope` from here (the "valid
 envelope" single definition, §3.1), and a back-edge would reintroduce the
@@ -180,6 +182,7 @@ ALLOWED_RECORD_KEYS: frozenset[str] = frozenset(
         "source",
         "observed_at",
         "note",
+        "usage_class",
     }
 )
 
@@ -784,18 +787,91 @@ def decide_verdict(
 # ---------------------------------------------------------------------------
 
 
-def _read_surface_record(path: Path) -> dict[str, Any]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return raw if isinstance(raw, dict) else {}
+def _read_surface_record(surface_root: Path, uid: str) -> tuple[Path, dict[str, Any], str]:
+    """Resolve *uid*'s record on the sensitivity-routed surface (issue athenaeum#872).
+
+    Reached through :func:`athenaeum.pii.resolve_contact_record_for_uid` — the
+    SAME uid-keyed resolution :func:`athenaeum.pii.read_person` uses — rather
+    than a bespoke ``{uid}.json`` path this router alone understood. That is
+    what makes a value this function's caller writes visible to
+    ``classify_contact_value``/``iter_contact_records``/``is_bounced`` by
+    construction, on whichever record shape the CONFIGURED surface actually
+    uses (markdown for the built-in excluded surface; whatever a storage
+    adapter's own shape is otherwise — see the module docstring's routing
+    section).
+
+    Returns ``(path, meta, body)``:
+
+    - an EXISTING ``.md`` record already carrying *uid*, parsed; or
+    - a **read-through** of a legacy ``{uid}.json`` record — the shape this
+      router minted before issue athenaeum#872 — when no ``.md`` record carries
+      this uid but that file exists. Its content is returned as *meta* so a
+      correction against a uid a pre-fix run already wrote merges onto that
+      data rather than starting over; *path* is still the canonical
+      ``{uid}.md`` location, so the very next write to this uid lands there,
+      upgrading the record to the canonical shape with no separate migration
+      script. The legacy file itself is left in place, untouched — read-through,
+      not delete-on-read;
+    - or a deterministic ``{uid}.md`` fallback path, with empty
+      ``meta``/``body``, when neither exists — the mint case, mirroring
+      :func:`athenaeum.pii.mark_bounced`'s own resolve-then-mint discipline
+      (deterministic naming keeps a second correction for the same uid
+      resolving to the record the first one just minted, rather than
+      re-scanning for a filename convention).
+    """
+    from athenaeum import pii
+
+    existing_path = pii.resolve_contact_record_for_uid(surface_root, uid)
+    if existing_path is not None:
+        meta, body = parse_frontmatter(existing_path.read_text(encoding="utf-8"))
+        return existing_path, (meta if isinstance(meta, dict) else {}), body
+
+    canonical_path = surface_root / f"{uid}.md"
+    legacy_path = surface_root / f"{uid}.json"
+    if legacy_path.exists():
+        try:
+            legacy_raw = json.loads(legacy_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            legacy_raw = None
+        if isinstance(legacy_raw, dict):
+            return canonical_path, legacy_raw, ""
+
+    return canonical_path, {}, ""
 
 
-def _write_surface_record(path: Path, record: dict[str, Any]) -> None:
+def _write_surface_record(path: Path, record: dict[str, Any], *, body: str = "") -> None:
+    """Write *record* to *path* in the SAME markdown-frontmatter shape every
+    other writer on the excluded surface uses (issue athenaeum#872) — never a
+    parallel JSON shape only this router wrote."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(
-        path, json.dumps(record, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+    atomic_write_text(path, render_frontmatter(record) + "\n" + body)
+
+
+def _apply_usage_classification(
+    surface_root: Path,
+    value: Any,
+    *,
+    usage_class: str,
+    source: Any,
+    observed_at: str,
+) -> None:
+    """Assert *usage_class* for *value* on its contact record, through
+    :func:`athenaeum.pii.classify_contact_value` (issue athenaeum#872) — the SAME
+    store-level no-downgrade rule athenaeum#866 introduced enforces this, not a
+    second implementation of it here. A no-op when no record on
+    *surface_root* lists *value* — never mints (mirrors
+    ``classify_contact_value``'s own refusal to mint); the caller only invokes
+    this once the value is already listed, whether by this correction's own
+    write moments earlier or an already-present match.
+    """
+    from athenaeum import pii
+
+    pii.classify_contact_value(
+        surface_root,
+        str(value),
+        usage_class=usage_class,
+        source=source,
+        observed_at=observed_at,
     )
 
 
@@ -996,6 +1072,37 @@ def process_correction_record(
     if shape not in ("scalar", "list"):
         return _raised(f"unrecognized shape {shape!r} for attribute {field_name!r}")
 
+    sensitive_map = resolve_corrections_sensitive_fields(config)
+    surface_class = sensitive_map.get(field_name)
+
+    # athenaeum#872: a contact-value correction may declare the usage class the
+    # value it writes should carry (`athenaeum.pii.USAGE_CLASSES`) — never
+    # defaulted, so an undeclared value stays `unclassified` (see the
+    # sensitivity-routing write path below, which only ever calls
+    # `pii.classify_contact_value` when this is set). Declaring one is only
+    # meaningful for an ADD onto a contact-identifier field
+    # (`athenaeum.pii.CONTACT_IDENTIFIER_FIELDS`) routed to an excluded
+    # surface — `classify_contact_value` classifies a VALUE already listed on
+    # a contact record, which is exactly what such an add is about to make
+    # true. Validated here, before target resolution/creation, so a
+    # malformed declaration is rejected before any side effect (including an
+    # athenaeum#865 tier-0 create) happens.
+    usage_class = effective.get("usage_class")
+    if usage_class is not None:
+        from athenaeum import pii
+
+        if not isinstance(usage_class, str) or usage_class not in pii.USAGE_CLASSES:
+            return _raised(
+                f"invalid usage_class {usage_class!r}; expected one of "
+                f"{list(pii.USAGE_CLASSES)}"
+            )
+        if not (surface_class and op == "add" and field_name in pii.CONTACT_IDENTIFIER_FIELDS):
+            return _raised(
+                "usage_class is only valid for an add correction on a "
+                "contact-identifier field routed to an excluded surface "
+                f"(field={field_name!r}, op={op!r})"
+            )
+
     resolution = resolve_target_for_apply(target, index=index, registry_entities=registry_entities)
     if resolution.kind == "unresolvable":
         return _raised("target resolves to zero or several entities")
@@ -1131,16 +1238,18 @@ def process_correction_record(
             )
 
     # §7.1 sensitivity routing -- redirects BOTH the read of "existing
-    # attribution" and the eventual write to the mapped surface,
-    # regardless of the destination the correction named.
-    sensitive_map = resolve_corrections_sensitive_fields(config)
-    surface_class = sensitive_map.get(field_name)
+    # attribution" and the eventual write to the mapped surface, regardless
+    # of the destination the correction named. ``surface_class`` was already
+    # resolved above (needed there to validate ``usage_class``); reused here
+    # rather than re-resolved.
     surface_path: Path | None = None
+    surface_body = ""
+    surface_root: Path | None = None
     if surface_class:
         uid = str(existing_meta.get("uid", "") or entity_path.stem)
         surface_root = surface_root_for_class(surface_class, config, knowledge_root)
-        surface_path = surface_root / f"{uid}.json"
-        read_meta: dict[str, Any] = _read_surface_record(surface_path)
+        surface_path, surface_meta, surface_body = _read_surface_record(surface_root, uid)
+        read_meta = dict(surface_meta)
         read_meta.setdefault("uid", uid)
     else:
         read_meta = existing_meta
@@ -1244,6 +1353,25 @@ def process_correction_record(
         return _result("applied", "entity created; field already matches the handle-derived value")
 
     if verdict == "noop":
+        if usage_class is not None and not dry_run:
+            # athenaeum#872: the field-value delta gate above found *value*
+            # already present, so nothing about the field itself changes —
+            # but a declared usage_class may still upgrade (or attempt to
+            # downgrade) the classification already recorded for it. The
+            # address is, by construction of "already present", already
+            # listed on the surface record, so `classify_contact_value`
+            # resolves it without this correction writing anything first.
+            # `_apply_usage_classification` is the only place that rule
+            # runs — a downgrade attempt is refused there, at the store
+            # level (issue athenaeum#866), never here.
+            assert surface_root is not None
+            _apply_usage_classification(
+                surface_root,
+                value,
+                usage_class=usage_class,
+                source=source,
+                observed_at=observed_at,
+            )
         return _result("noop", reason)
     if verdict == "defer":
         return _result("deferred-lower-precedence", reason)
@@ -1291,7 +1419,19 @@ def process_correction_record(
 
     if surface_class:
         assert surface_path is not None
-        _write_surface_record(surface_path, merged_read)
+        _write_surface_record(surface_path, merged_read, body=surface_body)
+        if usage_class is not None:
+            # athenaeum#872: the value is now listed on the surface record (the
+            # write just above), so `classify_contact_value` can resolve it —
+            # calling this any earlier would find no record to classify yet.
+            assert surface_root is not None
+            _apply_usage_classification(
+                surface_root,
+                value,
+                usage_class=usage_class,
+                source=source,
+                observed_at=observed_at,
+            )
         if monotone_apply:
             log.info(
                 "corrections: monotone apply (routed) — field=%s target=%s source=%s",

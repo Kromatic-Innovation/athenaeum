@@ -713,11 +713,25 @@ like the `max_api_calls` budget), never silently continuing. All ceilings are
 | Per-day dollar ceiling | `ATHENAEUM_SPEND_MAX_USD_PER_DAY` | `spend.max_usd_per_day` | — (off) | **API path.** Ledger dollars since UTC midnight + this run. |
 | Weekly subscription token limit | `ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT` | `spend.weekly_token_limit` | — (off) | **Subscription path.** The operator-declared weekly quota; a denominator, not a ceiling by itself (issue athenaeum#785). |
 | Max percent per day | `ATHENAEUM_SPEND_MAX_PCT_PER_DAY` | `spend.max_pct_per_day` | — (off) | **Subscription path.** Paired with the weekly limit above: `weekly_token_limit / 7 * max_pct_per_day / 100` becomes a SECOND, derived per-day token ceiling (issue athenaeum#785). |
+| Headroom warning threshold | `ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT` | `spend.warning_threshold_pct` | `75` | **API path.** Log a warning, naming which cap and by how much, once a run ends at/above this percent of EITHER the per-run or per-day dollar ceiling — before either one trips (issue athenaeum#926). Unlike the ceilings above this is not opt-in: it always resolves to a usable value, but it warns only when at least one dollar ceiling is actually configured. |
 
 The subscription path is bounded in **tokens**, the API path in **dollars** —
 each ceiling only gates its own path. `bool` / non-numeric / non-positive
 values fall through to "off" so a nonsensical value can never silently pin the
 pass to a no-op.
+
+**Headroom warning (issue athenaeum#926).** `ceiling_tripped()` reports only a
+breach — below either dollar ceiling it returns nothing, so a run at 99% of
+the day cap and a run at 1% look identical until the cap actually trips. A
+run that ends at or above the warning threshold gets a `log.warning` naming
+WHICH cap is close (per-run vs per-day call for different operator actions)
+and the remaining dollars, computed by `athenaeum.spend.spend_headroom()` /
+`spend_headroom_warning()`. It fires on the exact same path a trip is
+surfaced on (`ceiling_tripped()`, called from `librarian.py`, `merge.py`, and
+`batch.py`), so a run that ends past the ceiling gets BOTH the warning and the
+trip, never only one. An unconfigured dollar ceiling never warns — headroom
+reports a distinct "not configured" state rather than reading as 0% or 100%
+consumed.
 
 ```yaml
 spend:
@@ -726,6 +740,7 @@ spend:
   max_usd_per_day: 5.00           # cap real API dollars per day
   weekly_token_limit: 700000      # declared weekly subscription quota
   max_pct_per_day: 50             # -> 50,000 token/day derived ceiling
+  # warning_threshold_pct: 75     # warn at 75% of either dollar cap (default)
 ```
 
 The weekly-limit + max-percent-per-day pair (issue athenaeum#785) is a SECOND,
