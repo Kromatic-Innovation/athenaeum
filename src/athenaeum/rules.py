@@ -1238,10 +1238,11 @@ def run_shape_rule_phase(
             # resolve must leave the raw file exactly where it was, so the
             # record still reaches the tiers. Moving first would strand it.
             corr_record: dict[str, Any] | None = None
-            if matched_rule.correction is not None:
+            corr_spec = matched_rule.correction
+            if corr_spec is not None:
                 try:
                     corr_record = build_correction_record(
-                        matched_rule.correction, record, rule_tag=rule_tag
+                        corr_spec, record, rule_tag=rule_tag
                     )
                 except ShapeRuleTransformError as exc:
                     log.warning(
@@ -1264,7 +1265,7 @@ def run_shape_rule_phase(
             if dest is None:
                 _tally(rule_tag, matched_rule.mode, "preserve-failed")
                 continue
-            if corr_record is not None:
+            if corr_record is not None and corr_spec is not None:
                 # Point the fact at the artifact WITHOUT disturbing its
                 # precedence. The declared `source` is capped at machine tier
                 # and validated at LOAD time; an unknown source type silently
@@ -1276,7 +1277,7 @@ def run_shape_rule_phase(
                 pointer = preserved_log_source_pointer(
                     knowledge_root, dest, fmt=fmt
                 )
-                declared = parse_source(matched_rule.correction.source)
+                declared = parse_source(corr_spec.source)
                 corr_record["source"] = {
                     "type": declared.type if declared else "script",
                     "ref": pointer,
