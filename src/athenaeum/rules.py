@@ -110,6 +110,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic import ValidationError as PydanticValidationError
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.compiled_exempt import mark_exempt
 from athenaeum.config import resolve_shape_rules_max_records_per_run
 from athenaeum.corrections import compute_correction_id
 from athenaeum.intake import discover_raw_files
@@ -483,6 +484,68 @@ class CorrectionSpec(BaseModel):
         return v
 
 
+#: Dispositions that compile a correction record and therefore REQUIRE a
+#: `correction` block. Every other disposition must not carry one (issue
+#: athenaeum#901 for `emit`, athenaeum#903 for `rollup`).
+_CORRECTION_REQUIRED: frozenset[str] = frozenset({"emit", "rollup"})
+
+#: Every terminal disposition a matched record can reach. `transform-error` is
+#: NOT here: it is a degradation of `emit` to fallthrough, tallied under its own
+#: name so a rule failing to resolve is visible rather than hidden inside the
+#: fallthrough count (issue athenaeum#901).
+TERMINAL_DISPOSITIONS: frozenset[str] = frozenset(
+    {"emit", "fallthrough", "drop", "retain", "rollup"}
+)
+
+
+class RollupSpec(BaseModel):
+    """The `rollup` disposition's aggregation (issue athenaeum#903).
+
+    `docs/field-corrections.md` §12 is explicit about what may cross the
+    boundary from an event stream into an entity record: *"a small rollup —
+    last-event date, a windowed count"*, and nothing else. This spec is that
+    sentence expressed as a closed vocabulary:
+
+    - `group_by` — a value expression resolved per record. Records whose keys
+      compare equal collapse into ONE correction. (The natural key is whatever
+      identifies the entity the events are about.)
+    - `aggregate` — `count` (how many records in the group) or `last` (the
+      maximum value of `of` across the group, i.e. the last-event date).
+    - `of` — required by `last`, forbidden by `count`: the value expression
+      naming the per-record event timestamp.
+
+    The group's correction record is built from the rule's `correction` block
+    against the group's FIRST record (for `target` / `field` / `source` /
+    `note`), with `value` REPLACED by the computed aggregate. Deliberately no
+    new reserved token like `$$rollup`: a substitution token is a templating
+    language in miniature, and athenaeum#901's "no templating language" AC is a
+    property worth keeping literally true.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    group_by: Any
+    aggregate: Literal["count", "last"]
+    of: Any = None
+
+    @model_validator(mode="after")
+    def _validate_of_pairing(self) -> "RollupSpec":
+        if self.aggregate == "last" and self.of is None:
+            raise ValueError(
+                "rollup.aggregate 'last' requires 'of' (the value expression "
+                "naming the per-record event timestamp)"
+            )
+        if self.aggregate == "count" and self.of is not None:
+            raise ValueError("rollup.aggregate 'count' must not carry an 'of'")
+        return self
+
+    @field_validator("group_by", "of")
+    @classmethod
+    def _validate_no_unknown_functions(cls, v: Any) -> Any:
+        _validate_no_unknown_fn(v, path="rollup")
+        return v
+
+
 class ShapeRule(BaseModel):
     """One `<knowledge-root>/rules/*.yaml` file's full contents."""
 
@@ -492,8 +555,9 @@ class ShapeRule(BaseModel):
     name: str
     mode: Literal["observe", "live"] = "observe"
     match: MatchSpec
-    disposition: Literal["emit", "fallthrough"]
+    disposition: Literal["emit", "fallthrough", "drop", "retain", "rollup"]
     correction: CorrectionSpec | None = None
+    rollup: RollupSpec | None = None
 
     @field_validator("name")
     @classmethod
@@ -513,11 +577,26 @@ class ShapeRule(BaseModel):
 
     @model_validator(mode="after")
     def _validate_disposition_correction_pairing(self) -> "ShapeRule":
-        if self.disposition == "emit" and self.correction is None:
-            raise ValueError("disposition 'emit' requires a 'correction' block")
-        if self.disposition == "fallthrough" and self.correction is not None:
+        # Issue athenaeum#901: `emit` compiles ONE record into ONE correction.
+        # Issue athenaeum#903: `rollup` aggregates N records into ONE correction, so
+        # it needs the same `correction` block PLUS a `rollup` block saying how
+        # the N collapse. `fallthrough`/`drop`/`retain` write no correction at
+        # all, so carrying one is a rule the operator has mis-written — caught
+        # at load time rather than silently ignored per record.
+        if self.disposition in _CORRECTION_REQUIRED and self.correction is None:
             raise ValueError(
-                "disposition 'fallthrough' must not carry a 'correction' block"
+                f"disposition {self.disposition!r} requires a 'correction' block"
+            )
+        if self.disposition not in _CORRECTION_REQUIRED and self.correction is not None:
+            raise ValueError(
+                f"disposition {self.disposition!r} must not carry a "
+                "'correction' block"
+            )
+        if self.disposition == "rollup" and self.rollup is None:
+            raise ValueError("disposition 'rollup' requires a 'rollup' block")
+        if self.disposition != "rollup" and self.rollup is not None:
+            raise ValueError(
+                f"disposition {self.disposition!r} must not carry a 'rollup' block"
             )
         return self
 
@@ -693,6 +772,47 @@ def retire_compiled_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: 
     Best-effort: falls back to a plain unlink outside a git repo (test
     fixtures), same fallback `retire_batch` uses. Returns `True` on success.
     """
+    return _retire_raw_file(
+        knowledge_root,
+        raw_path,
+        snapshot_reason="before compile",
+        retire_reason=f"compiled into a correction batch by {rule_tag}",
+    )
+
+
+def drop_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: str) -> bool:
+    """Retire a raw intake file a `drop` rule judged information-free
+    (issue athenaeum#903) — the SAME two-commit provenance-snapshot-then-`git rm`
+    convention :func:`retire_compiled_raw_file` uses, with drop wording.
+
+    The distinction from `emit`'s retirement is the reason, not the mechanism,
+    and the mechanism is the point: a `drop` is an **audited discard**, never a
+    hard delete. The content is committed before it is removed, so it stays
+    recoverable from history (athenaeum#903 AC: "the discard is recoverable from
+    history") and the audit counter in the ledger says how many were discarded
+    and by which rule.
+    """
+    return _retire_raw_file(
+        knowledge_root,
+        raw_path,
+        snapshot_reason="before drop",
+        retire_reason=f"dropped as information-free by {rule_tag}",
+    )
+
+
+def _retire_raw_file(
+    knowledge_root: Path,
+    raw_path: Path,
+    *,
+    snapshot_reason: str,
+    retire_reason: str,
+) -> bool:
+    """Shared two-commit retirement: snapshot the content, then `git rm` it.
+
+    Committing BEFORE the removal is what makes every retirement recoverable —
+    a file that was never committed would be unrecoverable once unlinked, which
+    is the difference between an audited discard and a deletion.
+    """
     if not raw_path.exists():
         return True
     if (knowledge_root / ".git").is_dir():
@@ -707,7 +827,7 @@ def retire_compiled_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: 
                 knowledge_root,
                 "commit",
                 "-m",
-                f"shape-rules: raw-intake provenance snapshot before compile ({rel})",
+                f"shape-rules: raw-intake provenance snapshot {snapshot_reason} ({rel})",
             )
         rm_result = _git(knowledge_root, "rm", "--quiet", "-f", "--", rel)
         if rm_result.returncode == 0:
@@ -715,14 +835,14 @@ def retire_compiled_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: 
                 knowledge_root,
                 "commit",
                 "-m",
-                f"shape-rules: {rel} compiled into a correction batch by {rule_tag}",
+                f"shape-rules: {rel} {retire_reason}",
             )
             return True
     try:
         raw_path.unlink()
         return True
     except OSError:
-        log.warning("shape-rules: failed to retire compiled raw file %s", raw_path)
+        log.warning("shape-rules: failed to retire raw file %s", raw_path)
         return False
 
 
@@ -753,6 +873,56 @@ def _append_jsonl_line(path: Path, line: str) -> None:
 def append_shape_rules_ledger(wiki_root: Path, record: dict[str, Any]) -> None:
     path = default_shape_rules_ledger_path(wiki_root)
     _append_jsonl_line(path, json.dumps(record, sort_keys=True) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Rollup aggregation (issue athenaeum#903)
+# ---------------------------------------------------------------------------
+
+
+def _group_key_repr(key: Any) -> str:
+    """A stable string form of a resolved `group_by` value, for dict keying.
+
+    `json.dumps(sort_keys=True)` so a dict key groups by VALUE rather than by
+    identity, and two records whose keys differ only in mapping order collapse
+    together as the operator intends. Unserialisable values degrade to `repr`,
+    which still groups equal values equally.
+    """
+    try:
+        return json.dumps(key, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(key)
+
+
+def _compute_rollup_aggregate(
+    spec: "RollupSpec", records: list[dict[str, Any]]
+) -> Any:
+    """Reduce a rollup group's records to the ONE value that crosses into the
+    entity record (`docs/field-corrections.md` §12).
+
+    `count` -> the number of records in the group (a windowed count).
+    `last`  -> the maximum resolved `of` across the group (a last-event date).
+
+    Raises :class:`ShapeRuleTransformError` if `last`'s `of` cannot resolve for
+    any member, so the caller degrades the whole group to the reasoning tiers
+    rather than writing a correction computed from a partial group.
+    """
+    if spec.aggregate == "count":
+        return len(records)
+    values = [resolve_value_expr(spec.of, record) for record in records]
+    comparable = [v for v in values if v is not None]
+    if not comparable:
+        raise ShapeRuleTransformError(
+            "rollup 'last' resolved no non-null values across the group"
+        )
+    try:
+        return max(comparable)
+    except TypeError as exc:
+        # Mixed, mutually incomparable types (a str beside an int). Refusing is
+        # right: a silently coerced max would be an arbitrary answer.
+        raise ShapeRuleTransformError(
+            f"rollup 'last' values are not mutually comparable: {exc}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +978,19 @@ def run_shape_rule_phase(
     # history) never merge into one ledger line's denominator.
     tallies: dict[tuple[str, str], dict[str, int]] = {}
 
+    # Issue athenaeum#903: `rollup` members, keyed by (rule, mode, group key). The
+    # aggregate is not knowable until the scan finishes, so members accumulate
+    # here and are compiled into one correction per group afterwards.
+    rollup_groups: dict[
+        tuple[str, str, str], list[tuple[ShapeRule, dict[str, Any], RawFile]]
+    ] = {}
+
+    # Issue athenaeum#903: records SEEN per (rule, mode) -- the denominator the
+    # ledger's dispositions must sum to. Counted independently of `_tally` on
+    # purpose: if both came off the same increment the invariant would be a
+    # tautology and could never catch a disposition that forgot to tally.
+    counts_seen: dict[tuple[str, str], int] = {}
+
     def _tally(rule_tag: str, mode: str, disposition: str) -> None:
         counts = tallies.setdefault((rule_tag, mode), {})
         counts[disposition] = counts.get(disposition, 0) + 1
@@ -830,13 +1013,78 @@ def run_shape_rule_phase(
             continue
         summary["files_matched"] += 1
         rule_tag = matched_rule.qualified_name
+        _seen_key = (rule_tag, matched_rule.mode)
+        counts_seen[_seen_key] = counts_seen.get(_seen_key, 0) + 1
+
+        is_live = matched_rule.mode == "live" and not dry_run
 
         if matched_rule.disposition == "fallthrough":
-            is_live = matched_rule.mode == "live" and not dry_run
             disposition = "fallthrough" if is_live else "observed-fallthrough"
             _tally(rule_tag, matched_rule.mode, disposition)
             # Nothing written -- the file is left exactly as discovery
             # found it, for the ordinary tiered ladder to process normally.
+            continue
+
+        # Issue athenaeum#903: an audited discard of an information-free record.
+        # Never a hard delete -- the content is committed before it is removed,
+        # so it stays recoverable from history.
+        if matched_rule.disposition == "drop":
+            if not is_live:
+                _tally(rule_tag, matched_rule.mode, "observed-drop")
+                continue
+            drop_raw_file(knowledge_root, raw.path, rule_tag=rule_tag)
+            _tally(rule_tag, matched_rule.mode, "drop")
+            log.info(
+                "shape-rules: %s dropped %s as information-free "
+                "(recoverable from git history)",
+                rule_tag,
+                raw.ref,
+            )
+            continue
+
+        # Issue athenaeum#903: a long-lived SOURCE DOCUMENT. Marked compiled-exempt
+        # in the manifest under the knowledge root; the file itself is NOT
+        # deleted and NOT compiled. Discovery skips it from the next run on.
+        if matched_rule.disposition == "retain":
+            if not is_live:
+                _tally(rule_tag, matched_rule.mode, "observed-retain")
+                continue
+            mark_exempt(knowledge_root, [raw.ref])
+            _tally(rule_tag, matched_rule.mode, "retain")
+            log.info(
+                "shape-rules: %s retained %s as a preserved source document "
+                "(compiled-exempt; file left in place)",
+                rule_tag,
+                raw.ref,
+            )
+            continue
+
+        # Issue athenaeum#903: N records aggregate into ONE correction. Records are
+        # accumulated here and compiled after the scan -- the aggregate is not
+        # knowable until every member of the group has been seen.
+        if matched_rule.disposition == "rollup":
+            assert matched_rule.rollup is not None  # guaranteed by schema
+            try:
+                group_key = resolve_value_expr(matched_rule.rollup.group_by, record)
+            except ShapeRuleTransformError as exc:
+                log.warning(
+                    "shape-rules: rule %s matched %s but its rollup group_by "
+                    "failed to resolve (%s) -- falling through to the "
+                    "reasoning tiers",
+                    rule_tag,
+                    raw.ref,
+                    exc,
+                )
+                _tally(rule_tag, matched_rule.mode, "transform-error")
+                continue
+            rollup_groups.setdefault(
+                (rule_tag, matched_rule.mode, _group_key_repr(group_key)), []
+            ).append((matched_rule, record, raw))
+            _tally(
+                rule_tag,
+                matched_rule.mode,
+                "rollup" if is_live else "observed-rollup",
+            )
             continue
 
         # disposition == "emit"
@@ -875,8 +1123,73 @@ def run_shape_rule_phase(
             batch_path,
         )
 
+    # Issue athenaeum#903: compile each accumulated rollup group into ONE correction.
+    # Observe-mode groups are computed and ledgered above but never written here
+    # -- observe mode writes nothing, by definition.
+    summary["rollups_written"] = 0
+    for (rule_tag, mode, _group_key), members in sorted(rollup_groups.items()):
+        if mode != "live" or dry_run or not members:
+            continue
+        matched_rule, first_record, first_raw = members[0]
+        assert matched_rule.rollup is not None  # guaranteed by schema
+        try:
+            aggregate = _compute_rollup_aggregate(
+                matched_rule.rollup, [rec for _r, rec, _raw in members]
+            )
+            corr_record = build_correction_record(
+                matched_rule.correction,  # type: ignore[arg-type]  # schema-guaranteed
+                first_record,
+                rule_tag=rule_tag,
+            )
+        except ShapeRuleTransformError as exc:
+            log.warning(
+                "shape-rules: rule %s matched %d record(s) but its rollup "
+                "failed to compile (%s) -- the raw files are left for the "
+                "reasoning tiers",
+                rule_tag,
+                len(members),
+                exc,
+            )
+            continue
+        # The aggregate REPLACES the templated value: §12 lets exactly one
+        # thing cross the boundary -- "a last-event date, a windowed count".
+        corr_record["value"] = aggregate
+        corr_record["note"] = (
+            f"rollup of {len(members)} record(s) by shape rule {rule_tag}"
+        )
+        batch_path = write_correction_batch(
+            raw_root=raw_root,
+            source=first_raw.source,
+            submitter=f"shape-rule:{rule_tag}",
+            records=[corr_record],
+        )
+        for _rule, _rec, member_raw in members:
+            retire_compiled_raw_file(knowledge_root, member_raw.path, rule_tag=rule_tag)
+        summary["rollups_written"] += 1
+        log.info(
+            "shape-rules: %s rolled %d record(s) up into correction batch %s",
+            rule_tag,
+            len(members),
+            batch_path,
+        )
+
     if not dry_run:
         for (rule_tag, mode), counts in tallies.items():
+            records_total = sum(counts.values())
+            # Issue athenaeum#903's denominator invariant: the per-disposition counts
+            # must sum to the records this rule SAW. It is asserted here, at the
+            # one place the ledger line is built, so a future disposition that
+            # forgets to tally is caught by every run rather than by review.
+            if records_total != counts_seen.get((rule_tag, mode), records_total):
+                log.error(
+                    "shape-rules: denominator invariant violated for %s (%s): "
+                    "dispositions sum to %d but %d record(s) were seen "
+                    "(issue athenaeum#903)",
+                    rule_tag,
+                    mode,
+                    records_total,
+                    counts_seen.get((rule_tag, mode), records_total),
+                )
             append_shape_rules_ledger(
                 wiki_root,
                 {
@@ -884,7 +1197,8 @@ def run_shape_rule_phase(
                     "run_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "rule": rule_tag,
                     "mode": mode,
-                    "records_total": sum(counts.values()),
+                    "records_seen": counts_seen.get((rule_tag, mode), records_total),
+                    "records_total": records_total,
                     "dispositions": counts,
                 },
             )
