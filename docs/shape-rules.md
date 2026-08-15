@@ -2,10 +2,10 @@
 
 # The shape-rule engine — declarative YAML rules that compile foreign shapes
 
-**Status:** MVP. Issues athenaeum#901 (engine: `emit`, `fallthrough`) and
-athenaeum#903 (`drop`, `retain`, `rollup` + compiled-exempt retirement). All five
-dispositions now ship. Automatic rule generation is a later slice, not this
-one.
+**Status:** MVP. Issues athenaeum#901 (engine: `emit`, `fallthrough`),
+athenaeum#903 (`drop`, `retain`, `rollup` + compiled-exempt retirement) and
+athenaeum#837 (`preserve` — the log-shaped intake family). All six dispositions
+now ship. Automatic rule generation is a later slice, not this one.
 
 Companion to [`field-corrections.md`](field-corrections.md), which this
 document assumes throughout — the shape-rule engine's `emit` disposition
@@ -173,7 +173,7 @@ left untouched for the reasoning tiers — `field-corrections.md` §1.1's
 
 ---
 
-## 5. Dispositions (this slice: `emit`, `fallthrough`)
+## 5. Dispositions (`emit`, `fallthrough`, `drop`, `retain`, `rollup`, `preserve`)
 
 ### `emit`
 
@@ -230,6 +230,106 @@ than the cache dir. The two records fail differently: losing a cache entry
 costs a re-read, whereas losing an exemption would silently resurrect a
 preserved source document into the wiki one cache wipe after the operator
 asked for the opposite. "Permanently skips" cannot rest on a cache.
+
+### `preserve` (athenaeum#837)
+
+The file is a **log** — a source artifact to be kept whole, not intake, and
+not a claim. `preserve` **moves** it out of raw intake into an
+operator-configured preserved area, and (optionally) compiles a fact from it
+that points *back* at the moved file as its provenance.
+
+This is the operator decision of 2026-08-14 on athenaeum#837:
+
+> *"These logs are like a daily diary. We don't need the blow-by-blow into the
+> wiki. We need to retain the log as an artifact and point any facts that we do
+> ingest to that log as the source."*
+
+So the answer to a log-shaped family is **not** "cluster it better" — a log is
+a source document. It is kept whole, kept out of the wiki, and referenced by
+whatever the librarian legitimately learns from it.
+
+**Configure the area first — the feature is opt-in twice over.** A `preserve`
+rule is inert until an operator names a folder under the knowledge root:
+
+```yaml
+# <knowledge_root>/athenaeum.yaml
+librarian:
+  preserved_log_dir: logs
+```
+
+Unconfigured, a matching record is tallied `preserve-unconfigured` and falls
+through to the reasoning tiers with the raw file untouched — never a silent
+move to a guessed location. A value that is absolute, or that escapes the
+knowledge root via `..`, is refused with a warning: a preserved artifact
+outside the knowledge git repo is neither versioned nor recoverable, which
+defeats preservation entirely.
+
+**Why a move, and not `retain`.** `retain` (above) marks a file exempt *where
+it lies*, which is the weaker guarantee: the file stays in the intake tree, so
+every future mechanism that walks `raw/` must remember to consult the exempt
+manifest — and that manifest fails open by design. Moving the file makes the
+guarantee structural: a preserved log is not *skipped by* discovery, it is
+**not discoverable**, because `intake.discover_raw_files` only ever walks
+`raw/`.
+
+For the same reason `preserve` does **not** write an exempt row. The exempt key
+is `source/filename`, so exempting it would suppress a future, genuinely-new
+file that happened to reuse the name — which is exactly what a daily log writer
+emitting `today.jsonl` every day does. The move is the mechanism; the manifest
+is not involved.
+
+Layout under the area mirrors intake's own — `<preserved_dir>/<source>/<filename>`
+— so a log's origin survives the move, and a same-named file from a later run is
+suffixed (`today-1.jsonl`) rather than clobbered. Preservation that overwrites
+is not preservation.
+
+**The optional `correction:` block — provenance, not a second source.**
+`preserve` is the one disposition where `correction:` is optional. Without it,
+the log is simply moved. With it, the fact is compiled *and* its `source` is
+rewritten to point at the preserved artifact:
+
+```yaml
+disposition: preserve
+correction:
+  target: {type: person, handle: {email: "$email"}}
+  op: set
+  field: bounced
+  value: "$status_date"
+  source: "script:delivery-log"      # machine tier, validated at load
+```
+
+compiles a bounce fact whose source becomes the **structured** form:
+
+```json
+{"type": "script",
+ "ref": "preserved-log:logs/delivery/20260815T000000Z-aa.jsonl#L1",
+ "notes": "compiled by shape rule delivery-log@1 from a preserved log (asserted as delivery-log)"}
+```
+
+The `type` is deliberately preserved rather than replaced. An unknown source
+type silently falls to the rank-9 default (`precedence.source_rank`), so
+overwriting the whole scalar with `preserved-log:…` would quietly demote every
+fact a log produces below the machine tier the load-time guard exists to
+enforce. Keeping `type` and putting the pointer in `ref` — which is what `ref`
+is for — preserves the rank *and* resolves to the artifact.
+
+The locator after `#` is honest about what the extractor matched (§3.1): a raw
+file yields exactly one record, so the path plus that record's position locates
+it completely — `L1` for a `.jsonl`, `frontmatter` for a `.md`. When the
+extractor grows to multi-record files, that field carries the record index.
+
+**Ordering.** The correction is built *before* the move, so a transform that
+cannot resolve leaves the raw file exactly where it was (tallied
+`transform-error`) rather than stranding a half-moved log. A move that fails
+tallies `preserve-failed` and writes no fact.
+
+**Indexing is decided explicitly, not by accident.** The preserved area is
+**not** embedded into the recall corpus by this change. The corpus is built
+from `wiki_root` (plus explicitly-named extra roots); the preserved area lives
+under the knowledge root and outside it, so nothing indexes it as prose. A
+preserved log is reachable as *provenance* — via the pointer on the facts it
+produced — not as retrievable prose. Whether to index preserved logs directly
+is a separate, deliberate decision, not a side effect of where the files landed.
 
 ### `rollup` (athenaeum#903)
 

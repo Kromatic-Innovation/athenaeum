@@ -20,7 +20,8 @@ closed function vocabulary in :data:`KNOWN_FUNCTIONS` (`set_diff`, `first`,
 through a templating language** — :func:`resolve_value_expr` is a small,
 fixed, code-owned interpreter over already-`yaml.safe_load`'d data.
 
-**Dispositions** (this slice ships exactly two — the rest are athenaeum#903):
+**Dispositions** (`emit`/`fallthrough` are athenaeum#901; `drop`/`retain`/
+`rollup` athenaeum#903; `preserve` athenaeum#837):
 `emit` writes a correction batch in the ONE conformance format
 (`docs/field-corrections.md` §3.2), consumed by the existing correction
 machinery (:mod:`athenaeum.corrections`) with NO CHANGES to it — the batch
@@ -97,6 +98,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import uuid
 from collections.abc import Callable
@@ -111,7 +113,10 @@ from pydantic import ValidationError as PydanticValidationError
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.compiled_exempt import mark_exempt
-from athenaeum.config import resolve_shape_rules_max_records_per_run
+from athenaeum.config import (
+    resolve_preserved_log_dir,
+    resolve_shape_rules_max_records_per_run,
+)
 from athenaeum.corrections import compute_correction_id
 from athenaeum.intake import discover_raw_files
 from athenaeum.models import RawFile, RawFileTooLargeError, parse_frontmatter
@@ -489,12 +494,22 @@ class CorrectionSpec(BaseModel):
 #: athenaeum#901 for `emit`, athenaeum#903 for `rollup`).
 _CORRECTION_REQUIRED: frozenset[str] = frozenset({"emit", "rollup"})
 
+#: Dispositions that MAY carry a `correction` block but do not require one
+#: (issue athenaeum#837). `preserve` is the only one: a preserved log is kept for
+#: its own sake, and whether the librarian also learns a fact FROM it is a
+#: separate, optional question. Without a `correction` the log is simply moved
+#: and preserved; with one, the fact is compiled AND carries a source pointer
+#: back to the preserved artifact (the operator decision of 2026-08-14 — the
+#: log survives as the fact's provenance rather than the fact being asserted
+#: with none).
+_CORRECTION_OPTIONAL: frozenset[str] = frozenset({"preserve"})
+
 #: Every terminal disposition a matched record can reach. `transform-error` is
 #: NOT here: it is a degradation of `emit` to fallthrough, tallied under its own
 #: name so a rule failing to resolve is visible rather than hidden inside the
 #: fallthrough count (issue athenaeum#901).
 TERMINAL_DISPOSITIONS: frozenset[str] = frozenset(
-    {"emit", "fallthrough", "drop", "retain", "rollup"}
+    {"emit", "fallthrough", "drop", "retain", "rollup", "preserve"}
 )
 
 
@@ -555,7 +570,7 @@ class ShapeRule(BaseModel):
     name: str
     mode: Literal["observe", "live"] = "observe"
     match: MatchSpec
-    disposition: Literal["emit", "fallthrough", "drop", "retain", "rollup"]
+    disposition: Literal["emit", "fallthrough", "drop", "retain", "rollup", "preserve"]
     correction: CorrectionSpec | None = None
     rollup: RollupSpec | None = None
 
@@ -583,11 +598,17 @@ class ShapeRule(BaseModel):
         # the N collapse. `fallthrough`/`drop`/`retain` write no correction at
         # all, so carrying one is a rule the operator has mis-written — caught
         # at load time rather than silently ignored per record.
+        # Issue athenaeum#837: `preserve` is the one disposition where a correction
+        # is OPTIONAL — see `_CORRECTION_OPTIONAL`.
         if self.disposition in _CORRECTION_REQUIRED and self.correction is None:
             raise ValueError(
                 f"disposition {self.disposition!r} requires a 'correction' block"
             )
-        if self.disposition not in _CORRECTION_REQUIRED and self.correction is not None:
+        if (
+            self.disposition not in _CORRECTION_REQUIRED
+            and self.disposition not in _CORRECTION_OPTIONAL
+            and self.correction is not None
+        ):
             raise ValueError(
                 f"disposition {self.disposition!r} must not carry a "
                 "'correction' block"
@@ -798,6 +819,132 @@ def drop_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: str) -> boo
         snapshot_reason="before drop",
         retire_reason=f"dropped as information-free by {rule_tag}",
     )
+
+
+#: Scheme prefix on a correction's ``source`` when the fact was compiled FROM a
+#: preserved log (issue athenaeum#837). Chosen to read as a URI scheme so a
+#: consumer can dispatch on it without parsing prose, and to be greppable in a
+#: page's ``field_sources`` — "which facts came out of a log?" is one grep.
+PRESERVED_LOG_SOURCE_SCHEME = "preserved-log"
+
+
+def preserved_log_source_pointer(
+    knowledge_root: Path, preserved_path: Path, *, fmt: str
+) -> str:
+    """The provenance pointer a fact compiled from a preserved log carries.
+
+    ``preserved-log:<path-relative-to-knowledge-root>#<locator>`` — the
+    operator decision of 2026-08-14 in issue athenaeum#837: *"point any facts
+    that we do ingest to that log as the source"*, so the artifact IS the
+    provenance rather than the fact being asserted with none.
+
+    The locator is honest about what the extractor actually matched
+    (:func:`_record_and_format`): a raw file yields exactly ONE record, so the
+    path plus that record's position within the file locates it completely —
+    ``L1`` for a ``.jsonl`` (the engine reads the first line), ``frontmatter``
+    for a ``.md``. When the extractor grows to multi-record files this is the
+    field that carries the record index; the format is deliberately shaped to
+    take one now rather than needing a second pointer scheme later.
+    """
+    try:
+        rel = preserved_path.resolve().relative_to(knowledge_root.resolve()).as_posix()
+    except (ValueError, OSError):
+        rel = preserved_path.as_posix()
+    locator = {"jsonl": "L1", "md": "frontmatter"}.get(fmt, "")
+    return (
+        f"{PRESERVED_LOG_SOURCE_SCHEME}:{rel}#{locator}"
+        if locator
+        else f"{PRESERVED_LOG_SOURCE_SCHEME}:{rel}"
+    )
+
+
+def preserve_raw_file(
+    knowledge_root: Path,
+    raw_path: Path,
+    *,
+    preserved_dir: str,
+    source: str,
+    rule_tag: str,
+) -> Path | None:
+    """MOVE a log-shaped raw file out of raw intake into the preserved area.
+
+    The move — not a flag on a file that stays put — is what the athenaeum#837
+    operator decision asks for, and it is the stronger guarantee: a preserved
+    log is not *skipped by* discovery, it is outside the tree discovery walks
+    (:func:`athenaeum.intake.discover_raw_files` only ever walks ``raw/``), so
+    no future caller has to remember to consult an exempt manifest.
+
+    Layout under the preserved area mirrors intake's own
+    ``<preserved_dir>/<source>/<filename>``, so a log's origin survives the
+    move — a bare flat dump of filenames would lose which tool wrote it.
+
+    Returns the destination path, or ``None`` if the move could not be made
+    (the caller then falls through and leaves the raw file untouched — never
+    a half-move, and never a silent loss).
+    """
+    if not raw_path.exists():
+        return None
+    dest_dir = knowledge_root / preserved_dir / source
+    dest = dest_dir / raw_path.name
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        log.warning(
+            "shape-rules: %s could not create preserved-log area %s — "
+            "leaving %s in raw intake",
+            rule_tag,
+            dest_dir,
+            raw_path.name,
+        )
+        return None
+    # A same-named log from an earlier run must never be clobbered: the whole
+    # contract is that a preserved artifact SURVIVES. Suffix instead.
+    if dest.exists():
+        stem, suffix = raw_path.stem, raw_path.suffix
+        for n in range(1, 1000):
+            candidate = dest_dir / f"{stem}-{n}{suffix}"
+            if not candidate.exists():
+                dest = candidate
+                break
+        else:
+            log.warning(
+                "shape-rules: %s found no free filename for %s under %s — "
+                "leaving it in raw intake",
+                rule_tag,
+                raw_path.name,
+                dest_dir,
+            )
+            return None
+    if (knowledge_root / ".git").is_dir():
+        try:
+            rel_src = str(raw_path.resolve().relative_to(knowledge_root.resolve()))
+            rel_dst = str(dest.resolve().relative_to(knowledge_root.resolve()))
+        except (ValueError, OSError):
+            rel_src, rel_dst = str(raw_path), str(dest)
+        # `git add` first: an intake file may be untracked, and `git mv` on an
+        # untracked path fails. Staging makes the move recoverable from history
+        # exactly like a retirement is.
+        _git(knowledge_root, "add", "--", rel_src)
+        moved = _git(knowledge_root, "mv", "-f", "--", rel_src, rel_dst)
+        if moved.returncode == 0:
+            _git(
+                knowledge_root,
+                "commit",
+                "-m",
+                f"shape-rules: {rel_src} preserved as a source document "
+                f"by {rule_tag} -> {rel_dst}",
+            )
+            return dest
+    try:
+        shutil.move(str(raw_path), str(dest))
+        return dest
+    except OSError:
+        log.warning(
+            "shape-rules: %s failed to move %s into the preserved-log area",
+            rule_tag,
+            raw_path,
+        )
+        return None
 
 
 def _retire_raw_file(
@@ -1056,6 +1203,106 @@ def run_shape_rule_phase(
                 "(compiled-exempt; file left in place)",
                 rule_tag,
                 raw.ref,
+            )
+            continue
+
+        # Issue athenaeum#837: a LOG-SHAPED family. The file is MOVED out of raw
+        # intake into the operator-configured preserved area and kept whole as
+        # a source artifact; if the rule also carries a `correction`, the fact
+        # it compiles points BACK at the moved log as its provenance.
+        #
+        # Why no `mark_exempt` here, unlike `retain`: the move already puts the
+        # file outside the only tree `discover_raw_files` walks, so exemption
+        # would be redundant — and worse than redundant, it would be WRONG. The
+        # exempt key is `source/filename`, so exempting it would suppress a
+        # FUTURE, genuinely-new file that happens to reuse the name (a daily
+        # log writer emitting `today.md` every day is exactly that shape). The
+        # move is the mechanism; the manifest is not involved.
+        if matched_rule.disposition == "preserve":
+            if not is_live:
+                _tally(rule_tag, matched_rule.mode, "observed-preserve")
+                continue
+            preserved_dir = resolve_preserved_log_dir(config)
+            if preserved_dir is None:
+                log.warning(
+                    "shape-rules: %s matched %s as log-shaped but no "
+                    "preserved-log area is configured "
+                    "(librarian.preserved_log_dir) -- falling through to the "
+                    "reasoning tiers, raw file untouched",
+                    rule_tag,
+                    raw.ref,
+                )
+                _tally(rule_tag, matched_rule.mode, "preserve-unconfigured")
+                continue
+            # Build the correction BEFORE moving: a transform that cannot
+            # resolve must leave the raw file exactly where it was, so the
+            # record still reaches the tiers. Moving first would strand it.
+            corr_record: dict[str, Any] | None = None
+            corr_spec = matched_rule.correction
+            if corr_spec is not None:
+                try:
+                    corr_record = build_correction_record(
+                        corr_spec, record, rule_tag=rule_tag
+                    )
+                except ShapeRuleTransformError as exc:
+                    log.warning(
+                        "shape-rules: rule %s matched %s but its transform "
+                        "failed (%s) -- falling through to the reasoning "
+                        "tiers, raw file untouched",
+                        rule_tag,
+                        raw.ref,
+                        exc,
+                    )
+                    _tally(rule_tag, matched_rule.mode, "transform-error")
+                    continue
+            dest = preserve_raw_file(
+                knowledge_root,
+                raw.path,
+                preserved_dir=preserved_dir,
+                source=raw.source,
+                rule_tag=rule_tag,
+            )
+            if dest is None:
+                _tally(rule_tag, matched_rule.mode, "preserve-failed")
+                continue
+            if corr_record is not None and corr_spec is not None:
+                # Point the fact at the artifact WITHOUT disturbing its
+                # precedence. The declared `source` is capped at machine tier
+                # and validated at LOAD time; an unknown source type silently
+                # falls to the rank-9 default (`precedence.source_rank`), so
+                # replacing the whole scalar would quietly demote every fact a
+                # preserved log produces. Keeping `type` and putting the
+                # pointer in `ref` -- which is what `ref` is for -- preserves
+                # the rank and still resolves to the log.
+                pointer = preserved_log_source_pointer(
+                    knowledge_root, dest, fmt=fmt
+                )
+                declared = parse_source(corr_spec.source)
+                corr_record["source"] = {
+                    "type": declared.type if declared else "script",
+                    "ref": pointer,
+                    "notes": (
+                        f"compiled by shape rule {rule_tag} from a preserved "
+                        f"log (asserted as {declared.ref})"
+                        if declared
+                        else f"compiled by shape rule {rule_tag} from a preserved log"
+                    ),
+                }
+                write_correction_batch(
+                    raw_root=raw_root,
+                    source=raw.source,
+                    submitter=f"shape-rule:{rule_tag}",
+                    records=[corr_record],
+                )
+            _tally(rule_tag, matched_rule.mode, "preserve")
+            log.info(
+                "shape-rules: %s preserved %s as a log artifact at %s%s",
+                rule_tag,
+                raw.ref,
+                dest,
+                " (fact compiled with a source pointer back to it)"
+                if corr_record is not None
+                else "",
             )
             continue
 
