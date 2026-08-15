@@ -228,6 +228,26 @@ class TestResolveTarget:
         )
         assert path is None
 
+    def test_handle_resolution_apollo_organization_id(self, tmp_path: Path) -> None:
+        """issue athenaeum#874: a provider-keyed company correction target
+        resolves through registry.json on `apollo_organization_id`."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "c.md", {"uid": "company-acme", "type": "company", "name": "Acme"})
+        index = EntityIndex(wiki)
+        registry = {
+            "company-acme": {
+                "type": "company",
+                "handles": {"apollo_organization_id": "5f1a2b3c"},
+            }
+        }
+        path = resolve_target(
+            {"type": "company", "handle": {"apollo_organization_id": "5f1a2b3c"}},
+            index=index,
+            registry_entities=registry,
+        )
+        assert path is not None
+        assert path.name == "c.md"
+
 
 # ---------------------------------------------------------------------------
 # §3.3 create branch (issue athenaeum#865) -- resolve_target_for_apply's
@@ -777,6 +797,72 @@ class TestCreateByHandle:
         )
         assert first.disposition == "applied"
         assert len(list(wiki.glob("*.md"))) == 1
+
+        update_record = {
+            "record": "correction",
+            "target": target,
+            "op": "set",
+            "field": "employee_count",
+            "value": "500",
+            "source": "api:apollo",
+            "observed_at": "2026-08-07T00:00:00Z",
+        }
+        second = process_correction_record(
+            update_record,
+            env,
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert second.disposition == "applied"
+        pages = list(wiki.glob("*.md"))
+        assert len(pages) == 1  # still one entity, not a second create
+        meta, _ = parse_frontmatter(pages[0].read_text())
+        assert meta["industry"] == "Software"  # earlier field preserved
+        assert meta["employee_count"] == "500"  # new field applied
+        assert second.entity_path == first.entity_path  # same page, not a new one
+
+    def test_create_by_apollo_organization_id_then_update(self, tmp_path: Path) -> None:
+        """issue athenaeum#874: a zero-match `apollo_organization_id` handle
+        target creates the company at tier 0 (the athenaeum#865 path), and a
+        second submission carrying the same key updates that page rather
+        than creating a duplicate."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        registry: dict = {}
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+            employee_count={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        target = {"type": "company", "handle": {"apollo_organization_id": "5f1a2b3c"}}
+        env = self._envelope()
+
+        create_record = {
+            "record": "correction",
+            "target": target,
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        first = process_correction_record(
+            create_record,
+            env,
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert first.disposition == "applied"
+        pages = list(wiki.glob("*.md"))
+        assert len(pages) == 1
+        meta, _ = parse_frontmatter(pages[0].read_text())
+        assert meta["apollo_organization_id"] == "5f1a2b3c"
+        assert meta["field_sources"]["apollo_organization_id"] == "api:apollo"
+        uid = meta["uid"]
+        assert registry[uid]["handles"]["apollo_organization_id"] == "5f1a2b3c"
 
         update_record = {
             "record": "correction",
@@ -1410,12 +1496,21 @@ class TestSensitivityRouting:
         assert result.monotone is True
         # The entity page named by the correction is UNTOUCHED.
         assert page.read_text() == before
-        # The fact actually landed on the excluded/PII surface.
+        # The fact actually landed on the excluded/PII surface -- as the SAME
+        # markdown contact-record shape `classify_contact_value` /
+        # `iter_contact_records` read and write (issue athenaeum#872), never a
+        # parallel `{uid}.json` record only this router understood.
         excluded_root = tmp_path / "excluded"
-        surface_file = excluded_root / "person-alex.json"
+        surface_file = excluded_root / "person-alex.md"
         assert surface_file.exists()
-        surface_data = json.loads(surface_file.read_text())
-        assert surface_data["bounced"] == "2026-08-06"
+        surface_meta, _ = parse_frontmatter(surface_file.read_text())
+        assert surface_meta["bounced"] == "2026-08-06"
+        assert surface_meta["uid"] == "person-alex"
+        # Reachable through pii's own contact-record surface scan, not just
+        # at a filename this test happens to know.
+        from athenaeum import pii
+
+        assert pii.iter_contact_records(excluded_root) == [surface_file]
 
     def test_reapply_to_sensitive_surface_is_noop(self, tmp_path: Path) -> None:
         wiki = tmp_path / "wiki"
@@ -1442,6 +1537,255 @@ class TestSensitivityRouting:
             config=cfg,
         )
         assert second.disposition == "noop"
+
+    def test_reads_through_a_legacy_json_record_and_migrates_on_write(
+        self, tmp_path: Path
+    ) -> None:
+        """issue athenaeum#872 backward compatibility: a uid a PRE-FIX run wrote as
+        ``{uid}.json`` (the shape `_write_surface_record` minted before this
+        issue) is read through -- not silently orphaned -- and the very next
+        write for that uid lands on the canonical ``.md`` record instead.
+        """
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-alex", "type": "person", "name": "Alex Doe"})
+        registry = {
+            "person-alex": {"type": "person", "handles": {"alt_emails": ["alex@example.org"]}}
+        }
+        excluded_root = tmp_path / "excluded"
+        excluded_root.mkdir(parents=True)
+        legacy_file = excluded_root / "person-alex.json"
+        legacy_file.write_text(
+            json.dumps({"uid": "person-alex", "bounced": "2026-08-01", "note": "legacy"}),
+            encoding="utf-8",
+        )
+
+        result = process_correction_record(
+            self._record(),  # bounced=2026-08-06, monotone set -- applies over any prior value
+            _envelope(submitter="delivery-monitor"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=self._config(),
+        )
+        assert result.disposition == "routed-elsewhere"
+
+        # The legacy file is untouched -- read-through, not delete-on-read.
+        assert json.loads(legacy_file.read_text())["bounced"] == "2026-08-01"
+
+        # The write landed on the canonical markdown record, carrying the
+        # legacy data forward (the `note` key survives) plus the new value.
+        canonical_file = excluded_root / "person-alex.md"
+        assert canonical_file.exists()
+        canonical_meta, _ = parse_frontmatter(canonical_file.read_text())
+        assert canonical_meta["bounced"] == "2026-08-06"
+        assert canonical_meta["note"] == "legacy"
+
+
+# ---------------------------------------------------------------------------
+# §7.1 usage-class declaration (issue athenaeum#872): a contact-value
+# correction may carry the usage class of the value it writes, routed
+# through the SAME store `classify_contact_value` (issue athenaeum#866) owns --
+# these tests assert AGREEMENT between the correction path and that store,
+# not incidental facts like a file extension.
+# ---------------------------------------------------------------------------
+
+
+class TestSensitivityRoutingUsageClass:
+    def _config(self) -> dict:
+        return {
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "alt_emails": {"shape": "list", "writers": ["delivery-monitor"]}
+                    },
+                    "sensitive_fields": {"alt_emails": "pii"},
+                }
+            },
+            "storage": {"mapping": {"pii": "excluded"}},
+        }
+
+    def _record(self, **overrides) -> dict:
+        base = {
+            "record": "correction",
+            "target": {"uid": "person-alex"},
+            "op": "add",
+            "field": "alt_emails",
+            "value": "alex@example.org",
+            "source": "api:delivery-monitor:2026-08-06",
+            "observed_at": "2026-08-06T14:01:55Z",
+        }
+        base.update(overrides)
+        return base
+
+    def _setup(self, tmp_path: Path) -> tuple[EntityIndex, dict, Path]:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-alex", "type": "person", "name": "Alex Doe"})
+        return EntityIndex(wiki), {}, tmp_path / "excluded"
+
+    def test_correction_carries_a_class_agrees_with_classify_contact_value(
+        self, tmp_path: Path
+    ) -> None:
+        index, registry, excluded_root = self._setup(tmp_path)
+        result = process_correction_record(
+            self._record(usage_class="observed"),
+            _envelope(submitter="delivery-monitor"),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=self._config(),
+        )
+        assert result.disposition == "routed-elsewhere"
+
+        from athenaeum import pii
+
+        record_path = excluded_root / "person-alex.md"
+        before = record_path.read_text()
+        # The agreement assertion: calling `classify_contact_value` directly
+        # with the SAME class/source/observed_at the correction declared
+        # resolves to the SAME record and finds it already classified --
+        # byte-identical, no second write. The correction path and
+        # `classify_contact_value` converge on one classification, not two.
+        again = pii.classify_contact_value(
+            excluded_root,
+            "alex@example.org",
+            usage_class="observed",
+            source="api:delivery-monitor:2026-08-06",
+            observed_at="2026-08-06T14:01:55Z",
+        )
+        assert again == record_path
+        assert record_path.read_text() == before
+        assert (
+            pii.is_outreach_eligible(pii.read_bounce_record(record_path), "alex@example.org")
+            is True
+        )
+
+        # And readable through `read_person`, filterable by usage_classes,
+        # exactly as a directly-classified value is.
+        read = pii.read_person(
+            tmp_path,
+            self._config(),
+            "person-alex",
+            include_contact=True,
+            usage_classes=[pii.USAGE_CLASS_OBSERVED],
+        )
+        assert read is not None
+        assert read.contact["alt_emails"] == ["alex@example.org"]
+        assert read.classifications["alt_emails"][0].usage_class == pii.USAGE_CLASS_OBSERVED
+
+    def test_correction_without_a_class_stays_unclassified(self, tmp_path: Path) -> None:
+        index, registry, excluded_root = self._setup(tmp_path)
+        result = process_correction_record(
+            self._record(),
+            _envelope(submitter="delivery-monitor"),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=self._config(),
+        )
+        assert result.disposition == "routed-elsewhere"
+
+        from athenaeum import pii
+
+        record_path = excluded_root / "person-alex.md"
+        meta = pii.read_bounce_record(record_path)
+        assert "alex@example.org" in meta.get("alt_emails", [])
+        # No classification entry was written at all -- never defaulted to a
+        # usable class.
+        assert meta.get(pii.CONTACT_CLASSIFICATION_FIELD) is None
+        classification = pii.classification_for_value(meta, "alex@example.org")
+        assert classification.usage_class == pii.USAGE_CLASS_UNCLASSIFIED
+        assert classification.outreach_eligible is False
+
+        read = pii.read_person(
+            tmp_path, self._config(), "person-alex", include_contact=True
+        )
+        assert read is not None
+        assert read.classifications["alt_emails"][0].usage_class == pii.USAGE_CLASS_UNCLASSIFIED
+
+    def test_correction_cannot_downgrade(self, tmp_path: Path) -> None:
+        index, registry, excluded_root = self._setup(tmp_path)
+        cfg = self._config()
+        first = process_correction_record(
+            self._record(usage_class="observed"),
+            _envelope(submitter="delivery-monitor"),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert first.disposition == "routed-elsewhere"
+
+        # A second correction re-asserts the SAME (already-present) address
+        # with the weaker `provider` class.
+        second = process_correction_record(
+            self._record(
+                usage_class="provider",
+                observed_at="2026-08-07T09:00:00Z",
+                source="api:vendor-sync:2026-08-07",
+            ),
+            _envelope(submitter="delivery-monitor"),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        # The field-value delta is zero (the address was already present);
+        # the classification attempt is a separate, store-level question.
+        assert second.disposition == "noop"
+
+        from athenaeum import pii
+
+        record_path = excluded_root / "person-alex.md"
+        classification = pii.classification_for_value(
+            pii.read_bounce_record(record_path), "alex@example.org"
+        )
+        # The no-downgrade rule -- enforced by
+        # `pii._merge_contact_classification`, the SAME athenaeum#866 store rule,
+        # not a second implementation here -- refused the provider assertion;
+        # the stronger observed claim survives, provenance included.
+        assert classification.usage_class == pii.USAGE_CLASS_OBSERVED
+        assert classification.source == "api:delivery-monitor:2026-08-06"
+
+    def test_invalid_usage_class_value_raises_tier(self, tmp_path: Path) -> None:
+        index, registry, _ = self._setup(tmp_path)
+        result = process_correction_record(
+            self._record(usage_class="premium"),
+            _envelope(submitter="delivery-monitor"),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=self._config(),
+        )
+        assert result.disposition == "raised-tier"
+        assert "usage_class" in result.reason
+
+    def test_usage_class_on_non_identifier_field_raises_tier(self, tmp_path: Path) -> None:
+        index, registry, _ = self._setup(tmp_path)
+        cfg = self._config()
+        cfg["librarian"]["corrections"]["fields"]["bounced"] = {
+            "shape": "scalar",
+            "writers": ["delivery-monitor"],
+        }
+        cfg["librarian"]["corrections"]["sensitive_fields"]["bounced"] = "pii"
+        result = process_correction_record(
+            {
+                "record": "correction",
+                "target": {"uid": "person-alex"},
+                "op": "set",
+                "field": "bounced",
+                "value": "2026-08-06",
+                "usage_class": "observed",
+                "source": "api:delivery-monitor:2026-08-06",
+                "observed_at": "2026-08-06T14:01:55Z",
+            },
+            _envelope(submitter="delivery-monitor"),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert "usage_class" in result.reason
 
 
 # ---------------------------------------------------------------------------

@@ -1546,6 +1546,49 @@ def resolve_spend_max_pct_per_day(config: dict[str, Any] | None) -> float | None
     )
 
 
+#: Default headroom-warning threshold (issue athenaeum#926): a run that ends at
+#: or above this percentage of EITHER API dollar ceiling
+#: (:func:`resolve_spend_max_usd_per_run` / :func:`resolve_spend_max_usd_per_day`)
+#: gets a warning before the ceiling itself trips. See
+#: :func:`resolve_spend_warning_threshold_pct`.
+DEFAULT_SPEND_WARNING_THRESHOLD_PCT = 75.0
+
+
+def resolve_spend_warning_threshold_pct(config: dict[str, Any] | None) -> float:
+    """Resolve the spend-headroom warning threshold, as a percent of either
+    API dollar cap (issue athenaeum#926).
+
+    Unlike the ceilings above, this knob is NOT opt-in — it always resolves to
+    a usable value (:data:`DEFAULT_SPEND_WARNING_THRESHOLD_PCT` when unset),
+    because the warning it gates is meant to fire by default the first time a
+    run gets close to a ceiling the operator already configured; there is
+    nothing to warn about when neither ``max_usd_per_run`` nor
+    ``max_usd_per_day`` is set (see :func:`athenaeum.spend.spend_headroom`,
+    which reports a distinct "not configured" state for that case rather than
+    reading as 0% or 100% consumed). Precedence:
+    ``ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT`` env > ``spend.warning_threshold_pct``
+    yaml > ``75.0``. A ``bool`` / non-numeric / ``<= 0`` value (env or yaml)
+    falls through to the default — a zero/negative threshold would warn on
+    every run, including one that spent nothing. No seed in ``_DEFAULTS``
+    (issue athenaeum#231), matching every other spend knob in this module.
+    """
+    value = _env_number("ATHENAEUM_SPEND_WARNING_THRESHOLD_PCT", float)
+    if value is not None and value > 0:
+        return value
+    if isinstance(config, dict):
+        cfg = config.get("spend")
+        if isinstance(cfg, dict):
+            raw = cfg.get("warning_threshold_pct")
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None and value > 0:
+                    return value
+    return DEFAULT_SPEND_WARNING_THRESHOLD_PCT
+
+
 #: Code default for the classify-model knob (env ``ATHENAEUM_CLASSIFY_MODEL`` >
 #: yaml ``models.classify`` > this literal, via :func:`resolve_model`).
 #: Single-sourced HERE (issue athenaeum#640) rather than in :mod:`athenaeum.tiers`:

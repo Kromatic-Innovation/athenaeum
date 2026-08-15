@@ -210,6 +210,7 @@ because a batch may carry thousands of records and the applier streams it.
 | `source` | yes* | `SourceRef` shorthand `<type>:<ref>`, parsed by `provenance.parse_source`. The precedence input (§6). |
 | `observed_at` | yes* | RFC-3339 UTC — when the submitter *observed* the fact. Breaks same-tier ties. |
 | `note` | optional | Free text. Carried into the audit ledger, and into an escalation if one is raised — the *why*, which is what lets a human or an upper tier act without re-deriving context. |
+| `usage_class` | optional | One of `athenaeum.pii.USAGE_CLASSES` (§7.1). Valid only for an `add` onto a contact-identifier field routed to an excluded surface; absent, the written value stays `unclassified`. |
 
 \* or supplied by the envelope's `defaults`.
 
@@ -585,14 +586,26 @@ silently treated as usable. The marker lives in the store (`athenaeum.pii` —
 calls), so it binds every writer rather than each consumer re-implementing it. See
 `docs/security-posture.md` §2.3 for the permission table and the no-downgrade rule.
 
-Note the current boundary: the sensitivity routing above writes a correction's PII-bound
-value to the surface as a `{uid}.json` record, while the classification machinery reads
-and writes the markdown contact records the bounce/contact tooling uses. **Routing a
-contact-value correction through `classify_contact_value` so a correction can carry its
-own usage class is therefore not yet wired** — it needs those two record shapes
-reconciled first, which athenaeum#866 deliberately left alone. Until then, a
-correction-written contact value reads back as `unclassified` — which is the safe
-direction (not outreach-eligible), not a silent grant.
+**The record-shape question is settled (issue athenaeum#872, decided 2026-08-14).** The
+sensitivity routing above no longer writes a private `{uid}.json` record: it reads and
+writes through the SAME contact-record path `classify_contact_value` /
+`iter_contact_records` / `is_bounced` already use (`pii.resolve_contact_record_for_uid`
+for the read, `athenaeum.models.render_frontmatter` for the write) — whatever the
+CONFIGURED surface's own record shape is, not a shape hardcoded here. On the built-in
+excluded surface that shape is markdown, because that is what the operator can open and
+read; a storage adapter that persists differently is unaffected, since both halves reach
+the surface through the same seam.
+
+**A contact-value correction may declare the usage class of the value it writes.** Set
+`usage_class` (one of `athenaeum.pii.USAGE_CLASSES`) on a correction whose `op` is `add`
+and whose `field` is a contact-identifier field (`athenaeum.pii.CONTACT_IDENTIFIER_FIELDS`)
+routed to an excluded surface, and the router calls `classify_contact_value` for the
+address once it is written — the SAME store-level no-downgrade rule athenaeum#866
+introduced enforces it here too, not a second implementation inside `decide_verdict`. A
+correction that omits `usage_class` writes no classification entry at all, so the value
+reads back as `unclassified` (never outreach-eligible) exactly as before — the safe
+direction, not a silent grant. Declaring `usage_class` on any other field/op combination
+is non-conformant (§8).
 
 ### 7.2 Schema evolution
 

@@ -51,6 +51,7 @@ entity with none populated simply does not appear in the registry.
 | `drive_folder_ids` | `list[str]` | Google Drive folder ids holding the entity's material. |
 | `mural_board_ids` | `list[str]` | Mural board ids associated with the entity. |
 | `handles_verified` | `str` (date) | ISO date the handle set was last human-verified. |
+| `apollo_organization_id` | `str` | Apollo's organization id for the company (issue athenaeum#874). |
 
 The canonical key list and their list/scalar split live in one place —
 `SOURCE_HANDLE_KEYS` (`LIST_HANDLE_KEYS` + `SCALAR_HANDLE_KEYS`) in
