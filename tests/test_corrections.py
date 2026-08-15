@@ -228,6 +228,26 @@ class TestResolveTarget:
         )
         assert path is None
 
+    def test_handle_resolution_apollo_organization_id(self, tmp_path: Path) -> None:
+        """issue athenaeum#874: a provider-keyed company correction target
+        resolves through registry.json on `apollo_organization_id`."""
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "c.md", {"uid": "company-acme", "type": "company", "name": "Acme"})
+        index = EntityIndex(wiki)
+        registry = {
+            "company-acme": {
+                "type": "company",
+                "handles": {"apollo_organization_id": "5f1a2b3c"},
+            }
+        }
+        path = resolve_target(
+            {"type": "company", "handle": {"apollo_organization_id": "5f1a2b3c"}},
+            index=index,
+            registry_entities=registry,
+        )
+        assert path is not None
+        assert path.name == "c.md"
+
 
 # ---------------------------------------------------------------------------
 # §3.3 create branch (issue athenaeum#865) -- resolve_target_for_apply's
@@ -777,6 +797,72 @@ class TestCreateByHandle:
         )
         assert first.disposition == "applied"
         assert len(list(wiki.glob("*.md"))) == 1
+
+        update_record = {
+            "record": "correction",
+            "target": target,
+            "op": "set",
+            "field": "employee_count",
+            "value": "500",
+            "source": "api:apollo",
+            "observed_at": "2026-08-07T00:00:00Z",
+        }
+        second = process_correction_record(
+            update_record,
+            env,
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert second.disposition == "applied"
+        pages = list(wiki.glob("*.md"))
+        assert len(pages) == 1  # still one entity, not a second create
+        meta, _ = parse_frontmatter(pages[0].read_text())
+        assert meta["industry"] == "Software"  # earlier field preserved
+        assert meta["employee_count"] == "500"  # new field applied
+        assert second.entity_path == first.entity_path  # same page, not a new one
+
+    def test_create_by_apollo_organization_id_then_update(self, tmp_path: Path) -> None:
+        """issue athenaeum#874: a zero-match `apollo_organization_id` handle
+        target creates the company at tier 0 (the athenaeum#865 path), and a
+        second submission carrying the same key updates that page rather
+        than creating a duplicate."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        registry: dict = {}
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+            employee_count={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        target = {"type": "company", "handle": {"apollo_organization_id": "5f1a2b3c"}}
+        env = self._envelope()
+
+        create_record = {
+            "record": "correction",
+            "target": target,
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        first = process_correction_record(
+            create_record,
+            env,
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities=registry,
+            config=cfg,
+        )
+        assert first.disposition == "applied"
+        pages = list(wiki.glob("*.md"))
+        assert len(pages) == 1
+        meta, _ = parse_frontmatter(pages[0].read_text())
+        assert meta["apollo_organization_id"] == "5f1a2b3c"
+        assert meta["field_sources"]["apollo_organization_id"] == "api:apollo"
+        uid = meta["uid"]
+        assert registry[uid]["handles"]["apollo_organization_id"] == "5f1a2b3c"
 
         update_record = {
             "record": "correction",

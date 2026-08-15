@@ -46,10 +46,11 @@ def _make_repo(tmp_path: Path) -> Path:
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "t")
     (repo / "f.txt").write_text("v1\n")
-    # Mirror the real athenaeum deploy checkout: `dist/` is gitignored, so the
-    # `dist/.build-sha` stamp never shows as an untracked change (a stamp that
-    # dirtied the worktree would make the guard's dirty-refuse trip on itself).
-    (repo / ".gitignore").write_text("dist/\n")
+    # Mirror the real athenaeum deploy checkout: `dist/` and `.venv/` are
+    # gitignored, so the `dist/.build-sha` stamp and a test-constructed fake
+    # `.venv/` never show as untracked changes (either would make the guard's
+    # dirty-refuse trip on itself).
+    (repo / ".gitignore").write_text("dist/\n.venv/\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "c1")
     return repo
@@ -432,7 +433,8 @@ def test_default_install_cmd_uses_athenaeum_extras(tmp_path: Path) -> None:
     shims = _shim_dir(tmp_path, {"python3": "3.13"})
     out = _source_and_eval(f"_dg_default_install_cmd {tree}", {"PATH": _shimmed_path(shims)})
     assert out == (
-        f'"{shims}/python3" -m venv .venv && .venv/bin/pip install -q -e ".[mcp,vector]"'
+        f'"{shims}/python3" -m venv .venv && '
+        '.venv/bin/python -m pip install -q -e ".[mcp,vector]"'
     )
 
 
@@ -443,7 +445,10 @@ def test_deploy_extras_override_flows_into_install(tmp_path: Path) -> None:
         f"_dg_default_install_cmd {tree}",
         {"ATHENAEUM_DEPLOY_EXTRAS": "mcp", "PATH": _shimmed_path(shims)},
     )
-    assert out == f'"{shims}/python3" -m venv .venv && .venv/bin/pip install -q -e ".[mcp]"'
+    assert out == (
+        f'"{shims}/python3" -m venv .venv && '
+        '.venv/bin/python -m pip install -q -e ".[mcp]"'
+    )
 
 
 def test_default_reconcile_cmd_is_hard_reset_to_origin_ref() -> None:
@@ -571,8 +576,128 @@ def test_default_version_check_cmd_targets_deploy_venv() -> None:
 
 
 def test_default_metadata_refresh_cmd_is_no_deps_editable() -> None:
+    # athenaeum#894 AC2: routed through the venv's OWN python (`python -m
+    # pip`), never bare `.venv/bin/pip` — see module docstring on
+    # _dg_default_metadata_refresh_cmd for why the split matters.
     out = _source_and_eval("_dg_default_metadata_refresh_cmd /tmp/deploy", {})
-    assert out == '"/tmp/deploy/.venv/bin/pip" install -q -e . --no-deps'
+    assert out == '"/tmp/deploy/.venv/bin/python" -m pip install -q -e . --no-deps'
+
+
+# ---------------------------------------------------------------------------
+# Multi-tree detection (issue athenaeum#894 AC3/AC4) — a deploy venv whose
+# bin/python and bin/pip resolve to DIFFERENT interpreters (or that carries
+# more than one lib/python*/ tree) explains "metadata still drifted after
+# refresh" far better than a generic drift message, and the OLD recovery text
+# (re-run `.venv/bin/pip install -e .`) provably cannot fix it — that command
+# is exactly what the incident showed succeeding while changing nothing.
+# ---------------------------------------------------------------------------
+
+
+def _make_venv_bins(
+    repo: Path,
+    py_version: str,
+    pip_version: str,
+    extra_lib_trees: list[str] | None = None,
+) -> None:
+    """A throwaway `.venv/bin/{python,pip}` pair under `repo`, for exercising
+    the multi-tree detector hermetically — no real venv build. The shims
+    ignore their arguments and just report a fixed version, same pattern as
+    `_shim_dir` above. `repo`'s `.gitignore` already excludes `.venv/`, so
+    this never dirties the worktree the guard's dirty-refuse checks.
+    """
+    venv = repo / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    py = venv / "bin" / "python"
+    py.write_text(f"#!/bin/sh\necho {py_version}\n")
+    py.chmod(0o755)
+    pip = venv / "bin" / "pip"
+    pip.write_text(f'#!/bin/sh\necho "pip 25.3 from /fake (python {pip_version})"\n')
+    pip.chmod(0o755)
+    (venv / "lib" / f"python{py_version}" / "site-packages").mkdir(parents=True)
+    for extra in extra_lib_trees or []:
+        (venv / "lib" / extra / "site-packages").mkdir(parents=True)
+
+
+def test_multi_tree_reason_detects_python_pip_interpreter_mismatch(tmp_path: Path) -> None:
+    # THE athenaeum#894 condition: bin/python and bin/pip resolve to DIFFERENT
+    # interpreters (a stray python3.14 pip layered onto a python3.13 venv), so
+    # a refresh through bin/pip writes into a tree bin/python never reads.
+    _make_venv_bins(tmp_path, "3.13", "3.14")
+    reason = _source_and_eval(f"_dg_venv_multi_tree_reason {tmp_path}", {})
+    assert "3.13" in reason
+    assert "3.14" in reason
+
+
+def test_multi_tree_reason_detects_multiple_lib_trees(tmp_path: Path) -> None:
+    _make_venv_bins(tmp_path, "3.13", "3.13", extra_lib_trees=["python3.14"])
+    reason = _source_and_eval(f"_dg_venv_multi_tree_reason {tmp_path}", {})
+    assert "python3.13" in reason
+    assert "python3.14" in reason
+
+
+def test_multi_tree_reason_silent_on_healthy_single_interpreter_venv(tmp_path: Path) -> None:
+    # AC3: the detector must NOT trip on a healthy venv — bin/python and
+    # bin/pip agree, and there is exactly one lib/python*/ tree.
+    _make_venv_bins(tmp_path, "3.13", "3.13")
+    rc, out = _source_and_eval_rc(f"_dg_venv_multi_tree_reason {tmp_path}", {})
+    assert rc != 0
+    assert out == ""
+
+
+def test_multi_tree_reason_silent_when_venv_absent(tmp_path: Path) -> None:
+    # Nothing to detect before a venv has been built (e.g. pre-activation).
+    rc, out = _source_and_eval_rc(f"_dg_venv_multi_tree_reason {tmp_path}", {})
+    assert rc != 0
+    assert out == ""
+
+
+def test_sync_still_drifted_after_refresh_names_multi_tree_cause(tmp_path: Path) -> None:
+    # The exact incident from athenaeum#894: the version-check STILL fails
+    # after the refresh runs (the "recovery succeeds and the next check fails
+    # identically" loop), and the deploy venv shows the multi-tree signature.
+    # The abort must name that as the cause and must NOT repeat the old,
+    # proven-ineffective recovery command.
+    repo = _make_repo(tmp_path)
+    head = _head(repo)
+    _stamp(repo, head)
+    _make_venv_bins(repo, "3.13", "3.14")
+    env = _insync_env(
+        repo,
+        head,
+        {
+            "ATHENAEUM_GUARD_VERSION_CHECK_CMD": 'bash -c "exit 10"',  # never clears
+            "ATHENAEUM_GUARD_METADATA_REFRESH_CMD": "true",  # "succeeds", changes nothing
+        },
+    )
+    r = _run([], env)
+    assert r.returncode != 0
+    assert "ABORT" in r.stderr
+    assert "different interpreters" in r.stderr
+    assert "3.13" in r.stderr and "3.14" in r.stderr
+    assert ".venv/bin/pip install -e ." not in r.stderr  # the proven-ineffective recovery
+
+
+def test_sync_still_drifted_after_refresh_generic_when_single_interpreter(tmp_path: Path) -> None:
+    # AC3: a healthy single-interpreter venv must not trip the new detector —
+    # the abort falls back to the pre-existing generic message rather than
+    # naming a multi-tree cause that is not actually present.
+    repo = _make_repo(tmp_path)
+    head = _head(repo)
+    _stamp(repo, head)
+    _make_venv_bins(repo, "3.13", "3.13")
+    env = _insync_env(
+        repo,
+        head,
+        {
+            "ATHENAEUM_GUARD_VERSION_CHECK_CMD": 'bash -c "exit 10"',
+            "ATHENAEUM_GUARD_METADATA_REFRESH_CMD": "true",
+        },
+    )
+    r = _run([], env)
+    assert r.returncode != 0
+    assert "ABORT" in r.stderr
+    assert "still drifted after refresh" in r.stderr
+    assert "CAUSE:" not in r.stderr  # detector did not trip; no cause to name
 
 
 # ---------------------------------------------------------------------------
