@@ -2,10 +2,10 @@
 
 # The shape-rule engine — declarative YAML rules that compile foreign shapes
 
-**Status:** MVP. Issue athenaeum#901. Two dispositions ship in this slice (`emit`,
-`fallthrough`); `drop`/`retain`/`rollup` and compiled-exempt retirement are a
-later slice (athenaeum#903). Automatic rule generation is also a later slice, not
-this one.
+**Status:** MVP. Issues athenaeum#901 (engine: `emit`, `fallthrough`) and
+athenaeum#903 (`drop`, `retain`, `rollup` + compiled-exempt retirement). All five
+dispositions now ship. Automatic rule generation is a later slice, not this
+one.
 
 Companion to [`field-corrections.md`](field-corrections.md), which this
 document assumes throughout — the shape-rule engine's `emit` disposition
@@ -200,6 +200,67 @@ to be *counted* (the ledger records that this shape was recognised and
 deliberately deferred, distinguishing "we've seen this and chose not to
 auto-compile it" from "nothing recognised this at all").
 
+### `drop` (athenaeum#903)
+
+An **audited discard** of an information-free record — the 91% of daily
+contact-sync volume whose payload is a `skip_*` no-op, where the producer
+itself concluded nothing happened.
+
+`drop` carries no `correction:` block. The raw file is retired through the
+same two-commit convention `emit` uses: the content is **committed first**,
+then `git rm`'d, so the discard stays **recoverable from history**. This is
+the difference between an audited discard and a deletion, and it is the
+whole reason `drop` is a disposition rather than an `unlink`. The ledger's
+per-rule counter says how many were discarded and by which rule.
+
+### `retain` (athenaeum#903)
+
+The file is a **long-lived source document** — a daily journal, an operator's
+running log — not intake to be compiled into prose.
+
+`retain` carries no `correction:` block. The file is **not deleted** and
+**not compiled**: it is marked *compiled-exempt*, and discovery skips it on
+every subsequent run. That removes a standing source of wasted budget (a
+source document otherwise rediscovered and re-considered every run), without
+the `ephemeral: true` alternative's cost of dropping the content entirely.
+
+The exempt manifest is `compiled-exempt.json` **under the knowledge root**,
+keyed by `source/filename` — deliberately in the knowledge git repo rather
+than the cache dir. The two records fail differently: losing a cache entry
+costs a re-read, whereas losing an exemption would silently resurrect a
+preserved source document into the wiki one cache wipe after the operator
+asked for the opposite. "Permanently skips" cannot rest on a cache.
+
+### `rollup` (athenaeum#903)
+
+N matching records aggregate into **one** correction record, following the
+event-stream pattern in [`field-corrections.md`](field-corrections.md) §12.
+That section is explicit about what may cross from an event stream into an
+entity record — *"a small rollup — last-event date, a windowed count"* — and
+the `rollup:` block is that sentence as a closed vocabulary:
+
+```yaml
+disposition: rollup
+rollup:
+  group_by: "$person_uid"   # records with equal keys collapse into one correction
+  aggregate: count          # count -> group size; last -> max of `of`
+  # of: "$ts"               # required by `last`, forbidden by `count`
+correction:
+  target: {uid: "$person_uid"}
+  op: set
+  field: interaction_count
+  value: 0                  # REPLACED by the computed aggregate
+  source: "script:event-stream"
+```
+
+The group's correction is built from the `correction:` block against the
+group's first record (for `target`/`field`/`source`), with `value` replaced
+by the aggregate. There is deliberately **no** substitution token like
+`$$rollup`: a substitution token is a templating language in miniature, and
+athenaeum#901's "no templating language" guarantee is worth keeping literally
+true. Every member of a written group is retired exactly as `emit` retires a
+compiled file.
+
 ### The machine-tier guard
 
 `correction.source` must be a **literal** string (never a `$field`
@@ -240,12 +301,21 @@ tagged `rule@version` (`ShapeRule.qualified_name`) — the audit key
 downstream tooling (athenaeum#902/#903) keys off, and the same tag a rule's
 compiled `correction.note` carries by default.
 
-Disposition vocabulary this phase's ledger uses: `emit` / `fallthrough` (a
-`live`-mode rule that actually acted), `observed-emit` /
-`observed-fallthrough` (an `observe`-mode rule, or a `--dry-run` invocation,
-that only computed what it would have done), and `transform-error` (an
-`emit` rule matched but a value expression failed to resolve — degrades to
-fallthrough).
+Disposition vocabulary this phase's ledger uses: `emit` / `fallthrough` /
+`drop` / `retain` / `rollup` (a `live`-mode rule that actually acted), the
+matching `observed-*` forms (an `observe`-mode rule, or a `--dry-run`
+invocation, that only computed what it would have done), and
+`transform-error` (an `emit`/`rollup` rule matched but a value expression
+failed to resolve — degrades to fallthrough, raw file untouched).
+
+**The denominator invariant (athenaeum#903).** Alongside `records_total`, each
+line carries `records_seen` — the count of records that rule actually
+matched, tracked **independently** of the per-disposition tallies. The two
+must be equal: dispositions sum to records seen, for every rule, in every
+run. Counting them separately is the point — if both came off the same
+increment the invariant would be a tautology and could never catch a
+disposition that forgot to tally. A violation is logged at ERROR with both
+figures.
 
 ---
 
@@ -291,10 +361,13 @@ for the full knob table (`max_records_per_run`, `runtime_share`).
 
 ## 9. Not decided here (later slices)
 
-- **`drop` / `retain` / `rollup` dispositions, and compiled-exempt
-  retirement** — athenaeum#903.
 - **Automatic rule generation** — a separate slice in this batch, not
-  addressed here or by athenaeum#901.
+  addressed here, by athenaeum#901, or by athenaeum#903.
+- **A configured preserved-log AREA, and moving a retained file into it** —
+  athenaeum#837. `retain` (above) marks a file compiled-exempt *in place*;
+  relocating it under an operator-configured preserved area, and carrying a
+  source pointer back to it from any fact ingested out of it, is that issue's
+  remaining scope.
 - **Any change to the correction applier, allowlist, precedence, routing, or
   delta gate** — none; the engine's only interface to that machinery is
   writing a file in the format it already scans for.
