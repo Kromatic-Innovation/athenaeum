@@ -56,7 +56,23 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "--force",
         action="store_true",
         help="Overwrite existing template files at the destination; "
-        "no backup is created (only applies with --with-templates).",
+        "no backup is created (only applies with --with-templates and/or "
+        "--with-rules).",
+    )
+    init_parser.add_argument(
+        "--with-rules",
+        action="store_true",
+        help="Also copy bundled EXAMPLE shape rules (issue athenaeum#901) into "
+        "<path>/rules/. Every example ships 'mode: observe' -- installing "
+        "them changes nothing until you review wiki/_shape_rules_applied.jsonl "
+        "and edit a copy to 'mode: live'. See docs/shape-rules.md.",
+    )
+    init_parser.add_argument(
+        "--rules-dest",
+        type=Path,
+        default=None,
+        help="Override the shape-rules destination directory "
+        "(default: <path>/rules).",
     )
     init_parser.set_defaults(func=cmd_init)
 
@@ -180,7 +196,7 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    from athenaeum.init import copy_templates, init_knowledge_dir
+    from athenaeum.init import copy_example_rules, copy_templates, init_knowledge_dir
 
     target = init_knowledge_dir(args.path)
     print(f"Initialized knowledge directory at {target}")
@@ -197,6 +213,21 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(
             "warning: --templates-dest is ignored without --with-templates; "
             "no templates were copied.",
+            file=sys.stderr,
+        )
+
+    if getattr(args, "with_rules", False):
+        rules_dest = args.rules_dest if args.rules_dest else target / "rules"
+        rules_dest = rules_dest.expanduser().resolve()
+        written, skipped = copy_example_rules(rules_dest, force=args.force)
+        for fname in written:
+            print(f"  wrote   {rules_dest / fname} (mode: observe)")
+        for fname in skipped:
+            print(f"  skipped {rules_dest / fname} (exists; pass --force to overwrite)")
+    elif getattr(args, "rules_dest", None) is not None:
+        print(
+            "warning: --rules-dest is ignored without --with-rules; "
+            "no rules were copied.",
             file=sys.stderr,
         )
     return 0

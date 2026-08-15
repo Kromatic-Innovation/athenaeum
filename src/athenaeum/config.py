@@ -2662,3 +2662,72 @@ def resolve_corrections_runtime_share(config: dict[str, Any] | None) -> float:
                 if resolved is not None:
                     return resolved
     return default
+
+
+# ---------------------------------------------------------------------------
+# Shape-rule engine (issue athenaeum#901, docs/field-corrections.md)
+# ---------------------------------------------------------------------------
+#
+# The shape-rule engine compiles recognized foreign record shapes into
+# `docs/field-corrections.md`-conformant correction batches (`emit`) or
+# leaves them for the reasoning tiers (`fallthrough`). It runs in the same
+# deterministic phase slot as the field-correction fast path above, and its
+# per-run volume bound deliberately MIRRORS `librarian.corrections.
+# max_records_per_run` / `runtime_share` (same key names, own
+# `librarian.shape_rules` namespace) rather than sharing the corrections
+# budget outright — the two phases cost different things (rule matching vs.
+# applying an already-compiled batch) and a shared cap would let one starve
+# the other silently.
+
+
+def resolve_shape_rules_max_records_per_run(config: dict[str, Any] | None) -> int:
+    """``librarian.shape_rules.max_records_per_run`` (default 50,000).
+
+    Run-level cap on candidate raw files the engine evaluates against rules
+    in one run. Mirrors ``librarian.corrections.max_records_per_run``
+    (§10.2) — once the cap is hit, remaining candidates are left untouched
+    for the next run (never dropped, never partially processed).
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_SHAPE_RULES_MAX_RECORDS_PER_RUN",
+        "librarian",
+        "shape_rules",
+        "max_records_per_run",
+        50000,
+    )
+
+
+def resolve_shape_rules_runtime_share(config: dict[str, Any] | None) -> float:
+    """``librarian.shape_rules.runtime_share`` (default 0.05).
+
+    Fraction of ``librarian.max_runtime`` the shape-rule phase may spend,
+    mirroring :func:`resolve_corrections_runtime_share`'s mechanism exactly
+    (own env var, own yaml key, same coercion rules: only ``0 < share < 1``
+    reserves anything).
+    """
+    default = 0.05
+
+    def _coerce(value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return None
+        try:
+            share = float(value)
+        except (TypeError, ValueError):
+            return None
+        return share if 0.0 < share < 1.0 else None
+
+    env = os.environ.get("ATHENAEUM_SHAPE_RULES_RUNTIME_SHARE")
+    if env is not None:
+        resolved = _coerce(env)
+        if resolved is not None:
+            return resolved
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian") or {}
+        if isinstance(librarian_cfg, dict):
+            shape_rules_cfg = librarian_cfg.get("shape_rules")
+            if isinstance(shape_rules_cfg, dict):
+                resolved = _coerce(shape_rules_cfg.get("runtime_share"))
+                if resolved is not None:
+                    return resolved
+    return default
