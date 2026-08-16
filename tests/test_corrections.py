@@ -1104,6 +1104,93 @@ class TestCreateByHandle:
         assert meta["domains"] == ["acme.example"]
         assert meta["industry"] == "Software"
 
+    def test_dry_run_agrees_with_real_run_same_run_create_then_update(
+        self, tmp_path: Path
+    ) -> None:
+        """issue athenaeum#873: a `dry_run` batch that CREATES an entity (the
+        athenaeum#865 tier-0 create-by-handle path) must preview the SAME
+        outcome the real run produces -- one entity previewed, not two.
+        `process_correction_record`'s create branch used to update the
+        in-run `registry_entities` view (and `index`) only on the
+        NON-dry-run path, so a second record in the same dry-run batch,
+        keyed on the same handle as the first, did not resolve to the
+        entity the first record notionally created and took the create
+        branch again, minting a second `uid`.
+
+        This test runs the IDENTICAL two-record batch (one `add domains`,
+        one `set industry`, both keyed on ``handle: {domains:
+        acme.example}`` -- mirroring
+        ``test_same_run_second_record_resolves_created_page`` above) through
+        both `dry_run=False` and `dry_run=True` and asserts the two AGREE on
+        both dispositions and the number of distinct `entity_path` values,
+        rather than hardcoding either side's expectation (the strongest
+        form of this regression test)."""
+        env = self._envelope()
+        cfg = _fields_config(
+            domains={"shape": "list", "writers": ["employer-feed"]},
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        lines = [
+            json.dumps(env),
+            json.dumps(
+                {
+                    "record": "correction",
+                    "target": {"type": "company", "handle": {"domains": "acme.example"}},
+                    "op": "add",
+                    "field": "domains",
+                    "value": "acme.example",
+                    "source": "script:employer-feed",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                }
+            ),
+            json.dumps(
+                {
+                    "record": "correction",
+                    "target": {"type": "company", "handle": {"domains": "acme.example"}},
+                    "op": "set",
+                    "field": "industry",
+                    "value": "Software",
+                    "source": "script:employer-feed",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                }
+            ),
+        ]
+        batch_text = "\n".join(lines) + "\n"
+
+        def _run(dry_run: bool, root: Path) -> tuple[list[str], list[Path | None]]:
+            wiki = root / "wiki"
+            wiki.mkdir(parents=True)
+            batch_path = root / "raw" / "employer-feed" / "b.jsonl"
+            batch_path.parent.mkdir(parents=True)
+            batch_path.write_text(batch_text)
+            outcome = process_batch_file(
+                batch_path,
+                env,
+                "employer-feed",
+                index=EntityIndex(wiki),
+                knowledge_root=root,
+                config=cfg,
+                dry_run=dry_run,
+                registry_entities={},
+            )
+            return (
+                [r.disposition for r in outcome.results],
+                [r.entity_path for r in outcome.results],
+            )
+
+        real_dispositions, real_paths = _run(False, tmp_path / "real")
+        dry_dispositions, dry_paths = _run(True, tmp_path / "dry")
+
+        assert dry_dispositions == real_dispositions
+        assert len(set(dry_paths)) == len(set(real_paths)) == 1
+
+        # Hard invariant: dry run still writes NOTHING to disk.
+        assert list((tmp_path / "dry" / "wiki").glob("*.md")) == []
+        assert not (tmp_path / "dry" / "registry.json").exists()
+
+        # The real run, by contrast, actually wrote the one entity.
+        assert len(list((tmp_path / "real" / "wiki").glob("*.md"))) == 1
+
 
 class TestMixedDispositionBatch:
     def test_conformant_record_still_applies_alongside_a_fallthrough_record(
