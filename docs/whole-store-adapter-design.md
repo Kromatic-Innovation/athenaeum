@@ -217,7 +217,7 @@ than replace:
 
 | Abstraction | Location | Coverage |
 |---|---|---|
-| `atomic_io.atomic_write_text` — same-dir temp + `fsync` + `os.replace` | `src/athenaeum/atomic_io.py:32` | 28 modules. Its docstring states the invariant as codebase-wide: *"Every store-path write anywhere in the codebase must route through `atomic_write_text`"* (`atomic_io.py:18-20`) |
+| `atomic_io.atomic_write_text` — same-dir temp + `fsync` + `os.replace` | `src/athenaeum/atomic_io.py:32` | 28 modules. Its docstring states the invariant as codebase-wide: *"Every store-path write anywhere in the codebase must route through `atomic_write_text`"* (`atomic_io.py:17-20`) |
 | `storage.surface_root_for_class` — class → surface root | `src/athenaeum/storage.py:362` | 5 modules (§2.2) |
 | Per-module `O_APPEND` + `fsync` ledger append | 12 modules, duplicated by explicit house style (`quarantine.py:102-104`) | 12 modules, no shared implementation |
 
@@ -448,7 +448,7 @@ Every operation that removes user data falls into one of three tiers:
   `prune-filename-entities` (`filename_entity_prune.py:130`), and `prune-index`
   (`memory_index.py:196-199`). These fail safe.
 - **Tier B — silently degrades to a plain `unlink()` off-git.** Shape-rule
-  retirement (`rules.py:992-993`) and field-correction batch retirement
+  retirement (`rules.py:989`, handler at `992-993`) and field-correction batch retirement
   (`corrections.py:1830-1833`). Documented as a best-effort fallback for test
   fixtures — which is fine while "no git" is an edge case, and is exactly the
   wrong default the moment a non-filesystem adapter makes it the normal case.
@@ -535,7 +535,7 @@ the content" and "restore the ledger that explains it" become two operations
 that can diverge. The contract must make the coupling explicit (§5.3).
 
 The one exception is the LLM-observation ledger, which resolves under the
-*cache* dir rather than the store (`llm_schemas.py:391`, via
+*cache* dir rather than the store (`llm_schemas.py:391-394`, via
 `config.resolve_cache_dir`) — a durable, non-reconstructible record living in
 a directory whose name promises the opposite. §5.2 classifies it.
 
@@ -573,7 +573,7 @@ reconstructible from raw + wiki**:
 | `_calibration.jsonl`, `_reasoning_tier_decisions.jsonl`, `_axiom_governance.jsonl`, `_corrections_applied.jsonl`, `_shape_rules_applied.jsonl` | wiki root | no |
 | `_resolved_contradictions.jsonl` (`fingerprint.py:61`) | `raw/` | no |
 | `_observations.jsonl` / `_observation_supersessions.jsonl` (`pii.py:1309-1314`) | excluded surface root | no |
-| `observations.jsonl`, `spend.jsonl`, `_push_records.jsonl` (`llm_schemas.py:391`, `config.py:1449`, `push_metrics.py:132`) | **cache dir** | no |
+| `observations.jsonl`, `spend.jsonl`, `_push_records.jsonl` (`llm_schemas.py:391-394`, `config.py:1449`, `push_metrics.py:132`) | **cache dir** | no |
 | ingest / auto-memory / full-compile manifests (`librarian.py:5437-5647`), FTS5 + vector manifests, `.generation` (`search.py:576-686`, `search.py:1016`) | **cache dir** | yes — from a full rebuild |
 | `detection_incomplete.json`, `zero_yield_state.json`, killswitch `disabled` | **cache dir** | no, but machine-scoped |
 | the off-corpus ledger shard athenaeum#718 adds | purgeable off-corpus store | no |
@@ -634,9 +634,9 @@ it is a requirement the adapter must satisfy or explicitly refuse.
 
 This is the extension point athenaeum#911 asks to have drafted. It is a
 **draft for publication**, not a published surface: like the rest of
-`athenaeum.storage` it stays off the stable `__all__` surface until §9's S7
+`athenaeum.storage` it stays off the stable `__all__` surface until §9's S8
 promotes it, backed by the conformance suite S1 ships (the same staging the
-existing seam used — `docs/storage-adapter-contract.md:242-253`).
+existing seam used — `docs/storage-adapter-contract.md:247-249`).
 
 ### 6.1 Design decisions
 
@@ -743,6 +743,40 @@ call is what stops callers rebuilding a slower version themselves.
 - **No `exists()`.** `iter_meta` and a `None` from a read answer it, and a
   standalone existence check is the round trip callers most easily scatter.
 
+### 6.4 What the contract governs, and where it sits
+
+**Scope: `knowledge_root`, not the cache dir.** The `Store` contract governs
+the knowledge root and nothing else. Cache-dir artifacts — the FTS5 database,
+the chromadb collection, both index manifests, the raw-ingest and auto-memory
+manifests, and the vector generation stamp — stay on the local filesystem
+whatever adapter backs the store. They are `derived` or
+`operational`/`machine-local` (R3), they are per-machine by construction, and
+requiring an adapter to serve them would drag every backend into sqlite and
+chromadb's own file-handle assumptions (§2.5) for no benefit. This is also why
+`delta.py`'s dependence on cached chromadb embeddings (`delta.py:112-156`) is
+untouched by this design.
+
+The corollary is the part S5 has to act on: the `operational`/`store-durable`
+ledgers currently sitting in the cache dir — `spend.jsonl`,
+`observations.jsonl`, `_push_records.jsonl` — are misfiled. They are durable
+and not reconstructible, so they belong inside the store, and today they are
+in the one directory a user would feel safe deleting.
+
+**Layering.** `athenaeum/store.py` is **L1**, and it inherits `storage.py`'s
+documented exception verbatim: it may reach up to L2 `config` for adapter and
+mapping resolution, *because "which surface a class maps to" is explicitly a
+config-owned decision* (`storage.py:50-57`). `resolve_store_for_class()`
+therefore lives in `store.py` beside that exception, not in `storage.py` —
+which keeps `storage.py` as the class → surface router (D5) and gives the
+physical layer its own module.
+
+`FilesystemStore` is implementable without weakening `atomic_io.py`'s L0 rule
+(*"may import only stdlib"*, `atomic_io.py:17`): the dependency runs the
+correct way — L1 `store.py` imports L0 `atomic_io`, never the reverse — and
+`atomic_io` needs no change to serve as `put`'s implementation. S1's
+acceptance should assert the layering explicitly, since a store abstraction
+is exactly the kind of module that attracts upward imports.
+
 ## 7. Capability degradation and the honest-refusal rule
 
 > **R4 — no silent degradation.** A caller that needs an absent capability has
@@ -787,37 +821,65 @@ cold-tier mechanism, which this design leaves untouched. **Unaffected —
 proceeds on its existing dependency chain** (athenaeum#714, itself gated on
 athenaeum#711's baseline snapshot).
 
-**Surface 2 — off-corpus indexable mode, ledger shard, erasure taint.** Every
-one of its acceptance criteria is a store-contract capability under this
-design, and building it before the contract exists means building a bespoke
-second store:
+**Surface 2 — off-corpus indexable mode, ledger shard, erasure taint.** Its
+twelve acceptance criteria do **not** move as a block, and the first draft of
+this re-scope was wrong to treat them as one: only **three** are store-contract
+capabilities. The other nine are classification and taint-propagation logic
+that sits *above* wherever the bytes land, and blocking them on a store
+generalisation they do not touch would park correct work for no reason.
 
-| athenaeum#718 acceptance criterion | Becomes, under this design |
+**The three that depend on this design:**
+
+| athenaeum#718 criterion | Becomes, under this design |
 |---|---|
-| off-corpus adapter gains indexable mode, its own vector collection and index shard outside git | a surface declaring `purgeable` + `derived`-class support (R2, R3) |
-| erasure is a single-store delete of content + index shard + pointers | `delete` on a `purgeable` surface, with the R3 restore-together rule inverted into an erase-together rule |
-| ledger shard in the purgeable store, never the in-git ledger | an `operational`-class artifact on a `purgeable` surface (R3) |
-| HMAC-keyed erasure-class hashes | unchanged — a content-policy decision above the store, not a storage capability |
-| recall federates across corpus and off-corpus indexes | unchanged — a read-path change; the store contract supplies the surfaces, not the federation |
+| off-corpus adapter gains indexable mode — its own vector collection and index shard, outside git | a surface declaring `purgeable`, plus `derived` artifacts scoped to it (R2, R3) |
+| erasure is a single-store delete of content + index shard + pointers | `delete` on a `purgeable` surface, with R3's restore-together rule inverted into an erase-together rule |
+| off-corpus ledger shard, in the purgeable store, never the in-git ledger | an `operational` / `store-durable` artifact on a `purgeable` surface (R3) |
+
+Federated recall across the corpus and off-corpus indexes is a read-path
+change, not a store change — but it cannot be built before the off-corpus
+index exists, so it follows the first row transitively rather than on its own
+account.
+
+**The nine that do not:** HMAC-keyed erasure-class hashes, opaque
+person-entity slugs and pair ids, conservative default classification, the
+three taint rules (derivation, re-ingestion, push-is-egress), the named
+remediation path, "the redaction ledger records that-and-why, never what," and
+the retention-policy packs. Every one of these is a decision about *which*
+content is erasure-class and *what may be written about it* — answerable
+without knowing whether the bytes land on a filesystem or in a database.
+athenaeum#718's own framing already concedes this for the HMAC criterion
+(the rationale is about what must not enter git history, not about how storage
+works); the same reasoning covers the other eight.
 
 **The re-scope, stated explicitly:**
 
-1. **Split athenaeum#718 along its own two surfaces**, into two issues. It
-   currently requires both to be green to merge, on the reasoning that
-   splitting them *"would leave a half-wired store"* — that reasoning is what
-   this design invalidates, because the store wiring becomes the contract's
-   job rather than athenaeum#718's.
-2. **Surface 1 keeps athenaeum#718's existing gates** and is not blocked by
-   this design.
-3. **Surface 2 becomes `blocked_by` slices S1 and S3** (§9), and its scope
-   narrows from "build a purgeable indexed off-corpus store with a ledger
-   shard" to "declare and consume `purgeable` surfaces, and put the ledger
-   shard on one." The HMAC-keying and erasure-taint criteria stay with it
-   unchanged.
-4. **What must NOT happen:** athenaeum#718 implementing its own storage
+1. **Split athenaeum#718 three ways, not two.** It currently requires both
+   surfaces green to merge, on the reasoning that splitting them *"would leave
+   a half-wired store"* — that reasoning is what this design invalidates,
+   because the store wiring becomes the contract's job rather than
+   athenaeum#718's.
+   - **(a) Tiering and push budget** — surface 1, unchanged.
+   - **(b) Off-corpus storage** — the three criteria above.
+   - **(c) Erasure classification and taint** — the nine criteria above.
+2. **(a) keeps athenaeum#718's existing gates** (athenaeum#714, transitively
+   athenaeum#711's baseline) and is not blocked by this design.
+3. **(b) becomes `blocked_by` slices S1 and S3** (§9), and its scope narrows
+   from "build a purgeable indexed off-corpus store with a ledger shard" to
+   "declare and consume `purgeable` surfaces, and put the ledger shard on
+   one."
+4. **(c) is blocked by nothing in this design.** It may proceed in parallel.
+   Its tests will need somewhere to write, so it is *sequenced* after (b) for
+   convenience — but that is a scheduling preference, not a dependency edge,
+   and it should not be recorded as one.
+5. **What must NOT happen:** athenaeum#718 implementing its own storage
    abstraction for the off-corpus half. Two storage abstractions is the forked
    seam D5 exists to prevent, and it is the specific failure this re-scope is
    filed to avoid.
+
+athenaeum#718's cross-cutting "Wiring (both surfaces)" criteria — nothing
+lands unread, defaults leave the nightly run behaviourally unchanged, docs
+updated — are not re-scoped; each follows whichever of (a)/(b)/(c) it wires.
 
 athenaeum#764 (the librarian's wall-clock exhaustion) is **not** re-scoped by
 this design, but it is the reason P5 and P6 are stated as constraints rather
@@ -844,11 +906,12 @@ or not the store generalisation ever ships.
 |---|---|---|---|
 | **S1 — store protocol + filesystem adapter** | New `athenaeum/store.py` (L0/L1) carrying `StoreKey`, `ObjectMeta`, `StoreCapabilities`, `Store`, and a `FilesystemStore` implementing it over `atomic_io` + `pathlib`. `resolve_store_for_class()` alongside the existing `surface_root_for_class()`. **No callers migrated.** Acceptance: a conformance suite that an in-memory fake and `FilesystemStore` both pass, modelled on `tests/test_storage_enforcement.py::TestAdapterExtensionPointContract`. | must | — |
 | **S2 — index build on the bulk primitives** | `search._scan_indexed_records` consumes `iter_meta` instead of per-page `stat()`, and `read_many` for the changed set. Manifest stores the opaque `version` token (P2) with a schema stamp; a stamp mismatch forces one full re-hash, which athenaeum#373's staleness backstop already models. Acceptance: an op-count assertion against a latency-injecting fake adapter (P5) — one listing call plus `c` batched reads, for any `N`. | must | S1 |
-| **S3 — recoverability capability replaces the `.git` gate** | `snapshot()` on the protocol; `FilesystemStore` implements it with the existing `librarian.git_snapshot` code moved behind the seam. The four Tier-A gates become `capabilities.versioned` checks; Tier B's two silent `unlink` fallbacks are removed (R1). Acceptance: a destructive operation against a fake adapter declaring neither `versioned` nor `purgeable` refuses, with a test per Tier-A and Tier-B site. | must | S1 |
+| **S3 — recoverability capability replaces the `.git` gate** | `snapshot()` on the protocol; `FilesystemStore` implements it with the existing `librarian.git_snapshot` body (`librarian.py:495-521`) **moved**, not copied — an L4→L1 relocation whose body is stdlib + `subprocess` only, so it carries cleanly. Both existing call sites (`librarian.py:2894`, `librarian.py:3777`) migrate to call through the store in the same slice; leaving one behind would fork the seam at the snapshot primitive, which is D5's failure mode one level down. The four Tier-A gates become `capabilities.versioned` checks; Tier B's two silent `unlink` fallbacks are removed (R1). Acceptance: a destructive operation against a fake adapter declaring neither `versioned` nor `purgeable` refuses, with a test per Tier-A and Tier-B site, plus a grep-level assertion that no `git`-shelling code remains outside `FilesystemStore`. | must | S1 |
 | **S4 — lease primitive** | `Store.lease()`; `FilesystemStore` implements it over the existing `flock` + heartbeat + inode-race hardening; `runlock` migrates onto it. Acceptance: the existing `runlock` test suite passes unchanged against the filesystem adapter, plus a fake-adapter lease-expiry test. | should | S1 |
 | **S5 — artifact classification** | Every artifact in §5.2's tables declares one of the four R3 classes, and every `operational` one declares `store-durable` or `machine-local`. The 12 duplicated `O_APPEND` appenders collapse onto the contract's `append`; the cache-dir-resident artifacts are split by scope — durable ledgers move behind the seam, machine-local state stays out of it. The `config` class picks up `rules/`, `templates/`, the authority manifest and `athenaeum.yaml` (§2.3.1). Acceptance: a test enumerating every store artifact and asserting each declares exactly one class, and exactly one scope where the class is `operational`. | should | S1 |
 | **S6 — keyword backend declares its requirement** | `KeywordBackend` refuses on a surface without `cheap_local_scan`, naming FTS5 (P4, R4). Small. | should | S1 |
-| **S7 — publish the contract** | Promote `athenaeum.store` onto the stable `__all__` surface; publish §6 as `docs/store-contract.md`; ship the S1 conformance suite as a runnable third-party adapter-authoring harness, alongside the existing `adapter-authoring` skill's intake-adapter counterpart. | could | S1, S2, S3, S4, S5, S6 |
+| **S7 — one write-path caller, end to end** | Migrate a single self-contained write-heavy consumer fully onto the store — `quarantine.py` is the right candidate: ~13 sites, it exercises `append` (the ledger), `move` (both directions), and `put`, and it has no LLM in the path. **This is the slice that proves the write half.** Without it S1–S6 leave every one of the ~60 non-seam-consulting modules still writing through `Path`, and the "no caller can tell" goal is asserted rather than demonstrated. Acceptance: `quarantine.py` contains no `pathlib` or `shutil` call; its existing tests pass unchanged against `FilesystemStore`; and the same suite passes against the in-memory fake. | must | S1 |
+| **S8 — publish the contract** | Promote `athenaeum.store` onto the stable `__all__` surface; publish §6 as `docs/store-contract.md`; ship the S1 conformance suite as a runnable third-party adapter-authoring harness, alongside the existing `adapter-authoring` skill's intake-adapter counterpart. | could | S1–S7 |
 
 **Coverage of the walks in §3.1:** S2 migrates W1 (the search index build);
 S6 gates W2 (keyword scan-on-query). **W3 through W8 are deliberately not in
