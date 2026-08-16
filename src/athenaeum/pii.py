@@ -2790,6 +2790,29 @@ def resolve_excluded_fields(
     )
 
 
+def _normalize_frontmatter_uid(raw: Any) -> str:
+    """Coerce a raw frontmatter ``uid`` value to the string both uid-keyed
+    paths compare against — ``""`` means "absent" for both.
+
+    Shared by :func:`resolve_contact_record_for_uid` and
+    :func:`build_contact_record_uid_index` so a single definition governs
+    both (issue athenaeum#878). ``uid:`` with no value parses to YAML
+    ``None``, and ``str(None)`` is the literal string ``"None"`` — before
+    this helper existed, each function independently did ``str(...).strip()``
+    on the raw value, so a valueless ``uid:`` indexed/matched under the
+    literal ``"None"`` and a lookup for the string ``"None"`` would find it.
+    That was reproduced deliberately in athenaeum#877 to keep the two paths
+    from diverging, but it was never correct: a valueless uid is absent, not
+    a uid whose value happens to be the four characters ``N``, ``o``, ``n``,
+    ``e``. Mapping ``None`` to ``""`` here — the same sentinel an explicit
+    ``uid: ""`` already normalizes to — makes both paths skip it the same
+    way they already skip an explicit empty string.
+    """
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
 def resolve_contact_record_for_uid(contacts_root: Path, uid: str) -> Path | None:
     """Find the existing contact record whose frontmatter ``uid`` equals *uid*.
 
@@ -2806,17 +2829,21 @@ def resolve_contact_record_for_uid(contacts_root: Path, uid: str) -> Path | None
     - a missing *contacts_root* yields ``None``, same as
       :func:`resolve_contact_record`.
 
-    Compares ``str(...).strip()`` on both sides. An empty/blank *uid* never
-    matches anything — otherwise it would match every record with no
-    ``uid:`` field at all, which is never the intent of a uid lookup.
+    Compares :func:`_normalize_frontmatter_uid` on both sides. An
+    empty/blank *uid* never matches anything — otherwise it would match
+    every record with no ``uid:`` field at all, which is never the intent
+    of a uid lookup. That includes a record whose ``uid:`` key is present
+    but VALUELESS (YAML ``None``): normalized to ``""``, same as an
+    explicit ``uid: ""``, so it is treated as absent rather than matching a
+    lookup for the literal string ``"None"`` (issue athenaeum#878).
     """
-    wanted = str(uid).strip()
+    wanted = _normalize_frontmatter_uid(uid)
     if not wanted:
         return None
     matches = [
         path
         for path in iter_contact_records(contacts_root)
-        if str(read_bounce_record(path).get("uid", "")).strip() == wanted
+        if _normalize_frontmatter_uid(read_bounce_record(path).get("uid")) == wanted
     ]
     if not matches:
         return None
@@ -2850,21 +2877,15 @@ def build_contact_record_uid_index(contacts_root: Path) -> dict[str, Path]:
     - the FIRST match in :func:`iter_contact_records` order wins (that
       function sorts, so the same store always yields the same mapping);
     - ``log.warning`` (never raise) when more than one record carries a uid;
-    - the key is ``str(...).strip()`` of the record's ``uid`` frontmatter,
-      the SAME coercion the single-lookup function compares with. A record
-      with no ``uid`` key, or ``uid: ""``, is skipped — an empty uid must
-      never match anything, mirroring that function's empty-uid guard.
-
-    One consequence of matching that coercion exactly is worth naming,
-    because it looks like a bug in this function and is not: a record whose
-    ``uid:`` is present but VALUELESS parses to YAML null, which
-    ``str()`` renders as the literal ``"None"``, so it indexes under that
-    string. :func:`resolve_contact_record_for_uid` resolves a lookup for
-    ``"None"`` to that same record today — the behavior is pre-existing and
-    is reproduced here deliberately, since a batch read that diverged from a
-    single read on ANY uid would defeat the point of sharing the discipline.
-    Tracked separately rather than quietly changed here (issue athenaeum#877
-    is a cost fix, not a semantics fix).
+    - the key is :func:`_normalize_frontmatter_uid` of the record's ``uid``
+      frontmatter, the SAME normalizer the single-lookup function compares
+      with. A record with no ``uid`` key, ``uid: ""``, or a VALUELESS
+      ``uid:`` (YAML ``None``) is skipped — an empty/absent uid must never
+      match anything, mirroring that function's empty-uid guard. Before
+      issue athenaeum#878, a valueless ``uid:`` indexed under the literal
+      string ``"None"`` (from ``str(None)``) and so matched a lookup for
+      that string; both paths now treat it as absent instead, via the
+      shared normalizer.
 
     A missing *contacts_root* yields ``{}`` (:func:`iter_contact_records`
     returns ``[]`` for one), never a raise.
@@ -2872,7 +2893,7 @@ def build_contact_record_uid_index(contacts_root: Path) -> dict[str, Path]:
     index: dict[str, Path] = {}
     duplicates: dict[str, int] = {}
     for path in iter_contact_records(contacts_root):
-        uid = str(read_bounce_record(path).get("uid", "")).strip()
+        uid = _normalize_frontmatter_uid(read_bounce_record(path).get("uid"))
         if not uid:
             continue
         if uid in index:
