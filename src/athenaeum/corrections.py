@@ -390,6 +390,30 @@ def _resolve_email_handle(
     return EmailHandleResolution(kind="resolved", path=path)
 
 
+#: Per-run in-memory overlay of dry-run-created pages: ``entity_path ->
+#: (meta, body)`` (issue athenaeum#873). A `dry_run` batch that CREATES an
+#: entity (the athenaeum#865 tier-0 create-by-handle path) must not write
+#: the page to disk, but a LATER record in the same batch keyed on the same
+#: handle still needs to read it -- this dict is what makes that page
+#: readable without touching the filesystem. Populated only by
+#: :func:`process_correction_record`'s dry-run create branch; must be
+#: constructed once per batch RUN (see `run_correction_phase`) and never
+#: persisted. A real (non-dry) run never writes to it, so every check below
+#: reduces to today's behaviour when it is empty or `None`.
+DryRunPageOverlay = dict[Path, tuple[dict[str, Any], str]]
+
+
+def _page_exists(path: Path, dry_run_pages: DryRunPageOverlay | None) -> bool:
+    """Whether *path* is resolvable as a page: genuinely on disk, OR a
+    dry-run create's notionally-written page recorded in *dry_run_pages*
+    (issue athenaeum#873). ``dry_run_pages`` is only ever non-empty while
+    processing a dry-run batch, so a real run's check is exactly
+    ``path.exists()``, unchanged."""
+    if path.exists():
+        return True
+    return dry_run_pages is not None and path in dry_run_pages
+
+
 def resolve_target(
     target: Any,
     *,
@@ -398,6 +422,7 @@ def resolve_target(
     knowledge_root: Path | None = None,
     config: dict[str, Any] | None = None,
     excluded_index: Any | None = None,
+    dry_run_pages: DryRunPageOverlay | None = None,
 ) -> Path | None:
     """Resolve a §3.3 target shape to an existing entity-format page path.
 
@@ -420,6 +445,12 @@ def resolve_target(
             :class:`~athenaeum.pii.ExcludedRecordIndex` to resolve through,
             so a batch of corrections pays the surface scan once rather than
             once per record.
+        dry_run_pages: The per-run dry-run page overlay (issue athenaeum#873),
+            consulted only in the ``SOURCE_HANDLE_KEYS`` branch below — the
+            only shape the athenaeum#865 create branch ever mints a page for
+            (uid/name targets never create, so a page an overlay would carry
+            can never be uid/name-addressed). Optional and defaulting to
+            ``None`` so every existing caller is untouched.
     """
     if not isinstance(target, dict) or not target:
         return None
@@ -482,10 +513,14 @@ def resolve_target(
         if len(matches) != 1:
             return None  # zero or ambiguous — §3.3, raise a tier
         path = index.get_by_uid(matches[0])
-        if path is None or not path.exists() or not index.has_entity_format(path):
+        if (
+            path is None
+            or not _page_exists(path, dry_run_pages)
+            or not index.has_entity_format(path)
+        ):
             return None
         if isinstance(etype, str) and etype.strip():
-            return _cross_type_guard(path, etype.strip())
+            return _cross_type_guard(path, etype.strip(), dry_run_pages=dry_run_pages)
         return path
 
     return None
@@ -558,6 +593,7 @@ def resolve_target_for_apply(
     knowledge_root: Path | None = None,
     config: dict[str, Any] | None = None,
     excluded_index: Any | None = None,
+    dry_run_pages: DryRunPageOverlay | None = None,
 ) -> TargetResolution:
     """§3.3 resolution, extended with the athenaeum#865 tier-0 create branch.
 
@@ -581,7 +617,8 @@ def resolve_target_for_apply(
 
     ``knowledge_root`` / ``config`` / ``excluded_index`` are threaded to
     :func:`resolve_target` — see its docstring; all three are optional and
-    every existing caller is unaffected.
+    every existing caller is unaffected. ``dry_run_pages`` (issue athenaeum#873)
+    is threaded the same way — see :func:`resolve_target`'s docstring.
     """
     existing = resolve_target(
         target,
@@ -590,6 +627,7 @@ def resolve_target_for_apply(
         knowledge_root=knowledge_root,
         config=config,
         excluded_index=excluded_index,
+        dry_run_pages=dry_run_pages,
     )
     if existing is not None:
         return TargetResolution(kind="existing", path=existing)
@@ -650,13 +688,25 @@ def resolve_target_for_apply(
     )
 
 
-def _cross_type_guard(path: Path, declared_type: str) -> Path | None:
+def _cross_type_guard(
+    path: Path, declared_type: str, *, dry_run_pages: DryRunPageOverlay | None = None
+) -> Path | None:
     """Reject a target resolving to a page of a DIFFERENT type than declared
-    (mirrors ``librarian.tier0_handle_upsert``'s same guard)."""
-    try:
-        meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
-    except OSError:
-        return None
+    (mirrors ``librarian.tier0_handle_upsert``'s same guard).
+
+    Consults *dry_run_pages* FIRST (issue athenaeum#873): a dry-run create
+    mints its page only in the overlay, never on disk, so a later record's
+    cross-type check must read the notionally-written meta from there
+    rather than a path that was never written.
+    """
+    overlaid = dry_run_pages.get(path) if dry_run_pages is not None else None
+    if overlaid is not None:
+        meta, _ = overlaid
+    else:
+        try:
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except OSError:
+            return None
     existing_type = str(meta.get("type", "") or "").strip()
     if existing_type and existing_type != declared_type:
         return None
@@ -984,12 +1034,20 @@ def process_correction_record(
     registry_entities: dict[str, Any],
     config: dict[str, Any] | None,
     dry_run: bool = False,
+    dry_run_pages: DryRunPageOverlay | None = None,
 ) -> CorrectionRecordResult:
     """Process one correction record against a target entity — the tier-0
     applier. Never raises for a non-conformant record; every failure mode
     returns ``disposition="raised-tier"`` (§8) with a human-readable
     ``reason``, so the caller can hand it to the fallthrough path (§8.1)
     instead of dropping it.
+
+    ``dry_run_pages`` (issue athenaeum#873) is the per-run dry-run page overlay
+    — see :data:`DryRunPageOverlay`. Optional and defaulting to ``None`` so
+    every existing caller (dry_run or not) that does not pass one gets
+    exactly today's behaviour: a dry-run create still previews correctly for
+    a SINGLE record, it just cannot resolve a later record in the same
+    batch to the page this one notionally created.
     """
     schema_version = envelope.get("schema_version")
     submitter = envelope.get("submitter")
@@ -1103,7 +1161,12 @@ def process_correction_record(
                 f"(field={field_name!r}, op={op!r})"
             )
 
-    resolution = resolve_target_for_apply(target, index=index, registry_entities=registry_entities)
+    resolution = resolve_target_for_apply(
+        target,
+        index=index,
+        registry_entities=registry_entities,
+        dry_run_pages=dry_run_pages,
+    )
     if resolution.kind == "unresolvable":
         return _raised("target resolves to zero or several entities")
 
@@ -1111,13 +1174,25 @@ def process_correction_record(
     if resolution.kind == "existing":
         entity_path = resolution.path
         assert entity_path is not None
-        try:
-            existing_text = entity_path.read_text(encoding="utf-8")
-        except OSError:
-            return _raised("target page unreadable")
-        existing_meta, existing_body = parse_frontmatter(existing_text)
-        if not existing_meta:
-            return _raised("target page has no frontmatter")
+        # issue athenaeum#873: consult the dry-run overlay FIRST. A dry-run
+        # create earlier in this same run (see the "creatable" branch below)
+        # mints its page only in-memory — there is nothing on disk to read,
+        # and there never will be for a dry run. Serving the overlay content
+        # here instead of touching the filesystem is what lets a later
+        # record in the same dry-run batch resolve to the SAME notionally-
+        # created entity instead of falling through to "target page
+        # unreadable" and raising a tier.
+        overlaid = dry_run_pages.get(entity_path) if dry_run_pages is not None else None
+        if overlaid is not None:
+            existing_meta, existing_body = overlaid
+        else:
+            try:
+                existing_text = entity_path.read_text(encoding="utf-8")
+            except OSError:
+                return _raised("target page unreadable")
+            existing_meta, existing_body = parse_frontmatter(existing_text)
+            if not existing_meta:
+                return _raised("target page has no frontmatter")
     else:  # "creatable" — athenaeum#865
         # Mint the page now so the ordinary apply path below (schema-slot
         # routing, sensitivity routing, the §5.1 delta gate) runs for a
@@ -1152,7 +1227,13 @@ def process_correction_record(
             return _raised("uid collision constructing new entity")
 
         if dry_run:
+            # issue athenaeum#873: never write to disk (dry run's core
+            # invariant) — but the page still needs to be READABLE by a
+            # later record in this same batch, without touching disk. Stash
+            # it in the per-run overlay instead of writing it.
             existing_meta, existing_body = created_meta, ""
+            if dry_run_pages is not None:
+                dry_run_pages[entity_path] = (existing_meta, existing_body)
         else:
             atomic_write_text(entity_path, render_frontmatter(created_meta) + "\n")
             # Re-parse the just-written bytes, same discipline every other
@@ -1162,29 +1243,31 @@ def process_correction_record(
             existing_meta, existing_body = parse_frontmatter(
                 entity_path.read_text(encoding="utf-8")
             )
-            index.register(
-                WikiEntity(
-                    uid=uid,
-                    type=resolution.entity_type,
-                    name=entity_name0,
-                    created=today,
-                    updated=today,
-                    source=source,
-                )
+
+        # Keep the in-run registry AND index views current for BOTH the
+        # real write and a dry-run preview (issues athenaeum#865 / athenaeum#873): the
+        # snapshot loaded once at the top of a run must reflect a page
+        # created earlier in that SAME run — real or notional — or a later
+        # record keyed on the same handle would not see it and would create
+        # a second page/uid from the one batch. registry.json on disk is a
+        # separately-compiled artifact (`athenaeum registry`) and is
+        # deliberately NOT rewritten here regardless of dry_run — see the
+        # athenaeum#865 completion report for why.
+        index.register(
+            WikiEntity(
+                uid=uid,
+                type=resolution.entity_type,
+                name=entity_name0,
+                created=today,
+                updated=today,
+                source=source,
             )
-            # Keep the in-run registry view current (issue athenaeum#865): the
-            # snapshot loaded once at the top of a run must reflect a page
-            # created earlier in that SAME run, or a later record keyed on
-            # the same handle would not see it and would create a second
-            # page from the one batch. registry.json on disk is a
-            # separately-compiled artifact (`athenaeum registry`) and is
-            # deliberately NOT rewritten here — see the athenaeum#865
-            # completion report for why.
-            registry_entities[uid] = {
-                "type": resolution.entity_type,
-                "name": entity_name0,
-                "handles": {resolution.handle_key: created_meta[resolution.handle_key]},
-            }
+        )
+        registry_entities[uid] = {
+            "type": resolution.entity_type,
+            "name": entity_name0,
+            "handles": {resolution.handle_key: created_meta[resolution.handle_key]},
+        }
         just_created = True
 
     entity_name = str(existing_meta.get("name", "") or entity_path.stem)
@@ -1548,6 +1631,7 @@ def process_batch_file(
     config: dict[str, Any] | None,
     dry_run: bool = False,
     registry_entities: dict[str, Any] | None = None,
+    dry_run_pages: DryRunPageOverlay | None = None,
 ) -> BatchOutcome:
     """Process every correction record in one batch file.
 
@@ -1557,9 +1641,18 @@ def process_batch_file(
     handoff exactly like any other non-conformant record. This is the
     "nothing is rejected" rule applied one level below individual field
     validation.
+
+    ``dry_run_pages`` (issue athenaeum#873) follows the same "caller may share
+    one across several calls, or let this function default one" convention
+    ``registry_entities`` already uses — a caller processing several batch
+    files in one run (`run_correction_phase`) passes ONE overlay shared
+    across all of them; a caller processing a single file on its own (most
+    tests) gets a fresh, file-scoped one built here.
     """
     if registry_entities is None:
         registry_entities = load_registry(knowledge_root)
+    if dry_run_pages is None:
+        dry_run_pages = {}
 
     with path.open("r", encoding="utf-8") as fh:
         lines = fh.readlines()
@@ -1598,6 +1691,7 @@ def process_batch_file(
                 registry_entities=registry_entities,
                 config=config,
                 dry_run=dry_run,
+                dry_run_pages=dry_run_pages,
             )
         )
 
@@ -1912,6 +2006,11 @@ def run_correction_phase(
         "records_total": 0,
     }
     registry_entities = load_registry(knowledge_root)
+    # issue athenaeum#873: shared across every batch file this run processes,
+    # same lifetime as `registry_entities` above — a dry-run create in one
+    # batch file must be readable by a later record even if that record
+    # lands in a DIFFERENT batch file processed later in this same run.
+    dry_run_pages: DryRunPageOverlay = {}
     applied_this_run = 0
 
     for path, source, envelope in find_correction_batches(raw_root):
@@ -1949,6 +2048,7 @@ def run_correction_phase(
             config=config,
             dry_run=dry_run,
             registry_entities=registry_entities,
+            dry_run_pages=dry_run_pages,
         )
         applied_this_run += sum(
             1 for r in outcome.results if r.disposition in ("applied", "routed-elsewhere")
