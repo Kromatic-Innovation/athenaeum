@@ -421,7 +421,14 @@ class TestOneIndexPerCall:
             knowledge / "wiki", "widget", config=EXCLUDED_CONFIG, with_pii=True
         )
 
-        assert result.count("@example.org") == 3
+        # One rendered `emails:` line per hit. Counting the LINES, not raw
+        # address occurrences: since athenaeum#851 each hit also carries a
+        # structured `athenaeum-excluded-facts` block that repeats the address
+        # inside its per-value classification/validity entries, so a raw
+        # substring count no longer measures "how many hits rendered".
+        assert result.count("**emails:**") == 3
+        for uid in ("alex", "sam", "kim"):
+            assert f"{uid}@example.org" in result
         assert scans == 1
 
 

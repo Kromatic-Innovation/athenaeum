@@ -46,7 +46,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -735,15 +735,18 @@ def _excluded_block_for_hit(
     if record_path is None:
         return ""
 
-    fields, redactions, _ = pii.assemble_excluded_read(
+    record_meta = pii.read_bounce_record(record_path)
+    fields, redactions, classifications = pii.assemble_excluded_read(
         page_path,
         fm,
-        pii.read_bounce_record(record_path),
+        record_meta,
         surface_class=surface_class,
         config=config,
         include_excluded=True,
         usage_classes=usage_classes,
     )
+    validity = pii.assemble_excluded_validity(record_meta, fields)
+    do_not_email = pii.do_not_email_state(record_meta)
 
     lines: list[str] = []
     for field_name, values in fields.items():
@@ -753,9 +756,72 @@ def _excluded_block_for_hit(
         # the caller did not receive is reported AS withheld, with how many
         # values exist, rather than simply not appearing.
         lines.append(f"**{marker.field}:** [redacted — {marker.value_count} value(s) on file]")
+    if do_not_email.marked:
+        # Rendered even with no contact field to show: a record may carry ONLY
+        # a do-not-email mark, and dropping the whole block then would hide the
+        # single fact that most constrains what a caller may do.
+        lines.append(f"**{pii.DO_NOT_EMAIL_FIELD}:** marked")
     if not lines:
         return ""
-    return "".join(f"{line}\n" for line in lines)
+
+    facts = _excluded_facts_payload(fields, classifications, validity, do_not_email)
+    rendered = "".join(f"{line}\n" for line in lines)
+    return rendered + _render_facts_block(facts)
+
+
+def _excluded_facts_payload(
+    fields: Mapping[str, list[str]],
+    classifications: Mapping[str, list[Any]],
+    validity: Mapping[str, list[Any]],
+    do_not_email: Any,
+) -> dict[str, object]:
+    """The STRUCTURED half of the ``with_pii`` block (issue athenaeum#851).
+
+    "Prose is not an interface." The ``**field:** a@b, c@d`` lines above are
+    for a human reading a recall result; a consumer implementing its own
+    eligibility policy needs the value, its classification and its validity
+    state as parseable fields, and must not have to regex them back out of
+    rendered markdown.
+
+    Values are co-indexed exactly as :class:`~athenaeum.pii.EntityRead`
+    documents — ``values[i]`` / ``classification`` / ``validity`` describe the
+    same value — so the JSON carries the same contract the typed read does.
+    """
+    contact: dict[str, object] = {}
+    for field_name, values in fields.items():
+        field_classes = list(classifications.get(field_name, ()))
+        field_validity = list(validity.get(field_name, ()))
+        contact[field_name] = [
+            {
+                "value": value,
+                "classification": (
+                    field_classes[position].to_dict()
+                    if position < len(field_classes)
+                    else None
+                ),
+                "validity": (
+                    field_validity[position].to_dict()
+                    if position < len(field_validity)
+                    else None
+                ),
+            }
+            for position, value in enumerate(values)
+        ]
+    return {
+        "contact": contact,
+        "do_not_email": do_not_email.to_dict(),
+    }
+
+
+def _render_facts_block(facts: Mapping[str, object]) -> str:
+    """Fence *facts* as a labelled JSON block appended to the rendered lines.
+
+    ADDITIVE by design: the ``**field:**`` lines are unchanged, so every
+    existing reader of this block keeps working, and a machine consumer gets a
+    real interface next to them rather than instead of them.
+    """
+    payload = json.dumps(facts, ensure_ascii=False, sort_keys=True, default=str)
+    return f"```json athenaeum-excluded-facts\n{payload}\n```\n"
 
 
 def _recall_via_backend(
