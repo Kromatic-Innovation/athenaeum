@@ -102,8 +102,8 @@ positives, and in-memory `yaml.safe_load` on already-read text.
 | Modules in `src/athenaeum/` | 104 |
 | Modules with at least one raw pattern hit (mechanical) | 73–76 |
 | Raw pattern hits (mechanical) | ~613–667 |
-| **Modules with a genuine store touch (classified)** | **~60** |
-| **Genuine store-touch sites (classified)** | **~421** *(excluding ~83 non-store and counting the ~43 ambiguous separately)* |
+| **Modules with a genuine store touch (classified)** | **~65** *(76 modules had hits; ~9 proved to touch only CLI-arbitrary paths, temp fixtures or packaged resources, and `atomic_io.py` is the chokepoint itself rather than a consumer)* |
+| **Genuine store-touch sites (classified)** | **~421** *(131 wiki + 90 raw + 145 state + 33 index + 22 excluded; the ~83 non-store and ~43 ambiguous sites are counted separately in §2.2.1)* |
 | Modules routing writes through `atomic_io.atomic_write_text` | 28 |
 | Hand-rolled re-implementations of that same temp + `os.replace` pattern | 4 — `search.py:684-686`, `repair.py:91-100`, `clusters.py:643-659`, plus a plain `write_text` at `search.py:1032` |
 | Modules implementing their own `O_APPEND` ledger writer | 12 |
@@ -175,7 +175,7 @@ Ranked by classified store-touch count, with representative line references:
 Three structural facts follow:
 
 - **The store is not concentrated behind a few doors.** The top five modules
-  hold roughly a third of the sites; the tail runs long across command
+  hold 164 of ~421 sites — under two-fifths; the tail runs long across command
   modules, detectors, and ledger writers. There is no small set of files whose
   migration would generalise the store — which is the whole argument for §9's
   slice-by-slice plan over a cutover (§10).
@@ -850,16 +850,20 @@ or not the store generalisation ever ships.
 | **S6 — keyword backend declares its requirement** | `KeywordBackend` refuses on a surface without `cheap_local_scan`, naming FTS5 (P4, R4). Small. | should | S1 |
 | **S7 — publish the contract** | Promote `athenaeum.store` onto the stable `__all__` surface; publish §6 as `docs/store-contract.md`; ship the S1 conformance suite as a runnable third-party adapter-authoring harness, alongside the existing `adapter-authoring` skill's intake-adapter counterpart. | could | S1, S2, S3, S4, S5, S6 |
 
-**Not in these slices, deliberately:** migrating W5–W8 (§3.1) onto the bulk
-primitives. They are named in the inventory, they are real O(N)-round-trip
-liabilities, and each is its own follow-up once S2 has proven the pattern on
-W1. Sequencing them behind a demonstrated pattern is the point; doing all
-eight at once is the big-bang rewrite §10 rejects.
+**Coverage of the walks in §3.1:** S2 migrates W1 (the search index build);
+S6 gates W2 (keyword scan-on-query). **W3 through W8 are deliberately not in
+these slices** — the raw-intake manifest, delta clustering, auto-memory
+discovery, the `_index.md` rebuild, dedupe's person load, and the ~14 further
+full walks in W8. Every one is a real O(N)-round-trip liability under an
+adapter and every one is named here so it is tracked rather than silently
+inherited; each becomes its own follow-up once S2 has demonstrated the
+pattern on W1. Sequencing them behind a proven pattern is the point —
+converting all of them at once is the cutover §10 rejects.
 
 ## 10. Rejected alternatives
 
-- **Migrate every module to a `Store` handle in one change.** 73 of 104
-  modules touch the filesystem across roughly 600 call sites (§2). A single
+- **Migrate every module to a `Store` handle in one change.** About 65 of 104
+  modules touch the store across roughly 420 classified sites (§2). A single
   cutover has no intermediate state that is both shippable and verifiable, and
   no slice of it delivers value on its own. S1's "no callers migrated" is the
   deliberate opposite: the seam lands, proven by a conformance suite, before
