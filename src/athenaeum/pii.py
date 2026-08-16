@@ -975,7 +975,9 @@ class CorpusPiiFinding:
     phones: list[str]
 
 
-def iter_corpus_files(wiki_root: Path) -> list[Path]:
+def iter_corpus_files(
+    wiki_root: Path, *, exclude: Iterable[Path] = ()
+) -> list[Path]:
     """Return every regular file under *wiki_root*, recursively, sorted.
 
     Unlike the entity-page scans (:func:`athenaeum.storage_migrate.iter_entity_pages`,
@@ -985,13 +987,40 @@ def iter_corpus_files(wiki_root: Path) -> list[Path]:
     only worth as much as the completeness of the sweep, so ``_``-prefixed queue
     files, ``.bak`` backups and anything else living in the corpus are all in
     scope. Missing root yields ``[]`` (never raises).
+
+    *exclude* is the ONE narrow escape hatch (athenaeum#936): the adjudicated
+    allowlist (:func:`load_pii_allowlist`) is by construction a file containing
+    one verbatim contact value per entry, so scanning it would make every
+    adjudicated value a fresh finding and put exit 0 permanently out of reach.
+    Paths are compared after ``resolve()`` so a relative/symlinked spelling of
+    the same file still matches. Nothing else is ever excluded — the sweep's
+    completeness is the whole point of athenaeum#495.
     """
     if not wiki_root.is_dir():
         return []
-    return sorted(p for p in wiki_root.rglob("*") if p.is_file())
+    skip = set()
+    for p in exclude:
+        try:
+            skip.add(p.resolve())
+        except OSError:  # pragma: no cover - defensive (unresolvable path)
+            continue
+    out: list[Path] = []
+    for p in sorted(wiki_root.rglob("*")):
+        if not p.is_file():
+            continue
+        try:
+            resolved = p.resolve()
+        except OSError:  # pragma: no cover - defensive
+            resolved = p
+        if resolved in skip:
+            continue
+        out.append(p)
+    return out
 
 
-def scan_corpus_pii(wiki_root: Path) -> list[CorpusPiiFinding]:
+def scan_corpus_pii(
+    wiki_root: Path, *, exclude: Iterable[Path] = ()
+) -> list[CorpusPiiFinding]:
     """Scan every file under *wiki_root* for inline email/phone tokens.
 
     Returns one :class:`CorpusPiiFinding` per file that carries any
@@ -999,9 +1028,12 @@ def scan_corpus_pii(wiki_root: Path) -> list[CorpusPiiFinding]:
     cannot be read as UTF-8 text (binary assets) are skipped rather than
     treated as findings — the lint is about text-visible contact data, not
     byte-level scanning. A clean corpus returns ``[]``.
+
+    *exclude* is forwarded to :func:`iter_corpus_files` — see its docstring for
+    why the adjudicated allowlist must not scan itself (athenaeum#936).
     """
     findings: list[CorpusPiiFinding] = []
-    for path in iter_corpus_files(wiki_root):
+    for path in iter_corpus_files(wiki_root, exclude=exclude):
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -1011,6 +1043,203 @@ def scan_corpus_pii(wiki_root: Path) -> list[CorpusPiiFinding]:
         if emails or phones:
             findings.append(CorpusPiiFinding(path=path, emails=emails, phones=phones))
     return findings
+
+
+# ---------------------------------------------------------------------------
+# 2c. Adjudicated allowlist for the corpus lint (athenaeum#936)
+# ---------------------------------------------------------------------------
+#
+# athenaeum#437's acceptance criterion is "lint-pii exits 0, OR every remaining
+# finding appears in a committed allowlist, one entry per distinct value, each
+# carrying a one-line reason". Both branches were unreachable before this:
+# nothing read an allowlist, and — because :func:`iter_corpus_files` scans
+# every file under ``wiki/`` — authoring one would have RAISED the finding
+# count, since the artifact is by construction a list of verbatim contact
+# values. The self-exclusion in :func:`iter_corpus_files` is what makes exit 0
+# reachable at all; without it this feature cannot do its job.
+#
+# Why adjudication rather than deletion: athenaeum#437's residue splits into data that
+# is genuinely a person's (operator migration work) and data that is not a
+# person at all — service accounts, tagged test addresses, example-domain
+# placeholders, digit runs that are identifiers or timestamps misread by the
+# phone axis. Deleting the second class destroys true, non-personal facts;
+# that is the action that cost athenaeum#691 two restore passes. Adjudication
+# records a human's "this is not PII, and here is why" instead.
+#
+# The gate stays honest in both directions: an unexplained finding still fails
+# (a value is never tolerated by OMISSION — silence is not adjudication), and
+# an entry matching nothing is surfaced as STALE so the artifact cannot rot
+# into a permanent blanket over values that have since left the corpus.
+
+#: Conventional filename of the adjudicated allowlist, resolved under the wiki
+#: root. `_`-prefixed so it sorts with the corpus's other bookkeeping files;
+#: overridable via ``lint-pii --allowlist`` (athenaeum#936 / athenaeum#437).
+PII_ALLOWLIST_FILENAME = "_pii-allowlist.yml"
+
+
+@dataclass(frozen=True)
+class PiiAllowlistEntry:
+    """One adjudicated value: "this token is not PII, and here is why"."""
+
+    value: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class PiiAdjudicatedFinding:
+    """A corpus finding split into its adjudicated and unexplained halves.
+
+    ``allowlisted`` are tokens covered by an allowlist entry; the two
+    ``unexplained_*`` lists are what still fails the gate. A finding is fully
+    adjudicated when both unexplained lists are empty.
+    """
+
+    path: Path
+    allowlisted: list[str]
+    unexplained_emails: list[str]
+    unexplained_phones: list[str]
+
+    @property
+    def is_adjudicated(self) -> bool:
+        """True when nothing on this file remains unexplained."""
+        return not self.unexplained_emails and not self.unexplained_phones
+
+
+@dataclass(frozen=True)
+class PiiAdjudication:
+    """The whole corpus scan, adjudicated against the allowlist."""
+
+    findings: list[PiiAdjudicatedFinding]
+    stale: list[PiiAllowlistEntry]
+    errors: list[str]
+
+    @property
+    def unexplained_count(self) -> int:
+        """Number of tokens no allowlist entry explains — the gate's subject."""
+        return sum(
+            len(f.unexplained_emails) + len(f.unexplained_phones) for f in self.findings
+        )
+
+    @property
+    def adjudicated_count(self) -> int:
+        """Number of tokens an allowlist entry explains (reported, not failed)."""
+        return sum(len(f.allowlisted) for f in self.findings)
+
+    @property
+    def is_clean(self) -> bool:
+        """True when the gate should exit 0: nothing unexplained anywhere."""
+        return self.unexplained_count == 0
+
+
+def load_pii_allowlist(path: Path) -> tuple[list[PiiAllowlistEntry], list[str]]:
+    """Load the adjudicated allowlist at *path*.
+
+    Returns ``(entries, errors)``. A MISSING FILE IS NOT AN ERROR — it means
+    "nothing adjudicated", so behaviour is exactly as it was before athenaeum#936
+    (``([], [])``).
+
+    Schema — one entry per distinct value, each carrying a required non-empty
+    ``reason``::
+
+        - value: "noreply@example.com"
+          reason: "service account, not a person"
+
+    Malformed input is REPORTED AND SKIPPED, never raised and never partially
+    trusted (mirroring :func:`athenaeum.rules.load_shape_rules`). This fails
+    CLOSED by construction: a skipped entry adjudicates nothing, so whatever it
+    would have covered stays unexplained and the gate still fails. `yaml.safe_load`
+    only — an allowlist is DATA, never executed.
+    """
+    import yaml
+
+    errors: list[str] = []
+    if not path.is_file():
+        return [], errors
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError, UnicodeDecodeError) as exc:
+        return [], [f"{path}: unreadable or malformed YAML -- {exc}"]
+    if raw is None:
+        return [], errors
+    if not isinstance(raw, list):
+        return [], [
+            f"{path}: top-level YAML must be a list of entries, "
+            f"got {type(raw).__name__}"
+        ]
+
+    entries: list[PiiAllowlistEntry] = []
+    seen: set[str] = set()
+    for i, item in enumerate(raw):
+        where = f"{path}: entry {i}"
+        if not isinstance(item, dict):
+            errors.append(f"{where}: must be a mapping, got {type(item).__name__}")
+            continue
+        value = item.get("value")
+        reason = item.get("reason")
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{where}: missing a non-empty 'value'")
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            # A value cannot be tolerated by omission: an entry with no stated
+            # reason adjudicates nothing, so its value stays unexplained.
+            errors.append(f"{where} ({value!r}): missing a non-empty 'reason'")
+            continue
+        if value in seen:
+            errors.append(f"{where} ({value!r}): duplicate value")
+            continue
+        seen.add(value)
+        entries.append(PiiAllowlistEntry(value=value, reason=reason.strip()))
+    return entries, errors
+
+
+def adjudicate_corpus_pii(
+    findings: Iterable[CorpusPiiFinding],
+    entries: Iterable[PiiAllowlistEntry],
+    *,
+    errors: Iterable[str] = (),
+) -> PiiAdjudication:
+    """Split *findings* into adjudicated vs unexplained against *entries*.
+
+    A token is adjudicated when an entry's ``value`` matches it exactly. Every
+    file keeps an entry in the result (so the two populations stay countable
+    per file) — read :attr:`PiiAdjudicatedFinding.is_adjudicated` rather than
+    the presence of the record.
+
+    Any entry that matched nothing anywhere in the corpus is returned in
+    ``stale``, so the artifact is kept honest as the corpus changes instead of
+    quietly becoming a blanket over values that are no longer there.
+    """
+    allowed = {e.value: e for e in entries}
+    matched: set[str] = set()
+    out: list[PiiAdjudicatedFinding] = []
+
+    for f in findings:
+        allowlisted: list[str] = []
+        unexplained_emails: list[str] = []
+        unexplained_phones: list[str] = []
+        for token in f.emails:
+            if token in allowed:
+                allowlisted.append(token)
+                matched.add(token)
+            else:
+                unexplained_emails.append(token)
+        for token in f.phones:
+            if token in allowed:
+                allowlisted.append(token)
+                matched.add(token)
+            else:
+                unexplained_phones.append(token)
+        out.append(
+            PiiAdjudicatedFinding(
+                path=f.path,
+                allowlisted=allowlisted,
+                unexplained_emails=unexplained_emails,
+                unexplained_phones=unexplained_phones,
+            )
+        )
+
+    stale = [e for v, e in allowed.items() if v not in matched]
+    return PiiAdjudication(findings=out, stale=stale, errors=list(errors))
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from athenaeum.cli import main
-from athenaeum.pii import iter_corpus_files, scan_corpus_pii
+from athenaeum.pii import (
+    PII_ALLOWLIST_FILENAME,
+    PiiAllowlistEntry,
+    adjudicate_corpus_pii,
+    iter_corpus_files,
+    load_pii_allowlist,
+    scan_corpus_pii,
+)
 
 #: Exit code ``storage lint-pii`` returns when it finds inline PII (mirrors the
 #: outbound-lint convention; a "found something" signal distinct from 1).
@@ -160,3 +167,312 @@ class TestLintPiiCLI:
         payload = json.loads(capsys.readouterr().out)
         assert payload[0]["emails"] == ["grace@example.com"]
         assert payload[0]["path"].endswith("_queue.md")
+
+
+# ---------------------------------------------------------------------------
+# Adjudicated allowlist (issue athenaeum#936, unblocking athenaeum#437)
+# ---------------------------------------------------------------------------
+#
+# athenaeum#437's criterion is "exit 0, OR every remaining finding appears in a
+# committed allowlist, one entry per distinct value, each carrying a one-line
+# reason". Both branches were unreachable: nothing read an allowlist, and the
+# corpus-wide sweep above scans EVERY file under wiki/ — so the allowlist, a
+# file of verbatim contact values by construction, would have been scanned like
+# any other and RAISED the count. These pin both halves.
+
+
+def _allowlist(root: Path, body: str) -> Path:
+    """Write the conventional allowlist inside wiki/ (where it self-scans)."""
+    path = root / "wiki" / PII_ALLOWLIST_FILENAME
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+class TestLoadPiiAllowlist:
+    def test_missing_file_is_not_an_error(self, tmp_path: Path) -> None:
+        # "Nothing adjudicated" — behaviour identical to before athenaeum#936.
+        entries, errors = load_pii_allowlist(tmp_path / "nope.yml")
+        assert entries == []
+        assert errors == []
+
+    def test_loads_value_and_reason(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.yml"
+        p.write_text(
+            "- value: noreply@example.com\n"
+            "  reason: service account, not a person\n",
+            encoding="utf-8",
+        )
+        entries, errors = load_pii_allowlist(p)
+        assert errors == []
+        assert entries == [
+            PiiAllowlistEntry(
+                value="noreply@example.com", reason="service account, not a person"
+            )
+        ]
+
+    def test_entry_missing_its_reason_is_reported_and_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        # A value is never tolerated by OMISSION: no reason -> adjudicates
+        # nothing, so whatever it would have covered stays unexplained.
+        p = tmp_path / "a.yml"
+        p.write_text(
+            "- value: noreply@example.com\n"
+            "- value: ok@example.com\n  reason: tagged test address\n",
+            encoding="utf-8",
+        )
+        entries, errors = load_pii_allowlist(p)
+        assert [e.value for e in entries] == ["ok@example.com"]
+        assert len(errors) == 1
+        assert "noreply@example.com" in errors[0]
+        assert "reason" in errors[0]
+
+    def test_empty_reason_is_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.yml"
+        p.write_text("- value: a@example.com\n  reason: '   '\n", encoding="utf-8")
+        entries, errors = load_pii_allowlist(p)
+        assert entries == []
+        assert len(errors) == 1
+
+    def test_malformed_yaml_fails_closed(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.yml"
+        p.write_text("- value: [unclosed\n", encoding="utf-8")
+        entries, errors = load_pii_allowlist(p)
+        assert entries == []
+        assert len(errors) == 1
+
+    def test_non_list_top_level_is_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.yml"
+        p.write_text("value: a@example.com\n", encoding="utf-8")
+        entries, errors = load_pii_allowlist(p)
+        assert entries == []
+        assert "list" in errors[0]
+
+    def test_empty_file_loads_nothing_without_error(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.yml"
+        p.write_text("", encoding="utf-8")
+        assert load_pii_allowlist(p) == ([], [])
+
+
+class TestSelfScanExclusion:
+    def test_allowlist_is_excluded_from_its_own_scan(self, tmp_path: Path) -> None:
+        # THE load-bearing case: without this, authoring the artifact athenaeum#437
+        # demands would RAISE the finding count and exit 0 stays unreachable.
+        root = _wiki(tmp_path)
+        path = _allowlist(
+            root,
+            "- value: noreply@example.com\n  reason: service account\n",
+        )
+
+        assert scan_corpus_pii(root / "wiki") != []  # scanned like any file...
+        assert scan_corpus_pii(root / "wiki", exclude=[path]) == []  # ...unless excluded
+        assert path not in iter_corpus_files(root / "wiki", exclude=[path])
+
+    def test_exclusion_matches_an_unresolved_spelling(self, tmp_path: Path) -> None:
+        # Same file named via a `..` hop must still be excluded.
+        root = _wiki(tmp_path)
+        _allowlist(root, "- value: a@example.com\n  reason: test address\n")
+        spelled = root / "wiki" / "_x" / ".." / PII_ALLOWLIST_FILENAME
+        (root / "wiki" / "_x").mkdir()
+
+        assert scan_corpus_pii(root / "wiki", exclude=[spelled]) == []
+
+
+class TestAdjudication:
+    def test_full_coverage_leaves_nothing_unexplained(self, tmp_path: Path) -> None:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "ping noreply@example.com or 555-010-9988\n", encoding="utf-8"
+        )
+        findings = scan_corpus_pii(root / "wiki")
+        entries = [
+            PiiAllowlistEntry(value="noreply@example.com", reason="service account"),
+            PiiAllowlistEntry(value="555-010-9988", reason="ticket id, not a phone"),
+        ]
+
+        result = adjudicate_corpus_pii(findings, entries)
+
+        assert result.is_clean
+        assert result.unexplained_count == 0
+        assert result.adjudicated_count == 2
+        assert result.stale == []
+        assert result.findings[0].is_adjudicated
+
+    def test_partial_coverage_still_fails(self, tmp_path: Path) -> None:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "noreply@example.com and real.person@example.com\n", encoding="utf-8"
+        )
+        findings = scan_corpus_pii(root / "wiki")
+        entries = [
+            PiiAllowlistEntry(value="noreply@example.com", reason="service account")
+        ]
+
+        result = adjudicate_corpus_pii(findings, entries)
+
+        assert not result.is_clean
+        assert result.unexplained_count == 1
+        assert result.adjudicated_count == 1
+        assert result.findings[0].unexplained_emails == ["real.person@example.com"]
+        assert not result.findings[0].is_adjudicated
+
+    def test_entry_matching_nothing_is_stale(self, tmp_path: Path) -> None:
+        # The artifact must not rot into a permanent blanket over values that
+        # have since left the corpus.
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "noreply@example.com\n", encoding="utf-8"
+        )
+        findings = scan_corpus_pii(root / "wiki")
+        entries = [
+            PiiAllowlistEntry(value="noreply@example.com", reason="service account"),
+            PiiAllowlistEntry(value="gone@example.com", reason="migrated off-corpus"),
+        ]
+
+        result = adjudicate_corpus_pii(findings, entries)
+
+        assert result.is_clean
+        assert [e.value for e in result.stale] == ["gone@example.com"]
+
+    def test_no_entries_is_todays_behaviour(self, tmp_path: Path) -> None:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "grace@example.com\n", encoding="utf-8"
+        )
+        result = adjudicate_corpus_pii(scan_corpus_pii(root / "wiki"), [])
+        assert not result.is_clean
+        assert result.unexplained_count == 1
+        assert result.adjudicated_count == 0
+
+
+class TestLintPiiAllowlistCLI:
+    def test_no_allowlist_file_behaves_as_before(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "grace@example.com\n", encoding="utf-8"
+        )
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        assert rc == EXIT_PII_FOUND
+        assert "grace@example.com" in capsys.readouterr().out
+
+    def test_full_coverage_exits_zero(self, tmp_path: Path, capsys) -> None:
+        # athenaeum#437's second branch, reachable for the first time.
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "ping noreply@example.com\n", encoding="utf-8"
+        )
+        _allowlist(root, "- value: noreply@example.com\n  reason: service account\n")
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "0 unexplained" in out
+        assert "1 adjudicated residue" in out
+
+    def test_partial_coverage_exits_two(self, tmp_path: Path, capsys) -> None:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "noreply@example.com and real.person@example.com\n", encoding="utf-8"
+        )
+        _allowlist(root, "- value: noreply@example.com\n  reason: service account\n")
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        out = capsys.readouterr().out
+        assert rc == EXIT_PII_FOUND
+        assert "real.person@example.com" in out
+        # The adjudicated value is residue, not a failure line.
+        assert "1 unexplained" in out
+
+    def test_stale_entry_is_surfaced_on_stderr(self, tmp_path: Path, capsys) -> None:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "jane.md").write_text("Jane leads widgets.\n", encoding="utf-8")
+        _allowlist(root, "- value: gone@example.com\n  reason: migrated off-corpus\n")
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "stale allowlist entry" in captured.err
+        assert "gone@example.com" in captured.err
+
+    def test_entry_missing_reason_is_warned_and_still_fails(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "noreply@example.com\n", encoding="utf-8"
+        )
+        _allowlist(root, "- value: noreply@example.com\n")  # no reason
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        captured = capsys.readouterr()
+        assert rc == EXIT_PII_FOUND  # fails closed
+        assert "reason" in captured.err
+        assert "noreply@example.com" in captured.out
+
+    def test_allowlist_path_is_overridable(self, tmp_path: Path, capsys) -> None:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "noreply@example.com\n", encoding="utf-8"
+        )
+        elsewhere = tmp_path / "adjudicated.yml"
+        elsewhere.write_text(
+            "- value: noreply@example.com\n  reason: service account\n",
+            encoding="utf-8",
+        )
+
+        rc = main(
+            [
+                "storage",
+                "lint-pii",
+                "--path",
+                str(root),
+                "--allowlist",
+                str(elsewhere),
+            ]
+        )
+
+        assert rc == 0
+
+    def test_json_carries_adjudication_status(self, tmp_path: Path, capsys) -> None:
+        import json
+
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "noreply@example.com and real.person@example.com\n", encoding="utf-8"
+        )
+        _allowlist(root, "- value: noreply@example.com\n  reason: service account\n")
+
+        rc = main(["storage", "lint-pii", "--path", str(root), "--json"])
+
+        assert rc == EXIT_PII_FOUND
+        payload = json.loads(capsys.readouterr().out)
+        assert len(payload) == 1
+        assert payload[0]["emails"] == ["real.person@example.com"]
+        assert payload[0]["allowlisted"] == ["noreply@example.com"]
+        assert payload[0]["adjudicated"] is False
+
+    def test_json_exits_zero_when_fully_adjudicated(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        import json
+
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "noreply@example.com\n", encoding="utf-8"
+        )
+        _allowlist(root, "- value: noreply@example.com\n  reason: service account\n")
+
+        rc = main(["storage", "lint-pii", "--path", str(root), "--json"])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload[0]["adjudicated"] is True
+        assert payload[0]["emails"] == []
