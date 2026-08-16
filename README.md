@@ -910,6 +910,7 @@ specific piece:
 - [`docs/authority-manifest.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/authority-manifest.md) and [`docs/source-handles.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/source-handles.md) — source precedence and provenance handles.
 - [`docs/security-posture.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/security-posture.md) — audience scoping, fail-closed enforcement, PII screening.
 - [`docs/storage-adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/storage-adapter-contract.md) — the storage extension point.
+- [`docs/whole-store-adapter-design.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/whole-store-adapter-design.md) — design lock for generalising that extension point to the whole store: the seam inventory, the index-build latency constraints, and how git-backed recoverability becomes an adapter capability.
 - [`docs/adapter-contract.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/adapter-contract.md) — writing a custom intake adapter.
 - [`docs/configuration.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/configuration.md) — every env var, yaml key, and CLI flag, with defaults and precedence.
 - [`docs/exit-codes.md`](https://github.com/Kromatic-Innovation/athenaeum/blob/main/docs/exit-codes.md) — `athenaeum run`'s exit-code contract (`0` / `1` / `75` graceful-partial / `124` external-kill).

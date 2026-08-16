@@ -4,6 +4,14 @@
 > (`athenaeum.storage`) is importable but not part of the stable `__all__`
 > surface; signatures may change between minor releases until this contract is
 > promoted to a stable extension point.
+>
+> **Scope note.** This page covers the seam that exists today: an entity class
+> resolves to a *surface* (a root plus a corpus policy). It does not mediate
+> how bytes are read and written — `surface_root_for_class` hands back a
+> `pathlib.Path` and callers do ordinary filesystem work against it.
+> Generalising the physical layer to the whole store is designed in
+> [`docs/whole-store-adapter-design.md`](whole-store-adapter-design.md)
+> (athenaeum#911), which extends this seam rather than replacing it.
 
 Athenaeum persists every compiled entity as a markdown page in a flat `wiki/`
 tree, and every corpus consumer — the embedder, `recall`, and the wiki-dedup
