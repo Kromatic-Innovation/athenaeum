@@ -124,6 +124,38 @@ Five pieces, in the order the issue settles them:
    contacts half) and returns identical values, so the fix is a cost change
    and not a semantic one. Both entry points share one assembly body
    (``_person_read_from_indexes``) so they cannot drift.
+
+7. **Facts, not verdicts** (issue athenaeum#851) — athenaeum returns what it
+   knows and how it knows it; the consumer decides what to do about it.
+   Concretely, an authorized reader gets, for every contact value: the value,
+   its usage/provenance classification (:class:`ContactClassification`), and
+   its validity state including any valid-time close
+   (:class:`IdentifierValidity`) — plus, per record, the do-not-email mark
+   with provenance (:class:`DoNotEmailState`). Those ride the EXISTING read
+   path: ``recall(with_pii=True)`` and :func:`read_entity`, plus
+   :func:`read_identifier_facts` for the bulk by-address case.
+
+   **Explicit non-goal: no suppression/eligibility predicate ships here, and
+   the next lane should not re-derive one.** "May I email this person" folds
+   deliverability, an operator's do-not-email mark, provenance and campaign
+   policy into one boolean, and that boolean is an ACTION decision belonging
+   to the caller — putting it in the memory layer both moves policy into
+   storage and forks the read seam athenaeum#888 is consolidating. The
+   originally-filed ``suppression_state()`` was cancelled for exactly this
+   reason; see athenaeum#851's decision comment and
+   ``docs/authorized-reader-contract.md``. (:func:`is_outreach_eligible` is
+   NOT that predicate and is not a precedent for one: it reports a single
+   value's usage class and deliberately does not consult bounce state — its
+   own docstring says so.)
+
+   Two properties of these facts are load-bearing and easy to lose. **Unknown
+   is stated, never inferred**: :attr:`IdentifierFacts.known` positively
+   distinguishes "we have never heard of this address" from "we know it and
+   hold nothing against it", so a consumer cannot silently treat strangers as
+   safe. And the read is **fail-closed**: an unreachable surface raises
+   :class:`ExcludedSurfaceUnavailable` rather than reporting an empty result
+   a caller would read as "nothing suppressed" — a false skip is recoverable
+   by a human, a false send is not.
 """
 
 from __future__ import annotations
@@ -2301,6 +2333,290 @@ def is_outreach_eligible(meta: dict[str, Any] | None, identifier: str) -> bool:
     return classification_for_value(meta, identifier).outreach_eligible
 
 
+#: Frontmatter key carrying a do-not-email mark on a contact record (issue
+#: athenaeum#851). It exists on live records today and was, until this issue,
+#: absent from the API surface **entirely** — so a consumer could only reach it
+#: by reading the store's files, which is the pattern the excluded surface
+#: exists to remove.
+#:
+#: Deliberately NOT added to :data:`EXCLUDED_RECORD_BOOKKEEPING_FIELDS`: it is
+#: a FACT about the person, not bookkeeping about the record, and a
+#: bookkeeping key is invisible to :func:`resolve_excluded_fields`'s rule-3
+#: denylist-complement. It is surfaced through :func:`do_not_email_state`
+#: rather than as a contact *value* because it has no value to redact — it is
+#: a mark, not an address.
+DO_NOT_EMAIL_FIELD = "do_not_email"
+
+#: Strings a ``do_not_email:`` value may carry that mean "no mark". Anything
+#: else non-empty means the mark IS set: the failure direction of a typo must
+#: be a false SKIP (recoverable by a human), never a false SEND (not).
+_DO_NOT_EMAIL_FALSEY: frozenset[str] = frozenset(
+    {"", "false", "no", "none", "null", "0", "off"}
+)
+
+
+@dataclass(frozen=True)
+class DoNotEmailState:
+    """Whether a contact record carries a do-not-email mark, and on whose word.
+
+    The first-class exposure of :data:`DO_NOT_EMAIL_FIELD` (issue
+    athenaeum#851). Provenance is carried alongside the mark rather than
+    reduced out of it because issue athenaeum#77 requires an OPERATOR mark and a
+    PLATFORM unsubscribe to stay distinguishable — a bare boolean cannot say
+    which of the two it is, and a consumer that must honour one differently
+    from the other would have to go back to the files to find out.
+
+    ``marked`` is the fact; ``source`` / ``observed_at`` / ``reason`` are how
+    the store knows it. A record with no mark at all returns ``marked=False``
+    with no provenance — which is a positive statement ("nothing recorded"),
+    NOT an assertion that the person may be emailed. Athenaeum does not answer
+    that question; see this module's note on eligibility being the consumer's
+    policy.
+    """
+
+    marked: bool
+    source: str | dict[str, Any] | None = None
+    observed_at: str | None = None
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-serializable shape, mirroring :meth:`ContactClassification.to_dict`."""
+        return {
+            "marked": self.marked,
+            "source": self.source,
+            "observed_at": self.observed_at,
+            "reason": self.reason,
+        }
+
+
+def _coerce_do_not_email_flag(raw: Any) -> bool:
+    """Read the truthiness of a raw ``do_not_email:`` scalar, fail-closed.
+
+    ``True``/``False`` answer for themselves. A string is compared against
+    :data:`_DO_NOT_EMAIL_FALSEY` case-insensitively, so a hand-written
+    ``do_not_email: "unsubscribed 2026-02-01"`` reads as MARKED (and carries
+    its text as the reason) rather than being silently discarded as
+    unparseable. ``None`` — which is what a bare ``do_not_email:`` with no
+    value parses to — reads as NOT marked: the key was written with nothing
+    after it, which asserts nothing.
+    """
+    if isinstance(raw, bool):
+        return raw
+    if raw is None:
+        return False
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    return str(raw).strip().lower() not in _DO_NOT_EMAIL_FALSEY
+
+
+def do_not_email_state(meta: dict[str, Any] | None) -> DoNotEmailState:
+    """The do-not-email mark recorded on *meta*, with its provenance.
+
+    Always returns a :class:`DoNotEmailState` — never ``None`` — in the shape
+    of :func:`classification_for_value`, so a consumer never distinguishes
+    "no mark" from "no answer" by testing for ``None``.
+
+    **Tolerant reader**, mirroring :func:`identifier_validity_entries` and
+    :func:`contact_classification_entries`, because live records were written
+    by hand and by three different code paths. Four shapes are accepted:
+
+    - absent → ``marked=False``, no provenance;
+    - a scalar (``true`` / ``"unsubscribed"`` / …) → :func:`_coerce_do_not_email_flag`
+      decides, and a non-boolean scalar is kept as ``reason`` so the operator's
+      words are not thrown away;
+    - a mapping → ``marked`` comes from whichever of ``value`` / ``marked`` /
+      ``set`` / ``do_not_email`` is present (defaulting to ``True``: a mapping
+      was written AT ALL, which is an assertion), with ``source`` /
+      ``observed_at`` / ``reason`` read alongside;
+    - a list → the LAST entry wins, read by the rules above, matching the
+      last-writer-wins posture :func:`mark_bounced` already has. An empty list
+      is "no mark".
+
+    Nothing here raises. A record whose ``do_not_email:`` is malformed degrades
+    to a readable answer, never to a crash inside a consumer's send loop.
+    """
+    if not isinstance(meta, dict) or DO_NOT_EMAIL_FIELD not in meta:
+        return DoNotEmailState(marked=False)
+    raw = meta[DO_NOT_EMAIL_FIELD]
+    if isinstance(raw, list):
+        entries = [item for item in raw if item is not None]
+        if not entries:
+            return DoNotEmailState(marked=False)
+        raw = entries[-1]
+    if isinstance(raw, Mapping):
+        marked = True
+        for key in ("value", "marked", "set", DO_NOT_EMAIL_FIELD):
+            if key in raw:
+                marked = _coerce_do_not_email_flag(raw[key])
+                break
+        reason = raw.get("reason")
+        observed_at = raw.get("observed_at") or raw.get("date")
+        return DoNotEmailState(
+            marked=marked,
+            source=raw.get("source"),
+            observed_at=str(observed_at) if observed_at is not None else None,
+            reason=str(reason) if reason is not None else None,
+        )
+    marked = _coerce_do_not_email_flag(raw)
+    # A non-boolean scalar carries the operator's own words; keep them as the
+    # reason rather than reducing the mark to a bare bit.
+    reason = str(raw).strip() if marked and not isinstance(raw, bool) else None
+    return DoNotEmailState(marked=marked, reason=reason or None)
+
+
+@dataclass(frozen=True)
+class IdentifierValidity:
+    """The validity state of ONE contact value, with its valid-time close.
+
+    **This type is the answer to the representation trap** (issue
+    athenaeum#851). A hard bounce is recorded as a valid-time CLOSE — a
+    ``valid_until`` on the identifier, per :func:`mark_bounced` — and *not* as a
+    ``bounced:`` enum field. So ``grep '^bounced:'`` over the excluded contacts
+    surface returns 0 even after a fully successful mark, which has already
+    misled one verification lane (observed during maecenas#73's verification).
+
+    Before verifying a mark by hand, read ``docs/deprecated-email-tracking.md``
+    § "How to verify a mark — and the two greps that lie" — the canonical
+    account, covering BOTH failing greps. The one above is only the first; the
+    mirror-image error is grepping the WIKI surface for ``bounced:``, where the
+    field genuinely exists (a different surface, written outside athenaeum —
+    ``docs/bounce-surface-convergence.md``) and a ``0`` means the glob missed.
+    ``docs/authorized-reader-contract.md`` covers the caller-facing contract.
+
+    A consumer holding one of these never has to know that. It reads
+    ``closed`` (is this value closed as of the date I asked about), ``valid_until``
+    (when), ``reason`` (why — the SMTP diagnostic for a bounce), and ``source``
+    (who says so). Which frontmatter key encodes that is athenaeum's problem,
+    and changing it later is a non-event for callers. Making the representation
+    irrelevant to callers is most of what this type is for.
+
+    ``recorded`` distinguishes "the store holds a validity entry for this value
+    and it is still open" from "the store holds NO entry at all". Both have
+    ``closed=False``, and collapsing them would hide the difference between a
+    value someone has vouched for and one nobody has ever looked at.
+
+    Athenaeum states none of this as a verdict on whether the value may be
+    USED. ``closed`` is a fact about deliverability; eligibility is the
+    consumer's policy over these fields.
+    """
+
+    identifier: str
+    closed: bool
+    valid_until: str | None = None
+    reason: str | None = None
+    source: str | dict[str, Any] | None = None
+    observed_at: str | None = None
+    recorded: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-serializable shape, mirroring :meth:`ContactClassification.to_dict`."""
+        return {
+            "identifier": self.identifier,
+            "closed": self.closed,
+            "valid_until": self.valid_until,
+            "reason": self.reason,
+            "source": self.source,
+            "observed_at": self.observed_at,
+            "recorded": self.recorded,
+        }
+
+
+def _validity_from_entry(
+    identifier: str, entry: dict[str, Any], as_of: date | None
+) -> IdentifierValidity:
+    """Build an :class:`IdentifierValidity` from one stored validity mapping.
+
+    Reads the keys :func:`_merge_identifier_validity` writes — ``valid_until``,
+    ``bounce_diagnostic``, ``source``, ``observed_at`` — and falls back to a
+    generic ``reason`` key so a hand-written close (an operator closing an
+    address for a reason that is not a bounce) is readable too.
+    """
+    valid_until = entry.get("valid_until")
+    reason = entry.get("bounce_diagnostic")
+    if reason is None:
+        reason = entry.get("reason")
+    observed_at = entry.get("observed_at")
+    return IdentifierValidity(
+        identifier=identifier,
+        closed=valid_until_expired(entry, as_of),
+        valid_until=str(valid_until) if valid_until is not None else None,
+        reason=str(reason) if reason is not None else None,
+        source=entry.get("source"),
+        observed_at=str(observed_at) if observed_at is not None else None,
+        recorded=True,
+    )
+
+
+def validity_for_value(
+    meta: dict[str, Any] | None, identifier: str, as_of: date | None = None
+) -> IdentifierValidity:
+    """The validity state recorded for *identifier* on *meta*, with provenance.
+
+    The structured counterpart to :func:`is_bounced_identifier` — the same two
+    shapes, the same case-insensitive matching, the same "absent means no mark
+    recorded" posture — returning the *facts* (when, why, on whose word) rather
+    than reducing them to a bare boolean:
+
+    - a per-identifier entry in :data:`IDENTIFIER_VALIDITY_FIELD` (a person
+      record listing several addresses); else
+    - the record's own top-level close, but ONLY when the record's
+      ``identifier:`` IS the address asked about — so a slug-keyed record can
+      never answer for a neighbouring address.
+
+    Always returns an :class:`IdentifierValidity`, never ``None``. A value with
+    no stored entry comes back ``closed=False, recorded=False`` — "nothing
+    recorded", which is not the same claim as "verified deliverable" and must
+    not be read as one.
+
+    ``closed`` is evaluated through :func:`athenaeum.models.valid_until_expired`
+    — the SAME upper-bound predicate :func:`is_bounced` and
+    :func:`is_bounced_identifier` use — rather than a second comparison that
+    could drift from them.
+    """
+    wanted = normalize_identifier(identifier)
+    if not wanted:
+        return IdentifierValidity(identifier=identifier, closed=False)
+    for entry in identifier_validity_entries(meta):
+        if normalize_identifier(str(entry.get("identifier", ""))) == wanted:
+            return _validity_from_entry(identifier, entry, as_of)
+    if isinstance(meta, dict) and normalize_identifier(str(meta.get("identifier", ""))) == wanted:
+        return _validity_from_entry(identifier, meta, as_of)
+    return IdentifierValidity(identifier=identifier, closed=False)
+
+
+def assemble_excluded_validity(
+    record_meta: dict[str, Any] | None,
+    fields: Mapping[str, list[str]],
+    *,
+    as_of: date | None = None,
+) -> dict[str, list[IdentifierValidity]]:
+    """Validity state for every value in *fields*, co-indexed with it.
+
+    The validity sibling of the ``classifications`` map
+    :func:`assemble_excluded_read` returns: ``validity[field][i]`` describes
+    ``fields[field][i]``, so a caller holding a value always holds its validity
+    without a second lookup — the same co-indexing contract, for the same
+    reason.
+
+    Kept as a SEPARATE function rather than a fourth element of
+    :func:`assemble_excluded_read`'s tuple so that seam's arity — public, and
+    already consumed by ``recall``'s render join and by
+    :func:`_entity_read_from_indexes` — does not change. Additive here, and
+    breaking there.
+
+    Empty in exactly the case ``fields`` is empty: a redacted read exposes no
+    values, so it describes none. That is deliberate — a redaction marker
+    reports that values EXIST and how many, and attaching validity to values
+    the caller was not given would leak the shape of what was withheld.
+    """
+    if not fields:
+        return {}
+    return {
+        field_name: [validity_for_value(record_meta, value, as_of) for value in values]
+        for field_name, values in fields.items()
+    }
+
+
 def _merge_contact_classification(
     existing_meta: dict[str, Any],
     identifier: str,
@@ -2980,6 +3296,26 @@ class EntityRead:
     caller receiving an address always knows which kind it is and never has to
     make a second call to find out. It is empty exactly when ``contact`` is: a
     redacted read exposes no values, so it classifies none.
+
+    ``validity`` (issue athenaeum#851) is the third co-indexed map, on the same
+    contract: ``validity[field][i]`` is the :class:`IdentifierValidity` of
+    ``contact[field][i]``. With it, a caller holding a value holds all three
+    things the store knows about that value — what it is, how it was obtained,
+    and whether it is still open — in ONE read. It is likewise empty exactly
+    when ``contact`` is.
+
+    ``do_not_email`` (issue athenaeum#851) is a per-RECORD fact rather than a
+    per-value one, so it is a single :class:`DoNotEmailState` rather than a
+    co-indexed map. Unlike the two maps above it is populated even on a
+    REDACTED read: it carries no contact value to withhold — it is a mark, not
+    an address — and withholding the mark while returning the page would leave
+    a consumer unable to learn the one thing that most constrains what it may
+    do. An entity with no excluded record gets ``marked=False`` with no
+    provenance, the same "nothing recorded" answer :func:`do_not_email_state`
+    gives for a record without the key.
+
+    None of these three fields states whether the entity may be contacted.
+    They are facts; eligibility is the consumer's policy over them.
     """
 
     uid: str
@@ -2995,6 +3331,10 @@ class EntityRead:
     # shadow them (ruff F402).
     classifications: dict[str, list[ContactClassification]] = dataclass_field(
         default_factory=dict
+    )
+    validity: dict[str, list[IdentifierValidity]] = dataclass_field(default_factory=dict)
+    do_not_email: DoNotEmailState = dataclass_field(
+        default_factory=lambda: DoNotEmailState(marked=False)
     )
 
     def to_dict(self) -> dict[str, Any]:
@@ -3016,6 +3356,11 @@ class EntityRead:
                 name: [item.to_dict() for item in values]
                 for name, values in self.classifications.items()
             },
+            "validity": {
+                name: [item.to_dict() for item in values]
+                for name, values in self.validity.items()
+            },
+            "do_not_email": self.do_not_email.to_dict(),
         }
 
 
@@ -3196,6 +3541,10 @@ def _entity_read_from_indexes(
         contact_included=include_excluded,
         contact_record_path=record_path,
         classifications=classifications,
+        validity=assemble_excluded_validity(record_meta, fields),
+        # Populated even when the read is redacted — see `EntityRead`: the mark
+        # carries no contact value to withhold.
+        do_not_email=do_not_email_state(record_meta),
     )
 
 
@@ -3398,6 +3747,218 @@ def read_entity(
         wanted_classes=frozenset(usage_classes) if usage_classes is not None else None,
         surface_class=surface_class,
         config=config,
+    )
+
+
+class ExcludedSurfaceUnavailable(RuntimeError):
+    """The excluded surface could not be read — raised by the FAIL-CLOSED read path.
+
+    The failure mode this exists to prevent (issue athenaeum#851): a store that
+    cannot be reached returning an empty result, which a consumer reasonably
+    reads as "nothing suppressed" and acts on by sending. **A false skip is
+    recoverable by a human; a false send is not.** So the read path for
+    suppression facts raises rather than answering emptily.
+
+    Note the asymmetry with :func:`iter_contact_records`, which returns ``[]``
+    for a missing root and does NOT raise. That is correct for its callers —
+    :func:`mark_bounced` MINTS the first record on a surface that does not
+    exist yet, and a write path that refused to start on an empty store could
+    never bootstrap one. Reading and writing genuinely want opposite defaults
+    here, which is why this contract lives on the read entry point rather than
+    being pushed down into the shared scan.
+    """
+
+
+@dataclass(frozen=True)
+class IdentifierFacts:
+    """Everything the excluded surface knows about ONE contact value.
+
+    The per-identifier result of :func:`read_identifier_facts` (issue
+    athenaeum#851). It is a FACTS record, not a verdict: there is deliberately
+    no ``suppressed`` / ``may_email`` / ``eligible`` field on it, because
+    whether a value may be used for outreach is the consumer's policy, not
+    athenaeum's. See the module note on eligibility.
+
+    ``known`` is the load-bearing field, and it is stated POSITIVELY rather
+    than left to be inferred from empty containers. "We have never heard of
+    this address" and "we know this address and hold no mark against it" are
+    different answers with different consequences, and a consumer that infers
+    a stranger from an absence silently treats strangers as safe — the exact
+    conflation athenaeum#851 (and `maecenas#97`, which joins on it) exists to
+    make impossible. When ``known`` is ``False`` every other fact field is
+    ``None``/unset, and that is not an answer of "nothing against them".
+
+    ``ambiguous`` marks an address listed by MORE THAN ONE record — legitimate
+    (a shared family or role address) but not resolvable to a single person.
+    The facts returned are the FIRST matching record's, matching
+    :meth:`ExcludedRecordIndex.by_identifier`'s first-wins posture; the flag is
+    what lets a caller that must not guess (identity resolution) refuse, while
+    a caller that only needs deliverability proceeds.
+    """
+
+    identifier: str
+    known: bool
+    uid: str | None = None
+    record_path: Path | None = None
+    classification: ContactClassification | None = None
+    validity: IdentifierValidity | None = None
+    do_not_email: DoNotEmailState = dataclass_field(
+        default_factory=lambda: DoNotEmailState(marked=False)
+    )
+    ambiguous: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-serializable shape; ``None`` facts stay ``None`` (see ``known``)."""
+        return {
+            "identifier": self.identifier,
+            "known": self.known,
+            "uid": self.uid,
+            "record_path": str(self.record_path) if self.record_path is not None else None,
+            "classification": (
+                self.classification.to_dict() if self.classification is not None else None
+            ),
+            "validity": self.validity.to_dict() if self.validity is not None else None,
+            "do_not_email": self.do_not_email.to_dict(),
+            "ambiguous": self.ambiguous,
+        }
+
+
+def read_identifier_facts(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    identifiers: Iterable[str],
+    *,
+    surface_class: str = PII_ENTITY_CLASS,
+    as_of: date | None = None,
+    index: "ExcludedRecordIndex | None" = None,
+) -> Iterator[tuple[str, IdentifierFacts]]:
+    """Read the excluded surface's facts for MANY addresses, on ONE corpus scan.
+
+    The bulk read issue athenaeum#851 needs, in the shape of
+    :func:`read_entities` — the by-ADDRESS sibling of that by-uid batch. A
+    campaign evaluating ~16.9k contacts calls this once and pays the O(corpus)
+    scan once; the per-identifier work is a dict lookup plus reading that
+    record's own file.
+
+    It is built on :class:`ExcludedRecordIndex` (athenaeum#883), which already
+    indexes a surface by uid AND by address in a single
+    :func:`iter_contact_records` pass — deliberately NOT a second index, so
+    there is one definition of how an address resolves to a record and the two
+    cannot drift.
+
+    **This returns facts and no verdict.** There is no eligibility predicate
+    here and none is coming: athenaeum states what it knows and how it knows
+    it; the consumer decides what to do about it. See the module note.
+
+    **Fail-closed** (the athenaeum#851 AC): a surface root that does not exist,
+    is not a directory, or cannot be listed raises
+    :class:`ExcludedSurfaceUnavailable` rather than yielding
+    ``known=False`` for every identifier — which is indistinguishable from a
+    clean store in which nobody is suppressed, and would be acted on by
+    sending. The check runs ONCE, on the first identifier pulled, alongside the
+    index build.
+
+    Args:
+        knowledge_root: Root of the knowledge base (parent of ``wiki/``). The
+            caller supplies this and never constructs a surface path — the
+            two-path invariant (``docs/one-way-in-one-way-out.md`` §3), which
+            is why this is an entry point rather than an exported index.
+        config: Resolved ``athenaeum.yaml``.
+        identifiers: The addresses to look up. Consumed lazily.
+        surface_class: The **surface class** whose excluded surface holds these
+            records; defaults to :data:`PII_ENTITY_CLASS`, the only surface
+            that carries contact values today.
+        as_of: Evaluate every valid-time close as of this date (default:
+            today), so a campaign can ask "was this closed when the segment was
+            cut" rather than only "is it closed now".
+        index: An already-built :class:`ExcludedRecordIndex` to resolve
+            through — for a caller interleaving reads with
+            :func:`mark_bounced` writes on the same batch, so both see one
+            index and one scan.
+
+    Yields:
+        ``(identifier, IdentifierFacts)`` pairs in the order *identifiers*
+        supplies them. Pairs (not a bare sequence) so a caller always knows
+        which address a result belongs to; input order (not a dict) so
+        duplicates are neither collapsed nor reordered. EVERY identifier
+        yields a pair — an unknown address yields ``known=False``, never a
+        skipped entry, because a silently missing row is exactly the absence a
+        consumer would misread.
+
+    Raises:
+        ExcludedSurfaceUnavailable: The surface could not be read. Never
+            swallowed, never downgraded to an empty answer.
+    """
+    resolved_index = index
+    for identifier in identifiers:
+        if resolved_index is None:
+            # Built on the FIRST identifier, not at call time, exactly as
+            # `read_entities` builds its indexes: a caller whose candidate list
+            # came back empty pays nothing rather than a full O(corpus) pass to
+            # read zero facts. The fail-closed check rides along for the same
+            # reason — an empty batch asks the store nothing, so it has nothing
+            # to be wrong about.
+            contacts_root = excluded_surface_root(surface_class, knowledge_root, config)
+            _require_readable_surface(contacts_root, surface_class)
+            resolved_index = ExcludedRecordIndex(contacts_root)
+        yield identifier, _facts_for_identifier(identifier, resolved_index, as_of)
+
+
+def _require_readable_surface(contacts_root: Path, surface_class: str) -> None:
+    """Raise :class:`ExcludedSurfaceUnavailable` unless *contacts_root* is listable.
+
+    Deliberately probes with an actual directory listing rather than only
+    :meth:`~pathlib.Path.is_dir`: a surface that exists but cannot be read
+    (permissions, an unmounted volume that still has a mount point, a
+    decryption layer that is not up) is precisely the "unreachable store" the
+    fail-closed contract is about, and ``is_dir()`` returns ``True`` for it.
+    """
+    try:
+        if not contacts_root.is_dir():
+            raise ExcludedSurfaceUnavailable(
+                f"excluded surface for {surface_class!r} is not readable at "
+                f"{contacts_root} (no such directory). Refusing to report "
+                "'nothing recorded' for a store that was never read — a false "
+                "skip is recoverable, a false send is not."
+            )
+        next(iter(contacts_root.iterdir()), None)
+    except ExcludedSurfaceUnavailable:
+        raise
+    except OSError as exc:
+        raise ExcludedSurfaceUnavailable(
+            f"excluded surface for {surface_class!r} at {contacts_root} could "
+            f"not be listed: {exc}. Refusing to report 'nothing recorded' for "
+            "a store that was never read."
+        ) from exc
+
+
+def _facts_for_identifier(
+    identifier: str, index: "ExcludedRecordIndex", as_of: date | None
+) -> IdentifierFacts:
+    """Assemble one :class:`IdentifierFacts` from an ALREADY-BUILT index.
+
+    The per-identifier half of :func:`read_identifier_facts`, extracted for the
+    same reason :func:`_entity_read_from_indexes` was: it is the only genuinely
+    O(1)-per-key part of the read, and keeping it separate makes the one-scan
+    property visible rather than buried in a loop.
+    """
+    matches = index.all_by_identifier(identifier)
+    if not matches:
+        # Stated, not inferred: `known=False` with every fact field unset. This
+        # is NOT "no marks against them".
+        return IdentifierFacts(identifier=identifier, known=False)
+    record_path = matches[0]
+    meta = read_bounce_record(record_path)
+    uid = str(meta.get("uid", "")).strip() or None
+    return IdentifierFacts(
+        identifier=identifier,
+        known=True,
+        uid=uid,
+        record_path=record_path,
+        classification=classification_for_value(meta, identifier),
+        validity=validity_for_value(meta, identifier, as_of),
+        do_not_email=do_not_email_state(meta),
+        ambiguous=len(matches) > 1,
     )
 
 
@@ -3664,4 +4225,13 @@ __all__ = [
     "classification_for_value",
     "is_outreach_eligible",
     "classify_contact_value",
+    "DO_NOT_EMAIL_FIELD",
+    "DoNotEmailState",
+    "do_not_email_state",
+    "IdentifierValidity",
+    "validity_for_value",
+    "assemble_excluded_validity",
+    "ExcludedSurfaceUnavailable",
+    "IdentifierFacts",
+    "read_identifier_facts",
 ]

@@ -351,6 +351,12 @@ class TestCliEntityCommand:
             "contact_included",
             "contact_record_path",
             "classifications",
+            # athenaeum#851 — the per-value validity map (co-indexed with
+            # `contact`, exactly as `classifications` is) and the per-record
+            # do-not-email mark. Both are additive: every key above is
+            # unchanged, so an existing consumer of this payload keeps working.
+            "validity",
+            "do_not_email",
         }
 
     def test_withheld_by_default_with_a_marker(
