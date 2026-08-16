@@ -36,6 +36,7 @@ from athenaeum.librarian import (
     _arm_run_deadline,
     _resolve_run_config,
     _run_git_vcs_io,
+    _run_intake_audit_phase,
     _run_preconditions,
     _run_wiki_dedup_phase,
     _warn_if_knob_provider_override_inert,
@@ -711,6 +712,64 @@ class TestRunWikiDedupPhase:
         with patch("athenaeum.wiki_dedupe.propose_wiki_page_merges"):
             result = _run_wiki_dedup_phase(ctx)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _run_intake_audit_phase (issue athenaeum#836)
+# ---------------------------------------------------------------------------
+
+
+class TestRunIntakeAuditPhase:
+    def test_no_unclaimed_files_leaves_empty_summary(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path)
+        _run_intake_audit_phase(ctx)
+        assert ctx.intake_audit_summary == {
+            "unclaimed_files": 0,
+            "groups": 0,
+            "raised_groups": 0,
+            "raised_files": 0,
+            "already_open_groups": 0,
+        }
+        assert not (ctx.wiki_root / "_pending_questions.md").exists()
+
+    def test_unclaimed_file_raises_into_pending_questions(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path)
+        (ctx.raw_root / "daily-activity").mkdir(parents=True)
+        (ctx.raw_root / "daily-activity" / "events.bak").write_text("{}\n")
+
+        _run_intake_audit_phase(ctx)
+
+        assert ctx.intake_audit_summary is not None
+        assert ctx.intake_audit_summary["unclaimed_files"] == 1
+        assert ctx.intake_audit_summary["raised_groups"] == 1
+        pending = ctx.wiki_root / "_pending_questions.md"
+        assert pending.exists()
+        assert "unmatched extension" in pending.read_text()
+
+    def test_dry_run_computes_counts_but_writes_nothing(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path, dry_run=True)
+        (ctx.raw_root / "daily-activity").mkdir(parents=True)
+        (ctx.raw_root / "daily-activity" / "events.bak").write_text("{}\n")
+
+        _run_intake_audit_phase(ctx)
+
+        assert ctx.intake_audit_summary is not None
+        assert ctx.intake_audit_summary["unclaimed_files"] == 1
+        assert ctx.intake_audit_summary["raised_groups"] == 0
+        assert not (ctx.wiki_root / "_pending_questions.md").exists()
+
+    def test_recognised_raw_file_raises_nothing(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path)
+        (ctx.raw_root / "sessions").mkdir(parents=True)
+        (ctx.raw_root / "sessions" / "20260810T120000Z-abcdef01.md").write_text(
+            "---\n---\nbody\n"
+        )
+
+        _run_intake_audit_phase(ctx)
+
+        assert ctx.intake_audit_summary is not None
+        assert ctx.intake_audit_summary["unclaimed_files"] == 0
+        assert not (ctx.wiki_root / "_pending_questions.md").exists()
 
 
 if __name__ == "__main__":

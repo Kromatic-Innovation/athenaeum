@@ -145,6 +145,7 @@ from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE
     discover_raw_files,
     tier0_passthrough,
 )
+from athenaeum.intake_audit import find_unclaimed_raw_files, raise_unclaimed_files
 from athenaeum.merge import (
     RunDeadlineExceeded,
     derive_topic_slug,
@@ -2747,6 +2748,11 @@ class RunContext:
     # Issue athenaeum#901: run-summary disposition counts from
     # ``_run_shape_rule_phase`` (``None`` until that phase runs).
     shape_rules_summary: dict[str, Any] | None = None
+    # Issue athenaeum#836: run-summary counts from ``_run_intake_audit_phase``
+    # (``None`` until that phase runs) -- how many raw-intake files neither
+    # discovery path claimed this run, and how many pending decisions were
+    # raised (vs. already open/resolved) for them.
+    intake_audit_summary: dict[str, Any] | None = None
     # Issue athenaeum#440: absolute monotonic instant after which the entity phase stops
     # CLAIMING new files, reserving the remainder of ``run_deadline`` for the
     # phases downstream of it (auto-memory C2/C3 and the C4 contradiction
@@ -3412,6 +3418,73 @@ def _run_shape_rule_phase(ctx: RunContext) -> None:
             summary["files_matched"],
             summary["files_evaluated"],
             summary["dispositions"],
+        )
+
+
+def _run_intake_audit_phase(ctx: RunContext) -> None:
+    """Unrecognised-raw-intake audit (issue athenaeum#836).
+
+    Mechanical, LLM-free, and cheap (one ``raw_root`` walk plus at most a
+    handful of pending-question writes — one per distinct unrecognised
+    reason/sibling-group, never one per file) — runs unbudgeted in the same
+    deterministic-phase family as the shape-rule and correction phases,
+    right after shape-rules so a batch it just ``emit``/``rollup``-compiled
+    into ``raw/<source>/`` is already visible to
+    :func:`athenaeum.corrections.find_correction_batches` and therefore
+    correctly excluded here as claimed, never mis-flagged as unrecognised.
+
+    Finds every raw-intake file `athenaeum.intake.discover_raw_files` /
+    `discover_auto_memory_files` would never even offer to the tiers —
+    wrong extension, or (auto-memory only) a filename that misses the
+    naming convention — and raises at most one pending decision per
+    ``(reason, sibling-group)`` via
+    :func:`athenaeum.answers.raise_pending_question`, deduplicated
+    (:mod:`athenaeum.intake_audit`'s fingerprint mechanism) so a steady
+    backlog is surfaced once, not re-raised every run.
+    """
+    unclaimed = find_unclaimed_raw_files(ctx.raw_root, ctx.knowledge_root, ctx.config)
+    if not unclaimed:
+        ctx.intake_audit_summary = {
+            "unclaimed_files": 0,
+            "groups": 0,
+            "raised_groups": 0,
+            "raised_files": 0,
+            "already_open_groups": 0,
+        }
+        return
+    if ctx.dry_run:
+        # Same dry-run contract every deterministic phase honors: compute
+        # and report the counts, write nothing.
+        groups = {(u.reason, u.group_key) for u in unclaimed}
+        ctx.intake_audit_summary = {
+            "unclaimed_files": len(unclaimed),
+            "groups": len(groups),
+            "raised_groups": 0,
+            "raised_files": 0,
+            "already_open_groups": 0,
+        }
+        return
+
+    pending_path = ctx.wiki_root / "_pending_questions.md"
+    archive_path = ctx.wiki_root / "_pending_questions_archive.md"
+    summary = raise_unclaimed_files(
+        pending_path,
+        unclaimed,
+        raw_root=ctx.raw_root,
+        archive_path=archive_path,
+        now=ctx.now,
+    )
+    ctx.intake_audit_summary = summary
+    if summary["unclaimed_files"]:
+        log.info(
+            "intake-audit: %d unrecognised raw file(s) across %d group(s) -- "
+            "raised %d new pending decision(s) (%d file(s)), %d group(s) "
+            "already open/resolved",
+            summary["unclaimed_files"],
+            summary["groups"],
+            summary["raised_groups"],
+            summary["raised_files"],
+            summary["already_open_groups"],
         )
 
 
@@ -5332,6 +5405,15 @@ def run(
     # visible to the correction phase's OWN fresh raw_root walk later in
     # THIS SAME RUN -- see `_run_shape_rule_phase`'s docstring.
     _run_shape_rule_phase(ctx)
+
+    # Phase: unrecognised-raw-intake audit (issue athenaeum#836) -- deterministic,
+    # LLM-free, unbudgeted (see `_run_intake_audit_phase`'s docstring for
+    # why). Ordered right after shape-rules so a batch that phase just
+    # compiled is already visible to this phase's correction-batch
+    # exclusion check, and before the correction/entity/auto-memory phases
+    # since none of them can affect which raw files are UNRECOGNISED (they
+    # only ever act on files those phases' OWN discovery already claims).
+    _run_intake_audit_phase(ctx)
 
     # Phase: field-correction fast path (issue athenaeum#797) -- deterministic,
     # LLM-free, own runtime share. Ordered here (after the deadline is armed,
