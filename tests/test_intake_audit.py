@@ -422,7 +422,7 @@ class TestSummaryCounters:
     def test_denominator_invariant_holds_across_a_mixed_second_run(
         self, tmp_path: Path, caplog
     ) -> None:
-        """AC5: the counter participates in a #903-style denominator
+        """AC5: the counter participates in an athenaeum#903-style denominator
         invariant -- every file `raise_unclaimed_files` was given is
         accounted for by exactly one of "raised this call" or "already
         open" (an already-answered/archived group also counts as
