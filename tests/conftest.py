@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import tempfile
 import textwrap
 from collections.abc import Iterator
@@ -22,6 +23,42 @@ import pytest
 # tool from FakeLLMClient (which never touches the network). Imported here,
 # rather than reimplemented, so there is exactly one implementation.
 from tests.evals.harness import RecordingClient  # noqa: F401
+
+
+def init_git_repo(root: Path, *, branch: str = "develop") -> None:
+    """Initialize *root* as a git repo with an initial commit (issue athenaeum#947).
+
+    Shared by the ``fold-into-existing`` pending-merge test fixtures —
+    ``resolve_merge`` now refuses to fold outside a git repo (removal must
+    stay recoverable via ``git revert``/``git show``), so every such
+    fixture needs this. Centralized here rather than copy-pasted a
+    seventh+ time across ``test_merge_fold_write_paths.py`` /
+    ``test_pending_merges_resolve.py`` / ``test_retraction_cascade.py`` /
+    ``test_merges_propose_fold_cli.py`` / ``test_merge_proposal_gates.py`` /
+    ``test_t2_merge_wiring.py`` / ``test_merge_write_kind_validation.py``
+    (pre-existing standalone copies in ``test_auto_memory_prune.py`` /
+    ``test_corrections.py`` predate this issue and are left as-is — not
+    this change's concern).
+
+    Call AFTER writing whatever fixture files (target page, source pages,
+    ...) should exist BEFORE the operation under test runs, so they land
+    in the seed commit. ``ALLOW_PROTECTED_BRANCH_COMMIT=1`` is set globally
+    by ``/tmp/runtests.sh`` for this repo's container, so a ``-b develop``
+    (never ``-b main``, per this workspace's git-fixture convention) is not
+    strictly required for the commit to succeed — kept anyway to match the
+    convention used elsewhere in this suite.
+    """
+    def run(*args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=str(root), capture_output=True, text=True, check=True
+        )
+
+    root.mkdir(parents=True, exist_ok=True)
+    run("init", "-q", "-b", branch)
+    run("config", "user.email", "test@example.com")
+    run("config", "user.name", "Athenaeum Test")
+    run("add", "-A")
+    run("commit", "-q", "-m", "initial: seed fixture")
 
 
 def make_llm_response(text: str, usage: Any = None) -> SimpleNamespace:

@@ -29,6 +29,7 @@ Acceptance criteria under test (class -> AC):
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,7 @@ from athenaeum.decision_answers import (
     render_decision_answer,
     write_decision_answer,
 )
+from tests.conftest import init_git_repo
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -375,6 +377,99 @@ class TestApplyMerge:
 
         report = apply_decision_answers(wiki_root, raw_root)
         assert report.applied == 1
+
+
+# ---------------------------------------------------------------------------
+# TestFoldRecoverability — issue athenaeum#947 AC4.
+#
+# Drives the REAL deferred (MCP-shaped) path end to end: write a
+# decision-answer file approving a fold-into-existing merge (the exact
+# shape mcp_server.resolve_merge produces via write_decision_answer), apply
+# it through apply_decision_answers (the same function
+# _cmd_pending.cmd_ingest_answers calls after acquiring the run lock), and
+# assert the folded-away page is recoverable from git history afterward.
+# ---------------------------------------------------------------------------
+
+
+class TestFoldRecoverability:
+    def test_folded_source_recoverable_from_git_history(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        target_path = wiki_root / "canonical-topic.md"
+        target_path.write_text(
+            "---\nname: Canonical Topic\ntype: concept\n---\n"
+            "ORIGINAL CANONICAL PROSE\n",
+            encoding="utf-8",
+        )
+        src_path = wiki_root / "old-source.md"
+        src_path.write_text(
+            "---\nname: Old Source\ntype: feedback\n---\n"
+            "THE ORIGINAL SOURCE CONTENT\n",
+            encoding="utf-8",
+        )
+        init_git_repo(wiki_root)
+
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        merges_path = wiki_root / "_pending_merges.md"
+        # write_kind is left to derive (target already exists at this slug,
+        # so classify_write_kind derives fold-into-existing — mirrors the
+        # real proposal-time path, not a hand-set override).
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical Topic",
+            sources=[str(src_path)],
+            rationale="consolidate duplicate",
+            draft_merged_body="MERGED PROSE\n",
+            confidence=0.9,
+        )
+        mid = parse_pending_merges(merges_path)[0].id
+        assert parse_pending_merges(merges_path)[0].write_kind == "fold-into-existing"
+
+        # Same shape mcp_server.resolve_merge produces (issue athenaeum#908):
+        # a decision-answer file under raw/answers/ — NOT a synchronous
+        # apply. Nothing in the wiki has moved yet at this point.
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+        assert src_path.exists()
+
+        # Apply through the same deferred path _cmd_pending.cmd_ingest_answers
+        # drives (after acquiring the CLI run lock — see
+        # pending_merges._apply_fold_into_existing's docstring, AC3).
+        report = apply_decision_answers(wiki_root, raw_root)
+        assert report.applied == 1
+        assert report.skipped == 0
+
+        # Working tree: the folded-away source is gone; the target survived
+        # with the merged content.
+        assert not src_path.exists()
+        assert target_path.exists()
+        assert "MERGED PROSE" in target_path.read_text(encoding="utf-8")
+
+        # Git history: exactly one commit deleted old-source.md, and the
+        # ORIGINAL content (from before that commit) is still recoverable —
+        # the README.md "a bad merge is a `git revert` away" guarantee.
+        rel_src = "old-source.md"
+        log = subprocess.run(
+            ["git", "log", "--diff-filter=D", "--format=%H", "--", rel_src],
+            cwd=str(wiki_root),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        deleting_commits = [c for c in log.stdout.splitlines() if c]
+        assert len(deleting_commits) == 1
+        deleting_commit = deleting_commits[0]
+
+        recovered = subprocess.run(
+            ["git", "show", f"{deleting_commit}^:{rel_src}"],
+            cwd=str(wiki_root),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "THE ORIGINAL SOURCE CONTENT" in recovered.stdout
 
 
 # ---------------------------------------------------------------------------

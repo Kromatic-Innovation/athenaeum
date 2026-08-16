@@ -16,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ from athenaeum.pending_merges import (
     write_pending_merge,
 )
 from athenaeum.provenance import read_merge_provenance
+from tests.conftest import init_git_repo
 
 
 def _write_source(path: Path, *, name: str, body: str = "body\n") -> None:
@@ -66,6 +68,7 @@ class TestFoldIntoExisting:
         src_b = wiki / "topic-variant-b.md"
         _write_wiki_page(src_a, name="Topic Variant A", body="variant a\n")
         _write_wiki_page(src_b, name="Topic Variant B", body="variant b\n")
+        init_git_repo(wiki)
 
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
@@ -97,6 +100,7 @@ class TestFoldIntoExisting:
         _write_wiki_page(target, name="Already Here", body="pre-existing\n")
         src = wiki / "src-one.md"
         _write_wiki_page(src, name="Src One", body="one\n")
+        init_git_repo(wiki)
 
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
@@ -123,6 +127,7 @@ class TestFoldIntoExisting:
         _write_wiki_page(src_a, name="Old A", body="a\n")
         _write_wiki_page(src_b, name="Old B", body="b\n")
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,
@@ -153,6 +158,7 @@ class TestFoldIntoExisting:
         src_b = wiki / "old-b.md"
         _write_wiki_page(src_b, name="Old B", body="b\n")
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,
@@ -170,6 +176,159 @@ class TestFoldIntoExisting:
         assert target.exists()
         assert not src_b.exists()
         assert result["folded_sources"] == [str(src_b)]
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#947 — removal must be git-only for recoverability.
+#
+# AC1: an approved fold lands as a provenance-snapshot commit BEFORE any
+#      page is deleted, and the fold itself is its own commit.
+# AC2: the fold REFUSES (rather than deleting) when the knowledge root is
+#      not a git repo — no file removed, checkbox not flipped.
+# ---------------------------------------------------------------------------
+
+
+def _git_log_messages(root: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "log", "--format=%s"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [line for line in result.stdout.splitlines() if line]
+
+
+class TestGitRecoverability:
+    def test_fold_lands_as_two_commits_snapshot_then_fold(
+        self, tmp_path: Path
+    ) -> None:
+        """A successful fold-into-existing approve takes a provenance-
+        snapshot commit of the target + sources BEFORE any write, then
+        commits the fold itself as its own commit — two NEW commits beyond
+        the fixture's seed commit, in that order (newest first in
+        ``git log``: fold commit, then snapshot commit)."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        # Seed the repo with UNRELATED content only. The target + source
+        # pages are written and committed as their own step below (after
+        # init), so they are still untracked when the fold runs and the
+        # provenance-snapshot commit has real new content to capture —
+        # see ``test_fold_no_op_snapshot_still_commits_fold`` below for the
+        # already-committed (no-op snapshot) case.
+        _write_wiki_page(wiki / "unrelated.md", name="Unrelated", body="x\n")
+        init_git_repo(wiki)
+        seed_messages = _git_log_messages(wiki)
+        assert len(seed_messages) == 1  # just the fixture's seed commit
+
+        target = wiki / "canonical.md"
+        _write_wiki_page(target, name="Canonical", body="old\n")
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(src_a, name="Old A", body="a\n")
+        # target/src_a are UNTRACKED here — not part of the seed commit.
+
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="r",
+            draft_merged_body="merged\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        assert result["ok"] is True
+
+        messages = _git_log_messages(wiki)
+        assert len(messages) == 3  # seed + snapshot + fold
+        fold_msg, snapshot_msg, seed_msg = messages
+        assert "provenance snapshot" in snapshot_msg
+        assert "canonical" in snapshot_msg
+        assert "athenaeum#947" in snapshot_msg
+        assert "fold" in fold_msg
+        assert "old-a" in fold_msg
+        assert "canonical" in fold_msg
+        assert "athenaeum#947" in fold_msg
+        assert seed_msg == seed_messages[0]
+
+    def test_fold_no_op_snapshot_still_commits_fold(self, tmp_path: Path) -> None:
+        """When the target + sources are already fully committed (the
+        common case — this fixture's seed commit already covers them), the
+        provenance-snapshot commit is a legitimate no-op (nothing new to
+        stage), but the fold commit still lands."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(target, name="Canonical", body="old\n")
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(src_a, name="Old A", body="a\n")
+        init_git_repo(wiki)  # seed commit already covers target + src_a
+
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="r",
+            draft_merged_body="merged\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        assert result["ok"] is True
+
+        messages = _git_log_messages(wiki)
+        # No SEPARATE snapshot commit (nothing new was staged at that point —
+        # target/src_a were already captured by the seed commit), but the
+        # fold itself still commits.
+        assert len(messages) == 2  # seed + fold
+        assert "provenance snapshot" not in messages
+        assert "fold" in messages[0]
+
+    def test_fold_refuses_outside_git_repo_and_deletes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """No ``.git`` anywhere above ``wiki_root`` -> refuse, do not
+        degrade. No page is deleted, the target is untouched, and the
+        checkbox is NOT flipped (mirrors the ``fold_target_missing``
+        shape)."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()  # deliberately NOT a git repo
+        target = wiki / "canonical.md"
+        _write_wiki_page(target, name="Canonical", body="OLD BODY\n")
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(src_a, name="Old A", body="a\n")
+
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="r",
+            draft_merged_body="MERGED BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is False
+        assert result["error_code"] == "no_git_repo"
+        assert result["resolved_block"] is None
+        # Nothing was deleted.
+        assert src_a.exists()
+        # Target page untouched — the draft body never overwrote it.
+        assert target.read_text(encoding="utf-8") == (
+            "---\nname: Canonical\ntype: concept\n---\nOLD BODY\n"
+        )
+        # Checkbox still unchecked — merge remains pending, exactly like
+        # fold_target_missing.
+        md = merges_path.read_text(encoding="utf-8")
+        assert "- [ ]" in md
+        assert "- [x]" not in md
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +434,7 @@ class TestReferenceRewriteAndAliases:
             body="See [[old-a]] for details, also [[old-a|the older page]].\n",
         )
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,
@@ -306,6 +466,7 @@ class TestReferenceRewriteAndAliases:
         src_a = wiki / "old-a.md"
         _write_wiki_page(src_a, name="Old A", body="a\n")
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,
@@ -334,6 +495,7 @@ class TestReferenceRewriteAndAliases:
         src_a = wiki / "old-a.md"
         _write_wiki_page(src_a, name="Old A", body="a\n")
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,
@@ -362,6 +524,7 @@ class TestReferenceRewriteAndAliases:
         src_a = wiki / "old-a.md"
         _write_wiki_page(src_a, name="Old A", body="a\n")
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,
@@ -418,6 +581,7 @@ class TestVectorHygiene:
         before = collection.get(ids=["old-a.md"])
         assert before["ids"] == ["old-a.md"]
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,
@@ -454,6 +618,7 @@ class TestVectorHygiene:
         src_a = wiki / "old-a.md"
         _write_wiki_page(src_a, name="Old A", body="a\n")
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,
@@ -483,6 +648,7 @@ class TestVectorHygiene:
         src_a = wiki / "old-a.md"
         _write_wiki_page(src_a, name="Old A", body="a\n")
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,
@@ -533,6 +699,7 @@ class TestProvenanceRecording:
         src_a = wiki / "old-a.md"
         _write_wiki_page(src_a, name="Old A", body="a\n")
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,
@@ -595,6 +762,7 @@ class TestProvenanceRecording:
         _write_wiki_page(src_1, name="Old 1", body="1\n")
         _write_wiki_page(src_2, name="Old 2", body="2\n")
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,
@@ -668,6 +836,7 @@ class TestProvenanceRecording:
         src_a = wiki / "old-a.md"
         _write_wiki_page(src_a, name="Old A", body="a\n")
 
+        init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
             merges_path,

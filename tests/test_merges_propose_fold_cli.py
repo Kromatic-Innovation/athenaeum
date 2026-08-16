@@ -18,6 +18,7 @@ from pathlib import Path
 
 from athenaeum.cli import main as cli_main
 from athenaeum.pending_merges import parse_pending_merges, resolve_merge
+from tests.conftest import init_git_repo
 
 
 def _wiki_page(path: Path, *, name: str, body: str) -> None:
@@ -298,6 +299,10 @@ def test_refuses_canonical_whose_filename_is_not_its_slug(tmp_path: Path) -> Non
 
 def test_queued_proposal_folds_correctly_via_resolve_merge(tmp_path: Path) -> None:
     wiki, canonical, src_b, src_c = _seed(tmp_path)
+    # Issue athenaeum#947: resolve_merge now refuses a fold-into-existing approve
+    # outside a git repo — this is the one test in this module that actually
+    # approves (the rest only exercise propose-fold's queueing/dry-run).
+    init_git_repo(wiki)
     rc, _out = _run(
         [
             "merges",
