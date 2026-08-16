@@ -12,14 +12,15 @@ itself contains no per-command branching. A missing subcommand prints help
 and returns 0; an unrecognized one is rejected by argparse itself before
 ``main()`` ever sees ``args.command``.
 
-Fifteen sibling ``_cmd_*.py`` modules each own one or a few related
+Sixteen sibling ``_cmd_*.py`` modules each own one or a few related
 subcommands' argparse setup plus their handler(s):
 ``_cmd_lifecycle`` (init/status/disable/enable/spend), ``_cmd_serve``
 (serve), ``_cmd_run`` (run), ``_cmd_index`` (reindex/rebuild-index/compile/
 registry/ingest/session-end), ``_cmd_query`` (recall/people/query-topics/
 stopwords/test-mcp), ``_cmd_pending`` (ingest-answers/ingest-merges/
 reresolve-questions), ``_cmd_curate`` (dedupe/claims/auto-memory),
-``_cmd_repair`` (repair), ``_cmd_questions``, ``_cmd_merges``,
+``_cmd_decay`` (decay-sweep, issue athenaeum#904), ``_cmd_repair`` (repair),
+``_cmd_questions``, ``_cmd_merges``,
 ``_cmd_decisions``, ``_cmd_authority``, ``_cmd_axiom``, ``_cmd_calibration``,
 ``_cmd_outbound``, ``_cmd_drain``, ``_cmd_storage``, ``_cmd_push_metrics``
 (push-metrics baseline/coverage-audit, issue athenaeum#711).
@@ -72,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_bounce_divergence import add_bounce_divergence_subparser
     from athenaeum._cmd_calibration import add_calibration_subparser
     from athenaeum._cmd_curate import add_curate_subparsers
+    from athenaeum._cmd_decay import add_decay_subparser
     from athenaeum._cmd_decisions import add_decisions_subparser
     from athenaeum._cmd_drain import add_drain_subparser
     from athenaeum._cmd_index import add_index_subparsers
@@ -108,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparsers
     )  # ingest-answers, ingest-merges, reresolve-questions
     add_curate_subparsers(subparsers)  # dedupe, claims, auto-memory
+    add_decay_subparser(subparsers)  # decay-sweep
     add_repair_subparser(subparsers)  # repair
     add_questions_subparser(subparsers)  # questions
     add_merges_subparser(subparsers)  # merges

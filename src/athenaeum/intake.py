@@ -68,6 +68,7 @@ from athenaeum.models import (
     WikiEntity,
     coerce_source_type,
     parse_asserter,
+    parse_bucket,
     parse_claim_kind,
     parse_deprecated,
     parse_frontmatter,
@@ -279,6 +280,11 @@ def discover_auto_memory_files(
                         # Issue athenaeum#308: claim-level temporal validity bounds.
                         valid_from=validity_bound_str(meta_for_markers, "valid_from"),
                         valid_until=validity_bound_str(meta_for_markers, "valid_until"),
+                        # Issue athenaeum#904: optional decay bucket, set at intake by
+                        # ``remember()`` or a shape rule. Fail-open read — an
+                        # invalid on-disk value is treated as unset, never
+                        # crashes discovery (rejection happens at write time).
+                        bucket=parse_bucket(meta_for_markers),
                     )
                 )
     if dropped_ephemeral:
