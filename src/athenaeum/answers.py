@@ -127,6 +127,16 @@ _CHECKBOX_RE = re.compile(r"^- \[(?P<state>[ xX])\]\s*(?P<question>.*)$")
 # Lines we strip when extracting the user's answer body.
 _META_PREFIXES = ("**Conflict type**:", "**Description**:")
 
+# Issue athenaeum#912: single-line provenance-metadata tag recognized on a
+# pending-question block, mirroring the existing ``**Fingerprint**:`` /
+# ``**Also affects**:`` convention. Its presence (value ``"agent"``) is what
+# :func:`athenaeum.decisions.question_to_decision` uses to distinguish an
+# agent-raised item from a detector-raised one in ``list_pending_decisions``
+# output — see :func:`raise_pending_question` below, the sole writer of this
+# line.
+_RAISED_BY_PREFIX = "**Raised by**:"
+_RAISED_BY_AGENT = "agent"
+
 
 @dataclass
 class PendingQuestion:
@@ -158,6 +168,13 @@ class PendingQuestion:
     # primary entity (header) is NOT included here. Empty by default
     # — only populated when the dedup path in tier4_escalate fires.
     also_affects: list[str] = field(default_factory=list)
+    # Issue athenaeum#912: provenance marker recovered off an optional
+    # ``**Raised by**:`` line. Empty ("") means the block came from a
+    # detector (``tier4_escalate`) — every pre-athenaeum#912 block on disk lacks
+    # this line, so "" must mean detector-raised for those blocks to keep
+    # parsing identically. ``"agent"`` means the block was inserted via the
+    # ``raise_decision`` MCP tool (:func:`raise_pending_question` below).
+    raised_by: str = ""
 
 
 def _make_id(header_line: str, question_text: str) -> str:
@@ -331,6 +348,7 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
     answer_lines: list[str] = []
     also_affects: list[str] = []
     fingerprint = ""
+    raised_by = ""
 
     # Tracks whether we're still accumulating continuation lines into the
     # description field. A **Description**: line opens the window; the next
@@ -366,6 +384,14 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
             in_description = False
             fingerprint = stripped.removeprefix("**Fingerprint**:").strip()
             continue
+        if stripped.startswith(_RAISED_BY_PREFIX):
+            # Issue athenaeum#912: provenance marker distinguishing an agent-raised
+            # block (`raise_decision` MCP tool) from a detector-raised one.
+            # Recognized as metadata for the same reason as **Fingerprint**:
+            # above — it must not leak into answer_lines as a phantom answer.
+            in_description = False
+            raised_by = stripped.removeprefix(_RAISED_BY_PREFIX).strip()
+            continue
         if in_description:
             # Continuation: consume into description until we hit a terminator.
             # Blank line or another ``**Key**:`` tag closes the window.
@@ -389,6 +415,9 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
                     continue
                 if stripped.startswith("**Fingerprint**:"):
                     fingerprint = stripped.removeprefix("**Fingerprint**:").strip()
+                    continue
+                if stripped.startswith(_RAISED_BY_PREFIX):
+                    raised_by = stripped.removeprefix(_RAISED_BY_PREFIX).strip()
                     continue
                 # Unknown **Key**: — treat as answer body.
                 answer_lines.append(raw_line)
@@ -418,6 +447,7 @@ def _parse_block(block_text: str) -> PendingQuestion | None:
         raw_block=block_text,
         fingerprint=fingerprint,
         also_affects=also_affects,
+        raised_by=raised_by,
     )
 
 
@@ -1136,11 +1166,177 @@ def list_unanswered(
             "conflict_type": pq.conflict_type,
             "description": pq.description,
             "created_at": pq.created_at,
+            # Issue athenaeum#912: "" for a detector-raised (tier4_escalate) block,
+            # "agent" for one filed via `raise_pending_question` /
+            # ``raise_decision``. Additive field — existing callers that
+            # don't look at it are unaffected.
+            "raised_by": pq.raised_by,
         }
         for pq in parse_pending_questions(pending_path)
         if not pq.answered
         and is_page_authorized_at(pq.source, caller_audience, base=knowledge_root)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Raise path (issue athenaeum#912): agent-side INSERT into the pending-decisions
+# queue. Every prior write to `_pending_questions.md` originated from
+# athenaeum's own detectors (`tier4_escalate`, above); there was no way for an
+# agent that discovers something needing a human decision to file it here.
+# The real harm this closes: during a 2026-08-06 contact-sync fix, a
+# delegated agent flagged "I narrowed this to scalar fields — flag it if you
+# meant the stricter reading" in free-form prose to its orchestrator. The
+# orchestrator folded that flag into a summary next to an unrelated
+# question; the human answered the other one, and the flag — never given a
+# forcing function or persistent state — silently evaporated when the
+# session ended.
+#
+# Design: the file-backed `_pending_questions.md` sidecar is exactly why a
+# detector-raised item survives the session that created it — so an
+# agent-raised item is appended through the SAME sidecar, in the SAME block
+# grammar `tier4_escalate` writes, rather than inventing a second, parallel
+# queue (which the issue itself notes "reproduces the original problem one
+# level up"). The only new thing on disk is the optional ``**Raised by**:``
+# provenance line (see `_RAISED_BY_PREFIX` above) — everything else
+# (`list_pending_questions`, `list_pending_decisions`, `resolve_question`,
+# `ingest_answers`) already knows how to read and resolve this exact block
+# shape with zero special-casing.
+# ---------------------------------------------------------------------------
+
+
+def raise_pending_question(
+    pending_path: Path,
+    question: str,
+    context: str,
+    *,
+    entity: str = "",
+    source: str = "",
+    now: datetime | None = None,
+) -> dict:
+    """Append a NEW agent-raised block to ``_pending_questions.md`` (athenaeum#912).
+
+    Unlike every other writer of this file (:func:`tier4_escalate`, the sole
+    detector-side writer), this is called directly from the ``raise_decision``
+    MCP tool at agent request — so, unlike a detector item, there is no
+    upstream claim-pair or contradiction to describe. ``context`` fills that
+    role: it becomes the block's ``**Description**:`` field, which is exactly
+    what a human reading ``list_pending_decisions`` on a LATER, DIFFERENT
+    session sees — the whole point is that the item must be answerable
+    without the originating session ever having existed. Validation refuses
+    to accept a raise with no context for that reason: a question with no
+    standalone context reproduces the "flag with no forcing function" failure
+    this issue exists to close, just moved one layer down.
+
+    Args:
+        pending_path: Path to ``_pending_questions.md``.
+        question: The question a human should answer. Rejected if empty or
+            all-whitespace.
+        context: Standalone context — what a human needs to answer this
+            WITHOUT the originating session. Rejected if empty or
+            all-whitespace; there is no default, deliberately (see above).
+        entity: Optional short human-readable label for the header's
+            ``Entity: "..."`` field. Defaults to a generic
+            ``"(agent-raised decision)"`` when omitted — this is cosmetic
+            only; the machine-readable provenance signal is the
+            ``**Raised by**:`` line, not this label.
+        source: Optional free-text provenance ref for the header's
+            ``(from ...)`` field (mirrors a detector item's originating raw
+            file). Defaults to the literal ``"agent-raised"`` when omitted.
+            Because this is not generally a readable wiki-page path, a
+            RESTRICTED ``caller_audience`` (issue athenaeum#538) will not see this
+            item via ``list_pending_decisions`` unless the supplied
+            ``source`` happens to resolve to a page it is authorized to
+            read — fail-closed, same as every other decision-queue item.
+        now: Injectable clock for tests. Defaults to the real UTC time.
+
+    Returns:
+        A dict with ``ok`` (bool), ``error_code`` (``"invalid_question"`` |
+        ``"missing_context"`` | ``None``), ``message`` (str), ``decision_id``
+        (the id ``list_pending_questions`` / ``resolve_question`` will use
+        for this item, computed the same way :func:`_make_id` computes it
+        for any other block — ``None`` on failure), and ``raw_block`` (the
+        rendered block text, ``None`` on failure). ``block`` / ``error`` are
+        legacy-shaped aliases (mirroring :func:`resolve_by_id`) for
+        ``raw_block`` / ``message``-on-failure respectively. Never raises —
+        every failure mode is a structured refusal, matching every other
+        mutating MCP-facing helper in this module.
+    """
+    q = question.strip()
+    if not q:
+        msg = "question must be non-empty"
+        return {
+            "ok": False,
+            "error_code": "invalid_question",
+            "message": msg,
+            "decision_id": None,
+            "raw_block": None,
+            "block": None,
+            "error": msg,
+        }
+    ctx = context.strip()
+    if not ctx:
+        msg = (
+            "context must be non-empty — a human answering this on a later, "
+            "different session needs standalone context; a contextless raise "
+            "is never accepted (issue athenaeum#912)"
+        )
+        return {
+            "ok": False,
+            "error_code": "missing_context",
+            "message": msg,
+            "decision_id": None,
+            "raw_block": None,
+            "block": None,
+            "error": msg,
+        }
+
+    when = now or datetime.now(timezone.utc)
+    created_at = when.strftime("%Y-%m-%d")
+    ent = entity.strip() or "(agent-raised decision)"
+    ref = source.strip() or "agent-raised"
+    # Same escaping tier4_escalate applies to a header entity name, so an
+    # entity containing a literal `"` or `\` round-trips through the header
+    # grammar (`_HEADER_RE`) instead of corrupting it.
+    escaped_entity = ent.replace("\\", "\\\\").replace('"', '\\"')
+    header = f'## [{created_at}] Entity: "{escaped_entity}" (from {ref})'
+    block = (
+        f"{header}\n"
+        f"- [ ] {q}\n\n"
+        f"**Description**: {ctx}\n"
+        f"{_RAISED_BY_PREFIX} {_RAISED_BY_AGENT}\n"
+    ).rstrip() + "\n"
+
+    # Computed the exact same way `_make_id` computes an id when the block
+    # is later re-parsed off disk, from the same (header, question) pair —
+    # so the id returned here is valid immediately for `resolve_question`
+    # without a round-trip read.
+    decision_id = _make_id(header, q)
+
+    existing_text = (
+        pending_path.read_text(encoding="utf-8") if pending_path.exists() else ""
+    )
+    if existing_text.strip():
+        new_content = existing_text.rstrip() + "\n\n---\n\n" + block
+    else:
+        new_content = "# Pending Questions\n\n" + block
+    pending_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(pending_path, new_content)
+
+    log.info(
+        "raise_pending_question: appended agent-raised block id=%s to %s",
+        decision_id,
+        pending_path,
+    )
+    return {
+        "ok": True,
+        "error_code": None,
+        "message": "ok",
+        "decision_id": decision_id,
+        "raw_block": block,
+        # legacy-shaped aliases:
+        "block": block,
+        "error": None,
+    }
 
 
 def resolve_by_id(pending_path: Path, question_id: str, answer: str) -> dict:
