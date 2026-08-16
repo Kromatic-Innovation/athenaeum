@@ -3,7 +3,9 @@
 # Generalising the storage-adapter seam to the whole store
 
 **Status:** DESIGN LOCK. Issue athenaeum#911. Not yet implemented — the
-implementation slices this design locks are listed in §9.
+implementation slices this design locks are specified in §9.2 and filed by
+athenaeum#945, the operator follow-up that also performs the athenaeum#718
+re-scope in §8.
 
 From the 2026-08-14 intake-architecture review (Vitruvius Specify), which
 ratified [`docs/north-star.md`](north-star.md) §2.11:
@@ -91,23 +93,36 @@ will drift; the shape will not.
 
 ### 2.2 The headline numbers
 
-Two counts are given because they answer different questions. The
-**mechanical** count is what the command above returns and is reproducible to
-the digit; the **classified** count is that sweep hand-reviewed per site to
-drop non-I/O `Path()` constructors, `datetime.replace`/`str.replace` false
-positives, and in-memory `yaml.safe_load` on already-read text.
+Two figures are given, and they are **deliberately not reconciled to the
+digit**, because they come from different sweeps and pretending otherwise
+would be the kind of false precision this document is trying to avoid.
+
+The **mechanical** figure is exactly what the published command returns
+against `develop`: **73 modules, 613 hits.** Reproducible to the digit, and
+re-verified independently.
+
+The **classified** figure comes from a broader pattern set (adding `open(`,
+`Path(`, `tempfile`, `os.listdir`/`scandir`/`makedirs`, `json.load`,
+`yaml.safe_load`) hand-reviewed site by site, which is what a bucket
+assignment needs and a single regex cannot give. It yields **~421 genuine
+store touches** across **~65 modules**, alongside ~43 ambiguous and ~83
+non-store sites; the balance is dropped as non-I/O — bare `Path()`
+construction, `datetime.replace` / `str.replace`, and in-memory
+`yaml.safe_load` on already-read text. Widening the regex changes the total
+(74 modules / 790 hits for the broader set), which is precisely why the
+classified number is quoted with a tilde and the mechanical one without.
 
 | Measure | Count |
 |---|---|
-| Modules in `src/athenaeum/` | 104 |
-| Modules with at least one raw pattern hit (mechanical) | 73–76 |
-| Raw pattern hits (mechanical) | ~613–667 |
-| **Modules with a genuine store touch (classified)** | **~65** *(76 modules had hits; ~9 proved to touch only CLI-arbitrary paths, temp fixtures or packaged resources, and `atomic_io.py` is the chokepoint itself rather than a consumer)* |
-| **Genuine store-touch sites (classified)** | **~421** *(131 wiki + 90 raw + 145 state + 33 index + 22 excluded; the ~83 non-store and ~43 ambiguous sites are counted separately in §2.2.1)* |
-| Modules routing writes through `atomic_io.atomic_write_text` | 28 |
+| Modules in `src/athenaeum/` | 104 (exact) |
+| Modules matching the published command | 73 (exact) |
+| Hits from the published command | 613 (exact) |
+| **Genuine store touches, classified** | **~421** — 131 wiki + 90 raw + 145 state + 33 index + 22 excluded (§2.2.1) |
+| **Modules with a genuine store touch, classified** | **~65** |
+| Modules routing writes through `atomic_io.atomic_write_text` | 28 (exact) |
 | Hand-rolled re-implementations of that same temp + `os.replace` pattern | 4 — `search.py:684-686`, `repair.py:91-100`, `clusters.py:643-659`, plus a plain `write_text` at `search.py:1032` |
-| Modules implementing their own `O_APPEND` ledger writer | 12 |
-| Modules consulting `storage.surface_root_for_class` — **the existing seam** | **5** |
+| Modules implementing their own `O_APPEND` ledger writer | 12 (exact) |
+| Modules consulting `storage.surface_root_for_class` — **the existing seam** | **5** (exact) |
 
 The last row is the finding. Five modules ask the storage layer where a class
 lives (`storage.py`, `_cmd_storage.py`, `storage_migrate.py`, `corrections.py`,
@@ -170,7 +185,7 @@ Ranked by classified store-touch count, with representative line references:
 | `merge.py` | 11 | raw, wiki, ambiguous | member reads `568-1116`; wiki glob `2219,2501,2502`; cluster report `530,533` |
 | `dedupe.py` | 10 | wiki | person load `290,294`; reference rewrite `706-836` |
 | `storage_migrate.py` | 10 | wiki, excluded | wiki reads `330-766`; excluded write `643,644` |
-| `mcp_server.py` | — | wiki, excluded, state | the read/write seam itself: 46 `wiki_root`, 54 excluded-surface, 13 `cache_dir` references |
+| `mcp_server.py` | — | wiki, excluded, state | the read/write seam itself: 46 `wiki_root` and 13 `cache_dir` references, plus pervasive excluded-surface resolution |
 
 Three structural facts follow:
 
@@ -891,14 +906,17 @@ has no headroom to absorb `N · L` of new round-trip latency (§3.3).
 Each slice is one session's work, in dependency order. `blocked_by` edges are
 native, not prose.
 
-### 9.1 Filed separately, not a slice
+### 9.1 Raised separately, not a slice
 
 The Tier-C gap found while inventorying §4.3 —
 `pending_merges._apply_fold_into_existing` deleting a wiki page with an
 ungated `unlink()` (`pending_merges.py:1001`) — is a **live defect against
-today's documented guarantee**, independent of this design. It is filed as its
-own issue rather than folded into a slice, because it should be fixed whether
-or not the store generalisation ever ships.
+today's documented guarantee**, independent of this design. It is **raised for
+filing as its own issue** rather than folded into a slice, because it should
+be fixed whether or not the store generalisation ever ships. It is reported
+through the lane's structured completion rather than filed by the lane
+directly, so its issue number is not available to cite at the time of writing;
+athenaeum#945 carries the back-fill as an acceptance criterion.
 
 ### 9.2 The slices
 
