@@ -101,10 +101,12 @@ from athenaeum.config import (
 from athenaeum.models import (
     EntityIndex,
     WikiEntity,
+    coerce_bucket,
     generate_uid,
     parse_frontmatter,
     render_frontmatter,
     slugify,
+    validity_bound_str,
 )
 from athenaeum.precedence import source_rank
 from athenaeum.provenance import parse_source
@@ -183,6 +185,13 @@ ALLOWED_RECORD_KEYS: frozenset[str] = frozenset(
         "observed_at",
         "note",
         "usage_class",
+        # Issue athenaeum#904 (AC2): optional decay annotations. Same shape as
+        # `usage_class` — they ride alongside whatever field/value the
+        # correction is actually proposing, applied to the TARGET entity's
+        # page-level frontmatter regardless of op/field, never routed through
+        # the field/value allowlist+precedence machinery.
+        "bucket",
+        "valid_until",
     }
 )
 
@@ -1161,6 +1170,25 @@ def process_correction_record(
                 f"(field={field_name!r}, op={op!r})"
             )
 
+    # Issue athenaeum#904 (AC2): optional decay annotations, same "validate before
+    # any side effect" discipline as usage_class above. Unlike usage_class,
+    # these are not restricted to a specific op/field — a rule may tag the
+    # TARGET entity's page as a decay bucket regardless of which attribute
+    # the correction itself is fixing.
+    raw_bucket = effective.get("bucket")
+    try:
+        correction_bucket = coerce_bucket(raw_bucket)
+    except ValueError as exc:
+        return _raised(f"invalid bucket: {exc}")
+    # `valid_until` is a SUGGESTION (design brief) — fail-open normalize
+    # here, matching every other valid_until write path in this codebase
+    # (`models._coerce_iso_date`), rather than reject-at-boundary like
+    # `bucket`. A malformed value normalizes to "" (no suggestion), never
+    # raises a tier.
+    correction_valid_until = validity_bound_str(
+        {"valid_until": effective.get("valid_until")}, "valid_until"
+    )
+
     resolution = resolve_target_for_apply(
         target,
         index=index,
@@ -1523,6 +1551,25 @@ def process_correction_record(
                 source,
             )
         return _result("routed-elsewhere", reason, monotone_apply=monotone_apply)
+
+    # Issue athenaeum#904 (AC2): stamp the target ENTITY page's decay bucket /
+    # suggested valid_until, ordinary (non-excluded-surface) wiki pages only
+    # — bucket/valid_until are wiki decay concepts, not contact-surface ones,
+    # so the `surface_class` branch above never reaches here.
+    #
+    # `bucket` is a direct SET: an explicit correction naming a bucket is a
+    # definitive classification decision, not a competing claim to be
+    # weighed under §6.2 precedence (the field/value payload already went
+    # through that ladder above; bucket rides alongside it).
+    #
+    # `valid_until` is a SUGGESTION (design brief) — only fills an ABSENT
+    # bound, never overrides a `valid_until` the page already carries
+    # (mirroring `_stamp_member_validity`'s "only-fill-never-override" rule
+    # in `merge.py` for the analogous per-source case).
+    if correction_bucket:
+        merged_read["bucket"] = correction_bucket
+    if correction_valid_until and not merged_read.get("valid_until"):
+        merged_read["valid_until"] = correction_valid_until
 
     merged_read["updated"] = date.today().isoformat()
     validate_wiki_meta(merged_read)

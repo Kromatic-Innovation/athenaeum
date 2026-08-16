@@ -803,6 +803,71 @@ def validity_windows_disjoint(
     return False
 
 
+# --- Decay bucket (issue athenaeum#904) ---
+#
+# ``bucket:`` is an optional frontmatter classification declaring how a memory
+# DECAYS over time: ``daily`` (rapidly-overwritten status — the latest value
+# matters, not the history of prior values), ``weekly``, or ``durable``
+# (long-lived; the athenaeum#308 default posture — never auto-swept). It sits
+# BESIDE ``valid_from``/``valid_until`` (this file, above) rather than
+# replacing them: ``bucket`` says HOW a memory decays; ``valid_from``/
+# ``valid_until`` say over WHAT WINDOW a specific claim is true. A daily-bucket
+# page with no ``valid_until`` is not yet expired (the athenaeum#308 fail-open
+# posture is unchanged) — currency ranking (``mcp_server._is_deprioritized_for_
+# currency``) and the deterministic sweep (``athenaeum.decay_sweep``) both key
+# on the EXISTING ``valid_until_expired`` predicate above, not a new one.
+#
+# Closed enum, unlike ``source_type``/``memory_class``/etc: those are
+# read-side, fail-open axes with an established legacy corpus that must never
+# crash the nightly compile on a stale value. ``bucket`` has no legacy corpus
+# (this is its first release) and the athenaeum#904 design brief is explicit that an
+# invalid value must be REJECTED at the boundary, not silently coerced — so
+# :func:`coerce_bucket` (write-time) raises, while :func:`parse_bucket`
+# (read-time, for a value already on disk — e.g. a hand-edited page) stays
+# fail-open like every other reader in this module.
+MEMORY_BUCKETS: frozenset[str] = frozenset({"daily", "weekly", "durable"})
+
+
+def coerce_bucket(value: object) -> str:
+    """Validate a ``bucket:`` value against :data:`MEMORY_BUCKETS` — a WRITE-time
+    boundary function, not a fail-open reader (issue athenaeum#904).
+
+    Every write-time entry point that lets a caller declare a bucket
+    (``mcp_server.remember_write``, a shape-rule-emitted correction record in
+    ``corrections.process_correction_record``) calls this so an invalid value
+    is rejected right there rather than silently persisted. ``None`` / ``""``
+    (unset) returns ``""`` — unset is a valid, ordinary state that must behave
+    exactly as it did before this field existed. Anything else must be an
+    exact member of :data:`MEMORY_BUCKETS` or this raises ``ValueError``.
+    """
+    if value is None or value == "":
+        return ""
+    if isinstance(value, str) and value in MEMORY_BUCKETS:
+        return value
+    raise ValueError(
+        f"invalid bucket {value!r}; expected one of {sorted(MEMORY_BUCKETS)}, or unset"
+    )
+
+
+def parse_bucket(meta: Mapping[str, object] | None) -> str:
+    """Return the frontmatter ``bucket:`` value, or ``""`` when absent/invalid.
+
+    Read-side companion to :func:`coerce_bucket`: fail-open (the same posture
+    every other reader in this module takes) so a corrupted or hand-edited
+    on-disk value degrades to "no bucket" rather than raising and breaking
+    discovery/compile/recall/the sweep. Rejection happens once, at write time.
+    """
+    if not meta:
+        return ""
+    raw = meta.get("bucket")
+    if raw is None:
+        return ""
+    if isinstance(raw, str) and raw in MEMORY_BUCKETS:
+        return raw
+    log.debug("parse_bucket: invalid bucket %r; treating as absent", raw)
+    return ""
+
+
 # --- Audience / access scoping (issue athenaeum#312) ---
 #
 # Read-scoping for secondary agents/routines. The audience model is
@@ -1230,6 +1295,12 @@ class AutoMemoryFile:
     # valid (inclusive); absent => open interval (still valid).
     valid_from: str = ""
     valid_until: str = ""
+    # Issue athenaeum#904: optional decay classification — one of
+    # :data:`MEMORY_BUCKETS`, or ``""`` (unset, behaves exactly as before this
+    # field existed). Read via :func:`parse_bucket` (fail-open), never
+    # :func:`coerce_bucket` (that is the write-time boundary, not a discovery
+    # read).
+    bucket: str = ""
     _content: str | None = field(default=None, repr=False)
 
     @property

@@ -443,6 +443,24 @@ never swept in. Like move-then-retire, recovery is **git-only** — the
 command refuses to run outside a git repo and never hard-`unlink`s, so a
 pruned page is recoverable from history.
 
+```bash
+# Dry-run (default): print the kill-list + retained-list, change nothing.
+athenaeum decay-sweep
+# Apply: git-archive the kill-list (two-commit: snapshot, then git rm) and
+# rebuild the recall index.
+athenaeum decay-sweep --apply
+```
+
+`decay-sweep` (issue athenaeum#904) archives EXPIRED `bucket: daily` wiki pages —
+see `docs/provenance-shape.md` §8.8 for the `bucket:` / `valid_until:`
+frontmatter contract. `weekly` / `durable` / unbucketed pages are never
+candidates. Makes **zero LLM calls** — deterministic frontmatter/date
+comparison only. Dry-run is the default, same shape as `auto-memory prune`
+above; `--apply` git-archives the kill-list (a provenance-snapshot commit,
+then a `git rm` commit — mirrors `pending_merges`' fold-approve two-commit
+discipline) and rebuilds the recall index. Refuses to run outside a git
+repo; an archived page stays recoverable from history.
+
 ## Answering pending questions
 
 When Tier 3 can't resolve an ambiguity or a principled contradiction, the

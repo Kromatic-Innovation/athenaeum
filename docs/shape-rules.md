@@ -171,6 +171,40 @@ degrades to `transform-error` in the ledger and the original raw file is
 left untouched for the reasoning tiers — `field-corrections.md` §1.1's
 "nothing is rejected, only fallthrough" doctrine, applied to the compiler.
 
+### 4.2 Optional decay annotations (`bucket`, `valid_until` — issue athenaeum#904)
+
+A `correction:` block may additionally carry `bucket` (`daily` / `weekly` /
+`durable`) and/or `valid_until` — the same OPTIONAL, ride-alongside shape
+`usage_class` already uses (`field-corrections.md` §7.1): they apply to the
+correction's TARGET entity page regardless of what `field`/`value` the
+correction itself is proposing, rather than going through the
+`field`/value allowlist+precedence machinery. See
+`docs/provenance-shape.md` §8.8 for the full frontmatter contract these
+feed.
+
+```yaml
+disposition: emit
+correction:
+  target: {type: person, handle: {email: "$email"}}
+  op: set
+  field: bounced
+  value: "$status_date"
+  source: "script:delivery-monitor"
+  observed_at: "$observed_at"
+  bucket: daily              # optional, one of daily | weekly | durable
+  valid_until: "$expires_at" # optional SUGGESTION -- never overrides an
+                              # explicit valid_until already on the page
+```
+
+`bucket` is a plain **literal**, not a `$field`/function expression — unlike
+`value`/`observed_at`/`note`, it is validated against the closed enum at
+RULE-LOAD time (before any record is ever processed), because a rule's
+decay classification is a rule-authoring decision ("records this rule
+matches are daily status"), not something computed per record. `valid_until`
+may be `$field`-interpolated like `value`. Both are omitted from the emitted
+correction record entirely when the rule does not set them — a rule
+authored before athenaeum#904 existed emits a byte-identical record.
+
 ---
 
 ## 5. Dispositions (`emit`, `fallthrough`, `drop`, `retain`, `rollup`, `preserve`)

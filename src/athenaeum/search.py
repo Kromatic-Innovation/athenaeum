@@ -35,7 +35,11 @@ resolve cleanly — see ``docs/recall-architecture.md`` for why each backend is
 load-bearing.
 
 **Invariant:** every query path enforces the SAME three exclusions before a
-page can occupy a result slot — inactive/expired (:func:`athenaeum.models.is_inactive_memory`),
+page can occupy a result slot — inactive/expired
+(:func:`_is_recall_inactive` — issue athenaeum#904: the recall-time
+sibling of :func:`athenaeum.models.is_inactive_memory` that lets an
+expired ``bucket: daily`` page stay recall-visible for currency ranking
+instead of being hard-filtered; see that function's docstring),
 PII-flagged (:func:`athenaeum.pii.is_pii_flagged`), and audience-unauthorized
 (:func:`athenaeum.models.is_page_authorized` / the per-backend audience
 predicate) — pushed INSIDE the backend query (not post-filtered) so a
@@ -68,9 +72,10 @@ from athenaeum.models import (
     AUDIENCE_PUBLIC_TOKEN,
     audience_index_string,
     audience_string_authorized,
-    is_inactive_memory,
     is_page_authorized,
+    parse_deprecated,
     parse_frontmatter,
+    parse_superseded_by,
     valid_until_expired,
     validity_bound_str,
 )
@@ -447,6 +452,70 @@ def _passes_globs(
     return True
 
 
+def _is_recall_inactive(meta: dict[str, Any] | None, as_of: date | None = None) -> bool:
+    """Recall-time inactive predicate (issue athenaeum#904) — the SAME as
+    :func:`athenaeum.models.is_inactive_memory` EXCEPT a ``bucket: daily``
+    page's expired ``valid_until`` does NOT make it inactive here.
+
+    **Why this cannot just be** ``is_inactive_memory``: that predicate is the
+    single shared gate for BOTH recall visibility (this module's three
+    backends) AND C3 merge-compile member-activeness
+    (:meth:`athenaeum.models.AutoMemoryFile.is_inactive`) — the athenaeum#308 doc's
+    own words are "so they stay in lockstep". AC4's "deprioritizes, does not
+    filter" needs an expired ``daily``-bucket PAGE to remain recall-visible;
+    but an expired ``daily``-bucket raw MEMBER must still stop contributing
+    new content to the compiled page — that is what "a rapidly-overwritten
+    daily status collapses to its latest value" (the issue's own framing)
+    means. Loosening the SHARED predicate would do both at once and
+    silently resurrect stale content into compiled pages, which nothing in
+    the athenaeum#904 design brief asks for. So this is a SEPARATE, local predicate,
+    used ONLY by this module's recall query/build gates
+    (:meth:`KeywordBackend.query`, :func:`_scan_indexed_records`) — never by
+    :meth:`athenaeum.models.AutoMemoryFile.is_inactive`, which keeps calling
+    ``is_inactive_memory`` completely unchanged. Deliberately built from
+    only :mod:`athenaeum.models`' PRE-EXISTING primitives
+    (:func:`~athenaeum.models.parse_superseded_by`,
+    :func:`~athenaeum.models.parse_deprecated`,
+    :func:`~athenaeum.models.valid_until_expired`) plus a raw ``bucket``
+    frontmatter read, rather than importing a models-layer helper — the
+    "recall gate, not a general validity concept" scoping belongs at this
+    layer, not L1.
+
+    A ``bucket: daily`` page that instead flows through here is picked up by
+    recall's currency-aware ranking
+    (:func:`athenaeum.mcp_server._is_deprioritized_for_currency`), which
+    ranks it lower rather than hiding it — the deterministic sweep
+    (:mod:`athenaeum.decay_sweep`) is what eventually removes it from the
+    live tree, on the operator's own cadence, never recall itself.
+
+    ``weekly``/``durable``/unbucketed pages are BYTE-IDENTICAL to
+    ``is_inactive_memory`` here — the divergence fires ONLY for
+    ``bucket: daily``, which is what keeps "a corpus with no buckets
+    anywhere is completely unaffected" true for this function too.
+
+    Known limitation (documented, not silently accepted): the FTS5/vector
+    incremental-rebuild stat fast-path (:func:`_scan_indexed_records`)
+    re-checks an UNCHANGED page's stored ``valid_until`` without a full
+    re-read, and that stored stat record does not carry ``bucket`` — so a
+    ``daily``-bucket page whose ``valid_until`` crosses ``as_of`` between
+    incremental rebuilds can drop out of those TWO indexed backends until
+    the next FULL rebuild (the existing periodic
+    ``full_rehash_max_age_days`` self-healing backstop picks it back up,
+    deprioritized rather than dropped, same as everywhere else). The
+    scan-on-query ``keyword`` backend has no such lag — it always sees this
+    function's live answer.
+    """
+    if not meta:
+        return False
+    if parse_superseded_by(meta):
+        return True
+    if parse_deprecated(meta):
+        return True
+    if meta.get("bucket") == "daily":
+        return False
+    return valid_until_expired(meta, as_of)
+
+
 def _scan_indexed_records(
     wiki_root: Path,
     extra_roots: Iterable[Path] | None,
@@ -526,8 +595,11 @@ def _scan_indexed_records(
         meta, _ = parse_frontmatter(text)
         # Issue athenaeum#191: inactive members never enter the index or the manifest.
         # Issue athenaeum#308: an as-of build additionally drops pages outside their
-        # validity window relative to ``as_of`` (default today).
-        if is_inactive_memory(meta, as_of):
+        # validity window relative to ``as_of`` (default today). Issue athenaeum#904:
+        # ``_is_recall_inactive`` (not ``is_inactive_memory``) so an expired
+        # ``bucket: daily`` page stays indexed for currency ranking instead
+        # of being hard-dropped — see that function's docstring.
+        if _is_recall_inactive(meta, as_of):
             continue
         # Issue athenaeum#427: a ``pii: true``-flagged page never enters the index or
         # the manifest (belt-and-suspenders — see the docstring above).
@@ -1800,7 +1872,10 @@ class KeywordBackend:
             # Issue athenaeum#191: skip inactive members (superseded_by / deprecated).
             # Issue athenaeum#308 slice 3: also skip pages outside their validity window
             # relative to ``as_of`` (default today) — the query-time as-of view.
-            if is_inactive_memory(fm, as_of):
+            # Issue athenaeum#904: ``_is_recall_inactive`` lets an expired
+            # ``bucket: daily`` page stay recall-visible for currency ranking
+            # instead of being hard-dropped here.
+            if _is_recall_inactive(fm, as_of):
                 continue
             # Issue athenaeum#427: belt-and-suspenders — a ``pii: true``-flagged page is
             # excluded from keyword recall too, even though this backend scans
