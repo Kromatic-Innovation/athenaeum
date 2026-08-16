@@ -23,13 +23,14 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _iso_date
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
 from athenaeum.logconf import configure_logging
 
 if TYPE_CHECKING:
+    from athenaeum.reasoning_triggers import TriggerDecision
     from athenaeum.runlock import RunLock
 
 
@@ -228,6 +229,24 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Run the compile without writing files, committing, or "
         "updating the ingest stamp.",
+    )
+    ingest_parser.add_argument(
+        "--if-triggered",
+        action="store_true",
+        help="Additive control signal (issue athenaeum#909): before compiling, "
+        "evaluate the configured reasoning-tier triggers (backlog file "
+        "count / bytes, elapsed interval, nightly backstop — "
+        "librarian.reasoning_triggers.*) against LIVE state. When none "
+        "fired, does NOT compile — prints the same one-line JSON summary "
+        "carrying trigger=\"none\" and exits 0 (cheap, side-effect-free: "
+        "no lock taken). When one fired, runs the normal incremental "
+        "ingest exactly as without this flag, with the firing trigger's "
+        "name in the summary, and — on a clean non-dry-run completion — "
+        "advances the reasoning-trigger last-run stamp used by the "
+        "elapsed-interval and nightly-backstop checks. This adds a "
+        "control signal to the existing on-demand poke; it is not a "
+        "second way for data to enter, and it never forces a full "
+        "recompile (always --incremental's budgeted, resumable path).",
     )
     ingest_parser.add_argument(
         "--verbose",
@@ -529,6 +548,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     Acquires the shared run lock (single-flight, athenaeum#309) around the compile,
     prints a one-line JSON summary (counts + duration), and exits non-zero
     when the underlying compile fails.
+
+    ``--if-triggered`` (issue athenaeum#909) is an ADDITIVE control signal on this
+    SAME command, not a second entry point — see :func:`_evaluate_ingest_trigger`.
+    When given and no configured trigger fired, this function returns BEFORE
+    the lock-acquire block below: no lock, no ``ingest()`` call, no mutation.
     """
     import json
 
@@ -545,7 +569,51 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     # Default incremental: neither flag → None → True; --full → False.
     incremental = True if args.incremental is None else args.incremental
 
+    # Issue athenaeum#909 (AC4/D7): a triggered run is a budgeted, resumable,
+    # INCREMENTAL run — never a full recompile. ``--full`` and
+    # ``--if-triggered`` are independent argparse flags (not a mutually
+    # exclusive group — ``--full`` is meaningful without ``--if-triggered``
+    # too), so this combination is otherwise silently reachable. Reject it
+    # loudly rather than either silently downgrading ``--full`` (surprising:
+    # the operator explicitly asked for it) or silently honoring it (the one
+    # thing every trigger must never do).
+    if getattr(args, "if_triggered", False) and not incremental:
+        print(
+            "error: --if-triggered cannot be combined with --full — a "
+            "triggered run is always incremental (issue athenaeum#909); pass "
+            "--full-compile to `athenaeum run` for an explicit full "
+            "reconciliation instead.",
+            file=sys.stderr,
+        )
+        return 1
+
     cfg = load_config(knowledge_root)
+
+    # Issue athenaeum#909: on-demand (no --if-triggered, the pre-existing default
+    # behaviour, UNCHANGED) always compiles. With --if-triggered, evaluate the
+    # configured triggers against LIVE state FIRST — cheap (one directory
+    # listing + one small stamp read), side-effect-free, and deliberately
+    # BEFORE the lock-acquire below so a "nothing fired" evaluation never
+    # contends for the run lock at all.
+    trigger_reason = "on-demand"
+    if getattr(args, "if_triggered", False):
+        decision = _evaluate_ingest_trigger(raw_root, cfg, args.cache_dir)
+        trigger_reason = decision.reason
+        if not decision.fired:
+            noop_summary: dict[str, object] = {
+                "command": "ingest",
+                "mode": "incremental" if incremental else "full",
+                "new_or_changed": 0,
+                "compiled": 0,
+                "noop": True,
+                "duration_ms": 0,
+                "exit_code": 0,
+                "trigger": "none",
+            }
+            if args.session is not None:
+                noop_summary["session"] = args.session
+            print(json.dumps(noop_summary))
+            return 0
 
     # Issue athenaeum#309 single-flight: a real compile mutates wiki/ and shares the
     # nightly-run lock. A --dry-run reads only, so it does not take the lock.
@@ -581,8 +649,77 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         if lock is not None and not isinstance(lock, int):
             lock.release()
 
-    print(json.dumps(result.summary()))
+    summary = result.summary()
+    if getattr(args, "if_triggered", False):
+        summary["trigger"] = trigger_reason
+        # Issue athenaeum#909 (D4): advance the reasoning-trigger last-run stamp
+        # on a clean, real (non-dry-run) completion, regardless of exit
+        # code detail beyond "no exception" — a triggered run that ran to
+        # completion (even a compile-internal noop) resets BOTH the
+        # elapsed-interval and nightly-backstop clocks. A dry-run never
+        # stamps, mirroring every other stamp in this module.
+        if not args.dry_run and result.exit_code == 0:
+            _record_ingest_trigger_completion(args.cache_dir)
+    print(json.dumps(summary))
     return result.exit_code
+
+
+def _evaluate_ingest_trigger(
+    raw_root: Path, config: dict[str, Any], cache_dir: Path | None
+) -> "TriggerDecision":
+    """Gather live state and evaluate the reasoning-tier triggers (issue athenaeum#909).
+
+    The ONLY I/O :func:`athenaeum.reasoning_triggers.evaluate_triggers` itself
+    never performs: a raw-intake backlog scan (file count + byte size, both
+    via :mod:`athenaeum.intake`) and a read of the last-completed-triggered-
+    run stamp. Cheap (one directory listing, one small JSON file) and
+    read-only — safe to call before the run lock is even considered.
+    ``cache_dir`` MUST be the same ``--cache-dir`` value the real ingest call
+    (and :func:`_record_ingest_trigger_completion`) uses, or this reads a
+    stamp from the wrong location and evaluates against a stale/empty
+    baseline every time.
+    """
+    from datetime import datetime, timezone
+
+    from athenaeum.intake import discover_raw_backlog_bytes, discover_raw_files
+    from athenaeum.librarian import REASONING_TRIGGER_STAMP_NAME, _load_timestamp_stamp
+    from athenaeum.reasoning_triggers import evaluate_triggers
+
+    backlog_files = len(discover_raw_files(raw_root, config))
+    backlog_bytes = discover_raw_backlog_bytes(raw_root, config)
+    stamp_path = resolve_cache_dir(cache_dir) / REASONING_TRIGGER_STAMP_NAME
+    last_run = _load_timestamp_stamp(stamp_path)
+    since_last_run = (
+        None if last_run is None else datetime.now(timezone.utc) - last_run
+    )
+    return evaluate_triggers(
+        backlog_files=backlog_files,
+        backlog_bytes=backlog_bytes,
+        since_last_run=since_last_run,
+        on_demand=False,
+        config=config,
+    )
+
+
+def _record_ingest_trigger_completion(cache_dir: Path | None) -> None:
+    """Advance the reasoning-trigger last-run stamp (issue athenaeum#909).
+
+    Best-effort: a write failure is logged and swallowed, never fails the
+    (already-successful) ingest it is recording — mirrors every other
+    cache-dir stamp writer in this codebase.
+    """
+    import logging
+
+    from athenaeum.librarian import REASONING_TRIGGER_STAMP_NAME, _write_timestamp_stamp
+
+    log = logging.getLogger(__name__)
+    stamp_path = resolve_cache_dir(cache_dir) / REASONING_TRIGGER_STAMP_NAME
+    try:
+        from datetime import datetime, timezone
+
+        _write_timestamp_stamp(stamp_path, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 — must not break a successful ingest
+        log.warning("reasoning-trigger stamp write failed (non-fatal): %s", exc)
 
 
 def cmd_session_end(args: argparse.Namespace) -> int:

@@ -421,6 +421,32 @@ def discover_raw_files(
     return files
 
 
+def discover_raw_backlog_bytes(
+    raw_root: Path, config: dict[str, Any] | None = None
+) -> int:
+    """Sum on-disk byte size of the pending raw-intake backlog (issue athenaeum#909).
+
+    Literal disk bytes, not a cost/token estimate: ``sum(path.stat().st_size
+    for path in discover_raw_files(raw_root, config))``. Companion to
+    :func:`discover_raw_files`'s existing file-COUNT backlog usage (``len(...)``,
+    e.g. ``drain.py``/``_cmd_drain.py``/``status.py``) — this is the "M bytes"
+    half of the athenaeum#909 backlog-depth trigger
+    (:func:`athenaeum.config.resolve_reasoning_trigger_backlog_bytes`).
+
+    Tolerant of a file vanishing between discovery and stat (races with a
+    concurrent compile/retire pass): a per-file ``OSError`` is skipped rather
+    than raising, mirroring :func:`athenaeum.models.RawFile.content`'s own
+    stat-failure tolerance.
+    """
+    total = 0
+    for raw in discover_raw_files(raw_root, config):
+        try:
+            total += raw.path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 def tier0_passthrough(
     raw: RawFile,
     index: EntityIndex,

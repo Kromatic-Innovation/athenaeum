@@ -78,6 +78,10 @@ See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table 
 | Delta affected-cluster cap | — | — | `librarian.delta.max_affected_clusters` | `8` | If a change would touch more than this many clusters, fall back to a full whole-corpus compile rather than churning most of the corpus through the delta path (athenaeum#370). `bool` / non-positive / non-int values fall through to the default. |
 | Delta affected-member cap | — | — | `librarian.delta.max_affected_members` | `200` | If the affected-cluster member pool exceeds this many files, fall back to a full compile (athenaeum#370). Bounds worst-case re-cluster cost so a pathological closure never does more work than a full run. `bool` / non-positive / non-int values fall through to the default. |
 | Full-rehash backstop age (days) | — | — | `librarian.reindex.full_rehash_max_age_days` | `7` | Self-healing periodic full re-hash backstop (athenaeum#373). The athenaeum#370 stat pre-filter reuses a stored content hash whenever a file's `(mtime, size)` match the index manifest; when the manifest has not had a full re-hash within this window, the next incremental reindex re-hashes **every** file (catching a content edit that preserved both mtime and size) while still applying only the delta — seconds, not a full re-embed / FTS5 rebuild. `0` or negative = always re-hash; a very large value = effectively never. `bool` / non-numeric values fall through to the default. |
+| Reasoning-trigger backlog (files) | `athenaeum ingest --if-triggered` | — | `librarian.reasoning_triggers.backlog_files` | *(unset = OFF)* | Backlog-depth reasoning trigger, by pending raw-intake **file count** (athenaeum#909). When `athenaeum ingest --if-triggered` sees `discover_raw_files` reach or exceed this many files, it runs the normal incremental ingest; otherwise it is a cheap no-op (prints a summary with `"trigger": "none"`, exits 0, never takes the run lock). Unset (the default) disables this trigger entirely — see [reasoning-tier triggers](#reasoning-tier-triggers-athenaeum909) below. `bool` / non-positive / non-int values fall through to disabled. |
+| Reasoning-trigger backlog (bytes) | `athenaeum ingest --if-triggered` | — | `librarian.reasoning_triggers.backlog_bytes` | *(unset = OFF)* | Backlog-depth reasoning trigger, by pending raw-intake **byte size** (athenaeum#909) — literal on-disk bytes (`sum(stat().st_size)`), not a cost/token estimate. Fires alongside (not instead of) the file-count trigger above; either reaching its threshold fires. Unset disables. `bool` / non-positive / non-int values fall through to disabled. |
+| Reasoning-trigger interval (hours) | `athenaeum ingest --if-triggered` | — | `librarian.reasoning_triggers.interval_hours` | *(unset = OFF)* | Elapsed-interval reasoning trigger (athenaeum#909): fires once at least this many hours have passed since the last completed triggered run, regardless of backlog depth — a quiet night still gets a bounded, incremental look. Unset disables (only the nightly backstop below still applies). `bool` / non-positive / non-int values fall through to disabled. |
+| Reasoning-trigger nightly backstop (hours) | `athenaeum ingest --if-triggered` | — | `librarian.reasoning_triggers.nightly_backstop_hours` | `24` | Nightly-backstop reasoning trigger (athenaeum#909) — always on, unlike the three above. Fires once at least this many hours have elapsed since the last completed triggered run **and no other trigger fired this evaluation**; this is what keeps the old "once a night" schedule alive as a demoted fallback rather than the primary path. `bool` / non-positive / non-int values fall through to the default. |
 | API key | — | `ANTHROPIC_API_KEY` | — | (required) | Required for Tier 2/3 LLM calls. Optional with `--dry-run`, `--cluster-only`, or `--merge-only`. |
 
 > **Design decision — CLI rejects `0`, env/yaml accept it.** The
@@ -256,6 +260,52 @@ Behavior and guards:
 - **No credential handling** (athenaeum#284/#330): requires `ANTHROPIC_API_KEY` in the environment and errors out naming that requirement if it is absent.
 - **Cost guard is mandatory:** prints an up-front cost **estimate** (backlog × observed avg tokens/file × current model prices, batch discount applied) and requires `--yes` to proceed non-interactively.
 - **Loops intake windows** until the raw backlog is empty, the cumulative `--max-usd` ceiling trips, or a window makes **zero progress** (stops loudly — never spins).
+
+## Reasoning-tier triggers (athenaeum#909)
+
+There is no shipped nightly cron wrapper in this repo — `athenaeum run` /
+`athenaeum ingest` are invoked by an operator's own external cron / launchd
+(`librarian.pull_before_run` / `push_after_run`, documented under "Librarian
+run" above, make the same "no in-repo scheduler" assumption for git sync).
+Tying reasoning to one such nightly window means a bad night is invisible for
+24h and a large batch waits a full day. `athenaeum ingest --if-triggered`
+(issue athenaeum#909) replaces the single window with a small set of
+configurable triggers — backlog depth, an elapsed interval, and on-demand —
+plus a nightly **backstop** that only fires when nothing else did:
+
+```
+athenaeum ingest --if-triggered
+```
+
+Not to be confused with `librarian.full_compile_every_days` (the
+whole-corpus C2-C4 auto-memory **compile** cadence, above) or the
+"Reasoning-tier screening (T1/T2)" section below (a DIFFERENT pipeline —
+haiku/opus screening of merge proposals before they reach a human review
+queue). This section is about *when a reasoning run happens at all*, not
+what a run does once it starts.
+
+Every trigger — however it fires — runs through the SAME `athenaeum ingest`
+call path (`--incremental`, the default; never `--full`), so a fired trigger
+is always the existing budgeted, resumable, incremental compile
+(`athenaeum.librarian.ingest`) — never a full recompile. Evaluation is
+side-effect-free and happens BEFORE the run lock is taken: when nothing
+fires, `--if-triggered` is a cheap no-op (prints a one-line JSON summary with
+`"trigger": "none"`, exit 0, no lock contention).
+
+| Knob | YAML key | Default | What it does |
+|---|---|---|---|
+| Backlog trigger (files) | `librarian.reasoning_triggers.backlog_files` | unset = OFF | Fires when the pending raw-intake backlog reaches or exceeds this many files. |
+| Backlog trigger (bytes) | `librarian.reasoning_triggers.backlog_bytes` | unset = OFF | Fires when the pending raw-intake backlog reaches or exceeds this many bytes (literal on-disk size, not a cost estimate). |
+| Interval trigger | `librarian.reasoning_triggers.interval_hours` | unset = OFF | Fires once this many hours have elapsed since the last completed triggered run, regardless of backlog depth. |
+| Nightly backstop | `librarian.reasoning_triggers.nightly_backstop_hours` | `24` | Always on. Fires once this many hours have elapsed since the last completed triggered run **and no other trigger fired this evaluation** — the demoted fallback, not the primary path. |
+
+Without any of the three above configured, `--if-triggered` behaves as a
+backstop-only poke: it runs whenever 24h (default) have passed since the
+last triggered run, same as the old "once a night" cron, and otherwise no-ops.
+Configuring `backlog_files` / `backlog_bytes` / `interval_hours` is what
+makes reasoning respond to actual load instead of a fixed clock. `athenaeum
+ingest` **without** `--if-triggered` is unaffected by any of this — it is the
+pre-existing on-demand poke (issue athenaeum#349) and always compiles.
 
 ## Models
 
@@ -1204,6 +1254,11 @@ librarian:
     max_affected_members: 200   # > this many pooled members => full compile (athenaeum#370)
   reindex:
     full_rehash_max_age_days: 7 # periodic full re-hash backstop; 0 = always re-hash (athenaeum#373)
+  reasoning_triggers:           # `athenaeum ingest --if-triggered` (athenaeum#909); all unset = backstop-only
+    backlog_files: 25           # unset = OFF; backlog-depth trigger by file count
+    backlog_bytes: 5242880      # unset = OFF; backlog-depth trigger by byte size (5 MiB)
+    interval_hours: 6           # unset = OFF; elapsed-interval trigger
+    nightly_backstop_hours: 24  # always on; fires only when nothing else did
 
 models:
   classify: claude-haiku-4-5-20251001
