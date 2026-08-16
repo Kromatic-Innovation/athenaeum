@@ -573,6 +573,47 @@ def resolve_member_path(
     return None
 
 
+def _rows_touched_since(
+    rows: list[dict[str, Any]],
+    extra_roots: list[Path],
+    since: datetime,
+) -> set[str]:
+    """Cluster ids (issue athenaeum#909) with at least one member file modified
+    at/after *since*.
+
+    Pure row-level query used by :func:`merge_clusters_to_wiki`'s C4-since
+    scope — deliberately computed straight from the raw cluster JSONL rows
+    (via :func:`resolve_member_path`), the SAME source :func:`read_cluster_rows`
+    returns and the row-filter step already consumes, rather than from the
+    (more expensive to build) ``MergedWikiEntry`` list. A member ref that no
+    longer resolves to a file (retired/moved/deleted since C2 last ran) is
+    skipped, not an error — a cluster is "touched" by what is still there to
+    look at. Tolerant of a file vanishing mid-scan (``OSError`` on ``stat()``,
+    e.g. a concurrent retire pass) — skipped exactly like an unresolvable
+    ref, mirroring :func:`athenaeum.intake.discover_raw_backlog_bytes`'s
+    stat-failure tolerance.
+    """
+    since_ts = since.timestamp()
+    touched: set[str] = set()
+    for row in rows:
+        cluster_id = str(row.get("cluster_id", "") or "")
+        if not cluster_id:
+            continue
+        member_paths = row.get("member_paths") or []
+        for member_ref in member_paths:
+            resolved = resolve_member_path(str(member_ref), extra_roots)
+            if resolved is None:
+                continue
+            try:
+                mtime = resolved.stat().st_mtime
+            except OSError:
+                continue
+            if mtime >= since_ts:
+                touched.add(cluster_id)
+                break
+    return touched
+
+
 # ---------------------------------------------------------------------------
 # Topic-slug derivation
 # ---------------------------------------------------------------------------
@@ -1552,6 +1593,8 @@ def merge_clusters_to_wiki(
     max_api_calls: int | None = None,
     out_stats: dict | None = None,
     heartbeat: Callable[[], None] | None = None,
+    c4_since: datetime | None = None,
+    c4_full_sweep: bool = False,
 ) -> list[MergedWikiEntry]:
     """Read the canonical cluster JSONL and emit one wiki entry per cluster.
 
@@ -1625,6 +1668,32 @@ def merge_clusters_to_wiki(
             (``len(escalations)``) — so the run-level profile summary (athenaeum#464)
             can thread these counters up without recomputing them. Purely
             additive; ``None`` (every pre-athenaeum#464 caller) is byte-identical.
+            Issue athenaeum#909 additionally sets ``c4_swept_full`` (``bool``) — whether
+            this call's EFFECTIVE ``only_cluster_ids`` (after ``c4_since``
+            scoping below, if it engaged) ended up ``None``, i.e. a true
+            whole-corpus C4 pass ran. The caller (:func:`athenaeum.librarian.run`)
+            only advances the contradiction-sweep-completed stamp when this
+            is ``True``.
+        c4_since: Issue athenaeum#909. A C4-SPECIFIC "scope to clusters touched
+            since this timestamp" gate, ORTHOGONAL to ``only_cluster_ids``
+            above (the athenaeum#370/#463 auto-memory delta gate C4 otherwise just
+            piggybacks on). Only takes effect when ``only_cluster_ids is
+            None`` on entry (the delta gate already left this call
+            unscoped) AND ``c4_full_sweep`` is ``False`` — in that case this
+            function computes which cluster rows have at least one member
+            file modified at/after ``c4_since`` and uses THAT set exactly
+            like an ``only_cluster_ids`` the caller had passed in (same row
+            filter, same "unaffected wiki pages stay untouched" property,
+            same whole-corpus-similarity-sweep skip). ``None`` (the default,
+            and every pre-athenaeum#909 caller) never engages this — byte-identical
+            to today.
+        c4_full_sweep: Issue athenaeum#909. When ``True``, ``c4_since`` is ignored —
+            this call runs C4 over EVERY cluster regardless (the explicit
+            ``--full-contradiction-sweep`` escape hatch, AC6). Only
+            meaningful together with a caller that also then advances the
+            contradiction-sweep stamp (via ``out_stats["c4_swept_full"]``
+            above); this flag alone has no stamp side effect. Default
+            ``False``.
 
     Returns:
         The list of :class:`MergedWikiEntry` records in cluster-file order.
@@ -1657,6 +1726,18 @@ def merge_clusters_to_wiki(
     if not rows:
         log.info("merge pass: no clusters at %s — nothing to merge", cluster_path)
         return []
+
+    # Issue athenaeum#909: the C4-specific "since last completed sweep" gate.
+    # Only engages when the athenaeum#370/#463 delta gate above left this call
+    # UNSCOPED (``only_cluster_ids is None``) and the caller did not force a
+    # true full sweep — computed BEFORE the row filter below so it reuses
+    # that exact same filter (same untouched-page-stays-untouched property,
+    # same whole-corpus-similarity-sweep skip guard).
+    if only_cluster_ids is None and c4_since is not None and not c4_full_sweep:
+        since_extra_roots = resolve_extra_intake_roots(
+            knowledge_root, config=resolved_config
+        )
+        only_cluster_ids = _rows_touched_since(rows, since_extra_roots, c4_since)
 
     # Issue athenaeum#370 PR2: delta-scoped merge. Filter to the affected cluster rows
     # BEFORE building any entry so unaffected entries are neither rebuilt nor
@@ -2603,6 +2684,7 @@ def merge_clusters_to_wiki(
                     "pairs_added_via_similarity": pairs_added_via_similarity,
                     "entries_merged": len(entries),
                     "escalations_written": len(escalations),
+                    "c4_swept_full": only_cluster_ids is None,
                 }
             )
         return entries
@@ -2635,6 +2717,7 @@ def merge_clusters_to_wiki(
                 "pairs_added_via_similarity": pairs_added_via_similarity,
                 "entries_merged": len(entries),
                 "escalations_written": len(escalations),
+                "c4_swept_full": only_cluster_ids is None,
             }
         )
 
