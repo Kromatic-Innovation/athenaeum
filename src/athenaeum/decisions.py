@@ -245,13 +245,22 @@ def merge_to_decision(
 
 
 def question_to_decision(pq: PendingQuestion, *, with_proposal: bool = False) -> dict:
-    """Convert a :class:`PendingQuestion` to a unified decision dict."""
+    """Convert a :class:`PendingQuestion` to a unified decision dict.
+
+    ``payload["raised_by"]`` (issue athenaeum#912) is ``""`` for a detector-raised
+    block (every ``tier4_escalate`` block, including every block that
+    predates athenaeum#912) and ``"agent"`` for one filed via the
+    ``raise_decision`` MCP tool (:func:`athenaeum.answers.raise_pending_question`)
+    — the queue's provenance signal so an agent-raised item is never
+    mistaken for a corpus-detected contradiction.
+    """
     payload: dict = {
         "entity": pq.entity,
         "source": pq.source,
         "question": pq.question,
         "conflict_type": pq.conflict_type,
         "description": pq.description,
+        "raised_by": pq.raised_by,
     }
     if with_proposal:
         payload["proposal"] = _extract_proposal_block(pq.raw_block)
