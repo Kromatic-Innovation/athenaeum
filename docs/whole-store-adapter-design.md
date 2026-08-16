@@ -42,7 +42,7 @@ seam answers *where a class lives* and *what corpus it joins*; it does not
 mediate *how bytes are read and written*. `backing_store` is today a
 descriptive string — `"wiki-markdown"`, `"markdown"` — that no code dispatches
 on, and the documented `backing_store: "sqlite"` example
-(`docs/storage-adapter-contract.md:196-203`) changes no behaviour whatsoever.
+(`docs/storage-adapter-contract.md:207`) changes no behaviour whatsoever.
 
 That is the whole gap. **The class → surface routing generalises already; the
 physical layer does not exist yet.** Reaching north-star §2.11 means
@@ -636,7 +636,7 @@ This is the extension point athenaeum#911 asks to have drafted. It is a
 **draft for publication**, not a published surface: like the rest of
 `athenaeum.storage` it stays off the stable `__all__` surface until §9's S7
 promotes it, backed by the conformance suite S1 ships (the same staging the
-existing seam used — `docs/storage-adapter-contract.md:234-245`).
+existing seam used — `docs/storage-adapter-contract.md:242-253`).
 
 ### 6.1 Design decisions
 
@@ -754,7 +754,7 @@ call is what stops callers rebuilding a slower version themselves.
 R4 is not new policy — it is the existing layer's rule
 (`StorageConfigError`'s *"never silently falls back to the default surface"*,
 `storage.py:72-80`; the fail-closed `corpus_policy`,
-`docs/storage-adapter-contract.md:167-173`) applied to the physical layer.
+`docs/storage-adapter-contract.md:175-181`) applied to the physical layer.
 Concretely:
 
 - A destructive path on a surface declaring neither `versioned` nor
