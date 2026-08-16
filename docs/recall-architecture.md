@@ -121,6 +121,46 @@ contradiction-flagged pair — with no signal that the fact is disputed — is t
 exact failure this header prevents. The `Status:` line is the reader's cue to
 consult the pending-question queue before trusting the snippet.
 
+## Currency-aware ranking and decay buckets (athenaeum#904)
+
+A page may declare `bucket: daily | weekly | durable` (optionally alongside
+a suggested `valid_until`) — see `docs/provenance-shape.md` §8.8 for the
+full frontmatter contract. Recall uses it for exactly one thing: an EXPIRED
+`bucket: daily` page is reordered to the bottom of the result set it would
+already have occupied, rather than ranking equally alongside current
+facts — `mcp_server._reorder_hits_by_currency` runs a stable partition over
+the hits a backend already selected (never widening the candidate pool,
+never dropping a hit). `weekly` / `durable` / unbucketed pages are
+untouched, so a corpus with no `bucket:` anywhere sees byte-identical
+output to before this feature existed.
+
+Pass `recall(..., history=True)` (or the MCP tool's `history` parameter) to
+skip the reorder for one call and get plain relevance order — the
+conservative, explicit opt-in for "I am asking about the past, not the
+current state." No query-text keyword inference, no LLM intent
+classification: both would risk misfiring in either direction, and the
+issue's own scope forbids an LLM anywhere near the expiry decision.
+
+An expired `bucket: daily` page stays *findable* in ordinary (non-history)
+recall too — it does not disappear, it just ranks lower. This required a
+small divergence from the pre-existing "expired claims are hard-filtered by
+default" behavior (`docs/provenance-shape.md` §8.3):
+`athenaeum.search._is_recall_inactive` is a recall-scoped sibling of
+`athenaeum.models.is_inactive_memory` that exempts an expired
+`bucket: daily` page from that hard filter (every other case — a
+superseded/deprecated page, an expired non-daily page — behaves exactly as
+before). The C3 merge-compile's own member-activeness check is deliberately
+untouched by this: an expired daily-bucket raw member still stops
+contributing to the compiled page, which is what makes a rapidly-rewritten
+status page collapse to its latest value instead of accumulating stale
+content.
+
+The wiki itself never grows an in-tree "archived" marker page for this —
+`athenaeum decay-sweep` (`athenaeum.decay_sweep`) periodically `git rm`s an
+expired `bucket: daily` page from the live tree (never `weekly`/`durable`/
+unbucketed), leaving it recoverable from git history. Dry-run by default,
+same shape as `athenaeum auto-memory prune`.
+
 ## Handle-shaped queries — exact reverse lookup, not similarity search (athenaeum#907)
 
 A query that is **handle-shaped** — a bare address (`alex@example.org`), or a

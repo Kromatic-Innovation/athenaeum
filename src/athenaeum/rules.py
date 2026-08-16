@@ -119,7 +119,12 @@ from athenaeum.config import (
 )
 from athenaeum.corrections import compute_correction_id
 from athenaeum.intake import discover_raw_files
-from athenaeum.models import RawFile, RawFileTooLargeError, parse_frontmatter
+from athenaeum.models import (
+    MEMORY_BUCKETS,
+    RawFile,
+    RawFileTooLargeError,
+    parse_frontmatter,
+)
 from athenaeum.provenance import parse_source
 
 log = logging.getLogger(__name__)
@@ -411,6 +416,16 @@ class CorrectionSpec(BaseModel):
     `field`/`source` may be a literal, a `$field` reference, or a closed-
     vocabulary function call — resolved per-record by
     :func:`resolve_value_expr` (see :func:`build_correction_record`).
+
+    ``bucket`` / ``valid_until`` (issue athenaeum#904, AC2) are OPTIONAL sibling
+    annotations on the correction record — same shape as ``usage_class``
+    (`corrections.py`'s `ALLOWED_RECORD_KEYS`): they ride ALONGSIDE the
+    record's `field`/`value` payload rather than going through the
+    `field`/value allowlist+precedence machinery themselves. A rule that
+    corrects one attribute on a matched record's target entity can ALSO tag
+    that whole entity's page with a decay bucket / suggested expiry —
+    decoupled from which specific attribute the correction is fixing. See
+    ``corrections.process_correction_record`` for how these two are applied.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -422,12 +437,39 @@ class CorrectionSpec(BaseModel):
     source: str
     observed_at: Any = None
     note: Any = None
+    bucket: str | None = None
+    valid_until: Any = None
 
     @field_validator("field")
     @classmethod
     def _validate_field_name(cls, v: str) -> str:
         if not isinstance(v, str) or not v.strip():
             raise ValueError("correction.field must be a non-empty string")
+        return v
+
+    @field_validator("bucket")
+    @classmethod
+    def _validate_bucket(cls, v: str | None) -> str | None:
+        """Reject-at-the-boundary (issue athenaeum#904 design constraint), enforced at
+        RULE-LOAD time — the earliest possible boundary, before any record is
+        ever processed. ``bucket`` is deliberately a plain literal (unlike
+        `value`/`observed_at`/`note`, which may be `$field`-interpolated) —
+        a rule's decay classification is a rule-authoring decision ("records
+        this rule matches are daily status"), not a per-record computed
+        value.
+        """
+        if v is None:
+            return None
+        if v not in MEMORY_BUCKETS:
+            raise ValueError(
+                f"correction.bucket {v!r} must be one of {sorted(MEMORY_BUCKETS)}"
+            )
+        return v
+
+    @field_validator("valid_until")
+    @classmethod
+    def _validate_valid_until(cls, v: Any) -> Any:
+        _validate_no_unknown_fn(v, path="valid_until")
         return v
 
     @field_validator("target")
@@ -737,6 +779,14 @@ def build_correction_record(
         "observed_at": observed_at,
         "note": str(note),
     }
+    # Issue athenaeum#904 (AC2): optional decay annotations, riding alongside the
+    # field/value payload exactly like `usage_class` does — omitted entirely
+    # when the rule's `correction:` block does not set them, so a rule
+    # authored before this issue existed emits a byte-identical record.
+    if spec.bucket is not None:
+        out["bucket"] = spec.bucket
+    if spec.valid_until is not None:
+        out["valid_until"] = resolve_value_expr(spec.valid_until, record)
     out["correction_id"] = compute_correction_id(
         schema_version=schema_version,
         target=target,
