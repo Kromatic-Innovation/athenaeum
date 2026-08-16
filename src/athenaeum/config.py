@@ -1021,6 +1021,116 @@ def resolve_full_compile_every_days(config: dict[str, Any] | None) -> int:
     return default
 
 
+# ---------------------------------------------------------------------------
+# Reasoning-tier triggers (issue athenaeum#909): configurable backlog-depth,
+# elapsed-interval, and nightly-backstop knobs consumed by
+# :mod:`athenaeum.reasoning_triggers`'s pure evaluator. Every resolver here
+# copies :func:`resolve_full_compile_every_days`'s exact int/bool/positive-int
+# guard shape. Deliberately NOT seeded into ``_DEFAULTS`` (see the NOTE at
+# ``_DEFAULTS``'s definition above) — each trigger's "disabled" state (``None``,
+# not a magic sentinel int) is only representable when the key is absent, and
+# seeding a default here would make "operator explicitly configured this"
+# indistinguishable from "unset".
+# ---------------------------------------------------------------------------
+
+
+def resolve_reasoning_trigger_backlog_files(config: dict[str, Any] | None) -> int | None:
+    """Resolve the backlog-depth-by-file-count trigger threshold (issue athenaeum#909)
+    from ``librarian.reasoning_triggers.backlog_files``.
+
+    When the pending-reasoning raw-intake backlog (:func:`athenaeum.intake.
+    discover_raw_files`) reaches or exceeds this many files, the backlog-depth
+    trigger fires (see :mod:`athenaeum.reasoning_triggers`). ``None`` (the
+    default — key unset) DISABLES this trigger entirely; it never fires on
+    file count. ``bool`` and non-positive / non-int values fall through to
+    disabled, same as an unset key.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            triggers_cfg = cfg.get("reasoning_triggers")
+            if isinstance(triggers_cfg, dict):
+                raw = triggers_cfg.get("backlog_files")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    return raw
+    return None
+
+
+def resolve_reasoning_trigger_backlog_bytes(config: dict[str, Any] | None) -> int | None:
+    """Resolve the backlog-depth-by-byte-count trigger threshold (issue athenaeum#909)
+    from ``librarian.reasoning_triggers.backlog_bytes``.
+
+    ``M bytes`` is the LITERAL on-disk size of pending raw intake (sum of
+    :func:`athenaeum.intake.discover_raw_files`'s files' ``stat().st_size``,
+    via :func:`athenaeum.intake.discover_raw_backlog_bytes`) — not a cost or
+    token estimate. When the backlog reaches or exceeds this many bytes, the
+    backlog-depth trigger fires (see :mod:`athenaeum.reasoning_triggers`).
+    ``None`` (the default — key unset) DISABLES this trigger entirely.
+    ``bool`` and non-positive / non-int values fall through to disabled, same
+    as an unset key.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            triggers_cfg = cfg.get("reasoning_triggers")
+            if isinstance(triggers_cfg, dict):
+                raw = triggers_cfg.get("backlog_bytes")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    return raw
+    return None
+
+
+def resolve_reasoning_trigger_interval_hours(config: dict[str, Any] | None) -> int | None:
+    """Resolve the elapsed-interval trigger threshold in hours (issue athenaeum#909)
+    from ``librarian.reasoning_triggers.interval_hours``.
+
+    When at least this many hours have elapsed since the last completed
+    triggered reasoning run (see :mod:`athenaeum.reasoning_triggers` and the
+    reasoning-trigger last-run stamp), the interval trigger fires regardless
+    of backlog depth — so a quiet night still gets a bounded, incremental
+    look rather than going dark until the nightly backstop. ``None`` (the
+    default — key unset) DISABLES this trigger entirely. ``bool`` and
+    non-positive / non-int values fall through to disabled, same as an unset
+    key.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            triggers_cfg = cfg.get("reasoning_triggers")
+            if isinstance(triggers_cfg, dict):
+                raw = triggers_cfg.get("interval_hours")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    return raw
+    return None
+
+
+def resolve_reasoning_trigger_nightly_backstop_hours(
+    config: dict[str, Any] | None,
+) -> int:
+    """Resolve the nightly-backstop trigger threshold in hours (issue athenaeum#909,
+    default 24) from ``librarian.reasoning_triggers.nightly_backstop_hours``.
+
+    Unlike the other three reasoning triggers, the backstop is always ON —
+    tying reasoning to a single nightly window is exactly the failure mode
+    athenaeum#909 removes (a bad night goes invisible for 24h). The backstop fires
+    when at least this many hours have elapsed since the last completed
+    triggered reasoning run AND no other trigger fired this evaluation (see
+    :mod:`athenaeum.reasoning_triggers`) — it is the demoted fallback, not the
+    primary path. ``bool`` and non-positive / non-int values fall through to
+    the default.
+    """
+    default = 24
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            triggers_cfg = cfg.get("reasoning_triggers")
+            if isinstance(triggers_cfg, dict):
+                raw = triggers_cfg.get("nightly_backstop_hours")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    return raw
+    return default
+
+
 def resolve_drain_warn_days(config: dict[str, Any] | None) -> int:
     """Resolve the backlog-drain ETA warning threshold in days (issue athenaeum#470,
     default 3) from ``librarian.drain_warn_days``.

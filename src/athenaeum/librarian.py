@@ -1588,6 +1588,8 @@ def _compile_auto_memory(
     out_delta_taken: dict[str, bool] | None = None,
     out_merge_stats: dict | None = None,
     heartbeat: Callable[[], None] | None = None,
+    contradiction_sweep_since: datetime | None = None,
+    force_full_contradiction_sweep: bool = False,
 ) -> list:
     """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
 
@@ -1648,6 +1650,20 @@ def _compile_auto_memory(
     ``pairs_added_via_similarity``, ``entries_merged``,
     ``escalations_written``) without recomputing it. ``None`` (the default)
     skips the out-param write entirely.
+
+    ``contradiction_sweep_since`` / ``force_full_contradiction_sweep`` (issue
+    athenaeum#909) thread straight through to
+    :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``c4_since`` /
+    ``c4_full_sweep`` — the C4-specific "scope to clusters touched since the
+    last completed sweep" gate, ORTHOGONAL to the athenaeum#370/#463 delta gate
+    above. Deliberately disarmed (forced to ``None``) whenever
+    ``full_compile_due`` is true: a periodic full-compile reconciliation's
+    entire purpose is a TRUE whole-corpus pass that re-enters TTL-decayed
+    suppressions and reconciles drift a scoped pass could not see (see this
+    function's own docstring above) — narrowing it via the C4 stamp would
+    silently defeat that contract. ``None`` / ``False`` (the defaults, and
+    every pre-athenaeum#909 caller) leave ``merge_clusters_to_wiki``'s scoping
+    byte-for-byte unchanged.
     """
     delta_enabled = resolve_delta_enabled(config)
     live_delta_enabled = resolve_live_delta_enabled(config) and not full_compile_due
@@ -1709,6 +1725,12 @@ def _compile_auto_memory(
     # detection runs inside merge_clusters_to_wiki and reuses the shared client.
     # When ``only_cluster_ids`` is set (delta path), only the affected entries
     # are merged + written; every unaffected wiki page is left untouched.
+    # Issue athenaeum#909: disarm the C4-since scope whenever a real full-compile
+    # reconciliation is due — see the docstring above for why. A forced full
+    # sweep (``force_full_contradiction_sweep``) is passed through unchanged
+    # either way; ``merge_clusters_to_wiki`` itself treats it as an override
+    # that ignores ``c4_since`` regardless.
+    c4_since = None if full_compile_due else contradiction_sweep_since
     return merge_clusters_to_wiki(
         knowledge_root,
         auto_memory_files=auto_memory_files,
@@ -1721,6 +1743,8 @@ def _compile_auto_memory(
         max_api_calls=max_api_calls,
         out_stats=out_merge_stats,
         heartbeat=heartbeat,
+        c4_since=c4_since,
+        c4_full_sweep=force_full_contradiction_sweep,
     )
 
 
@@ -2694,6 +2718,12 @@ class RunContext:
     out_run_stats: dict[str, Any] | None
 
     # --- resolved at the top of the run ----------------------------------
+    #: Issue athenaeum#909 (AC6): force C4 over EVERY cluster this run and, on a
+    #: clean non-dry-run completion, advance the contradiction-sweep stamp.
+    #: Set post-construction (mirrors ``entity_changed_paths`` below) rather
+    #: than threaded through the constructor, to keep the "verbatim run()
+    #: parameters" block above untouched. CLI: ``--full-contradiction-sweep``.
+    full_contradiction_sweep: bool = False
     skip_entity_tiers: bool = False
     #: Issue athenaeum#900: the ENTITY-side changed set — absolute paths of raw
     #: intake this caller just wrote, used to seed the entity phase's selection
@@ -4590,6 +4620,31 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 )
                 full_compile_due = True
 
+    # Issue athenaeum#909: the C4-specific "since last completed sweep" baseline —
+    # read unconditionally (cheap: one small stamp file), not gated behind
+    # ``ctx.changed_paths is None`` like the full-compile stamp above, since a
+    # caller-supplied ``changed_paths`` (ingest / session_end) does not
+    # preclude the C4-since scope from also applying when THAT delta gate
+    # left ``only_cluster_ids`` at ``None``. A read failure degrades to
+    # ``None`` (no since-scope this run — behaves exactly as it did before
+    # athenaeum#909), never breaks the run.
+    contradiction_sweep_stamp_path = (
+        _resolve_cache_dir(None) / CONTRADICTION_SWEEP_STAMP_NAME
+    )
+    contradiction_sweep_since: datetime | None = None
+    if not ctx.dry_run and not ctx.cluster_only:
+        try:
+            contradiction_sweep_since = _load_timestamp_stamp(
+                contradiction_sweep_stamp_path
+            )
+        except Exception as exc:  # noqa: BLE001 — stamp read must not break the run
+            log.warning(
+                "contradiction-sweep stamp read failed (non-fatal, no "
+                "C4-since scope this run): %s",
+                exc,
+            )
+            contradiction_sweep_since = None
+
     # C2 + C3 + C4: cluster, merge, and detect. Issue athenaeum#370 PR2 threads the
     # optional ``changed_paths`` delta through this one call — see
     # :func:`_compile_auto_memory` for the delta-eligibility gate (issue
@@ -4615,6 +4670,8 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             out_delta_taken=_delta_taken_out,  # issue athenaeum#463
             out_merge_stats=_merge_stats,  # issue athenaeum#464
             heartbeat=ctx.heartbeat,  # issue athenaeum#762: tick run-lock heartbeat in C4
+            contradiction_sweep_since=contradiction_sweep_since,  # issue athenaeum#909
+            force_full_contradiction_sweep=ctx.full_contradiction_sweep,  # athenaeum#909
         )
     except RunDeadlineExceeded as exc:
         # Issue athenaeum#464: record the auto-memory phase's partial elapsed
@@ -4693,6 +4750,28 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 log.warning(
                     "full-compile stamp write failed (non-fatal): %s", exc
                 )
+
+    # Issue athenaeum#909: advance the C4-specific "last completed sweep" stamp
+    # whenever the merge call just above actually examined the WHOLE corpus
+    # (``out_stats["c4_swept_full"]`` — set by
+    # :func:`athenaeum.merge.merge_clusters_to_wiki` from its EFFECTIVE
+    # ``only_cluster_ids`` after the athenaeum#909 since-scope, if it engaged; see
+    # its docstring). Deliberately NOT gated on ``ctx.changed_paths is None``
+    # like the full-compile-manifest block above — a caller-supplied
+    # ``changed_paths`` (ingest / session_end) does not change what "C4 swept
+    # everything this run" means. Best-effort: a write failure never breaks
+    # the run.
+    if (
+        not ctx.dry_run
+        and not ctx.cluster_only
+        and _merge_stats.get("c4_swept_full", False)
+    ):
+        try:
+            _write_timestamp_stamp(contradiction_sweep_stamp_path, run_now)
+        except Exception as exc:  # noqa: BLE001 — must not break the run
+            log.warning(
+                "contradiction-sweep stamp write failed (non-fatal): %s", exc
+            )
 
     # Issue athenaeum#396: deadline check at the post-compile phase boundary,
     # before the retire + reresolve passes (both can commit / make
@@ -5059,6 +5138,7 @@ def run(
     changed_paths: set[Path] | None = None,
     entity_changed_paths: set[Path] | None = None,
     full_compile: bool = False,
+    full_contradiction_sweep: bool = False,
     now: datetime | None = None,
     heartbeat: Callable[[], None] | None = None,
     out_run_stats: dict[str, Any] | None = None,
@@ -5157,6 +5237,23 @@ def run(
     ``FULL_COMPILE_STAMP_NAME`` cache-dir stamp and
     :func:`athenaeum.config.resolve_full_compile_every_days`, default 7 days).
 
+    ``full_contradiction_sweep`` (issue athenaeum#909, CLI ``--full-contradiction-sweep``)
+    forces C4 (contradiction detection) over EVERY cluster this run,
+    regardless of what the delta gate / ``full_compile`` cadence above would
+    otherwise have scoped it to, and — on a clean non-dry-run,
+    non-``cluster_only`` completion — advances the SEPARATE
+    ``CONTRADICTION_SWEEP_STAMP_NAME`` cache-dir stamp (distinct from
+    ``FULL_COMPILE_STAMP_NAME``: that one tracks the last whole-corpus C2-C4
+    COMPILE, this one tracks C4 specifically). DEFAULT ``False``: absent an
+    explicit ask, C4's scope is unaffected by this flag or its stamp — see
+    :func:`_compile_auto_memory`'s ``contradiction_sweep_since`` /
+    ``force_full_contradiction_sweep`` params (and
+    :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``c4_since`` /
+    ``c4_full_sweep``) for exactly when the stamp's "since last sweep"
+    value, once one exists, additionally narrows an otherwise-unscoped C4
+    pass. The manual escape hatch for AC6: "a full-corpus contradiction
+    sweep runs only when explicitly invoked."
+
     ``now`` (issue athenaeum#463) is an optional injected "run start" timestamp for
     the full-compile cadence check, mirroring
     :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``now=`` parameter.
@@ -5206,6 +5303,9 @@ def run(
     # constructor arg) to keep the positional field order of this long
     # dataclass untouched.
     ctx.entity_changed_paths = entity_changed_paths
+    # Issue athenaeum#909: same "set after construction" rationale as
+    # ``entity_changed_paths`` above.
+    ctx.full_contradiction_sweep = full_contradiction_sweep
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)
 
@@ -5648,6 +5748,86 @@ def _write_full_compile_stamp(path: Path, at: datetime, head: str | None) -> Non
     payload: dict[str, Any] = {
         "at": at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "head": head,
+    }
+    atomic_write_text(path, json.dumps(payload))
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-tier trigger cadence state (issue athenaeum#909). Two MORE cache-dir
+# stamps, siblings of ``full-compile-stamp.json`` (same "outside the
+# knowledge git repo" rationale, same tolerant-reader/atomic-write shape) —
+# but answering two DIFFERENT questions than that stamp does:
+#
+# - ``REASONING_TRIGGER_STAMP_NAME`` records when a TRIGGERED reasoning run
+#   (``athenaeum ingest --if-triggered``, see :mod:`athenaeum._cmd_index`)
+#   last COMPLETED. It is the ``since_last_run`` baseline
+#   :func:`athenaeum.reasoning_triggers.evaluate_triggers` needs for its
+#   elapsed-interval and nightly-backstop checks — an on-demand or
+#   backlog-depth-triggered run advances it exactly like an interval/backstop
+#   one; every trigger reason marks the same "reasoning ran" clock.
+# - ``CONTRADICTION_SWEEP_STAMP_NAME`` records when C4 (contradiction
+#   detection) last completed a WHOLE-CORPUS pass, independent of the
+#   athenaeum#370/#463 auto-memory delta gate it otherwise piggybacks on. See
+#   :func:`_compile_auto_memory`'s ``contradiction_sweep_since`` /
+#   ``force_full_contradiction_sweep`` params and
+#   :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``c4_since`` /
+#   ``c4_full_sweep`` params for how it narrows C4's scope.
+# ---------------------------------------------------------------------------
+
+#: Stamp recording the last COMPLETED triggered-reasoning run:
+#: ``{"at": <ISO-8601 UTC timestamp>}``. Read by the ``--if-triggered`` CLI
+#: path to compute ``evaluate_triggers``'s ``since_last_run``.
+REASONING_TRIGGER_STAMP_NAME = "reasoning-trigger-stamp.json"
+
+#: Stamp recording the last completed WHOLE-CORPUS C4 contradiction-detection
+#: sweep: ``{"at": <ISO-8601 UTC timestamp>}``. Distinct from
+#: ``FULL_COMPILE_STAMP_NAME`` — that one records the last whole-corpus C2-C4
+#: auto-memory COMPILE (cluster + merge + detect together); this one records
+#: C4 specifically, so an explicit ``--full-contradiction-sweep`` (which
+#: forces only C4 over every cluster, not a full C2 re-cluster) has its own
+#: cadence clock.
+CONTRADICTION_SWEEP_STAMP_NAME = "contradiction-sweep-stamp.json"
+
+
+def _load_timestamp_stamp(path: Path) -> datetime | None:
+    """Load a ``{"at": <ISO-8601 UTC timestamp>}`` stamp's ``at`` as a
+    timezone-aware :class:`datetime` (issue athenaeum#909).
+
+    Shared tolerant reader for :data:`REASONING_TRIGGER_STAMP_NAME` and
+    :data:`CONTRADICTION_SWEEP_STAMP_NAME` — both are single-field siblings
+    of :func:`_load_full_compile_stamp`'s richer ``{"at", "head"}`` shape.
+    Returns ``None`` when absent/unreadable/malformed/missing ``at``/an
+    unparsable ``at`` — treated by every caller as "never recorded".
+    """
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    at = data.get("at")
+    if not isinstance(at, str) or not at:
+        return None
+    try:
+        return datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+def _write_timestamp_stamp(path: Path, at: datetime) -> None:
+    """Atomically write a ``{"at": <ISO-8601 UTC timestamp>}`` stamp (issue
+    athenaeum#909). Shared writer for :data:`REASONING_TRIGGER_STAMP_NAME` and
+    :data:`CONTRADICTION_SWEEP_STAMP_NAME` — mirrors
+    :func:`_write_full_compile_stamp`'s atomic-write shape minus the
+    audit-only ``head`` field neither of these stamps carries.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "at": at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     }
     atomic_write_text(path, json.dumps(payload))
 
