@@ -2695,6 +2695,15 @@ class RunContext:
 
     # --- resolved at the top of the run ----------------------------------
     skip_entity_tiers: bool = False
+    #: Issue athenaeum#900: the ENTITY-side changed set — absolute paths of raw
+    #: intake this caller just wrote, used to seed the entity phase's selection
+    #: ahead of the backlog. Deliberately SEPARATE from ``changed_paths``, which
+    #: is the auto-memory delta and excludes entity raw BY CONSTRUCTION (an
+    #: entity-only ingest yields an empty set there — the very gap athenaeum#900
+    #: closes). Overloading one field would silently change auto-memory delta
+    #: eligibility, which athenaeum#900 puts out of scope. ``None``/empty means
+    #: "no caller scope" and discovery order is used unchanged.
+    entity_changed_paths: set[Path] | None = None
     api_key: str | None = None
     config: dict[str, Any] | None = None
     provider: str = "api"
@@ -3632,6 +3641,48 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
     return 0
 
 
+def _prioritize_caller_scoped_raw(
+    raw_files: list[RawFile], changed: set[Path] | None
+) -> tuple[list[RawFile], int]:
+    """Move the caller's own new files to the front of *raw_files* (athenaeum#900).
+
+    A SessionEnd compile is meant to be scoped to what that session just wrote,
+    but the entity phase discovers the WHOLE raw tree and then truncates to
+    ``max_files`` — so a session's own writes joined the back of a backlog that
+    routinely exceeds the window and could wait days to compile.
+
+    This is a STABLE PARTITION, not a sort: the caller's files keep their
+    discovery order among themselves, and so does the backlog behind them. That
+    leaves the backlog's own ordering (and its fair-share question) exactly as
+    it was — athenaeum#900 scopes that to a separate slice — while guaranteeing
+    the caller's files fall inside the window rather than beyond it.
+
+    Returns ``(ordered_files, n_caller_scoped)``. ``None``/empty *changed*
+    returns the input list unchanged with a count of 0, so the nightly run
+    (which passes no caller scope) behaves exactly as before.
+    """
+    if not changed:
+        return raw_files, 0
+    resolved: set[Path] = set()
+    for p in changed:
+        try:
+            resolved.add(p.resolve())
+        except OSError:  # pragma: no cover - defensive (unresolvable path)
+            continue
+
+    def _is_callers(raw: RawFile) -> bool:
+        try:
+            return raw.path.resolve() in resolved
+        except OSError:  # pragma: no cover - defensive
+            return raw.path in resolved
+
+    callers = [r for r in raw_files if _is_callers(r)]
+    if not callers:
+        return raw_files, 0
+    backlog = [r for r in raw_files if not _is_callers(r)]
+    return callers + backlog, len(callers)
+
+
 def _run_entity_tier_phase(ctx: RunContext) -> None:
     """The ENTITY phase (C1 raw discovery, tier1-4 routing, INCLUDING the
     Batch API fan-out branch) — issue athenaeum#461/#337/#396/#378/#236 seam.
@@ -3680,6 +3731,22 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         else:
             total_intake = len(ctx.raw_files)
             log.info("Found %d raw file(s) to process", total_intake)
+
+            # Issue athenaeum#900: seed the selection with the caller's own new
+            # files BEFORE the max_files truncation below, so a session-scoped
+            # compile compiles what that session just wrote instead of losing it
+            # behind a backlog larger than the window. Remaining budget still
+            # fills from the backlog, in its existing order.
+            ctx.raw_files, n_scoped = _prioritize_caller_scoped_raw(
+                ctx.raw_files, ctx.entity_changed_paths
+            )
+            if n_scoped:
+                log.info(
+                    "Caller-scoped compile: %d of %d raw file(s) named by the "
+                    "caller compile ahead of the backlog",
+                    n_scoped,
+                    total_intake,
+                )
 
             if total_intake > ctx.max_files:
                 log.info(
@@ -4990,6 +5057,7 @@ def run(
     projects_root: Path | None = None,
     install_signal_handlers: bool = False,
     changed_paths: set[Path] | None = None,
+    entity_changed_paths: set[Path] | None = None,
     full_compile: bool = False,
     now: datetime | None = None,
     heartbeat: Callable[[], None] | None = None,
@@ -5133,6 +5201,11 @@ def run(
         out_run_stats=out_run_stats,
     )
     ctx.skip_entity_tiers = cluster_only or merge_only
+    # Issue athenaeum#900: the caller's own new raw files, seeded ahead of the
+    # backlog by the entity phase. Set after construction (rather than as a
+    # constructor arg) to keep the positional field order of this long
+    # dataclass untouched.
+    ctx.entity_changed_paths = entity_changed_paths
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)
 
@@ -5714,8 +5787,17 @@ def ingest(
     # via the dry-run / no-op early returns above.
     extra_roots = resolve_extra_intake_roots(knowledge_root, config=config)
     auto_changed: set[Path] = set()
+    # Issue athenaeum#900: the ENTITY-side counterpart. ``auto_changed`` above is
+    # auto-memory-only by construction, so an entity-only ingest yields an empty
+    # set and the entity phase learned nothing about what this session wrote —
+    # its own new files then joined the back of a backlog that routinely exceeds
+    # ``max_files``. This set carries EVERY new/changed raw path; the entity
+    # phase intersects it against its own discovery, so auto-memory paths in it
+    # simply never match and no exclusion logic is duplicated here.
+    entity_changed: set[Path] = set()
     for rel in (*added, *changed):
         abspath = (knowledge_root / rel).resolve()
+        entity_changed.add(abspath)
         for root in extra_roots:
             try:
                 abspath.relative_to(root.resolve())
@@ -5724,6 +5806,7 @@ def ingest(
             auto_changed.add(abspath)
             break
     run_kwargs.pop("changed_paths", None)
+    run_kwargs.pop("entity_changed_paths", None)
 
     # Issue athenaeum#530 (H2): capture whether the compile left any raw file
     # uncompiled — files beyond the max_files window, or budget/deadline
@@ -5735,6 +5818,7 @@ def ingest(
         knowledge_root=knowledge_root,
         dry_run=dry_run,
         changed_paths=auto_changed,
+        entity_changed_paths=entity_changed,
         out_run_stats=run_stats,
         **run_kwargs,
     )
