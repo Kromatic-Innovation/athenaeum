@@ -369,16 +369,19 @@ class TestBuildContactRecordUidIndex:
         assert set(index) == {"alex"}
 
     def test_valueless_uid_matches_the_single_lookup_exactly(self, tmp_path: Path) -> None:
-        """A valueless ``uid:`` indexes under ``"None"`` — as it already resolves.
+        """A valueless ``uid:`` is treated as absent by BOTH paths (athenaeum#878).
 
-        Not an endorsement of that shape: ``uid:`` with no value parses to
-        YAML null, and ``resolve_contact_record_for_uid`` has always
-        stringified it to the literal ``"None"`` and matched a lookup for
-        that string. Pinned here because the batch index reproduces the
-        coercion DELIBERATELY — a batch read diverging from a single read on
-        any uid, even a degenerate one, would defeat the point. If the
-        pre-existing behavior is ever fixed, both paths must move together
-        and this test is where that shows up.
+        ``uid:`` with no value parses to YAML null, and ``str(None)`` is the
+        literal string ``"None"`` — before athenaeum#878, both
+        ``resolve_contact_record_for_uid`` and this index independently
+        stringified the raw value and so treated a valueless uid as if it
+        were the uid ``"None"``. Fixed via a shared normalizer
+        (``_normalize_frontmatter_uid``) that maps ``None`` to ``""``, the
+        same sentinel an explicit ``uid: ""`` already normalizes to, so both
+        paths now skip it identically. Kept as a parity test — not just
+        "does neither path index it" but "do the two paths still agree" —
+        because a batch read diverging from a single read on ANY uid, even
+        a degenerate one, would defeat the point of athenaeum#877.
         """
         knowledge = tmp_path / "knowledge"
         contacts_root = contacts_surface_root(knowledge, EXCLUDED_CONFIG)
@@ -386,7 +389,25 @@ class TestBuildContactRecordUidIndex:
 
         index = build_contact_record_uid_index(contacts_root)
 
+        assert "None" not in index
         assert index.get("None") == pii.resolve_contact_record_for_uid(contacts_root, "None")
+
+    def test_valueless_uid_never_matches_a_lookup_for_the_string_none(
+        self, tmp_path: Path
+    ) -> None:
+        """A record with a valueless ``uid:`` must never resolve for uid ``"None"``.
+
+        Distinct from the parity test above (which asserts the two paths
+        AGREE): this asserts the shared, CORRECT behaviour directly — the
+        literal string ``"None"`` must not resolve to a record whose uid
+        merely happens to render that way via ``str(None)`` (athenaeum#878).
+        """
+        knowledge = tmp_path / "knowledge"
+        contacts_root = contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        _write_contact_record(contacts_root, "valueless.md", uid="")
+
+        assert pii.resolve_contact_record_for_uid(contacts_root, "None") is None
+        assert build_contact_record_uid_index(contacts_root).get("None") is None
 
     def test_missing_root_is_empty_not_an_error(self, tmp_path: Path) -> None:
         assert build_contact_record_uid_index(tmp_path / "nope") == {}
