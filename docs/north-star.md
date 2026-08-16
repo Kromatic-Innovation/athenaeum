@@ -163,7 +163,13 @@ fixed boundary. The physical layer is an adapter seam: a deployment may back
 the wiki or any excluded surface with encrypted storage, a database, or a
 synced filesystem, and no caller can tell, because callers only ever touch
 intake and recall. See
-[`docs/storage-adapter-contract.md`](storage-adapter-contract.md).
+[`docs/storage-adapter-contract.md`](storage-adapter-contract.md) for the seam
+as it exists today, and
+[`docs/whole-store-adapter-design.md`](whole-store-adapter-design.md) for the
+design lock generalising it to the whole store — which confirms this boundary
+and adds the two classes it is silent about: *operational* state (ledgers and
+queues, durable but not reconstructible) and *config* (§2.7's operator-authored
+rules and manifests).
 
 ## 3. What we deliberately do not do
 
