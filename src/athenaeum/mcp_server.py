@@ -1396,6 +1396,88 @@ def create_server(
         }
 
     @mcp.tool()
+    def raise_decision(question: str, context: str, entity: str = "") -> dict:
+        """File a NEW agent-raised item into the pending-decisions queue (issue athenaeum#912).
+
+        Before this tool, ``_pending_questions.md`` had exactly one writer —
+        athenaeum's own detectors (``tier4_escalate``) — so an agent that
+        discovers something needing a human decision had no way to file it.
+        The measured harm: during a 2026-08-06 contact-sync fix, a delegated
+        agent flagged an ambiguity ("flag it if you meant the stricter
+        reading") only in prose to its orchestrator; the flag was folded into
+        an unrelated summary, the human answered the OTHER question in that
+        summary, and the flag — with no forcing function and no persistent
+        state — silently evaporated when the session ended. This tool gives
+        that flag somewhere durable to live: the same file-backed sidecar
+        detector items already survive their own session through, so it
+        participates in the EXISTING ``list_pending_decisions`` render and
+        the EXISTING ``resolve_question`` resolve path with no special-casing
+        — never a second, parallel queue (which reproduces the original
+        problem one level up).
+
+        Args:
+            question: The question a human should answer. Required —
+                rejected if empty or all-whitespace (``error_code
+                "invalid_question"``).
+            context: Standalone context a human needs to answer this
+                WITHOUT the originating session — the entire reason this
+                tool exists is that a session-scoped flag evaporates once
+                the session ends. Required — rejected if empty or
+                all-whitespace (``error_code "missing_context"``); there is
+                deliberately no default, so a contextless raise is never
+                silently accepted.
+            entity: Optional short human-readable label. Cosmetic only —
+                provenance is carried by a dedicated marker (see below), not
+                by this label, so an unlabeled raise is still fully
+                distinguishable from a detector item.
+
+        Returns:
+            A dict with ``ok`` (bool), ``error_code`` (``"invalid_question"``
+            | ``"missing_context"`` | ``"disabled"`` | ``None``), ``message``
+            (str), and ``decision_id`` — on success, the SAME id
+            ``list_pending_decisions`` / ``list_pending_questions`` will
+            report for this item, usable immediately with
+            ``resolve_question`` without a round-trip list call. ``raw_block``
+            carries the rendered block text (``None`` on failure); ``block``
+            / ``error`` are legacy-shaped aliases for ``raw_block`` /
+            ``message``-on-failure, mirroring every other write tool's
+            result shape in this module.
+
+            The item is tagged with a provenance marker distinguishing it
+            from a detector-raised item — surfaced as ``payload["raised_by"]
+            == "agent"`` on the corresponding ``list_pending_decisions``
+            entry (``""`` for every detector-raised item, including every
+            item that predates this tool).
+
+        Deliberately NOT owner-gated: unlike ``resolve_question`` /
+        ``resolve_merge`` / ``review_audit_item`` (which ADJUDICATE an
+        existing queue item and are owner-only per issue athenaeum#538), this tool
+        only ever ADDS a new item — the same category of action as
+        ``remember``, which is intentionally left open to a restricted
+        ``caller_audience`` because intake is write-only and screened
+        downstream (see ``_FORBIDDEN_MSG`` above and
+        ``TestWriteGuards.test_remember_stays_open_for_restricted_caller``).
+        A delegated (restricted) agent is exactly the caller this tool exists
+        for — gating it owner-only would defeat the tool's own purpose.
+        """
+        if is_disabled("capture", cache_dir=cache_dir):
+            msg = _KILL_SWITCH_MSG
+            return {
+                "ok": False,
+                "error_code": "disabled",
+                "message": msg,
+                "decision_id": None,
+                "raw_block": None,
+                "block": None,
+                "error": msg,
+            }
+
+        from athenaeum.answers import raise_pending_question
+
+        pending_path = wiki_root / "_pending_questions.md"
+        return raise_pending_question(pending_path, question, context, entity=entity)
+
+    @mcp.tool()
     def list_pending_merges(full_body: bool = False) -> list[dict]:
         """List unresolved merge proposals (issue athenaeum#169).
 

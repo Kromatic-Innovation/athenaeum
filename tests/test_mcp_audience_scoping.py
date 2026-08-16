@@ -10,7 +10,10 @@ tests pin the closed hole on both axes:
   ``list_pending_decisions`` apply the SAME fail-closed predicate ``recall``
   applies — a restricted caller sees only items whose source pages authorize.
 - Write path: ``resolve_question`` / ``resolve_merge`` / ``review_audit_item``
-  fail closed for any restricted caller; ``remember`` stays open.
+  fail closed for any restricted caller; ``remember`` stays open, and so does
+  ``raise_decision`` (issue athenaeum#912) — it ADDS a new queue item rather than
+  adjudicating an existing one, the same category of action as ``remember``,
+  not the ``resolve_*`` category.
 
 Owner (``caller_audience=None``) behavior is unchanged throughout — every
 restricted assertion has an owner-sees-it counterpart.
@@ -292,6 +295,24 @@ class TestWriteGuards:
         )
         assert isinstance(result, str)
         assert result.startswith("Saved to")
+
+    def test_raise_decision_stays_open_for_restricted_caller(
+        self, tmp_path: Path
+    ) -> None:
+        # Issue athenaeum#912: raise_decision ADDS a queue item — it is the same
+        # category of action as `remember`, not `resolve_*` (which
+        # ADJUDICATES an existing item and is owner-only). A restricted
+        # (delegated) agent is exactly the caller this tool exists for, so
+        # gating it owner-only would defeat its own purpose.
+        server = _server(tmp_path, caller_audience=RESTRICTED)
+        result = _call(
+            server,
+            "raise_decision",
+            lambda fn: fn("Did you mean the stricter reading?", "standalone context"),
+        )
+        assert isinstance(result, dict)
+        assert result["ok"] is True
+        assert result.get("error_code") != "forbidden"
 
 
 class TestReadWiringThroughServer:
