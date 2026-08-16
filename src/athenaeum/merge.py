@@ -132,6 +132,7 @@ from athenaeum.models import (
     EscalationItem,
     TokenUsage,
     coerce_source_type,
+    parse_bucket,
     parse_deprecated,
     parse_frontmatter,
     parse_refines,
@@ -503,6 +504,17 @@ class MergedWikiEntry:
     # rather than in the expiring intake queue. Default False keeps every
     # non-retire write byte-identical to the pre-athenaeum#261 output.
     retired: bool = False
+    # Issue athenaeum#904: page-level decay classification, one of
+    # ``athenaeum.models.MEMORY_BUCKETS`` or ``""`` (unset — the default,
+    # behaves exactly as before this field existed). Unlike ``valid_from``/
+    # ``valid_until`` (per-CLAIM, carried per-source — see
+    # ``_stamp_member_validity``), ``bucket`` is a per-PAGE decay policy: a
+    # compiled page is either "daily churn" or it isn't, not per-citation.
+    # Computed by :func:`merge_cluster_row` from the ACTIVE resolved members
+    # (first non-empty wins, deterministic member order — the same
+    # first-wins convention this module already uses for citation merges;
+    # see the comment on that rule near ``dedupe_sources``).
+    bucket: str = ""
     # Resolved :class:`AutoMemoryFile` records backing this cluster. Populated
     # by :func:`merge_cluster_row` so the outer orchestrator does not need to
     # re-resolve filesystem paths to run the C4 contradiction detector.
@@ -1066,6 +1078,8 @@ def merge_cluster_row(
                 # Issue athenaeum#308: claim-level temporal validity bounds.
                 valid_from=validity_bound_str(meta if meta else None, "valid_from"),
                 valid_until=validity_bound_str(meta if meta else None, "valid_until"),
+                # Issue athenaeum#904: optional decay bucket.
+                bucket=parse_bucket(meta if meta else None),
             )
         # Issue athenaeum#278: secondary ephemeral guard. discover_auto_memory_files
         # already drops ephemeral intake, so the only way one reaches here is
@@ -1122,6 +1136,17 @@ def merge_cluster_row(
         if am.origin_scope not in origin_scopes_set:
             origin_scopes_set.append(am.origin_scope)
 
+    # Issue athenaeum#904: page-level decay bucket, first non-empty ACTIVE member
+    # wins (deterministic — ``members`` is already filtered to active-only,
+    # in cluster-row order). Members disagreeing on bucket is not validated
+    # here — the rare case an operator's own rules would need to reconcile,
+    # not something this compile step should escalate or silently average.
+    bucket = ""
+    for _mp, am in members:
+        if am.bucket:
+            bucket = am.bucket
+            break
+
     # Sources: parse each member's sources[] from frontmatter (source of
     # truth), plus a synthetic entry from originSessionId/turn when a
     # member has no sources[] at all.
@@ -1175,6 +1200,7 @@ def merge_cluster_row(
         body=body,
         member_paths=resolved_member_paths,
         resolved_members=[am for _mp, am in members],
+        bucket=bucket,
     )
 
 
@@ -1566,6 +1592,12 @@ def render_merged_entry(entry: MergedWikiEntry) -> str:
     # Issue athenaeum#261: mark the entry as a retired-on-move long-term memory.
     if entry.retired:
         meta["retired"] = True
+    # Issue athenaeum#904: page-level decay bucket, alongside the existing
+    # ``valid_from``/``valid_until`` validity fields (athenaeum#308, per-source —
+    # see ``render_source_footnotes``). Omitted entirely when unset, same
+    # omit-at-default rule every optional field in this dict follows.
+    if entry.bucket:
+        meta["bucket"] = entry.bucket
     # Issue athenaeum#260: append origin-traced source footnotes to the BODY (sources
     # already render to frontmatter above; the footnotes give the human-
     # readable, ultimate-source citation the worked example used).

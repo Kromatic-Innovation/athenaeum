@@ -712,6 +712,120 @@ to the claim, applied to each of its citations).
 
 Pinned by `tests/test_temporal_validity.py::TestPerClaimCompiledValiditySlice4`.
 
+### 8.8 Decay bucket (`bucket:`, issue athenaeum#904)
+
+An optional third frontmatter field, alongside `valid_from` / `valid_until`
+(§8.1) — **not a replacement or a parallel validity concept.** `bucket:`
+says HOW a memory decays; `valid_from` / `valid_until` say over WHAT WINDOW a
+specific claim is true. The motivating case: a rapidly-overwritten daily
+status note (a project's "current focus" today) should collapse to its
+latest value plus git history, instead of every past write competing
+equally with current facts in recall.
+
+```yaml
+---
+name: current focus
+type: feedback
+bucket: daily              # optional; one of daily | weekly | durable
+valid_until: 2026-08-20    # optional SUGGESTION at intake — see below
+---
+```
+
+**Enum, closed, rejected at the write boundary.** `bucket` is one of
+`daily` / `weekly` / `durable` (`athenaeum.models.MEMORY_BUCKETS`). Unlike
+every other frontmatter axis on this page (`source_type`, `memory_class`,
+…), which fail OPEN on an out-of-vocabulary value (a nightly compile must
+never crash on a stale value already on disk), `bucket` has no legacy
+corpus — this is its first release — so the design brief is explicit that
+an invalid value is REJECTED at the write boundary
+(`athenaeum.models.coerce_bucket`, raises), not silently coerced. Every
+write-time entry point calls it: the `remember()` MCP tool
+(`athenaeum.mcp_server.remember_write`) and a shape-rule-emitted correction
+(`athenaeum.corrections.process_correction_record`). Reading an
+already-on-disk value stays fail-open, same posture as everywhere else
+(`athenaeum.models.parse_bucket`) — a hand-edited/corrupted value degrades
+to "no bucket" rather than raising.
+
+**Where it can be set:**
+
+- **Intake records** (`AutoMemoryFile`, `raw/auto-memory/<scope>/*.md`) —
+  `discover_auto_memory_files` reads `bucket:` off frontmatter into
+  `AutoMemoryFile.bucket`, mirroring `valid_from` / `valid_until`.
+- **`remember()`** — the MCP tool and `remember_write()` accept optional
+  `bucket` / `valid_until` keyword arguments, stamped into the raw intake
+  file's frontmatter.
+- **A shape rule's `correction:` block** (issue athenaeum#901,
+  `docs/field-corrections.md`) — `bucket` / `valid_until` are OPTIONAL
+  sibling keys on the emitted correction record, the SAME shape as
+  `usage_class` (§7.1): they ride alongside whatever `field`/`value` the
+  correction is actually proposing and apply to the TARGET entity's page,
+  regardless of which attribute the correction itself is fixing. `bucket`
+  is a plain literal on the rule's `CorrectionSpec` (validated at RULE-LOAD
+  time, not per-record — a rule's decay classification is a rule-authoring
+  decision); `valid_until` may be `$field`-interpolated like `value`.
+
+**`valid_until` at intake/correction time is a SUGGESTION, never
+authoritative.** The existing §8.1 semantics stay the single source of
+truth: a suggested value only fills an ABSENT `valid_until` on the target —
+it never overrides one a human or the resolver already set (the same
+only-fill-never-override rule §8.6 already uses for per-source compiled
+validity, `merge._stamp_member_validity`).
+
+**Compiled wiki pages carry `bucket` alongside the existing validity
+fields.** The auto-memory C3 cluster-merge compile
+(`merge.merge_cluster_row` / `merge.render_merged_entry`) computes a
+PAGE-LEVEL bucket from the cluster's active members (first non-empty member
+wins, deterministic cluster-row order) and stamps `bucket:` into the
+compiled page's top-level frontmatter — omitted entirely when unset, same
+omit-at-default rule every other optional field in that frontmatter dict
+follows. Unlike `valid_from` / `valid_until` (§8.6, per-CLAIM, carried
+per-source), `bucket` is a per-PAGE decay policy: a compiled page is either
+"daily churn" or it isn't, not per-citation.
+
+**Recall ranks currency; it does not filter on it.** By default, recall
+deprioritizes an EXPIRED `bucket: daily` page — reorders it to the bottom
+of the result set it would already have occupied — rather than dropping it;
+it stays findable. This reuses the existing `valid_until_expired` predicate
+(§8.1) exactly, not a new one
+(`athenaeum.mcp_server._is_deprioritized_for_currency`,
+`_reorder_hits_by_currency`). `weekly` / `durable` / unbucketed pages are
+never touched by this reorder — a corpus with no `bucket:` anywhere is
+completely unaffected.
+
+Because an expired page would otherwise be HARD-EXCLUDED from recall by the
+same §8.3 "currently-valid-by-default" filter every other claim goes
+through, `athenaeum.search` uses a recall-scoped sibling predicate
+(`_is_recall_inactive`, local to that module) instead of
+`is_inactive_memory` at its two recall gates (`KeywordBackend.query`,
+`_scan_indexed_records`) — identical except a `bucket: daily` page's
+expired `valid_until` does not count as inactive there. The C3 compile's
+member-activeness check (`AutoMemoryFile.is_inactive`) is UNCHANGED and
+still calls `is_inactive_memory` as before: an expired daily-bucket raw
+MEMBER must keep dropping out of the compile (that is what "collapses to
+its latest value" means), even though the compiled PAGE, once written,
+stays recall-visible (deprioritized) until the deterministic sweep (below)
+archives it.
+
+A caller may opt into a HISTORY query — `recall(..., history=True)` —
+which skips the currency reorder entirely for that call and returns
+results in plain relevance order. Deliberately the most conservative
+detection mechanism available (an explicit boolean, not query-text
+inference or an LLM intent classifier): the issue's Out of scope section
+forbids language-model involvement in the expiry/currency decision, and
+keyword-based inference risks false positives either direction.
+
+**The deterministic sweep** (`athenaeum.decay_sweep`, `athenaeum
+decay-sweep` CLI) periodically archives EXPIRED `bucket: daily` pages —
+`weekly` / `durable` / unbucketed pages are never touched. Makes ZERO LLM
+calls (no `client`/model parameter exists anywhere in the module). Mirrors
+the existing git-retire precedent exactly
+(`auto_memory_prune.apply_prune`'s refuse-without-`.git` gate,
+`pending_merges._apply_fold_into_existing`'s two-commit
+snapshot-then-`git rm` shape, issue athenaeum#947) — archival is git-rm removal
+(never an in-tree tombstone marker, which would need its own new filtering
+logic threaded through every recall backend), so an archived page stays
+fully recoverable from git history (`git log` / `git show`).
+
 ## 9. Multi-dimensional scoped claims (`scope: {org, locale}` + time)
 
 Issue athenaeum#329 (buildable subset of the design pass). Generalizes §8's TIME

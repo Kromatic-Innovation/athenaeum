@@ -47,6 +47,7 @@ import json
 import logging
 import re
 from collections.abc import Collection
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -56,9 +57,12 @@ from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
     SOURCE_TYPES,
     EntityIndex,
+    coerce_bucket,
     is_page_authorized,
+    parse_bucket,
     parse_frontmatter,
     render_frontmatter,
+    valid_until_expired,
     validity_bound_str,
 )
 from athenaeum.provenance import resolve_remember_extras, resolve_remember_sources
@@ -186,6 +190,7 @@ def recall_search(
     config: dict[str, object] | None = None,
     with_pii: bool = False,
     usage_classes: Collection[str] | None = None,
+    history: bool = False,
 ) -> str:
     """Search the knowledge wiki for pages relevant to *query*.
 
@@ -242,6 +247,14 @@ def recall_search(
             not usage-class-blind, so a caller that must not receive a
             provider-sourced address (``docs/security-posture.md`` §2.3) can
             filter it here the same way ``read_person``'s callers already can.
+        history: Opt into a HISTORY query (issue athenaeum#904) — the caller is
+            explicitly asking about the past, not the current state, so an
+            expired ``daily``-bucket page must NOT be deprioritized relative
+            to a fresher one (AC5). Default ``False`` applies AC4's
+            currency-aware reorder to every result; ``True`` returns results
+            in the backend's own relevance order, unchanged. Deliberately the
+            most conservative opt-in mechanism (an explicit flag, not query-
+            text inference) — see ``_recall_via_backend``'s docstring.
 
     Returns a formatted string of matching wiki pages with relevance scores
     and content snippets.
@@ -284,6 +297,7 @@ def recall_search(
         config,
         with_pii=with_pii,
         usage_classes=usage_classes,
+        history=history,
     )
 
 
@@ -595,6 +609,70 @@ def _recall_metadata_lines(fm: dict[str, object]) -> list[str]:
     return lines
 
 
+def _is_deprioritized_for_currency(
+    fm: dict[str, object], *, as_of: date | None = None
+) -> bool:
+    """True when *fm* is an EXPIRED daily-bucket page (issue athenaeum#904, AC4).
+
+    Deliberately narrow, per the design brief: only ``bucket: daily`` pages
+    are ever deprioritized. ``weekly``/``durable``/unbucketed pages are never
+    touched by this predicate — a corpus with no ``bucket:`` anywhere is
+    completely unaffected, which is the load-bearing compatibility
+    constraint. Reuses the EXISTING athenaeum#308 :func:`valid_until_expired`
+    predicate rather than inventing a parallel validity concept — "expired"
+    here means exactly what it means everywhere else in this codebase.
+    """
+    if parse_bucket(fm) != "daily":
+        return False
+    return valid_until_expired(fm, as_of)
+
+
+def _reorder_hits_by_currency(
+    hits: list[tuple[str, str, float]],
+    *,
+    wiki_root: Path,
+    extra_roots: list[Path],
+) -> list[tuple[str, str, float]]:
+    """Stable-partition *hits* so an expired daily-bucket page sorts after
+    every other hit, without changing the relative order within either group
+    (issue athenaeum#904, AC4/AC5).
+
+    **Deprioritizes, does not filter.** This only REORDERS the hits the
+    backend already selected as the top *n* by relevance — it never widens
+    the candidate pool beyond what the caller asked for and never drops a
+    hit. An expired daily page that would have appeared in the results still
+    appears; it is simply no longer guaranteed to rank above a page that is
+    not currency-penalized. Every :class:`SearchBackend` guarantees its
+    return is "ordered by relevance, best first" regardless of the backend's
+    own score scale/direction (BM25 vs cosine distance vs the keyword
+    backend's integer score) — reordering by stable partition, rather than
+    by rewriting the numeric ``score``, works identically across all three
+    without needing to know or preserve any backend's score semantics.
+
+    Called only when the caller did NOT opt into history mode (see
+    ``_recall_via_backend``'s ``history`` parameter) — with no bucket data in
+    the corpus at all, every hit is "not deprioritized" and this is a no-op,
+    preserving today's order exactly.
+    """
+    primary: list[tuple[str, str, float]] = []
+    deprioritized: list[tuple[str, str, float]] = []
+    for hit in hits:
+        filename = hit[0]
+        page_path, _ = _resolve_hit_path(filename, wiki_root, extra_roots)
+        fm: dict[str, object] = {}
+        if page_path is not None and page_path.is_file():
+            try:
+                text = page_path.read_text(encoding="utf-8")
+                fm, _ = parse_frontmatter(text)
+            except (OSError, UnicodeDecodeError):
+                fm = {}
+        if _is_deprioritized_for_currency(fm):
+            deprioritized.append(hit)
+        else:
+            primary.append(hit)
+    return primary + deprioritized
+
+
 def _excluded_block_for_hit(
     page_path: Path | None,
     fm: dict[str, object],
@@ -692,6 +770,7 @@ def _recall_via_backend(
     *,
     with_pii: bool = False,
     usage_classes: Collection[str] | None = None,
+    history: bool = False,
 ) -> str:
     """Delegate recall to a registered search backend, then format results.
 
@@ -712,6 +791,16 @@ def _recall_via_backend(
       athenaeum#532 ``recallable`` drop. A hit dropped by either never triggers an
       excluded-surface lookup, so a restricted caller cannot use the flag to
       probe the existence of a record on a page it may not read.
+
+    ``history`` (issue athenaeum#904, AC5): the explicit, conservative opt-in
+    signal for "this query is asking for history, not the current state" —
+    the design brief calls for the MOST conservative detection mechanism, so
+    this is a plain boolean rather than inferred from query text (no keyword
+    heuristics, no LLM intent classification — the latter would be scope
+    creep the issue's Out of scope section explicitly forbids). Default
+    ``False`` applies AC4's currency reorder; ``True`` skips it entirely and
+    returns hits in the backend's own relevance order, exactly as before this
+    issue existed.
     """
     from athenaeum.search import DegradedIndexError, get_backend
 
@@ -742,6 +831,14 @@ def _recall_via_backend(
 
     if not hits:
         return f"No wiki pages matched query: {query!r}"
+
+    # Issue athenaeum#904 (AC4/AC5): currency-aware reorder, skipped entirely in
+    # history mode. Reorders only — never changes which hits are present or
+    # how many, so every filter/count below is unaffected by this call.
+    if not history:
+        hits = _reorder_hits_by_currency(
+            hits, wiki_root=wiki_root, extra_roots=extra_roots
+        )
 
     tokens = tokenize_keyword_query(query)
 
@@ -889,6 +986,8 @@ def remember_write(
     wiki_root: Path | None = None,
     sources: str | dict | None = None,
     screening: dict | None = None,
+    bucket: str | None = None,
+    valid_until: str | None = None,
 ) -> str:
     """Save a piece of knowledge to the raw intake directory.
 
@@ -965,12 +1064,35 @@ def remember_write(
             ``athenaeum.merge`` (which is a list of cluster-member uids
             being merged). They share a name for historical reasons; do
             not conflate them.
+        bucket: Optional decay classification (issue athenaeum#904) — one of
+            ``athenaeum.models.MEMORY_BUCKETS`` (``daily`` / ``weekly`` /
+            ``durable``). Rejected at this boundary (an ``Error:`` string,
+            not a silent coercion) when set to anything else. ``None``
+            (default) writes no ``bucket:`` at all — unset behaves exactly
+            as it did before this parameter existed.
+        valid_until: Optional SUGGESTED validity end date (``YYYY-MM-DD``,
+            issue athenaeum#904). A SUGGESTION, not authoritative: the existing
+            athenaeum#308 ``valid_from``/``valid_until`` semantics remain the source
+            of truth, so downstream compile/correction only fills this in
+            when the target does not already carry an explicit
+            ``valid_until`` — it never overrides one. Malformed input is
+            fail-open here (dropped, matching every other ``valid_until``
+            reader/writer in this codebase — see ``models._coerce_iso_date``),
+            not rejected like ``bucket``.
 
     Returns:
         Confirmation message with the file path, or an error string.
     """
     if len(content.encode("utf-8", errors="replace")) > _MAX_CONTENT_BYTES:
         return f"Error: content exceeds {_MAX_CONTENT_BYTES // (1024 * 1024)} MB limit."
+
+    # Issue athenaeum#904 (AC1): boundary-validate `bucket` before touching the
+    # filesystem — same "reject early" discipline the `sources` validation
+    # below already follows.
+    try:
+        coerced_bucket = coerce_bucket(bucket)
+    except ValueError as exc:
+        return f"Error: invalid `bucket`: {exc}"
 
     # Validate the per-claim provenance shape early so a malformed
     # ``sources`` argument is rejected before we touch the filesystem.
@@ -992,6 +1114,22 @@ def remember_write(
         return f"Error: invalid `sources`: {exc}"
     except TypeError as exc:
         return f"Error: invalid `sources`: {exc}"
+
+    # Issue athenaeum#904 (AC1): stamp the optional bucket + suggested valid_until
+    # into the SAME `extras` dict the channel-split provenance fields (§326)
+    # already ride into `_inject_provenance_frontmatter` on — no new plumbing
+    # needed. `coerced_bucket` is "" when unset (no-op). `valid_until` is
+    # normalized through the shared fail-open date coercer so a malformed
+    # value is silently dropped rather than rejected, matching every other
+    # valid_until write path.
+    if coerced_bucket:
+        extras["bucket"] = coerced_bucket
+    if valid_until:
+        normalized_valid_until = validity_bound_str(
+            {"valid_until": valid_until}, "valid_until"
+        )
+        if normalized_valid_until:
+            extras["valid_until"] = normalized_valid_until
 
     safe_source = "".join(c for c in source if c.isalnum() or c in "-_")
     if not safe_source:
@@ -1184,7 +1322,9 @@ def create_server(
     )
 
     @mcp.tool()
-    def recall(query: str, top_k: int = 5, with_pii: bool = False) -> str:
+    def recall(
+        query: str, top_k: int = 5, with_pii: bool = False, history: bool = False
+    ) -> str:
         """Search the knowledge wiki for pages relevant to a query.
 
         Dispatches to the configured search backend:
@@ -1223,6 +1363,12 @@ def create_server(
                 every audience and policy filter. A field you do not receive
                 comes back as a redaction marker naming the field and how many
                 values exist, never as silence.
+            history: Opt into a HISTORY query (issue athenaeum#904) — set this when
+                you are explicitly asking about the past ("what did the
+                daily status say last week?") rather than the current state.
+                By default an expired ``daily``-bucket page ranks below a
+                current one; ``history=True`` disables that reorder for this
+                call and returns results in plain relevance order.
 
         Returns:
             Matching wiki pages with relevance scores and content snippets.
@@ -1237,6 +1383,7 @@ def create_server(
             caller_audience=caller_audience,
             config=config,
             with_pii=with_pii,
+            history=history,
         )
 
     @mcp.tool()
@@ -1244,6 +1391,8 @@ def create_server(
         content: str,
         source: str = "claude-session",
         sources: str | dict | None = None,
+        bucket: str | None = None,
+        valid_until: str | None = None,
     ) -> str:
         """Save a piece of knowledge to the raw intake directory.
 
@@ -1272,6 +1421,16 @@ def create_server(
 
                 BREAKING (issue athenaeum#96): bare dicts without the wrapper keys
                 are rejected — see ``remember_write`` for the rationale.
+            bucket: Optional decay classification (issue athenaeum#904) — one of
+                ``daily`` / ``weekly`` / ``durable``. Use ``daily`` for a
+                rapidly-overwritten status note that should decay out of
+                recall once superseded rather than compete with durable
+                facts forever. Rejected (an error string, not a silent
+                coercion) if set to anything else. Unset (default) behaves
+                exactly as before this parameter existed.
+            valid_until: Optional SUGGESTED expiry date (``YYYY-MM-DD``, issue
+                athenaeum#904). A suggestion only — never overrides an explicit
+                ``valid_until`` the target already carries.
 
         Returns:
             Confirmation message with the file path.
@@ -1285,6 +1444,8 @@ def create_server(
             wiki_root=wiki_root,
             sources=sources,
             screening=screening,
+            bucket=bucket,
+            valid_until=valid_until,
         )
 
     @mcp.tool()

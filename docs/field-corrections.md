@@ -211,6 +211,8 @@ because a batch may carry thousands of records and the applier streams it.
 | `observed_at` | yes* | RFC-3339 UTC — when the submitter *observed* the fact. Breaks same-tier ties. |
 | `note` | optional | Free text. Carried into the audit ledger, and into an escalation if one is raised — the *why*, which is what lets a human or an upper tier act without re-deriving context. |
 | `usage_class` | optional | One of `athenaeum.pii.USAGE_CLASSES` (§7.1). Valid only for an `add` onto a contact-identifier field routed to an excluded surface; absent, the written value stays `unclassified`. |
+| `bucket` | optional | One of `athenaeum.models.MEMORY_BUCKETS` (`daily`/`weekly`/`durable`, issue athenaeum#904). Same ride-alongside shape as `usage_class` — applies to the TARGET entity's page regardless of `field`/`value`. Invalid value raises a tier (never silently coerced). See `docs/provenance-shape.md` §8.8. |
+| `valid_until` | optional | ISO-8601 date — a SUGGESTED expiry for the target page (issue athenaeum#904). Only fills an ABSENT `valid_until` on the target; never overrides an explicit one (§8.1's semantics stay authoritative). Malformed input is fail-open (dropped), unlike `bucket`. |
 
 \* or supplied by the envelope's `defaults`.
 
