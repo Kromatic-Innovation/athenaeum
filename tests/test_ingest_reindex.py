@@ -633,6 +633,236 @@ class TestIngestCLI:
 
 
 # ---------------------------------------------------------------------------
+# --if-triggered (issue athenaeum#909) — the trigger control-signal surface on
+# the SAME ``ingest`` command. Individual trigger LOGIC (each reason, the
+# backstop, precedence) is covered purely in
+# ``tests/test_reasoning_triggers.py``; these tests cover the CLI wiring:
+# evaluate-before-lock, the no-op JSON shape, a firing trigger running the
+# normal compile, and the single-flight lock guard (AC8, mirrors
+# ``test_single_flight_lock_held`` above).
+# ---------------------------------------------------------------------------
+
+
+class TestIngestIfTriggeredCLI:
+    def test_nothing_configured_second_call_is_a_cheap_noop(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        # First call: no reasoning-trigger stamp yet -> "infinitely overdue"
+        # -> the always-on nightly backstop fires -> runs and stamps.
+        rc1 = main(
+            ["ingest", "--if-triggered", "--path", str(root), "--cache-dir", str(cache)]
+        )
+        assert rc1 == 0
+        first = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert first["trigger"] == "nightly-backstop"
+        assert (cache / "reasoning-trigger-stamp.json").is_file()
+
+        # Second call, immediately after: no trigger configured, the stamp
+        # is fresh (well under the 24h backstop) -> a cheap no-op.
+        rc2 = main(
+            ["ingest", "--if-triggered", "--path", str(root), "--cache-dir", str(cache)]
+        )
+        assert rc2 == 0
+        second = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert second == {
+            "command": "ingest",
+            "mode": "incremental",
+            "new_or_changed": 0,
+            "compiled": 0,
+            "noop": True,
+            "duration_ms": 0,
+            "exit_code": 0,
+            "trigger": "none",
+        }
+
+    def test_noop_never_takes_the_run_lock(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from athenaeum.runlock import RunLock
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+        # Establish a fresh stamp with nothing else configured, then a
+        # held run lock must NOT block a no-op second call.
+        assert (
+            main(
+                [
+                    "ingest",
+                    "--if-triggered",
+                    "--path",
+                    str(root),
+                    "--cache-dir",
+                    str(cache),
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+
+        with RunLock(root):
+            rc = main(
+                [
+                    "ingest",
+                    "--if-triggered",
+                    "--path",
+                    str(root),
+                    "--cache-dir",
+                    str(cache),
+                ]
+            )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["trigger"] == "none"
+
+    def test_backlog_files_trigger_fires_and_runs(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path)
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  reasoning_triggers:\n    backlog_files: 1\n"
+        )
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        rc = main(
+            ["ingest", "--if-triggered", "--path", str(root), "--cache-dir", str(cache)]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["trigger"] == "backlog-files"
+        assert payload["compiled"] == 1
+        assert (cache / "reasoning-trigger-stamp.json").is_file()
+
+    def test_without_the_flag_behaves_exactly_as_before(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # AC3: on-demand is the EXISTING behaviour (no --if-triggered) —
+        # unchanged, no "trigger" key in the summary.
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        rc = main(["ingest", "--path", str(root), "--cache-dir", str(cache)])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert "trigger" not in payload
+        assert payload["compiled"] == 1
+
+    def test_single_flight_lock_held_blocks_a_firing_trigger(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # AC8 / D5: a trigger MUST go through the CLI's existing lock guard
+        # — mirrors TestIngestCLI.test_single_flight_lock_held above, but
+        # via --if-triggered with a trigger CONFIGURED TO FIRE.
+        from athenaeum.runlock import RunLock
+
+        root = _seed_knowledge_root(tmp_path)
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  reasoning_triggers:\n    backlog_files: 1\n"
+        )
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+
+        with RunLock(root):  # hold the lock so the fired trigger can't acquire it
+            rc = main(
+                [
+                    "ingest",
+                    "--if-triggered",
+                    "--path",
+                    str(root),
+                    "--cache-dir",
+                    str(tmp_path / "c"),
+                ]
+            )
+        assert rc == EXIT_LOCK_HELD
+        assert "error" in capsys.readouterr().err.lower()
+
+    def test_full_combo_is_rejected(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # D7/AC4: a triggered run is ALWAYS incremental — --if-triggered
+        # combined with --full must be a loud, rejected error, not a
+        # silent downgrade of either flag.
+        root = _seed_knowledge_root(tmp_path)
+
+        rc = main(
+            ["ingest", "--if-triggered", "--full", "--path", str(root)]
+        )
+        assert rc == 1
+        assert "--if-triggered" in capsys.readouterr().err
+
+    def test_firing_trigger_never_passes_incremental_false(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # D7/AC4 (positive half): capture the EXACT kwargs the CLI hands to
+        # the reusable ingest engine when a trigger fires, and assert
+        # ``incremental`` is True and no ``full_compile`` kwarg is smuggled
+        # through — never a full recompile.
+        import athenaeum.librarian as librarian_mod
+        from athenaeum.librarian import IngestResult
+
+        root = _seed_knowledge_root(tmp_path)
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  reasoning_triggers:\n    backlog_files: 1\n"
+        )
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+
+        captured: dict = {}
+
+        def fake_ingest(**kwargs):
+            captured.update(kwargs)
+            return IngestResult(
+                mode="incremental",
+                new_or_changed=1,
+                compiled=1,
+                noop=False,
+                exit_code=0,
+                duration_ms=1,
+            )
+
+        monkeypatch.setattr(librarian_mod, "ingest", fake_ingest)
+
+        rc = main(
+            [
+                "ingest",
+                "--if-triggered",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(tmp_path / "c"),
+            ]
+        )
+        assert rc == 0
+        assert captured["incremental"] is True
+        assert "full_compile" not in captured
+
+
+# ---------------------------------------------------------------------------
 # reindex CLI
 # ---------------------------------------------------------------------------
 
