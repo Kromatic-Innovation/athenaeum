@@ -78,6 +78,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import subprocess
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -728,6 +729,7 @@ def _rewrite_inbound_wikilinks(
     canonical_slug: str,
     *,
     skip: Path | None = None,
+    touched: list[Path] | None = None,
 ) -> int:
     """Rewrite every ``[[old-slug]]`` / ``[[old-slug|text]]`` link to canonical.
 
@@ -739,6 +741,13 @@ def _rewrite_inbound_wikilinks(
     link TARGET changes, not the displayed text. ``skip`` excludes the
     canonical page itself (it may legitimately reference its own former
     slug in body prose describing the merge).
+
+    ``touched``, when supplied, has every actually-modified path appended
+    to it (issue athenaeum#947 — ``resolve_merge``'s fold commit needs the
+    exact set of sibling pages this call rewrote so it can scope its
+    ``git add`` pathspec to them; the return value here is only a count).
+    Additive optional parameter — :mod:`athenaeum.storage_migrate`'s
+    existing call site, which only wants the count, is unaffected.
 
     Returns the number of files modified. Best-effort: unreadable files are
     skipped, not fatal.
@@ -777,6 +786,8 @@ def _rewrite_inbound_wikilinks(
         if new_text != text:
             atomic_write_text(path, new_text)
             n += 1
+            if touched is not None:
+                touched.append(path)
     return n
 
 
@@ -901,12 +912,73 @@ def _same_file(a: Path, b: Path) -> bool:
         return False
 
 
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run ``git <args>`` with ``cwd=root`` (issue athenaeum#947).
+
+    Matches the existing precedent in :func:`athenaeum.corrections._git` /
+    :func:`athenaeum.auto_memory_prune._git`. Uses ``check=False`` — callers
+    inspect ``.returncode`` themselves — so a git failure degrades to a
+    reported condition (or a silent no-op, per call site) rather than
+    raising out of a fold. A fold must never crash on a git hiccup; it may
+    only ever fail closed via an explicit ``error_code``.
+    """
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _find_git_repo(wiki_root: Path) -> Path | None:
+    """Resolve the git repository containing *wiki_root* (issue athenaeum#947).
+
+    ``_apply_fold_into_existing`` / ``resolve_merge`` are only ever handed
+    ``wiki_root`` (conventionally ``<knowledge_root>/wiki``) — never the
+    containing ``knowledge_root`` itself. Other modules that gate destructive
+    writes on git (:func:`athenaeum.auto_memory_prune.apply_prune`,
+    :func:`athenaeum.corrections.retire_batch`) are handed ``knowledge_root``
+    directly and can just check ``(knowledge_root / ".git").exists()``; that
+    idiom is not available here without threading a brand-new parameter
+    through every ``resolve_merge`` caller (the MCP tool, the CLI, every
+    test). Instead, ask git itself: run ``git rev-parse --show-toplevel``
+    with ``cwd=wiki_root`` and trust its answer — this finds the repo root
+    regardless of how many directories separate ``wiki_root`` from it, and
+    works identically whether ``wiki_root`` IS the repo root or a
+    subdirectory of it.
+
+    Never raises. Any failure — git not installed, ``wiki_root`` missing,
+    not inside a work tree, or anything else — degrades to ``None``, which
+    the caller (``resolve_merge``) treats as "no git repo" and refuses the
+    fold. This function must fail SAFE (refuse), never fail OPEN (proceed
+    without git).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(wiki_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    top = result.stdout.strip()
+    if not top:
+        return None
+    return Path(top)
+
+
 def _apply_fold_into_existing(
     pm: PendingMerge,
     *,
     target_path: Path,
     target_slug: str,
     wiki_root: Path,
+    repo_root: Path,
     cache_dir: Path | None,
     search_backend: str | None,
     embedding_model: str | None,
@@ -915,6 +987,15 @@ def _apply_fold_into_existing(
 
     The target IS the canonical existing page. Steps, in order:
 
+    0. Take a provenance-snapshot commit (Commit A) of the target page and
+       every folded-away source, BEFORE any write below touches a byte
+       (issue athenaeum#947 — the delete in step 5 must be recoverable via
+       plain ``git revert``/``git show``, per ``README.md``'s recovery
+       guarantee). Callers of this function (only :func:`resolve_merge`, for
+       ``write_kind == "fold-into-existing"``) have already verified
+       ``repo_root`` is a real git repo before calling — see the
+       ``no_git_repo`` gate there — so this step is never skipped for that
+       write kind.
     1. Write ``draft_merged_body`` to ``target_path`` (the merged content —
        same convention as the ``create-merged`` path's body write).
     2. Derive the folded-away source slugs (the OTHER sources — a source
@@ -924,8 +1005,12 @@ def _apply_fold_into_existing(
        frontmatter, deduped.
     4. Rewrite every inbound ``[[old-slug]]`` wikilink under ``wiki_root``
        (excluding the canonical page itself) to ``target_slug``.
-    5. Delete the old source wiki files.
+    5. Delete the old source wiki files via ``git rm`` (issue athenaeum#947 —
+       never a bare ``Path.unlink()``; see the step-5 comment below for the
+       untracked-file fallback).
     6. Best-effort purge their vectors from the search index.
+    7. Commit the fold itself as its own commit (Commit B), scoped to
+       exactly the paths this fold touched.
 
     Returns ``{"ok": True, "folded_sources", "aliases_added",
     "links_rewritten"}`` on success. ``target_exists`` is unreachable from
@@ -933,6 +1018,18 @@ def _apply_fold_into_existing(
     ``write_kind == "fold-into-existing"``, and athenaeum#421's proposal-time
     classification only assigns that write_kind when the slug already
     exists; this function does not re-check.
+
+    Concurrency (issue athenaeum#947 AC3): this function performs real file
+    mutation and git commits, but it is only ever reached via the deferred
+    apply path (:func:`athenaeum.decision_answers.apply_decision_answers` ->
+    this module's :func:`resolve_merge`), which
+    :func:`athenaeum._cmd_pending.cmd_ingest_answers` runs after acquiring
+    the CLI run lock (issue athenaeum#309, ``_cli_shared._acquire_or_exit``).
+    The MCP ``resolve_merge`` tool (``mcp_server.py``) never calls this
+    function directly — issue athenaeum#908 changed it to only validate and
+    write a decision-answer file under ``raw/answers/``. So a concurrent
+    ``athenaeum run`` is already excluded by the same run lock that guards
+    every other mutating CLI command; no additional lock is needed here.
     """
     # Read the PRE-EXISTING target's frontmatter first — its ``aliases:``
     # (accumulated by any prior fold) must survive the draft-body overwrite
@@ -948,16 +1045,54 @@ def _apply_fold_into_existing(
     prior_aliases_list = prior_aliases if isinstance(prior_aliases, list) else []
     existing_alias_slugs = {slugify(str(a)) for a in prior_aliases_list}
 
-    # Step 1 — write the merged draft body to the canonical target.
-    atomic_write_text(target_path, pm.draft_merged_body)
-
-    # Step 2 — folded-away source slugs, excluding the canonical page
-    # reappearing among its own sources.
+    # Step 2 (computed early, before any write) — folded-away source slugs,
+    # excluding the canonical page reappearing among its own sources. Moved
+    # ahead of step 1 (the numbering above is the SEMANTIC step order, not
+    # this function's statement order) because Commit A below needs the
+    # full set of about-to-change paths before any of them are touched.
     all_source_slugs = _source_slugs(pm.sources)
     folded_slugs = [s for s in all_source_slugs if s != target_slug]
     folded_sources = [
         src for src in pm.sources if slugify(Path(src).stem) != target_slug
     ]
+
+    # --- Commit A: provenance snapshot, BEFORE any write below (issue
+    # athenaeum#947). Stages exactly the target page (about to be
+    # overwritten in step 1) and every folded-away source (about to be
+    # deleted in step 5) with a SCOPED pathspec — never `git add -A` — so an
+    # operator's OTHER pre-staged/modified content elsewhere in the
+    # knowledge repo can never be swept into this commit under a misleading
+    # "provenance snapshot" message (the exact concern
+    # ``auto_memory_prune.apply_prune`` documents for its own commit).
+    # Commits only when something is ACTUALLY staged (`git diff --cached
+    # --quiet` returncode != 0) — the common case where the target/sources
+    # are already fully committed from a prior run is a legitimate no-op,
+    # not an error.
+    repo_root_resolved = repo_root.resolve()
+    snapshot_rel_paths: list[str] = []
+    for p in (target_path, *[Path(s) for s in folded_sources]):
+        try:
+            snapshot_rel_paths.append(str(p.resolve().relative_to(repo_root_resolved)))
+        except ValueError:
+            # Outside repo_root -- cannot be captured by a git snapshot.
+            # Step 5 below applies the identical relative_to() check before
+            # deleting, so a path that fails here is also never deleted.
+            continue
+    if snapshot_rel_paths:
+        _git(repo_root, "add", "--", *snapshot_rel_paths)
+        staged = _git(repo_root, "diff", "--cached", "--quiet", "--", *snapshot_rel_paths)
+        if staged.returncode != 0:
+            _git(
+                repo_root,
+                "commit",
+                "-m",
+                f"librarian: fold provenance snapshot ({target_slug}) (athenaeum#947)",
+                "--",
+                *snapshot_rel_paths,
+            )
+
+    # Step 1 — write the merged draft body to the canonical target.
+    atomic_write_text(target_path, pm.draft_merged_body)
 
     # Step 3 — alias map, deduped. The draft body just written in step 1 may
     # carry its OWN frontmatter (a merge draft can legitimately open with
@@ -978,14 +1113,30 @@ def _apply_fold_into_existing(
     aliases_added = [s for s in folded_slugs if s not in existing_alias_slugs]
 
     # Step 4 — rewrite inbound wikilinks pointing at any folded slug.
+    # ``touched`` collects the exact sibling paths modified (a-priori
+    # unknown — could be any page under ``wiki_root``) so Commit B below
+    # can scope its pathspec to them instead of guessing (issue athenaeum#947).
+    rewritten_touched: list[Path] = []
     links_rewritten = _rewrite_inbound_wikilinks(
-        wiki_root, folded_slugs, target_slug, skip=target_path
+        wiki_root, folded_slugs, target_slug, skip=target_path, touched=rewritten_touched
     )
 
-    # Step 5 — delete the old source wiki files (reference rewrite, not
-    # stub pages — a content-bearing stub would get re-embedded and create
-    # a near-duplicate retrieval hit).
+    # Step 5 — delete the old source wiki files via ``git rm`` (issue
+    # athenaeum#947 — reference rewrite, not stub pages: a content-bearing
+    # stub would get re-embedded and create a near-duplicate retrieval hit).
+    # ``resolve_merge`` has already confirmed ``repo_root`` is a real git
+    # repo before calling this function, so ``git rm`` is expected to
+    # succeed for every source that is actually tracked. A source that is
+    # NOT tracked (e.g. written straight to disk and never committed) falls
+    # back to a plain ``unlink`` for THAT FILE ONLY — reasoning: the file is
+    # still inside a git repo, so Commit A above already captured its
+    # content if it was staged there; an untracked file was never
+    # recoverable via git regardless of which delete mechanism removes it,
+    # so the fallback does not weaken the recoverability guarantee for any
+    # file git actually knew about.
     deleted_paths: list[str] = []
+    git_rm_staged_rel: list[str] = []
+    unlink_fallback_rel: list[str] = []
     for src in folded_sources:
         src_path = Path(src)
         try:
@@ -997,8 +1148,31 @@ def _apply_fold_into_existing(
             # path can delete the page being folded into.
             if _same_file(src_path, target_path):
                 continue
-            if src_path.is_file():
+            if not src_path.is_file():
+                continue
+            try:
+                rel_src = str(src_path.resolve().relative_to(repo_root_resolved))
+            except ValueError:
+                log.warning(
+                    "pending_merges: folded source %s is outside git repo %s; "
+                    "skipping delete (git-only removal cannot be guaranteed)",
+                    src_path,
+                    repo_root,
+                )
+                continue
+            rm_result = _git(repo_root, "rm", "--quiet", "-f", "--", rel_src)
+            if rm_result.returncode == 0:
+                git_rm_staged_rel.append(rel_src)
+                deleted_paths.append(src)
+            else:
+                log.warning(
+                    "pending_merges: git rm failed for folded source %s (%s); "
+                    "falling back to unlink",
+                    src_path,
+                    rm_result.stderr.strip(),
+                )
                 src_path.unlink()
+                unlink_fallback_rel.append(rel_src)
                 deleted_paths.append(src)
         except OSError as exc:
             log.warning(
@@ -1012,6 +1186,40 @@ def _apply_fold_into_existing(
         search_backend=search_backend,
         embedding_model=embedding_model,
     )
+
+    # --- Commit B: the fold itself, as its own commit (issue athenaeum#947).
+    # ``git rm`` already staged the tracked deletes above; here we additionally
+    # `git add` the target page (rewritten in steps 1/3), any wikilink-rewritten
+    # siblings (step 4), and any unlink-fallback deletes (step 5's untracked
+    # branch) — each a SPECIFIC path, never a directory-wide or repo-wide add,
+    # so this commit cannot silently absorb unrelated dirty state either.
+    add_rel_paths = list(
+        dict.fromkeys(
+            [str(target_path.resolve().relative_to(repo_root_resolved))]
+            + [
+                str(p.resolve().relative_to(repo_root_resolved))
+                for p in rewritten_touched
+            ]
+            + unlink_fallback_rel
+        )
+    )
+    if add_rel_paths:
+        _git(repo_root, "add", "--", *add_rel_paths)
+    commit_b_rel_paths = list(dict.fromkeys(add_rel_paths + git_rm_staged_rel))
+    if commit_b_rel_paths:
+        staged_b = _git(
+            repo_root, "diff", "--cached", "--quiet", "--", *commit_b_rel_paths
+        )
+        if staged_b.returncode != 0:
+            folded_slug_desc = ", ".join(folded_slugs) if folded_slugs else "(none)"
+            _git(
+                repo_root,
+                "commit",
+                "-m",
+                f"librarian: fold {folded_slug_desc} into {target_slug} (athenaeum#947)",
+                "--",
+                *commit_b_rel_paths,
+            )
 
     return {
         "ok": True,
@@ -1071,7 +1279,18 @@ def resolve_merge(
               vectors from the vector store. ``target_exists`` is
               unreachable here for a correctly-classified proposal — the
               precheck at proposal time (`_classify_merge_write_kind`)
-              already confirmed the slug exists.
+              already confirmed the slug exists. Issue athenaeum#947: the
+              delete step (and the target-page overwrite before it) is
+              refused with ``no_git_repo`` — no file is touched, the
+              checkbox is not flipped — unless ``wiki_root`` resolves
+              (via ``git rev-parse --show-toplevel``) inside a git
+              repository, since the removal must stay recoverable via
+              plain ``git revert``/``git show`` (README.md's recovery
+              guarantee). When it does resolve, the fold lands as TWO
+              commits: a provenance snapshot of the target + sources
+              taken before any write, then the fold itself. This gate
+              applies ONLY to ``fold-into-existing`` — ``create-merged``
+              deletes nothing and is unaffected.
 
             Either way, on success a provenance record is appended (see
             :func:`athenaeum.provenance.record_merge_provenance`) naming
@@ -1202,11 +1421,39 @@ def resolve_merge(
                     ),
                     "resolved_block": None,
                 }
+            # Issue athenaeum#947: removal must be git-only for recoverability
+            # (README.md's "a bad merge is a `git revert` away" guarantee) —
+            # mirrors ``auto_memory_prune.apply_prune``'s refuse-don't-degrade
+            # gate. This fires BEFORE any mutation whatsoever (before the
+            # draft body overwrites the target below) and must NOT flip the
+            # checkbox, same shape as the ``fold_target_missing`` check above.
+            # Scoped to ``fold-into-existing`` only — ``create-merged``
+            # deletes nothing and is unaffected. See ``_find_git_repo``'s
+            # docstring for why this asks git itself rather than checking
+            # ``(knowledge_root / ".git").exists()`` like the other
+            # git-gated destructive paths in this codebase.
+            repo_root = _find_git_repo(root)
+            if repo_root is None:
+                return {
+                    "ok": False,
+                    "error_code": "no_git_repo",
+                    "message": (
+                        f"{root} is not inside a git repository; refusing to "
+                        "fold — a fold-into-existing approve deletes the "
+                        "folded-away source pages, and removal must be "
+                        "git-only so it stays recoverable via `git revert` "
+                        "(README.md's recovery guarantee). Initialize the "
+                        "knowledge root as a git repo before approving this "
+                        "merge."
+                    ),
+                    "resolved_block": None,
+                }
             fold_result = _apply_fold_into_existing(
                 target_pm,
                 target_path=target_path,
                 target_slug=target_slug,
                 wiki_root=root,
+                repo_root=repo_root,
                 cache_dir=cache_dir,
                 search_backend=search_backend,
                 embedding_model=embedding_model,

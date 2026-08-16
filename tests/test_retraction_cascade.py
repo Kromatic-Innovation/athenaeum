@@ -34,6 +34,7 @@ from athenaeum.retraction_cascade import (
     review_id,
     scan_retraction_cascade,
 )
+from tests.conftest import init_git_repo
 
 
 def _write_wiki_page(path: Path, *, name: str, body: str = "body\n") -> None:
@@ -47,8 +48,12 @@ def _execute_merge(wiki: Path, *, target_name: str, sources: list[str]) -> str:
     """Run a real fold-into-existing merge, returning its merge id.
 
     The merge records provenance (issue athenaeum#425) listing ``sources`` as its
-    supporting ``source_paths`` — the exact fact the cascade keys on.
+    supporting ``source_paths`` — the exact fact the cascade keys on. Issue
+    athenaeum#947: ``resolve_merge`` now refuses a fold-into-existing approve
+    outside a git repo, so this shared helper initializes one over the
+    already-written target/source fixture files before folding.
     """
+    init_git_repo(wiki)
     merges_path = wiki / "_pending_merges.md"
     write_pending_merge(
         merges_path,
