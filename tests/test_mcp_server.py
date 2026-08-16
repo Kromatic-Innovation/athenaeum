@@ -960,7 +960,7 @@ class TestCLIServe:
 
 
 class TestAllMcpToolWrappers:
-    """Invoke all 13 registered MCP tool wrappers through ``tool.fn()``."""
+    """Invoke all 14 registered MCP tool wrappers through ``tool.fn()``."""
 
     # One valid-args invocation per registered tool. Read tools take no args;
     # the write tools are called with a nonexistent id so a single call
@@ -976,6 +976,7 @@ class TestAllMcpToolWrappers:
         "remember": lambda fn: fn("a note worth remembering", source="test-session"),
         "list_pending_questions": lambda fn: fn(),
         "resolve_question": lambda fn: fn("no-such-id", "an answer body"),
+        "raise_decision": lambda fn: fn("a question worth asking", "standalone context"),
         "list_pending_merges": lambda fn: fn(),
         "list_pending_decisions": lambda fn: fn(),
         "list_axiom_audit": lambda fn: fn(),
@@ -994,6 +995,7 @@ class TestAllMcpToolWrappers:
         "list_pending_decisions": list,
         "list_axiom_audit": list,
         "resolve_question": dict,
+        "raise_decision": dict,
         "resolve_merge": dict,
         "review_audit_item": dict,
         "scan_retraction_cascade": dict,
@@ -1040,7 +1042,7 @@ class TestAllMcpToolWrappers:
             f"registered-only={registered - set(self._INVOKE)}, "
             f"map-only={set(self._INVOKE) - registered}"
         )
-        assert len(registered) == 13
+        assert len(registered) == 14
 
     @pytest.mark.parametrize("name", sorted(_INVOKE))
     def test_wrapper_marshals_args_and_returns_declared_type(
@@ -1102,6 +1104,30 @@ class TestAllMcpToolWrappers:
         bad = self._call(server, "resolve_merge", lambda fn: fn("x", "bogus-decision"))
         assert bad["ok"] is False
         assert bad["error_code"] == "invalid_decision"
+
+    def test_raise_decision_marshalling_and_error_to_string(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#912: valid raise succeeds; invalid input reports, not raises."""
+        server = self._server(tmp_path)
+        # Marshalling: a valid call returns a decision_id and structured keys.
+        ok = self._call(
+            server,
+            "raise_decision",
+            lambda fn: fn("Did you mean the stricter reading?", "standalone context"),
+        )
+        assert isinstance(ok, dict)
+        assert set(ok) >= {"ok", "error_code", "message", "decision_id"}
+        assert ok["ok"] is True
+        assert ok["decision_id"]
+        # Error-to-string: an empty question is validated and reported, not raised.
+        bad_q = self._call(server, "raise_decision", lambda fn: fn("   ", "context"))
+        assert bad_q["ok"] is False
+        assert bad_q["error_code"] == "invalid_question"
+        # Error-to-string: missing context is validated and reported, not raised.
+        bad_ctx = self._call(server, "raise_decision", lambda fn: fn("a question", "  "))
+        assert bad_ctx["ok"] is False
+        assert bad_ctx["error_code"] == "missing_context"
 
     def test_review_audit_item_marshalling_and_error_to_string(
         self, tmp_path: Path
