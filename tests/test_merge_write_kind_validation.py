@@ -33,6 +33,7 @@ from athenaeum.pending_merges import (
     resolve_merge,
     write_pending_merge,
 )
+from tests.conftest import init_git_repo
 
 
 def _write_wiki_page(path: Path, *, name: str, body: str = "body\n") -> None:
@@ -223,6 +224,10 @@ class TestTargetPageNeverDeleted:
         alias_link = wiki / "alias-link.md"
         os.symlink(target.name, alias_link)
 
+        # Issue athenaeum#947: this fold actually approves (unlike this module's
+        # other resolve_merge calls, which are refused before reaching the
+        # delete step regardless of git), so it needs a git repo.
+        init_git_repo(wiki)
         merges = wiki / "_pending_merges.md"
         write_pending_merge(
             merges,
