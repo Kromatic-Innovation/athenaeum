@@ -994,6 +994,20 @@ class ClaudeCliClient:
             # REPLACE Claude Code's default agent persona so the tier prompt
             # is the entire instruction context (athenaeum#330).
             argv += ["--system-prompt", system_text]
+        # ``--tools ""`` (athenaeum#906): pin the subprocess to TEXT-ONLY.
+        # ``--strict-mcp-config`` below keeps MCP servers out, but says nothing
+        # about Claude Code's OWN built-in tools (Bash, Edit, Read, WebFetch,
+        # …) — without this flag their availability inside the subprocess is
+        # whatever ``claude -p`` happens to default to, which this repository
+        # does not control. Tier prompts embed fenced UNTRUSTED intake content,
+        # so an inherited tool default is a live residual on the injection
+        # surface. Per ``claude --help`` (verified against CLI 2.1.226,
+        # 2026-08-19): ``--tools <tools...>  … Use "" to disable all tools``.
+        # The empty string is a real argv element, and the variadic option is
+        # terminated by the ``--strict-mcp-config`` flag appended right after
+        # it — keep a flag immediately following, or the variadic would swallow
+        # whatever came next.
+        argv += ["--tools", ""]
         # ``--strict-mcp-config`` (athenaeum#775): without it, every ``claude
         # -p`` spawn boots all nine user-scoped MCP servers from
         # ``~/.claude.json`` regardless of ``cwd`` — including athenaeum's own
