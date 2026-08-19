@@ -89,6 +89,22 @@ covered what leaves the process on that path and what comes back.
   user's own notes are not visible to a local `ps` for the (up to 300s) life of
   the call. The argv-list form (no `shell=True`; the audit confirmed zero
   `shell=True` / `os.system` across the tree) is retained.
+- **The `claude-cli` subprocess is text-only, asserted rather than inherited
+  (athenaeum#906).** Tier prompts embed fenced *untrusted* intake content, so
+  what the subprocess can DO is part of the injection surface. Two flags pin it
+  shut, both constructed in `provider.ClaudeCliClient._build_argv` and both
+  covered by argv regression tests: `--strict-mcp-config` (athenaeum#775) keeps
+  MCP servers from loading, and `--tools ""` disables Claude Code's own
+  built-in tools (Bash, Edit, Read, WebFetch, …). Before athenaeum#906 only the
+  first flag was passed, so built-in tool availability inside the subprocess was
+  whatever `claude -p` defaulted to — unverified rather than controlled. The
+  `--tools` spelling and its empty-string "disable all tools" semantics were
+  read from the installed CLI's own `claude --help` and confirmed to parse
+  (CLI **2.1.226**, 2026-08-19); a CLI old enough to lack the flag fails loudly
+  with `unknown option`, not silently with tools enabled. The asymmetry is
+  deliberate: on the `api` backend the requests carry no `tools` key at all, so
+  there is nothing to pin — the subprocess is the one path whose answer would
+  otherwise come from a default this repository does not control.
 - **L5 — response logging is redacted.** The one response-logging site that
   embedded raw model output in an error (`provider._parse_envelope`) now runs it
   through `redact_outbound_text` first, matching the sibling site in `tiers.py`.
