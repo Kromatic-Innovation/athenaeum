@@ -527,6 +527,34 @@ class TestClaudeCliCreate:
         )
         assert "--strict-mcp-config" in cap["argv"]
 
+    def test_argv_disables_builtin_tools(self, monkeypatch):
+        # athenaeum#906: tier prompts embed fenced UNTRUSTED intake content, so
+        # the subprocess must be text-only. ``--strict-mcp-config`` (above)
+        # only keeps MCP servers out; Claude Code's OWN built-in tools are
+        # disabled by ``--tools ""`` (per ``claude --help``: 'Use "" to disable
+        # all tools'). Without this flag the answer is inherited from a CLI
+        # default this repo does not control. The ``api`` backend needs no
+        # equivalent — it passes params through verbatim and never sends a
+        # ``tools`` key — so this property is asserted on the CLI argv only.
+        cap = {}
+        _stub_run(monkeypatch, stdout=_envelope(), capture=cap)
+        client = ClaudeCliClient()
+        client.messages.create(
+            model="m-1",
+            system="s",
+            messages=[{"role": "user", "content": "u"}],
+        )
+        argv = cap["argv"]
+        assert "--tools" in argv
+        index = argv.index("--tools")
+        # The value is the empty string — "disable all tools", not "default".
+        assert argv[index + 1] == ""
+        # ``--tools`` is variadic: it consumes argv elements until the next
+        # option. A flag must follow the empty value, or the variadic would
+        # swallow whatever came next and the tools set would not be empty.
+        assert index + 2 < len(argv), "--tools '' must not be the last argument"
+        assert argv[index + 2].startswith("--")
+
     def test_user_prompt_passed_on_stdin_not_argv(self, monkeypatch):
         # Issue athenaeum#543 (L4): the user's own notes must never sit in the process
         # table. The prompt rides subprocess stdin (`input=`), and no element of
