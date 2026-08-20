@@ -312,6 +312,150 @@ class TestMcpReadPersonWrapperParity:
         }
 
 
+class TestDateTypedFrontmatterCoercion:
+    """A bare YAML date/datetime must not crash JSON serialization (athenaeum#1002).
+
+    ``yaml.safe_load`` (``parse_frontmatter``) parses an unquoted frontmatter
+    date into ``datetime.date`` and a timestamp into ``datetime.datetime`` —
+    neither serializable by plain ``json.dumps``. Before the fix, a page like
+    the reported ``9660b25b`` crashed every read tool with ``Object of type
+    date is not JSON serializable``. These pin the fix at the ONE shared
+    coercion point (:func:`athenaeum.pii.json_date_default`), exercised
+    across ``read_entity``, ``read_person`` and both of ``recall``'s
+    ``with_pii=True`` JSON-emitting branches (the ordinary similarity-search
+    facts block AND the handle-shaped exact-lookup document) — so a fix
+    landed on only one of the three would leave this failing on the others.
+    """
+
+    def test_read_entity_round_trips_a_bare_date_and_a_datetime(
+        self, tmp_path: Path
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        _write_config(knowledge)
+        _write_page(
+            knowledge / "wiki",
+            "alex",
+            name="Alex Widget",
+            extra="dob: 1990-01-01\nlast_synced: 2026-03-01T10:30:00\n",
+        )
+
+        payload = json.loads(
+            entity_read(knowledge, "alex", page_class="person", config=EXCLUDED_CONFIG)
+        )
+
+        assert payload["frontmatter"]["dob"] == "1990-01-01"
+        assert payload["frontmatter"]["last_synced"] == "2026-03-01T10:30:00"
+
+    def test_read_entity_round_trips_with_excluded_data_included_too(
+        self, corpus: Path
+    ) -> None:
+        """The crash reproduces regardless of ``include_excluded`` — the
+        raw ``frontmatter`` field is embedded either way."""
+        page = corpus / "wiki" / "alex.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace(
+                "type: person\n", "type: person\ndob: 1990-01-01\n"
+            ),
+            encoding="utf-8",
+        )
+
+        payload = json.loads(
+            entity_read(
+                corpus,
+                "alex",
+                page_class="person",
+                include_excluded=True,
+                config=EXCLUDED_CONFIG,
+            )
+        )
+
+        assert payload["frontmatter"]["dob"] == "1990-01-01"
+        assert payload["contact"] == {"emails": ["alex@example.org"]}
+
+    def test_read_person_wrapper_round_trips_the_same_page(
+        self, tmp_path: Path
+    ) -> None:
+        """``read_person`` delegates to ``read_entity`` — same fix, same result."""
+        knowledge = tmp_path / "knowledge"
+        _write_config(knowledge)
+        _write_page(
+            knowledge / "wiki", "alex", name="Alex Widget", extra="dob: 1990-01-01\n"
+        )
+
+        payload = json.loads(
+            person_read(knowledge, "alex", config=EXCLUDED_CONFIG)
+        )
+
+        assert payload["frontmatter"]["dob"] == "1990-01-01"
+
+    def test_mcp_read_entity_tool_round_trips_a_dated_page(self, tmp_path: Path) -> None:
+        knowledge = tmp_path / "knowledge"
+        _write_config(knowledge)
+        _write_page(
+            knowledge / "wiki", "alex", name="Alex Widget", extra="dob: 1990-01-01\n"
+        )
+        tool = _tool(_server(knowledge), "read_entity")
+
+        payload = json.loads(tool.fn("alex", "person"))
+
+        assert payload["frontmatter"]["dob"] == "1990-01-01"
+
+    def _dated_source_corpus(self, tmp_path: Path) -> Path:
+        """A person with an excluded value whose classification ``source`` is
+        a BARE (unquoted) YAML datetime — the vector for ``recall``'s crash,
+        distinct from the page-frontmatter vector above: neither JSON-emitting
+        branch of ``recall`` ever embeds the page's own raw frontmatter, only
+        ``ContactClassification.source``/``ContactValueFact.source``, which
+        read straight off the excluded RECORD's frontmatter uncoerced."""
+        knowledge = tmp_path / "knowledge"
+        _write_page(knowledge / "wiki", "alex", name="Alex Widget")
+        _write_record(
+            pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
+            "alex-contact.md",
+            uid="alex",
+            fields=(
+                "emails:\n"
+                "  - alex@example.org\n"
+                "contact_classification:\n"
+                "  - identifier: alex@example.org\n"
+                "    usage_class: observed\n"
+                "    source: 2026-03-01T10:30:00\n"
+            ),
+        )
+        return knowledge
+
+    def test_recall_with_pii_similarity_search_coerces_the_source_datetime(
+        self, tmp_path: Path
+    ) -> None:
+        """Also pins the ISO-8601 format itself: the prior ``default=str``
+        fallback rendered a datetime as ``'2026-03-01 10:30:00'`` (space
+        separator, ``str()``'s default) — not ISO-8601. This asserts the
+        actual ``'T'``-separated form, so a regression back to ``default=str``
+        would fail even though it no longer crashes."""
+        knowledge = self._dated_source_corpus(tmp_path)
+        tool = _tool(_server(knowledge), "recall")
+
+        result = tool.fn("widget", with_pii=True)
+
+        assert '"source": "2026-03-01T10:30:00"' in result
+        assert "2026-03-01 10:30:00" not in result
+
+    def test_recall_with_pii_handle_shaped_query_does_not_crash(
+        self, tmp_path: Path
+    ) -> None:
+        """The handle-shaped path (``recall("alex@example.org", with_pii=True)``)
+        had NO ``default=`` fallback at all before the fix — a raw datetime
+        ``source`` crashed it outright, not merely mis-formatted it."""
+        knowledge = self._dated_source_corpus(tmp_path)
+        tool = _tool(_server(knowledge), "recall")
+
+        result = tool.fn("alex@example.org", with_pii=True)
+        payload = json.loads(result)
+
+        assert payload["resolved"] is True
+        assert payload["contact_values"][0]["source"] == "2026-03-01T10:30:00"
+
+
 def _person_args(knowledge: Path, uid: str, **kwargs: object) -> argparse.Namespace:
     return argparse.Namespace(
         path=knowledge,
