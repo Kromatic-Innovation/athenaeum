@@ -158,6 +158,38 @@ class FieldPredicate:
                 raise ValueError(f"Invalid regex {self.value!r}: {exc}") from exc
 
 
+def predicate_from_dict(raw: dict[str, Any]) -> FieldPredicate:
+    """Build a :class:`FieldPredicate` from a JSON-shaped dict.
+
+    The MCP ``enumerate_entities`` tool's wire shape for one predicate:
+    ``{"fields": [...] | "field-name", "kind": "eq"|"ne"|"substring"|"regex",
+    "value": "..."}`` — ``fields`` accepts either a bare string (single
+    field, the common case) or a list (the ordered fallback-field shape).
+    ``kind: "ne"`` is the same ergonomic negated-``eq`` convenience the CLI's
+    ``--where ...:ne:...`` accepts (see ``_cmd_enumerate._parse_where``) —
+    kept in sync deliberately so the two surfaces never drift.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"Predicate must be an object, got {type(raw).__name__}")
+    fields_raw = raw.get("fields")
+    if isinstance(fields_raw, str):
+        fields: tuple[str, ...] = (fields_raw,)
+    elif isinstance(fields_raw, list) and fields_raw:
+        fields = tuple(str(f) for f in fields_raw)
+    else:
+        raise ValueError(
+            f"Predicate 'fields' must be a non-empty string or list, got {fields_raw!r}"
+        )
+    kind = str(raw.get("kind", "")).strip().lower()
+    negate = bool(raw.get("negate", False))
+    if kind == "ne":
+        kind = "eq"
+        negate = True
+    if "value" not in raw:
+        raise ValueError("Predicate is missing required key 'value'")
+    return FieldPredicate(fields=fields, kind=kind, value=str(raw["value"]), negate=negate)
+
+
 @dataclass(frozen=True)
 class EnumerationResult:
     """The return shape of :func:`enumerate_entities`."""
@@ -203,7 +235,8 @@ def _value_matches(value: str, kind: str, needle: str) -> bool:
         return needle.lower() in value.lower()
     if kind == "regex":
         return re.search(needle, value, re.IGNORECASE) is not None
-    raise ValueError(f"Unknown predicate kind: {kind}")  # pragma: no cover — guarded in __post_init__
+    # pragma: no cover — guarded by FieldPredicate.__post_init__
+    raise ValueError(f"Unknown predicate kind: {kind}")
 
 
 def _predicate_matches(meta: dict[str, object], predicate: FieldPredicate) -> bool:
@@ -277,7 +310,12 @@ def _json_safe(value: object) -> object:
 
 
 def _encode_cursor(
-    *, entity_type: str, sort_key: str, descending: bool, sort_tuple: tuple[int, float, str], uid: str
+    *,
+    entity_type: str,
+    sort_key: str,
+    descending: bool,
+    sort_tuple: tuple[int, float, str],
+    uid: str,
 ) -> str:
     payload = {
         "entity_type": entity_type,
@@ -294,7 +332,9 @@ def _decode_cursor(cursor: str) -> dict[str, Any]:
     try:
         raw = base64.urlsafe_b64decode(cursor.encode("ascii"))
         payload = json.loads(raw.decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001 — any malformed cursor is a caller error
+    except Exception as exc:
+        # Any malformed cursor (bad base64, bad JSON, ...) is a caller error;
+        # re-raised as ValueError below, so BLE001 does not flag this site.
         raise ValueError(f"Malformed enumeration cursor: {cursor!r}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"Malformed enumeration cursor: {cursor!r}")
@@ -382,7 +422,9 @@ def enumerate_entities(
             c.name for c in resolve_entity_classes(wiki_root, caller_audience=caller_audience)
         }
     if entity_type not in known_classes:
-        return EnumerationResult(hits=(), next_cursor=None, known_classes=tuple(sorted(known_classes)))
+        return EnumerationResult(
+            hits=(), next_cursor=None, known_classes=tuple(sorted(known_classes))
+        )
 
     if not wiki_root.is_dir():
         return EnumerationResult(hits=(), next_cursor=None)

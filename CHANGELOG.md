@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Generalized ENUMERATION primitive: `enumerate_entities` (MCP) /
+  `athenaeum enumerate` (CLI) (athenaeum#965).** Return every entity of a
+  declared type matching field predicates, ordered by a named field — with
+  NO query text, and never routed through `recall`'s relevance ranking. A
+  distinct code path from `recall`, not an argument on it: every one of
+  `recall`'s three backends either returns nothing or meaningless
+  neighbours for empty query text, so "enumerate everything of type X" was
+  structurally unanswerable through it even after athenaeum#964's `type`
+  filter. Field predicates support exact/substring/regex match (all
+  case-insensitive) over a named field or an ORDERED FALLBACK list of
+  fields (the generalized form of `athenaeum people --company`'s
+  `current_company`/`linkedin_company_at_connect` OR-shape), AND-combined
+  and repeatable. Results are sorted by a caller-named field (descending by
+  default, deterministic `uid`-ascending tiebreak) and paginated via a
+  `limit` (`0` = unlimited) plus an opaque continuation cursor. Every hit
+  carries `uid`/`type`/`name`, plus any additionally requested declared
+  fields; `google_contact_*` and `do_not_email` are usable as predicates
+  and output fields only behind `with_pii=True` (the same flag contract
+  `recall` already uses). Permitted type values and predicable field names
+  are derived from the deployment's declared entity-class schema (the
+  athenaeum#964 resolver) rather than hardcoded, and an unrecognized type
+  returns an empty result plus this deployment's known classes rather than
+  erroring. Reads the converged filterable-metadata store athenaeum#964
+  built (`FTS5Backend.candidates_by_type` — a plain indexed `WHERE type =
+  ?`, never FTS5 `MATCH`/ranking) to narrow the candidate set, then
+  re-reads fresh frontmatter per candidate for predicates, sorting, output
+  fields, and the same fail-closed audience scoping (athenaeum#538) every
+  other read tool applies. Does NOT deprecate or change `athenaeum people`
+  (that is athenaeum#966); `docs/recall-architecture.md` documents a
+  full capability-parity table against it. See
+  `src/athenaeum/enumeration.py` for the full contract.
+
 ### Changed
 
 - **Dropped the redundant `push: [develop]` trigger from `oss-readiness.yml`
