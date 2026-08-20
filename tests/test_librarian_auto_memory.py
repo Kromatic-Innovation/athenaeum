@@ -1276,6 +1276,27 @@ class TestRetireNoGitSafety:
         assert report.committed is False
         assert any(d.disposition == SKIP for d in report.dispositions)
 
+    def test_fake_declaring_no_recovery_capability_means_no_retire(
+        self, retire_root: Path
+    ) -> None:
+        """issue athenaeum#978 (S3, Tier A AC5): even with a REAL git repo
+        present (``retire_root`` is git-init'd), an injected store fake
+        declaring neither ``versioned`` nor ``purgeable`` (design note §4.4
+        R1) makes the gate refuse — proving it is driven by the declared
+        capability, not by probing ``knowledge_root / ".git"`` directly."""
+        from athenaeum.merge import merge_clusters_to_wiki
+        from athenaeum.retire import SKIP, run_retire_pass
+        from tests.store_fakes import NoRecoveryStore
+
+        raw = _raw_file(retire_root)
+        entries = merge_clusters_to_wiki(retire_root)
+        report = run_retire_pass(entries, retire_root, store=NoRecoveryStore())
+
+        assert raw.exists()  # nothing retired despite a real git repo
+        assert report.moved == []
+        assert report.committed is False
+        assert any(d.disposition == SKIP for d in report.dispositions)
+
 
 class TestRetireIntegrationViaRun:
     def test_run_merge_only_retires_by_default(self, retire_root: Path) -> None:
