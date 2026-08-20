@@ -138,6 +138,12 @@ class TestExistingAxesUnchanged:
     def test_known_types_frozenset_unchanged(self) -> None:
         # Exact membership pinned — a regression here would mean athenaeum#424
         # accidentally touched the athenaeum#93 entity-schema axis.
+        #
+        # Issue athenaeum#971 (a deliberate, tracked change to THIS axis, not an
+        # accidental one from unrelated work) added "incident" and removed
+        # "feedback"/"user" (folded per `_schema/types.md`) — updated here
+        # in lockstep with `schemas.FALLBACK_TYPES` so this guard keeps
+        # doing its job of catching the NEXT accidental drift.
         assert KNOWN_TYPES == {
             "person",
             "company",
@@ -148,9 +154,8 @@ class TestExistingAxesUnchanged:
             "tool",
             "reference",
             "principle",
-            "feedback",
             "preference",
-            "user",
+            "incident",
         }
 
     def test_unknown_type_still_warns_exactly_as_before(self) -> None:
