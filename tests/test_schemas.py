@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from athenaeum.models import parse_frontmatter
+from athenaeum.models import load_schema_list, parse_frontmatter
 from athenaeum.schemas import (
     FALLBACK_TYPES,
     KNOWN_TYPES,
@@ -370,9 +370,8 @@ class TestKnownTypes:
             "tool",
             "reference",
             "principle",
-            "feedback",
             "preference",
-            "user",
+            "incident",
         ):
             assert t in KNOWN_TYPES
             assert t in FALLBACK_TYPES
@@ -408,3 +407,89 @@ class TestKnownTypes:
             _w.simplefilter("error", UserWarning)
             # Should not raise — no warning expected for KNOWN_TYPES.
             validate_wiki_meta(meta)
+
+
+# --- Issue athenaeum#971: incident recognized, user/feedback deprecated ---
+
+
+class TestSchemaAlignment971:
+    """Follow-up to #970's ``_schema/types.md`` reconciliation: ``incident``
+    is the 10th declared type and must stop warning as unknown; ``user``/
+    ``feedback`` are folded away by #970 and must stop counting as a
+    currently-valid type WITHOUT starting to raise for a page already on
+    disk with one of those values (athenaeum#93's non-raising design)."""
+
+    def test_incident_is_known_and_emits_no_warning(self) -> None:
+        import warnings as _w
+
+        assert "incident" in KNOWN_TYPES
+        assert "incident" in FALLBACK_TYPES
+        meta = {"uid": "abc12345", "type": "incident", "name": "X"}
+        with _w.catch_warnings():
+            _w.simplefilter("error", UserWarning)
+            validate_wiki_meta(meta)
+
+    def test_user_and_feedback_no_longer_known(self) -> None:
+        # The fold's enforcement teeth (AC2): no longer counted as valid for
+        # a NEW write — see test_corrections.py's create-path gate test.
+        assert "user" not in KNOWN_TYPES
+        assert "feedback" not in KNOWN_TYPES
+        assert "user" not in FALLBACK_TYPES
+        assert "feedback" not in FALLBACK_TYPES
+
+    def test_existing_user_page_still_validates_without_raising(self) -> None:
+        # AC2's compatibility requirement: a page in the wild with
+        # `type: user` must not start erroring. It now takes the ordinary
+        # "unknown wiki type" UserWarning path (same as any other
+        # out-of-registry value) instead of the silent KNOWN_TYPES path —
+        # still falls through to WikiBase, still validates uid/type/name,
+        # never raises.
+        meta = {"uid": "abc12345", "type": "user", "name": "X"}
+        with pytest.warns(UserWarning, match="unknown wiki type"):
+            m = validate_wiki_meta(meta)
+        assert m.type == "user"
+
+    def test_existing_feedback_page_still_validates_without_raising(self) -> None:
+        meta = {"uid": "abc12345", "type": "feedback", "name": "X"}
+        with pytest.warns(UserWarning, match="unknown wiki type"):
+            m = validate_wiki_meta(meta)
+        assert m.type == "feedback"
+
+    def test_every_known_type_declared_reserved_or_a_documented_fold(
+        self, tmp_path: Path
+    ) -> None:
+        """AC4: every type writable by any code path (``KNOWN_TYPES``, the
+        fallback :func:`athenaeum.corrections.process_correction_record`'s
+        create gate and :func:`athenaeum.librarian`'s tier-0 paths both fall
+        back to when a deployment's ``_schema/types.md`` is absent/empty)
+        must parse from a ``types.md``-shaped schema file or be the one
+        explicitly reserved exception (``auto-memory``, minted by the
+        auto-memory intake pipeline, never a normal declared entity type).
+
+        Uses a SYNTHETIC fixture ``types.md`` (never the live wiki's real
+        registry — that file lives in the separate knowledge repo, not
+        this checkout) shaped like #970's reconciled 10 declared types.
+        """
+        schema_dir = tmp_path / "_schema"
+        schema_dir.mkdir()
+        (schema_dir / "types.md").write_text(
+            "| Type | Description |\n"
+            "|---|---|\n"
+            "| person | ... |\n"
+            "| company | ... |\n"
+            "| project | ... |\n"
+            "| concept | ... |\n"
+            "| source | ... |\n"
+            "| tool | ... |\n"
+            "| reference | ... |\n"
+            "| principle | ... |\n"
+            "| preference | ... |\n"
+            "| incident | ... |\n"
+        )
+        declared = set(load_schema_list(schema_dir, "types.md"))
+        reserved = {"auto-memory"}
+        unaccounted = KNOWN_TYPES - declared - reserved
+        assert unaccounted == set(), (
+            f"KNOWN_TYPES member(s) neither declared in types.md nor "
+            f"reserved: {sorted(unaccounted)}"
+        )
