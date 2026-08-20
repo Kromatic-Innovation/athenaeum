@@ -24,7 +24,8 @@ reresolve-questions), ``_cmd_curate`` (dedupe/claims/auto-memory),
 ``_cmd_decisions``, ``_cmd_authority``, ``_cmd_axiom``, ``_cmd_calibration``,
 ``_cmd_outbound``, ``_cmd_drain``, ``_cmd_storage``, ``_cmd_push_metrics``
 (push-metrics baseline/coverage-audit, issue athenaeum#711),
-``_cmd_memory_class`` (memory-class backfill, issue athenaeum#996).
+``_cmd_memory_class`` (memory-class backfill, issue athenaeum#996),
+``_cmd_verdicts`` (verdict ledger inspection, issue athenaeum#712).
 
 FACTORING RULE: **every subcommand lives in its own ``_cmd_<name>.py`` module
 (or a small same-domain group module) with an ``add_<name>_subparser(subparsers)``
@@ -80,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_drain import add_drain_subparser
     from athenaeum._cmd_index import add_index_subparsers
     from athenaeum._cmd_lifecycle import add_lifecycle_subparsers
+    from athenaeum._cmd_measure import add_measure_subparser
     from athenaeum._cmd_memory_class import add_memory_class_subparser
     from athenaeum._cmd_merges import add_merges_subparser
     from athenaeum._cmd_outbound import add_outbound_subparser
@@ -92,6 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
+    from athenaeum._cmd_verdicts import add_verdicts_subparser
 
     parser = argparse.ArgumentParser(
         prog="athenaeum",
@@ -130,7 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_drain_subparser(subparsers)  # drain
     add_storage_subparser(subparsers)  # storage
     add_push_metrics_subparser(subparsers)  # push-metrics
+    add_measure_subparser(subparsers)  # measure (shadow-linkage, backlog-price, ordinary-night)
     add_memory_class_subparser(subparsers)  # memory-class backfill
+    add_verdicts_subparser(subparsers)  # verdicts (issue athenaeum#712)
     add_index_subparsers(
         subparsers
     )  # reindex/rebuild-index, compile, registry, ingest, session-end

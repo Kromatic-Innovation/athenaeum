@@ -178,10 +178,9 @@ from athenaeum.pii import (
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.provider import (
     LLMBackend,
+    LLMClientCache,
     ProviderConfigError,
-    build_llm_client,
     capabilities_for_knob,
-    knob_provider_override_source,
     preflight_provider,
     resolve_provider,
 )
@@ -1076,8 +1075,15 @@ def process_one(
     max_runtime_for_file: float | None = None,
     calls_before_file: int = 0,
     started_at_file: float | None = None,
+    write_client: LLMBackend | None = None,
 ) -> ProcessingResult:
     """Process a single raw file through all tiers.
+
+    ``client`` serves Tier 2 (:func:`tier2_classify` — the ``classify``
+    knob). ``write_client`` (issue athenaeum#841) serves Tier 3
+    (:func:`tier3_derive_actions` — the ``write`` knob); ``None`` (every
+    pre-athenaeum#841 caller) falls back to *client*, preserving the old
+    single-client behavior byte-for-byte.
 
     ``config`` is the resolved athenaeum.yaml dict (issue athenaeum#232) — it routes
     the ``models:`` section to the Tier 2/3 calls. ``None`` (legacy/test
@@ -1105,6 +1111,7 @@ def process_one(
     caller at the moment THIS file started, so the deltas measured here are
     this file's own spend, not the phase's running total.
     """
+    effective_write_client = write_client if write_client is not None else client
     result = ProcessingResult(raw_file=raw)
 
     # Sticky intake access (issue athenaeum#320 §5): an `access:` stamped on the raw
@@ -1303,14 +1310,14 @@ def process_one(
     # whatever completed before the bound tripped (see that exception's
     # docstring); caught below, that partial progress is written durably
     # before re-raising, rather than discarded.
-    assert client is not None, "client required for non-dry-run"
+    assert effective_write_client is not None, "write client required for non-dry-run"
     try:
         new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
             raw,
             actions,
             index,
             wiki_root,
-            client,
+            effective_write_client,
             usage=usage,
             config=config,
             max_api_calls_for_file=max_api_calls_for_file,
@@ -1620,8 +1627,17 @@ def _compile_auto_memory(
     heartbeat: Callable[[], None] | None = None,
     contradiction_sweep_since: datetime | None = None,
     force_full_contradiction_sweep: bool = False,
+    resolve_client: Any = None,
+    reasoning_t1_client: Any = None,
+    reasoning_t2_client: Any = None,
 ) -> list:
     """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
+
+    ``client`` is the ``classify`` knob's client (C4 detect). ``resolve_client``
+    / ``reasoning_t1_client`` / ``reasoning_t2_client`` (issue athenaeum#841) are
+    forwarded straight through to :func:`athenaeum.merge.merge_clusters_to_wiki`
+    — each ``None`` (every pre-athenaeum#841 caller) falls back to *client*
+    there, unchanged.
 
     Issue athenaeum#370 PR2: this is the single choke point for the delta-scoped compile,
     extracted from :func:`run` so the equivalence test can drive the EXACT
@@ -1752,7 +1768,8 @@ def _compile_auto_memory(
         out_delta_taken["taken"] = only_cluster_ids is not None
 
     # C3: merge clusters into canonical wiki/auto-*.md entries. C4 contradiction
-    # detection runs inside merge_clusters_to_wiki and reuses the shared client.
+    # detection runs inside merge_clusters_to_wiki and reuses the ``classify``
+    # knob's client passed in as *client* above (issue athenaeum#841).
     # When ``only_cluster_ids`` is set (delta path), only the affected entries
     # are merged + written; every unaffected wiki page is left untouched.
     # Issue athenaeum#909: disarm the C4-since scope whenever a real full-compile
@@ -1767,6 +1784,9 @@ def _compile_auto_memory(
         config=config,
         dry_run=dry_run,
         client=client,
+        resolve_client=resolve_client,
+        reasoning_t1_client=reasoning_t1_client,
+        reasoning_t2_client=reasoning_t2_client,
         usage=usage,
         only_cluster_ids=only_cluster_ids,
         deadline=deadline,
@@ -2764,12 +2784,48 @@ class RunContext:
     #: eligibility, which athenaeum#900 puts out of scope. ``None``/empty means
     #: "no caller scope" and discovery order is used unchanged.
     entity_changed_paths: set[Path] | None = None
+    #: Issue athenaeum#712 — the caller's ALREADY-ACQUIRED
+    #: :class:`athenaeum.runlock.RunLock`, when the caller holds one (the CLI
+    #: `athenaeum run` path always does for a non-dry-run; a `--dry-run` call,
+    #: and every pre-athenaeum#712 test/caller, leaves this ``None``). Set after
+    #: construction, same rationale as ``entity_changed_paths``/
+    #: ``full_contradiction_sweep`` above. Used ONLY by the finalize phase's
+    #: verdict-ledger advisor, and only when
+    #: ``librarian.verdict_ledger_enabled`` is also on — with either
+    #: condition unmet, the run is byte-identical to before athenaeum#712.
+    lock: Any = None
     api_key: str | None = None
     config: dict[str, Any] | None = None
     provider: str = "api"
     head_at_start: str | None = None
     usage: TokenUsage = field(default_factory=TokenUsage)
-    merge_client: Any = None
+    # Per-knob clients (issue athenaeum#841 — finishes the athenaeum#786 routing seam).
+    # Replaces the single shared ``merge_client`` this pipeline used to build
+    # from the run's GLOBAL provider for every knob it serves. Each is
+    # resolved and constructed independently in ``_arm_run_deadline`` via one
+    # shared :class:`~athenaeum.provider.LLMClientCache`, so a config with no
+    # ``llm.providers.<knob>`` overrides still constructs exactly ONE client
+    # (all five resolve to the same global provider -> same cache key ->
+    # same object) — byte-identical to the pre-athenaeum#841 single-client
+    # behavior (AC6). ``None`` on every field until ``_arm_run_deadline``
+    # runs, and whenever the resolved provider has no usable client (``api``
+    # with no key) — every consumer already degrades on ``client is None``.
+    classify_client: Any = None
+    write_client: Any = None
+    resolve_client: Any = None
+    reasoning_t1_client: Any = None
+    reasoning_t2_client: Any = None
+    # Issue athenaeum#841 AC2: each of the five knobs' ACTUALLY resolved
+    # provider, keyed by knob name — set alongside the clients above. Lets
+    # the end-of-run spend recording split the ledger by provider instead of
+    # assuming the whole run was served by one (``spend.
+    # record_spend_per_knob_provider``).
+    knob_providers: dict[str, str] = field(default_factory=dict)
+    #: Each knob's resolved MODEL id this run (mirrors ``knob_providers``) —
+    #: threaded to the per-provider spend split so a knob's tokens are
+    #: attributed to the model that actually served them, not guessed back
+    #: out of the aggregate ``per_model`` breakdown.
+    knob_models: dict[str, str] = field(default_factory=dict)
     run_deadline: float | None = None
     # Issue athenaeum#797: run-summary disposition counts from
     # ``_run_correction_phase`` (``None`` until that phase runs).
@@ -3022,50 +3078,13 @@ def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
     ]
 
 
-#: The five knobs the librarian's entity/merge pipeline serves through ONE
-#: shared client (``ctx.merge_client``, see ``_arm_run_deadline``) — a
-#: ``llm.providers.<knob>`` override for any of these is accepted (no error)
-#: but has NO EFFECT on a librarian run until athenaeum#841 threads
-#: per-knob clients through that pipeline (issue athenaeum#786's documented
-#: known limitation). ``topic`` is deliberately excluded — it IS actually
-#: routed today (:mod:`athenaeum.query_topics` resolves it independently).
-_LIBRARIAN_UNROUTED_KNOBS = ("classify", "write", "resolve", "reasoning_t1", "reasoning_t2")
-
-
-def _warn_if_knob_provider_override_inert(config: dict[str, Any] | None) -> None:
-    """Warn when a per-knob provider override is set but has no effect on a
-    librarian run (issue athenaeum#786).
-
-    Mirrors :func:`athenaeum.reasoning_tiers._warn_if_tier_model_knob_inert`'s
-    inert-knob-warning pattern (issue athenaeum#780): an operator who sets
-    ``llm.providers.write: claude-cli`` (or the equivalent env var) gets a
-    config that LOOKS applied — :func:`athenaeum.provider.resolve_provider`
-    accepts it without error — but the librarian's entity/merge pipeline
-    still serves ``write`` (and ``classify``/``resolve``/``reasoning_t1``/
-    ``reasoning_t2``) through ONE client built from the run's global
-    provider. Silently doing nothing here is exactly the failure class this
-    epic exists to kill (athenaeum#782's framing: the backend appears to work
-    and the operator has no signal their override was never applied). A
-    config with no per-knob override for any of these five knobs logs
-    NOTHING — this is the AC6 byte-identical-by-default case.
-    """
-    for knob in _LIBRARIAN_UNROUTED_KNOBS:
-        source = knob_provider_override_source(config, knob)
-        if source is not None:
-            log.warning(
-                "llm.providers.%s (%s) is set but has NO EFFECT on this "
-                "librarian run: the entity/merge pipeline still serves the "
-                "'%s' knob through the run's single shared client, built "
-                "from the global llm.provider. Per-knob client routing for "
-                "this pipeline is not wired yet (tracked in athenaeum#841); "
-                "llm.providers.topic (query_topics) and llm.providers.resolve "
-                "via the ingest-answers/reresolve-questions CLI commands ARE "
-                "honored today. See docs/configuration.md's \"Per-knob "
-                "provider routing\" section.",
-                knob,
-                source,
-                knob,
-            )
+#: The five knobs the librarian's entity/merge pipeline serves, each through
+#: its OWN per-knob client (issue athenaeum#841 — see ``_arm_run_deadline``,
+#: which resolves and constructs one client per entry here via a shared
+#: :class:`~athenaeum.provider.LLMClientCache`). ``topic`` is deliberately
+#: excluded — :mod:`athenaeum.query_topics` resolves it independently
+#: (issue athenaeum#786), outside this pipeline.
+_LIBRARIAN_ROUTED_KNOBS = ("classify", "write", "resolve", "reasoning_t1", "reasoning_t2")
 
 
 def _run_preconditions(ctx: RunContext) -> int | None:
@@ -3080,15 +3099,20 @@ def _run_preconditions(ctx: RunContext) -> int | None:
     # clean run failure rather than a traceback.
     try:
         ctx.provider = resolve_provider(ctx.config)
+        # Issue athenaeum#841: validate every per-knob override this pipeline
+        # now actually routes through (see ``_arm_run_deadline``) at the SAME
+        # preflight gate as the global provider — an unrecognized
+        # ``llm.providers.<knob>`` value must fail as a clean run failure
+        # here, not surface as a raw traceback later when
+        # ``_arm_run_deadline`` constructs that knob's client. Resolution
+        # here is otherwise thrown away (cheap: no client construction, no
+        # I/O) — ``_arm_run_deadline`` re-resolves each knob when it builds
+        # the actual client.
+        for _knob in _LIBRARIAN_ROUTED_KNOBS:
+            resolve_provider(ctx.config, knob=_knob, default=ctx.provider)
     except ProviderConfigError as exc:
         log.error("%s", exc)
         return 1
-
-    # Issue athenaeum#786: warn (never error) when a per-knob provider override is
-    # set for a knob this pipeline does not yet route per-knob — see
-    # _warn_if_knob_provider_override_inert's docstring. No-op (no log line)
-    # when no per-knob override is set anywhere (AC6 byte-identical default).
-    _warn_if_knob_provider_override_inert(ctx.config)
 
     # Issue athenaeum#330: fail loudly at startup if the claude-cli binary is missing,
     # instead of silently deferring every file to an rc-0 no-op run.
@@ -3181,21 +3205,19 @@ def _resolve_run_config(ctx: RunContext) -> int | None:
     # silently falling back to the api backend or silently dropping the batch
     # request.
     #
-    # Issue athenaeum#786 AC5: checked PER KNOB, not just the run's global
-    # ``ctx.provider`` — determined by reading ``batch.py`` rather than
-    # guessing: ``process_batch_run`` calls ``execute_batch(..., knob=...)``
-    # exactly twice, ``knob="classify"`` for the tier-2 batch and
-    # ``knob="write"`` for the tier-3 batch (no other knob is ever batched).
-    # A per-knob override on EITHER of those two — even though the
-    # librarian's shared client (``ctx.merge_client``, see its construction
-    # below) does not yet route batch calls to a knob-specific client
-    # (documented limitation, ``docs/configuration.md``) — must still reject
-    # loudly here: an operator who sets ``llm.providers.write: claude-cli``
-    # expecting it to be honored must not silently get an "incompatible with
-    # claude-cli" run purely because the GLOBAL default happened to be
-    # ``api``. A config with no ``llm.providers.classify``/``.write`` key
-    # resolves both to ``ctx.provider`` and behaves byte-identically to the
-    # pre-athenaeum#786 single-provider check (AC6).
+    # Issue athenaeum#786 AC5 (still true post-athenaeum#841): checked PER KNOB, not just
+    # the run's global ``ctx.provider`` — determined by reading ``batch.py``
+    # rather than guessing: ``process_batch_run`` calls
+    # ``execute_batch(..., knob=...)`` exactly twice, ``knob="classify"`` for
+    # the tier-2 batch and ``knob="write"`` for the tier-3 batch (no other
+    # knob is ever batched). Both are now genuinely per-knob-routed clients
+    # (``ctx.classify_client`` / ``ctx.write_client``, see
+    # ``_arm_run_deadline`` below) — this guard still has to reject a
+    # ``claude-cli``-routed ``classify``/``write`` LOUDLY here, before either
+    # client is even built, rather than let batch submission fail with an
+    # opaque transport error. A config with no ``llm.providers.classify``/
+    # ``.write`` key resolves both to ``ctx.provider`` and behaves
+    # byte-identically to the pre-athenaeum#786 single-provider check (AC6).
     _batch_knobs = ("classify", "write")
     _batch_incompatible_knobs = [
         knob
@@ -3312,30 +3334,44 @@ def _arm_run_deadline(ctx: RunContext) -> None:
         # reports $0 instead of pricing them at API list rates.
         ctx.usage.subscription_covered = True
 
-    # Build the shared LLM client early (issue athenaeum#330 provider seam) so both the
-    # entity tiers and the C4 contradiction detector can share it. ``None`` for
-    # the api backend when the key is unset (detector degrades deterministically);
+    # Build one client PER KNOB (issue athenaeum#841, finishing the athenaeum#786 routing
+    # seam) instead of one shared client built from the run's global provider
+    # for all five. Each of ``_LIBRARIAN_ROUTED_KNOBS`` is resolved
+    # independently — ``llm.providers.<knob>`` / ``ATHENAEUM_<KNOB>_LLM_PROVIDER``
+    # now genuinely changes which backend serves THAT knob's calls
+    # (``classify`` via tier2_classify/the C4 detector/claim_kind stamping,
+    # ``write`` via tier3_create/tier3_merge, ``resolve`` via reresolve,
+    # ``reasoning_t1``/``reasoning_t2`` via the merge-phase reasoning-tier
+    # screen). ``None`` for the api backend when the key is unset (every
+    # consumer already degrades deterministically on ``client is None``);
     # for claude-cli it is the subscription CLI adapter. ``max_retries=3``
     # preserves the pre-athenaeum#330 api-backend construction byte-for-byte.
     #
-    # Issue athenaeum#786 known limitation (recorded, not solved here — see
-    # ``docs/configuration.md``): this client is built from the run's GLOBAL
-    # provider (no ``knob=``), same as before athenaeum#786. It serves EVERY knob the
-    # entity/merge pipeline touches (``classify`` via tier2_classify/the C4
-    # detector/claim_kind stamping, ``write`` via tier3_create/tier3_merge,
-    # ``resolve`` via reresolve, ``reasoning_t1``/``reasoning_t2`` via the
-    # merge-phase reasoning-tier screen) — a ``llm.providers.<knob>`` override
-    # for any of THOSE five is accepted (no error, but
-    # ``_warn_if_knob_provider_override_inert`` in ``_run_preconditions``
-    # above warns loudly at startup) and has no effect here; only
-    # :mod:`athenaeum.query_topics` (``topic``) and the
-    # ``ingest-answers``/``reresolve-questions`` CLI commands (``resolve``,
-    # via a SEPARATE client built outside this run) are actually per-knob
-    # routed today. Splitting this shared client so each of the five knobs
-    # above gets its own resolved client is tracked in athenaeum#841 — out of
-    # scope for this scaffolding lane (mirrors the classify-knob-granularity
-    # limitation this same issue documents rather than resolves).
-    ctx.merge_client = build_llm_client(ctx.config, api_key=ctx.api_key, max_retries=3)
+    # Shared through ONE :class:`~athenaeum.provider.LLMClientCache` so
+    # knobs that resolve to the SAME provider construct exactly ONE client,
+    # not one each (AC3) — a config with no ``llm.providers.<knob>``
+    # overrides resolves every knob to the same global provider, so all five
+    # below land on the SAME cached client object: byte-identical to the
+    # pre-athenaeum#841 single-``merge_client`` behavior (AC6).
+    _client_cache = LLMClientCache()
+    for _knob in _LIBRARIAN_ROUTED_KNOBS:
+        _provider = resolve_provider(ctx.config, knob=_knob, default=ctx.provider)
+        ctx.knob_providers[_knob] = _provider
+        setattr(
+            ctx,
+            f"{_knob}_client",
+            _client_cache.get_or_build(
+                ctx.config, knob=_knob, api_key=ctx.api_key, max_retries=3
+            ),
+        )
+    # Issue athenaeum#841 AC2: each knob's resolved MODEL id, threaded to the
+    # end-of-run per-provider spend split so a mixed-provider run's ledger
+    # rows attribute tokens to the model that actually served them.
+    ctx.knob_models = {
+        knob: model
+        for knob, model in _resolve_run_models(ctx.config)
+        if knob in _LIBRARIAN_ROUTED_KNOBS
+    }
 
     # Issue athenaeum#396: arm the run-level wall-clock deadline. ``run_deadline`` is an
     # absolute :func:`time.monotonic` value (or ``None`` when disabled) covering
@@ -3537,8 +3573,9 @@ def _run_correction_phase(ctx: RunContext) -> None:
     assertion below is not decorative: every write this phase performs
     (frontmatter merge, JSONL ledger append, `_pending_questions.md`
     escalation, git retirement) is mechanical. A future edit that
-    accidentally threads ``ctx.merge_client`` into this path would trip it
-    immediately instead of silently eating into the entity phase's budget.
+    accidentally threads a knob client (``ctx.classify_client`` / etc.) into
+    this path would trip it immediately instead of silently eating into the
+    entity phase's budget.
     """
     pending_path = ctx.wiki_root / "_pending_questions.md"
     max_escalations = resolve_corrections_max_escalations_per_run(ctx.config)
@@ -3692,7 +3729,14 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
             ctx.knowledge_root,
             config=ctx.config,
             dry_run=ctx.dry_run,
-            client=ctx.merge_client,
+            # Issue athenaeum#841: per-knob clients — ``client`` (C4 detect) is the
+            # ``classify`` knob; ``resolve_client``/``reasoning_t1_client``/
+            # ``reasoning_t2_client`` route their own knobs instead of
+            # falling back to ``client``.
+            client=ctx.classify_client,
+            resolve_client=ctx.resolve_client,
+            reasoning_t1_client=ctx.reasoning_t1_client,
+            reasoning_t2_client=ctx.reasoning_t2_client,
             usage=ctx.usage,
             deadline=ctx.run_deadline,  # issue athenaeum#396
             max_api_calls=ctx.max_api_calls,  # issue athenaeum#461
@@ -3749,7 +3793,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
         _reresolve_start = time.monotonic()
         _reresolve_calls_before = ctx.usage.api_calls
         _run_reresolve_pass(
-            ctx.knowledge_root, config=ctx.config, client=ctx.merge_client, usage=ctx.usage
+            ctx.knowledge_root, config=ctx.config, client=ctx.resolve_client, usage=ctx.usage
         )
         ctx.run_profile.append(
             (
@@ -3903,7 +3947,13 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             index = EntityIndex(ctx.wiki_root)
             log.info("Loaded %d wiki entries into index", len(index))
 
-            client = ctx.merge_client  # shared with C4 contradiction detector
+            # Issue athenaeum#841: two knob-routed clients, not one shared client —
+            # ``classify_client`` serves tier2_classify (and, via
+            # ``_stamp_unclassified_claim_kinds``/the C4 detector elsewhere
+            # in this run, the rest of the ``classify`` knob's call sites);
+            # ``write_client`` serves tier3_create/tier3_merge.
+            classify_client = ctx.classify_client
+            write_client = ctx.write_client
 
             if not ctx.dry_run:
                 git_snapshot(ctx.knowledge_root, "librarian: pre-processing snapshot")
@@ -3948,10 +3998,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                 # (record_spend swallows every error and no-ops when nothing
                 # was spent), so it can never block the partial-progress
                 # commit below or the exit.
-                spend.record_spend(
+                # Issue athenaeum#841 AC2: split by provider when this run's knobs
+                # resolved to more than one (falls straight through to a
+                # single record_spend row, byte-identical, when they didn't).
+                spend.record_spend_per_knob_provider(
                     ctx.usage,
+                    ctx.knob_providers,
+                    ctx.knob_models,
                     run_type="librarian",
-                    provider=ctx.provider,
+                    default_provider=ctx.provider,
                     files_processed=ctx.processed_count,
                 )
                 git_snapshot(
@@ -3991,7 +4046,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         "using the synchronous dry-run path"
                     )
 
-                if ctx.batch_mode and not ctx.dry_run and client is not None:
+                if ctx.batch_mode and not ctx.dry_run and classify_client is not None:
                     # Issue athenaeum#236: phased fan-out via the Messages Batch API.
                     # The synchronous loop below is untouched when the flag
                     # is off. Issue athenaeum#337 note: `processed_count` is
@@ -4012,7 +4067,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         ctx.raw_files,
                         index,
                         ctx.wiki_root,
-                        client,
+                        classify_client,
                         valid_types,
                         valid_tags,
                         valid_access,
@@ -4020,6 +4075,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         config=ctx.config,
                         max_api_calls=ctx.max_api_calls,
                         provider=ctx.provider,
+                        # Issue athenaeum#841: the tier-3 write batch routes to its own
+                        # ``write`` knob client — ``None`` falls back to
+                        # *client* (the ``classify`` client) unchanged.
+                        write_client=write_client,
                     )
                     ctx.total_created = outcome.created
                     ctx.total_updated = outcome.updated
@@ -4215,7 +4274,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 raw,
                                 index,
                                 ctx.wiki_root,
-                                client,
+                                classify_client,
                                 valid_types,
                                 valid_tags,
                                 valid_access,
@@ -4227,6 +4286,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 max_runtime_for_file=raw_file_max_runtime_seconds,
                                 calls_before_file=_file_calls_before,
                                 started_at_file=_file_start,
+                                # Issue athenaeum#841: tier3_derive_actions (the
+                                # ``write`` knob) gets its own client — ``None``
+                                # falls back to *client* (``classify``)
+                                # unchanged.
+                                write_client=write_client,
                             )
                         except RawFileTooLargeError as exc:
                             # Issue athenaeum#898: the per-file BYTE bound (checked by
@@ -4589,8 +4653,9 @@ def _stamp_unclassified_claim_kinds(
 
     Wires :func:`athenaeum.claim_kind.stamp_claim_kind` into the nightly
     intake path: the single natural point where the run already holds a live
-    ``anthropic`` client (``ctx.merge_client``, shared with the C4
-    contradiction detector) AND iterates every raw auto-memory file exactly
+    ``classify``-knob client (``ctx.classify_client``, issue athenaeum#841 — same
+    client the C4 contradiction detector uses, since both serve the
+    ``classify`` knob) AND iterates every raw auto-memory file exactly
     once per run. Called from :func:`_run_auto_memory_phase` right after C1
     discovery and BEFORE the C2 cluster pass, so a freshly-stamped
     ``claim_kind`` is visible to clustering, C3 merge, and (via
@@ -4693,7 +4758,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         # — mirrors every other LLM-bearing step in this phase, which is
         # already skipped above for dry-run.
         _stamp_unclassified_claim_kinds(
-            auto_memory_files, ctx.merge_client, ctx.config, ctx.usage
+            auto_memory_files, ctx.classify_client, ctx.config, ctx.usage
         )
 
     # Issue athenaeum#463 (slice D of athenaeum#460): the nightly run's own delta
@@ -4784,7 +4849,12 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             ctx.knowledge_root,
             config=ctx.config,
             dry_run=ctx.dry_run,
-            client=ctx.merge_client,
+            # Issue athenaeum#841: per-knob clients threaded straight through to
+            # merge_clusters_to_wiki (see _compile_auto_memory below).
+            client=ctx.classify_client,
+            resolve_client=ctx.resolve_client,
+            reasoning_t1_client=ctx.reasoning_t1_client,
+            reasoning_t2_client=ctx.reasoning_t2_client,
             usage=ctx.usage,
             changed_paths=run_changed_paths,
             deadline=ctx.run_deadline,
@@ -4942,7 +5012,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         _reresolve_start = time.monotonic()  # issue athenaeum#464
         _reresolve_calls_before = ctx.usage.api_calls
         _run_reresolve_pass(
-            ctx.knowledge_root, config=ctx.config, client=ctx.merge_client, usage=ctx.usage
+            ctx.knowledge_root, config=ctx.config, client=ctx.resolve_client, usage=ctx.usage
         )
         ctx.run_profile.append(
             (
@@ -5040,10 +5110,16 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         # cumulative drain ceiling (drain.run_drain) and the athenaeum#487 cross-repo
         # accounting contract both re-read this ledger, so an unrecorded run
         # makes them silently under-count. Surface it loudly at the run level.
-        _ledger_written = spend.record_spend(
+        # Issue athenaeum#841 AC2: split by provider when this run's knobs
+        # resolved to more than one (falls straight through to a single
+        # record_spend row, byte-identical, when they didn't — see
+        # record_spend_per_knob_provider's docstring).
+        _ledger_written = spend.record_spend_per_knob_provider(
             ctx.usage,
+            ctx.knob_providers,
+            ctx.knob_models,
             run_type="librarian",
-            provider=ctx.provider,
+            default_provider=ctx.provider,
             files_processed=ctx.files_processed_count,
         )
         if not _ledger_written and (ctx.usage.api_calls > 0 or ctx.usage.total_tokens > 0):
@@ -5166,6 +5242,31 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         except Exception as exc:  # noqa: BLE001 — advisor must never break a run
             log.warning("pending-merge revalidation advisor failed (non-fatal): %s", exc)
 
+    # Issue athenaeum#712: verdict-ledger night bookkeeping. OFF by default
+    # (librarian.verdict_ledger_enabled) — with the flag off, or with no
+    # caller-held lock (e.g. --dry-run), this block does not run at all and
+    # the finalize phase is byte-identical to before this issue: no new file
+    # under wiki/_verdicts/, no exit-code change. With the flag on, this
+    # materializes the ledger directory + epoch registry (a well-formed,
+    # queryable — if still comparator-empty — ledger; the five-verdict
+    # comparator that populates it with real content is a separate, future
+    # child of athenaeum#709) and advances the per-branch duty-cycle counters
+    # one night. Reuses the SAME lock the CLI caller already holds around
+    # this whole run (mod:`athenaeum.verdicts`'s single-appender contract) —
+    # never acquires a second one. Best-effort: never breaks a run.
+    if not ctx.dry_run and ctx.lock is not None:
+        try:
+            from athenaeum.config import resolve_verdict_ledger_enabled
+            from athenaeum.verdicts import ensure_ledger_initialized, note_run_night
+
+            if resolve_verdict_ledger_enabled(ctx.config):
+                ensure_ledger_initialized(ctx.wiki_root, lock=ctx.lock)
+                _duty = note_run_night(ctx.wiki_root, lock=ctx.lock)
+                if _duty:
+                    log.info("verdict ledger duty cycle: %s", _duty)
+        except Exception as exc:  # noqa: BLE001 — advisor must never break a run
+            log.warning("verdict-ledger finalize advisor failed (non-fatal): %s", exc)
+
     # Issue athenaeum#464: normal finalize path — every return below this point
     # (the entity-loop deadline_tripped EXIT_GRACEFUL_PARTIAL/75, the
     # failed-files 1, the strict-budget 1, and the clean 0) shares this one
@@ -5265,6 +5366,7 @@ def run(
     now: datetime | None = None,
     heartbeat: Callable[[], None] | None = None,
     out_run_stats: dict[str, Any] | None = None,
+    lock: Any = None,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error,
     EXIT_GRACEFUL_PARTIAL (75) on its own internal deadline trip (issue
@@ -5382,6 +5484,16 @@ def run(
     :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``now=`` parameter.
     Defaults to ``datetime.now(timezone.utc)`` (frozen once here); tests pass
     a fixed value so no wall-clock leaks into cadence assertions.
+
+    ``lock`` (issue athenaeum#712) is the caller's already-acquired
+    :class:`athenaeum.runlock.RunLock`, when the caller holds one — the CLI
+    ``athenaeum run`` path passes it (see ``_cmd_run.py``); every other
+    caller, and a ``--dry-run`` invocation, leaves it ``None``. Used ONLY by
+    the finalize phase's verdict-ledger advisor (single-appender reuse of
+    this SAME lock, per :mod:`athenaeum.verdicts`'s module docstring), and
+    only when ``librarian.verdict_ledger_enabled`` is also on. With either
+    condition unmet the run touches nothing under ``wiki/_verdicts/`` — byte-
+    identical to before athenaeum#712.
     """
     # Issue athenaeum#540 (M25): stamp a fresh per-run correlation id so every log line
     # this run emits carries the same id (via the logconf run-id filter) — even
@@ -5429,6 +5541,7 @@ def run(
     # Issue athenaeum#909: same "set after construction" rationale as
     # ``entity_changed_paths`` above.
     ctx.full_contradiction_sweep = full_contradiction_sweep
+    ctx.lock = lock
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)
 

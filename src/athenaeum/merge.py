@@ -1616,6 +1616,9 @@ def merge_clusters_to_wiki(
     config: dict[str, Any] | None = None,
     dry_run: bool = False,
     client: "LLMBackend | None" = None,
+    resolve_client: "LLMBackend | None" = None,
+    reasoning_t1_client: "LLMBackend | None" = None,
+    reasoning_t2_client: "LLMBackend | None" = None,
     usage: TokenUsage | None = None,
     now: datetime | None = None,
     as_of: date | None = None,
@@ -1641,11 +1644,25 @@ def merge_clusters_to_wiki(
         config: Optional resolved config dict.
         dry_run: If True, build the entries in memory but do NOT write
             to ``wiki/``. Returns the entries for caller inspection.
-        client: Optional live Anthropic client used for the C4
-            contradiction detector. When ``None`` (e.g. ``ANTHROPIC_API_KEY``
-            unset), the detector is skipped with a deterministic
-            ``detected=False`` fallback — see
+        client: Optional live LLM client for the ``classify`` knob, used by
+            the C4 contradiction detector. When ``None`` (e.g.
+            ``ANTHROPIC_API_KEY`` unset), the detector is skipped with a
+            deterministic ``detected=False`` fallback — see
             :func:`athenaeum.contradictions.detect_contradictions`.
+        resolve_client: Issue athenaeum#841. The ``resolve`` knob's client, used by
+            the Opus resolver (:func:`athenaeum.resolutions.propose_resolution`).
+            ``None`` (every pre-athenaeum#841 caller) falls back to *client* —
+            byte-identical to the pre-athenaeum#841 single-client behavior.
+        reasoning_t1_client: Issue athenaeum#841. The ``reasoning_t1`` knob's
+            client, used by the T1 merge-proposal screen
+            (:func:`t1_screen_rejects_merge_proposal` /
+            :func:`athenaeum.reasoning_tiers.run_t1_tier`). ``None`` falls
+            back to *client*.
+        reasoning_t2_client: Issue athenaeum#841. The ``reasoning_t2`` knob's
+            client, used by the T2 merge-proposal screen
+            (:func:`t2_screen_merge_proposal` /
+            :func:`athenaeum.reasoning_tiers.run_t2_tier`). ``None`` falls
+            back to *client*.
         usage: Optional run-level :class:`TokenUsage` (issue athenaeum#220). When
             provided AND a live client is present, every detector (Haiku)
             and resolver (Opus) call increments ``usage.api_calls`` so the
@@ -1731,6 +1748,21 @@ def merge_clusters_to_wiki(
         The list of :class:`MergedWikiEntry` records in cluster-file order.
     """
     resolved_config = config if config is not None else load_config(knowledge_root)
+    # Issue athenaeum#841: each knob-specific client falls back to *client* (the
+    # ``classify`` knob's client, used for C4 detect) when the caller did not
+    # pass one — every pre-athenaeum#841 caller only ever set ``client=``, so this
+    # keeps their behavior byte-identical while a caller that DOES resolve
+    # per-knob clients (:func:`athenaeum.librarian._run_merge_only_phase` /
+    # ``_compile_auto_memory``) gets genuine per-knob routing. Reassigning the
+    # parameter names directly (rather than introducing ``_effective_*``
+    # locals) lets every nested closure below keep referencing them unchanged.
+    resolve_client = resolve_client if resolve_client is not None else client
+    reasoning_t1_client = (
+        reasoning_t1_client if reasoning_t1_client is not None else client
+    )
+    reasoning_t2_client = (
+        reasoning_t2_client if reasoning_t2_client is not None else client
+    )
     # Issue athenaeum#568 (H7): the active provider, resolved once so both C4 loop heads
     # below can consult ``spend.ceiling_tripped`` (the ceiling's UNIT — tokens
     # for the subscription path, dollars for the metered API path — is keyed on
@@ -2024,7 +2056,8 @@ def merge_clusters_to_wiki(
                 member_paths=member_paths,
                 merge_target_name=proposal.merge_target_name,
                 cluster_id=entry.cluster_id,
-                client=client,
+                # Issue athenaeum#841: the ``reasoning_t1`` knob's own client.
+                client=reasoning_t1_client,
                 usage=usage,
                 wiki_root=wiki_root,
                 config=resolved_config,
@@ -2063,7 +2096,8 @@ def merge_clusters_to_wiki(
                 confidence=proposal.confidence,
                 write_kind=write_kind,
                 cluster_id=entry.cluster_id,
-                client=client,
+                # Issue athenaeum#841: the ``reasoning_t2`` knob's own client.
+                client=reasoning_t2_client,
                 usage=usage,
                 wiki_root=wiki_root,
                 config=resolved_config,
@@ -2296,9 +2330,12 @@ def merge_clusters_to_wiki(
                 )
             return None
         resolve_calls += 1
-        if usage is not None and client is not None:
+        # Issue athenaeum#841: gate on resolve_client (the client propose_resolution
+        # actually calls below), not the classify-knob ``client`` — the two
+        # can now differ.
+        if usage is not None and resolve_client is not None:
             usage.api_calls += 1
-        return propose_resolution(result, members, client, usage=usage)
+        return propose_resolution(result, members, resolve_client, usage=usage)
 
     # Issue athenaeum#462: FIRST WRITE — persist the deterministic C3 merge output to
     # disk BEFORE C4 detection runs. Until this change the page write loop sat

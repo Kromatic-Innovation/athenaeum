@@ -9,6 +9,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **v6 memory-model measurement pack: shadow-linkage count, backlog price
+  sheet, ordinary-night steady-state table (athenaeum#713).** Three new
+  `athenaeum measure` subcommands the comparator slice (child of athenaeum#709)
+  is gated on, all read-only against the live store (no wiki write, no
+  `_pending_merges.md` mutation, no reindex) and all committing their dated
+  snapshot into `docs/memory-model-measurements.md`:
+  - `athenaeum measure shadow-linkage` — runs the existing complete-linkage
+    formation (`athenaeum.clusters`, athenaeum#681) over the live wiki-page
+    population in shadow mode: embeddings only, zero LLM calls (asserted by
+    test), no writes. Reports cluster count, size distribution, and the
+    count of pairs that would reach the comparator's content-comparison
+    stage — for both the current complete-linkage path and the pre-athenaeum#681
+    single-linkage path, side by side.
+  - `athenaeum measure backlog-price` — prices draining the raw-intake
+    backlog: re-counts the backlog (`athenaeum.intake.discover_raw_files`,
+    never a copied literal), reads measured calls/file and tokens/file from
+    the spend ledger (`athenaeum.drain_advisor`, extended with the new
+    `observed_calls_per_file`), derives wall-clock/file from the operator's
+    `librarian-run-summary` log lines (new `athenaeum.run_summary_log`
+    parser — the spend ledger itself has no elapsed-time field), and prices
+    via the existing per-MTok rate table
+    (`athenaeum.drain_advisor.estimate_drain_cost_usd`). Includes a
+    decision-inflow-rate sensitivity table (5-50 decisions/100 compiled
+    files) showing days-to-terminal-disposition against a configurable
+    human daily decision budget (default 20/day) and flagging a 6-month
+    horizon breach. The "with write-refusal/retention-pack pre-filter"
+    column is reported `n/a` unless an operator supplies
+    `--prefilter-excluded-fraction` — that classifier does not exist yet in
+    this codebase, so its saving is never fabricated.
+  - `athenaeum measure ordinary-night` — builds the ordinary-night
+    steady-state table: measured files/day of intake, calls/file,
+    wall-clock/file, against the ACTUAL configured nightly call budget
+    (`librarian.max_api_calls`, default 800) and wall-clock window
+    (`librarian.max_runtime`, default 3600s) — plus the comparator regime's
+    amortized load as explicit, operator-supplied assumptions (the
+    comparator/TTL/invalidation-wave/audit-sampling subsystems don't exist
+    yet). States a `closes` / `does-not-close` / `indeterminate` verdict
+    up front; when it does not close, lists the three documented options
+    the design lock names WITHOUT auto-selecting one — that remains an
+    explicit operator decision.
+
+  Every figure a real corpus run would need is produced by a named,
+  reproducible command (`athenaeum measure ...`), never a hand-typed table
+  or an ad-hoc session calculation. Where this implementation ran without
+  access to the operator's live `~/knowledge` store, no figure was
+  estimated or fabricated — the instrument ships; the measurement run is
+  handed back to the operator.
+
+- **Verdict ledger with justification basis (athenaeum#712).** New
+  `src/athenaeum/verdicts.py` — an append-only, per-month-partitioned ledger
+  of pairwise comparison verdicts (`duplicate | contradiction |
+  specialization | distinct | underdetermined`), each carrying the exact
+  `basis` of facts (content hashes, coordinates, epochs, authority) it was
+  justified by, so a change to any one fact invalidates exactly the
+  verdicts that depended on it — a truth-maintenance move that ships ahead
+  of the five-verdict comparator that will populate it (a separate, future
+  child of the memory-model v6 epic, athenaeum#709). Content hashing covers
+  claim content only (system-authored coordinates/breadcrumbs/predicate
+  annotations/tier flags are excluded, so the verdict system never
+  triggers its own re-comparison waves). Six targeted, per-basis-element
+  stale-marking rules, each independently testable. Single-appender via
+  the existing `athenaeum.runlock.RunLock` (no second lock). A per-branch
+  comparator-epoch registry enforces no-overlapping-wave and computes the
+  nights-in-wave/nights duty cycle. New CLI surface: `athenaeum verdicts
+  {count,list-by-verdict,show-one-pair,show-stale}`. Ships dark behind
+  `librarian.verdict_ledger_enabled` (default `false`) — with it on, a
+  merge approve/reject via `athenaeum ingest-answers` records a verdict for
+  the decision the pipeline already made, and `athenaeum run`'s finalize
+  phase materializes the ledger and advances the duty-cycle counters. See
+  `docs/configuration.md`'s "Verdict ledger" section. `run()`'s new `lock`
+  parameter is covered end to end (not just at the finalize-phase boundary)
+  by `tests/test_verdicts_run_wiring.py::TestRunEndToEndLockThreading`,
+  which drives the real top-level `run(..., lock=lock)` against an
+  empty-corpus scratch tree and asserts a well-formed ledger with the flag
+  on and no `wiki/_verdicts/` at all with it off.
+
+- **Per-knob provider routing threaded through the librarian pipeline
+  (athenaeum#841, finishing the athenaeum#786 scaffolding).** `llm.providers.<knob>` /
+  `ATHENAEUM_<KNOB>_LLM_PROVIDER` overrides for `classify`, `write`,
+  `resolve`, `reasoning_t1`, and `reasoning_t2` used to be accepted but
+  silently inert on an `athenaeum run` librarian run — the entity/merge
+  pipeline built ONE shared client from the global provider for all five,
+  and a startup warning was the only signal an override had no effect. Each
+  of the five now gets its OWN client, constructed once per DISTINCT
+  resolved provider via a shared `LLMClientCache` (several knobs sharing one
+  provider still construct exactly one client — no behavior change for the
+  common no-override case, which resolves byte-identically to before). The
+  ineffective-override warning is removed; a bad per-knob provider id now
+  fails the run loudly at the same startup preflight gate as the global
+  provider, instead of surfacing later as a raw traceback. `athenaeum spend
+  --by-knob` now shows the real provider split for a mixed-provider
+  librarian run too: when a run's knobs resolve to more than one provider,
+  the run writes one spend-ledger row PER distinct provider (each carrying
+  only that provider's own token/knob/model attribution and correct
+  `billing_mode`) via the new `spend.record_spend_per_knob_provider`,
+  instead of one row assuming a single provider for the whole run. See
+  `docs/configuration.md`'s "Per-knob provider routing" section for the
+  updated "what is actually wired" summary.
+
 - **`athenaeum surface-divergence --field <name>` — the bounce-divergence
   check generalized into a per-field guard that runs unattended and fails
   (athenaeum#963).** `bounce-divergence` (athenaeum#853) never failed on a
@@ -36,6 +135,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped. See `docs/configuration.md` → "Surface-divergence guard
   (athenaeum#963)" for the operator-invocation contract this registers for
   an unattended nightly pass against the live store.
+
+### Documentation
+
+- **Design note: standing sensitive-value filter at raw-sweep intake
+  (athenaeum#949).** New `docs/sensitivity-value-routing.md` answers the
+  issue's AC1–AC13 — placement and pointer contract (AC1/AC2), the uid
+  problem and the proposed record-keyed read-path disposition (AC3), the
+  raw-tree observability gap stated as open rather than solved (AC4),
+  disposition of the existing `screen_intake` stage (AC5), per-write-path
+  redaction mechanics (AC6), precedence and fail-closed behavior (AC7/AC10),
+  usage-classification default (AC9), idempotency (AC11), the correlation
+  trade (AC12), the migration story relative to athenaeum#437 (AC13), and
+  the relationship to `pii.RedactionMarker` left as an explicit open
+  question (AC8). Cites a working spike (branch
+  `prototype/949-sensitivity-routing-spike`, not merged and not part of
+  this change) as verification evidence for specific mechanical claims —
+  the note's decisions are proposals for review, not settled by the spike
+  having been built. Implementation is explicitly deferred to the
+  follow-on slices the note's §10 lists — athenaeum#1022 (config resolver),
+  athenaeum#1023 (routing/redaction mechanism), athenaeum#1024
+  (record-keyed read path), athenaeum#1025 (wire into the librarian raw
+  sweep) — filed as separate issues against this note (AC14's filing half;
+  review of the note itself is routed separately). Docs-only; no code
+  changed.
 
 ### Fixed
 
