@@ -2,7 +2,7 @@
 
 Durable record of measurements taken against the live `~/knowledge` store for the
 reasoning-tier screening subsystem (`src/athenaeum/reasoning_tiers.py`, issues
-athenaeum#518 / #602 / #432).
+athenaeum#518 / athenaeum#602 / athenaeum#432).
 
 Figures here are **measured**, never estimated. Every section records the exact
 commands that produced it so a later agent with no session memory can reproduce a
