@@ -38,7 +38,11 @@ import pytest
 
 from athenaeum.bounce_divergence import (
     compute_divergence,
+)
+from athenaeum.bounce_divergence import (
     render_report as bounce_render_report,
+)
+from athenaeum.bounce_divergence import (
     report_as_dict as bounce_report_as_dict,
 )
 from athenaeum.cli import main
