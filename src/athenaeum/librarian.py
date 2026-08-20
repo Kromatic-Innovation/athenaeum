@@ -1001,6 +1001,64 @@ def tier0_bounce_mark(
     return fact
 
 
+def _apply_tier3_results(
+    result: ProcessingResult,
+    *,
+    new_entities: list[WikiEntity],
+    pending_updates: list[tuple[Path, str]],
+    updated_uids: list[str],
+    escalations: list[EscalationItem],
+    wiki_root: Path,
+    index: EntityIndex,
+    config: dict[str, object] | None,
+) -> None:
+    """Write a Tier-3 result set to disk and fold it into *result* in place.
+
+    Shared by :func:`process_one`'s clean-completion path and its
+    over-budget partial-progress path (issue athenaeum#994) so both apply the
+    EXACT same write/validate/register/escalate sequence — the two paths
+    must be indistinguishable on disk for the entities that made it in
+    either way. Callers pass either a full Tier-3 result (clean completion)
+    or the partial payload carried on a caught
+    :class:`~athenaeum.models.RawFileOverBudgetError` (bound tripped
+    mid-file); this function does not know or care which.
+    """
+    for _update_path, _update_content in pending_updates:
+        atomic_write_text(_update_path, _update_content)
+
+    for entity in new_entities:
+        page_path = wiki_root / entity.filename
+        rendered = entity.render()
+        # Schema-gate the LLM-produced entity before write. Re-parse the
+        # rendered frontmatter so the validator sees exactly the bytes
+        # that would land on disk — this round-trip catches YAML-render
+        # quirks (numeric coercion, quoting drift, key reordering edge
+        # cases) that a direct dict-validate would miss. Deliberate; do
+        # NOT collapse to validating ``entity`` directly without first
+        # re-parsing ``rendered``.
+        rendered_meta, _ = parse_frontmatter(rendered)
+        validate_wiki_meta(rendered_meta)
+        atomic_write_text(page_path, rendered)
+        index.register(entity)
+        result.created.append(entity)
+        log.info("  Created: %s → %s", entity.name, entity.filename)
+
+    result.updated.extend(updated_uids)
+    result.escalated.extend(escalations)
+
+    # --- Tier 4: Escalation ---
+    if escalations:
+        # wiki_root is <knowledge_root>/wiki; the config sits at the
+        # knowledge_root level. Reuse the caller's resolved config when
+        # provided; otherwise resolve it here so the auto-apply lane
+        # (issue athenaeum#156) sees the operator's yaml settings.
+        tier4_escalate(
+            escalations,
+            wiki_root / "_pending_questions.md",
+            config=config if config is not None else load_config(wiki_root.parent),
+        )
+
+
 def process_one(
     raw: RawFile,
     index: EntityIndex,
@@ -1238,88 +1296,59 @@ def process_one(
         return result
 
     # --- Tier 3: LLM-call phase (issue athenaeum#898: writes NOTHING yet) ---
+    # Issue athenaeum#994: the per-file LLM-call / wall-clock bound is now
+    # checked INCREMENTALLY, inside tier3_derive_actions itself, after each
+    # entity action — not once here, after the whole file's actions have
+    # all already run. A trip raises RawFileOverBudgetError carrying
+    # whatever completed before the bound tripped (see that exception's
+    # docstring); caught below, that partial progress is written durably
+    # before re-raising, rather than discarded.
     assert client is not None, "client required for non-dry-run"
-    new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
-        raw,
-        actions,
-        index,
-        wiki_root,
-        client,
-        usage=usage,
+    try:
+        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
+            raw,
+            actions,
+            index,
+            wiki_root,
+            client,
+            usage=usage,
+            config=config,
+            max_api_calls_for_file=max_api_calls_for_file,
+            max_runtime_for_file=max_runtime_for_file,
+            calls_before_file=calls_before_file,
+            started_at_file=started_at_file,
+        )
+    except RawFileOverBudgetError as exc:
+        # Issue athenaeum#994: land the partial progress BEFORE propagating
+        # the error, so the entity loop's over-bound handling (which never
+        # unlinks the raw file and records a quarantine-ledger violation,
+        # unchanged from athenaeum#898) sits on top of durable partial work
+        # instead of discarding it. Mirrors the full-completion write path
+        # below exactly, applied to the exception's partial payload instead
+        # of a clean return.
+        _apply_tier3_results(
+            result,
+            new_entities=exc.new_entities,
+            pending_updates=exc.pending_updates,
+            updated_uids=exc.updated_uids,
+            escalations=exc.escalations,
+            wiki_root=wiki_root,
+            index=index,
+            config=config,
+        )
+        raise
+
+    # All LLM calls succeeded AND this file is within its per-file budget.
+    _apply_tier3_results(
+        result,
+        new_entities=new_entities,
+        pending_updates=pending_updates,
+        updated_uids=updated_uids,
+        escalations=escalations,
+        wiki_root=wiki_root,
+        index=index,
         config=config,
     )
-
-    # Issue athenaeum#898: the per-file LLM-call / wall-clock bound, checked HERE
-    # — after every LLM call this file will make (Tier 2 classify + Tier 3's
-    # create/merge calls above), before ANY of this file's writes start.
-    # ``pending_updates`` has not been flushed and ``new_entities`` has not
-    # been written, so raising here means the file's result really is
-    # discarded — no wiki page created, no existing page updated, no
-    # escalation written, and (since nothing changed) the raw file is left
-    # on disk for the entity loop's over-bound handling to leave alone,
-    # exactly like a processing failure. See RawFileOverBudgetError's
-    # docstring for why a POST-`process_one` check (the pre-review shape)
-    # could not make this guarantee: by the time control returned to the
-    # caller, tier3_write's own update flush and this function's create-write
-    # loop below had both already run.
-    if max_api_calls_for_file is not None and usage is not None:
-        _calls_used_for_file = usage.api_calls - calls_before_file
-        if _calls_used_for_file > max_api_calls_for_file:
-            raise RawFileOverBudgetError(
-                raw.ref,
-                bound="llm_calls",
-                detail=(
-                    f"{_calls_used_for_file} call(s) > "
-                    f"{max_api_calls_for_file}-call limit"
-                ),
-            )
-    if max_runtime_for_file is not None and started_at_file is not None:
-        _elapsed_for_file = time.monotonic() - started_at_file
-        if _elapsed_for_file > max_runtime_for_file:
-            raise RawFileOverBudgetError(
-                raw.ref,
-                bound="wall_clock",
-                detail=f"{_elapsed_for_file:.1f}s > {max_runtime_for_file}s limit",
-            )
-
-    # All LLM calls succeeded AND this file is within its per-file budget —
-    # apply the Tier 3 update writes atomically (mirrors tier3_write's own
-    # flush step, which this function deliberately bypasses above).
-    for _update_path, _update_content in pending_updates:
-        atomic_write_text(_update_path, _update_content)
-
-    for entity in new_entities:
-        page_path = wiki_root / entity.filename
-        rendered = entity.render()
-        # Schema-gate the LLM-produced entity before write. Re-parse the
-        # rendered frontmatter so the validator sees exactly the bytes
-        # that would land on disk — this round-trip catches YAML-render
-        # quirks (numeric coercion, quoting drift, key reordering edge
-        # cases) that a direct dict-validate would miss. Deliberate; do
-        # NOT collapse to validating ``entity`` directly without first
-        # re-parsing ``rendered``.
-        rendered_meta, _ = parse_frontmatter(rendered)
-        validate_wiki_meta(rendered_meta)
-        atomic_write_text(page_path, rendered)
-        index.register(entity)
-        result.created.append(entity)
-        log.info("  Created: %s → %s", entity.name, entity.filename)
-
-    result.updated.extend(updated_uids)
-    result.escalated.extend(escalations)
-
-    # --- Tier 4: Escalation ---
-    if escalations:
-        # wiki_root is <knowledge_root>/wiki; the config sits at the
-        # knowledge_root level. Reuse the caller's resolved config when
-        # provided; otherwise resolve it here so the auto-apply lane
-        # (issue athenaeum#156) sees the operator's yaml settings.
-        tier4_escalate(
-            escalations,
-            wiki_root / "_pending_questions.md",
-            config=config if config is not None else load_config(wiki_root.parent),
-        )
-
     return result
 
 
@@ -4228,25 +4257,46 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     quarantine_candidates.pop(raw.ref, None)
                             continue
                         except RawFileOverBudgetError as exc:
-                            # Issue athenaeum#898: the per-file LLM-call / wall-clock
-                            # bound, raised by process_one itself AFTER this
-                            # file's LLM calls but BEFORE any of its writes
-                            # (see RawFileOverBudgetError's docstring) — so
-                            # unlike a bare post-hoc check, no wiki page was
-                            # created or updated and no escalation was
-                            # written for this file this run. The raw file is
-                            # untouched on disk (never unlinked on this
-                            # path), so it is re-discovered next run and can
-                            # accumulate a consecutive-violation count exactly
-                            # like a processing failure would.
+                            # Issue athenaeum#994 (was athenaeum#898): the per-file
+                            # LLM-call / wall-clock bound, raised by
+                            # tier3_derive_actions AFTER each action that
+                            # completed before the bound tripped — process_one
+                            # already wrote that partial progress durably
+                            # (see RawFileOverBudgetError's and
+                            # _apply_tier3_results's docstrings) before this
+                            # exception reached us, so `exc.new_entities` /
+                            # `exc.updated_uids` / `exc.escalations` are
+                            # already on disk and must be folded into this
+                            # run's totals. Only the NOT-YET-STARTED remainder
+                            # of the file's actions was discarded. The raw
+                            # file itself is untouched on disk either way
+                            # (never unlinked on this path), so it is
+                            # re-discovered next run — its already-written
+                            # entities are then matched by Tier 1 instead of
+                            # re-derived — and can accumulate a
+                            # consecutive-violation count exactly like a
+                            # processing failure would.
                             log.warning(
-                                "%s ref=%s reason=%s-over-bound: %s",
+                                "%s ref=%s reason=%s-over-bound: %s "
+                                "(partial progress landed: %d created, %d updated)",
                                 ENTITY_FILE_FAILURE_PREFIX,
                                 raw.ref,
                                 exc.bound,
                                 exc.detail,
+                                len(exc.new_entities),
+                                len(exc.updated_uids),
                             )
-                            entity_heartbeat.tick(raw.ref, error=1)
+                            ctx.total_created += len(exc.new_entities)
+                            ctx.total_updated += len(exc.updated_uids)
+                            ctx.total_escalated += len(exc.escalations)
+                            _partial_made_change = bool(
+                                exc.new_entities or exc.updated_uids
+                            )
+                            entity_heartbeat.tick(
+                                raw.ref,
+                                compiled=1 if _partial_made_change else 0,
+                                error=1,
+                            )
                             if not ctx.dry_run:
                                 _crossed = _record_bound_violation(
                                     quarantine_candidates,
