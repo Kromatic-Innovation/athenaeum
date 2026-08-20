@@ -654,6 +654,54 @@ def _get_git_sha(repo_root: Path | None = None) -> str:
         return "unknown"
 
 
+def _resolve_exclude_sessions(
+    requested: Iterable[str], known_session_ids: Iterable[str]
+) -> set[str]:
+    """Resolve operator-supplied ``--exclude-session`` values to full session ids.
+
+    Issue athenaeum#987: a bare exact-match denylist let a session-id PREFIX
+    (`d5774338-7d8b` instead of the full `d5774338-7d8b-4152-a252-248d156f95ef`)
+    match nothing and still exit 0 — a contaminated baseline published as if
+    filtered. Each *requested* value must resolve to exactly one entry in
+    *known_session_ids*:
+
+    - an exact match, resolved as-is; else
+    - an unambiguous prefix (exactly one known id starts with it), resolved
+      to that id; else
+    - a hard error — ``ValueError`` — when the value matches zero known ids
+      (the athenaeum#987 silent-no-op case) or more than one (ambiguous:
+      resolving it would silently pick a session the operator didn't name).
+
+    Silent zero-match success is impossible: every requested value either
+    resolves to exactly one real session or raises.
+    """
+    known = sorted({s for s in known_session_ids if s})
+    resolved: set[str] = set()
+    for value in requested:
+        if not value:
+            continue
+        if value in known:
+            resolved.add(value)
+            continue
+        matches = [sid for sid in known if sid.startswith(value)]
+        if len(matches) == 1:
+            resolved.add(matches[0])
+        elif len(matches) == 0:
+            raise ValueError(
+                f"--exclude-session {value!r} matches no known session id "
+                "(pass the full id or an unambiguous prefix)"
+            )
+        else:
+            preview = ", ".join(matches[:5])
+            if len(matches) > 5:
+                preview += f", +{len(matches) - 5} more"
+            raise ValueError(
+                f"--exclude-session {value!r} is ambiguous: matches "
+                f"{len(matches)} known session ids ({preview})"
+            )
+    return resolved
+
+
 def compute_baseline(
     *,
     since: datetime | None = None,
@@ -684,11 +732,22 @@ def compute_baseline(
     but never silently: the excluded session ids and record counts are always
     on the returned :class:`BaselineWindow`, so a cleaned window still shows
     that it needed cleaning.
+
+    Each requested value is resolved via :func:`_resolve_exclude_sessions`
+    against every session id in the FULL ledger (push and reference records,
+    not just the ``[since, now]`` window — a session that's real but simply
+    has no records in this window is a legitimate no-op, not a typo). It may
+    be the full session id or an unambiguous prefix of exactly one known id
+    (issue athenaeum#987); a value matching zero or more-than-one known
+    session ids raises ``ValueError`` rather than silently excluding nothing.
     """
     now = datetime.now(tz=timezone.utc)
     pushes = read_push_records(cache_dir)
     refs = _read_jsonl(reference_records_path(cache_dir))
-    exclude_set = {s for s in (exclude_sessions or ()) if s}
+    known_session_ids = {
+        sid for r in (pushes + refs) if isinstance(sid := r.get("session_id"), str) and sid
+    }
+    exclude_set = _resolve_exclude_sessions(exclude_sessions or (), known_session_ids)
 
     def _in_window(ts_raw: Any) -> bool:
         ts = _parse_ts(ts_raw)
@@ -964,9 +1023,19 @@ def build_coverage_worksheet(
     reproducible from the worksheet file alone (issue athenaeum#986):
     ``missed = count of verdicts == "relevant-missed"``; ``miss_rate =
     missed / (pushed_count + missed)``.
+
+    Each requested ``exclude_sessions`` value is resolved via
+    :func:`_resolve_exclude_sessions` against every session id in the full
+    push-records ledger: the full session id, or an unambiguous prefix of
+    exactly one known id (issue athenaeum#987). A value matching zero or
+    more-than-one known session ids raises ``ValueError`` rather than
+    silently excluding nothing.
     """
-    exclude_set = {s for s in (exclude_sessions or ()) if s}
     records = read_push_records(cache_dir)
+    known_session_ids = {
+        sid for r in records if isinstance(sid := r.get("session_id"), str) and sid
+    }
+    exclude_set = _resolve_exclude_sessions(exclude_sessions or (), known_session_ids)
     excluded_records = (
         [r for r in records if r.get("session_id") in exclude_set] if exclude_set else []
     )
