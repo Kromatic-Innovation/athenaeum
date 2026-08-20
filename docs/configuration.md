@@ -1012,6 +1012,79 @@ intake per the configured action and access.
 |---|---|---|---|---|
 | Medical screening | `ATHENAEUM_SCREEN_MEDICAL` | `screening.medical.action` | `off` | Action for medical intake: `off` (default, no screening) or an enabled action per `docs/screening.md`. **Fails loudly** — a mis-set value raises `ScreeningConfigError` rather than serving with a silently inert classifier. This is one of the two deliberate exceptions to the WARN-and-fall-back malformed-env policy (athenaeum#528). |
 
+## Sensitivity classes (athenaeum#910)
+
+The open, deployment-configurable sensitivity-class vocabulary specified in
+[`docs/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md).
+Athenaeum ships exactly one class today (`pii`); a deployment can define its
+own (`hipaa`, a `classified`/`secret`/`top-secret` gradation, …) without
+patching this repository. This section documents the **class-vocabulary**
+half only — *which classes exist, what detects them, and what read policy
+each carries*. The recogniser code-registration contract
+(`register_recognizer` / `available_recognizers`) is a Python extension
+point, not a YAML knob, and is documented in `sensitivity.py`'s module
+docstring rather than here; the class-to-storage-surface mapping is the
+**pre-existing, unchanged** `storage.mapping`/`storage.adapters` knobs
+documented elsewhere in this file (they are not repeated here — see
+`docs/storage-adapter-contract.md`).
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Class definitions | — | `sensitivity.classes.<name>` | `{}` (operator entries) — the built-in `pii` class is always resolved regardless, see below | Defines a sensitivity class: `recognizers` (a list of recogniser names bound to it — code-registered, never config-defined) and `read_policy` (`access` + `audience`, below). No env override — a dict has no single scalar encoding (`resolve_storage_mapping`'s precedent). |
+| Bound recognisers | — | `sensitivity.classes.<name>.recognizers` | `[]` when omitted | The recogniser names (e.g. `email`, `phone`, or a deployment's own code-registered one) whose matches count toward this class. **Not inherited** — only `read_policy` inherits (see below). An empty list — explicit `[]` or the key simply omitted — is honoured literally: the class is never auto-detected, reachable only by explicit operator/agent tagging. Naming a recogniser `available_recognizers()` doesn't know about raises `SensitivityConfigError` at build time. |
+| Read policy | — | `sensitivity.classes.<name>.read_policy.access` | none (must resolve, directly or via `inherits`) | One of the four existing `access:` levels (`open` / `internal` / `confidential` / `personal` — the same vocabulary athenaeum#312 already ships, not a new one). An out-of-vocabulary value raises `SensitivityConfigError` rather than defaulting; so does a class whose `access` never resolves at all (no value set anywhere in its `inherits` chain). |
+| Read policy audience | — | `sensitivity.classes.<name>.read_policy.audience` | `[]` when omitted | The same opaque role-list mechanism `athenaeum serve --audience` already documents (`docs/security-posture.md` §2.1). **Unvalidated** — any role name is accepted; there is no known-role vocabulary to check against. |
+| Inheritance | — | `sensitivity.classes.<name>.inherits` | unset (no parent) | Names another class in the resolved config (built-in or operator-defined) whose `read_policy` this class defaults from. See "Inheritance semantics" below. |
+
+**Built-in `pii` class, unless overridden.** With no `sensitivity:` config at
+all, `pii` resolves to `recognizers: [email, phone]` and
+`read_policy: {access: personal}` — byte-identical to today's hardcoded
+`PII_ENTITY_CLASS` behaviour. The shipped default lives in
+`sensitivity._BUILTIN_CLASSES` (a module constant), **not** in this module's
+`_DEFAULTS` — the same "shipped default lives beside the owning domain
+module, not seeded into config's defaults dict" pattern
+`excluded_read_mapping` already uses, so the code default stays reachable
+(issue athenaeum#187's regression is exactly what seeding here would risk). An
+operator `sensitivity.classes.pii` entry **overrides the built-in wholesale**
+— recognisers and read_policy alike, not merged field-by-field: an override
+that omits `recognizers:` gets an *empty* list, not the built-in's two.
+
+**Inheritance semantics (`inherits: <parent-class-name>`).** Field-default-
+fill only, resolved parent-first through a chain (not required to be one
+level): an unset field on the child's `read_policy` takes the parent's
+already-resolved value; an explicitly set child field always wins, in either
+direction. There is **no monotonic-restriction floor** — a child may resolve
+*looser* than its parent (e.g. `access: open` inheriting from a `personal`
+parent) if an operator genuinely configures that; nothing in this design or
+`storage.mapping` enforces a ceiling (a lint over the resolved
+`(read_policy, storage adapter)` pair is a possible future slice, not
+shipped here).
+
+**Partition invariant.** A recogniser name may be bound to **at most one**
+class's `recognizers:` list across the whole resolved config (built-ins plus
+operator classes together) — including the built-in `pii` class's own
+`email`/`phone`. Binding the same recogniser name to two classes raises
+`SensitivityConfigError` naming both classes and the recogniser. This makes
+every detected match's destination class unambiguous by construction — see
+`docs/sensitivity-class-vocabulary.md` §7 Decision D6 for the deliberate
+escape hatch (two *different* recogniser names wrapping the same detection
+function, each bound to a different class) and how `sensitivity.classify()`
+surfaces its consequence.
+
+**Cycle / dangling-parent errors.** Both raise `SensitivityConfigError` at
+build time, never a silent fallback:
+
+- **`inherits` cycle** — a class's `inherits` chain loops back on itself
+  (`a inherits b inherits a`, or a longer chain), including a class naming
+  itself (`a inherits a`). The error names every class in the cycle.
+- **Dangling parent** — `inherits` names a class absent from the resolved
+  config (not a built-in, not another operator entry). The error names the
+  missing parent.
+
+**Example `athenaeum.yaml`: unchanged.** The defaults need no config — a
+deployment with no `sensitivity:` block behaves exactly as it does today.
+The example at the end of this file is not amended for this section.
+
 ## Authority manifest (athenaeum#426)
 
 | Knob | Env var | YAML key | Default | What it does |
