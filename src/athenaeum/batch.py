@@ -334,6 +334,7 @@ def process_batch_run(
     max_api_calls: int,
     provider: str = "api",
     sleep: Callable[[float], None] = time.sleep,
+    write_client: "anthropic.Anthropic | None" = None,
 ) -> BatchRunResult:
     """Process the intake window through the Batch API phases (issue athenaeum#236).
 
@@ -343,6 +344,17 @@ def process_batch_run(
     fanning the tier-2/tier-3 LLM calls out into two Messages Batch API
     submissions. See the module docstring for phase layout, budget
     semantics, and documented divergences from the synchronous loop.
+
+    ``client`` serves the tier-2 classify batch (the ``classify`` knob).
+    ``write_client`` (issue athenaeum#841) serves the tier-3 batch AND the
+    synchronous same-page merge / truncation-retry fallbacks below it (the
+    ``write`` knob) — ``None`` (every pre-athenaeum#841 caller) falls back to
+    *client*, preserving the old single-client behavior byte-for-byte. In
+    practice the two rarely differ in batch mode: the startup guard
+    (:func:`athenaeum.librarian._resolve_run_config`) already rejects a
+    ``classify``/``write`` combination where either resolves to
+    ``claude-cli``, so both must resolve to ``api`` for a batch run to even
+    start — but a distinct API key/timeout per knob is still honored.
 
     Issue athenaeum#483: the configured spend ceiling (athenaeum#378) is enforced at each
     phase boundary — before the tier-2 submit and before the tier-3 submit
@@ -355,6 +367,7 @@ def process_batch_run(
     for the metered ``api`` path — always the case in batch mode, which is
     Anthropic-endpoint-only; tokens for ``claude-cli``).
     """
+    effective_write_client = write_client if write_client is not None else client
     from athenaeum.config import load_config, resolve_owner
 
     owner = resolve_owner(config)
@@ -720,7 +733,7 @@ def process_batch_run(
     elif t3_requests:
         try:
             t3_results = execute_batch(
-                client,
+                effective_write_client,
                 t3_requests,
                 description="tier3_write",
                 usage=usage,
@@ -804,7 +817,7 @@ def process_batch_run(
                         action,
                         existing_body,
                         st.raw.ref,
-                        AnthropicBatchClientBackend(client),
+                        AnthropicBatchClientBackend(effective_write_client),
                         usage=usage,
                         config=config,
                     )
@@ -833,7 +846,7 @@ def process_batch_run(
                     action,
                     existing_body,
                     st.raw.ref,
-                    AnthropicBatchClientBackend(client),
+                    AnthropicBatchClientBackend(effective_write_client),
                     usage=usage,
                     config=config,
                 )

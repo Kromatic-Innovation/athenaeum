@@ -599,45 +599,55 @@ llm:
     topic: claude-cli     # recall query-topic extraction only
 ```
 
-**Which knobs are ACTUALLY routed today (scaffolding, athenaeum#786):**
+**What is actually wired today (issue athenaeum#841 — all six knobs are wired):**
 
-- **Routed (fully honored):** `topic` (`athenaeum.query_topics`, the recall
-  sidecar) and `resolve` **only via** the `athenaeum ingest-answers` /
-  `athenaeum reresolve-questions` CLI commands. Both resolve their own
-  provider independently and construct their own client — a per-knob
-  override is fully honored, including in the spend ledger (`athenaeum spend
-  --by-knob` shows the provider split, since each of these commands writes
-  its own ledger row tagged with the provider that actually served it).
-- **Accepted but NOT yet routed (warned, not silent):** `classify`, `write`,
-  `resolve` (within an `athenaeum run` librarian run — distinct from the
-  `resolve` knob's CLI-command path above, which IS routed), `reasoning_t1`,
-  and `reasoning_t2`. The librarian's (`athenaeum run`) entity/merge pipeline
-  serves all five through ONE client built from the **global** provider. A
-  `llm.providers.<knob>` override for one of these five is accepted (no
-  error) but currently has **no effect** on which client serves a librarian
-  run — threading per-knob clients through that pipeline is tracked in
-  athenaeum#841. This is not silent: at startup, `_run_preconditions` logs a
-  WARNING naming the knob, the override's source, and that it has no effect
-  yet (issue athenaeum#786, mirroring the `reasoning_tiers`
-  inert-model-knob-warning pattern from athenaeum#780) — a config with no per-knob
-  override anywhere logs nothing. The batch-mode startup guard (below) still
-  validates a `classify`/`write` override correctly regardless (loudly
-  rejecting an incompatible one before the run starts, since batch mode +
-  `claude-cli` is invalid no matter which client construction catches up
-  later).
+Every one of `classify` / `write` / `resolve` / `topic` / `reasoning_t1` /
+`reasoning_t2` genuinely routes to the provider it resolves to:
+
+- `topic` (`athenaeum.query_topics`, the recall sidecar) and `resolve` via
+  the `athenaeum ingest-answers` / `athenaeum reresolve-questions` CLI
+  commands each resolve their own provider independently and construct
+  their own client (issue athenaeum#786) — unchanged by athenaeum#841.
+- `classify`, `write`, `resolve` (within an `athenaeum run` librarian run —
+  distinct from the `resolve` knob's CLI-command path above, wired
+  separately), `reasoning_t1`, and `reasoning_t2` are now each threaded
+  through the librarian's (`athenaeum run`) entity/merge pipeline as their
+  OWN client (issue athenaeum#841): `classify` serves `tiers.classify`
+  (page classification), the C4 contradiction detector, and `claim_kind`
+  stamping; `write` serves `tiers.tier3_create`/`tier3_merge` (including the
+  Batch API's tier-3 batch and its same-page-merge/truncation-retry
+  fallbacks); `resolve` serves the C4 resolver (`resolutions.
+  propose_resolution`); `reasoning_t1`/`reasoning_t2` serve the merge-phase
+  reasoning-tier screen. Clients are constructed per DISTINCT resolved
+  provider, not per call or per knob — several knobs sharing one provider
+  (the common case: no per-knob overrides) share exactly ONE client, same as
+  before athenaeum#841. The athenaeum#786 "accepted but inert" startup warning is
+  gone — every override above now has an effect, so there is nothing left
+  to warn about.
+- In the spend ledger, `athenaeum spend --by-knob` shows the real provider
+  split for a librarian run too: when a run's knobs resolve to more than one
+  provider, the run writes one ledger row PER distinct provider (each
+  carrying only that provider's own token/knob/model attribution and correct
+  `billing_mode`) instead of one row assuming a single provider for the
+  whole run.
 - **Known limitation — knob granularity, not functional-area granularity.**
   The `classify` knob is shared by `tiers.classify` (the librarian's page
   classifier), `contradictions.detect_system` (the C4 contradiction
   detector), and `claim_kind` — routing "the contradiction detector on a
   different provider than the page classifier" is **not** reachable through
   `llm.providers.classify` today; it needs the `classify` knob split into
-  separate knobs first, which is a deliberate, separate refactor.
+  separate knobs first, which is a deliberate, separate refactor (unchanged
+  by athenaeum#841 — recorded, not solved, exactly as athenaeum#786 originally
+  documented it).
 
 Batch mode (`ATHENAEUM_BATCH_MODE` / `librarian.batch_mode`) is served by the
 `classify` and `write` knobs only (`batch.py`'s two `execute_batch` call
-sites). The startup guard checks BOTH knobs' resolved providers — batch mode
-+ `claude-cli` on either one is a loud startup error, matching the
+sites), now via each knob's own client. The startup guard still checks BOTH
+knobs' resolved providers before either client is built — batch mode +
+`claude-cli` on either one is a loud startup error, matching the
 `claude-cli` provider's existing "Batch mode is API-only" constraint above.
+In practice the two rarely differ in a batch run: the guard requires BOTH to
+resolve to `api` before a batch run can even start.
 
 ## Spend ledger and ceiling (athenaeum#378)
 
