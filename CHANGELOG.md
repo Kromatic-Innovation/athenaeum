@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Decay-sweep ledger (athenaeum#969).** `athenaeum.decay_sweep.apply_sweep`
+  now writes one durable, machine-readable record per archived page —
+  which page, bucket + expiry, sweep timestamp, and the recovering commit
+  SHA — to `_decay_sweep_records.jsonl` under the cache dir (same discipline
+  as `_push_records.jsonl`: JSONL, `O_APPEND` + `fsync`, never inside the
+  wiki corpus), written BEFORE the archival `git rm` so a ledger-write
+  failure refuses the archival entirely rather than deleting without a
+  record. `docs/recall-architecture.md` and `docs/provenance-shape.md` §8.8
+  now name the expired-`daily` carve-out as the sole exemption from the
+  fail-closed expiry filter, state the swept-vs-cold distinction, and record
+  the `bucket:` → policy-pack `delete-after` mapping commitment for the
+  athenaeum#718 policy-pack work to consume — a documented mapping, not a
+  migration; no sweep/currency/bucket behavior changes.
+
 ### Changed
 
 - **Dropped the redundant `push: [develop]` trigger from `oss-readiness.yml`
