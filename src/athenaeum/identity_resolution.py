@@ -90,7 +90,7 @@ if TYPE_CHECKING:
     # Annotation-only, mirroring the lazy-import convention every module in
     # this read path already follows (`mcp_server.py`, `_cmd_query.py`) — the
     # real import stays local to each function that needs it.
-    from athenaeum.pii import RedactionMarker
+    from athenaeum.pii import DoNotEmailState, IdentifierValidity, RedactionMarker
 
 #: Minimal LOCAL email-shape check used only to DETECT a handle-shaped query
 #: (D2(a)). Never used for comparison/lookup — the matched substring is
@@ -284,6 +284,19 @@ class ContactValueFact:
     :meth:`athenaeum.pii.ContactClassification.to_dict` — that method includes
     ``outreach_eligible`` (AC5's hard "no action predicate" constraint forbids
     it appearing anywhere in this module's output).
+
+    ``do_not_email`` and ``validity`` (issue athenaeum#961) close the field
+    gap between this path and ``recall``'s similarity-search excluded-facts
+    block: both are the raw, unreduced :meth:`athenaeum.pii.DoNotEmailState.to_dict`
+    / :meth:`athenaeum.pii.IdentifierValidity.to_dict` shapes — the same
+    objects :func:`athenaeum.mcp_server._excluded_block_for_hit` embeds via
+    ``do_not_email.to_dict()`` / ``field_validity[position].to_dict()`` — so
+    the two ``recall`` paths carry the identical vocabulary rather than a
+    hand-picked subset that could drift from it. ``do_not_email`` is a
+    per-RECORD fact (the mark is not scoped to one value), so every
+    ``ContactValueFact`` for the same record carries the same
+    ``do_not_email``. The existing ``valid_from``/``valid_until`` flat bounds
+    are UNCHANGED — ``validity`` is additive, not a replacement.
     """
 
     identifier: str
@@ -293,6 +306,8 @@ class ContactValueFact:
     bounced: bool
     valid_from: str | None
     valid_until: str | None
+    do_not_email: DoNotEmailState
+    validity: IdentifierValidity
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable shape. No ``outreach_eligible`` key — see the class docstring."""
@@ -304,6 +319,8 @@ class ContactValueFact:
             "bounced": self.bounced,
             "valid_from": self.valid_from,
             "valid_until": self.valid_until,
+            "do_not_email": self.do_not_email.to_dict(),
+            "validity": self.validity.to_dict(),
         }
 
 
@@ -366,6 +383,14 @@ def _assemble_contact_values(
     if not with_pii:
         return (), redactions
 
+    # Issue athenaeum#961: both facts below come from the shared `pii` state
+    # helpers — never re-derived from `record_meta`/`page_fm` here — so this
+    # module never grows a second, drift-prone reading of either surface.
+    # `do_not_email` is a per-record mark (issue athenaeum#960 converged the
+    # wiki-page and excluded-record surfaces into this one call), computed
+    # once per record rather than once per value.
+    do_not_email = pii.do_not_email_state(record_meta, page_fm)
+
     values: list[ContactValueFact] = []
     for field_name, field_values in fields.items():
         classified = classifications.get(field_name, [])
@@ -380,6 +405,8 @@ def _assemble_contact_values(
                     bounced=pii.is_bounced_identifier(record_meta, value),
                     valid_from=valid_from,
                     valid_until=valid_until,
+                    do_not_email=do_not_email,
+                    validity=pii.validity_for_value(record_meta, value),
                 )
             )
     return tuple(values), ()
