@@ -2,13 +2,15 @@
 
 # Sensitivity-class vocabulary — config-defined classes, shipped recognisers, one path
 
-**Status:** DESIGN LOCK. Issue athenaeum#910. Partially implemented — slice
+**Status:** DESIGN LOCK. Issue athenaeum#910. Partially implemented — slices
 **S1a** (athenaeum#989: the recogniser protocol + registry + shipped
-`email`/`phone` recognisers) has landed; the class-vocabulary half (S1b —
-`sensitivity.classes`, its config resolver, read-policy inheritance,
-`classify()`) has not. The remaining implementation slices this design locks
-are listed in §9 and are filed against this note by the orchestrator, not by
-this design itself.
+`email`/`phone` recognisers) and **S1b** (athenaeum#990: `sensitivity.classes`
+and its `config.py` resolver, `SensitivityClass`/`ReadPolicy`/
+`available_classes`, read-policy inheritance, the partition invariant, and
+`classify()`) have landed. No production caller is migrated onto
+`classify()` yet — that is slice S3. The remaining implementation slices this
+design locks are listed in §9 and are filed against this note by the
+orchestrator, not by this design itself.
 
 From the 2026-08-14 intake-architecture review (Vitruvius Specify) that also
 produced [`docs/whole-store-adapter-design.md`](whole-store-adapter-design.md)
@@ -276,6 +278,22 @@ A new `sensitivity.py` module (L3 — see §3.2's layering note) owns:
   `screening.py:81-83`) at build time, never a silent fallback — same fail-
   loud posture as both existing config-error classes.
 
+**As implemented in athenaeum#990 (S1b):** `SensitivityClass` is a frozen
+dataclass of `(name: str, recognizers: tuple[str, ...], read_policy:
+ReadPolicy)`, and `read_policy` is itself a frozen dataclass —
+`ReadPolicy(access: str, audience: tuple[str, ...] = ())` — rather than a
+bare dict, for the same reason `CorpusPolicy` is a dataclass alongside
+`StorageAdapter`. `recognizers` is **not** inherited (only `read_policy`
+is — §4); an operator override of a built-in class name replaces the whole
+block, so an override that omits `recognizers:` gets an empty tuple, not the
+built-in's. `available_classes` additionally enforces, at the SAME build-time
+pass: the partition invariant (§3.2 Decision D6 — a recogniser name bound to
+two classes raises, naming both), unknown-recognizer names (a class naming a
+recogniser absent from `available_recognizers(config)` raises), and
+`inherits`-chain cycles/dangling parents (§4). `SensitivityConfigError` is
+reused from `sensitivity.py` (S1a already defined it) rather than declared
+twice.
+
 ### 3.2 (b) The recogniser registration contract
 
 **The anti-special-casing requirement, stated as a protocol.** A recogniser
@@ -402,6 +420,42 @@ detection against text/frontmatter; a follow-on slice (§9, S3) threads
 `sensitivity.classify()` through both rather than each continuing to import
 `find_inline_emails`/`find_inline_phones` by name.
 
+**`classify()`'s signature — specified and implemented in athenaeum#990 (S1b),
+closing this note's own named gap** (this section originally named
+`classify()` as the registry entry point without ever giving it a
+signature):
+
+```python
+@dataclass(frozen=True)
+class ClassifiedMatch:
+    match: SensitivityMatch
+    sensitivity_class: str
+
+def classify(
+    *,
+    text: str,
+    frontmatter: Mapping[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+) -> list[ClassifiedMatch]:
+    """Run every available recogniser against text/frontmatter, then route
+    each SensitivityMatch to the class whose recognizers: list names that
+    recognizer, per available_classes(config)."""
+```
+
+Runs every recogniser `available_recognizers(config)` returns, then routes
+each resulting `SensitivityMatch` to the one class (the partition invariant
+guarantees at most one) whose `recognizers:` list names that recognizer. A
+match from a recognizer no configured class currently names contributes
+nothing to the result — not an error, since naming an unregistered
+recognizer already raised earlier, at `available_classes` build time.
+
+**The Decision D6 escape hatch, made observable exactly where this note's
+Motivation asked for it.** Two different recogniser names wrapping the same
+detection function, each bound to a different class, both fire on one input
+value — `classify()` returns TWO `ClassifiedMatch` entries for it, one per
+class, with no deduplication and no arbitration between them. See §7
+Decision D6 for the updated statement of this consequence.
+
 ### 3.3 (c) The class-to-storage-surface mapping
 
 **No new mapping is introduced.** A sensitivity class name **is** an entity
@@ -450,6 +504,25 @@ operator genuinely configures that.
 See §7 Decision D4 for why this does **not** enforce a monotonic-restriction
 floor (the `more_restrictive` shape `screening.py:85` already has, but for a
 different purpose).
+
+**As implemented in athenaeum#990 (S1b) — the two gaps this note originally
+left open, closed:**
+
+- **Cycle / dangling-parent behaviour** (this note's §4 previously said only
+  "a chain, not required to be one level" without stating what an actual
+  cycle or a missing parent does): both raise `SensitivityConfigError` at
+  `available_classes` build time. A cycle — `a inherits b inherits a`, a
+  longer chain, or a class naming itself (`a inherits a`) — names every
+  class in the cycle in the error message. An `inherits` value naming a
+  class absent from the resolved config (not a built-in, not another
+  operator entry) names the missing parent.
+- **Unset `access` with no ancestor ever setting it.** This note specifies
+  validation for an *invalid* `access` value but not an *absent* one at the
+  top of an inheritance chain (e.g. a class with `read_policy: {}` and no
+  `inherits`). Implemented as the same failure: `SensitivityConfigError`,
+  since an unresolved access level is exactly as unusable to a caller as an
+  out-of-vocabulary one, and this module's fail-loud posture treats the two
+  identically rather than silently defaulting to some rank.
 
 **Interaction with `storage.mapping`.** Read policy and storage routing are
 independent config surfaces that both key off the same class name
@@ -624,6 +697,19 @@ retroactively is a bulk edit, not a config change.
 > wanting the same *shape* to feed two policies can register two thin
 > recognisers wrapping the same detection function under two names — cheap,
 > and it keeps the partition invariant intact.
+>
+> **As built in athenaeum#990 (S1b), the escape hatch's consequence is made
+> observable rather than left implicit.** `classify()` (§3.2) does not
+> collapse the two thin recognisers' matches back into one: it returns one
+> `ClassifiedMatch` per (match, destination-class) pair, so two recognisers
+> bound to two classes that both fire on the same value produce TWO entries
+> in `classify()`'s result — the multi-destination case this decision's own
+> rejected alternative would have produced directly, now reachable one layer
+> up through the escape hatch instead. `classify()` performs no
+> deduplication and no arbitration between the two; which of the two "wins"
+> (if either should) is a routing-policy question this slice deliberately
+> leaves to whichever consumer first needs an answer (per this issue's own
+> Motivation).
 
 ---
 
@@ -665,11 +751,14 @@ retroactively is a bulk edit, not a config change.
     `find_inline_emails`/`find_inline_phones` (see the corrected §3.2). No
     caller migrated yet; `SensitivityClass`/`available_classes`/
     `resolve_sensitivity_classes` are **not** part of this slice.
-  - **S1b (not yet filed as of athenaeum#989)** — the class-vocabulary half:
+  - **S1b (athenaeum#990, shipped)** — the class-vocabulary half:
     `sensitivity.classes` config resolver (`resolve_sensitivity_classes` in
-    `config.py`), `SensitivityClass`/`available_classes`, read-policy
-    inheritance (§4), and the shipped `pii` class from §5, binding class
-    names to the S1a registry by recogniser name.
+    `config.py`), `SensitivityClass`/`ReadPolicy`/`available_classes`,
+    read-policy inheritance with cycle/dangling-parent detection (§4), the
+    partition invariant and unknown-recognizer validation (§3.2 Decision
+    D6), the shipped `pii` class from §5, and `classify()` (§3.2), binding
+    class names to the S1a registry by recogniser name. No caller migrated
+    onto `classify()` yet — that remains S3's job.
 - **S2 — street-address recognizer.** The recogniser athenaeum#910's own
   summary describes as already shipped (§2.1) but is not; implement and
   register it through the S1 contract, bound to `pii` by default per §5.
