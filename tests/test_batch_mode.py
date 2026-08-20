@@ -43,7 +43,13 @@ from athenaeum.batch import (
 )
 from athenaeum.cli import main
 from athenaeum.intake import discover_raw_files
-from athenaeum.librarian import FALLBACK_ACCESS, FALLBACK_TAGS, FALLBACK_TYPES, librarian_batch_mode, run
+from athenaeum.librarian import (
+    FALLBACK_ACCESS,
+    FALLBACK_TAGS,
+    FALLBACK_TYPES,
+    librarian_batch_mode,
+    run,
+)
 from athenaeum.models import EntityIndex, TokenUsage
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
