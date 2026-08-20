@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Verdict ledger with justification basis (athenaeum#712).** New
+  `src/athenaeum/verdicts.py` — an append-only, per-month-partitioned ledger
+  of pairwise comparison verdicts (`duplicate | contradiction |
+  specialization | distinct | underdetermined`), each carrying the exact
+  `basis` of facts (content hashes, coordinates, epochs, authority) it was
+  justified by, so a change to any one fact invalidates exactly the
+  verdicts that depended on it — a truth-maintenance move that ships ahead
+  of the five-verdict comparator that will populate it (a separate, future
+  child of the memory-model v6 epic, athenaeum#709). Content hashing covers
+  claim content only (system-authored coordinates/breadcrumbs/predicate
+  annotations/tier flags are excluded, so the verdict system never
+  triggers its own re-comparison waves). Six targeted, per-basis-element
+  stale-marking rules, each independently testable. Single-appender via
+  the existing `athenaeum.runlock.RunLock` (no second lock). A per-branch
+  comparator-epoch registry enforces no-overlapping-wave and computes the
+  nights-in-wave/nights duty cycle. New CLI surface: `athenaeum verdicts
+  {count,list-by-verdict,show-one-pair,show-stale}`. Ships dark behind
+  `librarian.verdict_ledger_enabled` (default `false`) — with it on, a
+  merge approve/reject via `athenaeum ingest-answers` records a verdict for
+  the decision the pipeline already made, and `athenaeum run`'s finalize
+  phase materializes the ledger and advances the duty-cycle counters. See
+  `docs/configuration.md`'s "Verdict ledger" section.
+
 ### Fixed
 
 - **The librarian's per-raw-file LLM-call/wall-clock bounds rejected
