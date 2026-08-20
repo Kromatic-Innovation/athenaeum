@@ -28,6 +28,7 @@ Structure mirrors the issue's acceptance criteria:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -453,3 +454,144 @@ class TestNoUidHit:
 
         assert "Loose Widget" in result
         assert "redacted" not in result
+
+
+class TestHandleShapedPathFieldParity:
+    """athenaeum#961 — the handle-shaped (`identity_resolution.resolve_handle_query`)
+    path gains `do_not_email` and structured `validity` on every
+    `contact_values` entry, matching what `read_entity(include_excluded=True)`
+    already returns for the same entity via the similarity-search path
+    (`recall`'s excluded-facts block). The marked case, the unmarked case, and
+    the with_pii=False / audience-restricted case the field-widening AC
+    forbids.
+    """
+
+    def _corpus_marked(self, tmp_path: Path) -> Path:
+        knowledge = tmp_path / "knowledge"
+        _write_page(
+            knowledge / "wiki",
+            "alex",
+            name="Alex Widget",
+            extra="do_not_email: true\ndo_not_email_reason: family request\n",
+        )
+        _write_record(
+            pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
+            "alex-contact.md",
+            uid="alex",
+            fields="emails:\n  - alex@example.org\n",
+        )
+        return knowledge
+
+    def test_marked_record_carries_do_not_email_and_validity(self, tmp_path: Path) -> None:
+        knowledge = self._corpus_marked(tmp_path)
+
+        payload = json.loads(
+            recall_search(
+                knowledge / "wiki", "alex@example.org", config=EXCLUDED_CONFIG, with_pii=True
+            )
+        )
+
+        entry = payload["contact_values"][0]
+        assert entry["do_not_email"]["marked"] is True
+        assert entry["do_not_email"]["reason"] == "family request"
+        assert entry["validity"]["closed"] is False
+        assert entry["validity"]["recorded"] is False
+        # The existing flat bounds are untouched — additive, not a replacement.
+        assert entry["valid_from"] is None
+        assert entry["valid_until"] is None
+
+    def test_unmarked_record_reports_marked_false_with_no_provenance(
+        self, corpus: Path
+    ) -> None:
+        payload = json.loads(
+            recall_search(
+                corpus / "wiki", "alex@example.org", config=EXCLUDED_CONFIG, with_pii=True
+            )
+        )
+
+        entry = payload["contact_values"][0]
+        assert entry["do_not_email"] == {
+            "marked": False,
+            "source": None,
+            "observed_at": None,
+            "reason": None,
+            "surface": None,
+        }
+        assert entry["validity"]["closed"] is False
+        assert entry["validity"]["recorded"] is False
+
+    def test_without_with_pii_the_new_fields_do_not_widen_the_response(
+        self, tmp_path: Path
+    ) -> None:
+        """A handle-shaped query issued without `with_pii=True` returns the
+        same shape it returns today (AC): `do_not_email`/`validity` never
+        appear because `contact_values` stays empty, exactly as before this
+        issue existed."""
+        knowledge = self._corpus_marked(tmp_path)
+
+        payload = json.loads(
+            recall_search(knowledge / "wiki", "alex@example.org", config=EXCLUDED_CONFIG)
+        )
+
+        assert payload["with_pii"] is False
+        assert payload["contact_values"] == []
+        assert "do_not_email" not in json.dumps(payload)
+
+    def test_unauthorized_caller_gets_no_match_and_no_leak(self, tmp_path: Path) -> None:
+        """A caller outside the page's audience never reaches the join at all
+        (D6 step 2, unchanged by this issue) — the new fields cannot leak
+        through a channel that was already fail-closed."""
+        knowledge = self._corpus_marked(tmp_path)
+
+        payload = json.loads(
+            recall_search(
+                knowledge / "wiki",
+                "alex@example.org",
+                config=EXCLUDED_CONFIG,
+                caller_audience=RESTRICTED,
+                with_pii=True,
+            )
+        )
+
+        assert payload["resolved"] is False
+        assert payload["contact_values"] == []
+
+    def test_do_not_email_matches_read_entity_for_a_marked_record(
+        self, tmp_path: Path
+    ) -> None:
+        knowledge = self._corpus_marked(tmp_path)
+
+        handle_payload = json.loads(
+            recall_search(
+                knowledge / "wiki", "alex@example.org", config=EXCLUDED_CONFIG, with_pii=True
+            )
+        )
+        entity_read = pii.read_entity(
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+        )
+
+        assert entity_read is not None
+        assert entity_read.do_not_email.marked is True
+        assert (
+            handle_payload["contact_values"][0]["do_not_email"]
+            == entity_read.do_not_email.to_dict()
+        )
+
+    def test_do_not_email_matches_read_entity_for_an_unmarked_record(
+        self, corpus: Path
+    ) -> None:
+        handle_payload = json.loads(
+            recall_search(
+                corpus / "wiki", "alex@example.org", config=EXCLUDED_CONFIG, with_pii=True
+            )
+        )
+        entity_read = pii.read_entity(
+            corpus, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+        )
+
+        assert entity_read is not None
+        assert entity_read.do_not_email.marked is False
+        assert (
+            handle_payload["contact_values"][0]["do_not_email"]
+            == entity_read.do_not_email.to_dict()
+        )
