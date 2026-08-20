@@ -161,7 +161,13 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
         # this only flips the checkbox; the ingest_answers() pass right
         # below completes the write-back/archival for it, unchanged.
         wiki_root = target / "wiki"
-        decision_report = apply_decision_answers(wiki_root, raw_root, config=cfg)
+        # Issue athenaeum#712: forward the run lock already held above (`lock =
+        # _acquire_or_exit(...)`) so a merge decision applied in this tick can
+        # record a verdict-ledger entry when librarian.verdict_ledger_enabled
+        # is on — see apply_decision_answers's `lock` docstring.
+        decision_report = apply_decision_answers(
+            wiki_root, raw_root, config=cfg, lock=lock
+        )
         count = ingest_answers(
             pending_path, raw_root, client=anthropic_client, config=cfg
         )

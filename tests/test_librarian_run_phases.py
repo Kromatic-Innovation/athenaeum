@@ -39,7 +39,6 @@ from athenaeum.librarian import (
     _run_intake_audit_phase,
     _run_preconditions,
     _run_wiki_dedup_phase,
-    _warn_if_knob_provider_override_inert,
 )
 from athenaeum.provider import ProviderConfigError
 
@@ -298,17 +297,19 @@ class TestRunPreconditions:
 
 
 # ---------------------------------------------------------------------------
-# _warn_if_knob_provider_override_inert (issue athenaeum#786)
-#
-# Mirrors tests/test_reasoning_tiers.py::TestInertModelKnobWarning (issue
-# athenaeum#780's precedent this function follows): a per-knob provider override
-# for a knob the librarian pipeline does not yet route per-knob warns loudly
-# (naming the knob) instead of silently doing nothing; a knob that IS routed
-# (``topic``), or no override at all, stays silent.
+# Per-knob provider overrides are now genuinely EFFECTIVE (issue athenaeum#841,
+# finishing the athenaeum#786 routing seam). Supersedes the old
+# TestWarnIfKnobProviderOverrideInert class this file used to carry: an
+# override for one of the five librarian-pipeline knobs used to be
+# accepted-but-inert (warned, no effect on the client actually used); it now
+# changes which client serves that knob, and a bad value fails the run
+# loudly at the SAME preflight gate as the global provider (rather than
+# surfacing as a raw traceback later, when ``_arm_run_deadline`` builds that
+# knob's client).
 # ---------------------------------------------------------------------------
 
 
-class TestWarnIfKnobProviderOverrideInert:
+class TestPerKnobProviderOverridesAreEffective:
     def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for knob in (
             "CLASSIFY",
@@ -319,81 +320,26 @@ class TestWarnIfKnobProviderOverrideInert:
             "REASONING_T2",
         ):
             monkeypatch.delenv(f"ATHENAEUM_{knob}_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
 
-    def test_warns_for_write_knob_yaml_override(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    def test_bad_per_knob_override_fails_preconditions_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._clear_env(monkeypatch)
-        config = {"llm": {"providers": {"write": "claude-cli"}}}
-        with caplog.at_level("WARNING", logger="athenaeum.librarian"):
-            _warn_if_knob_provider_override_inert(config)
-        assert len(caplog.records) == 1
-        msg = caplog.records[0].getMessage()
-        assert "write" in msg
-        assert "no effect" in msg.lower()
-        assert "llm.providers.write" in msg
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        ctx = _make_ctx(
+            tmp_path, knowledge_root=knowledge_root, wiki_root=wiki_root, dry_run=True
+        )
+        ctx.api_key = "sk-test"
+        ctx.config = {"llm": {"providers": {"write": "not-a-real-provider"}}}
+        with patch("athenaeum.librarian.preflight_provider", return_value=None):
+            assert _run_preconditions(ctx) == 1
 
-    def test_warns_for_env_override(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    def test_good_per_knob_overrides_pass_preconditions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        self._clear_env(monkeypatch)
-        monkeypatch.setenv("ATHENAEUM_CLASSIFY_LLM_PROVIDER", "claude-cli")
-        with caplog.at_level("WARNING", logger="athenaeum.librarian"):
-            _warn_if_knob_provider_override_inert(None)
-        assert len(caplog.records) == 1
-        msg = caplog.records[0].getMessage()
-        assert "classify" in msg
-        assert "ATHENAEUM_CLASSIFY_LLM_PROVIDER" in msg
-
-    def test_warns_once_per_ineffective_knob_when_several_set(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        self._clear_env(monkeypatch)
-        config = {
-            "llm": {
-                "providers": {
-                    "classify": "claude-cli",
-                    "write": "claude-cli",
-                    "reasoning_t1": "claude-cli",
-                }
-            }
-        }
-        with caplog.at_level("WARNING", logger="athenaeum.librarian"):
-            _warn_if_knob_provider_override_inert(config)
-        messages = [r.getMessage() for r in caplog.records]
-        assert len(messages) == 3
-        assert any("classify" in m for m in messages)
-        assert any("write" in m for m in messages)
-        assert any("reasoning_t1" in m for m in messages)
-
-    def test_no_warning_for_topic_knob_override(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        # ``topic`` IS routed (query_topics resolves it independently) — an
-        # override there must never trigger the ineffective-knob warning.
-        self._clear_env(monkeypatch)
-        config = {"llm": {"providers": {"topic": "claude-cli"}}}
-        with caplog.at_level("WARNING", logger="athenaeum.librarian"):
-            _warn_if_knob_provider_override_inert(config)
-        assert caplog.records == []
-
-    def test_no_warning_when_no_per_knob_keys(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        # AC6: a config with no ``llm.providers`` section (and no per-knob
-        # env vars) logs NOTHING — byte-identical to a pre-athenaeum#786 install.
-        self._clear_env(monkeypatch)
-        with caplog.at_level("WARNING", logger="athenaeum.librarian"):
-            _warn_if_knob_provider_override_inert(None)
-            _warn_if_knob_provider_override_inert({})
-            _warn_if_knob_provider_override_inert({"llm": {"provider": "claude-cli"}})
-        assert caplog.records == []
-
-    def test_wired_into_run_preconditions(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Integration check: the warning actually fires as part of the real
-        startup gate, not just when called directly."""
         self._clear_env(monkeypatch)
         knowledge_root = tmp_path / "knowledge"
         wiki_root = knowledge_root / "wiki"
@@ -403,16 +349,65 @@ class TestWarnIfKnobProviderOverrideInert:
         )
         ctx.api_key = "sk-test"
         ctx.config = {"llm": {"providers": {"write": "claude-cli"}}}
-        with (
-            patch("athenaeum.librarian.resolve_provider", return_value="api"),
-            patch("athenaeum.librarian.preflight_provider", return_value=None),
-            caplog.at_level("WARNING", logger="athenaeum.librarian"),
-        ):
+        with patch("athenaeum.librarian.preflight_provider", return_value=None):
             assert _run_preconditions(ctx) is None
-        assert any(
-            "write" in r.getMessage() and "no effect" in r.getMessage().lower()
-            for r in caplog.records
-        )
+
+    def test_arm_run_deadline_builds_distinct_clients_per_knob_provider(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The core athenaeum#841 behavior: two knobs on different providers in
+        ONE run get two DIFFERENT client objects, not one shared client."""
+        self._clear_env(monkeypatch)
+        ctx = _make_ctx(tmp_path, max_runtime=3600)
+        ctx.provider = "api"
+        ctx.config = {"llm": {"providers": {"write": "claude-cli"}}}
+        ctx.api_key = "sk-test"
+
+        with patch("athenaeum.provider._construct_client") as mock_construct:
+            mock_construct.side_effect = lambda provider, **kw: object()
+            _arm_run_deadline(ctx)
+
+        assert ctx.knob_providers == {
+            "classify": "api",
+            "write": "claude-cli",
+            "resolve": "api",
+            "reasoning_t1": "api",
+            "reasoning_t2": "api",
+        }
+        # ``write`` is on a DIFFERENT provider -> a DIFFERENT client object.
+        assert ctx.write_client is not ctx.classify_client
+        # classify/resolve/reasoning_t1/reasoning_t2 all share the global
+        # provider -> the SAME cached client object (AC3: constructed per
+        # DISTINCT provider, not per knob).
+        assert ctx.classify_client is ctx.resolve_client
+        assert ctx.classify_client is ctx.reasoning_t1_client
+        assert ctx.classify_client is ctx.reasoning_t2_client
+
+    def test_arm_run_deadline_single_client_with_no_overrides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: a config with no ``llm.providers`` overrides constructs
+        exactly ONE client shared by all five knobs — the pre-athenaeum#841
+        single-``merge_client`` behavior, preserved byte-for-byte."""
+        self._clear_env(monkeypatch)
+        ctx = _make_ctx(tmp_path, max_runtime=3600)
+        ctx.provider = "api"
+        ctx.config = {}
+        ctx.api_key = "sk-test"
+
+        with patch("athenaeum.provider._construct_client") as mock_construct:
+            mock_construct.side_effect = lambda provider, **kw: object()
+            _arm_run_deadline(ctx)
+
+        assert mock_construct.call_count == 1
+        clients = {
+            ctx.classify_client,
+            ctx.write_client,
+            ctx.resolve_client,
+            ctx.reasoning_t1_client,
+            ctx.reasoning_t2_client,
+        }
+        assert len(clients) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -581,7 +576,7 @@ class TestArmRunDeadline:
         ctx = _make_ctx(tmp_path, max_runtime=0)
         ctx.provider = "api"
         ctx.config = {}
-        with patch("athenaeum.librarian.build_llm_client", return_value=None):
+        with patch("athenaeum.provider.build_llm_client", return_value=None):
             _arm_run_deadline(ctx)
         assert ctx.run_deadline is None
 
@@ -589,7 +584,7 @@ class TestArmRunDeadline:
         ctx = _make_ctx(tmp_path, max_runtime=3600)
         ctx.provider = "api"
         ctx.config = {}
-        with patch("athenaeum.librarian.build_llm_client", return_value=None):
+        with patch("athenaeum.provider.build_llm_client", return_value=None):
             _arm_run_deadline(ctx)
         assert ctx.run_deadline is not None
         assert ctx.run_deadline > 0
@@ -600,7 +595,7 @@ class TestArmRunDeadline:
         ctx = _make_ctx(tmp_path, max_runtime=3600)
         ctx.provider = "claude-cli"
         ctx.config = {}
-        with patch("athenaeum.librarian.build_llm_client", return_value=None):
+        with patch("athenaeum.provider.build_llm_client", return_value=None):
             _arm_run_deadline(ctx)
         assert ctx.usage.subscription_covered is True
 
@@ -608,7 +603,7 @@ class TestArmRunDeadline:
         ctx = _make_ctx(tmp_path, max_runtime=3600)
         ctx.provider = "api"
         ctx.config = {}
-        with patch("athenaeum.librarian.build_llm_client", return_value=None):
+        with patch("athenaeum.provider.build_llm_client", return_value=None):
             _arm_run_deadline(ctx)
         assert ctx.usage.subscription_covered is False
 
@@ -617,7 +612,7 @@ class TestArmRunDeadline:
         ctx = _make_ctx(tmp_path, max_runtime=3600, out_run_stats=stats)
         ctx.provider = "api"
         ctx.config = {}
-        with patch("athenaeum.librarian.build_llm_client", return_value=None):
+        with patch("athenaeum.provider.build_llm_client", return_value=None):
             _arm_run_deadline(ctx)
         assert stats == {
             "beyond_window": 0,
@@ -632,7 +627,7 @@ class TestArmRunDeadline:
         ctx = _make_ctx(tmp_path, max_runtime=3600, out_run_stats=stats)
         ctx.provider = "api"
         ctx.config = {}
-        with patch("athenaeum.librarian.build_llm_client", return_value=None):
+        with patch("athenaeum.provider.build_llm_client", return_value=None):
             _arm_run_deadline(ctx)
         assert stats == {
             "beyond_window": 9,

@@ -2956,3 +2956,52 @@ def resolve_shape_rules_runtime_share(config: dict[str, Any] | None) -> float:
                 if resolved is not None:
                     return resolved
     return default
+
+
+def resolve_verdict_ledger_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the verdict-ledger opt-in (issue athenaeum#712). DEFAULT OFF.
+
+    Gates the ENTIRE verdict-ledger subsystem (:mod:`athenaeum.verdicts`):
+    with this off, ``athenaeum run`` never touches ``wiki/_verdicts/`` (no
+    new file, no new run-summary phase, no exit-code change — byte-identical
+    to before athenaeum#712), and a merge approve/reject via ``athenaeum
+    ingest-answers`` never writes a verdict entry. Mirrors
+    :func:`resolve_reasoning_tier_auditing_enabled`'s shape exactly: env
+    ``ATHENAEUM_VERDICT_LEDGER_ENABLED`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.verdict_ledger_enabled`` > default
+    ``False``. No seed in ``_DEFAULTS`` (issue athenaeum#231). Default OFF is
+    deliberate — the comparator that would populate the ledger with real
+    verdicts does not exist yet (a separate, future child of athenaeum#709);
+    turning this on before then only exercises the store/schema/epoch
+    machinery via the merge approve/reject decisions the pipeline already
+    makes. Non-bool yaml values and unrecognized env strings fall through to
+    off.
+    """
+    env = os.environ.get("ATHENAEUM_VERDICT_LEDGER_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("verdict_ledger_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
+def resolve_verdict_epoch_batch_interval_days(config: dict[str, Any] | None) -> int:
+    """Resolve the comparator-epoch batching interval in days (issue athenaeum#712).
+
+    "Epoch bumps are batched (default monthly) and the batching interval is
+    a documented config key" — this is that key. Precedence:
+    ``ATHENAEUM_VERDICT_EPOCH_BATCH_INTERVAL_DAYS`` env > yaml
+    ``librarian.verdict_epoch_batch_interval_days`` > ``30``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+    non-int / ``<= 0`` values fall through to the default).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "verdict_epoch_batch_interval_days",
+        "ATHENAEUM_VERDICT_EPOCH_BATCH_INTERVAL_DAYS",
+        30,
+    )
