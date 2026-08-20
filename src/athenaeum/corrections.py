@@ -113,6 +113,7 @@ from athenaeum.provenance import parse_source
 from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.storage import surface_root_for_class
+from athenaeum.store import FilesystemStore, Store
 
 log = logging.getLogger(__name__)
 
@@ -1929,51 +1930,70 @@ def _git(knowledge_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def retire_batch(knowledge_root: Path, batch_path: Path) -> bool:
+def retire_batch(
+    knowledge_root: Path,
+    batch_path: Path,
+    *,
+    store: Store | None = None,
+) -> bool:
     """§5.4: once every record in a batch is terminal, retire it — a
     ``git rm`` after a provenance-snapshot commit, recoverable from git
     history, never hard-deleted (mirrors ``adapter-contract.md`` §4.5 /
     ``retire.py``'s exact two-commit pattern).
 
-    Best-effort: when *knowledge_root* is not a git repository (a bare
-    filesystem test fixture), falls back to a plain ``unlink`` — the batch
-    is still removed from ``raw/`` (which is what actually prevents
-    re-processing; retirement's git-recoverability is a nice-to-have on top
-    of that, not the mechanism that stops the re-read). Returns ``True`` on
-    success.
+    Refuses (returns ``False``) against a store that is not versioned
+    (design note §4.4 R1; issue athenaeum#978): the plain-``unlink``
+    fallback this used to fall through to when *knowledge_root* was not a
+    git repository (documented as best-effort for "a bare filesystem test
+    fixture") is REMOVED — that was exactly the silent degradation to an
+    unrecoverable delete R1 prohibits. A ``git rm`` that itself fails
+    (rather than "no git repo" at all) also now refuses rather than falling
+    through to ``unlink`` — the old fallback covered both cases identically,
+    so removing it removes both.
+
+    *store* is the Tier-B recoverability gate, injectable so a test can
+    supply a fake declaring ``capabilities.versioned=False`` without a real
+    git repo. Defaults to a :class:`~athenaeum.store.FilesystemStore` over
+    *knowledge_root*. Returns ``True`` on success.
     """
     if not batch_path.exists():
         return True
-    if (knowledge_root / ".git").is_dir():
-        try:
-            rel = str(batch_path.resolve().relative_to(knowledge_root.resolve()))
-        except ValueError:
-            rel = str(batch_path)
-        _git(knowledge_root, "add", "--", rel)
-        staged = _git(knowledge_root, "diff", "--cached", "--quiet")
-        if staged.returncode != 0:
-            _git(
-                knowledge_root,
-                "commit",
-                "-m",
-                f"librarian: field-correction batch provenance snapshot ({rel})",
-            )
-        rm_result = _git(knowledge_root, "rm", "--quiet", "-f", "--", rel)
-        if rm_result.returncode == 0:
-            _git(
-                knowledge_root,
-                "commit",
-                "-m",
-                f"librarian: field-correction batch retired ({rel})",
-            )
-            return True
-        # git rm failed for some reason (e.g. not actually tracked) -- fall
-        # through to the plain-unlink fallback below rather than leaving the
-        # batch stuck forever.
-    try:
-        batch_path.unlink()
-    except OSError:
+    store = store if store is not None else FilesystemStore(knowledge_root, {})
+    if not store.capabilities.versioned:
+        log.warning(
+            "corrections: store at %s is not versioned — refusing to "
+            "retire batch %s (recovery is git-only)",
+            knowledge_root,
+            batch_path,
+        )
         return False
+    try:
+        rel = str(batch_path.resolve().relative_to(knowledge_root.resolve()))
+    except ValueError:
+        rel = str(batch_path)
+    _git(knowledge_root, "add", "--", rel)
+    staged = _git(knowledge_root, "diff", "--cached", "--quiet")
+    if staged.returncode != 0:
+        _git(
+            knowledge_root,
+            "commit",
+            "-m",
+            f"librarian: field-correction batch provenance snapshot ({rel})",
+        )
+    rm_result = _git(knowledge_root, "rm", "--quiet", "-f", "--", rel)
+    if rm_result.returncode != 0:
+        log.warning(
+            "corrections: git rm failed for %s — refusing to retire (no "
+            "unlink fallback)",
+            batch_path,
+        )
+        return False
+    _git(
+        knowledge_root,
+        "commit",
+        "-m",
+        f"librarian: field-correction batch retired ({rel})",
+    )
     return True
 
 
