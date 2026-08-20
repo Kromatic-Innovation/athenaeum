@@ -80,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_drain import add_drain_subparser
     from athenaeum._cmd_index import add_index_subparsers
     from athenaeum._cmd_lifecycle import add_lifecycle_subparsers
+    from athenaeum._cmd_measure import add_measure_subparser
     from athenaeum._cmd_memory_class import add_memory_class_subparser
     from athenaeum._cmd_merges import add_merges_subparser
     from athenaeum._cmd_outbound import add_outbound_subparser
@@ -128,6 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_drain_subparser(subparsers)  # drain
     add_storage_subparser(subparsers)  # storage
     add_push_metrics_subparser(subparsers)  # push-metrics
+    add_measure_subparser(subparsers)  # measure (shadow-linkage, backlog-price, ordinary-night)
     add_memory_class_subparser(subparsers)  # memory-class backfill
     add_index_subparsers(
         subparsers
