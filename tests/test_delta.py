@@ -54,6 +54,20 @@ def test_splice_replaces_affected_keeps_rest() -> None:
     assert spliced[0].member_paths == ["beta/y.md"]
 
 
+def test_splice_kept_row_without_embedder_key_still_deserializes() -> None:
+    """Issue athenaeum#1032: a pre-athenaeum#1032 JSONL row has no "embedder" key at all —
+    ``splice_cluster_report`` must still reconstruct a ``Cluster`` from it
+    (defaulting to ``EMBEDDER_UNKNOWN``) rather than raising a KeyError."""
+    from athenaeum.clusters import EMBEDDER_UNKNOWN
+
+    prior = [
+        {"cluster_id": "b-2", "member_paths": ["beta/y.md"], "centroid_score": 0.9},
+    ]
+    spliced = splice_cluster_report(prior, set(), [])
+    assert len(spliced) == 1
+    assert spliced[0].embedder == EMBEDDER_UNKNOWN
+
+
 # ---------------------------------------------------------------------------
 # compute_affected_clusters fallbacks
 # ---------------------------------------------------------------------------
