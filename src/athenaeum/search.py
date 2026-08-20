@@ -2205,6 +2205,13 @@ def query_vector_index(
 _EF: Any | None = None
 _EF_LOADED: bool = False  # True once we have tried to load (even if None)
 
+# Issue athenaeum#1032: one-time WARNING flag for ``embed_texts`` returning ``None``.
+# Separate from ``_EF_LOADED`` above — ``_get_ef`` only fails once (init is
+# memoized), but ``embed_texts`` can also return ``None`` on a per-call embedding
+# failure (``ef`` initialized fine, the call itself raised) even after ``_get_ef``
+# has already succeeded once, so it needs its own one-time guard.
+_EMBED_TEXTS_NONE_WARNED: bool = False
+
 
 def _get_ef() -> Any | None:
     """Return a memoized chromadb DefaultEmbeddingFunction, or None."""
@@ -2216,8 +2223,23 @@ def _get_ef() -> Any | None:
         from chromadb.utils import embedding_functions
 
         _EF = embedding_functions.DefaultEmbeddingFunction()
-    except Exception:  # noqa: BLE001 — ImportError, any chromadb init error: degrade to None
+    except Exception as exc:  # noqa: BLE001 — ImportError, any chromadb init error: degrade to None
         _EF = None
+        # Issue athenaeum#1032: one-time WARNING (the ``_EF_LOADED`` memo above already
+        # guarantees this branch runs at most once per process) naming the
+        # exception class/message — the coarse embedding-fallback path used to
+        # degrade completely silently, making athenaeum#1005's over-cluster diagnosis
+        # unfalsifiable from run artifacts.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "search: chromadb embedding function failed to initialize (%s: %s) — "
+            "embed_texts will return None for the rest of this process; callers "
+            "needing vectors (e.g. wiki-page dedup clustering) fall back to the "
+            "fallback-hashing embedder to produce them (issue athenaeum#1032)",
+            type(exc).__name__,
+            exc,
+        )
     return _EF
 
 
@@ -2232,10 +2254,42 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
     """
     ef = _get_ef()
     if ef is None:
+        _warn_embed_texts_none_once()
         return None
     try:
         result = ef(texts)
         # chromadb EF returns a list-like of list-likes; normalise to list[list[float]]
         return [list(map(float, vec)) for vec in result]
-    except Exception:  # noqa: BLE001 — embedding call failure: degrade to None (caller falls back)
+    except Exception as exc:  # noqa: BLE001 — embedding call failure: degrade to None (caller falls back)
+        _warn_embed_texts_none_once(exc)
         return None
+
+
+def _warn_embed_texts_none_once(exc: BaseException | None = None) -> None:
+    """One-time WARNING (issue athenaeum#1032) when ``embed_texts`` returns ``None``.
+
+    Fires at most once per process regardless of which of the two ``None``
+    paths above triggered it (no ``ef`` available vs. the embedding call
+    itself raising) — matching the memoized-failure shape ``_get_ef`` already
+    uses, so a hot loop of failing calls does not spam the log.
+    """
+    global _EMBED_TEXTS_NONE_WARNED
+    if _EMBED_TEXTS_NONE_WARNED:
+        return
+    _EMBED_TEXTS_NONE_WARNED = True
+    import logging
+
+    if exc is None:
+        logging.getLogger(__name__).warning(
+            "search: embed_texts has no embedding function available; callers "
+            "needing vectors (e.g. wiki-page dedup clustering) fall back to the "
+            "fallback-hashing embedder to produce them (issue athenaeum#1032)"
+        )
+    else:
+        logging.getLogger(__name__).warning(
+            "search: embed_texts call failed (%s: %s); callers needing vectors "
+            "(e.g. wiki-page dedup clustering) fall back to the fallback-hashing "
+            "embedder to produce them (issue athenaeum#1032)",
+            type(exc).__name__,
+            exc,
+        )
