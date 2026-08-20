@@ -2784,6 +2784,16 @@ class RunContext:
     #: eligibility, which athenaeum#900 puts out of scope. ``None``/empty means
     #: "no caller scope" and discovery order is used unchanged.
     entity_changed_paths: set[Path] | None = None
+    #: Issue athenaeum#712 — the caller's ALREADY-ACQUIRED
+    #: :class:`athenaeum.runlock.RunLock`, when the caller holds one (the CLI
+    #: `athenaeum run` path always does for a non-dry-run; a `--dry-run` call,
+    #: and every pre-athenaeum#712 test/caller, leaves this ``None``). Set after
+    #: construction, same rationale as ``entity_changed_paths``/
+    #: ``full_contradiction_sweep`` above. Used ONLY by the finalize phase's
+    #: verdict-ledger advisor, and only when
+    #: ``librarian.verdict_ledger_enabled`` is also on — with either
+    #: condition unmet, the run is byte-identical to before athenaeum#712.
+    lock: Any = None
     api_key: str | None = None
     config: dict[str, Any] | None = None
     provider: str = "api"
@@ -5232,6 +5242,31 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         except Exception as exc:  # noqa: BLE001 — advisor must never break a run
             log.warning("pending-merge revalidation advisor failed (non-fatal): %s", exc)
 
+    # Issue athenaeum#712: verdict-ledger night bookkeeping. OFF by default
+    # (librarian.verdict_ledger_enabled) — with the flag off, or with no
+    # caller-held lock (e.g. --dry-run), this block does not run at all and
+    # the finalize phase is byte-identical to before this issue: no new file
+    # under wiki/_verdicts/, no exit-code change. With the flag on, this
+    # materializes the ledger directory + epoch registry (a well-formed,
+    # queryable — if still comparator-empty — ledger; the five-verdict
+    # comparator that populates it with real content is a separate, future
+    # child of athenaeum#709) and advances the per-branch duty-cycle counters
+    # one night. Reuses the SAME lock the CLI caller already holds around
+    # this whole run (mod:`athenaeum.verdicts`'s single-appender contract) —
+    # never acquires a second one. Best-effort: never breaks a run.
+    if not ctx.dry_run and ctx.lock is not None:
+        try:
+            from athenaeum.config import resolve_verdict_ledger_enabled
+            from athenaeum.verdicts import ensure_ledger_initialized, note_run_night
+
+            if resolve_verdict_ledger_enabled(ctx.config):
+                ensure_ledger_initialized(ctx.wiki_root, lock=ctx.lock)
+                _duty = note_run_night(ctx.wiki_root, lock=ctx.lock)
+                if _duty:
+                    log.info("verdict ledger duty cycle: %s", _duty)
+        except Exception as exc:  # noqa: BLE001 — advisor must never break a run
+            log.warning("verdict-ledger finalize advisor failed (non-fatal): %s", exc)
+
     # Issue athenaeum#464: normal finalize path — every return below this point
     # (the entity-loop deadline_tripped EXIT_GRACEFUL_PARTIAL/75, the
     # failed-files 1, the strict-budget 1, and the clean 0) shares this one
@@ -5331,6 +5366,7 @@ def run(
     now: datetime | None = None,
     heartbeat: Callable[[], None] | None = None,
     out_run_stats: dict[str, Any] | None = None,
+    lock: Any = None,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error,
     EXIT_GRACEFUL_PARTIAL (75) on its own internal deadline trip (issue
@@ -5448,6 +5484,16 @@ def run(
     :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``now=`` parameter.
     Defaults to ``datetime.now(timezone.utc)`` (frozen once here); tests pass
     a fixed value so no wall-clock leaks into cadence assertions.
+
+    ``lock`` (issue athenaeum#712) is the caller's already-acquired
+    :class:`athenaeum.runlock.RunLock`, when the caller holds one — the CLI
+    ``athenaeum run`` path passes it (see ``_cmd_run.py``); every other
+    caller, and a ``--dry-run`` invocation, leaves it ``None``. Used ONLY by
+    the finalize phase's verdict-ledger advisor (single-appender reuse of
+    this SAME lock, per :mod:`athenaeum.verdicts`'s module docstring), and
+    only when ``librarian.verdict_ledger_enabled`` is also on. With either
+    condition unmet the run touches nothing under ``wiki/_verdicts/`` — byte-
+    identical to before athenaeum#712.
     """
     # Issue athenaeum#540 (M25): stamp a fresh per-run correlation id so every log line
     # this run emits carries the same id (via the logconf run-id filter) — even
@@ -5495,6 +5541,7 @@ def run(
     # Issue athenaeum#909: same "set after construction" rationale as
     # ``entity_changed_paths`` above.
     ctx.full_contradiction_sweep = full_contradiction_sweep
+    ctx.lock = lock
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)
 
