@@ -1120,6 +1120,44 @@ class FTS5Backend:
         finally:
             conn.close()
 
+    def candidates_by_type(self, cache_dir: Path, entity_type: str) -> list[str]:
+        """Return every indexed filename whose ``type`` column equals *entity_type*.
+
+        Issue athenaeum#965 (AC amendment 3): the ENUMERATION primitive's read of
+        the converged filterable-metadata store this class builds — the SAME
+        ``type UNINDEXED`` column :meth:`query`'s ``type_filter`` predicate
+        already applies. A plain indexed ``WHERE``, never routed through FTS5
+        ``MATCH``/BM25 ranking — enumeration must not go through query-text
+        ranking at all. Returns filenames only, sorted for a deterministic
+        base ordering before :mod:`athenaeum.enumeration` applies its own
+        sort key: per-page frontmatter (needed for predicate evaluation, the
+        caller-named sort key, and output field selection) is read by the
+        caller from the resolved on-disk path — this table does not, and per
+        the issue's "no new index structures" constraint must not, carry
+        arbitrary frontmatter fields.
+
+        A missing/unreadable DB returns ``[]`` rather than raising; the
+        caller is responsible for ensuring the index exists via
+        :meth:`build_index` first.
+        """
+        db_path = cache_dir / _DB_NAME
+        if not db_path.is_file():
+            return []
+        try:
+            conn = sqlite3.connect(str(db_path))
+        except sqlite3.Error:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT filename FROM wiki WHERE type = ? ORDER BY filename",
+                (entity_type,),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        finally:
+            conn.close()
+        return [str(r[0]) for r in rows]
+
 
 # ---------------------------------------------------------------------------
 # Vector backend (chromadb)
