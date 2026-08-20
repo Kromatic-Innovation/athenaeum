@@ -108,6 +108,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/configuration.md`'s "Per-knob provider routing" section for the
   updated "what is actually wired" summary.
 
+- **`athenaeum surface-divergence --field <name>` — the bounce-divergence
+  check generalized into a per-field guard that runs unattended and fails
+  (athenaeum#963).** `bounce-divergence` (athenaeum#853) never failed on a
+  divergence — `report.complete` was the only thing its exit code reflected
+  — and nothing ran it automatically; `do-not-email-divergence`
+  (athenaeum#960) fixed that for its own one field but copied the whole
+  module to do it. `surface-divergence` is one command, registry-driven
+  (`athenaeum.surface_divergence.FieldSpec`): adding a field is registering
+  a descriptor (wiki key, join key, declared allowance), not copying a
+  module. `bounced` and `do_not_email` are both registered; `bounced`'s
+  report numbers and JSON keys are unchanged from `bounce-divergence`'s.
+  Exits non-zero (`3`) when a registered field diverges beyond its declared
+  allowance — `bounced` tolerates a wiki-surface entry with no pii mark
+  (the documented evidence-class asymmetry,
+  `docs/bounce-surface-convergence.md`) but not a pii mark with no wiki
+  entry; `do_not_email` tolerates neither direction. `2` on an unreadable
+  surface, distinct from a genuine divergence. `--report-only` preserves
+  the pre-athenaeum#963 exit-0-unless-unreadable contract for interactive
+  inspection. Reachable from the installed console-script entry point, not
+  only `PYTHONPATH=src python -m athenaeum.cli` — the exact gap athenaeum#963
+  reports for `bounce-divergence` (`tests/test_surface_divergence.py::TestInstalledCli`
+  builds a wheel and installs it fresh to prove it). Wired into `pytest`
+  (and therefore `ci.yml`) against fixture stores; the two prior commands
+  (`bounce-divergence`, `do-not-email-divergence`) are unchanged and still
+  shipped. See `docs/configuration.md` → "Surface-divergence guard
+  (athenaeum#963)" for the operator-invocation contract this registers for
+  an unattended nightly pass against the live store.
+
 ### Documentation
 
 - **Design note: standing sensitive-value filter at raw-sweep intake
