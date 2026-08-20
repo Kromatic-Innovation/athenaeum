@@ -307,6 +307,53 @@ makes reasoning respond to actual load instead of a fixed clock. `athenaeum
 ingest` **without** `--if-triggered` is unaffected by any of this — it is the
 pre-existing on-demand poke (issue athenaeum#349) and always compiles.
 
+## Surface-divergence guard (athenaeum#963)
+
+`athenaeum surface-divergence --field <name>` is the generalized, **failing**
+guard for the class of defect athenaeum#853/#960/#963 name: two surfaces
+(wiki frontmatter and the contacts/excluded surface) record the same fact
+under independent write paths with no invariant binding them, so a
+divergence is invisible unless something actually checks and can fail. It
+supersedes `bounce-divergence` / `do-not-email-divergence` as the entry
+point an unattended caller should use (those two commands still exist,
+unchanged, for backward compatibility and interactive use).
+
+```
+athenaeum surface-divergence --field bounced --path ~/knowledge
+athenaeum surface-divergence --field do_not_email --path ~/knowledge
+```
+
+| Field | Registered by | Tolerated residual |
+|---|---|---|
+| `bounced` | issue athenaeum#853 | Wiki-surface entries with no pii mark are TOLERATED — the documented evidence-class asymmetry, [bounce-surface-convergence.md](bounce-surface-convergence.md). Pii marks with no wiki entry are NOT tolerated (zero). |
+| `do_not_email` | issue athenaeum#960 | Zero, in either direction — one operator-directed fact with one meaning. |
+
+Exit codes (shared with `bounce-divergence` / `do-not-email-divergence`):
+`0` clean (or `--report-only`, which reports and never fails on divergence —
+interactive-inspection only, never for an unattended caller); `2` a surface
+could not be read (the difference is not a divergence measurement); `3` a
+registered field diverged beyond its declared allowance. An unregistered
+`--field` value is rejected by argument parsing rather than guessed at.
+
+**Where this runs unattended:**
+
+- **CI, against fixture stores, on every push/PR** — `tests/test_surface_divergence.py`
+  builds both fields' failing/passing/unreadable cases as synthetic
+  fixtures and runs through this repo's normal `pytest` step in `ci.yml`,
+  so a regression in the checker itself fails the build. GitHub Actions has
+  no access to a live store, so this is deliberately the fixture-only half
+  (2026-08-20 AC amendment on athenaeum#963).
+- **The live store, on an operator's own schedule** — there is no shipped
+  nightly cron wrapper in this repo (see "Reasoning-tier triggers" below);
+  an operator's external cron/launchd (or a cross-repo nightly sweep, e.g.
+  Hestia's, which is out of scope for this repository) should invoke both
+  lines above alongside the existing `athenaeum run` / `athenaeum ingest`
+  entries and treat a non-zero, non-report-only exit as an alert. This
+  in-repo command and its documented exit-code contract are the
+  registration artifact athenaeum#963 asks for; whether an operator's own
+  external wrapper has actually added these two lines is state on that
+  operator's host, outside anything this repository's tests can observe.
+
 ## Models
 
 All model values are free-form model-id strings passed to the Anthropic SDK.
