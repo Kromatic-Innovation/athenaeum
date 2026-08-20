@@ -113,8 +113,8 @@ class PageOutcome:
     ``None`` for every skip. ``reason`` is the report's grouping key, so it
     is a closed vocabulary rather than prose:
     ``mechanical`` / ``classifier`` (assignments) and ``already-classed`` /
-    ``no-frontmatter`` / ``unparseable-frontmatter`` / ``retired`` /
-    ``residual-undecided`` / ``unmapped-type`` (skips).
+    ``no-frontmatter`` / ``empty-frontmatter`` / ``unparseable-frontmatter`` /
+    ``retired`` / ``residual-undecided`` / ``unmapped-type`` (skips).
     """
 
     path: Path
@@ -214,10 +214,18 @@ def _classify_page(
 
     meta, body = parse_frontmatter(text)
     if not meta:
-        # Delimiters present but the YAML did not load — parse_frontmatter
-        # swallows the YAMLError and returns ``{}``. Distinct from the case
-        # above, and equally not this command's to repair.
-        return PageOutcome(path, None, "unparseable-frontmatter"), None, ""
+        # ``parse_frontmatter`` returns ``{}`` for BOTH a block that failed to
+        # load (it swallows the YAMLError) and a block that is legitimately
+        # blank, so the raw block decides which the report names — calling an
+        # empty page "unparseable" would send an operator hunting a YAML bug
+        # that is not there. Neither is this command's to repair; both are
+        # skipped and counted.
+        reason = (
+            "empty-frontmatter"
+            if not match.group(1).strip()
+            else "unparseable-frontmatter"
+        )
+        return PageOutcome(path, None, reason), None, ""
 
     existing = meta.get("memory_class")
     if isinstance(existing, str) and existing.strip():
