@@ -183,3 +183,15 @@ Read its output with the asymmetry above in mind: **an entry on the wiki
 surface with no pii mark is the expected state** for every evidence class the
 Tier-0 gate does not admit, so a non-zero divergence is not by itself a
 defect. What the report defends is a *moving* number.
+
+**`athenaeum bounce-divergence` never fails on this — that is deliberate for
+this command, and it is exactly the property athenaeum#963 generalizes past.**
+`athenaeum surface-divergence --field bounced` (issue athenaeum#963, see
+[configuration.md](configuration.md#surface-divergence-guard-athenaeum963))
+reports the identical two surfaces and the identical numbers, but exits
+non-zero when the asymmetry above is violated in the direction it does NOT
+excuse: a pii mark with no wiki entry (`marked_not_on_wiki`). A wiki-only
+entry (`on_wiki_not_marked`) stays tolerated, unchanged, for the reason
+stated above. Use `bounce-divergence` for interactive inspection;
+`surface-divergence --field bounced` is the entry point an unattended
+caller should use.

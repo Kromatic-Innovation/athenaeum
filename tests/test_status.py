@@ -123,6 +123,36 @@ class TestStatus:
         info = status(root)
         assert info["zero_yield_consecutive"] == 4
 
+    def test_status_verdict_ledger_duty_cycle_defaults_to_none(self, tmp_path: Path) -> None:
+        # Issue athenaeum#712: no run has ever materialized wiki/_verdicts/ (the
+        # flag-off default) -- status must not report a duty cycle at all.
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        info = status(root)
+        assert info["verdict_ledger_duty_cycle"] is None
+
+    def test_status_surfaces_verdict_ledger_duty_cycle(self, tmp_path: Path) -> None:
+        # Issue athenaeum#712 AC: wave duty cycle is computed and reported,
+        # surfaced on athenaeum status -- exercised here via the same
+        # epoch-registry writer the run finalize phase calls, without
+        # driving a full librarian run.
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdicts import note_run_night, open_epoch
+
+        root = tmp_path / "knowledge"
+        wiki_root = root / "wiki"
+        wiki_root.mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+
+        lock = RunLock(root)
+        with lock:
+            open_epoch(wiki_root, "gate2", "v1.gate2", lock=lock)
+            note_run_night(wiki_root, lock=lock)
+
+        info = status(root)
+        assert info["verdict_ledger_duty_cycle"] == {"gate2": pytest.approx(1.0)}
+
     def test_format_status(self) -> None:
         info = {
             "raw_pending": 3,
@@ -171,6 +201,40 @@ class TestStatus:
         del info["zero_yield_consecutive"]
         output = format_status(info)  # type: ignore[arg-type]
         assert "Zero-yield" not in output
+
+    def test_format_status_includes_verdict_ledger_duty_cycle_line(self) -> None:
+        info = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+            "verdict_ledger_duty_cycle": {"gate2": 0.25},
+        }
+        output = format_status(info)
+        assert "Verdict ledger duty cycle:" in output
+        assert "gate2: 25%" in output
+
+    def test_format_status_omits_verdict_ledger_line_when_absent(self) -> None:
+        # Issue athenaeum#712: the flag-off default (None, or the key absent
+        # entirely on a pre-athenaeum#712 status dict) must not clutter status
+        # output -- mirrors the zero-yield "only when actionable" rule.
+        info = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+            "verdict_ledger_duty_cycle": None,
+        }
+        output = format_status(info)  # type: ignore[arg-type]
+        assert "Verdict ledger" not in output
+
+        del info["verdict_ledger_duty_cycle"]
+        output = format_status(info)  # type: ignore[arg-type]
+        assert "Verdict ledger" not in output
 
     def test_cli_status(self, tmp_path: Path) -> None:
         from athenaeum.cli import main

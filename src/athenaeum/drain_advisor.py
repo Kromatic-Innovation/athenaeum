@@ -168,6 +168,32 @@ def observed_tokens_per_file(
     return (total_input / total_files, total_output / total_files)
 
 
+def observed_calls_per_file(
+    records: list[dict[str, Any]],
+    *,
+    max_history: int = MAX_HISTORY,
+) -> float | None:
+    """Average API calls per file over recent librarian runs (issue athenaeum#713).
+
+    Sibling to :func:`observed_tokens_per_file`, same ``_librarian_records_with_files``
+    history window and the same ``None`` contract: ``None`` when the ledger has no
+    usable history (never a fabricated ``0.0``). This is a RUN-LEVEL ratio — the
+    ledger records ``api_calls`` per run, not per LLM-tier — so it mixes tier-1
+    (zero-LLM), tier-2 (one classify call/file), and tier-3 (the bulk, content
+    writing) calls. It is the closest figure this ledger can produce to a
+    tier-3-only "calls/file" measurement without new per-knob call
+    instrumentation (:attr:`athenaeum.models.TokenUsage.per_knob` tracks TOKENS
+    per knob, not call counts) — callers that need a tier-3-only figure must
+    label this a proxy, not re-derive a false precision from it.
+    """
+    history = _librarian_records_with_files(records)[-max_history:]
+    total_files = sum(int(r["files_processed"]) for r in history)
+    if total_files <= 0:
+        return None
+    total_calls = sum(int(r.get("api_calls", 0) or 0) for r in history)
+    return total_calls / total_files
+
+
 def estimate_drain_cost_usd(
     *,
     backlog: int,
