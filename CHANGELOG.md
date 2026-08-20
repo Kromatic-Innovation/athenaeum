@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **v6 memory-model measurement pack: shadow-linkage count, backlog price
+  sheet, ordinary-night steady-state table (athenaeum#713).** Three new
+  `athenaeum measure` subcommands the comparator slice (child of athenaeum#709)
+  is gated on, all read-only against the live store (no wiki write, no
+  `_pending_merges.md` mutation, no reindex) and all committing their dated
+  snapshot into `docs/memory-model-measurements.md`:
+  - `athenaeum measure shadow-linkage` — runs the existing complete-linkage
+    formation (`athenaeum.clusters`, athenaeum#681) over the live wiki-page
+    population in shadow mode: embeddings only, zero LLM calls (asserted by
+    test), no writes. Reports cluster count, size distribution, and the
+    count of pairs that would reach the comparator's content-comparison
+    stage — for both the current complete-linkage path and the pre-athenaeum#681
+    single-linkage path, side by side.
+  - `athenaeum measure backlog-price` — prices draining the raw-intake
+    backlog: re-counts the backlog (`athenaeum.intake.discover_raw_files`,
+    never a copied literal), reads measured calls/file and tokens/file from
+    the spend ledger (`athenaeum.drain_advisor`, extended with the new
+    `observed_calls_per_file`), derives wall-clock/file from the operator's
+    `librarian-run-summary` log lines (new `athenaeum.run_summary_log`
+    parser — the spend ledger itself has no elapsed-time field), and prices
+    via the existing per-MTok rate table
+    (`athenaeum.drain_advisor.estimate_drain_cost_usd`). Includes a
+    decision-inflow-rate sensitivity table (5-50 decisions/100 compiled
+    files) showing days-to-terminal-disposition against a configurable
+    human daily decision budget (default 20/day) and flagging a 6-month
+    horizon breach. The "with write-refusal/retention-pack pre-filter"
+    column is reported `n/a` unless an operator supplies
+    `--prefilter-excluded-fraction` — that classifier does not exist yet in
+    this codebase, so its saving is never fabricated.
+  - `athenaeum measure ordinary-night` — builds the ordinary-night
+    steady-state table: measured files/day of intake, calls/file,
+    wall-clock/file, against the ACTUAL configured nightly call budget
+    (`librarian.max_api_calls`, default 800) and wall-clock window
+    (`librarian.max_runtime`, default 3600s) — plus the comparator regime's
+    amortized load as explicit, operator-supplied assumptions (the
+    comparator/TTL/invalidation-wave/audit-sampling subsystems don't exist
+    yet). States a `closes` / `does-not-close` / `indeterminate` verdict
+    up front; when it does not close, lists the three documented options
+    the design lock names WITHOUT auto-selecting one — that remains an
+    explicit operator decision.
+
+  Every figure a real corpus run would need is produced by a named,
+  reproducible command (`athenaeum measure ...`), never a hand-typed table
+  or an ad-hoc session calculation. Where this implementation ran without
+  access to the operator's live `~/knowledge` store, no figure was
+  estimated or fabricated — the instrument ships; the measurement run is
+  handed back to the operator.
+
 - **Verdict ledger with justification basis (athenaeum#712).** New
   `src/athenaeum/verdicts.py` — an append-only, per-month-partitioned ledger
   of pairwise comparison verdicts (`duplicate | contradiction |
@@ -36,6 +84,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which drives the real top-level `run(..., lock=lock)` against an
   empty-corpus scratch tree and asserts a well-formed ledger with the flag
   on and no `wiki/_verdicts/` at all with it off.
+
+### Documentation
+
+- **Design note: standing sensitive-value filter at raw-sweep intake
+  (athenaeum#949).** New `docs/sensitivity-value-routing.md` answers the
+  issue's AC1–AC13 — placement and pointer contract (AC1/AC2), the uid
+  problem and the proposed record-keyed read-path disposition (AC3), the
+  raw-tree observability gap stated as open rather than solved (AC4),
+  disposition of the existing `screen_intake` stage (AC5), per-write-path
+  redaction mechanics (AC6), precedence and fail-closed behavior (AC7/AC10),
+  usage-classification default (AC9), idempotency (AC11), the correlation
+  trade (AC12), the migration story relative to athenaeum#437 (AC13), and
+  the relationship to `pii.RedactionMarker` left as an explicit open
+  question (AC8). Cites a working spike (branch
+  `prototype/949-sensitivity-routing-spike`, not merged and not part of
+  this change) as verification evidence for specific mechanical claims —
+  the note's decisions are proposals for review, not settled by the spike
+  having been built. Implementation is explicitly deferred to the
+  follow-on slices the note's §10 lists — athenaeum#1022 (config resolver),
+  athenaeum#1023 (routing/redaction mechanism), athenaeum#1024
+  (record-keyed read path), athenaeum#1025 (wire into the librarian raw
+  sweep) — filed as separate issues against this note (AC14's filing half;
+  review of the note itself is routed separately). Docs-only; no code
+  changed.
 
 ### Fixed
 
