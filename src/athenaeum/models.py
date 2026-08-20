@@ -467,6 +467,33 @@ def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
     return meta, body
 
 
+def resolve_page_type(meta: dict[str, object] | None) -> str:
+    """Return a page's entity class (``type:``), with a documented precedence.
+
+    Issue athenaeum#964: ``type`` appears both top-level (``type: person``, the
+    documented shape) and — on some pages — nested under ``metadata:``
+    (``metadata: {type: person}``). Precedence: a non-empty top-level
+    ``type`` wins; a non-empty ``metadata.type`` is used only when the
+    top-level key is absent/empty; otherwise ``""``. This is the ONE place
+    that precedence is decided — the type-filter code path in
+    :mod:`athenaeum.search` and the entity-class resolver in
+    :mod:`athenaeum.entity_schema` both call this rather than reading
+    ``meta.get("type")`` directly, so a page authored either way is found by
+    the same filter value.
+    """
+    if not meta:
+        return ""
+    top = meta.get("type")
+    if isinstance(top, str) and top.strip():
+        return top.strip()
+    nested = meta.get("metadata")
+    if isinstance(nested, dict):
+        inner = nested.get("type")
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip()
+    return ""
+
+
 def parse_refines(meta: dict[str, object] | None) -> list[str]:
     """Coerce a frontmatter ``refines:`` value into a clean list of slugs.
 
@@ -1074,6 +1101,24 @@ def all_sources_authorized(
     )
 
 
+def delimited_index_string(values: Iterable[str]) -> str:
+    """Serialize a set/list of tokens as a ``|``-delimited, anchored string.
+
+    Issue athenaeum#964 (AC amendment 2): the ONE shared list-valued-field encoding
+    every search backend materializes through, factored out of
+    :func:`audience_index_string` (its original, sole caller) rather than each
+    caller inventing its own delimiter convention. Anchored on both ends so a
+    substring/``LIKE`` test can never cross a token boundary (``|ops|`` never
+    matches ``|opsadmin|``) — the same property :func:`audience_index_string`
+    already relied on. Empty input returns ``"|"`` (the empty-sentinel shape),
+    not ``""``, so a caller can always safely wrap a probe token in ``|...|``.
+    """
+    parts = sorted({v for v in values if v})
+    if not parts:
+        return "|"
+    return "|" + "|".join(parts) + "|"
+
+
 def audience_index_string(meta: dict[str, object] | None) -> str:
     """Serialize a page's effective audience for storage in the search index.
 
@@ -1090,13 +1135,8 @@ def audience_index_string(meta: dict[str, object] | None) -> str:
     metadata so Layer B can filter INSIDE each backend query.
     """
     roles, public = effective_audience(meta)
-    parts: list[str] = []
-    if public:
-        parts.append(AUDIENCE_PUBLIC_TOKEN)
-    parts.extend(sorted(roles))
-    if not parts:
-        return "|"
-    return "|" + "|".join(parts) + "|"
+    parts: list[str] = [AUDIENCE_PUBLIC_TOKEN] if public else []
+    return delimited_index_string(parts + sorted(roles))
 
 
 def audience_string_authorized(

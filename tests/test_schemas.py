@@ -377,6 +377,17 @@ class TestKnownTypes:
             assert t in KNOWN_TYPES
             assert t in FALLBACK_TYPES
 
+    def test_librarian_has_no_duplicate_fallback_types(self) -> None:
+        # Issue athenaeum#964 AC 9: the two independently-drifted
+        # `FALLBACK_TYPES` definitions (this module's frozenset and
+        # `librarian.py`'s own list) are collapsed to ONE — this module's
+        # `KNOWN_TYPES` is the single source `librarian.py` now imports and
+        # uses directly at its one call site. The second definition is GONE,
+        # not merely re-exported under the same name.
+        import athenaeum.librarian as librarian_module
+
+        assert not hasattr(librarian_module, "FALLBACK_TYPES")
+
     def test_unknown_type_emits_warning(self) -> None:
         meta = {"uid": "abc12345", "type": "persn", "name": "X"}
         with pytest.warns(UserWarning, match="unknown wiki type"):
