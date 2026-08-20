@@ -32,7 +32,14 @@ Three invariants this module exists to hold:
 
 Layering: L2 (domain logic over the wiki tree). Imports models/schemas and
 the provider seam; imported by ``_cmd_memory_class`` (L5). Holds no argparse
-and prints nothing — the CLI module owns presentation.
+and prints nothing — the CLI module owns presentation. :func:`classify_residual`
+additionally takes a function-level (deferred) import of the L3
+:mod:`athenaeum.spend` ledger (issue athenaeum#1007) — the same deferred-import
+convention this module already uses for :mod:`athenaeum.provider` /
+:mod:`athenaeum.config` — so its classifier calls route through the shared
+spend-recording path (ceiling enforcement + one ledger row per API call
+batch) instead of bypassing it, which is what every other classifier call
+site in athenaeum already does.
 """
 
 from __future__ import annotations
@@ -294,17 +301,47 @@ def classify_residual(
     Returns ``(decisions, calls_made, rejected)``. Pages the model omits or
     answers unusably are simply absent from ``decisions`` — the caller
     reports them as ``residual-undecided`` rather than defaulting them, since
-    a wrong class on a kernel dimension is worse than an absent one.
+    a wrong class on a kernel dimension is worse than an absent one. A batch
+    left unprocessed because the spend ceiling tripped (below) lands in the
+    same ``residual-undecided`` bucket via the same absence — the caller
+    cannot tell "the model declined" from "we never asked", which is correct:
+    neither is a class this pass may guess.
 
     Routed through the ``classify`` knob of the provider seam (the same knob
     Tier-2 entity classification uses) so an operator can pin this pass to a
     backend without a new config key. Any per-batch failure is logged and
     skipped: a bad batch costs its pages a class, never the whole run.
+
+    Issue athenaeum#1007: every batch call is routed through the shared spend
+    ledger, mirroring the enforcement/recording every other classifier call
+    site (librarian's Tier-2, ``query_topics``, the C4 contradiction
+    detector) already has — this was the one classifier call site that made
+    real API calls while staying invisible to ``spend.jsonl``. Two
+    obligations, both per call site precedent:
+
+    * **Ceiling enforcement** — :func:`athenaeum.spend.ceiling_tripped` is
+      checked BEFORE each batch against this call's cumulative
+      :class:`~athenaeum.models.TokenUsage`, mirroring
+      ``librarian.py``'s/``merge.py``'s early-exit exactly: on a trip, log
+      loudly and stop issuing further batches rather than silently
+      continuing to burn budget. The per-day dollar half of the ceiling
+      additionally accounts for spend already committed by EARLIER batches
+      in this same call, because each batch's spend is recorded to the
+      ledger (below) before the next batch's check runs.
+    * **Spend recording** — one ledger row per API call batch (never one
+      blended row for the whole pass), so ``athenaeum spend`` can attribute
+      cost to individual batches the same way it attributes any other run.
+      Best-effort via :func:`athenaeum.spend.record_spend`, which already
+      swallows and logs its own failures — a ledger hiccup must never break
+      the backfill.
     """
+    from athenaeum import push_metrics, spend
     from athenaeum.config import resolve_model
     from athenaeum.json_utils import extract_json_array
+    from athenaeum.models import TokenUsage
     from athenaeum.provider import (
         resolve_max_tokens,
+        resolve_provider,
         resolve_thinking,
         response_text,
     )
@@ -327,6 +364,16 @@ def classify_residual(
     thinking = resolve_thinking(
         "classify", "ATHENAEUM_CLASSIFY_THINKING", "disabled", config
     )
+    # The backend actually serving the ``classify`` knob (issue athenaeum#1007) —
+    # recorded on every ledger row so an operator pinning this pass to a
+    # different provider than the run default sees the real backend, never a
+    # hardcoded ``api`` that would misreport a subscription call.
+    provider = resolve_provider(config, knob="classify")
+    session_id = push_metrics.resolve_session_id() or None
+    # Cumulative across every batch THIS call makes — the per-run half of
+    # ``ceiling_tripped``'s check needs this call's own accrual, distinct
+    # from the fresh per-batch accumulator below that becomes one ledger row.
+    run_usage = TokenUsage()
 
     for start in range(0, len(residual), max(1, batch_size)):
         chunk = residual[start : start + max(1, batch_size)]
@@ -334,6 +381,22 @@ def classify_residual(
             (offset, path, meta, excerpt)
             for offset, (path, meta, excerpt) in enumerate(chunk)
         ]
+
+        # Issue athenaeum#378/#1007: the spend ceiling is the actual mitigation —
+        # checked BEFORE spending on the next batch, mirroring librarian.py's/
+        # merge.py's early-exit. A trip leaves this batch (and every batch
+        # after it) undecided rather than silently continuing to burn budget.
+        _ceiling = spend.ceiling_tripped(run_usage, provider=provider, config=config)
+        if _ceiling is not None:
+            log.warning(
+                "memory-class classifier: spend ceiling reached (%s) — "
+                "stopping early at offset %d; %d page(s) left undecided",
+                _ceiling,
+                start,
+                len(residual) - start,
+            )
+            break
+
         try:
             response = client.messages.create(
                 model=model,
@@ -358,6 +421,32 @@ def classify_residual(
             )
             continue
         calls += 1
+
+        # Issue athenaeum#1007: attribute this batch's tokens both to the
+        # run-cumulative accumulator (the next iteration's ceiling check) and
+        # to a FRESH per-batch accumulator that becomes exactly one ledger
+        # row — never a blended row for the whole pass. Only recorded when
+        # the response carried usage counters (a real SDK response always
+        # does; a canned test double that omits ``usage`` simply records
+        # nothing, matching ``query_topics``'s same guard).
+        _usage = getattr(response, "usage", None)
+        if _usage is not None:
+            _counts = (
+                int(getattr(_usage, "input_tokens", 0) or 0),
+                int(getattr(_usage, "output_tokens", 0) or 0),
+                int(getattr(_usage, "cache_creation_input_tokens", 0) or 0),
+                int(getattr(_usage, "cache_read_input_tokens", 0) or 0),
+            )
+            run_usage.add(*_counts, model=model, knob="classify")
+            batch_usage = TokenUsage()
+            batch_usage.add(*_counts, model=model, knob="classify")
+            spend.record_spend(
+                batch_usage,
+                run_type="memory-class-backfill",
+                provider=provider,
+                session_id=session_id,
+                config=config,
+            )
 
         parsed = extract_json_array(response_text(response)) or []
         for record in parsed:
