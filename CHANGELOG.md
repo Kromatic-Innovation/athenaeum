@@ -41,6 +41,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **No existing caller is migrated onto the seam in this slice** — this is
   the seam and its tests only; callers migrate in S2/S3/S7.
 
+- **Recoverability is a declared store capability, not an ambient `.git`
+  check (athenaeum#978, S3 of the whole-store adapter design lock, athenaeum#911).**
+  `Store.snapshot()` (S1's protocol member, previously inert) is now
+  implemented for real: `FilesystemStore.snapshot()` carries the exact body
+  `librarian.git_snapshot` used to have (`git status --porcelain` / `git add
+  -A` / `git commit`, now against `self._knowledge_root` and returning the
+  new commit SHA rather than a bool) — moved, not duplicated;
+  `librarian.py` no longer defines `git_snapshot` at all. All four of its
+  call sites (design note §9.2 named two; the actual count is four —
+  `stop_on_deadline`, the pre-processing snapshot, the SIGTERM/SIGINT
+  handler, and the terminal per-run commit) now go through
+  `FilesystemStore(knowledge_root, {}).snapshot(...)`.
+  `FilesystemStore.capabilities.versioned` is `True` iff
+  `knowledge_root/.git` existed at construction time (design note §4.4 R1)
+  — the same precondition the old ad-hoc check expressed, now a declared
+  capability a caller can inject a fake for. The four Tier-A gates
+  (`retire.run_retire_pass`, `auto_memory_prune.apply_prune`,
+  `filename_entity_prune.apply_filename_entity_prune`,
+  `memory_index.apply_prune_index`) now refuse on
+  `not store.capabilities.versioned` instead of probing `.git` directly,
+  each taking an injectable `store:` keyword (default: a `FilesystemStore`
+  over the passed `knowledge_root`). Tier B's two silent `unlink`
+  fallbacks — `rules._retire_raw_file` (`retire_compiled_raw_file` /
+  `drop_raw_file`) and `corrections.retire_batch` — for a non-git
+  `knowledge_root` are REMOVED: both now refuse the same way Tier A does,
+  with no unlink-without-git escape hatch, including when a `git rm` itself
+  fails (previously also a silent-unlink fall-through). A new
+  `tests.store_fakes.NoRecoveryStore` fake (declaring neither `versioned`
+  nor `purgeable`) backs a refusal test at every Tier-A and Tier-B site,
+  each proving the gate is driven by the injected capability even against a
+  REAL git repo — not merely by the directory's absence.
+  `tests/test_no_git_shelling_outside_store.py` mechanically asserts
+  `git_snapshot` is not redefined or duplicated anywhere outside
+  `FilesystemStore`, and pins the remaining knowledge-store git-argv call
+  sites this slice did not migrate (push/pull/rev-parse and each Tier
+  site's own scoped `git rm`-and-commit mechanics) to an explicit,
+  monotonically-shrinking baseline.
+
 - **v6 memory-model measurement pack: shadow-linkage count, backlog price
   sheet, ordinary-night steady-state table (athenaeum#713).** Three new
   `athenaeum measure` subcommands the comparator slice (child of athenaeum#709)
