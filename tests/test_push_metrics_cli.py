@@ -342,6 +342,46 @@ def test_coverage_audit_json_stdout(tmp_path: Path) -> None:
     assert payload["sampled_session_count"] == 1
 
 
+def test_coverage_audit_exclude_session_flag(tmp_path: Path) -> None:
+    """athenaeum#986 AC2: ``--exclude-session`` on coverage-audit at the CLI
+    layer — same semantics as ``baseline --exclude-session``: the excluded
+    session is dropped from the sample and reported, never silently ignored.
+    """
+    cache_dir = tmp_path / "cache"
+    clean = push_metrics.build_push_record(
+        session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+    )
+    push_metrics.record_push(clean, cache_dir=cache_dir)
+    synth = push_metrics.build_push_record(
+        session_id="synth", query="q", backend="fts5", hits=[("test-page.md", None, "b")]
+    )
+    push_metrics.record_push(synth, cache_dir=cache_dir)
+
+    rc, out = _run(
+        [
+            "push-metrics",
+            "coverage-audit",
+            "--cache-dir",
+            str(cache_dir),
+            "--n",
+            "5",
+            "--seed",
+            "1",
+            "--output",
+            str(tmp_path / "ws.json"),
+            "--exclude-session",
+            "synth",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["sampled_session_count"] == 1
+    assert payload["sessions"][0]["session_id"] == "clean"
+    assert payload["excluded_sessions"] == ["synth"]
+    assert payload["excluded_push_records"] == 1
+
+
 def test_no_subcommand_prints_usage(tmp_path: Path) -> None:
     buf = io.StringIO()
     with redirect_stderr(buf):

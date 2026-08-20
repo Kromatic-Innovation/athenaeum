@@ -114,6 +114,7 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
         wiki_root=wiki_root,
         cache_dir=args.cache_dir,
         seed=getattr(args, "seed", None),
+        exclude_sessions=getattr(args, "exclude_session", None),
     )
     output_path = args.output.expanduser().resolve()
     push_metrics.write_coverage_worksheet(worksheet, output_path=output_path)
@@ -121,9 +122,14 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
     if args.json:
         sys.stdout.write(json.dumps(worksheet) + "\n")
     else:
+        excluded_sessions_str = (
+            ",".join(worksheet["excluded_sessions"]) if worksheet["excluded_sessions"] else "none"
+        )
         print(
             f"sampled {worksheet['sampled_session_count']} session(s) -> "
             f"{output_path}\n"
+            f"excluded_sessions: {excluded_sessions_str}\n"
+            f"excluded_push_records: {worksheet['excluded_push_records']}\n"
             "Mark each candidate's reviewer_verdict, then compute the "
             "coverage-floor miss rate from the completed worksheet."
         )
@@ -228,4 +234,15 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         type=Path,
         default=Path("coverage-audit-worksheet.json"),
         help="Worksheet output file (default: ./coverage-audit-worksheet.json).",
+    )
+    coverage_p.add_argument(
+        "--exclude-session",
+        action="append",
+        default=None,
+        metavar="SESSION_ID",
+        help="Exclude a KNOWN-synthetic session id (same semantics as "
+        "`baseline --exclude-session`, issue athenaeum#791) from being "
+        "sampled and from other sessions' candidate lists. Repeatable. "
+        "Excluded sessions and their record counts are always reported, "
+        "never silently dropped.",
     )
