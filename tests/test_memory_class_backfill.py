@@ -245,6 +245,19 @@ class TestFrontmatterlessPages:
         assert report.counts_by_reason() == {"unparseable-frontmatter": 1}
         assert path.read_text(encoding="utf-8") == original
 
+    def test_empty_frontmatter_is_not_reported_as_unparseable(self, wiki: Path) -> None:
+        """A blank block loads fine; naming it "unparseable" sends an operator
+        hunting a YAML bug that does not exist."""
+        path = wiki / "empty.md"
+        path.write_text("---\n\n---\nBody.\n", encoding="utf-8")
+        original = path.read_text(encoding="utf-8")
+
+        report = build_backfill_report(wiki)
+        apply_backfill(report)
+
+        assert report.counts_by_reason() == {"empty-frontmatter": 1}
+        assert path.read_text(encoding="utf-8") == original
+
     def test_insert_refuses_a_page_without_frontmatter(self) -> None:
         assert insert_memory_class("no frontmatter here\n", "entity") is None
 
