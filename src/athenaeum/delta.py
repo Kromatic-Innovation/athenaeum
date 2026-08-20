@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.clusters import (
+    EMBEDDER_UNKNOWN,
     Cluster,
     _fallback_embeddings,
     _indexed_id_for,
@@ -362,6 +363,9 @@ def splice_cluster_report(
                 member_paths=[str(m) for m in row.get("member_paths", [])],
                 centroid_score=float(row.get("centroid_score", 1.0) or 0.0),
                 rationale=str(row.get("rationale", "")),
+                # Issue athenaeum#1032: pre-athenaeum#1032 rows have no "embedder" key —
+                # default to EMBEDDER_UNKNOWN so old JSONL lines still splice.
+                embedder=str(row.get("embedder", EMBEDDER_UNKNOWN)),
             )
         )
     spliced.extend(new_partial)

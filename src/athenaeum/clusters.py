@@ -94,6 +94,23 @@ DEFAULT_CLUSTER_OUTPUT = "raw/_librarian-clusters.jsonl"
 # window is plenty. ``0`` (or negative) disables pruning entirely.
 DEFAULT_ROTATION_RETENTION = 30
 
+# Issue athenaeum#1032: embedder identity strings recorded on each ``Cluster`` —
+# observability only, so #1005's over-cluster diagnosis can tell which
+# embedder produced a cluster's vectors from run artifacts instead of having
+# to re-derive it from context. See ``_resolve_embeddings``/
+# ``cluster_auto_memory_files`` below for how a cluster's value is derived.
+EMBEDDER_CHROMADB_DEFAULT = "chromadb-default"
+EMBEDDER_FALLBACK_HASHING = "fallback-hashing"
+# A cluster whose members' vectors came from BOTH sources — possible only via
+# the raw-intake path's per-file partial fallback (some ids hit the chromadb
+# collection, others didn't). Reported rather than picking one source
+# arbitrarily; does not change which files land in the cluster.
+EMBEDDER_MIXED = "mixed"
+# Legacy ``raw/_librarian-clusters.jsonl`` rows written before this issue, and
+# callers that supply their own ``embeddings`` map without an
+# ``embedder_sources`` counterpart, have no recorded source.
+EMBEDDER_UNKNOWN = "unknown"
+
 
 @dataclass
 class Cluster:
@@ -111,6 +128,11 @@ class Cluster:
     # backstop for legacy/pre-athenaeum#681 rows rather than the load-bearing gate.
     min_pairwise_score: float = 1.0
     rationale: str = ""
+    # Issue athenaeum#1032: which embedder produced this cluster's vectors — one of
+    # the ``EMBEDDER_*`` constants above. Defaults to ``EMBEDDER_UNKNOWN`` so
+    # pre-athenaeum#1032 JSONL rows (and any caller that hasn't been updated to pass
+    # ``embedder_sources``) still deserialize without a KeyError.
+    embedder: str = EMBEDDER_UNKNOWN
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -119,6 +141,7 @@ class Cluster:
             "centroid_score": float(self.centroid_score),
             "min_pairwise_score": float(self.min_pairwise_score),
             "rationale": self.rationale,
+            "embedder": self.embedder,
         }
 
 
@@ -191,7 +214,7 @@ def _resolve_embeddings(
     *,
     extra_roots: Sequence[Path],
     cache_dir: Path,
-) -> dict[str, list[float]]:
+) -> tuple[dict[str, list[float]], dict[str, str]]:
     """Resolve an embedding for every file, keyed by absolute path string.
 
     Strategy:
@@ -200,6 +223,11 @@ def _resolve_embeddings(
       2. For any file whose id was missing from the collection, fall
          back to the hashing-trick vector. This keeps the pipeline
          robust against a stale or partial recall index.
+
+    Returns ``(embeddings, sources)`` — ``sources`` maps the same
+    ``str(path)`` keys to the ``EMBEDDER_*`` constant that produced each
+    vector (issue athenaeum#1032), so callers (:func:`cluster_auto_memory_files`) can
+    record which embedder backed each formed cluster.
     """
     # Build id → AutoMemoryFile map so we can translate hits back.
     id_to_file: dict[str, AutoMemoryFile] = {}
@@ -210,6 +238,7 @@ def _resolve_embeddings(
         id_to_file[idx_id] = am
 
     embeddings: dict[str, list[float]] = {}
+    sources: dict[str, str] = {}
     hit_ids: set[str] = set()
     if id_to_file:
         try:
@@ -230,20 +259,27 @@ def _resolve_embeddings(
             if hit_file is None:
                 continue
             embeddings[str(hit_file.path)] = vec
+            sources[str(hit_file.path)] = EMBEDDER_CHROMADB_DEFAULT
             hit_ids.add(idx_id)
 
     # Fallback for any misses.
     missing = [am for am in files if str(am.path) not in embeddings]
     if missing:
-        log.debug(
-            "cluster embeddings: %d of %d served from chromadb, %d fell back",
+        # Issue athenaeum#1032: raised DEBUG -> WARNING — this was invisible at the
+        # deployed INFO level, so the coarse-embedding-fallback engagement that
+        # feeds #1005's over-cluster diagnosis left no trace in normal runs.
+        log.warning(
+            "cluster embeddings: %d of %d served from chromadb, %d fell back "
+            "to the fallback-hashing embedder",
             len(files) - len(missing),
             len(files),
             len(missing),
         )
         embeddings.update(_fallback_embeddings(missing))
+        for am in missing:
+            sources[str(am.path)] = EMBEDDER_FALLBACK_HASHING
 
-    return embeddings
+    return embeddings, sources
 
 
 def _build_adjacency(
@@ -509,6 +545,7 @@ def cluster_auto_memory_files(
     cache_dir: Path = DEFAULT_CACHE_DIR,
     threshold: float = DEFAULT_CLUSTER_THRESHOLD,
     embeddings: dict[str, list[float]] | None = None,
+    embedder_sources: dict[str, str] | None = None,
 ) -> list[Cluster]:
     """Group auto-memory files into near-duplicate clusters.
 
@@ -545,6 +582,15 @@ def cluster_auto_memory_files(
             wiki-page path, where the raw-intake extra-root id scheme
             doesn't apply). ``None`` (the default) preserves the original
             chromadb-then-fallback behavior byte-for-byte.
+        embedder_sources: Optional ``{str(path): EMBEDDER_*}`` map (issue athenaeum#1032)
+            recording which embedder produced each file's vector — same
+            keys as ``embeddings``. Only meaningful together with a supplied
+            ``embeddings`` map; when ``embeddings`` is ``None`` this is
+            ignored and overwritten with what :func:`_resolve_embeddings`
+            itself resolves. A member missing from this map (or the map
+            itself being ``None``) reports :data:`EMBEDDER_UNKNOWN` on its
+            cluster — observability bookkeeping only, never affects which
+            files land in a cluster.
 
     Returns:
         A list of :class:`Cluster` records. Empty input → empty list.
@@ -554,11 +600,13 @@ def cluster_auto_memory_files(
         return []
 
     if embeddings is None:
-        embeddings = _resolve_embeddings(
+        embeddings, embedder_sources = _resolve_embeddings(
             files,
             extra_roots=list(extra_roots),
             cache_dir=cache_dir,
         )
+    if embedder_sources is None:
+        embedder_sources = {}
     # Index files by the string form of their absolute path (stable and
     # unique; avoids Path equality surprises across tempdirs).
     file_ids: list[str] = [str(am.path) for am in files]
@@ -612,6 +660,9 @@ def cluster_auto_memory_files(
         )
         cluster_id = f"{scope_hint}-{digest}"
 
+        member_ids = [file_ids[i] for i in component]
+        cluster_embedder = _cluster_embedder_identity(member_ids, embedder_sources)
+
         centroid = _mean_intra_similarity(component, file_ids, embeddings)
         min_pairwise = _min_intra_similarity(component, file_ids, embeddings)
         if len(component) == 1:
@@ -634,10 +685,33 @@ def cluster_auto_memory_files(
                 centroid_score=centroid,
                 min_pairwise_score=min_pairwise,
                 rationale=rationale,
+                embedder=cluster_embedder,
             )
         )
 
     return clusters
+
+
+def _cluster_embedder_identity(
+    member_ids: Sequence[str], sources: dict[str, str]
+) -> str:
+    """Collapse each member's recorded embedder source into one cluster value.
+
+    Issue athenaeum#1032. Uniform sources (the common case — a caller-supplied
+    ``embeddings``/``embedder_sources`` pair is always uniform today, and the
+    raw-intake ``_resolve_embeddings`` path usually is too) report that single
+    value. A cluster whose members were served by different embedders —
+    possible only via ``_resolve_embeddings``'s per-file partial fallback,
+    where some ids hit the chromadb collection and others didn't — reports
+    :data:`EMBEDDER_MIXED` rather than picking one arbitrarily. A member with
+    no recorded source (caller didn't pass ``embedder_sources``) reports
+    :data:`EMBEDDER_UNKNOWN`. Bookkeeping only — never influences which files
+    land in a cluster.
+    """
+    seen = {sources.get(mid, EMBEDDER_UNKNOWN) for mid in member_ids}
+    if len(seen) == 1:
+        return next(iter(seen))
+    return EMBEDDER_MIXED
 
 
 def _atomic_replace(target: Path, text: str) -> None:
