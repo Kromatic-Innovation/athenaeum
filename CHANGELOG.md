@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dropped the redundant `push: [develop]` trigger from `oss-readiness.yml`
+  (athenaeum#816).** The workflow now runs on `pull_request: branches:
+  [develop]` only. Develop's strict required-status-checks ruleset
+  (`develop-ci-required`) already guarantees a merge commit's tree is
+  identical to the tree its PR run tested, so the post-merge `push` run only
+  ever reproduced the same result — pure noise on every merge. `OSS
+  Readiness` is not in develop's required-check set and
+  `promote-main.yml`'s promotion gate never queries it (re-confirmed live:
+  `gh api repos/Kromatic-Innovation/athenaeum/rules/branches/develop` lists
+  only `CI Required`), so this is safe in isolation. `ci.yml` intentionally
+  keeps its own `push: [develop]` trigger — it is the only run that stamps
+  `CI Required` check-runs onto develop's tip SHA, which
+  `promote-main.yml`'s develop -> main gate resolves by SHA. That will be
+  revisited once athenaeum#1031 lands. The `concurrency` block (keyed on
+  `${{ github.workflow }}-${{ github.ref }}`) is unchanged.
+
 ### Added
 
 - **Coarse embedding fallback is now observable (athenaeum#1032).** The chromadb
@@ -31,6 +49,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     line now states the embedder that produced the suppressed cluster's
     vectors. Pre-athenaeum#1032 JSONL rows without the field still
     deserialize (default `unknown`).
+- **Whole-store adapter seam: `Store` protocol + `FilesystemStore` (athenaeum#976,
+  S1 of the whole-store adapter design lock, athenaeum#911).** New
+  `athenaeum/store.py` (L0/L1) defines `StoreKey`, `ObjectMeta`,
+  `StoreCapabilities`, and the `Store` protocol per
+  `docs/whole-store-adapter-design.md` §6.2, plus `FilesystemStore` — the
+  protocol implemented over `atomic_io` + `pathlib`. `resolve_store_for_class()`
+  is now available alongside the existing `surface_root_for_class()` in
+  `athenaeum.storage`, extending the seam rather than forking it (design note
+  §6.1 D5). A conformance suite (`tests/test_store_conformance.py`) exercises
+  both `FilesystemStore` and a reusable in-memory fake
+  (`tests/store_fakes.InMemoryStore`, load-bearing for later slices S2/S7).
+  **No existing caller is migrated onto the seam in this slice** — this is
+  the seam and its tests only; callers migrate in S2/S3/S7.
 
 - **v6 memory-model measurement pack: shadow-linkage count, backlog price
   sheet, ordinary-night steady-state table (athenaeum#713).** Three new

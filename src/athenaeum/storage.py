@@ -67,6 +67,13 @@ from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import resolve_storage_adapters, resolve_storage_mapping
+from athenaeum.store import FilesystemStore, Store
+
+# One-directional edge, real (not deferred): athenaeum.store (L0/L1) imports
+# NOTHING from this module (see its module docstring's "Layering" note), so
+# this module importing athenaeum.store here carries no cycle —
+# tests/test_import_graph_acyclic.py's zero-tolerance SCC guard (baseline
+# pinned to `[]` since issue athenaeum#640) would fail loudly if it did.
 
 
 class StorageConfigError(ValueError):
@@ -372,6 +379,47 @@ def surface_root_for_class(
     the default, the configured excluded root for an excluded class).
     """
     return resolve_adapter_for_class(entity_class, config).resolve_root(knowledge_root)
+
+
+def resolve_store_for_class(
+    entity_class: str | None,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> Store:
+    """Store-backed counterpart to :func:`surface_root_for_class` (issue athenaeum#976).
+
+    Same fail-closed resolution as :func:`surface_root_for_class` — an
+    *entity_class* that ``storage.mapping`` routes to an unknown adapter
+    raises :class:`StorageConfigError` here too — but returns a
+    :class:`athenaeum.store.Store` handle instead of a bare
+    :class:`~pathlib.Path`.
+
+    Lives HERE, alongside :func:`surface_root_for_class` (the issue's
+    acceptance criterion), rather than in :mod:`athenaeum.store` the way
+    ``docs/whole-store-adapter-design.md`` §6.4's layering paragraph
+    describes. That module is deliberately built with no import of this one
+    (see its docstring) so this module can import IT — a real, one-directional,
+    module-level import — without the two forming a 2-node import-graph SCC
+    (``tests/test_import_graph_acyclic.py``, zero-tolerance since issue
+    athenaeum#640). This is the one place S1's contract reading departs from
+    the design note's stated module split; the resulting shape still honors
+    D5 ("the existing seam is extended, never forked") — there is exactly one
+    ``resolve_store_for_class`` implementation, defined here, and
+    :class:`~athenaeum.store.FilesystemStore` has no second entry point.
+
+    Builds a ``{surface_name: root}`` mapping from every adapter this
+    *config* makes available (:func:`available_adapters`) — not just the one
+    *entity_class* resolves to — so the returned :class:`Store` can address
+    any configured surface via ``StoreKey.surface``, matching the protocol's
+    "keys carry surface" shape (design note §6.2 D2) rather than binding one
+    store instance to one surface.
+    """
+    resolve_adapter_for_class(entity_class, config)  # fail-closed validation only
+    roots = {
+        name: adapter.resolve_root(knowledge_root)
+        for name, adapter in available_adapters(config).items()
+    }
+    return FilesystemStore(knowledge_root, roots)
 
 
 _RAW_INTAKE_FILENAME_RETRIES = 5
