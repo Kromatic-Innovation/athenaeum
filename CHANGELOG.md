@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dropped the redundant `push: [develop]` trigger from `oss-readiness.yml`
+  (athenaeum#816).** The workflow now runs on `pull_request: branches:
+  [develop]` only. Develop's strict required-status-checks ruleset
+  (`develop-ci-required`) already guarantees a merge commit's tree is
+  identical to the tree its PR run tested, so the post-merge `push` run only
+  ever reproduced the same result — pure noise on every merge. `OSS
+  Readiness` is not in develop's required-check set and
+  `promote-main.yml`'s promotion gate never queries it (re-confirmed live:
+  `gh api repos/Kromatic-Innovation/athenaeum/rules/branches/develop` lists
+  only `CI Required`), so this is safe in isolation. `ci.yml` intentionally
+  keeps its own `push: [develop]` trigger — it is the only run that stamps
+  `CI Required` check-runs onto develop's tip SHA, which
+  `promote-main.yml`'s develop -> main gate resolves by SHA. That will be
+  revisited once athenaeum#1031 lands. The `concurrency` block (keyed on
+  `${{ github.workflow }}-${{ github.ref }}`) is unchanged.
+
 ### Added
 
 - **Whole-store adapter seam: `Store` protocol + `FilesystemStore` (athenaeum#976,
