@@ -2530,6 +2530,41 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     return adapters
 
 
+def resolve_sensitivity_classes(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Resolve the ``sensitivity.classes`` class-definition blocks (athenaeum#910, S1b).
+
+    Returns the raw (still-unvalidated) per-class mapping dicts keyed by class
+    name; :func:`athenaeum.sensitivity.available_classes` validates each,
+    resolves ``inherits`` chains, and builds the
+    :class:`~athenaeum.sensitivity.SensitivityClass` objects. Returns an EMPTY
+    dict when unset — the shipped built-in ``pii`` class (defined in
+    :data:`athenaeum.sensitivity._BUILTIN_CLASSES`, not here — this dict's
+    own source-of-truth rule, §2.4 of ``docs/sensitivity-class-vocabulary.md``)
+    is still resolved by ``available_classes`` regardless, so this resolver is
+    NOT seeded in ``_DEFAULTS``: seeding it here would make the code default
+    unreachable, the exact athenaeum#187 regression that rule exists to
+    prevent. Non-string keys and non-mapping values are dropped defensively
+    (a malformed entry is surfaced loudly later, at build time, with the
+    class name in the message — same posture as :func:`resolve_storage_adapters`).
+    """
+    if not isinstance(config, dict):
+        return {}
+    sensitivity_cfg = config.get("sensitivity") or {}
+    if not isinstance(sensitivity_cfg, dict):
+        return {}
+    raw = sensitivity_cfg.get("classes")
+    if not isinstance(raw, dict):
+        return {}
+    classes: dict[str, dict[str, Any]] = {}
+    for name, definition in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(definition, dict):
+            continue
+        classes[name.strip()] = definition
+    return classes
+
+
 def resolve_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str, str]:
     """Resolve ``storage.excluded_read_mapping`` — page ``type:`` → surface class (athenaeum#885).
 
