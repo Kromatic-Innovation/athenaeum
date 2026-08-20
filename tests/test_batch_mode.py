@@ -46,12 +46,18 @@ from athenaeum.intake import discover_raw_files
 from athenaeum.librarian import (
     FALLBACK_ACCESS,
     FALLBACK_TAGS,
-    FALLBACK_TYPES,
     librarian_batch_mode,
     run,
 )
 from athenaeum.models import EntityIndex, TokenUsage
+from athenaeum.schemas import KNOWN_TYPES
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
+
+# Issue athenaeum#964: ``librarian.FALLBACK_TYPES`` was consolidated into the
+# one ``schemas.KNOWN_TYPES`` definition (drift fix -- see librarian.py's
+# ``_run_entity_tier_phase`` call site for the same substitution). Sorted for
+# a deterministic ``list[str]``, matching what ``process_batch_run`` expects.
+FALLBACK_TYPES = sorted(KNOWN_TYPES)
 
 # ---------------------------------------------------------------------------
 # Fakes
