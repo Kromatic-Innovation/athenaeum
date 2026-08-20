@@ -76,6 +76,7 @@ from athenaeum.models import (
     parse_deprecated,
     parse_frontmatter,
     parse_superseded_by,
+    resolve_page_type,
     valid_until_expired,
     validity_bound_str,
 )
@@ -185,6 +186,7 @@ class SearchBackend(Protocol):
         wiki_root: Path | None = None,
         caller_audience: set[str] | None = None,
         as_of: date | None = None,
+        type_filter: str | Sequence[str] | None = None,
     ) -> list[tuple[str, str, float]]:
         """Search the index.
 
@@ -206,6 +208,21 @@ class SearchBackend(Protocol):
         computed over permitted rows only — a forbidden page can neither
         occupy a slot nor push a permitted page past the limit. Fail-closed:
         untagged / malformed pages are withheld from a restricted caller.
+
+        ``type_filter`` (issue athenaeum#964) narrows the search to one or more
+        entity classes (a page's ``type:``, resolved via
+        :func:`athenaeum.models.resolve_page_type`). Accepts a single class
+        name or a sequence of names (OR semantics — a page matching ANY named
+        class is eligible); ``None`` (default) or an empty value applies no
+        filter, byte-identical to the pre-athenaeum#964 behavior. The value is an
+        OPAQUE operator-defined string — it is NEVER validated against
+        ``wiki/_schema/types.md`` here (see :mod:`athenaeum.entity_schema` for
+        the declared/observed registry a caller can consult before choosing
+        one). Every backend MUST push this predicate INSIDE the query (before
+        ranking/top-k is selected), exactly like the ``caller_audience``
+        predicate above — a backend that only post-filters the result list
+        returns silently-wrong (too-few or wrongly-ranked) answers, per this
+        Protocol's existing invariant for ``caller_audience``.
 
         Returns a list of ``(filename, page_name, score)`` tuples,
         ordered by relevance (best first). The ``filename`` may be a
@@ -255,6 +272,26 @@ _DB_NAME = "wiki-index.db"
 # contents, not a memory. Callers who want to search index files directly
 # can do so with a filename-targeted query outside recall.
 _INTAKE_SKIP_NAMES: frozenset[str] = frozenset({"MEMORY.md"})
+
+
+def normalize_type_filter(
+    type_filter: str | Sequence[str] | None,
+) -> tuple[str, ...] | None:
+    """Normalize a ``query(type_filter=...)`` argument to a dedup'd tuple.
+
+    Issue athenaeum#964: accepts a single class name or a sequence, per the
+    ``SearchBackend.query`` contract. Returns ``None`` when the input is
+    ``None`` or normalizes to nothing (an empty string, an empty sequence, or
+    a sequence of only blank strings) — the "no filter" case every backend
+    must treat identically to the parameter being absent. Values are
+    trimmed but NOT case-folded or otherwise validated: the filter is an
+    opaque operator-defined string (see the Protocol docstring).
+    """
+    if type_filter is None:
+        return None
+    values = [type_filter] if isinstance(type_filter, str) else list(type_filter)
+    normalized = tuple(dict.fromkeys(v.strip() for v in values if v and v.strip()))
+    return normalized or None
 
 
 def _like_escape(value: str) -> str:
@@ -769,16 +806,23 @@ class FTS5Backend:
     # rebuilt instead of reused, so a stale-shaped table can never survive an
     # incremental build and turn every audience-filtered query into a silent
     # ``OperationalError`` → empty recall. Version 2 == the ``audience``-aware
-    # shape (athenaeum#312); anything older (0/1) triggers a one-time full rebuild.
-    _SCHEMA_VERSION = 2
+    # shape (athenaeum#312); version 3 == the ``type``-aware shape (issue athenaeum#964,
+    # AC amendment 1) — an unchanged page's stat-matched incremental scan never
+    # re-reads its frontmatter, so without this bump a contract change ("type
+    # is now filterable") would silently serve the old (missing) column value
+    # for every page an ordinary incremental build leaves untouched.
+    _SCHEMA_VERSION = 3
 
-    # SQL fragments shared by the full and incremental build paths.
+    # SQL fragments shared by the full and incremental build paths. ``type`` is
+    # UNINDEXED (out of the BM25 term space, exact-matched via WHERE) — same
+    # storage shape ``audience`` already uses (issue athenaeum#964).
     _CREATE_SQL = (
         "CREATE VIRTUAL TABLE IF NOT EXISTS wiki USING fts5"
         "(filename, name, tags, aliases, description, audience UNINDEXED, "
+        "type UNINDEXED, "
         'tokenize="porter unicode61")'
     )
-    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?)"
+    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?)"
 
     @staticmethod
     def _db_schema_version(db_path: Path) -> int:
@@ -810,7 +854,7 @@ class FTS5Backend:
     @staticmethod
     def _row_for(
         indexed_name: str, path: Path, text: str, meta: dict[str, Any]
-    ) -> tuple[str, str, str, str, str, str]:
+    ) -> tuple[str, str, str, str, str, str, str]:
         """Build the FTS5 row tuple for one page."""
         name, tags, aliases, description = _extract_frontmatter_fields(text)
         if not name:
@@ -820,7 +864,14 @@ class FTS5Backend:
         # Issue athenaeum#312: store each page's effective audience (delimited,
         # anchored) so Layer B can filter inside the query.
         audience = audience_index_string(meta)
-        return (indexed_name, name, tags, aliases, description, audience)
+        # Issue athenaeum#964: unlike name/tags/aliases/description above (the
+        # hand-rolled ``_extract_frontmatter_fields`` scanner), ``type`` is read
+        # from the REAL ``parse_frontmatter`` result the caller already has —
+        # ``meta`` — via the one shared precedence resolver, so a page using
+        # either the top-level or nested ``metadata:`` shape is found the
+        # same way regardless of which scanner produced ``meta``.
+        page_type = resolve_page_type(meta)
+        return (indexed_name, name, tags, aliases, description, audience, page_type)
 
     def build_index(
         self,
@@ -992,6 +1043,7 @@ class FTS5Backend:
         wiki_root: Path | None = None,
         caller_audience: set[str] | None = None,
         as_of: date | None = None,
+        type_filter: str | Sequence[str] | None = None,
     ) -> list[tuple[str, str, float]]:
         """Query the FTS5 index. Returns ``(filename, name, score)`` triples."""
         del wiki_root  # FTS5 reads the pre-built index, not the wiki files
@@ -1040,13 +1092,27 @@ class FTS5Backend:
                 audience_params.append(f"%|{_like_escape(role)}|%")
             audience_clause = " AND (" + " OR ".join(like_clauses) + ")"
 
+        # Issue athenaeum#964: push the type predicate INSIDE the WHERE, same rule
+        # ``audience_clause`` above already follows — computed BEFORE
+        # ``ORDER BY rank LIMIT`` so a non-matching page can never occupy a
+        # top-k slot. ``normalize_type_filter`` returns ``None`` for "no
+        # filter", so an unset/blank ``type_filter`` adds no predicate at all
+        # (byte-identical to pre-athenaeum#964 behavior).
+        type_clause = ""
+        type_params: list[str] = []
+        normalized_types = normalize_type_filter(type_filter)
+        if normalized_types is not None:
+            placeholders = ", ".join("?" for _ in normalized_types)
+            type_clause = f" AND type IN ({placeholders})"
+            type_params = list(normalized_types)
+
         conn = sqlite3.connect(str(db_path))
         try:
             cursor = conn.execute(
                 f"SELECT filename, name, rank FROM wiki "
-                f"WHERE wiki MATCH ? {exclude_clause}{audience_clause} "
+                f"WHERE wiki MATCH ? {exclude_clause}{audience_clause}{type_clause} "
                 f"ORDER BY rank LIMIT ?",
-                [fts_query, *params, *audience_params, n],
+                [fts_query, *params, *audience_params, *type_params, n],
             )
             return [(row[0], row[1], row[2]) for row in cursor.fetchall()]
         except sqlite3.OperationalError:
@@ -1113,6 +1179,8 @@ def _hits_from_query_results(
     results: dict[str, Any],
     n: int,
     caller_audience: set[str] | None,
+    *,
+    type_narrowed: bool = False,
 ) -> list[tuple[str, str, float]]:
     """Turn a chromadb ``collection.query`` result into ranked recall hits.
 
@@ -1127,6 +1195,15 @@ def _hits_from_query_results(
       neighbours come back at an identical distance, the index is not ranking;
       raise :class:`DegradedIndexError` instead of returning flat-scored,
       confidently-wrong hits.
+
+    ``type_narrowed`` (issue athenaeum#964): ``True`` when the caller applied a
+    ``where`` type predicate that can legitimately shrink the candidate set to
+    a handful of rows (a rare class, e.g. 2 live pages). A tiny, genuinely
+    ranked result set commonly ties at the same rounded distance by
+    coincidence, not because the index is degraded — the AC3 guard above was
+    built to catch a *global, unfiltered* query returning uniformly flat
+    scores, not a legitimately narrow one. Skips the guard in that case only;
+    an unfiltered (or exclude-only) query is checked exactly as before.
     """
     ids_rows = results.get("ids") or []
     if not ids_rows or not ids_rows[0]:
@@ -1138,7 +1215,11 @@ def _hits_from_query_results(
     dist_row = dist_rows[0] if dist_rows else []
 
     distances = [dist_row[i] if i < len(dist_row) else 0.0 for i in range(len(id_row))]
-    if len(distances) >= 2 and len({round(d, 6) for d in distances}) == 1:
+    if (
+        not type_narrowed
+        and len(distances) >= 2
+        and len({round(d, 6) for d in distances}) == 1
+    ):
         raise DegradedIndexError(
             f"vector index returned {len(distances)} results at an identical "
             f"distance ({distances[0]}); this is a degraded/unavailable index, "
@@ -1172,6 +1253,16 @@ class VectorBackend:
     # Text length used both as the embedded document and as the batch cap.
     _DOC_LIMIT = 4000
     _BATCH_SIZE = 5000
+
+    # Issue athenaeum#964 (AC amendment 1): the filterable-METADATA contract
+    # version, stamped into the manifest at build time and compared before an
+    # incremental build the same way ``FTS5Backend._SCHEMA_VERSION`` gates the
+    # FTS5 table shape. Bump whenever a metadata key is added/removed/
+    # reinterpreted. A mismatch (including a pre-athenaeum#964 manifest, which has
+    # no key at all) forces a FULL rebuild — the athenaeum#370 stat pre-filter would
+    # otherwise leave every untouched page's metadata on the old shape
+    # forever. Version 2 == the ``type``-aware shape.
+    _METADATA_SCHEMA_VERSION = 2
 
     def __init__(self, embedding_model: str | None = None) -> None:
         """Construct the backend.
@@ -1292,6 +1383,11 @@ class VectorBackend:
                     "name": name,
                     "filename": indexed_name,
                     "audience": audience_index_string(meta),
+                    # Issue athenaeum#964: same precedence resolver the FTS5 ``type``
+                    # column uses (top-level ``type:`` wins, ``metadata.type``
+                    # falls back), so a page found by one backend's filter is
+                    # found by the other's too.
+                    "type": resolve_page_type(meta),
                 }
             )
         for i in range(0, len(ids), self._BATCH_SIZE):
@@ -1337,14 +1433,21 @@ class VectorBackend:
             _load_manifest(manifest_path) if incremental and as_of is None else None
         )
         stored_model = stored.get("embedding_model") if stored else None
+        # Issue athenaeum#964 (AC amendment 1): a manifest predating the metadata
+        # schema stamp (``None``) or stamped with an older contract version
+        # must NOT be reused incrementally — same rule ``stored_model`` above
+        # already applies for an embedding-model swap.
+        stored_metadata_schema = stored.get("metadata_schema_version") if stored else None
         # Incremental only when we have a prior manifest, a live collection
-        # dir, AND the SAME embedding model — a model swap must re-embed all.
+        # dir, the SAME embedding model (a model swap must re-embed all), AND
+        # the SAME metadata schema version.
         do_incremental = (
             incremental
             and as_of is None
             and stored is not None
             and vector_dir.is_dir()
             and stored_model == self.embedding_model
+            and stored_metadata_schema == self._METADATA_SCHEMA_VERSION
         )
 
         # Issue athenaeum#373: self-healing full-re-hash backstop (identical to FTS5).
@@ -1440,7 +1543,10 @@ class VectorBackend:
             _write_manifest(
                 manifest_path,
                 current_hashes,
-                {"embedding_model": self.embedding_model},
+                {
+                    "embedding_model": self.embedding_model,
+                    "metadata_schema_version": self._METADATA_SCHEMA_VERSION,
+                },
                 stats=current_stats,
                 last_full_rehash_at=now,
             )
@@ -1464,7 +1570,10 @@ class VectorBackend:
         _write_manifest(
             manifest_path,
             current_hashes,
-            {"embedding_model": self.embedding_model},
+            {
+                "embedding_model": self.embedding_model,
+                "metadata_schema_version": self._METADATA_SCHEMA_VERSION,
+            },
             stats=current_stats,
             last_full_rehash_at=(now if stale else last_rehash),
         )
@@ -1481,6 +1590,7 @@ class VectorBackend:
         wiki_root: Path | None = None,
         caller_audience: set[str] | None = None,
         as_of: date | None = None,
+        type_filter: str | Sequence[str] | None = None,
     ) -> list[tuple[str, str, float]]:
         """Query the chromadb collection with semantic search."""
         del wiki_root  # Vector reads the pre-built chromadb collection
@@ -1520,11 +1630,36 @@ class VectorBackend:
             return []
 
         # Build where filter for exclusions
-        where: dict[str, Any] | None = None
+        exclude_clause: dict[str, Any] | None = None
         if exclude and len(exclude) == 1:
-            where = {"filename": {"$ne": next(iter(exclude))}}
+            exclude_clause = {"filename": {"$ne": next(iter(exclude))}}
         elif exclude and len(exclude) > 1:
-            where = {"filename": {"$nin": list(exclude)}}
+            exclude_clause = {"filename": {"$nin": list(exclude)}}
+
+        # Issue athenaeum#964: push the type predicate INSIDE the ``where`` — same
+        # rule the audience predicate below already follows for chromadb (as
+        # far as chromadb's ``where=`` can express it; ``type`` IS a single
+        # scalar metadata key, so — unlike ``audience`` — it composes directly
+        # as a native ``where`` clause, no Python post-filter needed).
+        normalized_types = normalize_type_filter(type_filter)
+        type_clause: dict[str, Any] | None = None
+        if normalized_types is not None:
+            type_clause = (
+                {"type": normalized_types[0]}
+                if len(normalized_types) == 1
+                else {"type": {"$in": list(normalized_types)}}
+            )
+
+        # Compose exclude + type WITH ``$and`` rather than one overwriting the
+        # other (issue athenaeum#964) — a call passing both must honor both.
+        clauses = [c for c in (exclude_clause, type_clause) if c is not None]
+        where: dict[str, Any] | None
+        if not clauses:
+            where = None
+        elif len(clauses) == 1:
+            where = clauses[0]
+        else:
+            where = {"$and": clauses}
 
         # Issue athenaeum#312 — Layer B (vector): chromadb metadata is scalar-only, so
         # there is no native substring/list-membership operator to express the
@@ -1549,8 +1684,12 @@ class VectorBackend:
         )
 
         # athenaeum#489 AC3/AC4: guard None metadata (no 'NoneType'.get crash) and
-        # surface a degenerate flat-score result set as an explicit error.
-        return _hits_from_query_results(results, n, caller_audience)
+        # surface a degenerate flat-score result set as an explicit error —
+        # unless a type filter (athenaeum#964) legitimately narrowed the candidate
+        # set, in which case a coincidental distance tie is not a signal.
+        return _hits_from_query_results(
+            results, n, caller_audience, type_narrowed=normalized_types is not None
+        )
 
     def fetch_embeddings(
         self,
@@ -1832,6 +1971,7 @@ class KeywordBackend:
         wiki_root: Path | None = None,
         caller_audience: set[str] | None = None,
         as_of: date | None = None,
+        type_filter: str | Sequence[str] | None = None,
     ) -> list[tuple[str, str, float]]:
         """Score every non-underscore wiki page and return the top-n hits.
 
@@ -1847,6 +1987,15 @@ class KeywordBackend:
         tokens = tokenize_keyword_query(query)
         if not tokens:
             return []
+
+        # Issue athenaeum#964: the keyword backend has no persisted index (it scans
+        # frontmatter fresh every query), so honoring the type filter needs no
+        # index change at all — just an extra predicate on the same
+        # already-parsed ``fm`` dict, checked BEFORE scoring so a non-matching
+        # page never enters ``scored`` and cannot occupy a top-n slot (same
+        # "pushed inside the query" rule as the audience check below, not a
+        # post-filter over the sorted/truncated result list).
+        normalized_types = normalize_type_filter(type_filter)
 
         excluded = exclude or set()
         scored: list[tuple[float, str, str]] = []
@@ -1886,6 +2035,8 @@ class KeywordBackend:
             # forbidden page never enters ``scored`` and cannot occupy a top-n
             # slot. Owner (caller_audience=None) is authorized for everything.
             if not is_page_authorized(fm, caller_audience):
+                continue
+            if normalized_types is not None and resolve_page_type(fm) not in normalized_types:
                 continue
             score = score_keyword_page(tokens, fm, body)
             if score > 0:

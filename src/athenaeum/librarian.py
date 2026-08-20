@@ -188,7 +188,7 @@ from athenaeum.provider import (
 from athenaeum.quarantine import quarantine_file as _quarantine_file
 from athenaeum.registry import collect_handles
 from athenaeum.rules import run_shape_rule_phase
-from athenaeum.schemas import validate_wiki_meta
+from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.tiers import (
     Tier2ParseStats,
@@ -420,18 +420,15 @@ QUARANTINE_FILE_PREFIX = "librarian-quarantine-file"
 # updates.
 ZERO_YIELD_PREFIX = "librarian-zero-yield"
 
-# Fallback valid values if schema files are missing
-FALLBACK_TYPES = [
-    "person",
-    "company",
-    "project",
-    "concept",
-    "tool",
-    "reference",
-    "source",
-    "preference",
-    "principle",
-]
+# Fallback valid values if schema files are missing.
+#
+# Issue athenaeum#964: a ``FALLBACK_TYPES`` used to be defined here AND, separately,
+# as a same-purpose-but-drifted frozenset in ``schemas.py`` (issue athenaeum#964's own
+# evidence section named both). Collapsed to the ONE definition —
+# ``schemas.KNOWN_TYPES`` (imported above), used directly at the one call site
+# below — this module no longer defines its own copy. Widens what a
+# ``types.md``-missing fallback accepts (12 known types instead of 9) rather
+# than narrowing it, so no previously-valid write is newly rejected.
 FALLBACK_ACCESS = ["open", "internal", "confidential", "personal"]
 FALLBACK_TAGS = [
     "active",
@@ -3894,7 +3891,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             ctx.beyond_window = total_intake - len(ctx.raw_files)
 
             schema_path = ctx.wiki_root / "_schema"
-            valid_types = load_schema_list(schema_path, "types.md") or FALLBACK_TYPES
+            valid_types = load_schema_list(schema_path, "types.md") or sorted(
+                KNOWN_TYPES
+            )
             valid_tags = load_schema_list(schema_path, "tags.md") or FALLBACK_TAGS
             valid_access = (
                 load_schema_list(schema_path, "access-levels.md") or FALLBACK_ACCESS

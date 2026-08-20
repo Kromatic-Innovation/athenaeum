@@ -352,6 +352,19 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "filters at query time (keyword); the live index is untouched. Unset = "
         "today.",
     )
+    recall_parser.add_argument(
+        "--type",
+        dest="type_filter",
+        action="append",
+        default=[],
+        metavar="CLASS",
+        help="Issue athenaeum#964: narrow to one or more entity classes (a page's "
+        "`type:`), repeatable (OR semantics). Opaque, NOT validated against "
+        "wiki/_schema/types.md — see the MCP `entity_schema` tool for the "
+        "declared/observed registry. Unset = every class (default, unchanged "
+        "behavior). An unrecognized value prints the deployment's known "
+        "classes instead of a bare 'no results'.",
+    )
     recall_parser.set_defaults(func=cmd_recall)
 
 
@@ -467,6 +480,8 @@ def cmd_recall(args: argparse.Namespace) -> int:
             print(f"As-of index build failed: {exc}", file=sys.stderr)
             return 1
 
+    type_filter = getattr(args, "type_filter", None) or None
+
     try:
         hits = backend.query(
             args.query,
@@ -475,10 +490,32 @@ def cmd_recall(args: argparse.Namespace) -> int:
             wiki_root=wiki_root,
             caller_audience=caller_audience,
             as_of=as_of,
+            type_filter=type_filter,
         )
     except NotImplementedError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+    # Issue athenaeum#964: same "never a silent no-results" rule as the MCP `recall`
+    # tool — an unrecognized `--type` value prints the deployment's actual
+    # entity classes rather than leaving an empty hit list unexplained.
+    if type_filter:
+        from athenaeum.entity_schema import resolve_entity_classes
+        from athenaeum.search import normalize_type_filter
+
+        normalized_types = normalize_type_filter(type_filter) or ()
+        known_names = {
+            c.name for c in resolve_entity_classes(wiki_root, caller_audience=caller_audience)
+        }
+        unrecognized = [t for t in normalized_types if t not in known_names]
+        if unrecognized:
+            classes_str = ", ".join(sorted(known_names)) if known_names else "(none)"
+            print(
+                f"Note: --type value(s) {', '.join(unrecognized)} are not a "
+                f"recognized entity class on this deployment. Known classes: "
+                f"{classes_str}.",
+                file=sys.stderr,
+            )
 
     from athenaeum.mcp_server import _resolve_hit_path
 
