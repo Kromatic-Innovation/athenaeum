@@ -91,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_run import add_run_subparser
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
+    from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
 
     parser = argparse.ArgumentParser(
         prog="athenaeum",
@@ -125,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_bounce_contract_subparser(subparsers)  # bounce-contract
     add_bounce_divergence_subparser(subparsers)  # bounce-divergence
     add_do_not_email_divergence_subparser(subparsers)  # do-not-email-divergence
+    add_surface_divergence_subparser(subparsers)  # surface-divergence
     add_drain_subparser(subparsers)  # drain
     add_storage_subparser(subparsers)  # storage
     add_push_metrics_subparser(subparsers)  # push-metrics
