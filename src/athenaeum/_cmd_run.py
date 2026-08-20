@@ -246,6 +246,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             # heartbeat — making heartbeat_age_seconds report progress age, not
             # acquire age, so a healthy long run is never auto-broken.
             heartbeat=lock.heartbeat,
+            # Issue athenaeum#712: also thread the lock itself — the finalize
+            # phase's verdict-ledger advisor reuses it (single-appender) rather
+            # than acquiring a second one. Only ever consulted when
+            # librarian.verdict_ledger_enabled is on.
+            lock=lock,
         )
     finally:
         lock.release()

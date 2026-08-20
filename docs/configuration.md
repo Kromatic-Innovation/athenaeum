@@ -1172,6 +1172,73 @@ one record per decision: `tier`, `decision`, `reason`, `reason_code`,
 `reasoning_tiers.read_reasoning_tier_decisions()`, optionally filtered by
 `proposal_id` or `tier`.
 
+## Verdict ledger (athenaeum#712) — off by default
+
+An append-only record of pairwise comparison verdicts
+(`duplicate | contradiction | specialization | distinct | underdetermined`),
+each carrying the exact set of facts — the **basis** — it was justified by
+(content hashes, coordinates, epochs, authority), so a change to any one of
+those facts can invalidate exactly the verdicts that depended on it. Ships
+in `src/athenaeum/verdicts.py`, ahead of the five-verdict comparator that
+will populate it (a separate, future child of the memory-model v6 epic,
+athenaeum#709) — the comparator's invalidation story depends on the basis
+being right from entry one.
+
+**Wiring decision (athenaeum#712 AC).** The comparator does not exist yet, so
+this ships dark behind one flag defaulting off. With the flag on, two real
+integration points fire — this is not a schema nothing writes to:
+
+- `athenaeum ingest-answers` — a merge **approve**/**reject** decision
+  (`athenaeum.decision_answers._apply_merge_answer`) records a
+  `duplicate`/`distinct` verdict for the resolved pair, using the same
+  sources the pending-merge proposal already named. This is "consumed
+  within this issue by writing verdicts for the decisions the current
+  pipeline already makes."
+- `athenaeum run`'s finalize phase materializes the ledger directory and
+  epoch registry (if absent) and advances the per-branch duty-cycle
+  counters one night — so a live run genuinely produces a well-formed,
+  queryable ledger even before the comparator exists to populate it with
+  real content.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Verdict ledger | `ATHENAEUM_VERDICT_LEDGER_ENABLED` | `librarian.verdict_ledger_enabled` | `false` (**off**) | Gates the whole subsystem: the `ingest-answers` merge-decision recorder, the `run` finalize advisor, and materializing `wiki/_verdicts/` at all. See [`resolve_verdict_ledger_enabled`](../src/athenaeum/config.py). |
+| Epoch batch interval | `ATHENAEUM_VERDICT_EPOCH_BATCH_INTERVAL_DAYS` | `librarian.verdict_epoch_batch_interval_days` | `30` | Comparator-epoch bumps are batched on this interval (days) — passed to `verdicts.open_epoch`'s `batch_interval_days`. |
+
+```yaml
+librarian:
+  verdict_ledger_enabled: true
+  verdict_epoch_batch_interval_days: 30
+```
+
+**With the flag off:** `athenaeum run` is byte-identical to before athenaeum#712
+— no file appears under `wiki/_verdicts/`, no new run-summary phase, no
+exit-code change. `athenaeum ingest-answers` resolves merges exactly as
+before; nothing records a verdict.
+
+**Store layout**, under `wiki/_verdicts/`:
+
+- `<YYYY-MM>.jsonl` — one **live** monthly partition, keyed by the month a
+  pair's currently-live verdict was decided. Append-only, `O_APPEND` +
+  fsync, same durability discipline as `_merge_provenance.jsonl`.
+- `_verdicts_history.jsonl` — verdicts superseded by a newer decision for
+  the same pair, moved out by `verdicts.compact()`. Invalidation waves scan
+  the live partitions only.
+- `_verdicts_epochs.json` — the per-branch comparator-epoch registry:
+  current version, whether a re-comparison wave is open, and the
+  nights-in-wave / nights-total duty-cycle counters (target <=25%,
+  reporting only — enforcing the target is out of scope).
+
+**Single-appender.** Every mutating `verdicts.py` function reuses
+`athenaeum.runlock.RunLock` rather than a second lock — it takes a required
+`lock:` argument and requires it already acquired (raises `LockNotHeld`
+otherwise); it never acquires the lock itself. Both integration points above
+thread through the SAME lock the CLI command already holds.
+
+**How to inspect it.** `athenaeum verdicts {count,list-by-verdict,show-one-pair,show-stale}`
+is the sanctioned read path (mirrors `athenaeum merges`) — hand-parsing
+`wiki/_verdicts/*.jsonl` directly is not supported.
+
 ## Recall and search
 
 | Knob | CLI flag | Env var | YAML key | Default | What it does |
@@ -1321,6 +1388,8 @@ librarian:
   decisions_max_sources_per_merge: 20       # decisions-view per-merge source fan-out cap (athenaeum#431)
   audit_sample_rate_t2_approvals: 0.075     # share of T2 approvals sampled for human audit (athenaeum#438)
   audit_sample_rate_t1_rejects: 0.075       # share of T1 rejects sampled for human audit (athenaeum#438)
+  verdict_ledger_enabled: false              # off by default; verdict ledger + basis (athenaeum#712)
+  verdict_epoch_batch_interval_days: 30      # comparator-epoch bump batching interval (athenaeum#712)
   delta:
     enabled: true               # delta-scoped incremental compile on client=None path (athenaeum#370)
     max_affected_clusters: 8    # > this many clusters touched => full compile (athenaeum#370)
