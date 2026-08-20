@@ -153,14 +153,15 @@ class TestResolveRawFileMaxBytes:
 
 
 class TestResolveRawFileMaxApiCalls:
-    """Issue athenaeum#898: the per-raw-file LLM-call bound resolver."""
+    """Issue athenaeum#898, recalibrated athenaeum#994: the per-raw-file
+    LLM-call bound resolver."""
 
     def test_default(self) -> None:
         from athenaeum.config import resolve_raw_file_max_api_calls
 
-        assert resolve_raw_file_max_api_calls(None) == 8
-        assert resolve_raw_file_max_api_calls({}) == 8
-        assert resolve_raw_file_max_api_calls({"librarian": {}}) == 8
+        assert resolve_raw_file_max_api_calls(None) == 60
+        assert resolve_raw_file_max_api_calls({}) == 60
+        assert resolve_raw_file_max_api_calls({"librarian": {}}) == 60
 
     def test_yaml_value_wins(self) -> None:
         from athenaeum.config import resolve_raw_file_max_api_calls
@@ -179,17 +180,17 @@ class TestResolveRawFileMaxApiCalls:
             resolve_raw_file_max_api_calls(
                 {"librarian": {"raw_file_max_api_calls": True}}
             )
-            == 8
+            == 60
         )
         assert (
             resolve_raw_file_max_api_calls(
                 {"librarian": {"raw_file_max_api_calls": "abc"}}
             )
-            == 8
+            == 60
         )
         assert (
             resolve_raw_file_max_api_calls({"librarian": {"raw_file_max_api_calls": 0}})
-            == 8
+            == 60
         )
 
     def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,14 +211,15 @@ class TestResolveRawFileMaxApiCalls:
 
 
 class TestResolveRawFileMaxRuntimeSeconds:
-    """Issue athenaeum#898: the per-raw-file wall-clock bound resolver."""
+    """Issue athenaeum#898, recalibrated athenaeum#994: the per-raw-file
+    wall-clock bound resolver."""
 
     def test_default(self) -> None:
         from athenaeum.config import resolve_raw_file_max_runtime_seconds
 
-        assert resolve_raw_file_max_runtime_seconds(None) == 120
-        assert resolve_raw_file_max_runtime_seconds({}) == 120
-        assert resolve_raw_file_max_runtime_seconds({"librarian": {}}) == 120
+        assert resolve_raw_file_max_runtime_seconds(None) == 900
+        assert resolve_raw_file_max_runtime_seconds({}) == 900
+        assert resolve_raw_file_max_runtime_seconds({"librarian": {}}) == 900
 
     def test_yaml_value_wins(self) -> None:
         from athenaeum.config import resolve_raw_file_max_runtime_seconds
@@ -236,19 +238,19 @@ class TestResolveRawFileMaxRuntimeSeconds:
             resolve_raw_file_max_runtime_seconds(
                 {"librarian": {"raw_file_max_runtime_seconds": True}}
             )
-            == 120
+            == 900
         )
         assert (
             resolve_raw_file_max_runtime_seconds(
                 {"librarian": {"raw_file_max_runtime_seconds": "abc"}}
             )
-            == 120
+            == 900
         )
         assert (
             resolve_raw_file_max_runtime_seconds(
                 {"librarian": {"raw_file_max_runtime_seconds": 0}}
             )
-            == 120
+            == 900
         )
 
     def test_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
