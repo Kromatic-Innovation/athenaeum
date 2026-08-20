@@ -501,10 +501,12 @@ class TestRunAutoMemoryPhaseInvokesStamping:
     ) -> None:
         """Drive the real ``_run_auto_memory_phase`` (not the extracted
         helper in isolation) far enough to prove IT calls the stamper with
-        ``ctx.merge_client`` before compile runs. ``_compile_auto_memory``
-        and the reresolve pass are stubbed to no-ops — this test's job is
-        to pin the phase function's own wiring/ordering, not to re-exercise
-        clustering/merge (covered elsewhere).
+        ``ctx.classify_client`` (issue athenaeum#841 — the ``classify`` knob's
+        client; ``claim_kind`` stamping shares that knob) before compile
+        runs. ``_compile_auto_memory`` and the reresolve pass are stubbed to
+        no-ops — this test's job is to pin the phase function's own
+        wiring/ordering, not to re-exercise clustering/merge (covered
+        elsewhere).
         """
         from athenaeum import librarian
 
@@ -548,7 +550,7 @@ class TestRunAutoMemoryPhaseInvokesStamping:
         from athenaeum.config import load_config
 
         ctx.config = load_config(knowledge_root)
-        ctx.merge_client = client
+        ctx.classify_client = client
 
         librarian._run_auto_memory_phase(ctx)
 

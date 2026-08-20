@@ -1221,6 +1221,160 @@ class TestContradictionFixture:
         assert "**Proposed resolution**" not in text
 
 
+# ---------------------------------------------------------------------------
+# Per-knob client routing (issue athenaeum#841) — proves each pipeline stage
+# reached from ONE merge_clusters_to_wiki call uses the CLIENT FOR ITS OWN
+# KNOB, not a global/shared default. Four DISTINCT fake clients, each primed
+# with exactly the ONE response its own stage expects; a regression that
+# collapses any two knobs back onto one shared client either starves a fake
+# of its expected call (assert_called_once fails) or double-serves another
+# (StopIteration from an exhausted side_effect).
+# ---------------------------------------------------------------------------
+
+
+class TestPerKnobClientRouting:
+    @staticmethod
+    def _fake_client(*response_texts: str):
+        from unittest.mock import MagicMock
+
+        def _resp(text: str):
+            r = MagicMock()
+            r.content = [MagicMock(text=text)]
+            return r
+
+        client = MagicMock()
+        client.messages.create.side_effect = [_resp(t) for t in response_texts]
+        return client
+
+    def test_classify_and_resolve_knobs_use_their_own_clients(
+        self, contradiction_merge_root: Path
+    ) -> None:
+        """AC1 for classify + resolve: the C4 detector call reaches ONLY
+        ``client`` (the classify knob); the resolver call reaches ONLY
+        ``resolve_client`` — never the other way around, and never the same
+        object serving both."""
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        resolver_payload = (
+            '{"action": "escalate", "rationale": "needs a human", '
+            '"confidence": 0.4}'
+        )
+        classify_client = self._fake_client(detector_payload)
+        resolve_client = self._fake_client(resolver_payload)
+
+        entries = merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=classify_client,
+            resolve_client=resolve_client,
+        )
+        assert len(entries) == 1
+        assert entries[0].contradictions_detected is True
+
+        classify_client.messages.create.assert_called_once()
+        resolve_client.messages.create.assert_called_once()
+        # Never accidentally the SAME mock object.
+        assert classify_client is not resolve_client
+
+    def test_reasoning_t1_and_t2_knobs_use_their_own_clients(
+        self, contradiction_merge_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1 for reasoning_t1 + reasoning_t2: with the reasoning-tier
+        screen opted in, the T1/T2 merge-proposal screens each reach ONLY
+        their own client — never ``client``/``resolve_client``, and never
+        each other's."""
+        from athenaeum import merge as merge_mod
+        from athenaeum.config import load_config
+
+        monkeypatch.setattr(merge_mod.spend, "ceiling_tripped", lambda *a, **k: None)
+        # Load the fixture's own written athenaeum.yaml (carries
+        # recall.extra_intake_roots, load-bearing for member resolution)
+        # and layer the reasoning-tier opt-in on top, rather than
+        # overwriting it with a bare dict.
+        config = load_config(contradiction_merge_root)
+        config.setdefault("librarian", {})["reasoning_tier_auditing_enabled"] = True
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        resolver_payload = (
+            '{"action": "propose_merge", '
+            '"merge_target_name": "prior-session-debris-policy", '
+            '"draft_merged_body": "Prefer parking prior-session debris on WIP.", '
+            '"confidence": 0.9, "source_precedence_used": []}'
+        )
+        classify_client = self._fake_client(detector_payload)
+        resolve_client = self._fake_client(resolver_payload)
+        # T1/T2 both degrade gracefully (pass_up / escalate) on unparseable
+        # text — see reasoning_tiers._parse_t1_response / _parse_t2_response
+        # — so a plain non-JSON body is a safe, minimal fake response here.
+        reasoning_t1_client = self._fake_client("T1 pass-up (test)")
+        reasoning_t2_client = self._fake_client("T2 escalate (test)")
+
+        merge_clusters_to_wiki(
+            contradiction_merge_root,
+            client=classify_client,
+            resolve_client=resolve_client,
+            reasoning_t1_client=reasoning_t1_client,
+            reasoning_t2_client=reasoning_t2_client,
+            config=config,
+        )
+
+        classify_client.messages.create.assert_called_once()
+        resolve_client.messages.create.assert_called_once()
+        reasoning_t1_client.messages.create.assert_called_once()
+        reasoning_t2_client.messages.create.assert_called_once()
+        # Four genuinely distinct objects — no two knobs collapsed onto one.
+        assert len(
+            {
+                id(classify_client),
+                id(resolve_client),
+                id(reasoning_t1_client),
+                id(reasoning_t2_client),
+            }
+        ) == 4
+
+    def test_unset_knob_clients_fall_back_to_client_ac6(
+        self, contradiction_merge_root: Path
+    ) -> None:
+        """AC6: a caller that only passes ``client=`` (every pre-athenaeum#841
+        call site, and most of this file's OWN fixtures) gets byte-identical
+        behavior — the SAME client serves the detector AND the resolver, as
+        it always has."""
+        detector_payload = (
+            '{"detected": true, "conflict_type": "prescriptive", '
+            '"members_involved": ['
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v1.md", '
+            '"-Users-tristankromer-Code/feedback_prior_session_debris_v2.md"], '
+            '"conflicting_passages": ['
+            '"Commit prior-session debris directly to develop.", '
+            '"Park prior-session debris on a WIP branch."], '
+            '"rationale": "One says commit directly; the other says park."}'
+        )
+        resolver_payload = (
+            '{"action": "escalate", "rationale": "needs a human", '
+            '"confidence": 0.4}'
+        )
+        fake_client = self._fake_client(detector_payload, resolver_payload)
+
+        entries = merge_clusters_to_wiki(contradiction_merge_root, client=fake_client)
+        assert len(entries) == 1
+        assert fake_client.messages.create.call_count == 2
+
+
 class TestBudgetExhaustedC4Guard:
     """Issue athenaeum#461, AC3: the C4 detector/resolver call sites must not burn API
     calls past an already-spent run-level ``max_api_calls`` budget.
