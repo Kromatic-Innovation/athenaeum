@@ -149,7 +149,7 @@ def add_memory_class_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Also class the residual (auto-memory/preference/feedback/"
         "incident/issue and untyped-but-frontmattered pages) with batched "
         "LLM calls routed through the 'classify' knob. Off by default: the "
-        "deterministic rule map needs no model and covers ~97% of pages.",
+        "deterministic rule map needs no model and covers ~97%% of pages.",
     )
     backfill.add_argument(
         "--include-retired",
