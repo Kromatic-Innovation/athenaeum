@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum import verdicts
 from athenaeum.runlock import RunLock
 from athenaeum.verdicts import (
     Basis,
@@ -241,6 +240,18 @@ class TestWriteAndLookup:
             append_verdict(wiki_root, entry, lock=lock)
         assert show_one_pair(wiki_root, entry.pair)["verdict"] == "duplicate"
         assert show_one_pair(wiki_root, "missing+pair") is None
+
+    def test_show_stale_cli_helper(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        lock = RunLock(tmp_path)
+        with lock:
+            append_verdict(wiki_root, _entry("a", "b", verdict="duplicate"), lock=lock)
+            append_verdict(wiki_root, _entry("c", "d", verdict="distinct"), lock=lock)
+            mark_pairs_stale(wiki_root, {"a+b": "changed_page"}, lock=lock)
+        stale = show_stale(wiki_root)
+        assert [e["pair"] for e in stale] == ["a+b"]
+        assert stale[0]["stale"] is True
+        assert stale[0]["stale_reason"] == "changed_page"
 
 
 # ---------------------------------------------------------------------------

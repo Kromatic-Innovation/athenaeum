@@ -581,7 +581,9 @@ def compact(wiki_root: Path, *, lock: RunLock) -> CompactionResult:
 
     rewritten: list[str] = []
     d = ledger_dir(wiki_root)
-    existing_months = {p.stem for p in d.glob("*.jsonl") if p.name != HISTORY_FILENAME} if d.is_dir() else set()
+    existing_months = (
+        {p.stem for p in d.glob("*.jsonl") if p.name != HISTORY_FILENAME} if d.is_dir() else set()
+    )
     for month in sorted(existing_months | set(by_month)):
         entries = sorted(by_month.get(month, []), key=lambda e: e.pair)
         text = "".join(json.dumps(e.to_dict(), separators=(",", ":")) + "\n" for e in entries)
@@ -704,7 +706,7 @@ def select_stale_for_tree_epoch_bump(
                 continue
             coord_str = str(coord)
             if any(coord_str.startswith(prefix) for prefix in renamed_subtree_prefixes):
-                out[e.pair] = f"tree_epoch bump touches renamed subtree in coords"
+                out[e.pair] = "tree_epoch bump touches renamed subtree in coords"
                 break
     return out
 

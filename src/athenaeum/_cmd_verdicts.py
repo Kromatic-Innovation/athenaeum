@@ -92,14 +92,14 @@ def cmd_verdicts(args: argparse.Namespace) -> int:
 
     if sub == "show-one-pair":
         pair = args.pair
-        entry = show_one_pair(wiki_root, pair)
+        pair_entry = show_one_pair(wiki_root, pair)
         if args.json:
-            sys.stdout.write((json.dumps(entry) if entry else "null") + "\n")
+            sys.stdout.write((json.dumps(pair_entry) if pair_entry else "null") + "\n")
             return 0
-        if entry is None:
+        if pair_entry is None:
             print(f"no decided verdict for pair {pair!r}")
             return 0
-        print(_format_entry(entry))
+        print(_format_entry(pair_entry))
         return 0
 
     # sub == "show-stale"

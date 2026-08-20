@@ -458,7 +458,7 @@ def _apply_merge_answer(
     # docstring. Never lets a ledger write affect the outcome above —
     # record_pair_decision is itself best-effort/non-raising, so this is
     # purely an additional side effect on an already-successful resolve.
-    if verdict_ledger_enabled and result.get("ok") and len(sources) >= 2:
+    if verdict_ledger_enabled and lock is not None and result.get("ok") and len(sources) >= 2:
         from athenaeum.verdicts import record_pair_decision
 
         verdict_value = "duplicate" if decision == "approve" else "distinct"
