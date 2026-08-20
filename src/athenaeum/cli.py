@@ -79,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_decisions import add_decisions_subparser
     from athenaeum._cmd_do_not_email_divergence import add_do_not_email_divergence_subparser
     from athenaeum._cmd_drain import add_drain_subparser
+    from athenaeum._cmd_enumerate import add_enumerate_subparser
     from athenaeum._cmd_index import add_index_subparsers
     from athenaeum._cmd_lifecycle import add_lifecycle_subparsers
     from athenaeum._cmd_measure import add_measure_subparser
@@ -113,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_query_subparsers(
         subparsers
     )  # test-mcp, people, query-topics, stopwords, recall
+    add_enumerate_subparser(subparsers)  # enumerate (issue athenaeum#965)
     add_pending_subparsers(
         subparsers
     )  # ingest-answers, ingest-merges, reresolve-questions
