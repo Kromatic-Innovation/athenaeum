@@ -85,6 +85,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty-corpus scratch tree and asserts a well-formed ledger with the flag
   on and no `wiki/_verdicts/` at all with it off.
 
+- **Per-knob provider routing threaded through the librarian pipeline
+  (athenaeum#841, finishing the athenaeum#786 scaffolding).** `llm.providers.<knob>` /
+  `ATHENAEUM_<KNOB>_LLM_PROVIDER` overrides for `classify`, `write`,
+  `resolve`, `reasoning_t1`, and `reasoning_t2` used to be accepted but
+  silently inert on an `athenaeum run` librarian run — the entity/merge
+  pipeline built ONE shared client from the global provider for all five,
+  and a startup warning was the only signal an override had no effect. Each
+  of the five now gets its OWN client, constructed once per DISTINCT
+  resolved provider via a shared `LLMClientCache` (several knobs sharing one
+  provider still construct exactly one client — no behavior change for the
+  common no-override case, which resolves byte-identically to before). The
+  ineffective-override warning is removed; a bad per-knob provider id now
+  fails the run loudly at the same startup preflight gate as the global
+  provider, instead of surfacing later as a raw traceback. `athenaeum spend
+  --by-knob` now shows the real provider split for a mixed-provider
+  librarian run too: when a run's knobs resolve to more than one provider,
+  the run writes one spend-ledger row PER distinct provider (each carrying
+  only that provider's own token/knob/model attribution and correct
+  `billing_mode`) via the new `spend.record_spend_per_knob_provider`,
+  instead of one row assuming a single provider for the whole run. See
+  `docs/configuration.md`'s "Per-knob provider routing" section for the
+  updated "what is actually wired" summary.
+
 ### Documentation
 
 - **Design note: standing sensitive-value filter at raw-sweep intake
