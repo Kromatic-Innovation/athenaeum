@@ -173,6 +173,50 @@ class WikiBase(BaseModel):
             return None
         return str(v)
 
+    # Issue athenaeum#714 (dimension registry): four NEW fields, read-side
+    # counterparts to the write-side fields added to ``models.WikiEntity``.
+    # None collide with any existing key — see ``athenaeum/dimensions.py``'s
+    # module docstring for why the kernel ``scope`` dimension's coordinate is
+    # ``claimed_scope`` rather than reusing THIS class's existing ``scope``
+    # field (which a different subsystem, ``scoped_claims.py``/athenaeum#329,
+    # already reads as an incompatible nested ``{org, locale}`` shape).
+    recorded_at: str | None = None
+    origin_scope: str | None = None
+    claimed_scope: str | None = None
+    subject: str | None = None
+
+    @field_validator("recorded_at", "origin_scope", "claimed_scope", "subject", mode="before")
+    @classmethod
+    def _validate_dimension_coordinate_str(cls, v: Any) -> Any:
+        if v is None or v == "":
+            return None
+        return str(v)
+
+    @model_validator(mode="after")
+    def _validate_intake_temporal(self) -> "WikiBase":
+        """Enforce the athenaeum#714 intake temporal-validation AC at the schema
+        boundary (the same choke point every other intake path already
+        validates through — see :func:`athenaeum.intake.tier0_passthrough`'s
+        ``validate_wiki_meta`` call).
+
+        ``recorded_at`` is a NEW field (see above) so most frontmatter this
+        validates today has none yet; :func:`athenaeum.dimensions.validate_intake_temporal`
+        falls back to ``date.today()`` when absent — the anchor
+        ``recorded_at`` is stamped to at construction time anyway
+        (:meth:`athenaeum.models.WikiEntity.__post_init__`), so the
+        comparison is equivalent whether or not the caller has already
+        threaded a real ``recorded_at`` through. Hard reject
+        (:class:`athenaeum.dimensions.ObservedAfterRecordedError`, a
+        :class:`ValueError` subclass pydantic wraps into
+        :class:`pydantic.ValidationError`) on ``observed_at`` later than
+        ``recorded_at``; soft :class:`UserWarning` on a deep back-date. Both
+        tested — see ``tests/test_dimensions.py``.
+        """
+        from athenaeum.dimensions import validate_intake_temporal
+
+        validate_intake_temporal(observed_at=self.observed_at, recorded_at=self.recorded_at)
+        return self
+
     @field_validator("source", mode="before")
     @classmethod
     def _validate_source(cls, v: Any) -> Any:

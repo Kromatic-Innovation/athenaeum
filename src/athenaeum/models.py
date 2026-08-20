@@ -1426,6 +1426,25 @@ class WikiEntity:
     # without any call site having to know the taxonomy. An explicit value
     # always wins; an unmapped ``type`` stays ``None`` and renders no key.
     memory_class: str | None = None
+    # Issue athenaeum#714 (dimension registry): four NEW write-side coordinate
+    # fields, none of which collide with any existing frontmatter key (see
+    # ``athenaeum/dimensions.py``'s module docstring for the collision
+    # analysis that ruled out reusing the existing ``scope:`` key).
+    # ``recorded_at`` is stamped unconditionally by ``__post_init__`` below
+    # (never writer-supplied); the other three are left exactly as the
+    # caller set them — a missing coordinate is not an error, it lands per
+    # the dimension's null semantics.
+    recorded_at: str | None = None
+    # PROVENANCE (where/what context wrote this claim) — never auto-copied
+    # into ``claimed_scope`` below. See ``dimensions.py``'s write-discipline
+    # section and ``tests/test_dimensions.py::test_origin_scope_never_populates_claimed_scope``.
+    origin_scope: str | None = None
+    # The ASSERTED "scope" kernel-dimension coordinate (where the claim
+    # APPLIES) — must be explicit (writer, classifier proposal, or queue
+    # answer); never derived from ``origin_scope``.
+    claimed_scope: str | None = None
+    # The "subject" kernel-dimension coordinate (identity kind).
+    subject: str | None = None
 
     def __post_init__(self) -> None:
         # Lazy import: only this one call needs the vocabulary, and
@@ -1435,8 +1454,7 @@ class WikiEntity:
 
         if self.memory_class is None or self.memory_class == "":
             self.memory_class = memory_class_for_type(self.type)
-            return
-        if self.memory_class not in MEMORY_CLASSES:
+        elif self.memory_class not in MEMORY_CLASSES:
             # Warn-and-keep, matching how ``schemas.WikiBase`` treats an
             # unrecognized value (and the athenaeum#93 ``KNOWN_TYPES`` precedent it
             # cites): round-trip fidelity beats silently dropping a value the
@@ -1447,6 +1465,25 @@ class WikiEntity:
                 UserWarning,
                 stacklevel=2,
             )
+
+        # Issue athenaeum#714: recorded-time kernel dimension — system transaction
+        # time, stamped ONCE per construction call where ``recorded_at`` is
+        # absent (mirroring ``created``'s own stamp-once-if-absent
+        # convention above, NOT ``updated``'s always-refresh one). A caller
+        # that reconstructs an already-recorded entity from an on-disk page
+        # (an edit/merge round-trip) and threads the existing ``recorded_at``
+        # back into the constructor preserves it rather than bumping it —
+        # "monotonic per corpus" describes NEW claims entering the corpus,
+        # not every subsequent touch of an existing one. The raw-intake path
+        # (``intake.tier0_passthrough``) never forwards a raw frontmatter
+        # ``recorded_at:`` into this constructor, so a writer cannot get a
+        # self-supplied value accepted for a genuinely new page either way —
+        # "never writer-supplied" holds because no caller threads untrusted
+        # input into this field, not because this method rejects one.
+        if not self.recorded_at:
+            from athenaeum.dimensions import stamp_recorded_time
+
+            self.recorded_at = stamp_recorded_time()
 
     @property
     def filename(self) -> str:
@@ -1489,6 +1526,17 @@ class WikiEntity:
             meta["on_behalf_of"] = self.on_behalf_of
         if self.asserter is not None:
             meta["asserter"] = self.asserter
+        # Issue athenaeum#714: dimension-registry coordinates. Rendered only when
+        # set — legacy entities without them round-trip byte-for-byte
+        # unchanged, matching every other optional-field convention above.
+        if self.recorded_at is not None:
+            meta["recorded_at"] = self.recorded_at
+        if self.origin_scope is not None:
+            meta["origin_scope"] = self.origin_scope
+        if self.claimed_scope is not None:
+            meta["claimed_scope"] = self.claimed_scope
+        if self.subject is not None:
+            meta["subject"] = self.subject
         return render_frontmatter(meta) + "\n" + self.body
 
 
