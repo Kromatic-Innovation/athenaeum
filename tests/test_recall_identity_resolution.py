@@ -607,6 +607,8 @@ class TestNoActionPredicate:
             bounced=False,
             valid_from=None,
             valid_until=None,
+            do_not_email=pii.DoNotEmailState(marked=False),
+            validity=pii.IdentifierValidity(identifier="alex@example.org", closed=False),
         )
 
         assert "outreach_eligible" not in fact.to_dict()

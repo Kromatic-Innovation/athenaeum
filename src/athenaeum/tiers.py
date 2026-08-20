@@ -90,6 +90,7 @@ from athenaeum.models import (
     EntityIndex,
     EscalationItem,
     RawFile,
+    RawFileOverBudgetError,
     TokenUsage,
     WikiEntity,
     cache_usage_counts,
@@ -2140,6 +2141,11 @@ def tier3_derive_actions(
     client: LLMBackend,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
+    *,
+    max_api_calls_for_file: int | None = None,
+    max_runtime_for_file: float | None = None,
+    calls_before_file: int = 0,
+    started_at_file: float | None = None,
 ) -> tuple[list[WikiEntity], list[tuple[Path, str]], list[str], list[EscalationItem]]:
     """The LLM-call phase of Tier 3 — makes every call, writes NOTHING.
 
@@ -2153,16 +2159,42 @@ def tier3_derive_actions(
     every other caller (``batch.py`` does not use either function; the tests
     that call ``tier3_write`` directly are unaffected).
 
-    Invariant (issue athenaeum#663): actions are evaluated in order and a mid-loop
-    exception discards everything derived so far — see :func:`tier3_write`'s
-    docstring for the full rationale (re-derivation non-determinism makes a
-    partial-apply-then-retry-whole unsafe). That invariant lives entirely in
-    THIS function now; ``tier3_write``'s flush step cannot violate it because
-    it only runs after this function returns cleanly.
+    ``max_api_calls_for_file`` / ``max_runtime_for_file`` / ``calls_before_file`` /
+    ``started_at_file`` (issue athenaeum#994) are this file's per-file LLM-call
+    and wall-clock bound, checked INCREMENTALLY — after EACH action in
+    ``actions`` completes, not once after the whole loop. The moment an
+    action's completion pushes the file over either bound, the loop stops
+    (the remaining, not-yet-started actions are never attempted) and
+    :class:`~athenaeum.models.RawFileOverBudgetError` is raised carrying
+    everything derived so far (``new_entities`` / ``pending_updates`` /
+    ``updated_uids`` / ``escalations``) as its own attributes, so the caller
+    can write that partial progress durably instead of discarding it — see
+    that exception's docstring for the full contract this supersedes.
+    ``max_api_calls_for_file=None`` / ``max_runtime_for_file=None`` (the
+    default, and what every caller other than the entity-loop passes)
+    disables the respective check — unbounded, matching pre-athenaeum#898
+    behaviour. ``calls_before_file`` is ``usage.api_calls`` and
+    ``started_at_file`` is ``time.monotonic()``, both snapshotted by the
+    caller at the moment THIS file started, so the deltas measured here are
+    this file's own spend, not the phase's running total.
 
-    On a mid-file failure the propagating exception is annotated with
-    ``athenaeum_failing_action`` (``"<kind>:<name>"``); the exception object
-    and type are otherwise unchanged.
+    Invariant (issue athenaeum#663): actions are evaluated in order and a mid-loop
+    *processing* exception (a malformed response, a transient API error)
+    still discards everything derived so far — see :func:`tier3_write`'s
+    docstring for the full rationale (re-derivation non-determinism makes a
+    partial-apply-then-retry-whole unsafe for an ordinary failure). The
+    over-budget path above is a deliberate, narrower exception to that
+    invariant (issue athenaeum#994): the actions that already landed a
+    result are not "a failure to retry", they are completed, billed work,
+    and the raw file is left in place either way — so a future run's tier-1
+    match against the already-written page prevents the same duplicate work
+    from being re-derived, exactly as it does for any other pre-existing
+    wiki entity. ``tier3_write``'s flush step cannot violate either
+    invariant because it only runs after this function returns cleanly.
+
+    On a mid-file *processing* failure the propagating exception is
+    annotated with ``athenaeum_failing_action`` (``"<kind>:<name>"``); the
+    exception object and type are otherwise unchanged.
 
     Returns ``(new_entities, pending_updates, updated_uids, escalations)`` —
     ``pending_updates`` is ``[(path, new_content), ...]``, not yet written.
@@ -2230,6 +2262,41 @@ def tier3_derive_actions(
         except Exception as exc:
             setattr(exc, "athenaeum_failing_action", f"{action.kind}:{action.name}")
             raise
+
+        # Issue athenaeum#994: the per-file LLM-call / wall-clock bound,
+        # checked HERE — after every action that just completed, not once
+        # after the whole loop (the athenaeum#898-era shape). Everything
+        # derived so far (this action included) rides along on the raised
+        # exception as durable partial progress; only the NOT-YET-STARTED
+        # remainder of ``actions`` is discarded. See this function's and
+        # RawFileOverBudgetError's docstrings for the full rationale.
+        if max_api_calls_for_file is not None and usage is not None:
+            _calls_used_for_file = usage.api_calls - calls_before_file
+            if _calls_used_for_file > max_api_calls_for_file:
+                raise RawFileOverBudgetError(
+                    raw.ref,
+                    bound="llm_calls",
+                    detail=(
+                        f"{_calls_used_for_file} call(s) > "
+                        f"{max_api_calls_for_file}-call limit"
+                    ),
+                    new_entities=new_entities,
+                    pending_updates=pending_updates,
+                    updated_uids=updated_uids,
+                    escalations=escalations,
+                )
+        if max_runtime_for_file is not None and started_at_file is not None:
+            _elapsed_for_file = time.monotonic() - started_at_file
+            if _elapsed_for_file > max_runtime_for_file:
+                raise RawFileOverBudgetError(
+                    raw.ref,
+                    bound="wall_clock",
+                    detail=f"{_elapsed_for_file:.1f}s > {max_runtime_for_file}s limit",
+                    new_entities=new_entities,
+                    pending_updates=pending_updates,
+                    updated_uids=updated_uids,
+                    escalations=escalations,
+                )
 
     return new_entities, pending_updates, updated_uids, escalations
 
