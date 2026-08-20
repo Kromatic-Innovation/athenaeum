@@ -824,7 +824,46 @@ the existing git-retire precedent exactly
 snapshot-then-`git rm` shape, issue athenaeum#947) — archival is git-rm removal
 (never an in-tree tombstone marker, which would need its own new filtering
 logic threaded through every recall backend), so an archived page stays
-fully recoverable from git history (`git log` / `git show`).
+fully recoverable from git history (`git log` / `git show`). Every archived
+page also gets one durable ledger record — page, bucket + expiry, sweep
+timestamp, and the recovering commit SHA — written BEFORE the `git rm`, with
+the sweep refusing to archive at all if that write fails (issue athenaeum#969).
+
+**Compiles to a policy-pack rule when packs land — a documented mapping
+commitment, not a migration (issue athenaeum#969, reconciling athenaeum#904
+with the memory model; the pack itself is athenaeum#718 territory).**
+`bucket:` is deliberately the v0 SHORTHAND for a per-class `delete-after`
+retention rule, not a second retention vocabulary competing with the memory
+model's tiers and retention policy packs
+(`docs/whole-store-adapter-design.md` §8, "the retention-policy packs" —
+one of the athenaeum#718 criteria that does not depend on the store
+generalisation and may land independently). Concretely, `bucket: daily`
+compiles to:
+
+```
+delete-after <period>   keyed by (memory_class, data_class)
+```
+
+— `<period>` is the same window `bucket: daily`'s `valid_until` already
+encodes today (§8.1); packs do not introduce a second expiry clock. The key
+is the compiled page's `memory_class` (`docs/memory-taxonomy.md`) crossed
+with its data/sensitivity classification
+(`docs/sensitivity-class-vocabulary.md`) — NOT the bucket label itself,
+which is why the pack, once it exists, is the authority and `bucket:`
+becomes sugar for it.
+
+**`bucket:` stays as sugar; the pack becomes the authority.** This
+commitment does not remove or deprecate the frontmatter field — it stays
+exactly as specified above, the write-time shorthand a human, `remember()`,
+or a shape rule sets, and `athenaeum.decay_sweep` keeps reading it exactly
+as documented. Once a policy pack exists for a page's `(memory_class,
+data_class)` pair, THAT rule is authoritative for expiry/deletion; `bucket:`
+resolves to (and must agree with) the pack's `delete-after` rule rather than
+remaining a second, independently-enforced expiry mechanism. **No behavior
+change ships with this note** — no policy pack exists yet, so today's
+`bucket:`/`valid_until`/sweep semantics (this whole §8.8) are completely
+unaffected; this paragraph exists so the policy-pack work does not reinvent
+a competing rule for the pages `bucket: daily` already governs.
 
 ## 9. Multi-dimensional scoped claims (`scope: {org, locale}` + time)
 
