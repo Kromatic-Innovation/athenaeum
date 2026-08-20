@@ -364,6 +364,17 @@ class RunLock:
 
     # -- public API --------------------------------------------------------
 
+    @property
+    def acquired(self) -> bool:
+        """True if this instance currently holds the lock (issue athenaeum#712).
+
+        Read-only mirror of the private ``_acquired`` flag, added so a
+        caller (e.g. :mod:`athenaeum.verdicts`'s single-appender guard) can
+        assert a lock is genuinely held without reaching into a private
+        attribute. Purely additive — no existing behavior changes.
+        """
+        return self._acquired
+
     def acquire(self) -> RunLock:
         """Acquire the lock, honoring *wait* / *force*. Returns ``self``.
 
