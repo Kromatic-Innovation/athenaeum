@@ -18,6 +18,7 @@ from athenaeum.models import (
     asserter_identity_key,
     coerce_source_type,
     compare_asserters,
+    delimited_index_string,
     generate_uid,
     is_inactive_memory,
     load_schema_list,
@@ -28,6 +29,7 @@ from athenaeum.models import (
     parse_on_behalf_of,
     parse_superseded_by,
     render_frontmatter,
+    resolve_page_type,
     slugify,
 )
 
@@ -167,6 +169,70 @@ class TestParseFrontmatter:
         assert meta["name"] == "42"
         assert isinstance(meta["name"], str)
         assert meta["type"] == "person"
+
+
+# ---------------------------------------------------------------------------
+# resolve_page_type (issue athenaeum#964)
+# ---------------------------------------------------------------------------
+
+
+class TestResolvePageType:
+    def test_top_level_type(self) -> None:
+        assert resolve_page_type({"type": "person"}) == "person"
+
+    def test_nested_metadata_type_fallback(self) -> None:
+        # Precedence: top-level absent -> fall back to metadata.type.
+        assert resolve_page_type({"metadata": {"type": "company"}}) == "company"
+
+    def test_top_level_wins_over_nested(self) -> None:
+        meta = {"type": "person", "metadata": {"type": "company"}}
+        assert resolve_page_type(meta) == "person"
+
+    def test_empty_top_level_falls_back_to_nested(self) -> None:
+        meta = {"type": "", "metadata": {"type": "project"}}
+        assert resolve_page_type(meta) == "project"
+
+    def test_no_type_anywhere(self) -> None:
+        assert resolve_page_type({"name": "Untyped"}) == ""
+
+    def test_none_meta(self) -> None:
+        assert resolve_page_type(None) == ""
+
+    def test_empty_meta(self) -> None:
+        assert resolve_page_type({}) == ""
+
+    def test_nested_metadata_not_a_dict(self) -> None:
+        assert resolve_page_type({"metadata": "not-a-dict"}) == ""
+
+    def test_whitespace_trimmed(self) -> None:
+        assert resolve_page_type({"type": "  person  "}) == "person"
+
+
+# ---------------------------------------------------------------------------
+# delimited_index_string (issue athenaeum#964 AC amendment 2)
+# ---------------------------------------------------------------------------
+
+
+class TestDelimitedIndexString:
+    def test_empty_is_sentinel(self) -> None:
+        assert delimited_index_string([]) == "|"
+
+    def test_single_value(self) -> None:
+        assert delimited_index_string(["a"]) == "|a|"
+
+    def test_multiple_values_sorted(self) -> None:
+        assert delimited_index_string(["b", "a"]) == "|a|b|"
+
+    def test_dedupes(self) -> None:
+        assert delimited_index_string(["a", "a", "b"]) == "|a|b|"
+
+    def test_drops_falsy_entries(self) -> None:
+        assert delimited_index_string(["a", "", "b"]) == "|a|b|"
+
+    def test_anchored_no_substring_crossing(self) -> None:
+        # A ``LIKE '%|ops|%'`` probe must not match an ``opsadmin`` entry.
+        encoded = delimited_index_string(["opsadmin"])
+        assert "|ops|" not in encoded
 
 
 # ---------------------------------------------------------------------------

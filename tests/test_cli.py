@@ -527,6 +527,75 @@ class TestRecall:
         lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
         assert len(lines) <= 1
 
+    def test_type_filter_narrows_results(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Issue athenaeum#964: `--type` on the shell-accessible `recall` command,
+        # exercising the same backend.query(type_filter=...) path as the MCP
+        # tool.
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "alice.md").write_text(
+            "---\nuid: u1\ntype: person\nname: Alice\n---\n\n"
+            "Alice practices lean startup.\n"
+        )
+        (wiki / "acme.md").write_text(
+            "---\nuid: u2\ntype: company\nname: Acme Corp\n---\n\n"
+            "Acme Corp practices lean startup.\n"
+        )
+        rc = main(
+            [
+                "recall",
+                "lean startup",
+                "--path",
+                str(knowledge),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "keyword",
+                "--type",
+                "company",
+            ]
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "acme.md" in out
+        assert "alice.md" not in out
+
+    def test_unrecognized_type_filter_names_known_classes(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "acme.md").write_text(
+            "---\nuid: u2\ntype: company\nname: Acme Corp\n---\n\n"
+            "Acme Corp practices lean startup.\n"
+        )
+        rc = main(
+            [
+                "recall",
+                "lean startup",
+                "--path",
+                str(knowledge),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "keyword",
+                "--type",
+                "no-such-class",
+            ]
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "not a recognized entity class" in err
+        assert "company" in err
+
     def test_missing_wiki_returns_error(
         self,
         tmp_path: Path,

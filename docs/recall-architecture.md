@@ -192,6 +192,141 @@ returns. Access control (who may set `with_pii`, or call `recall` at all) is
 a separate, deferred question (athenaeum#864); this module implements
 neither.
 
+## Type filter, config-derived tool schema, and entity-class discovery (athenaeum#964)
+
+`recall` (the MCP tool and the `athenaeum recall` CLI) accepts an optional
+**`type`** filter that narrows the search to one or more entity classes (a
+page's `type:`). It is the alternative to a per-kind API (a `people`
+endpoint, a `companies` endpoint, ...) — one generalizable argument instead
+of a proliferating set of typed interfaces, matching the ratified
+`athenaeum-one-ladder-no-typed-interfaces` position already applied to the
+resolve/read half of the interface (athenaeum#883/#885/#886).
+
+**Contract:**
+
+- Omitting `type` (the default, `None`) searches every class — byte-identical
+  to the pre-athenaeum#964 behavior.
+- The value is an **opaque, operator-defined string** — it is NEVER validated
+  against `wiki/_schema/types.md`. A corpus can carry a class that isn't
+  declared there at all (`auto-memory` is exactly such a class on the live
+  corpus, per the issue's own evidence), and a filter on it still works.
+- An unrecognized value does NOT error and does NOT read as a silent "nothing
+  matched": the response names the deployment's actual entity classes
+  alongside the empty result, so a typo is always diagnosable from the
+  response itself.
+- The predicate is pushed **INSIDE** every backend's query — before
+  ranking/top-k is selected, never post-filtered on the result list — the
+  same rule athenaeum#312's `caller_audience` predicate already follows. A backend
+  that only post-filtered would silently return too few (or wrongly-ranked)
+  results once a filtered class fell outside the unfiltered top-k.
+
+**Per-backend implementation:**
+
+| Backend | Storage | Predicate |
+|---|---|---|
+| `keyword` | none (scans frontmatter live) | checked before scoring, so a non-matching page never enters the candidate list |
+| `fts5` | a `type UNINDEXED` column (same shape as the existing `audience` column) | `AND type IN (...)` in the `WHERE` clause, before `ORDER BY rank LIMIT` |
+| `vector` | a `type` key in chromadb metadata | a native `where=` clause, composed with the existing `filename` exclusion via `$and` so a call passing both honors both |
+
+**Frontmatter precedence.** `type` appears both top-level (`type: person`,
+the documented shape) and, on some pages, nested under `metadata:`
+(`metadata: {type: person}`). `athenaeum.models.resolve_page_type` is the
+ONE place this precedence is decided — top-level wins, `metadata.type` is
+the fallback — and every `type`-column/metadata writer (FTS5's `_row_for`,
+the vector backend's `_add_records`) and the entity-class resolver all call
+it, so a page authored either way is found identically by every backend.
+
+**Index rebuild.** Because the athenaeum#370 stat pre-filter skips re-reading an
+unchanged file's frontmatter, adding a filterable field to the metadata
+contract does not "just work" on the next ordinary incremental build — an
+untouched page would silently keep serving its old (type-less) metadata
+forever. Both indexed backends carry a metadata-schema version stamp checked
+before every incremental build: FTS5 reuses its existing
+`_SCHEMA_VERSION`/`PRAGMA user_version` mechanism (bumped 2 → 3); the vector
+backend gained an equivalent `metadata_schema_version` manifest key (new at
+2). A mismatch — including a pre-athenaeum#964 manifest carrying no such key at
+all — forces a FULL rebuild rather than being incrementally reused, so every
+page picks up the new column/key exactly once. The operator's own ratified
+direction for this migration: *"I genuinely don't care if we have to
+rebuild ... plan for the long term and generalized use case"* — a full
+rebuild is CPU-only (the embedding model runs locally, no API spend) and is
+the sanctioned migration path, not a fallback.
+
+**Full-rebuild wall time — PENDING host-side measurement.** The issue asks
+for a measured (not predicted) full-rebuild wall time on the live corpus
+(22,797 wiki pages at the time the issue was filed) on the vector backend.
+This PR was built in a sandboxed lane with no access to the operator's real
+`~/knowledge` corpus and no network egress to chromadb's embedding-model
+download endpoint, so that measurement could not be produced here — a
+fabricated number would be worse than an honest gap. Run once, post-merge,
+against the live corpus:
+
+```
+time athenaeum reindex --full --backend vector
+```
+
+and replace this paragraph with the observed wall time.
+
+**Related-record identity.** Each recall hit now always renders `**Uid:**`
+and `**Type:**` (unlike the omit-at-default athenaeum#325 header — "go dig
+further" is the point, so these are never hidden), plus a `**Links:**` line
+listing the page's outbound `[[wikilink]]` targets when it has any (omitted
+entirely when it has none). This closes the identity gap the issue's own
+evidence named: previously the only way to reach `read_entity` from a hit was
+to string-parse the `<uid>-<slug>.md` filename. Inbound backlinks are
+explicitly OUT of scope — serving them needs a new index this issue does not
+build; see the issue's own "Out of scope" section.
+
+**Entity-class discovery — the `entity_schema` MCP tool.** The ONE new MCP
+tool this issue adds (deliberately the only addition — "the only other
+endpoint or MCP tooling we should be adding is schema queries," per the
+operator's ratified direction). Call it before narrowing with `type=...` when
+the deployment's classes aren't already known. It reports, per class:
+
+- `count` — live pages this caller may read (fail-closed audience-scoped,
+  same predicate as `recall` itself).
+- `declared` — present in `wiki/_schema/types.md`.
+- `observed` — at least one live page carries this class.
+- `fields` — the union of frontmatter KEYS its pages carry. Keys only, never
+  values, and any key routed to an excluded surface (e.g. inline `emails`)
+  is omitted entirely rather than listed — the tool can never become a
+  "which PII fields exist" oracle.
+
+`declared` and `observed` are reported independently rather than reconciled:
+the two CAN legitimately drift (an operator adds a class to the corpus before
+updating `types.md`, or the reverse), and this tool's job is to make that
+drift visible at the protocol level, not to paper over it — reconciling
+`types.md` itself is a separate, out-of-scope corpus-repair job.
+
+`queryable_fields` reports exactly the fields `recall`'s filter arguments
+implement today — `["type"]`. It must never advertise a field no filter
+actually honors.
+
+**Config-derived tool schema, computed once.** `recall`'s `type` parameter
+description — and `entity_schema`'s whole answer — are computed from the SAME
+resolver (`athenaeum.entity_schema.resolve_entity_classes`) at
+`create_server()` time, from THIS deployment's own `wiki/_schema/types.md`
+and corpus, not from a hardcoded literal in source. A deployment with no (or
+an empty) `types.md` degrades to the observed classes / the collapsed
+fallback set (`athenaeum.schemas.KNOWN_TYPES` — see below) rather than
+failing to register the tool at all.
+
+This is computed **once**, at server construction — not per call. A
+`types.md` edit takes effect on the **next server start**. This is a
+deliberate choice, not a limitation: the installed protocol
+(`mcp` at `2025-11-25`) supports `notifications/tools/list_changed` for live
+schema invalidation, and nothing in this implementation precludes wiring that
+up later — it is simply out of scope for this issue.
+
+**One fallback source of truth.** Two independently-drifted "fallback entity
+types" lists used to exist — `athenaeum.librarian.FALLBACK_TYPES` (a list,
+used when `types.md` is missing at compile time) and
+`athenaeum.schemas.FALLBACK_TYPES` (a frozenset, used to build
+`KNOWN_TYPES` for the athenaeum#93 unknown-type warning). They are collapsed to
+one: `athenaeum.schemas.KNOWN_TYPES`, which the entity-class resolver AND
+`librarian.py`'s compile-time fallback both now read directly. `librarian.py`
+no longer defines its own copy.
+
 ## Load-bearing invariants
 
 Do not simplify any of these without reading this page and the related commit history. Every one of them is a **silent failure mode** — no exception, no log, just degraded recall quality. The "What breaks" column is what forces a future reviewer to think twice before deleting the guard.

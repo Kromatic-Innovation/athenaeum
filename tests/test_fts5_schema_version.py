@@ -24,6 +24,14 @@ _LEGACY_CREATE_SQL = (
     '(filename, name, tags, aliases, description, tokenize="porter unicode61")'
 )
 
+# The athenaeum#312 (schema version 2) shape: ``audience``-aware but predating the
+# athenaeum#964 ``type`` column.
+_V2_CREATE_SQL = (
+    "CREATE VIRTUAL TABLE wiki USING fts5"
+    "(filename, name, tags, aliases, description, audience UNINDEXED, "
+    'tokenize="porter unicode61")'
+)
+
 
 def _write_wiki_page(
     wiki: Path, filename: str, name: str, body: str, audience: str = "eng"
@@ -103,6 +111,55 @@ def test_pre_audience_db_triggers_rebuild_not_empty_recall(tmp_path: Path) -> No
 
     # The mismatched schema forced a full rebuild → the DB is now audience-aware.
     assert FTS5Backend._db_schema_version(db_path) == FTS5Backend._SCHEMA_VERSION
+
+
+def _seed_v2_index(cache: Path) -> Path:
+    """Write an audience-aware (version 2), pre-``type`` (issue athenaeum#964) FTS5 DB."""
+    cache.mkdir(parents=True, exist_ok=True)
+    db_path = cache / _DB_NAME
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(_V2_CREATE_SQL)
+        conn.execute("PRAGMA user_version = 2")
+        conn.execute(
+            "INSERT INTO wiki VALUES (?,?,?,?,?,?)",
+            ("stale.md", "Stale", "", "", "old body", "|"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    (cache / _FTS5_MANIFEST).write_text(
+        json.dumps({"version": 2, "hashes": {"stale.md": "deadbeef"}}),
+        encoding="utf-8",
+    )
+    return db_path
+
+
+def test_v2_db_reads_as_version_2(tmp_path: Path) -> None:
+    db_path = _seed_v2_index(tmp_path / "cache")
+    assert FTS5Backend._db_schema_version(db_path) == 2
+
+
+def test_pre_type_db_triggers_rebuild_and_gains_type_column(tmp_path: Path) -> None:
+    # Issue athenaeum#964 (AC amendment 1): an audience-aware v2 DB predates the
+    # ``type`` column. An ordinary incremental build over it must be forced to
+    # a FULL rebuild — not reused — so the new ``type`` filter is populated
+    # for every page, not just newly-added/changed ones.
+    wiki = tmp_path / "wiki"
+    cache = tmp_path / "cache"
+    db_path = _seed_v2_index(cache)
+    assert FTS5Backend._db_schema_version(db_path) == 2
+
+    _write_wiki_page(wiki, "alpha.md", "alphaunique marker", "searchable body text")
+    backend = FTS5Backend()
+    backend.build_index(wiki, cache, incremental=True)
+
+    assert FTS5Backend._db_schema_version(db_path) == FTS5Backend._SCHEMA_VERSION
+    # The stale v2 row (with no `type` value) is gone -- a full rebuild
+    # replaced the whole table rather than leaving it half-typed.
+    results = backend.query("alphaunique", cache, caller_audience={"eng"})
+    assert any(fn == "alpha.md" for fn, _name, _score in results)
+    assert not any(fn == "stale.md" for fn, _name, _score in results)
 
     # And an audience-filtered recall (the missing-``audience``-column path that
     # used to raise OperationalError → []) returns the public page.
