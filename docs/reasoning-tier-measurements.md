@@ -2,7 +2,7 @@
 
 Durable record of measurements taken against the live `~/knowledge` store for the
 reasoning-tier screening subsystem (`src/athenaeum/reasoning_tiers.py`, issues
-athenaeum#518 / #602 / #432).
+athenaeum#518 / athenaeum#602 / athenaeum#432).
 
 Figures here are **measured**, never estimated. Every section records the exact
 commands that produced it so a later agent with no session memory can reproduce a
@@ -24,7 +24,7 @@ written.
 | Measured | 2026-08-19 (UTC 2026-08-20T02:0x) |
 | Store | `~/knowledge` (live) |
 | athenaeum version | `0.19.0` |
-| Interpreter | `/Users/tristankromer/local-deploys/athenaeum/.venv/bin/python` — the pinned deploy checkout the nightly librarian runs from (`librarian-run.sh` resolves this same path) |
+| Interpreter | `~/local-deploys/athenaeum/.venv/bin/python` — the pinned deploy checkout the nightly librarian runs from (`librarian-run.sh` resolves this same path) |
 | Deploy checkout git SHA | `ca038f5bfa5856bf12a0a3f9eb58990cdf403a3a` (committed 2026-08-16) |
 | Provider at measurement time | `llm.provider: api` (flipped from `claude-cli` on 2026-08-14, athenaeum#774) |
 
@@ -208,13 +208,13 @@ reconcile against the total.
 Run from any directory; all paths absolute. None takes `.athenaeum.lock`.
 
 ```sh
-PY=/Users/tristankromer/local-deploys/athenaeum/.venv/bin/python
-BIN=/Users/tristankromer/local-deploys/athenaeum/.venv/bin/athenaeum
+PY=~/local-deploys/athenaeum/.venv/bin/python
+BIN=~/local-deploys/athenaeum/.venv/bin/athenaeum
 
 # provenance
 "$PY" -c 'import athenaeum, sys; sys.stdout.write(athenaeum.__file__)'
-git -C /Users/tristankromer/local-deploys/athenaeum log -1 --format='%H %ci'
-grep -n '^version' /Users/tristankromer/local-deploys/athenaeum/pyproject.toml
+git -C ~/local-deploys/athenaeum log -1 --format='%H %ci'
+grep -n '^version' ~/local-deploys/athenaeum/pyproject.toml
 
 # queue depth, write kinds, source-page histogram, safe-class breakdown
 "$PY" - <<'EOF'
