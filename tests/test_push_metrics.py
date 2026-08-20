@@ -620,18 +620,51 @@ class TestComputeBaselineExcludeSessions:
         assert baseline.excluded_push_record_count == 1
         assert baseline.excluded_reference_record_count == 1
 
-    def test_excluding_a_session_absent_from_the_window_reports_zero(self, tmp_path: Path) -> None:
-        """Requesting exclusion of a session id with no records in the window
-        must not fabricate a count — it reports zero, honestly.
+    def test_excluding_an_unknown_session_id_raises(self, tmp_path: Path) -> None:
+        """athenaeum#987: a value that matches no known session id anywhere
+        in the ledger must be a hard error, never a silent zero-effect
+        success — the exact defect that let a session-id PREFIX exclude
+        nothing while the run still reported success.
+        """
+        cache = tmp_path
+        self._seed_ledger(cache)
+        with pytest.raises(ValueError, match="matches no known session id"):
+            push_metrics.compute_baseline(
+                cache_dir=cache, repo_root=Path("."), exclude_sessions=["never-ran"]
+            )
+
+    def test_excluding_an_unambiguous_prefix_drops_the_session(self, tmp_path: Path) -> None:
+        """athenaeum#987: an unambiguous prefix of a known session id is
+        accepted and resolved to the full id, same effect as passing the
+        full id.
         """
         cache = tmp_path
         self._seed_ledger(cache)
         baseline = push_metrics.compute_baseline(
-            cache_dir=cache, repo_root=Path("."), exclude_sessions=["never-ran"]
+            cache_dir=cache, repo_root=Path("."), exclude_sessions=["synth-sess"]
         )
-        assert baseline.excluded_sessions == ()
-        assert baseline.excluded_push_record_count == 0
-        assert baseline.session_count == 2  # unaffected
+        assert baseline.session_count == 1
+        assert baseline.excluded_sessions == ("synth-session",)
+        assert baseline.excluded_push_record_count == 1
+
+    def test_excluding_an_ambiguous_prefix_raises(self, tmp_path: Path) -> None:
+        """athenaeum#987: a prefix shared by more than one known session id
+        must not silently resolve to either — it's a hard error.
+        """
+        cache = tmp_path
+        self._seed_ledger(cache)
+        for extra_sid, extra_uid in (("synth-session-2", "z8"), ("synth-session-3", "z9")):
+            extra_push = push_metrics.build_push_record(
+                session_id=extra_sid,
+                query="q",
+                backend="fts5",
+                hits=[("f2.md", {"uid": extra_uid}, "b")],
+            )
+            push_metrics.record_push(extra_push, cache_dir=cache)
+        with pytest.raises(ValueError, match="ambiguous"):
+            push_metrics.compute_baseline(
+                cache_dir=cache, repo_root=Path("."), exclude_sessions=["synth-session-"]
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -943,23 +976,73 @@ class TestCoverageWorksheet:
         assert ws["excluded_sessions"] == ["synth"]
         assert ws["excluded_push_records"] == 1
 
-    def test_excluding_a_session_absent_from_the_ledger_reports_zero(self, tmp_path: Path) -> None:
+    def test_excluding_an_unknown_session_id_raises(self, tmp_path: Path) -> None:
+        """athenaeum#987: a value that matches no known session id in the
+        push-records ledger must be a hard error, never a silent no-op.
+        """
         cache = tmp_path
         rec = push_metrics.build_push_record(
             session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
         )
         push_metrics.record_push(rec, cache_dir=cache)
 
+        with pytest.raises(ValueError, match="matches no known session id"):
+            push_metrics.build_coverage_worksheet(
+                n=5,
+                wiki_root=tmp_path / "wiki",
+                cache_dir=cache,
+                seed=1,
+                exclude_sessions=["never-ran"],
+            )
+
+    def test_excluding_an_unambiguous_prefix_drops_from_sample(self, tmp_path: Path) -> None:
+        """athenaeum#987: an unambiguous session-id prefix is accepted and
+        resolved to the matching full id, same effect as the full id.
+        """
+        cache = tmp_path
+        clean = push_metrics.build_push_record(
+            session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+        )
+        synth = push_metrics.build_push_record(
+            session_id="d5774338-7d8b-4152-a252-248d156f95ef",
+            query="q",
+            backend="fts5",
+            hits=[("test-page.md", None, "b")],
+        )
+        push_metrics.record_push(clean, cache_dir=cache)
+        push_metrics.record_push(synth, cache_dir=cache)
+
         ws = push_metrics.build_coverage_worksheet(
             n=5,
             wiki_root=tmp_path / "wiki",
             cache_dir=cache,
             seed=1,
-            exclude_sessions=["never-ran"],
+            exclude_sessions=["d5774338-7d8b"],
         )
         assert ws["sampled_session_count"] == 1
-        assert ws["excluded_sessions"] == []
-        assert ws["excluded_push_records"] == 0
+        assert ws["sessions"][0]["session_id"] == "clean"
+        assert ws["excluded_sessions"] == ["d5774338-7d8b-4152-a252-248d156f95ef"]
+        assert ws["excluded_push_records"] == 1
+
+    def test_excluding_an_ambiguous_prefix_raises(self, tmp_path: Path) -> None:
+        """athenaeum#987: a prefix shared by more than one known session id
+        must not silently resolve to either — it's a hard error.
+        """
+        cache = tmp_path
+        for sid, uid in (("synth-a", "u1"), ("synth-b", "u2")):
+            rec = push_metrics.build_push_record(
+                session_id=sid, query="q", backend="fts5", hits=[("f.md", {"uid": uid}, "b")]
+            )
+            push_metrics.record_push(rec, cache_dir=cache)
+
+        with pytest.raises(ValueError, match="ambiguous"):
+            push_metrics.build_coverage_worksheet(
+                n=5,
+                wiki_root=tmp_path / "wiki",
+                cache_dir=cache,
+                seed=1,
+                exclude_sessions=["synth-"],
+            )
 
 
 # ---------------------------------------------------------------------------
