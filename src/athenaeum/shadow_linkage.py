@@ -31,7 +31,7 @@ does the parallel check by patching ``anthropic.Anthropic`` to explode.
 
 **Both linkage paths, for comparison.** Complete-linkage formation
 (:func:`cluster_auto_memory_files`, issue athenaeum#681) is what a fresh run
-produces today; single-linkage connected components — the PRE-#681 shape,
+produces today; single-linkage connected components — the PRE-athenaeum#681 shape,
 where one weak bridging edge can chain a giant component — are recomputed
 here directly from the same adjacency (:func:`athenaeum.clusters._build_adjacency`
 + :func:`athenaeum.clusters._single_linkage`) so the "what changed" comparison
@@ -230,7 +230,7 @@ def run_shadow_linkage(
     )
     complete_sizes = [len(c.member_paths) for c in complete_clusters]
     complete_summary = LinkagePathSummary(
-        label="complete-linkage (post-#681, current formation)",
+        label="complete-linkage (post-athenaeum#681, current formation)",
         cluster_count=len(complete_clusters),
         multi_member_cluster_count=sum(1 for n in complete_sizes if n >= 2),
         size_distribution=_size_distribution(complete_sizes),
@@ -244,7 +244,7 @@ def run_shadow_linkage(
         single_components = []
     single_sizes = [len(c) for c in single_components]
     single_summary = LinkagePathSummary(
-        label="single-linkage (pre-#681, historical anchor's regime)",
+        label="single-linkage (pre-athenaeum#681, historical anchor's regime)",
         cluster_count=len(single_components),
         multi_member_cluster_count=sum(1 for n in single_sizes if n >= 2),
         size_distribution=_size_distribution(single_sizes),
