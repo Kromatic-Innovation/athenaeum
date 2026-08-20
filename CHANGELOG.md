@@ -27,6 +27,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`quarantine.py` migrated onto the whole-store adapter seam (athenaeum#982,
+  S7 of the whole-store adapter design lock, athenaeum#911 — "the slice that
+  proves the write half").** `src/athenaeum/quarantine.py` now contains no
+  `pathlib` and no `shutil` call: the ledger append (`quarantine_file` /
+  `release_quarantine`) routes through `Store.append`, and the physical move
+  in both directions routes through `Store.move`. Every public function gains
+  an optional keyword-only `store=` parameter; when omitted, a private
+  `FilesystemStore` scoped to the caller's existing `wiki_root`/`raw_root`
+  is built per call, so no existing caller changes and the pre-migration
+  test suite (`tests/test_quarantine.py`) passes unchanged against real
+  files (one exception: a white-box test that monkeypatched
+  `athenaeum.quarantine.shutil.move` directly can no longer intercept
+  anything now that `shutil` is not imported — reported, not edited, per the
+  issue's own guidance). A new `tests/test_quarantine_store_parity.py`
+  parametrizes the same logical scenarios over both `FilesystemStore` and
+  `tests.store_fakes.InMemoryStore`, verified by reading back through the
+  store rather than the filesystem — demonstrating the "no caller can tell"
+  property rather than asserting it.
+
 - **Whole-store adapter seam: `Store` protocol + `FilesystemStore` (athenaeum#976,
   S1 of the whole-store adapter design lock, athenaeum#911).** New
   `athenaeum/store.py` (L0/L1) defines `StoreKey`, `ObjectMeta`,
