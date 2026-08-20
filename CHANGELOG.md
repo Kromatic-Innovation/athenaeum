@@ -40,6 +40,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (that is athenaeum#966); `docs/recall-architecture.md` documents a
   full capability-parity table against it. See
   `src/athenaeum/enumeration.py` for the full contract.
+- **Decay-sweep ledger (athenaeum#969).** `athenaeum.decay_sweep.apply_sweep`
+  now writes one durable, machine-readable record per archived page —
+  which page, bucket + expiry, sweep timestamp, and the recovering commit
+  SHA — to `_decay_sweep_records.jsonl` under the cache dir (same discipline
+  as `_push_records.jsonl`: JSONL, `O_APPEND` + `fsync`, never inside the
+  wiki corpus), written BEFORE the archival `git rm` so a ledger-write
+  failure refuses the archival entirely rather than deleting without a
+  record. `docs/recall-architecture.md` and `docs/provenance-shape.md` §8.8
+  now name the expired-`daily` carve-out as the sole exemption from the
+  fail-closed expiry filter, state the swept-vs-cold distinction, and record
+  the `bucket:` → policy-pack `delete-after` mapping commitment for the
+  athenaeum#718 policy-pack work to consume — a documented mapping, not a
+  migration; no sweep/currency/bucket behavior changes.
 
 ### Changed
 
@@ -60,6 +73,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `${{ github.workflow }}-${{ github.ref }}`) is unchanged.
 
 ### Added
+
+- **Coarse embedding fallback is now observable (athenaeum#1032).** The chromadb
+  embedding path used to degrade silently three layers deep — no log line
+  ever recorded that the hashing-trick fallback embedder produced a
+  cluster's vectors, making the athenaeum#823/athenaeum#1005 over-cluster diagnosis
+  unfalsifiable from run artifacts. Observability only — no change to
+  clustering behaviour, thresholds, or the fallback's activation
+  conditions:
+  - `athenaeum.search._get_ef` now logs a one-time WARNING (naming the
+    exception class and message) when the chromadb embedding function
+    fails to initialize; `embed_texts` logs its own one-time WARNING when
+    it returns `None`, naming the fallback-hashing embedder as what will
+    produce vectors for callers that need them.
+  - `athenaeum.wiki_dedupe._resolve_wiki_embeddings` logs a one-time
+    WARNING when it engages `clusters._fallback_embeddings`.
+  - `clusters._resolve_embeddings`'s per-run fallback-count line is raised
+    `DEBUG` -> `WARNING` (was invisible at the deployed INFO level).
+  - `Cluster` gains an `embedder` field (`chromadb-default` /
+    `fallback-hashing` / `mixed` / `unknown`) carried through `to_row()`
+    into `raw/_librarian-clusters.jsonl`; the wiki-dedupe `SUPPRESSED` log
+    line now states the embedder that produced the suppressed cluster's
+    vectors. Pre-athenaeum#1032 JSONL rows without the field still
+    deserialize (default `unknown`).
+- **Whole-store adapter seam: `Store` protocol + `FilesystemStore` (athenaeum#976,
+  S1 of the whole-store adapter design lock, athenaeum#911).** New
+  `athenaeum/store.py` (L0/L1) defines `StoreKey`, `ObjectMeta`,
+  `StoreCapabilities`, and the `Store` protocol per
+  `docs/whole-store-adapter-design.md` §6.2, plus `FilesystemStore` — the
+  protocol implemented over `atomic_io` + `pathlib`. `resolve_store_for_class()`
+  is now available alongside the existing `surface_root_for_class()` in
+  `athenaeum.storage`, extending the seam rather than forking it (design note
+  §6.1 D5). A conformance suite (`tests/test_store_conformance.py`) exercises
+  both `FilesystemStore` and a reusable in-memory fake
+  (`tests/store_fakes.InMemoryStore`, load-bearing for later slices S2/S7).
+  **No existing caller is migrated onto the seam in this slice** — this is
+  the seam and its tests only; callers migrate in S2/S3/S7.
 
 - **v6 memory-model measurement pack: shadow-linkage count, backlog price
   sheet, ordinary-night steady-state table (athenaeum#713).** Three new

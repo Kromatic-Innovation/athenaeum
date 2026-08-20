@@ -118,7 +118,9 @@ def cmd_decay_sweep(args: argparse.Namespace) -> int:
     if isinstance(lock, int):
         return lock
     try:
-        report = apply_sweep(knowledge_root, report)
+        report = apply_sweep(
+            knowledge_root, report, cache_dir=getattr(args, "cache_dir", None)
+        )
         for err in report.errors:
             print(f"  ERR {err}", file=sys.stderr)
         if report.errors:
