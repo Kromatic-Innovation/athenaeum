@@ -1198,7 +1198,7 @@ class TestCreateTypeGate971:
     create/upsert paths (``intake.py`` tier0_passthrough,
     ``librarian.py`` tier0_handle_upsert) — reject-and-escalate
     (``disposition="raised-tier"``), never silently mint a page under an
-    unrecognized or #970-folded type.
+    unrecognized or athenaeum#970-folded type.
     """
 
     def _envelope(self, **overrides: object) -> dict:
@@ -1239,7 +1239,7 @@ class TestCreateTypeGate971:
     def test_folded_type_user_raises_tier_and_writes_nothing(
         self, tmp_path: Path
     ) -> None:
-        # #970's fold enforcement teeth: `type: user` on a NEW create is no
+        # athenaeum#970's fold enforcement teeth: `type: user` on a NEW create is no
         # longer minted verbatim — it must raise a tier, exactly like a
         # never-declared type, so the folded value cannot recur.
         wiki = tmp_path / "wiki"
