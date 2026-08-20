@@ -261,7 +261,7 @@ def _resolve_wiki_embeddings(
     vectors = provider(texts)
     if vectors is None or len(vectors) != len(files):
         # Issue athenaeum#1032: one-time WARNING — this fallback used to engage with
-        # no log call at all, so #1005's over-cluster diagnosis had no way to
+        # no log call at all, so athenaeum#1005's over-cluster diagnosis had no way to
         # tell from run artifacts whether the hashing-trick embedder (rather
         # than real MiniLM vectors) produced a cluster's similarity scores.
         _warn_wiki_fallback_engaged_once(len(files))

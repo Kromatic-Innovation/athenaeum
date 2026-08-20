@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Coarse embedding fallback is now observable (athenaeum#1032).** The chromadb
   embedding path used to degrade silently three layers deep — no log line
   ever recorded that the hashing-trick fallback embedder produced a
-  cluster's vectors, making the athenaeum#823/#1005 over-cluster diagnosis
+  cluster's vectors, making the athenaeum#823/athenaeum#1005 over-cluster diagnosis
   unfalsifiable from run artifacts. Observability only — no change to
   clustering behaviour, thresholds, or the fallback's activation
   conditions:

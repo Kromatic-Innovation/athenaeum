@@ -2228,7 +2228,7 @@ def _get_ef() -> Any | None:
         # Issue athenaeum#1032: one-time WARNING (the ``_EF_LOADED`` memo above already
         # guarantees this branch runs at most once per process) naming the
         # exception class/message — the coarse embedding-fallback path used to
-        # degrade completely silently, making #1005's over-cluster diagnosis
+        # degrade completely silently, making athenaeum#1005's over-cluster diagnosis
         # unfalsifiable from run artifacts.
         import logging
 

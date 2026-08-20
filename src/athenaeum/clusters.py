@@ -95,7 +95,7 @@ DEFAULT_CLUSTER_OUTPUT = "raw/_librarian-clusters.jsonl"
 DEFAULT_ROTATION_RETENTION = 30
 
 # Issue athenaeum#1032: embedder identity strings recorded on each ``Cluster`` —
-# observability only, so #1005's over-cluster diagnosis can tell which
+# observability only, so athenaeum#1005's over-cluster diagnosis can tell which
 # embedder produced a cluster's vectors from run artifacts instead of having
 # to re-derive it from context. See ``_resolve_embeddings``/
 # ``cluster_auto_memory_files`` below for how a cluster's value is derived.
@@ -267,7 +267,7 @@ def _resolve_embeddings(
     if missing:
         # Issue athenaeum#1032: raised DEBUG -> WARNING — this was invisible at the
         # deployed INFO level, so the coarse-embedding-fallback engagement that
-        # feeds #1005's over-cluster diagnosis left no trace in normal runs.
+        # feeds athenaeum#1005's over-cluster diagnosis left no trace in normal runs.
         log.warning(
             "cluster embeddings: %d of %d served from chromadb, %d fell back "
             "to the fallback-hashing embedder",
