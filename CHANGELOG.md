@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Whole-store adapter seam: `Store` protocol + `FilesystemStore` (athenaeum#976,
+  S1 of the whole-store adapter design lock, athenaeum#911).** New
+  `athenaeum/store.py` (L0/L1) defines `StoreKey`, `ObjectMeta`,
+  `StoreCapabilities`, and the `Store` protocol per
+  `docs/whole-store-adapter-design.md` §6.2, plus `FilesystemStore` — the
+  protocol implemented over `atomic_io` + `pathlib`. `resolve_store_for_class()`
+  is now available alongside the existing `surface_root_for_class()` in
+  `athenaeum.storage`, extending the seam rather than forking it (design note
+  §6.1 D5). A conformance suite (`tests/test_store_conformance.py`) exercises
+  both `FilesystemStore` and a reusable in-memory fake
+  (`tests/store_fakes.InMemoryStore`, load-bearing for later slices S2/S7).
+  **No existing caller is migrated onto the seam in this slice** — this is
+  the seam and its tests only; callers migrate in S2/S3/S7.
+
 - **v6 memory-model measurement pack: shadow-linkage count, backlog price
   sheet, ordinary-night steady-state table (athenaeum#713).** Three new
   `athenaeum measure` subcommands the comparator slice (child of athenaeum#709)
