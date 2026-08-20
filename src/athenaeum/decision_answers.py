@@ -66,12 +66,15 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import yaml
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter
+
+if TYPE_CHECKING:  # pragma: no cover - type-checking only, avoids a hard import
+    from athenaeum.runlock import RunLock
 
 log = logging.getLogger(__name__)
 
@@ -404,9 +407,10 @@ def _apply_merge_answer(
     answer: DecisionAnswer,
     *,
     config: dict | None,
+    lock: "RunLock | None" = None,
 ) -> DecisionAnswerOutcome:
-    from athenaeum.config import resolve_cache_dir
-    from athenaeum.pending_merges import resolve_merge
+    from athenaeum.config import resolve_cache_dir, resolve_verdict_ledger_enabled
+    from athenaeum.pending_merges import parse_pending_merges, resolve_merge
 
     decision = answer.verdict.strip().lower()
     if decision not in ("approve", "reject"):
@@ -423,6 +427,20 @@ def _apply_merge_answer(
     search_backend = cfg.get("search_backend", "fts5") if isinstance(cfg, dict) else "fts5"
     cache_dir = resolve_cache_dir(None)
 
+    # Issue athenaeum#712: when the verdict ledger is enabled AND a lock is
+    # available (the CLI's `_acquire_or_exit` run lock — see
+    # `athenaeum.verdicts`'s single-appender contract), capture the
+    # proposal's sources BEFORE resolving. `resolve_merge()` does not return
+    # sources, and by the time it returns the block's checkbox has already
+    # flipped, so this is the last point they are cheaply available.
+    verdict_ledger_enabled = lock is not None and resolve_verdict_ledger_enabled(config)
+    sources: list[str] = []
+    if verdict_ledger_enabled:
+        for pm in parse_pending_merges(merges_path):
+            if pm.id == answer.decision_id and not pm.resolved:
+                sources = list(pm.sources)
+                break
+
     result = resolve_merge(
         merges_path,
         merge_id=answer.decision_id,
@@ -432,6 +450,27 @@ def _apply_merge_answer(
         cache_dir=cache_dir,
         search_backend=search_backend,
     )
+
+    # Issue athenaeum#712: record this decision — approve/reject on a proposed
+    # pair — as a verdict-ledger entry. This is the "consumed within this
+    # same issue by writing verdicts for the decisions the current pipeline
+    # already makes" Wiring option; see athenaeum.verdicts.record_pair_decision's
+    # docstring. Never lets a ledger write affect the outcome above —
+    # record_pair_decision is itself best-effort/non-raising, so this is
+    # purely an additional side effect on an already-successful resolve.
+    if verdict_ledger_enabled and result.get("ok") and len(sources) >= 2:
+        from athenaeum.verdicts import record_pair_decision
+
+        verdict_value = "duplicate" if decision == "approve" else "distinct"
+        record_pair_decision(
+            wiki_root,
+            source_a=sources[0],
+            source_b=sources[1],
+            verdict=verdict_value,
+            decided_by=f"pipeline:merge-{decision}",
+            lock=lock,
+        )
+
     return DecisionAnswerOutcome(
         path=answer.path,
         decision_id=answer.decision_id,
@@ -493,6 +532,7 @@ def apply_decision_answers(
     raw_root: Path,
     *,
     config: dict | None = None,
+    lock: "RunLock | None" = None,
 ) -> ApplyReport:
     """Apply every pending decision-answer file at tier 0.
 
@@ -529,6 +569,14 @@ def apply_decision_answers(
             dispatch for ``search_backend`` resolution (vector-purge
             hygiene on a fold-into-existing approve is opportunistic — see
             :func:`athenaeum.pending_merges.resolve_merge`).
+        lock: Issue athenaeum#712 — the caller's ALREADY-ACQUIRED run lock
+            (:class:`athenaeum.runlock.RunLock`), forwarded to a merge
+            dispatch so it can record a verdict-ledger entry when
+            ``librarian.verdict_ledger_enabled`` is on
+            (:func:`athenaeum.verdicts.record_pair_decision`'s
+            single-appender contract). ``None`` (the default — every
+            pre-athenaeum#712 caller) skips the ledger write entirely; this
+            function never acquires a lock itself.
 
     Returns:
         An :class:`ApplyReport` with per-file outcomes.
@@ -566,7 +614,7 @@ def apply_decision_answers(
             outcome = _apply_question_answer(pending_questions_path, answer)
         elif answer.decision_type == "merge":
             outcome = _apply_merge_answer(
-                pending_merges_path, wiki_root, answer, config=config
+                pending_merges_path, wiki_root, answer, config=config, lock=lock
             )
         elif answer.decision_type == "audit":
             outcome = _apply_audit_answer(wiki_root, answer)
