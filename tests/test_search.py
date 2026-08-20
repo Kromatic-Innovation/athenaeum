@@ -1820,3 +1820,100 @@ class TestFetchEmbeddingsNoModelLoad:
         assert captured["ef"] is None
         assert set(out) == {"a.md", "b.md"}
         assert out["a.md"] == pytest.approx([0.1, 0.2, 0.3], abs=1e-6)
+
+
+class TestEmbedTextsFallbackObservability:
+    """Issue athenaeum#1032: the coarse embedding fallback used to engage silently
+    three layers deep (``_get_ef`` init failure, ``embed_texts`` returning
+    ``None``, and — one layer up — ``wiki_dedupe._resolve_wiki_embeddings``
+    engaging the hashing-trick fallback, covered in test_wiki_dedupe.py).
+    These tests force a failure deterministically via ``sys.modules`` /
+    a stub raising EF — never real chromadb — so they pass regardless of
+    whether the optional ``[vector]`` extra happens to be installed.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_ef_memo(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The ``_get_ef``/``embed_texts`` memo flags are process-global module
+        state — reset them before every test in this class so one test's
+        memoized failure can't mask another's warning assertion."""
+        monkeypatch.setattr(search_module, "_EF", None)
+        monkeypatch.setattr(search_module, "_EF_LOADED", False)
+        monkeypatch.setattr(search_module, "_EMBED_TEXTS_NONE_WARNED", False)
+
+    def test_get_ef_warns_once_naming_exception_class_and_message(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A forced import failure logs exactly one WARNING naming the
+        exception class and message; the pre-existing memoized-failure shape
+        (``_EF`` stays ``None``, no repeated stack spam on a second call) is
+        unchanged."""
+        import logging
+        import sys
+
+        monkeypatch.setitem(sys.modules, "chromadb.utils", None)
+        caplog.set_level(logging.WARNING, logger="athenaeum.search")
+
+        first = search_module._get_ef()
+        assert first is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        msg = warnings[0].getMessage()
+        assert "ModuleNotFoundError" in msg
+
+        caplog.clear()
+        second = search_module._get_ef()
+        assert second is None
+        assert not caplog.records  # memoized — no repeat warning on the second call
+
+    def test_embed_texts_warns_once_when_no_ef_available(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``embed_texts`` returning ``None`` because no EF is available emits
+        its own one-time WARNING (separate flag from ``_get_ef``'s) naming
+        the fallback-hashing embedder as what will produce vectors instead."""
+        import logging
+        import sys
+
+        monkeypatch.setitem(sys.modules, "chromadb.utils", None)
+        caplog.set_level(logging.WARNING, logger="athenaeum.search")
+
+        first = search_module.embed_texts(["hello"])
+        assert first is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        fallback_hashing = [r for r in warnings if "fallback-hashing" in r.getMessage()]
+        assert fallback_hashing, [r.getMessage() for r in warnings]
+
+        caplog.clear()
+        second = search_module.embed_texts(["hello"])
+        assert second is None
+        assert not caplog.records  # both _get_ef's and embed_texts' flags are one-time
+
+    def test_embed_texts_warns_once_when_embedding_call_fails(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A different failure mode: ``_get_ef`` succeeds (a stub EF is
+        memoized), but calling it raises. ``embed_texts`` still emits its own
+        one-time WARNING naming the exception and the fallback embedder."""
+        import logging
+
+        class _BoomEF:
+            def __call__(self, texts: list[str]) -> list[list[float]]:
+                raise RuntimeError("boom: embedding call failed")
+
+        monkeypatch.setattr(search_module, "_EF", _BoomEF())
+        monkeypatch.setattr(search_module, "_EF_LOADED", True)
+        caplog.set_level(logging.WARNING, logger="athenaeum.search")
+
+        first = search_module.embed_texts(["hello"])
+        assert first is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        msg = warnings[0].getMessage()
+        assert "RuntimeError" in msg
+        assert "fallback-hashing" in msg
+
+        caplog.clear()
+        second = search_module.embed_texts(["hello"])
+        assert second is None
+        assert not caplog.records  # one-time — no repeat warning

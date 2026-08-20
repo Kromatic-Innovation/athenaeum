@@ -218,12 +218,18 @@ def run_shadow_linkage(
     threshold = resolve_cluster_threshold(knowledge_root, resolved_config)
 
     files = discover_wiki_dedupe_candidates(wiki_root, config=resolved_config)
-    embeddings = _resolve_wiki_embeddings(files, embedding_provider=embedding_provider)
+    embeddings, embedder_sources = _resolve_wiki_embeddings(
+        files, embedding_provider=embedding_provider
+    )
     file_ids = [str(am.path) for am in files]
 
     complete_clusters: list[Cluster] = (
         cluster_auto_memory_files(
-            files, extra_roots=[wiki_root], threshold=threshold, embeddings=embeddings
+            files,
+            extra_roots=[wiki_root],
+            threshold=threshold,
+            embeddings=embeddings,
+            embedder_sources=embedder_sources,
         )
         if files
         else []
