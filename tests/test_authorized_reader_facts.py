@@ -47,11 +47,12 @@ from athenaeum.mcp_server import recall_search
 EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
 
 
-def _write_page(wiki_root: Path, uid: str, *, name: str) -> Path:
+def _write_page(wiki_root: Path, uid: str, *, name: str, extra_frontmatter: str = "") -> Path:
     wiki_root.mkdir(parents=True, exist_ok=True)
     path = wiki_root / f"{uid}.md"
     path.write_text(
-        f"---\nuid: {uid}\nname: {name}\ntype: person\n---\n\n{name} does things.\n",
+        f"---\nuid: {uid}\nname: {name}\ntype: person\n{extra_frontmatter}---\n\n"
+        f"{name} does things.\n",
         encoding="utf-8",
     )
     return path
@@ -306,6 +307,96 @@ class TestDoNotEmailIsFirstClass:
         assert pii.DO_NOT_EMAIL_FIELD not in pii.CONTACT_DATA_FIELDS
 
 
+class TestDoNotEmailReadsBothSurfaces:
+    """athenaeum#960: `do_not_email_state()` reads the wiki page too.
+
+    athenaeum#851 shipped reading only the excluded-record surface, which
+    holds zero live `do_not_email` marks — every hand-authored mark lives on
+    the wiki page's frontmatter instead, so the field was inert on live data.
+    """
+
+    def test_wiki_page_only_mark_is_read(self) -> None:
+        """The defect: a mark on the wiki page ONLY. This is the test that
+        failed before athenaeum#960 — `do_not_email_state` took only the
+        excluded-record meta and never saw the page at all."""
+        state = pii.do_not_email_state({}, {"do_not_email": True})
+
+        assert state.marked is True
+        assert state.surface == "wiki"
+
+    def test_excluded_record_only_mark_is_still_read(self) -> None:
+        """No regression for the shape athenaeum#851 shipped."""
+        state = pii.do_not_email_state({"do_not_email": True}, {})
+
+        assert state.marked is True
+        assert state.surface == "excluded"
+
+    def test_neither_surface_marked_is_false_with_no_provenance(self) -> None:
+        state = pii.do_not_email_state({"emails": ["a@b.com"]}, {"name": "Alex"})
+
+        assert state.marked is False
+        assert state.source is None
+        assert state.observed_at is None
+        assert state.reason is None
+        assert state.surface is None
+
+    def test_wiki_page_takes_precedence_when_both_surfaces_carry_the_field(self) -> None:
+        """2026-08-20 AC amendment: wiki wins — never a merge of both.
+
+        A caller reading `.source`/`.reason` must get one surface's answer,
+        never a value stitched together from both.
+        """
+        state = pii.do_not_email_state(
+            {"do_not_email": {"value": True, "source": "mailchimp", "reason": "unsubscribed"}},
+            {"do_not_email": True, "do_not_email_reason": "family request"},
+        )
+
+        assert state.marked is True
+        assert state.surface == "wiki"
+        assert state.source == "operator"
+        assert state.reason == "family request"
+
+    def test_wiki_provenance_reads_the_sibling_reason_and_date_keys(self) -> None:
+        """The page's shape is flat — not the excluded surface's nested mapping."""
+        state = pii.do_not_email_state(
+            None,
+            {
+                "do_not_email": True,
+                "do_not_email_reason": "confirmed deceased by operator",
+                "do_not_email_date": "2026-07-01",
+            },
+        )
+
+        assert state.marked is True
+        assert state.surface == "wiki"
+        assert state.source == "operator"
+        assert state.reason == "confirmed deceased by operator"
+        assert state.observed_at == "2026-07-01"
+
+    def test_malformed_wiki_scalar_reads_marked_fail_closed(self) -> None:
+        """The same fail-closed rule as the excluded surface, on the page too."""
+        state = pii.do_not_email_state(None, {"do_not_email": "do not contact, ever"})
+
+        assert state.marked is True
+        assert state.surface == "wiki"
+        assert state.reason == "do not contact, ever"
+
+    def test_wiki_explicit_false_falls_back_to_the_excluded_record(self) -> None:
+        state = pii.do_not_email_state(
+            {"do_not_email": True}, {"do_not_email": False}
+        )
+
+        assert state.marked is True
+        assert state.surface == "excluded"
+
+    def test_page_frontmatter_defaults_to_none_for_pre_960_callers(self) -> None:
+        """Existing single-argument callers keep working unchanged."""
+        state = pii.do_not_email_state({"do_not_email": True})
+
+        assert state.marked is True
+        assert state.surface == "excluded"
+
+
 class TestEntityReadCarriesTheFacts:
     """No new read seam: the facts ride `read_entity` (athenaeum#888)."""
 
@@ -363,6 +454,35 @@ class TestEntityReadCarriesTheFacts:
         assert read.contact == {}
         assert read.validity == {}  # no values exposed, so none described
         assert read.do_not_email.marked is True
+
+    def test_do_not_email_wiki_only_mark_is_read(self, tmp_path: Path) -> None:
+        """athenaeum#960's central defect, at the `read_entity` call site
+        (`src/athenaeum/pii.py` `_entity_read_from_indexes`): a mark on the
+        wiki page only, with an excluded record present but carrying nothing.
+        This is the shape all 4 live marks are in — this test fails before
+        athenaeum#960's fix."""
+        knowledge = tmp_path / "knowledge"
+        _write_page(
+            knowledge / "wiki",
+            "alex",
+            name="Alex Example",
+            extra_frontmatter="do_not_email: true\ndo_not_email_reason: family request\n",
+        )
+        _write_record(
+            pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
+            "alex-contact.md",
+            uid="alex",
+            fields="emails:\n  - alex@example.org\n",
+        )
+
+        read = pii.read_entity(
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+        )
+
+        assert read is not None
+        assert read.do_not_email.marked is True
+        assert read.do_not_email.surface == "wiki"
+        assert read.do_not_email.reason == "family request"
 
     def test_entity_with_no_record_reports_no_mark(self, tmp_path: Path) -> None:
         knowledge = tmp_path / "knowledge"
@@ -482,6 +602,29 @@ class TestUnknownIsStatedNotInferred:
         assert facts["alex@example.org"].do_not_email.marked is True
         assert facts["alex@example.org"].validity is not None
         assert facts["alex@example.org"].validity.closed is False
+
+    def test_do_not_email_wiki_only_mark_is_read(self, tmp_path: Path) -> None:
+        """athenaeum#960 at the `IdentifierFacts` call site
+        (`src/athenaeum/pii.py` `_facts_for_identifier`): the record's `uid`
+        is resolved back to its wiki page, and the mark there is read even
+        though the excluded record itself carries nothing."""
+        knowledge = tmp_path / "knowledge"
+        _write_page(
+            knowledge / "wiki",
+            "alex",
+            name="Alex Example",
+            extra_frontmatter="do_not_email: true\n",
+        )
+        contacts = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        _write_record(contacts, "alex.md", uid="alex", fields="emails:\n  - alex@example.org\n")
+
+        (_, facts), = pii.read_identifier_facts(
+            knowledge, EXCLUDED_CONFIG, ["alex@example.org"]
+        )
+
+        assert facts.known is True
+        assert facts.do_not_email.marked is True
+        assert facts.do_not_email.surface == "wiki"
 
     def test_to_dict_is_json_serializable(self, tmp_path: Path) -> None:
         import json
@@ -714,6 +857,35 @@ class TestRecallRendersStructuredFacts:
         facts = self._facts_block(result)
         assert facts["do_not_email"]["marked"] is True
         assert facts["do_not_email"]["source"] == "mailchimp"
+
+    def test_do_not_email_wiki_only_mark_is_rendered(self, tmp_path: Path) -> None:
+        """athenaeum#960 at the MCP read path
+        (`src/athenaeum/mcp_server.py` `_excluded_block_for_hit`, the
+        `recall(with_pii=True)` join): a mark on the wiki page only still
+        renders, even though the matched excluded record carries nothing."""
+        knowledge = tmp_path / "knowledge"
+        _write_page(
+            knowledge / "wiki",
+            "alex",
+            name="Alex Widget",
+            extra_frontmatter="do_not_email: true\ndo_not_email_reason: operator request\n",
+        )
+        _write_record(
+            pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG),
+            "alex-contact.md",
+            uid="alex",
+            fields="emails:\n  - alex@example.org\n",
+        )
+
+        result = recall_search(
+            knowledge / "wiki", "widget", config=EXCLUDED_CONFIG, with_pii=True
+        )
+
+        assert "**do_not_email:** marked" in result
+        facts = self._facts_block(result)
+        assert facts["do_not_email"]["marked"] is True
+        assert facts["do_not_email"]["surface"] == "wiki"
+        assert facts["do_not_email"]["reason"] == "operator request"
 
     def test_record_with_nothing_to_report_renders_no_block(self, tmp_path: Path) -> None:
         """A matched record holding no values and no mark says nothing at all.
