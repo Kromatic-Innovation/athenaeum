@@ -30,7 +30,7 @@ directly rather than lean on the relation value for that.
 orchestrator's ambiguity policy):** the ``scope`` and ``subject`` kernel
 dimensions have no existing frontmatter reader the way valid-time/
 observed-time/memory-class do. Three NEW frontmatter keys are introduced:
-``claimed_scope`` (the ``scope`` dimension's coordinate), ``origin_scope``
+``claimed_scope`` (the ``scope`` dimension's coordinate), ``provenance_scope``
 (provenance — see the write-discipline section below), and ``subject`` (the
 ``subject`` dimension's coordinate). ``recorded_at`` is a fourth new key (the
 ``recorded-time`` dimension). None of the four collide with any existing
@@ -56,13 +56,13 @@ Lifecycle section's "retiring a dimension" note).
 
 Write-side discipline — origin scope vs. claimed scope (the round-4 blocker
 this issue names as its highest-risk item): **origin scope is PROVENANCE**
-(``WikiEntity.origin_scope`` — where/what context wrote the claim; a writer
+(``WikiEntity.provenance_scope`` — where/what context wrote the claim; a writer
 gets this "for free," the same way ``source``/``source_type`` are free).
 **Claimed scope is an ASSERTED coordinate** (``WikiEntity.claimed_scope`` —
 where the claim APPLIES; must be explicit, never derived). The two are
 different dataclass fields and no code path in this module or
 :mod:`athenaeum.models` ever copies one into the other — see
-``tests/test_dimensions.py::test_origin_scope_never_populates_claimed_scope``
+``tests/test_dimensions.py::test_provenance_scope_never_populates_claimed_scope``
 for the regression test the issue's AC demands.
 
 Layering: L1/L2, mirroring :mod:`athenaeum.scoped_claims`'s posture (the

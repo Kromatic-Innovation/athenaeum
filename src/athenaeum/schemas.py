@@ -181,11 +181,11 @@ class WikiBase(BaseModel):
     # field (which a different subsystem, ``scoped_claims.py``/athenaeum#329,
     # already reads as an incompatible nested ``{org, locale}`` shape).
     recorded_at: str | None = None
-    origin_scope: str | None = None
+    provenance_scope: str | None = None
     claimed_scope: str | None = None
     subject: str | None = None
 
-    @field_validator("recorded_at", "origin_scope", "claimed_scope", "subject", mode="before")
+    @field_validator("recorded_at", "provenance_scope", "claimed_scope", "subject", mode="before")
     @classmethod
     def _validate_dimension_coordinate_str(cls, v: Any) -> Any:
         if v is None or v == "":

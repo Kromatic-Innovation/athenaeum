@@ -1363,12 +1363,14 @@ degrades to `unknown`, never a false `disjoint`/`equal` from colliding
 vocabularies that happen to share a name or value set.
 
 **Write-side discipline (the highest-risk item this issue names).** Origin
-scope is PROVENANCE (`WikiEntity.origin_scope` — where/what context wrote the
-claim, free the way `source`/`source_type` are). Claimed scope is an
-ASSERTED coordinate (`WikiEntity.claimed_scope` — where the claim APPLIES).
-They are never the same field and origin is never auto-copied into the
-coordinate — guarded by a regression test
-(`tests/test_dimensions.py::TestOriginScopeNeverPopulatesClaimedScope`). A
+scope is PROVENANCE (`WikiEntity.provenance_scope` — where/what context wrote
+the claim, free the way `source`/`source_type` are; named `provenance_scope`,
+not `origin_scope`, to avoid colliding with `AutoMemoryFile.origin_scope`, an
+unrelated pre-existing field — see "Ambiguity resolved" below). Claimed scope
+is an ASSERTED coordinate (`WikiEntity.claimed_scope` — where the claim
+APPLIES). They are never the same field and provenance is never auto-copied
+into the coordinate — guarded by a regression test
+(`tests/test_dimensions.py::TestProvenanceScopeNeverPopulatesClaimedScope`). A
 claim missing a coordinate is not rejected; it lands per the dimension's null
 semantics.
 
@@ -1384,6 +1386,18 @@ trivially reversible: retargeting the reader/writer to a different key is a
 one-line change (`dimensions.coordinate_value` / `parsed_coordinate`,
 `models.WikiEntity`'s field), with no data migration since coordinates are
 additive metadata.
+
+The provenance field went through the same check for a different reason: an
+early draft named it `origin_scope`, which collides with a real, heavily-used
+PRE-EXISTING field — `AutoMemoryFile.origin_scope` (issue athenaeum#167, the
+raw-intake scope-directory identifier consumed across `merge.py`,
+`cross_scope.py`, `clusters.py`, `resolutions.py`, `tiers.py`, and more) —
+that `resolutions.py` documents as "NEVER stored in frontmatter." Storing a
+NEW frontmatter key with that exact identifier would have directly
+contradicted that documented invariant for anyone grepping the name, even
+though the two fields live on different dataclasses and never share data at
+runtime. Renamed to `provenance_scope` before this landed — verified
+zero-collision the same way as `claimed_scope`/`subject`/`recorded_at`.
 
 **Intake temporal validation** (`dimensions.validate_intake_temporal`, wired
 into `schemas.WikiBase`'s model validator — the same choke point every

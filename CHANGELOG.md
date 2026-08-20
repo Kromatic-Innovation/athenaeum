@@ -25,9 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale-marking (`maybe_flip_to_enforced`); corpus namespacing via
   `cross_corpus_compare`. Write-side discipline: `WikiEntity` gains
   `recorded_at` (stamped once at construction, never writer-supplied),
-  `origin_scope` (PROVENANCE), `claimed_scope` (the ASSERTED `scope`
-  coordinate — never auto-copied from `origin_scope`, with a regression test
-  guarding it), and `subject`. Intake temporal validation
+  `provenance_scope` (PROVENANCE — named to avoid colliding with the
+  pre-existing, unrelated `AutoMemoryFile.origin_scope`), `claimed_scope`
+  (the ASSERTED `scope` coordinate — never auto-copied from
+  `provenance_scope`, with a regression test guarding it), and `subject`.
+  Intake temporal validation
   (`validate_intake_temporal`, wired into `schemas.WikiBase`): hard-rejects
   `observed_at` later than `recorded_at`, soft-flags a deep back-date.
   Consumer for this PR: coordinate stamping at write time plus the new

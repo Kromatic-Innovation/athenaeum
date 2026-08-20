@@ -581,10 +581,10 @@ class TestCoordinateValueAndParsing:
 
 
 class TestOriginScopeNeverPopulatesClaimedScope:
-    def test_origin_scope_never_populates_claimed_scope(self) -> None:
+    def test_provenance_scope_never_populates_claimed_scope(self) -> None:
         """Regression test (issue athenaeum#714 AC): constructing a WikiEntity with
-        ``origin_scope`` set but ``claimed_scope`` unset must NEVER result in
-        ``claimed_scope`` being populated from ``origin_scope``.
+        ``provenance_scope`` set but ``claimed_scope`` unset must NEVER result in
+        ``claimed_scope`` being populated from ``provenance_scope``.
 
         Rationale: origin scope is PROVENANCE (where/what context wrote the
         claim — a writer gets this "for free"); claimed scope is an ASSERTED
@@ -601,9 +601,9 @@ class TestOriginScopeNeverPopulatesClaimedScope:
             uid="p-1",
             type="principle",
             name="Test Principle",
-            origin_scope="kromatic/platform",
+            provenance_scope="kromatic/platform",
         )
-        assert entity.origin_scope == "kromatic/platform"
+        assert entity.provenance_scope == "kromatic/platform"
         assert entity.claimed_scope is None
 
     def test_claimed_scope_survives_when_explicitly_asserted(self) -> None:
@@ -611,16 +611,16 @@ class TestOriginScopeNeverPopulatesClaimedScope:
             uid="p-2",
             type="principle",
             name="Test Principle 2",
-            origin_scope="kromatic/platform",
+            provenance_scope="kromatic/platform",
             claimed_scope="kromatic",
         )
-        assert entity.origin_scope == "kromatic/platform"
+        assert entity.provenance_scope == "kromatic/platform"
         assert entity.claimed_scope == "kromatic"
 
     def test_render_never_derives_claimed_scope_from_origin(self) -> None:
-        entity = WikiEntity(uid="p-3", type="principle", name="P3", origin_scope="acme/widgets")
+        entity = WikiEntity(uid="p-3", type="principle", name="P3", provenance_scope="acme/widgets")
         rendered = entity.render()
-        assert "origin_scope: acme/widgets" in rendered
+        assert "provenance_scope: acme/widgets" in rendered
         assert "claimed_scope:" not in rendered
 
 
@@ -667,7 +667,7 @@ class TestMissingCoordinateNotRejected:
     def test_wiki_entity_with_no_coordinates_constructs_fine(self) -> None:
         entity = WikiEntity(uid="p-7", type="principle", name="P7")
         assert entity.claimed_scope is None
-        assert entity.origin_scope is None
+        assert entity.provenance_scope is None
         assert entity.subject is None
 
     def test_validate_wiki_meta_accepts_missing_coordinates(self) -> None:

@@ -1469,7 +1469,14 @@ class WikiEntity:
     # Issue athenaeum#714 (dimension registry): four NEW write-side coordinate
     # fields, none of which collide with any existing frontmatter key (see
     # ``athenaeum/dimensions.py``'s module docstring for the collision
-    # analysis that ruled out reusing the existing ``scope:`` key).
+    # analysis that ruled out reusing the existing ``scope:`` key — and for
+    # why this field is ``provenance_scope``, NOT ``origin_scope``: that
+    # identifier is already taken, with an entirely different meaning, by
+    # :class:`AutoMemoryFile`'s ``origin_scope`` field above (the raw-intake
+    # scope-directory identifier, issue athenaeum#167 — NEVER stored in
+    # frontmatter per ``resolutions.py``'s documented invariant). Reusing it
+    # here would silently contradict that invariant for readers grepping the
+    # name.
     # ``recorded_at`` is stamped unconditionally by ``__post_init__`` below
     # (never writer-supplied); the other three are left exactly as the
     # caller set them — a missing coordinate is not an error, it lands per
@@ -1477,11 +1484,11 @@ class WikiEntity:
     recorded_at: str | None = None
     # PROVENANCE (where/what context wrote this claim) — never auto-copied
     # into ``claimed_scope`` below. See ``dimensions.py``'s write-discipline
-    # section and ``tests/test_dimensions.py::test_origin_scope_never_populates_claimed_scope``.
-    origin_scope: str | None = None
+    # section and ``tests/test_dimensions.py::test_provenance_scope_never_populates_claimed_scope``.
+    provenance_scope: str | None = None
     # The ASSERTED "scope" kernel-dimension coordinate (where the claim
     # APPLIES) — must be explicit (writer, classifier proposal, or queue
-    # answer); never derived from ``origin_scope``.
+    # answer); never derived from ``provenance_scope``.
     claimed_scope: str | None = None
     # The "subject" kernel-dimension coordinate (identity kind).
     subject: str | None = None
@@ -1578,8 +1585,8 @@ class WikiEntity:
         # unchanged, matching every other optional-field convention above.
         if self.recorded_at is not None:
             meta["recorded_at"] = self.recorded_at
-        if self.origin_scope is not None:
-            meta["origin_scope"] = self.origin_scope
+        if self.provenance_scope is not None:
+            meta["provenance_scope"] = self.provenance_scope
         if self.claimed_scope is not None:
             meta["claimed_scope"] = self.claimed_scope
         if self.subject is not None:
