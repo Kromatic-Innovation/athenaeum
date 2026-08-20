@@ -339,7 +339,10 @@ class TestCorrectionsBucketApply:
         # The explicit, pre-existing bound survives untouched (round-tripped
         # through YAML as a native date, hence unquoted on disk).
         assert "valid_until: 2026-01-01" in page.read_text()
-        assert "2026-08-20" not in page.read_text()
+        # Key-scoped, not a bare substring: the write path also stamps
+        # ``updated: <today>``, so an unqualified ``"2026-08-20" not in ...``
+        # fires on any run whose UTC date happens to equal this literal.
+        assert "valid_until: 2026-08-20" not in page.read_text()
 
 
 # ---------------------------------------------------------------------------

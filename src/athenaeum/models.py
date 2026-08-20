@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -1378,6 +1379,36 @@ class WikiEntity:
     model: str | None = None
     on_behalf_of: str | None = None
     asserter: dict[str, object] | None = None
+    # Issue athenaeum#996: the memory-taxonomy axis (athenaeum#424) reaches the WRITE
+    # model. It existed only on the read/validation model (``schemas.WikiBase``)
+    # until now, so no code path could emit it and coverage could only ever be
+    # zero — a backfill without this field would decay at the new-page rate.
+    # Left ``None`` by a caller it is DERIVED from ``type`` in ``__post_init__``
+    # via the adopted rule map, so every newly created page lands classed
+    # without any call site having to know the taxonomy. An explicit value
+    # always wins; an unmapped ``type`` stays ``None`` and renders no key.
+    memory_class: str | None = None
+
+    def __post_init__(self) -> None:
+        # Lazy import: only this one call needs the vocabulary, and
+        # ``memory_class`` is a leaf module (see its docstring for why the
+        # constants do not live in ``schemas``).
+        from athenaeum.memory_class import MEMORY_CLASSES, memory_class_for_type
+
+        if self.memory_class is None or self.memory_class == "":
+            self.memory_class = memory_class_for_type(self.type)
+            return
+        if self.memory_class not in MEMORY_CLASSES:
+            # Warn-and-keep, matching how ``schemas.WikiBase`` treats an
+            # unrecognized value (and the athenaeum#93 ``KNOWN_TYPES`` precedent it
+            # cites): round-trip fidelity beats silently dropping a value the
+            # operator deliberately wrote. The read path warns about it too.
+            warnings.warn(
+                f"unknown memory_class {self.memory_class!r} "
+                f"(recognized: {sorted(MEMORY_CLASSES)})",
+                UserWarning,
+                stacklevel=2,
+            )
 
     @property
     def filename(self) -> str:
@@ -1390,6 +1421,11 @@ class WikiEntity:
             "type": self.type,
             "name": self.name,
         }
+        # Issue athenaeum#996: emitted immediately after ``type`` — the two type
+        # axes read together (docs/memory-taxonomy.md §2). Absent when the
+        # rule map does not decide, never defaulted to a class.
+        if self.memory_class:
+            meta["memory_class"] = self.memory_class
         if self.aliases:
             meta["aliases"] = self.aliases
         meta["access"] = self.access
