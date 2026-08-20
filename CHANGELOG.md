@@ -30,7 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   merge approve/reject via `athenaeum ingest-answers` records a verdict for
   the decision the pipeline already made, and `athenaeum run`'s finalize
   phase materializes the ledger and advances the duty-cycle counters. See
-  `docs/configuration.md`'s "Verdict ledger" section.
+  `docs/configuration.md`'s "Verdict ledger" section. `run()`'s new `lock`
+  parameter is covered end to end (not just at the finalize-phase boundary)
+  by `tests/test_verdicts_run_wiring.py::TestRunEndToEndLockThreading`,
+  which drives the real top-level `run(..., lock=lock)` against an
+  empty-corpus scratch tree and asserts a well-formed ledger with the flag
+  on and no `wiki/_verdicts/` at all with it off.
 
 ### Fixed
 
