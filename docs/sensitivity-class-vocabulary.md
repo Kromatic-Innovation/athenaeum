@@ -2,9 +2,13 @@
 
 # Sensitivity-class vocabulary — config-defined classes, shipped recognisers, one path
 
-**Status:** DESIGN LOCK. Issue athenaeum#910. Not yet implemented — the
-implementation slices this design locks are listed in §9 and are filed
-against this note by the orchestrator, not by this design itself.
+**Status:** DESIGN LOCK. Issue athenaeum#910. Partially implemented — slice
+**S1a** (athenaeum#989: the recogniser protocol + registry + shipped
+`email`/`phone` recognisers) has landed; the class-vocabulary half (S1b —
+`sensitivity.classes`, its config resolver, read-policy inheritance,
+`classify()`) has not. The remaining implementation slices this design locks
+are listed in §9 and are filed against this note by the orchestrator, not by
+this design itself.
 
 From the 2026-08-14 intake-architecture review (Vitruvius Specify) that also
 produced [`docs/whole-store-adapter-design.md`](whole-store-adapter-design.md)
@@ -72,8 +76,8 @@ avoid paying twice.
 | `DEFAULT_EXCLUDED_READ_MAPPING = {"person": PII_ENTITY_CLASS}` | `src/athenaeum/pii.py:201` | The one shipped page-class → surface-class non-identity entry (`docs/storage-adapter-contract.md`'s "Page class vs surface class" section). A second regulatory class needs a second entry, and today that means editing this module. |
 | `contacts_surface_root()` | `src/athenaeum/pii.py:234` | A convenience wrapper hardcoded to `PII_ENTITY_CLASS` — there is no equivalent for a second class without a second hand-written function. |
 | `is_pii_class_excluded()` | `src/athenaeum/pii.py:248` | Same shape: a boolean predicate name-bound to one class. |
-| `_EMAIL_RE`, `_PHONE_RE` | `src/athenaeum/pii.py:322`, `:329` | Compiled module-level regexes — the only two detection "recognisers" that exist today, and they are not a registry: they are private module attributes three other modules import directly. |
-| `find_inline_emails()` / `find_inline_phones()` | `src/athenaeum/pii.py:602`, `:612` | The de facto detector functions. Consumed directly (not through any lookup) by `src/athenaeum/storage_migrate.py:69-70` (the athenaeum#479/#502 migration sweep, whose own docstring at `storage_migrate.py:12-20` already calls this shape "DETECTOR-DRIVEN" — the word this design promotes to a contract) and by `src/athenaeum/outbound_pii.py:60-64` (re-imported for the outbound-draft lint, with a comment at `outbound_pii.py:47-52` explicitly justifying the direct import as "one definition... rather than a second, driftable copy" — the right instinct, applied to the wrong mechanism: a shared *function* is fine; three modules each knowing the literal name `find_inline_emails` is the part a registry replaces). |
+| `_EMAIL_RE`, `_PHONE_RE` | `src/athenaeum/pii.py:322`, `:329` | Compiled module-level regexes — the only two detection "recognisers" that exist today. As of athenaeum#989 (S1a) they are no longer solely three modules' private import: `src/athenaeum/sensitivity.py`'s built-in `email`/`phone` recognisers also iterate these two patterns directly (via `.finditer`, for offsets — see the corrected §3.2 below), alongside `src/athenaeum/outbound_pii.py`'s pre-existing direct import. They remain private module attributes; nothing about `pii.py`'s own behavior changed. |
+| `find_inline_emails()` / `find_inline_phones()` | `src/athenaeum/pii.py:602`, `:612` | The de facto detector functions. Consumed directly (not through any lookup) by `src/athenaeum/storage_migrate.py:69-70` (the athenaeum#479/#502 migration sweep, whose own docstring at `storage_migrate.py:12-20` already calls this shape "DETECTOR-DRIVEN" — the word this design promotes to a contract) and by `src/athenaeum/outbound_pii.py:60-64` (re-imported for the outbound-draft lint, with a comment at `outbound_pii.py:47-52` explicitly justifying the direct import as "one definition... rather than a second, driftable copy" — the right instinct, applied to the wrong mechanism: a shared *function* is fine; three modules each knowing the literal name `find_inline_emails` is the part a registry replaces). **Not** consumed by `sensitivity.py`'s built-in recognisers — see §3.2's corrected span decision: these two functions return a deduped `list[str]` with no offsets, so a recogniser needing `SensitivityMatch.span` cannot wrap them and instead iterates the compiled patterns directly. Neither function, nor any existing caller of either, changed. |
 | `CONTACT_IDENTIFIER_FIELDS = ("emails", "former_emails", "alt_emails")` | `src/athenaeum/pii.py:1693` | Hardcodes which frontmatter fields the `pii` class's contact recognisers look at. A `hipaa` class would need its own field allowlist with no shared mechanism to declare it. |
 | `USAGE_CLASSES` (`observed`/`provider`/`unclassified`) | `src/athenaeum/pii.py:1731` | **A different axis, not sensitivity class** — worth naming so this design does not conflate them. `usage_class` is a per-*value* permission (may this specific address be used for outreach), scoped entirely inside the `pii` class per `docs/security-posture.md` §2.3. Sensitivity class (this design) is which regulatory bucket a fact belongs to at all. A `hipaa` class gets its own read policy (§4); it does not need a `usage_class`-shaped table unless a follow-on slice decides that regime needs one too. |
 | **A "street address" recogniser** | — (searched, not found) | Athenaeum#910's own summary states "shipped recognisers cover email, phone and street address." A repo-wide search (`rg -i 'street|postal|zip.code'` across `src/athenaeum/`) finds no such detector. **This design corrects that premise**: athenaeum ships two recognisers today, not three. Street-address detection is real future scope, not existing behavior — see §5 and slice S2 in §9. Stating it as already-shipped would misrepresent the starting point to a reader who did not check. |
@@ -285,8 +289,11 @@ phone, and a deployment's HIPAA pattern all classify the same way" true by
 construction rather than by convention.
 
 ```python
-# src/athenaeum/sensitivity.py — new module, L3 (peer to pii.py/screening.py;
-# imports athenaeum.storage L1/L2, athenaeum.config L2, athenaeum.atomic_io L0)
+# src/athenaeum/sensitivity.py — L3 (peer to pii.py/screening.py). As
+# implemented in athenaeum#989 (S1a), this slice imports only athenaeum.pii
+# (a sibling L3 module, for its compiled patterns and phone false-positive
+# helpers) — athenaeum.storage/athenaeum.config/athenaeum.atomic_io are not
+# needed until S1b's class-config resolver lands.
 
 @dataclass(frozen=True)
 class SensitivityMatch:
@@ -313,13 +320,26 @@ def register_recognizer(
 ) -> None:
     """The code extension point — mirrors storage.register_adapter's shape
     (storage.py:179-201) exactly: a built-in recognizer name can never be
-    shadowed; re-registering a custom name raises unless replace=True."""
+    shadowed; re-registering a custom name raises unless replace=True. As
+    implemented, "built-in" is tracked as a protected NAME set
+    (`_BUILTIN_RECOGNIZER_NAMES = {"email", "phone"}`) rather than a separate
+    dict the built-ins bypass registration to populate (contrast
+    `storage.py`'s `_BUILTIN_ADAPTERS`, populated by direct assignment, not by
+    calling `register_adapter`): once a protected name has registered once —
+    which can only happen from this module's own import-time bootstrap, since
+    no external caller can reach `register_recognizer` before importing this
+    module runs that bootstrap first — every subsequent registration under
+    that name raises, `replace` notwithstanding."""
     ...
 
 def available_recognizers(config: dict[str, Any] | None) -> dict[str, SensitivityRecognizer]:
     """Built-ins ∪ code-registered. UNLIKE available_classes, config cannot
     define a recognizer — detection is behavior, not data, so it can only
-    be code (§7 Decision D2's converse)."""
+    be code (§7 Decision D2's converse). *config* is accepted for signature
+    symmetry with `storage.available_adapters` but is not consulted by this
+    slice; a config `recognizers:` entry naming an unregistered recogniser
+    resolves to nothing here — S1b's class resolver is where an unknown name
+    becomes a loud `SensitivityConfigError`, not this function."""
     ...
 ```
 
@@ -328,8 +348,8 @@ whole point.** `sensitivity.py` registers its own built-ins at import time:
 
 ```python
 # inside src/athenaeum/sensitivity.py, at module scope
-register_recognizer(_EmailRecognizer())   # wraps pii.find_inline_emails, pii.py:602
-register_recognizer(_PhoneRecognizer())   # wraps pii.find_inline_phones, pii.py:612
+register_recognizer(_EmailRecognizer())
+register_recognizer(_PhoneRecognizer())
 ```
 
 exactly the call a deployment makes for its own `hipaa-identifier`
@@ -340,9 +360,24 @@ deployment's own import happens (the same "adding a surface is config + a
 for adapters, applied to recognisers). There is no `if built_in` branch
 anywhere in this contract; `_EmailRecognizer`/`_PhoneRecognizer` are
 ordinary `SensitivityRecognizer` implementations that happen to ship in this
-repo, wrapping the existing `find_inline_emails`/`find_inline_phones`
-functions (§2.1) rather than re-implementing detection — the functions
-themselves are untouched, only how a class binds to them changes.
+repo.
+
+**Corrected from the original draft above: the built-ins do NOT wrap
+`find_inline_emails`/`find_inline_phones` (§2.1).** athenaeum#989 found that
+claim incompatible with the `span` field this same section specifies:
+`find_inline_emails`/`find_inline_phones` return a deduped `list[str]` with
+no offsets, so a wrapper over them can never populate `span` and collapses
+repeated occurrences of one value into a single match. athenaeum#989 resolved
+this in favor of `span` (the choice that keeps a future span-consuming
+caller migratable): `_EmailRecognizer`/`_PhoneRecognizer` iterate
+`pii._EMAIL_RE`/`pii._PHONE_RE` directly via `.finditer`, applying
+`pii._is_excluded_phone_shape` and `pii._has_labeled_identifier_prefix` so
+the phone false-positive suppression `find_inline_phones` already has
+(athenaeum#500 / athenaeum#683 / athenaeum#720 / athenaeum#732) is preserved
+byte-for-byte, and yielding one `SensitivityMatch` — with a real
+`(start, end)` span — per occurrence rather than a deduped set.
+`find_inline_emails`/`find_inline_phones` themselves, and every existing
+caller of either, are untouched.
 
 **Binding is a partition, not an overlapping tag set (§7 Decision D6).** A
 recognizer name may appear under at most one class's `recognizers:` list in
@@ -619,13 +654,22 @@ retroactively is a bulk edit, not a config change.
 
 ## 9. Follow-on implementation slices
 
-- **S1 — `sensitivity.py` module + config resolver.** `SensitivityMatch`,
-  `SensitivityRecognizer` protocol, `register_recognizer`/
-  `available_recognizers`, `SensitivityClass`/`available_classes`,
-  `SensitivityConfigError`; `resolve_sensitivity_classes` in `config.py`;
-  built-in `email`/`phone` recognisers wrapping the existing
-  `find_inline_emails`/`find_inline_phones`; the shipped `pii` class from
-  §5. No caller migrated yet.
+- **S1 — `sensitivity.py` module + config resolver.** Split by the
+  orchestrator into two slices once the recogniser/class halves proved
+  independently reviewable (see the compatibility-boundary rationale in §1):
+  - **S1a (athenaeum#989, shipped)** — the recogniser half only:
+    `SensitivityMatch`, the `SensitivityRecognizer` protocol,
+    `register_recognizer`/`available_recognizers`, `SensitivityConfigError`,
+    and the built-in `email`/`phone` recognisers — iterating
+    `pii._EMAIL_RE`/`pii._PHONE_RE` directly rather than wrapping
+    `find_inline_emails`/`find_inline_phones` (see the corrected §3.2). No
+    caller migrated yet; `SensitivityClass`/`available_classes`/
+    `resolve_sensitivity_classes` are **not** part of this slice.
+  - **S1b (not yet filed as of athenaeum#989)** — the class-vocabulary half:
+    `sensitivity.classes` config resolver (`resolve_sensitivity_classes` in
+    `config.py`), `SensitivityClass`/`available_classes`, read-policy
+    inheritance (§4), and the shipped `pii` class from §5, binding class
+    names to the S1a registry by recogniser name.
 - **S2 — street-address recognizer.** The recogniser athenaeum#910's own
   summary describes as already shipped (§2.1) but is not; implement and
   register it through the S1 contract, bound to `pii` by default per §5.
