@@ -23,6 +23,7 @@ Load-bearing fixtures:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -557,6 +558,86 @@ class TestFallbackEmbedder:
         assert len(clusters) == 2
         assert all(len(c.member_paths) == 1 for c in clusters)
 
+    def test_fallback_engagement_logs_warning_and_records_embedder(
+        self,
+        singleton_pair_root: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Issue athenaeum#1032: the "fell back" count line is WARNING (was DEBUG,
+        invisible at deployed INFO), and every cluster formed from
+        hashing-trick vectors records ``embedder="fallback-hashing"`` so run
+        artifacts can tell which embedder produced a cluster's vectors.
+        """
+        import logging
+
+        from athenaeum.clusters import (
+            EMBEDDER_FALLBACK_HASHING,
+            cluster_auto_memory_files,
+        )
+        from athenaeum.config import resolve_extra_intake_roots
+        from athenaeum.librarian import discover_auto_memory_files
+
+        files = discover_auto_memory_files(singleton_pair_root)
+        extra_roots = resolve_extra_intake_roots(singleton_pair_root)
+
+        caplog.set_level(logging.WARNING, logger="athenaeum.clusters")
+        clusters = cluster_auto_memory_files(
+            files,
+            extra_roots=extra_roots,
+            cache_dir=singleton_pair_root / ".empty-cache",
+            threshold=0.9,
+        )
+        assert clusters
+        assert all(c.embedder == EMBEDDER_FALLBACK_HASHING for c in clusters)
+
+        fallback_warnings = [r for r in caplog.records if "fell back" in r.getMessage()]
+        assert len(fallback_warnings) == 1
+        assert fallback_warnings[0].levelno == logging.WARNING
+
+    def test_chromadb_hit_records_chromadb_default_embedder(
+        self,
+        singleton_pair_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue athenaeum#1032: when every file's vector is served from the
+        chromadb collection (no fallback engaged), every formed cluster
+        records ``embedder="chromadb-default"``.
+
+        Stubs :meth:`VectorBackend.fetch_embeddings` (issue athenaeum#1032's "stub
+        embedding provider" seam for this module — ``_resolve_embeddings``
+        has no injectable-callable shape of its own, unlike
+        ``wiki_dedupe._resolve_wiki_embeddings``) instead of depending on the
+        real optional ``chromadb`` extra.
+        """
+        from athenaeum.clusters import (
+            EMBEDDER_CHROMADB_DEFAULT,
+            _indexed_id_for,
+            cluster_auto_memory_files,
+        )
+        from athenaeum.config import resolve_extra_intake_roots
+        from athenaeum.librarian import discover_auto_memory_files
+        from athenaeum.search import VectorBackend
+
+        files = discover_auto_memory_files(singleton_pair_root)
+        extra_roots = resolve_extra_intake_roots(singleton_pair_root)
+        expected_ids = {_indexed_id_for(am, extra_roots) for am in files}
+
+        def _fake_fetch_embeddings(
+            self: VectorBackend, ids: Iterable[str], cache_dir: Path
+        ) -> dict[str, list[float]]:
+            return {idx_id: [1.0, 0.0] for idx_id in ids if idx_id in expected_ids}
+
+        monkeypatch.setattr(VectorBackend, "fetch_embeddings", _fake_fetch_embeddings)
+
+        clusters = cluster_auto_memory_files(
+            files,
+            extra_roots=extra_roots,
+            cache_dir=singleton_pair_root / ".empty-cache",
+            threshold=0.9,
+        )
+        assert clusters
+        assert all(c.embedder == EMBEDDER_CHROMADB_DEFAULT for c in clusters)
+
 
 # ---------------------------------------------------------------------------
 # Output / rotation
@@ -590,12 +671,14 @@ class TestClusterReportJSONL:
         rows = [json.loads(line) for line in out.read_text().splitlines()]
         assert len(rows) == 2
         for row in rows:
+            # Issue athenaeum#1032: "embedder" joined the row schema.
             assert set(row.keys()) == {
                 "cluster_id",
                 "member_paths",
                 "centroid_score",
                 "min_pairwise_score",
                 "rationale",
+                "embedder",
             }
             assert isinstance(row["cluster_id"], str)
             assert isinstance(row["member_paths"], list)
@@ -603,6 +686,7 @@ class TestClusterReportJSONL:
             assert isinstance(row["centroid_score"], float)
             assert isinstance(row["min_pairwise_score"], float)
             assert isinstance(row["rationale"], str)
+            assert isinstance(row["embedder"], str)
 
     def test_rotation_preserves_previous_run(self, tmp_path: Path) -> None:
         """Two back-to-back runs should leave 2 timestamped files + canonical."""
