@@ -69,12 +69,17 @@ Layering: L1/L2, mirroring :mod:`athenaeum.scoped_claims`'s posture (the
 direct conceptual precursor to the ``hierarchy`` comparator here — see that
 module's docstring). Imports :mod:`athenaeum.models` (L1, for
 ``parse_valid_from``/``parse_valid_until``/``parse_observed_at``) and
-:mod:`athenaeum.memory_class` (L0, for ``MEMORY_CLASSES``) at module level;
-imports :mod:`athenaeum.verdicts` (L2) function-locally inside
-:func:`maybe_flip_to_enforced` only, mirroring ``config.py``'s
-``resolve_screening`` "reach up, deferred, one function" pattern — this module
-must stay importable without pulling in the verdict ledger's own dependency
-chain for callers that only want the comparator algebra.
+:mod:`athenaeum.memory_class` (L0, for ``MEMORY_CLASSES``) at module level.
+
+Deliberately does NOT import :mod:`athenaeum.verdicts` anywhere (not even
+function-locally — ``tests/test_import_graph_acyclic.py`` counts deferred
+imports too): :mod:`athenaeum.config` already imports THIS module
+(``resolve_dimensions``), and :mod:`athenaeum.verdicts` imports
+:mod:`athenaeum.pii`, which imports :mod:`athenaeum.config` — a
+``dimensions -> verdicts`` edge would close ``config -> dimensions ->
+verdicts -> pii -> config``, a real cycle. :func:`maybe_flip_to_enforced`
+instead takes an injected ``on_flip`` callback the CALLER wires to
+athenaeum#712's targeted stale-marking, keeping the dependency arrow one-way.
 """
 
 from __future__ import annotations
@@ -82,18 +87,13 @@ from __future__ import annotations
 import logging
 import re
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import Any, Mapping
 
 from athenaeum.memory_class import MEMORY_CLASSES
 from athenaeum.models import parse_observed_at, parse_valid_from, parse_valid_until
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from athenaeum.runlock import RunLock
-    from athenaeum.verdicts import VerdictEntry
 
 log = logging.getLogger(__name__)
 
@@ -897,30 +897,44 @@ def maybe_flip_to_enforced(
     dimension: Dimension,
     *,
     coverage: float,
-    entries: list[VerdictEntry],
-    changed_ids: set[str],
-    wiki_root: Path,
-    lock: RunLock,
+    on_flip: Callable[[Dimension], int] | None = None,
 ) -> tuple[Dimension, int]:
     """Flip *dimension* ``backfill`` -> ``enforced`` once *coverage* crosses
     ``dimension.coverage_threshold`` (issue athenaeum#714 AC).
 
     No-op (returns *dimension* unchanged, ``0`` marked) when the dimension is
     already ``enforced`` or coverage has not yet crossed the threshold. On a
-    genuine flip: stale-marks every ledger entry the newly-enforced dimension
-    touches via athenaeum#712's targeted stale-marking
-    (:func:`athenaeum.verdicts.select_stale_for_dimension_change` +
-    :func:`athenaeum.verdicts.mark_pairs_stale`) and returns the dimension
-    with ``state=enforced``. Requires an ALREADY-ACQUIRED *lock* — mirrors
-    every other mutating ``verdicts.py`` call's single-appender contract; this
-    function does not acquire the lock itself.
-    """
-    from athenaeum.verdicts import mark_pairs_stale, select_stale_for_dimension_change
+    genuine flip, calls *on_flip* (given the still-``backfill`` dimension)
+    and returns its result as the stale-marked count, alongside the
+    dimension with ``state=enforced``.
 
+    *on_flip* is INJECTED rather than this module calling
+    :mod:`athenaeum.verdicts` directly — :mod:`athenaeum.config`'s
+    ``resolve_dimensions`` already imports THIS module, and
+    :mod:`athenaeum.verdicts` imports :mod:`athenaeum.pii`, which imports
+    :mod:`athenaeum.config`; a direct ``dimensions -> verdicts`` edge here
+    would therefore close ``config -> dimensions -> verdicts -> pii ->
+    config``, a real import cycle
+    (``tests/test_import_graph_acyclic.py`` counts function-local imports
+    too, so deferring the import does not avoid it — the cycle is a
+    dependency-graph fact, not a timing one). A caller wires athenaeum#712's
+    targeted stale-marking as the closure::
+
+        def on_flip(dim: Dimension) -> int:
+            reasons = select_stale_for_dimension_change(
+                entries, dim.name, changed_ids=changed_ids
+            )
+            return mark_pairs_stale(wiki_root, reasons, lock=lock) if reasons else 0
+
+        flipped, marked = maybe_flip_to_enforced(dimension, coverage=cov, on_flip=on_flip)
+
+    ``lock`` (an already-acquired :class:`athenaeum.runlock.RunLock`) is the
+    caller's responsibility to hold before invoking *on_flip*, per every
+    other mutating ``verdicts.py`` call's single-appender contract.
+    """
     if dimension.state != LifecycleState.BACKFILL or coverage < dimension.coverage_threshold:
         return dimension, 0
-    reasons = select_stale_for_dimension_change(entries, dimension.name, changed_ids=changed_ids)
-    marked = mark_pairs_stale(wiki_root, reasons, lock=lock) if reasons else 0
+    marked = on_flip(dimension) if on_flip is not None else 0
     return replace(dimension, state=LifecycleState.ENFORCED), marked
 
 

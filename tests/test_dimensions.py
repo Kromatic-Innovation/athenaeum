@@ -735,6 +735,13 @@ class TestValidateIntakeTemporal:
 
 
 class TestMaybeFlipToEnforced:
+    """dimensions.py deliberately does not import verdicts.py (would close an
+    import cycle — see dimensions.py's module docstring); maybe_flip_to_enforced
+    takes an injected ``on_flip`` callback instead. These tests build that
+    callback the way a real caller would: from verdicts.py's own targeted
+    stale-marking (athenaeum#712), proving the wiring end-to-end.
+    """
+
     def test_below_threshold_is_noop(self, tmp_path: Path) -> None:
         dim = Dimension(
             name="engagement",
@@ -742,39 +749,38 @@ class TestMaybeFlipToEnforced:
             state=LifecycleState.BACKFILL,
             coverage_threshold=0.9,
         )
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        lock = RunLock(tmp_path)
-        with lock:
-            flipped, marked = maybe_flip_to_enforced(
-                dim,
-                coverage=0.5,
-                entries=[],
-                changed_ids=set(),
-                wiki_root=wiki_root,
-                lock=lock,
-            )
+        calls: list[Dimension] = []
+        flipped, marked = maybe_flip_to_enforced(
+            dim, coverage=0.5, on_flip=lambda d: calls.append(d) or 99
+        )
         assert flipped.state == LifecycleState.BACKFILL
         assert marked == 0
+        assert calls == []  # on_flip never invoked below threshold
 
     def test_already_enforced_is_noop(self, tmp_path: Path) -> None:
         dim = Dimension(name="engagement", kind=DimensionKind.IDENTITY)  # enforced default
-        wiki_root = tmp_path / "wiki"
-        wiki_root.mkdir()
-        lock = RunLock(tmp_path)
-        with lock:
-            flipped, marked = maybe_flip_to_enforced(
-                dim,
-                coverage=1.0,
-                entries=[],
-                changed_ids=set(),
-                wiki_root=wiki_root,
-                lock=lock,
-            )
+        flipped, marked = maybe_flip_to_enforced(
+            dim, coverage=1.0, on_flip=lambda d: 99
+        )
         assert flipped.state == LifecycleState.ENFORCED
         assert marked == 0
 
-    def test_crossing_threshold_flips_and_stale_marks(self, tmp_path: Path) -> None:
+    def test_no_on_flip_defaults_to_zero_marked(self) -> None:
+        dim = Dimension(
+            name="engagement",
+            kind=DimensionKind.IDENTITY,
+            state=LifecycleState.BACKFILL,
+            coverage_threshold=0.8,
+        )
+        flipped, marked = maybe_flip_to_enforced(dim, coverage=0.95)
+        assert flipped.state == LifecycleState.ENFORCED
+        assert marked == 0
+
+    def test_crossing_threshold_flips_and_stale_marks_end_to_end(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.verdicts import mark_pairs_stale, select_stale_for_dimension_change
+
         dim = Dimension(
             name="engagement",
             kind=DimensionKind.IDENTITY,
@@ -785,16 +791,16 @@ class TestMaybeFlipToEnforced:
         wiki_root.mkdir()
         lock = RunLock(tmp_path)
         entry = _entry("alpha", "beta")
+
+        def on_flip(d: Dimension) -> int:
+            reasons = select_stale_for_dimension_change(
+                [entry], d.name, changed_ids={"alpha"}
+            )
+            return mark_pairs_stale(wiki_root, reasons, lock=lock) if reasons else 0
+
         with lock:
             append_verdict(wiki_root, entry, lock=lock)
-            flipped, marked = maybe_flip_to_enforced(
-                dim,
-                coverage=0.95,
-                entries=[entry],
-                changed_ids={"alpha"},
-                wiki_root=wiki_root,
-                lock=lock,
-            )
+            flipped, marked = maybe_flip_to_enforced(dim, coverage=0.95, on_flip=on_flip)
         assert flipped.state == LifecycleState.ENFORCED
         assert marked == 1
         found = lookup_pair(wiki_root, entry.pair)

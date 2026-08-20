@@ -33,7 +33,7 @@ import uuid
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -1480,10 +1480,17 @@ class WikiEntity:
         # self-supplied value accepted for a genuinely new page either way —
         # "never writer-supplied" holds because no caller threads untrusted
         # input into this field, not because this method rejects one.
+        #
+        # Inlined rather than calling ``athenaeum.dimensions.stamp_recorded_time``
+        # (which duplicates this one-liner and is the canonical public
+        # helper other callers should use): ``models`` is an L1 hub that
+        # ``dimensions`` (L1/L2) already imports at module level for the
+        # temporal parsers, so a ``models -> dimensions`` back-edge here
+        # would close a real import cycle (caught by
+        # ``tests/test_import_graph_acyclic.py``'s whole-graph SCC guard,
+        # which counts function-local imports too, not just top-level ones).
         if not self.recorded_at:
-            from athenaeum.dimensions import stamp_recorded_time
-
-            self.recorded_at = stamp_recorded_time()
+            self.recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     @property
     def filename(self) -> str:
