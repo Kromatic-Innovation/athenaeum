@@ -400,6 +400,13 @@ def _make_over_budget_client(n_creates: int) -> MagicMock:
     ever fired). Driving the REAL `tier2_classify` -> `tier3_derive_actions`
     -> (bound check) -> write path, with only the network boundary mocked,
     is what makes a regression in that ordering fail this test.
+
+    Issue athenaeum#994: the bound check moved from "once, after the whole
+    file's actions" to "after EACH action" — so of the ``n_creates``
+    proposed entities, however many actions complete before the running
+    call count crosses the (small, test-configured) bound land as durable
+    partial progress; only the not-yet-attempted remainder is discarded.
+    This is exactly the behaviour the two tests below now assert.
     """
     classify_response = MagicMock()
     classify_response.content = [
@@ -432,16 +439,23 @@ def _entity_pages(wiki_root: Path) -> list[Path]:
     return [p for p in wiki_root.glob("*.md") if not p.name.startswith("_")]
 
 
-def test_budget_looping_file_writes_no_pages_and_is_quarantined_after_n_runs(
+def test_budget_looping_file_lands_partial_progress_and_is_quarantined_after_n_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """AC 2/3/4/7, and the regression test for the "discard is not honoured"
-    code-review finding: a file whose classification proposes enough new
-    entities to blow the per-file LLM-call bound must have NONE of those
-    entity pages written to wiki_root — on the run below threshold AND on
-    the crossing run — not merely be left uncounted while pages accumulate
-    underneath the accounting. The raw file itself is left on disk (not
-    deleted) below threshold, then quarantined on the run that crosses it.
+    """AC 2/3/4/7 (issue athenaeum#994, superseding athenaeum#898's
+    all-discard contract — see its git history for the prior version of
+    this test): a file whose classification proposes enough new entities to
+    blow the per-file LLM-call bound lands whichever entities' actions
+    completed BEFORE the bound tripped as durable partial progress, and
+    discards only the not-yet-attempted remainder. It is still not silently
+    redone identically forever — the consecutive-violation ledger still
+    crosses the quarantine threshold and physically quarantines the file.
+
+    With a 2-call bound and 1 classify + 4 create calls queued: the running
+    call count is 2 after the first create (not yet over — the check is
+    ``>``, not ``>=``) and 3 after the second (over), so exactly 2 of the 4
+    proposed entities ("Budget Blower 0" and "Budget Blower 1") land each
+    run; "Budget Blower 2" and "3" are never attempted.
     """
     root = _seed_knowledge_root(tmp_path, n_files=1)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -470,18 +484,28 @@ def test_budget_looping_file_writes_no_pages_and_is_quarantined_after_n_runs(
         )
         return stats
 
-    # Run 1: over-bound — the LLM calls happened (all 4 "Budget Blower"
-    # entities were classified and drafted), but the result must be
-    # discarded BEFORE any of them is written.
+    # Run 1: over-bound after the 2nd create action — "Budget Blower 0" and
+    # "1" land (the actions that completed before the trip); "2" and "3"
+    # are never attempted. Not yet quarantined (one violation).
     stats1 = _run()
     assert stats1["quarantined_files"] == []
     assert raw_file.exists()
-    assert _entity_pages(root / "wiki") == [], (
-        "an over-bound process_one wrote an entity page — the bug this test "
-        "regresses: 'discarded' must mean never written, not merely uncounted"
-    )
+    pages1 = _entity_pages(root / "wiki")
+    assert len(pages1) == 2
+    assert any(p.name.endswith("budget-blower-0.md") for p in pages1)
+    assert any(p.name.endswith("budget-blower-1.md") for p in pages1)
+    assert not any(p.name.endswith("budget-blower-2.md") for p in pages1)
+    assert not any(p.name.endswith("budget-blower-3.md") for p in pages1)
+    candidates = _load_quarantine_candidates(root / "wiki")
+    entry = candidates[next(iter(candidates))]
+    assert entry["violations"] == 1
 
-    # Run 2: crosses the threshold — quarantined. Still zero pages written.
+    # Run 2: the raw file is re-derived from scratch (LLM tiers are
+    # non-deterministic-by-design; see tier3_write's docstring on why a
+    # partially-completed file is retried whole, not resumed action-by-
+    # action) and crosses the threshold — quarantined. The partial progress
+    # from run 1 already landed on disk regardless of what happens to the
+    # raw file afterwards.
     caplog.clear()
     stats2 = _run()
     assert len(stats2["quarantined_files"]) == 1
@@ -492,17 +516,21 @@ def test_budget_looping_file_writes_no_pages_and_is_quarantined_after_n_runs(
     assert not raw_file.exists()
     moved = root / "wiki" / "_quarantine" / "sessions" / raw_file.name
     assert moved.exists()
-    assert _entity_pages(root / "wiki") == []
+    # The raw file will not be rediscovered and reprocessed again — quarantine
+    # is exactly the backoff behaviour (AC 3) that stops it from being redone
+    # identically every night at full LLM cost.
 
 
 def test_wall_clock_bound_full_cycle_to_quarantine_and_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """AC 2/3/4/5/6/7: the wall-clock bound (independent of the call-count
-    bound above) drives the SAME full crossing -> quarantine -> release
-    cycle the byte and llm_calls bounds get — closing the loop the earlier
-    version of this test left open (it asserted only one recorded
-    violation, never a full crossing)."""
+    """AC 2/3/4/5/6/7 (issue athenaeum#994): the wall-clock bound (independent
+    of the call-count bound above) drives the SAME full crossing ->
+    quarantine -> release cycle the byte and llm_calls bounds get — closing
+    the loop the earlier version of this test left open (it asserted only
+    one recorded violation, never a full crossing). Per athenaeum#994, the
+    single completed action ("Slow Entity") lands as durable partial
+    progress on the run that trips the bound, rather than being discarded."""
     root = _seed_knowledge_root(tmp_path, n_files=1)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
@@ -567,8 +595,9 @@ def test_wall_clock_bound_full_cycle_to_quarantine_and_release(
         )
         return stats
 
-    # Run 1: one recorded violation, not yet quarantined — and, same
-    # regression proof as the llm_calls test, "Slow Entity" is never written.
+    # Run 1: one recorded violation, not yet quarantined — and, per
+    # athenaeum#994, "Slow Entity" (the one action that completed before the
+    # bound tripped) IS written; there is simply nothing further to land.
     stats1 = _run()
     assert stats1["quarantined_files"] == []
     candidates = _load_quarantine_candidates(root / "wiki")
@@ -576,9 +605,13 @@ def test_wall_clock_bound_full_cycle_to_quarantine_and_release(
     assert entry["last_bound"] == "wall_clock"
     assert entry["violations"] == 1
     assert raw_file.exists()
-    assert _entity_pages(root / "wiki") == []
+    pages1 = _entity_pages(root / "wiki")
+    assert len(pages1) == 1
+    assert pages1[0].name.endswith("slow-entity.md")
 
-    # Run 2: crosses the threshold — quarantined. Still zero pages written.
+    # Run 2: the raw file is re-derived from scratch and crosses the
+    # threshold — quarantined. The partial progress from run 1 stays landed
+    # regardless.
     caplog.clear()
     stats2 = _run()
     assert len(stats2["quarantined_files"]) == 1
@@ -588,7 +621,6 @@ def test_wall_clock_bound_full_cycle_to_quarantine_and_release(
     assert QUARANTINE_FILE_PREFIX in caplog.text
     assert not raw_file.exists()
     assert _load_quarantine_candidates(root / "wiki") == {}
-    assert _entity_pages(root / "wiki") == []
 
     # AC 6: released -> back in the discovery set.
     pending = list_pending_quarantine(root / "wiki")
