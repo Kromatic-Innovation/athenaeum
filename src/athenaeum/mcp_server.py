@@ -759,7 +759,10 @@ def _excluded_block_for_hit(
         usage_classes=usage_classes,
     )
     validity = pii.assemble_excluded_validity(record_meta, fields)
-    do_not_email = pii.do_not_email_state(record_meta)
+    # Reads BOTH surfaces (issue athenaeum#960): `fm` is this hit's own
+    # already-resolved page frontmatter, the same value `assemble_excluded_read`
+    # above was given — no extra read needed.
+    do_not_email = pii.do_not_email_state(record_meta, fm)
 
     lines: list[str] = []
     for field_name, values in fields.items():

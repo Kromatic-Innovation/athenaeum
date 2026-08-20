@@ -620,18 +620,51 @@ class TestComputeBaselineExcludeSessions:
         assert baseline.excluded_push_record_count == 1
         assert baseline.excluded_reference_record_count == 1
 
-    def test_excluding_a_session_absent_from_the_window_reports_zero(self, tmp_path: Path) -> None:
-        """Requesting exclusion of a session id with no records in the window
-        must not fabricate a count — it reports zero, honestly.
+    def test_excluding_an_unknown_session_id_raises(self, tmp_path: Path) -> None:
+        """athenaeum#987: a value that matches no known session id anywhere
+        in the ledger must be a hard error, never a silent zero-effect
+        success — the exact defect that let a session-id PREFIX exclude
+        nothing while the run still reported success.
+        """
+        cache = tmp_path
+        self._seed_ledger(cache)
+        with pytest.raises(ValueError, match="matches no known session id"):
+            push_metrics.compute_baseline(
+                cache_dir=cache, repo_root=Path("."), exclude_sessions=["never-ran"]
+            )
+
+    def test_excluding_an_unambiguous_prefix_drops_the_session(self, tmp_path: Path) -> None:
+        """athenaeum#987: an unambiguous prefix of a known session id is
+        accepted and resolved to the full id, same effect as passing the
+        full id.
         """
         cache = tmp_path
         self._seed_ledger(cache)
         baseline = push_metrics.compute_baseline(
-            cache_dir=cache, repo_root=Path("."), exclude_sessions=["never-ran"]
+            cache_dir=cache, repo_root=Path("."), exclude_sessions=["synth-sess"]
         )
-        assert baseline.excluded_sessions == ()
-        assert baseline.excluded_push_record_count == 0
-        assert baseline.session_count == 2  # unaffected
+        assert baseline.session_count == 1
+        assert baseline.excluded_sessions == ("synth-session",)
+        assert baseline.excluded_push_record_count == 1
+
+    def test_excluding_an_ambiguous_prefix_raises(self, tmp_path: Path) -> None:
+        """athenaeum#987: a prefix shared by more than one known session id
+        must not silently resolve to either — it's a hard error.
+        """
+        cache = tmp_path
+        self._seed_ledger(cache)
+        for extra_sid, extra_uid in (("synth-session-2", "z8"), ("synth-session-3", "z9")):
+            extra_push = push_metrics.build_push_record(
+                session_id=extra_sid,
+                query="q",
+                backend="fts5",
+                hits=[("f2.md", {"uid": extra_uid}, "b")],
+            )
+            push_metrics.record_push(extra_push, cache_dir=cache)
+        with pytest.raises(ValueError, match="ambiguous"):
+            push_metrics.compute_baseline(
+                cache_dir=cache, repo_root=Path("."), exclude_sessions=["synth-session-"]
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +822,227 @@ class TestCoverageWorksheet:
         assert out.is_file()
         loaded = json.loads(out.read_text())
         assert loaded["sampled_session_count"] == 1
+
+    def test_candidates_restricted_to_sample_window(self, tmp_path: Path) -> None:
+        """athenaeum#986 AC1: a session NOT drawn into the sample must never
+        contribute a candidate — even though it shares the same default
+        tier/scope pairing as every other session here. Pre-fix, candidates
+        were drawn from ``all_pushed_ids`` (the WHOLE ledger), so this test
+        fails against the old implementation.
+        """
+        cache = tmp_path
+        ids: dict[str, str] = {}
+        for i, sid in enumerate(["s1", "s2", "s3"]):
+            pid = f"id{i}"
+            rec = push_metrics.build_push_record(
+                session_id=sid, query="q", backend="fts5", hits=[("f.md", {"uid": pid}, "b")]
+            )
+            push_metrics.record_push(rec, cache_dir=cache)
+            ids[sid] = pid
+
+        ws = push_metrics.build_coverage_worksheet(
+            n=2, wiki_root=tmp_path / "wiki", cache_dir=cache, seed=1
+        )
+        sampled_sids = {s["session_id"] for s in ws["sessions"]}
+        assert len(sampled_sids) == 2
+        excluded_sid = next(iter(set(ids) - sampled_sids))
+        excluded_pid = ids[excluded_sid]
+
+        for session in ws["sessions"]:
+            assert excluded_pid not in session["candidates_not_pushed"]
+
+    def test_candidates_require_matching_tier_scope_pairing(self, tmp_path: Path) -> None:
+        """athenaeum#986 AC1: a same-window id with a DIFFERENT tier/scope
+        pairing than the reviewing session's own pushed set is excluded; a
+        same-window id with a MATCHING pairing is included.
+        """
+        cache = tmp_path
+        rec1 = push_metrics.build_push_record(
+            session_id="s1",
+            query="q",
+            backend="fts5",
+            hits=[("f.md", {"uid": "secret1", "access": "secret"}, "b")],
+        )
+        rec2 = push_metrics.build_push_record(
+            session_id="s2",
+            query="q",
+            backend="fts5",
+            hits=[("f.md", {"uid": "internal2", "access": "internal"}, "b")],
+        )
+        rec3 = push_metrics.build_push_record(
+            session_id="s3",
+            query="q",
+            backend="fts5",
+            hits=[("f.md", {"uid": "secret3", "access": "secret"}, "b")],
+        )
+        for rec in (rec1, rec2, rec3):
+            push_metrics.record_push(rec, cache_dir=cache)
+
+        ws = push_metrics.build_coverage_worksheet(
+            n=3, wiki_root=tmp_path / "wiki", cache_dir=cache, seed=1
+        )
+        s1 = next(s for s in ws["sessions"] if s["session_id"] == "s1")
+        assert "secret3" in s1["candidates_not_pushed"]
+        assert "internal2" not in s1["candidates_not_pushed"]
+
+    def test_bounded_candidate_count_vs_whole_corpus(self, tmp_path: Path) -> None:
+        """athenaeum#986 AC4 (live-shaped fixture): many sessions, overlapping
+        pushes. Per-session candidate count must stay bounded by the sample
+        window (the other ``n - 1`` sampled sessions), well below the full
+        corpus size — the exact defect the 2026-08-20 live audit found
+        (candidates == whole pushed-id corpus, 503 ids / 4,926 verdict slots).
+        """
+        cache = tmp_path
+        n_sessions = 60
+        items_per_session = 5
+        for i in range(n_sessions):
+            hits = [(f"f{i}_{j}.md", {"uid": f"u{i}_{j}"}, "b") for j in range(items_per_session)]
+            rec = push_metrics.build_push_record(
+                session_id=f"sess{i}", query="q", backend="fts5", hits=hits
+            )
+            push_metrics.record_push(rec, cache_dir=cache)
+        corpus_size = n_sessions * items_per_session
+
+        ws = push_metrics.build_coverage_worksheet(
+            n=10, wiki_root=tmp_path / "wiki", cache_dir=cache, seed=1
+        )
+        assert ws["sampled_session_count"] == 10
+        for session in ws["sessions"]:
+            # Bounded by the OTHER 9 sampled sessions' items, never the
+            # whole 300-item corpus.
+            assert session["candidate_count"] <= 9 * items_per_session
+            assert session["candidate_count"] < corpus_size
+
+    def test_worksheet_records_miss_rate_formula_and_inputs(self, tmp_path: Path) -> None:
+        """athenaeum#986 AC3: the worksheet records the miss-rate formula and
+        its inputs (pushed_count per session), so a reviewer can recompute
+        the coverage miss rate from the worksheet file alone once verdicts
+        are filled in — no need to re-derive it from the instructions prose.
+        """
+        cache = tmp_path
+        rec1 = push_metrics.build_push_record(
+            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "p1"}, "b")]
+        )
+        rec2 = push_metrics.build_push_record(
+            session_id="s2", query="q", backend="fts5", hits=[("f.md", {"uid": "p2"}, "b")]
+        )
+        push_metrics.record_push(rec1, cache_dir=cache)
+        push_metrics.record_push(rec2, cache_dir=cache)
+
+        ws = push_metrics.build_coverage_worksheet(
+            n=2, wiki_root=tmp_path / "wiki", cache_dir=cache, seed=1
+        )
+        assert ws["miss_rate_formula"] == "missed / (pushed + missed)"
+        s1 = next(s for s in ws["sessions"] if s["session_id"] == "s1")
+        assert s1["pushed_count"] == len(s1["pushed"]) == 1
+        assert s1["candidate_count"] == len(s1["candidates_not_pushed"]) == 1
+
+        # Simulate a reviewer marking the one candidate relevant-missed, then
+        # recompute the miss rate from worksheet fields alone.
+        for cid in s1["reviewer_verdict"]:
+            s1["reviewer_verdict"][cid] = "relevant-missed"
+        missed = sum(1 for v in s1["reviewer_verdict"].values() if v == "relevant-missed")
+        miss_rate = missed / (s1["pushed_count"] + missed)
+        assert miss_rate == pytest.approx(0.5)
+
+    def test_exclude_session_drops_from_sample_and_candidates(self, tmp_path: Path) -> None:
+        """athenaeum#986 AC2: ``--exclude-session`` semantics at the function
+        level — a known-synthetic session is dropped from the sampling pool
+        entirely AND cannot contribute candidates to other sessions, with the
+        exclusion always reported (never silently dropped).
+        """
+        cache = tmp_path
+        clean = push_metrics.build_push_record(
+            session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+        )
+        synth = push_metrics.build_push_record(
+            session_id="synth",
+            query="q",
+            backend="fts5",
+            hits=[("test-page.md", None, "b")],
+        )
+        push_metrics.record_push(clean, cache_dir=cache)
+        push_metrics.record_push(synth, cache_dir=cache)
+
+        ws = push_metrics.build_coverage_worksheet(
+            n=5,
+            wiki_root=tmp_path / "wiki",
+            cache_dir=cache,
+            seed=1,
+            exclude_sessions=["synth"],
+        )
+        assert ws["sampled_session_count"] == 1
+        assert ws["sessions"][0]["session_id"] == "clean"
+        assert ws["excluded_sessions"] == ["synth"]
+        assert ws["excluded_push_records"] == 1
+
+    def test_excluding_an_unknown_session_id_raises(self, tmp_path: Path) -> None:
+        """athenaeum#987: a value that matches no known session id in the
+        push-records ledger must be a hard error, never a silent no-op.
+        """
+        cache = tmp_path
+        rec = push_metrics.build_push_record(
+            session_id="s1", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+        )
+        push_metrics.record_push(rec, cache_dir=cache)
+
+        with pytest.raises(ValueError, match="matches no known session id"):
+            push_metrics.build_coverage_worksheet(
+                n=5,
+                wiki_root=tmp_path / "wiki",
+                cache_dir=cache,
+                seed=1,
+                exclude_sessions=["never-ran"],
+            )
+
+    def test_excluding_an_unambiguous_prefix_drops_from_sample(self, tmp_path: Path) -> None:
+        """athenaeum#987: an unambiguous session-id prefix is accepted and
+        resolved to the matching full id, same effect as the full id.
+        """
+        cache = tmp_path
+        clean = push_metrics.build_push_record(
+            session_id="clean", query="q", backend="fts5", hits=[("f.md", {"uid": "u1"}, "b")]
+        )
+        synth = push_metrics.build_push_record(
+            session_id="d5774338-7d8b-4152-a252-248d156f95ef",
+            query="q",
+            backend="fts5",
+            hits=[("test-page.md", None, "b")],
+        )
+        push_metrics.record_push(clean, cache_dir=cache)
+        push_metrics.record_push(synth, cache_dir=cache)
+
+        ws = push_metrics.build_coverage_worksheet(
+            n=5,
+            wiki_root=tmp_path / "wiki",
+            cache_dir=cache,
+            seed=1,
+            exclude_sessions=["d5774338-7d8b"],
+        )
+        assert ws["sampled_session_count"] == 1
+        assert ws["sessions"][0]["session_id"] == "clean"
+        assert ws["excluded_sessions"] == ["d5774338-7d8b-4152-a252-248d156f95ef"]
+        assert ws["excluded_push_records"] == 1
+
+    def test_excluding_an_ambiguous_prefix_raises(self, tmp_path: Path) -> None:
+        """athenaeum#987: a prefix shared by more than one known session id
+        must not silently resolve to either — it's a hard error.
+        """
+        cache = tmp_path
+        for sid, uid in (("synth-a", "u1"), ("synth-b", "u2")):
+            rec = push_metrics.build_push_record(
+                session_id=sid, query="q", backend="fts5", hits=[("f.md", {"uid": uid}, "b")]
+            )
+            push_metrics.record_push(rec, cache_dir=cache)
+
+        with pytest.raises(ValueError, match="ambiguous"):
+            push_metrics.build_coverage_worksheet(
+                n=5,
+                wiki_root=tmp_path / "wiki",
+                cache_dir=cache,
+                seed=1,
+                exclude_sessions=["synth-"],
+            )
 
 
 # ---------------------------------------------------------------------------

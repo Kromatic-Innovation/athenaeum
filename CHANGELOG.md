@@ -5,6 +5,39 @@ All notable changes to Athenaeum are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The librarian's per-raw-file LLM-call/wall-clock bounds rejected
+  ordinary files instead of catching loopers, and an over-bound file's
+  completed work was discarded wholesale (athenaeum#994).**
+  `resolve_raw_file_max_api_calls` (default `8`) and
+  `resolve_raw_file_max_runtime_seconds` (default `120`, seconds) assumed an
+  ordinary raw file cost roughly 1-3 LLM calls and well under two minutes.
+  Measured reality on the live deployment (2026-08-15/16 nightly logs, api
+  provider) put an ordinary file at 20-46 calls and 300-690 seconds —
+  un-batched `tier3_write` spends one call per entity action — so both
+  bounds sat 3-6x below the median file and rejected normal input rather
+  than catching genuine loopers; two consecutive nights spent over 3,000s
+  and 240+ calls each on `created=0 updated=0 files=0`, redoing the same
+  files at full cost both nights. Defaults are recalibrated to `60` calls
+  and `900` seconds, covering the measured distribution with headroom.
+  Enforcement also moved from post-hoc (checked once, after a whole file's
+  actions had all already run and paid for) to pre-emptive/incremental:
+  `tier3_derive_actions` now checks both bounds after EACH entity action, so
+  a file whose Nth action pushes it over the bound never starts action N+1.
+  The action(s) that completed before the trip now land as durable partial
+  progress — written to disk before the over-budget error propagates,
+  via the new `RawFileOverBudgetError.new_entities` /
+  `pending_updates` / `updated_uids` / `escalations` payload and
+  `librarian._apply_tier3_results` — instead of the entire file's spent
+  work being discarded every time, which is what caused the same file to be
+  redone in full on consecutive nights. The existing quarantine ledger
+  (athenaeum#898) is unchanged and still backstops a file that keeps
+  tripping the bound after it is quarantined out of the discovery set, so a
+  chronically over-bound file is still never retried identically forever.
+
 ## [0.19.0] - 2026-08-15
 
 _Supersedes six untagged, unpublished patch bumps (0.18.2–0.18.7) that never shipped to PyPI; the last published release was v0.18.1._
