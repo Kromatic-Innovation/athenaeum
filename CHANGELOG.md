@@ -57,6 +57,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   estimated or fabricated — the instrument ships; the measurement run is
   handed back to the operator.
 
+### Documentation
+
+- **Design note: standing sensitive-value filter at raw-sweep intake
+  (athenaeum#949).** New `docs/sensitivity-value-routing.md` answers the
+  issue's AC1–AC13 — placement and pointer contract (AC1/AC2), the uid
+  problem and the proposed record-keyed read-path disposition (AC3), the
+  raw-tree observability gap stated as open rather than solved (AC4),
+  disposition of the existing `screen_intake` stage (AC5), per-write-path
+  redaction mechanics (AC6), precedence and fail-closed behavior (AC7/AC10),
+  usage-classification default (AC9), idempotency (AC11), the correlation
+  trade (AC12), the migration story relative to athenaeum#437 (AC13), and
+  the relationship to `pii.RedactionMarker` left as an explicit open
+  question (AC8). Cites a working spike (branch
+  `prototype/949-sensitivity-routing-spike`, not merged and not part of
+  this change) as verification evidence for specific mechanical claims —
+  the note's decisions are proposals for review, not settled by the spike
+  having been built. Implementation is explicitly deferred to the
+  follow-on slices the note's §10 lists — athenaeum#1022 (config resolver),
+  athenaeum#1023 (routing/redaction mechanism), athenaeum#1024
+  (record-keyed read path), athenaeum#1025 (wire into the librarian raw
+  sweep) — filed as separate issues against this note (AC14's filing half;
+  review of the note itself is routed separately). Docs-only; no code
+  changed.
+
 ### Fixed
 
 - **The librarian's per-raw-file LLM-call/wall-clock bounds rejected
