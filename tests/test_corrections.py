@@ -1205,6 +1205,147 @@ class TestCreateByHandle:
         assert len(list((tmp_path / "real" / "wiki").glob("*.md"))) == 1
 
 
+class TestCreateTypeGate971:
+    """Issue athenaeum#971 AC3: the create branch's declared ``type`` gets the
+    same unknown-type handling as the two other deterministic (non-LLM)
+    create/upsert paths (``intake.py`` tier0_passthrough,
+    ``librarian.py`` tier0_handle_upsert) — reject-and-escalate
+    (``disposition="raised-tier"``), never silently mint a page under an
+    unrecognized or athenaeum#970-folded type.
+    """
+
+    def _envelope(self, **overrides: object) -> dict:
+        return _envelope(submitter="employer-feed", **overrides)
+
+    def test_unrecognized_type_raises_tier_and_writes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        record = {
+            "record": "correction",
+            "target": {
+                "type": "totally-bogus-type",
+                "handle": {"domains": "acme.example"},
+            },
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert "totally-bogus-type" in (result.reason or "")
+        assert list(wiki.glob("*.md")) == []
+
+    def test_folded_type_user_raises_tier_and_writes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        # athenaeum#970's fold enforcement teeth: `type: user` on a NEW create is no
+        # longer minted verbatim — it must raise a tier, exactly like a
+        # never-declared type, so the folded value cannot recur.
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        record = {
+            "record": "correction",
+            "target": {"type": "user", "handle": {"domains": "acme.example"}},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert list(wiki.glob("*.md")) == []
+
+    def test_recognized_type_still_creates(self, tmp_path: Path) -> None:
+        # Control: a currently-valid type (in KNOWN_TYPES, since this test's
+        # tmp wiki has no `_schema/types.md`) is unaffected by the new gate.
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        record = {
+            "record": "correction",
+            "target": {"type": "company", "handle": {"domains": "acme.example"}},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "applied"
+        assert len(list(wiki.glob("*.md"))) == 1
+
+    def test_declared_types_md_gates_over_the_known_types_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        # When a deployment DOES have a `_schema/types.md`, that declared
+        # list — not the code-side KNOWN_TYPES fallback — is authoritative.
+        # A type present in KNOWN_TYPES but ABSENT from this deployment's
+        # types.md must still raise a tier.
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        schema_dir = wiki / "_schema"
+        schema_dir.mkdir()
+        (schema_dir / "types.md").write_text(
+            "| Type | Description |\n|---|---|\n| company | ... |\n"
+        )
+        cfg = _fields_config(
+            industry={"shape": "scalar", "writers": ["employer-feed"]},
+        )
+        record = {
+            "record": "correction",
+            "target": {"type": "principle", "handle": {"domains": "acme.example"}},
+            "op": "set",
+            "field": "industry",
+            "value": "Software",
+            "source": "api:apollo",
+            "observed_at": "2026-08-06T00:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            self._envelope(),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=cfg,
+        )
+        assert result.disposition == "raised-tier"
+        assert list(wiki.glob("*.md")) == []
+
+
 class TestMixedDispositionBatch:
     def test_conformant_record_still_applies_alongside_a_fallthrough_record(
         self, tmp_path: Path

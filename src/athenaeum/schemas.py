@@ -18,7 +18,7 @@ Design:
 - ``validate_wiki_meta`` dispatches a frontmatter dict to the right model
   by ``type``. Unknown types fall through to ``WikiBase`` rather than
   raising — the live wiki has 13+ types (tool, reference, principle,
-  auto-memory, feedback, preference, user, …) and Lane A is not retyping
+  auto-memory, incident, preference, …) and Lane A is not retyping
   them.
 
 Out of scope here (Lane B / athenaeum#90, Lane G / athenaeum#91):
@@ -307,15 +307,25 @@ _BY_TYPE: dict[str, type[WikiBase]] = {
 # :class:`WikiBase` for validation; the allowlist exists so unknown
 # types (typos, drift) emit a warning instead of being silently
 # accepted. See issue athenaeum#93.
+#
+# Issue athenaeum#971 (follow-up to the ``_schema/types.md`` reconciliation in
+# athenaeum#970): ``incident`` added — the 10th declared type per athenaeum#970's audit, absent
+# here meant every incident page warned as "unknown". ``user`` and
+# ``feedback`` REMOVED — athenaeum#970 folds them (``user`` -> ``preference``); they
+# stay non-raising (fall through to the ordinary "unknown wiki type"
+# :class:`UserWarning` below, same as any other out-of-registry value, never
+# an exception — a page in the wild with ``type: user`` keeps validating) but
+# no longer count as a currently-valid type for a NEW write, which is what
+# lets :func:`athenaeum.corrections.process_correction_record` gate a create
+# against the fold (see that module's ``valid_types`` check).
 FALLBACK_TYPES: frozenset[str] = frozenset(
     {
         "auto-memory",
         "tool",
         "reference",
         "principle",
-        "feedback",
         "preference",
-        "user",
+        "incident",
     }
 )
 

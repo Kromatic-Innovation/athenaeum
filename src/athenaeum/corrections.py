@@ -103,6 +103,7 @@ from athenaeum.models import (
     WikiEntity,
     coerce_bucket,
     generate_uid,
+    load_schema_list,
     parse_frontmatter,
     render_frontmatter,
     slugify,
@@ -111,7 +112,7 @@ from athenaeum.models import (
 from athenaeum.precedence import source_rank
 from athenaeum.provenance import parse_source
 from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
-from athenaeum.schemas import validate_wiki_meta
+from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.storage import surface_root_for_class
 from athenaeum.store import FilesystemStore, Store
 
@@ -1231,6 +1232,32 @@ def process_correction_record(
         assert resolution.entity_type is not None
         assert resolution.handle_key is not None
         assert resolution.handle_value is not None
+
+        # Issue athenaeum#971: gate the create branch's declared ``type`` the
+        # same way the two other deterministic (non-LLM) create/upsert paths
+        # already do — ``intake.py``'s tier0_passthrough eligibility check
+        # and ``librarian.py``'s tier0_handle_upsert (both: unrecognized type
+        # -> reject, i.e. this record is not eligible here and must fall
+        # through to a higher tier). This is the closer precedent than
+        # ``tiers.py``'s post-LLM tier-2 classify path, which COERCES an
+        # unrecognized ``entity_type`` to ``"reference"`` -- that coercion is
+        # safe there because tier-2 is the last stop for an already
+        # LLM-judged entity. Here ``resolution.entity_type`` is an externally
+        # declared string with zero LLM judgment in between (the same shape
+        # as a raw frontmatter ``type:``), AND coercing would misfile a athenaeum#970
+        # fold (e.g. a stale writer still declaring ``type: user``) into the
+        # wrong bucket ("reference") instead of preserving it for correct
+        # reclassification. Reject-and-escalate (this module's own idiom for
+        # "not eligible here", per the module docstring's "every failure to
+        # conform is a fallthrough to a higher tier, never a rejection") is
+        # the matching semantics, not a fourth variant.
+        schema_path = index.wiki_root / "_schema"
+        valid_types = load_schema_list(schema_path, "types.md") or sorted(KNOWN_TYPES)
+        if resolution.entity_type not in valid_types:
+            return _raised(
+                f"unrecognized entity type on create: {resolution.entity_type!r}"
+            )
+
         today = date.today().isoformat()
         created_meta = _build_created_entity_meta(
             entity_type=resolution.entity_type,

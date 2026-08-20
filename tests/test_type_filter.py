@@ -163,6 +163,38 @@ class TestFTS5TypeFilter:
         )
         assert [fn for fn, _n, _s in results] == ["incident-1.md"]
 
+
+class TestFTS5CandidatesByType:
+    """``candidates_by_type`` — the plain indexed WHERE issue athenaeum#965's
+    enumeration primitive reads (AC amendment 3), as distinct from ``query``'s
+    MATCH/BM25-ranked path above."""
+
+    def test_returns_every_filename_of_the_type_sorted(
+        self, typed_wiki: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        backend = FTS5Backend()
+        backend.build_index(typed_wiki, cache)
+        assert backend.candidates_by_type(cache, "person") == ["alice.md", "bob.md"]
+
+    def test_nested_metadata_type_shape_is_found(
+        self, typed_wiki: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        backend = FTS5Backend()
+        backend.build_index(typed_wiki, cache)
+        assert backend.candidates_by_type(cache, "concept") == ["nested.md"]
+
+    def test_unknown_type_returns_empty(self, typed_wiki: Path, tmp_path: Path) -> None:
+        cache = tmp_path / "cache"
+        backend = FTS5Backend()
+        backend.build_index(typed_wiki, cache)
+        assert backend.candidates_by_type(cache, "no-such-type") == []
+
+    def test_missing_index_returns_empty_without_raising(self, tmp_path: Path) -> None:
+        backend = FTS5Backend()
+        assert backend.candidates_by_type(tmp_path / "no-such-cache", "person") == []
+
     def test_nested_metadata_type_is_filterable(
         self, typed_wiki: Path, tmp_path: Path
     ) -> None:
