@@ -44,6 +44,7 @@ def _ledger_record(
     files_processed: int | None = None,
     input_tokens: int = 0,
     output_tokens: int = 0,
+    api_calls: int = 0,
     provider: str = "anthropic",
     run_type: str = "librarian",
     estimated_cost_usd: float = 0.0,
@@ -59,6 +60,7 @@ def _ledger_record(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
+        "api_calls": api_calls,
         "estimated_cost_usd": estimated_cost_usd,
     }
     if files_processed is not None:
@@ -143,6 +145,40 @@ class TestObservedTokensPerFile:
 
     def test_none_when_no_history(self) -> None:
         assert drain_advisor.observed_tokens_per_file([]) is None
+
+
+class TestObservedCallsPerFile:
+    """Issue athenaeum#713: sibling to :class:`TestObservedTokensPerFile`, same
+    ``_librarian_records_with_files`` history window and ``None`` contract,
+    but for API-call count rather than tokens — the calls/file figure the
+    backlog price sheet and ordinary-night table both need."""
+
+    def test_averages_over_history(self) -> None:
+        records = [
+            _ledger_record(files_processed=2, api_calls=20),
+            _ledger_record(files_processed=3, api_calls=30),
+        ]
+        calls = drain_advisor.observed_calls_per_file(records)
+        assert calls == 10.0  # 50 calls / 5 files
+
+    def test_none_when_no_history(self) -> None:
+        assert drain_advisor.observed_calls_per_file([]) is None
+
+    def test_ignores_non_librarian_and_zero_files_records(self) -> None:
+        records = [
+            _ledger_record(files_processed=2, api_calls=20),
+            _ledger_record(run_type="answers", files_processed=100, api_calls=999),
+            _ledger_record(files_processed=0, api_calls=999),
+        ]
+        assert drain_advisor.observed_calls_per_file(records) == 10.0
+
+    def test_respects_max_history_window(self) -> None:
+        records = [
+            _ledger_record(files_processed=1, api_calls=100),  # excluded by window
+            _ledger_record(files_processed=1, api_calls=10),
+            _ledger_record(files_processed=1, api_calls=10),
+        ]
+        assert drain_advisor.observed_calls_per_file(records, max_history=2) == 10.0
 
 
 class TestEstimateDrainCostUsd:

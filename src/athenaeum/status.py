@@ -100,6 +100,13 @@ class StatusInfo(TypedDict):
     # run has ever finalized). Read directly from :mod:`athenaeum.zero_yield`'s
     # sidecar, the same persisted state the librarian finalize phase writes.
     zero_yield_consecutive: int
+    # Issue athenaeum#712: per-branch verdict-ledger duty cycle
+    # (nights-in-wave / nights, target <=0.25 — reporting only, enforcing the
+    # target is out of scope), or ``None`` when the ledger has never been
+    # materialized (``librarian.verdict_ledger_enabled`` off, or a run has
+    # never touched it) — the common case, and the ONLY case while the flag
+    # is off, so status output is unaffected until an operator opts in.
+    verdict_ledger_duty_cycle: dict[str, float] | None
 
 
 def scan_page_sizes(
@@ -266,6 +273,26 @@ def status(knowledge_root: Path) -> StatusInfo:
     # and write sides always agree on the same file.
     zero_yield_consecutive = load_zero_yield_state(resolve_cache_dir())["consecutive"]
 
+    # Issue athenaeum#712: verdict-ledger duty-cycle report. Only computed when
+    # the ledger has actually been materialized (flag-off / never-run leaves
+    # this None, so status output is unaffected until an operator opts in via
+    # librarian.verdict_ledger_enabled). Best-effort — a read hiccup here must
+    # never break status, same discipline as the drain advisory above.
+    verdict_ledger_duty_cycle: dict[str, float] | None = None
+    try:
+        from athenaeum.verdicts import duty_cycle_report, ledger_exists
+
+        if ledger_exists(wiki_root):
+            report = duty_cycle_report(wiki_root)
+            if report:
+                verdict_ledger_duty_cycle = report
+    except Exception as exc:  # noqa: BLE001 — must never break status
+        log.debug(
+            "status: verdict-ledger duty-cycle report skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+
     return {
         "raw_pending": raw_pending,
         "entity_count": entity_count,
@@ -278,6 +305,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "drain_advisory": drain_advisory,
         "schema_fragments": schema_fragments,
         "zero_yield_consecutive": zero_yield_consecutive,
+        "verdict_ledger_duty_cycle": verdict_ledger_duty_cycle,
     }
 
 
@@ -310,6 +338,16 @@ def format_status(info: StatusInfo) -> str:
         lines.append(
             f"Zero-yield runs:      {zero_yield_consecutive} consecutive"
         )
+
+    # Issue athenaeum#712: verdict-ledger duty cycle (nights-in-wave / nights,
+    # target <=25%), one line per branch with an open/closed comparator
+    # epoch. ``.get`` keeps a pre-athenaeum#712 status dict formatting cleanly;
+    # ``None``/empty (the flag-off default) shows nothing.
+    verdict_duty_cycle = info.get("verdict_ledger_duty_cycle")
+    if verdict_duty_cycle:
+        lines.append("Verdict ledger duty cycle:")
+        for branch in sorted(verdict_duty_cycle):
+            lines.append(f"  {branch}: {verdict_duty_cycle[branch]:.0%}")
 
     # Issue athenaeum#310: oversized-page summary. Use ``.get`` so pre-athenaeum#310 status
     # dicts (missing these keys) still format cleanly.
