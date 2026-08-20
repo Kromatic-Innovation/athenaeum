@@ -14,10 +14,12 @@ from pathlib import Path
 
 import pytest
 
+from athenaeum import spend
 from athenaeum.cli import main
 from athenaeum.memory_class_backfill import (
     apply_backfill,
     build_backfill_report,
+    classify_residual,
     discover_wiki_pages,
     insert_memory_class,
 )
@@ -28,7 +30,7 @@ from athenaeum.schemas import (
     TYPE_TO_MEMORY_CLASS,
     memory_class_for_type,
 )
-from tests.conftest import FakeLLMClient
+from tests.conftest import FakeLLMClient, make_llm_response, make_llm_usage
 
 
 def _page(root: Path, name: str, frontmatter: str, body: str = "Body text.\n") -> Path:
@@ -364,6 +366,118 @@ class TestClassifierResidual:
         )
 
         assert report.counts_by_class() == {"fact": 1}
+
+
+# --- athenaeum#1007: classifier calls route through the shared spend ledger --
+
+
+def _residual_page(root: Path, name: str, i: int) -> Path:
+    return _page(root, name, f"uid: '{i}'\ntype: auto-memory\nname: M{i}")
+
+
+class TestClassifierSpendRecording:
+    def test_batch_call_records_a_spend_row(self, wiki: Path) -> None:
+        """AC1: a classifier call lands a row in the shared ledger, with
+        token counts, routed through the ``classify`` knob."""
+        _residual_page(wiki, "m.md", 0)
+        response = make_llm_response(
+            json.dumps([{"i": 0, "memory_class": "fact"}]),
+            usage=make_llm_usage(input_tokens=123, output_tokens=45),
+        )
+        client = FakeLLMClient(response=response)
+
+        residual = [(wiki / "m.md", {"name": "M0"}, "body")]
+        decisions, calls, rejected = classify_residual(residual, client=client)
+
+        assert calls == 1
+        assert decisions == {wiki / "m.md": "fact"}
+
+        records = spend.read_ledger(spend.resolve_ledger_path())
+        assert len(records) == 1
+        row = records[0]
+        assert row["run_type"] == "memory-class-backfill"
+        assert row["input_tokens"] == 123
+        assert row["output_tokens"] == 45
+        assert "classify" in row["tokens_by_knob"]
+
+    def test_one_spend_row_per_api_call_batch(self, wiki: Path) -> None:
+        """AC3: N batches -> N ledger rows, never one blended row."""
+        residual = [
+            (wiki / f"m{i}.md", {"name": f"M{i}"}, "body") for i in range(5)
+        ]
+        response = make_llm_response(
+            "[]", usage=make_llm_usage(input_tokens=10, output_tokens=2)
+        )
+        client = FakeLLMClient(response=response)
+
+        _decisions, calls, _rejected = classify_residual(
+            residual, client=client, batch_size=2
+        )
+
+        assert calls == 3  # 2 + 2 + 1
+        records = spend.read_ledger(spend.resolve_ledger_path())
+        assert len(records) == 3
+        assert all(r["run_type"] == "memory-class-backfill" for r in records)
+
+    def test_daily_ceiling_stops_the_pass(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: the spend ceiling applies to this command's calls — a mocked
+        ceiling that trips after the first batch must stop further calls and
+        leave the rest of the residual undecided, never silently continuing.
+        """
+        import athenaeum.spend as spend_mod
+
+        trips = {"n": 0}
+
+        def _fake_ceiling_tripped(*_a: object, **_k: object) -> str | None:
+            trips["n"] += 1
+            return None if trips["n"] == 1 else "per-day API dollar ceiling reached"
+
+        monkeypatch.setattr(spend_mod, "ceiling_tripped", _fake_ceiling_tripped)
+
+        residual = [
+            (wiki / f"m{i}.md", {"name": f"M{i}"}, "body") for i in range(4)
+        ]
+        response = make_llm_response(
+            "[]", usage=make_llm_usage(input_tokens=10, output_tokens=2)
+        )
+        client = FakeLLMClient(response=response)
+
+        decisions, calls, _rejected = classify_residual(
+            residual, client=client, batch_size=1
+        )
+
+        # Ceiling checked before batch 1 (not tripped) and before batch 2
+        # (tripped) — only the first batch's call actually happens.
+        assert calls == 1
+        assert len(client.calls) == 1
+        assert decisions == {}  # the one call answered "[]" — nothing decided
+
+    def test_ceiling_trip_is_visible_through_build_backfill_report(
+        self, wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tripped ceiling must not be mistaken for a model that declined —
+        both land in ``residual-undecided``, but the pages after the trip
+        must never have been sent to the model at all (asserted via calls
+        made, since the report cannot distinguish the two by design)."""
+        import athenaeum.spend as spend_mod
+
+        monkeypatch.setattr(
+            spend_mod, "ceiling_tripped", lambda *a, **k: "per-run API dollar ceiling"
+        )
+
+        for i in range(3):
+            _residual_page(wiki, f"m{i}.md", i)
+        client = FakeLLMClient(text="[]")
+
+        report = build_backfill_report(
+            wiki, use_classifier=True, client=client, batch_size=1
+        )
+
+        assert client.calls == []  # ceiling tripped before the very first batch
+        assert report.classifier_calls == 0
+        assert report.counts_by_reason() == {"residual-undecided": 3}
 
 
 # --- CLI surface -----------------------------------------------------------
