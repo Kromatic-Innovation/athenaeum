@@ -1388,3 +1388,50 @@ class TestEverySubparserHasFuncDefault:
             if not has_func
         ]
         assert missing, "guard failed to detect a stripped func binding"
+
+
+class TestEverySubparserHelpRenders:
+    """Guard athenaeum#1004: an unescaped literal ``%`` in a ``help=`` string
+    makes argparse's ``_expand_help`` crash at *render* time (``%(...)s``
+    interpolation runs the whole help string through ``% params``), not at
+    parser-build time — so only actually calling ``--help`` catches it. This
+    walks every registered subparser, top-level and nested, and calls
+    ``format_help()`` on each, so the whole class of unescaped-``%`` help
+    crashes fails CI, not the operator's terminal.
+    """
+
+    @staticmethod
+    def _all_parsers(parser: argparse.ArgumentParser, prefix: list[str]):
+        yield prefix, parser
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, subparser in action.choices.items():
+                    yield from TestEverySubparserHelpRenders._all_parsers(
+                        subparser, [*prefix, name]
+                    )
+
+    def test_format_help_does_not_crash_for_any_subparser(self) -> None:
+        parser = build_parser()
+        failures: list[tuple[str, str]] = []
+        for path, sub in self._all_parsers(parser, prefix=[]):
+            try:
+                sub.format_help()
+            except Exception as exc:  # noqa: BLE001 - failure detail matters
+                failures.append((" ".join(path) or "athenaeum", repr(exc)))
+        assert not failures, (
+            "these subcommand paths crash rendering --help (likely an "
+            f"unescaped literal % in a help= string — use %%): {failures}"
+        )
+
+    def test_memory_class_backfill_help_exits_zero(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Regression test for the reported crash: ``athenaeum memory-class
+        backfill --help`` used to raise ``TypeError: %o format: an integer
+        is required, not dict`` from the ``~97%`` in ``--classifier``'s help.
+        """
+        with pytest.raises(SystemExit) as excinfo:
+            main(["memory-class", "backfill", "--help"])
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        assert "97%" in out
