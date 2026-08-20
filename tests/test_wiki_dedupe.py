@@ -374,6 +374,74 @@ class TestSuppressionGates:
         if merges_path.is_file():
             assert "## [" not in merges_path.read_text(encoding="utf-8")
 
+    def test_over_cluster_suppressed_states_chromadb_default_embedder(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue athenaeum#1032: the SUPPRESSED log line names which embedder
+        produced the suppressed cluster's vectors — chromadb-default when
+        real (stub) vectors were used."""
+        import logging
+
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        knowledge_root = self._seed_cohesive_cluster(tmp_path, n=6)
+        caplog.set_level(logging.INFO, logger="athenaeum.wiki_dedupe")
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            config={},  # defaults: max_merge_sources=5
+            threshold=0.8,
+            embedding_provider=_identical_embed,
+        )
+        assert proposals == []
+        suppressed = [r for r in caplog.records if "SUPPRESSED" in r.getMessage()]
+        assert suppressed
+        assert all("embedder=chromadb-default" in r.getMessage() for r in suppressed)
+
+    def test_over_cluster_suppressed_states_fallback_hashing_embedder(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue athenaeum#1032: same gate, but the embedding provider returns
+        ``None`` (chromadb absent / embedding call failed), so the pass
+        falls back to the hashing-trick embedder. The SUPPRESSED line must
+        name THAT embedder, not chromadb-default, since it produced the
+        vectors that actually drove the suppression decision.
+
+        Bodies are near-identical (differing only in the filename-derived
+        ``name``/stem token — file paths must be distinct) so the
+        deterministic hashing-trick vectors land at ~0.62-0.67 pairwise
+        cosine — a lower ``threshold`` (0.6, vs. 0.8 for the real-vector
+        variant of this test) reliably clusters all 6 into one clique
+        without depending on the real embedder this test deliberately
+        disables.
+        """
+        import logging
+
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        for i in range(6):
+            _write_page(
+                wiki_root,
+                f"dup-{i}.md",
+                body="Identical cohesive duplicate content for the fallback-hashing test.",
+            )
+        knowledge_root = wiki_root.parent
+
+        def _no_vectors(texts: list[str]) -> list[list[float]] | None:
+            return None
+
+        caplog.set_level(logging.INFO, logger="athenaeum.wiki_dedupe")
+        proposals = propose_wiki_page_merges(
+            knowledge_root,
+            config={},  # defaults: max_merge_sources=5
+            threshold=0.6,
+            embedding_provider=_no_vectors,
+        )
+        assert proposals == []
+        suppressed = [r for r in caplog.records if "SUPPRESSED" in r.getMessage()]
+        assert suppressed
+        assert all("embedder=fallback-hashing" in r.getMessage() for r in suppressed)
+
     def test_over_cluster_suppressed_in_dry_run(self, tmp_path: Path) -> None:
         """dry-run reflects the gated real run — the over-cluster is not previewed."""
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
@@ -453,6 +521,71 @@ def _circle_provider(bodies: list[str], degrees: float = 20.0):
         return [vec_by_body[t.strip()] for t in texts]
 
     return provider
+
+
+class TestResolveWikiEmbeddingsObservability:
+    """Issue athenaeum#1032: ``_resolve_wiki_embeddings`` itself — the per-file
+    embedder-source map it returns, and the one-time WARNING it emits when it
+    engages the hashing-trick fallback.
+    """
+
+    def test_real_vectors_branch_records_chromadb_default_and_no_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        from athenaeum.clusters import EMBEDDER_CHROMADB_DEFAULT
+        from athenaeum.wiki_dedupe import (
+            _resolve_wiki_embeddings,
+            discover_wiki_dedupe_candidates,
+        )
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        _write_page(wiki_root, "a.md", body=_BODY_A)
+        _write_page(wiki_root, "b.md", body=_BODY_B)
+        files = discover_wiki_dedupe_candidates(wiki_root)
+
+        caplog.set_level(logging.WARNING, logger="athenaeum.wiki_dedupe")
+        embeddings, sources = _resolve_wiki_embeddings(
+            files, embedding_provider=_fake_embed
+        )
+        assert set(embeddings) == {str(am.path) for am in files}
+        assert set(sources.values()) == {EMBEDDER_CHROMADB_DEFAULT}
+        assert not caplog.records
+
+    def test_fallback_branch_warns_once_and_records_fallback_hashing(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import logging
+
+        import athenaeum.wiki_dedupe as wiki_dedupe_module
+        from athenaeum.clusters import EMBEDDER_FALLBACK_HASHING
+
+        # The one-time-warning flag is process-global module state — reset it
+        # so an earlier test's fallback engagement can't mask this assertion.
+        monkeypatch.setattr(wiki_dedupe_module, "_WIKI_FALLBACK_WARNED", False)
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        _write_page(wiki_root, "a.md", body=_BODY_A)
+        _write_page(wiki_root, "b.md", body=_BODY_B)
+        files = wiki_dedupe_module.discover_wiki_dedupe_candidates(wiki_root)
+
+        def _none_provider(texts: list[str]) -> list[list[float]] | None:
+            return None
+
+        caplog.set_level(logging.WARNING, logger="athenaeum.wiki_dedupe")
+        embeddings, sources = wiki_dedupe_module._resolve_wiki_embeddings(
+            files, embedding_provider=_none_provider
+        )
+        assert set(embeddings) == {str(am.path) for am in files}
+        assert set(sources.values()) == {EMBEDDER_FALLBACK_HASHING}
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "fallback-hashing" in warnings[0].getMessage()
+
+        caplog.clear()
+        wiki_dedupe_module._resolve_wiki_embeddings(files, embedding_provider=_none_provider)
+        assert not caplog.records  # one-time — no repeat warning on the second call
 
 
 class TestWikiClusterFormationIsCompleteLinkage:
