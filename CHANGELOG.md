@@ -43,6 +43,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Coarse embedding fallback is now observable (athenaeum#1032).** The chromadb
+  embedding path used to degrade silently three layers deep — no log line
+  ever recorded that the hashing-trick fallback embedder produced a
+  cluster's vectors, making the athenaeum#823/athenaeum#1005 over-cluster diagnosis
+  unfalsifiable from run artifacts. Observability only — no change to
+  clustering behaviour, thresholds, or the fallback's activation
+  conditions:
+  - `athenaeum.search._get_ef` now logs a one-time WARNING (naming the
+    exception class and message) when the chromadb embedding function
+    fails to initialize; `embed_texts` logs its own one-time WARNING when
+    it returns `None`, naming the fallback-hashing embedder as what will
+    produce vectors for callers that need them.
+  - `athenaeum.wiki_dedupe._resolve_wiki_embeddings` logs a one-time
+    WARNING when it engages `clusters._fallback_embeddings`.
+  - `clusters._resolve_embeddings`'s per-run fallback-count line is raised
+    `DEBUG` -> `WARNING` (was invisible at the deployed INFO level).
+  - `Cluster` gains an `embedder` field (`chromadb-default` /
+    `fallback-hashing` / `mixed` / `unknown`) carried through `to_row()`
+    into `raw/_librarian-clusters.jsonl`; the wiki-dedupe `SUPPRESSED` log
+    line now states the embedder that produced the suppressed cluster's
+    vectors. Pre-athenaeum#1032 JSONL rows without the field still
+    deserialize (default `unknown`).
 - **Whole-store adapter seam: `Store` protocol + `FilesystemStore` (athenaeum#976,
   S1 of the whole-store adapter design lock, athenaeum#911).** New
   `athenaeum/store.py` (L0/L1) defines `StoreKey`, `ObjectMeta`,
