@@ -269,7 +269,7 @@ def recall_search(
     # similarity search. `resolve_handle_query` is a complete no-op \u2014 no
     # lookup of any kind \u2014 when the query is not handle-shaped, so an ordinary
     # query's output below is untouched by this branch existing.
-    from athenaeum import identity_resolution
+    from athenaeum import identity_resolution, pii
 
     handle_resolution = identity_resolution.resolve_handle_query(
         wiki_root.parent,
@@ -281,7 +281,16 @@ def recall_search(
         usage_classes=usage_classes,
     )
     if handle_resolution is not None:
-        return json.dumps(handle_resolution.to_dict(), indent=2, sort_keys=True)
+        # Issue athenaeum#1002: `contact_values[].source` can carry a raw
+        # frontmatter/record value (including a bare YAML date) straight
+        # through from `ContactClassification.source` — coerce it the same
+        # way every other JSON-emitting read surface does.
+        return json.dumps(
+            handle_resolution.to_dict(),
+            indent=2,
+            sort_keys=True,
+            default=pii.json_date_default,
+        )
 
     if not tokenize_keyword_query(query):
         return "Query too short \u2014 provide at least one keyword (2+ characters)."
@@ -487,7 +496,11 @@ def entity_read(
         return json.dumps(
             {"ok": False, "error": f"{not_found_label} not found: uid={uid!r}"}, indent=2
         )
-    return json.dumps(result.to_dict(), indent=2)
+    # Issue athenaeum#1002: `result.to_dict()["frontmatter"]` is the page's
+    # RAW parsed frontmatter, which can carry a `datetime.date`/`datetime`
+    # value straight from a bare YAML date — coerce it to ISO-8601 rather
+    # than letting `json.dumps` raise on it.
+    return json.dumps(result.to_dict(), indent=2, default=pii.json_date_default)
 
 
 def _resolve_hit_path(
@@ -746,7 +759,10 @@ def _excluded_block_for_hit(
         usage_classes=usage_classes,
     )
     validity = pii.assemble_excluded_validity(record_meta, fields)
-    do_not_email = pii.do_not_email_state(record_meta)
+    # Reads BOTH surfaces (issue athenaeum#960): `fm` is this hit's own
+    # already-resolved page frontmatter, the same value `assemble_excluded_read`
+    # above was given — no extra read needed.
+    do_not_email = pii.do_not_email_state(record_meta, fm)
 
     lines: list[str] = []
     for field_name, values in fields.items():
@@ -819,8 +835,18 @@ def _render_facts_block(facts: Mapping[str, object]) -> str:
     ADDITIVE by design: the ``**field:**`` lines are unchanged, so every
     existing reader of this block keeps working, and a machine consumer gets a
     real interface next to them rather than instead of them.
+
+    ``default=pii.json_date_default`` (issue athenaeum#1002), not a bare
+    ``str``: a ``classification["source"]`` value can carry a raw frontmatter
+    date, and this is the same coercion point ``read_entity``/``read_person``
+    use, so recall's ``with_pii`` block cannot render a date differently than
+    the typed read does.
     """
-    payload = json.dumps(facts, ensure_ascii=False, sort_keys=True, default=str)
+    from athenaeum import pii
+
+    payload = json.dumps(
+        facts, ensure_ascii=False, sort_keys=True, default=pii.json_date_default
+    )
     return f"```json athenaeum-excluded-facts\n{payload}\n```\n"
 
 

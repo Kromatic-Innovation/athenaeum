@@ -166,7 +166,7 @@ import os
 import re
 import warnings
 from collections.abc import Collection, Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -2372,12 +2372,22 @@ class DoNotEmailState:
     NOT an assertion that the person may be emailed. Athenaeum does not answer
     that question; see this module's note on eligibility being the consumer's
     policy.
+
+    ``surface`` (issue athenaeum#960) names WHICH of the two surfaces
+    :func:`do_not_email_state` read the mark from — ``"wiki"`` or
+    ``"excluded"`` — and is ``None`` exactly when ``marked`` is ``False``. It
+    exists because the wiki page frontmatter and the excluded-record meta are
+    two independently-authored surfaces (issue athenaeum#851 shipped reading
+    only the latter, which is inert on live data — every hand-authored mark
+    lives on the former); a caller auditing where a mark came from should not
+    have to re-derive it from which argument was non-``None``.
     """
 
     marked: bool
     source: str | dict[str, Any] | None = None
     observed_at: str | None = None
     reason: str | None = None
+    surface: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable shape, mirroring :meth:`ContactClassification.to_dict`."""
@@ -2386,6 +2396,7 @@ class DoNotEmailState:
             "source": self.source,
             "observed_at": self.observed_at,
             "reason": self.reason,
+            "surface": self.surface,
         }
 
 
@@ -2409,12 +2420,12 @@ def _coerce_do_not_email_flag(raw: Any) -> bool:
     return str(raw).strip().lower() not in _DO_NOT_EMAIL_FALSEY
 
 
-def do_not_email_state(meta: dict[str, Any] | None) -> DoNotEmailState:
-    """The do-not-email mark recorded on *meta*, with its provenance.
+def _do_not_email_from_record_meta(meta: dict[str, Any] | None) -> DoNotEmailState:
+    """The do-not-email mark recorded on ONE excluded-record *meta*, with provenance.
 
-    Always returns a :class:`DoNotEmailState` — never ``None`` — in the shape
-    of :func:`classification_for_value`, so a consumer never distinguishes
-    "no mark" from "no answer" by testing for ``None``.
+    ``surface`` is left ``None`` here — it is the caller's job
+    (:func:`do_not_email_state`) to stamp it, since this helper does not know
+    which of the two surfaces it was asked to parse.
 
     **Tolerant reader**, mirroring :func:`identifier_validity_entries` and
     :func:`contact_classification_entries`, because live records were written
@@ -2462,6 +2473,93 @@ def do_not_email_state(meta: dict[str, Any] | None) -> DoNotEmailState:
     # reason rather than reducing the mark to a bare bit.
     reason = str(raw).strip() if marked and not isinstance(raw, bool) else None
     return DoNotEmailState(marked=marked, reason=reason or None)
+
+
+def _do_not_email_from_page(page_frontmatter: dict[str, Any] | None) -> DoNotEmailState:
+    """The do-not-email mark recorded on ONE wiki page's frontmatter, with provenance.
+
+    The page's shape is FLAT, not the excluded-record surface's nested
+    mapping: a bare ``do_not_email:`` scalar, with provenance (if any) on the
+    sibling keys ``do_not_email_reason`` and ``do_not_email_date`` (issue
+    athenaeum#960's plan). ``source`` is always reported as ``"operator"`` for
+    a page-originated mark — this repo's own live-store evidence is that
+    every ``do_not_email:`` mark on this surface is hand-authored by the
+    operator (there is no automated writer of this field anywhere in
+    ``src/``, on either surface) — which keeps the operator-vs-platform
+    distinction issue athenaeum#77 requires true by construction for this
+    surface, without inventing an unrequested ``do_not_email_source:`` key.
+
+    Coercion is the SAME fail-closed rule :func:`_coerce_do_not_email_flag`
+    applies to the excluded-record surface: a malformed or unparseable scalar
+    reads as MARKED, never silently as "no mark".
+    """
+    if not isinstance(page_frontmatter, dict) or DO_NOT_EMAIL_FIELD not in page_frontmatter:
+        return DoNotEmailState(marked=False)
+    raw = page_frontmatter[DO_NOT_EMAIL_FIELD]
+    marked = _coerce_do_not_email_flag(raw)
+    if not marked:
+        return DoNotEmailState(marked=False)
+    reason = page_frontmatter.get("do_not_email_reason")
+    if reason is None and not isinstance(raw, bool):
+        # A hand-written scalar like `do_not_email: "family request"` carries
+        # the operator's own words even with no separate reason key —
+        # mirroring the excluded-record scalar shape's behaviour.
+        reason = raw
+    observed_at = page_frontmatter.get("do_not_email_date")
+    return DoNotEmailState(
+        marked=True,
+        source="operator",
+        observed_at=str(observed_at) if observed_at is not None else None,
+        reason=str(reason).strip() if reason is not None else None,
+    )
+
+
+def do_not_email_state(
+    record_meta: dict[str, Any] | None,
+    page_frontmatter: dict[str, Any] | None = None,
+) -> DoNotEmailState:
+    """The do-not-email mark for one contact, read across BOTH surfaces.
+
+    Always returns a :class:`DoNotEmailState` — never ``None`` — in the shape
+    of :func:`classification_for_value`, so a consumer never distinguishes
+    "no mark" from "no answer" by testing for ``None``.
+
+    **Converges the two surfaces (issue athenaeum#960).** Issue athenaeum#851
+    shipped this reading ONLY *record_meta* — the excluded-record surface —
+    which holds zero live ``do_not_email`` marks; every hand-authored mark
+    lives on the wiki page's frontmatter instead, so the field was inert on
+    live data. *page_frontmatter* is the new, optional second surface.
+
+    **Precedence, not merge** (2026-08-20 AC amendment, operator-ratified):
+    the wiki page is checked FIRST. If it carries the mark, its own
+    ``source`` / ``observed_at`` / ``reason`` are returned exactly as read
+    from the page — ``surface="wiki"`` — and *record_meta* is never
+    consulted. Only when the page carries no mark does *record_meta*'s own
+    mark answer (``surface="excluded"``), preserving the exact shape issue
+    athenaeum#851 shipped so no existing record-side caller regresses. The
+    two are never blended: a caller reading ``.source``/``.reason`` never
+    receives a value assembled from both surfaces. Neither is backfilled onto
+    the other — the wiki page remains the sole authoring surface, and a
+    future divergence (the excluded surface newly carrying the field) is
+    athenaeum#963's guard's job to flag, not this function's to resolve.
+
+    A contact with no mark on EITHER surface returns ``marked=False`` with
+    every provenance field (including ``surface``) ``None`` — "nothing
+    recorded" stays a distinguishable, positive answer, not an assertion that
+    the person may be emailed. Athenaeum does not answer that question; see
+    this module's note on eligibility being the consumer's policy.
+
+    Nothing here raises. A record whose ``do_not_email:`` is malformed on
+    either surface degrades to a readable answer, never to a crash inside a
+    consumer's send loop.
+    """
+    page_state = _do_not_email_from_page(page_frontmatter)
+    if page_state.marked:
+        return replace(page_state, surface="wiki")
+    record_state = _do_not_email_from_record_meta(record_meta)
+    if record_state.marked:
+        return replace(record_state, surface="excluded")
+    return DoNotEmailState(marked=False)
 
 
 @dataclass(frozen=True)
@@ -3256,6 +3354,34 @@ class RedactionMarker:
         }
 
 
+def json_date_default(obj: object) -> str:
+    """``default=`` callback for ``json.dumps``: coerce dates to ISO-8601 (issue athenaeum#1002).
+
+    The ONE coercion point for every JSON-emitting read surface built over the
+    sanctioned excluded-field read path — ``read_entity``, ``read_person``
+    (:meth:`EntityRead.to_dict` carries ``frontmatter`` unconverted, and
+    ``read_person`` is a thin wrapper over ``read_entity``) and
+    ``recall(with_pii=True)`` (:mod:`athenaeum.mcp_server`'s excluded-facts
+    render and handle-resolution join, both of which can carry a
+    :class:`ContactClassification`'s ``source`` straight from record
+    frontmatter). Passed as ``default=`` at each call site rather than
+    reimplemented per site, so the three surfaces cannot drift in HOW they
+    coerce a date and a caller never has to walk its own payload first —
+    ``json.dumps`` already recurses into nested dicts/lists on its own and
+    calls this function for exactly the values it cannot otherwise encode.
+
+    :mod:`yaml`'s safe loader (:func:`athenaeum.models.parse_frontmatter`)
+    parses a bare frontmatter date (``dob: 1990-01-01``) into
+    ``datetime.date`` and a timestamp into ``datetime.datetime`` — neither of
+    which the stdlib ``json`` module can serialize on its own, so an affected
+    page previously crashed every read tool with ``Object of type date is not
+    JSON serializable`` before this existed.
+    """
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 @dataclass(frozen=True)
 class EntityRead:
     """Result of :func:`read_entity` — an entity's page plus excluded-data view.
@@ -3543,8 +3669,10 @@ def _entity_read_from_indexes(
         classifications=classifications,
         validity=assemble_excluded_validity(record_meta, fields),
         # Populated even when the read is redacted — see `EntityRead`: the mark
-        # carries no contact value to withhold.
-        do_not_email=do_not_email_state(record_meta),
+        # carries no contact value to withhold. Reads BOTH surfaces (issue
+        # athenaeum#960): the page's own frontmatter is already in hand as
+        # `frontmatter`, no extra read needed.
+        do_not_email=do_not_email_state(record_meta, frontmatter),
     )
 
 
@@ -3876,6 +4004,15 @@ def read_identifier_facts(
             :func:`mark_bounced` writes on the same batch, so both see one
             index and one scan.
 
+    Each yielded fact's ``do_not_email`` reads BOTH surfaces (issue
+    athenaeum#960): the excluded record AND, when the record carries a
+    ``uid``, that uid's wiki page — the surface every live mark actually
+    lives on. Resolving uid to page needs
+    :class:`~athenaeum.models.EntityIndex`, built lazily on the first
+    identifier that resolves to a record (same "pay once for the batch, pay
+    nothing for an empty one" posture as the excluded-surface index above,
+    and the same index :func:`read_entities` already builds once per batch).
+
     Yields:
         ``(identifier, IdentifierFacts)`` pairs in the order *identifiers*
         supplies them. Pairs (not a bare sequence) so a caller always knows
@@ -3890,6 +4027,7 @@ def read_identifier_facts(
             swallowed, never downgraded to an empty answer.
     """
     resolved_index = index
+    entity_index: EntityIndex | None = None
     for identifier in identifiers:
         if resolved_index is None:
             # Built on the FIRST identifier, not at call time, exactly as
@@ -3901,7 +4039,16 @@ def read_identifier_facts(
             contacts_root = excluded_surface_root(surface_class, knowledge_root, config)
             _require_readable_surface(contacts_root, surface_class)
             resolved_index = ExcludedRecordIndex(contacts_root)
-        yield identifier, _facts_for_identifier(identifier, resolved_index, as_of)
+        if entity_index is None:
+            # Same lazy-on-first-use posture as `resolved_index` above, and
+            # the same index `read_entities` builds once per batch — never
+            # rebuilt per identifier (issue athenaeum#883's cost note on
+            # `EntityIndex` construction applies here too).
+            entity_index = EntityIndex(knowledge_root / "wiki")
+        yield (
+            identifier,
+            _facts_for_identifier(identifier, resolved_index, as_of, entity_index=entity_index),
+        )
 
 
 def _require_readable_surface(contacts_root: Path, surface_class: str) -> None:
@@ -3933,7 +4080,11 @@ def _require_readable_surface(contacts_root: Path, surface_class: str) -> None:
 
 
 def _facts_for_identifier(
-    identifier: str, index: "ExcludedRecordIndex", as_of: date | None
+    identifier: str,
+    index: "ExcludedRecordIndex",
+    as_of: date | None,
+    *,
+    entity_index: EntityIndex | None = None,
 ) -> IdentifierFacts:
     """Assemble one :class:`IdentifierFacts` from an ALREADY-BUILT index.
 
@@ -3941,6 +4092,12 @@ def _facts_for_identifier(
     same reason :func:`_entity_read_from_indexes` was: it is the only genuinely
     O(1)-per-key part of the read, and keeping it separate makes the one-scan
     property visible rather than buried in a loop.
+
+    *entity_index*, when supplied, resolves the matched record's ``uid`` back
+    to its wiki page (issue athenaeum#960) so ``do_not_email`` can read that
+    surface too — ``None`` (the default, and every pre-existing caller) skips
+    the resolution and reads only the excluded-record surface, exactly as
+    issue athenaeum#851 shipped.
     """
     matches = index.all_by_identifier(identifier)
     if not matches:
@@ -3950,6 +4107,11 @@ def _facts_for_identifier(
     record_path = matches[0]
     meta = read_bounce_record(record_path)
     uid = str(meta.get("uid", "")).strip() or None
+    page_frontmatter: dict[str, Any] | None = None
+    if uid is not None and entity_index is not None:
+        page_path = entity_index.get_by_uid(uid)
+        if page_path is not None:
+            page_frontmatter = read_bounce_record(page_path)
     return IdentifierFacts(
         identifier=identifier,
         known=True,
@@ -3957,7 +4119,7 @@ def _facts_for_identifier(
         record_path=record_path,
         classification=classification_for_value(meta, identifier),
         validity=validity_for_value(meta, identifier, as_of),
-        do_not_email=do_not_email_state(meta),
+        do_not_email=do_not_email_state(meta, page_frontmatter),
         ambiguous=len(matches) > 1,
     )
 

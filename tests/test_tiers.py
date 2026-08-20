@@ -15,6 +15,8 @@ from athenaeum.models import (
     EntityIndex,
     EscalationItem,
     RawFile,
+    RawFileOverBudgetError,
+    TokenUsage,
 )
 from athenaeum.tiers import (
     _MERGE_MAX_TOKENS,
@@ -39,6 +41,7 @@ from athenaeum.tiers import (
     tier2_reclassify_larger_budget,
     tier2_request_params,
     tier3_create,
+    tier3_derive_actions,
     tier3_merge,
     tier3_write,
     tier4_escalate,
@@ -1668,6 +1671,226 @@ class TestTier3Write:
         assert updated_uids == ["a1b2c3d4"]
         acme_content = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
         assert "Updated content" in acme_content
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 — per-file budget (issue athenaeum#994, revising athenaeum#898):
+# tier3_derive_actions checks the LLM-call / wall-clock bound INCREMENTALLY,
+# after each action, and a trip carries whatever completed so far as durable
+# partial progress rather than discarding the whole file's work.
+# ---------------------------------------------------------------------------
+
+
+class TestTier3DeriveActionsBudget:
+    def test_llm_calls_bound_lands_completed_actions_and_discards_the_rest(
+        self, wiki_dir: Path
+    ) -> None:
+        """Three create actions, a 1-call-over-budget bound: the action that
+        pushes the running count over the bound (the 2nd) still lands, along
+        with the 1st that completed before it; the 3rd is never attempted —
+        proved by the mock's side_effect queue holding only two responses,
+        so a third call would raise StopIteration and fail this test."""
+        raw = _make_raw("Three new people mentioned.")
+        index = EntityIndex(wiki_dir)
+        actions = [
+            EntityAction(
+                kind="create",
+                name=f"Person {i}",
+                entity_type="person",
+                tags=[],
+                access="internal",
+                existing_uid=None,
+                observations=f"Observation {i}.",
+            )
+            for i in range(3)
+        ]
+
+        responses = []
+        for i in range(2):  # only 2 — a 3rd call would StopIteration
+            r = MagicMock()
+            r.content = [MagicMock(text=f"# Person {i}\n\nObservation {i}.")]
+            responses.append(r)
+        client = MagicMock()
+        client.messages.create.side_effect = responses
+
+        usage = TokenUsage()
+        with pytest.raises(RawFileOverBudgetError) as excinfo:
+            tier3_derive_actions(
+                raw,
+                actions,
+                index,
+                wiki_dir,
+                client,
+                usage=usage,
+                max_api_calls_for_file=1,
+                calls_before_file=0,
+            )
+
+        exc = excinfo.value
+        assert exc.bound == "llm_calls"
+        assert [e.name for e in exc.new_entities] == ["Person 0", "Person 1"]
+        assert exc.pending_updates == []
+        assert exc.updated_uids == []
+        assert exc.escalations == []
+
+    def test_wall_clock_bound_lands_completed_actions_and_discards_the_rest(
+        self, wiki_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same shape as the llm_calls test above but for the wall-clock
+        bound: the clock advances 20s per LLM call against a 10s bound, so
+        the 1st action's completion already trips it — landing that one
+        action and discarding the 2nd, unattempted (StopIteration-guarded
+        by a single-response queue)."""
+        raw = _make_raw("Two new people mentioned.")
+        index = EntityIndex(wiki_dir)
+        actions = [
+            EntityAction(
+                kind="create",
+                name=f"Person {i}",
+                entity_type="person",
+                tags=[],
+                access="internal",
+                existing_uid=None,
+                observations=f"Observation {i}.",
+            )
+            for i in range(2)
+        ]
+
+        clock = {"n": 0.0}
+        monkeypatch.setattr("athenaeum.tiers.time.monotonic", lambda: clock["n"])
+
+        response = MagicMock()
+        response.content = [MagicMock(text="# Person 0\n\nObservation 0.")]
+
+        _calls_made = {"n": 0}
+
+        def _side_effect(**kwargs):
+            # Guards the 2nd action: raises if ever called more than once,
+            # proving "Person 1" is never attempted.
+            _calls_made["n"] += 1
+            if _calls_made["n"] > 1:
+                raise AssertionError("a 2nd LLM call means the bound did not stop the loop")
+            clock["n"] += 20.0
+            return response
+
+        client = MagicMock()
+        client.messages.create.side_effect = _side_effect
+
+        with pytest.raises(RawFileOverBudgetError) as excinfo:
+            tier3_derive_actions(
+                raw,
+                actions,
+                index,
+                wiki_dir,
+                client,
+                max_runtime_for_file=10.0,
+                started_at_file=0.0,
+            )
+
+        exc = excinfo.value
+        assert exc.bound == "wall_clock"
+        assert [e.name for e in exc.new_entities] == ["Person 0"]
+
+    def test_partial_progress_carries_pending_updates_from_a_completed_action(
+        self, wiki_dir: Path
+    ) -> None:
+        """A mixed update-then-create action list: the update completes
+        first (landing in ``pending_updates``/``updated_uids``) and the
+        create that immediately follows is what actually trips the bound —
+        both ride along on the raised exception, proving the partial
+        payload isn't limited to ``new_entities``."""
+        raw = _make_raw("Acme update plus a new person.")
+        index = EntityIndex(wiki_dir)
+        actions = [
+            EntityAction(
+                kind="update",
+                name="Acme Corp",
+                entity_type="company",
+                tags=[],
+                access="",
+                existing_uid="a1b2c3d4",
+                observations="New partnership announced.",
+            ),
+            EntityAction(
+                kind="create",
+                name="New Person",
+                entity_type="person",
+                tags=[],
+                access="internal",
+                existing_uid=None,
+                observations="text",
+            ),
+        ]
+
+        merge_response = MagicMock()
+        merge_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {
+                        "ops": [
+                            {"op": "append_section", "text": "New partnership announced."}
+                        ]
+                    }
+                )
+            )
+        ]
+        merge_response.stop_reason = "end_turn"
+        create_response = MagicMock()
+        create_response.content = [MagicMock(text="# New Person\n\ntext")]
+
+        client = MagicMock()
+        client.messages.create.side_effect = [merge_response, create_response]
+
+        usage = TokenUsage()
+        with pytest.raises(RawFileOverBudgetError) as excinfo:
+            tier3_derive_actions(
+                raw,
+                actions,
+                index,
+                wiki_dir,
+                client,
+                usage=usage,
+                max_api_calls_for_file=1,
+                calls_before_file=0,
+            )
+
+        exc = excinfo.value
+        assert exc.updated_uids == ["a1b2c3d4"]
+        assert len(exc.pending_updates) == 1
+        assert exc.pending_updates[0][0] == wiki_dir / "a1b2c3d4-acme-corp.md"
+        assert [e.name for e in exc.new_entities] == ["New Person"]
+
+        # Not yet written — tier3_derive_actions never writes; that is the
+        # caller's (process_one's) job on catching the exception.
+        acme_content = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
+        assert "New partnership announced" not in acme_content
+
+    def test_no_bound_configured_behaves_exactly_as_before(self, wiki_dir: Path) -> None:
+        """The default (``max_api_calls_for_file=None``) is unbounded —
+        every other caller of tier3_derive_actions (tier3_write, and every
+        pre-athenaeum#994 test) must see byte-identical behaviour."""
+        raw = _make_raw("New info about Alice.")
+        index = EntityIndex(wiki_dir)
+        actions = [
+            EntityAction(
+                kind="create",
+                name="Alice Zhang",
+                entity_type="person",
+                tags=[],
+                access="internal",
+                existing_uid=None,
+                observations="Product lead.",
+            ),
+        ]
+        client = _mock_client("# Alice Zhang\n\nProduct lead.")
+
+        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
+            raw, actions, index, wiki_dir, client
+        )
+        assert [e.name for e in new_entities] == ["Alice Zhang"]
+        assert pending_updates == []
+        assert updated_uids == []
+        assert escalations == []
 
 
 # ---------------------------------------------------------------------------
