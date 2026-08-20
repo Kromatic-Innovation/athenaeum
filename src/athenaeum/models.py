@@ -1156,27 +1156,65 @@ class RawFileTooLargeError(Exception):
 
 
 class RawFileOverBudgetError(Exception):
-    """Raised by :func:`athenaeum.librarian.process_one` when a raw file's
-    LLM-call count or wall-clock spend crosses its per-file bound
-    (issue athenaeum#898).
+    """Raised by :func:`athenaeum.tiers.tier3_derive_actions` when a raw
+    file's LLM-call count or wall-clock spend crosses its per-file bound
+    (issue athenaeum#898, revised athenaeum#994).
 
-    Raised AFTER this file's LLM calls complete (:func:`athenaeum.tiers.tier3_derive_actions`
-    returns) but BEFORE any of this file's disk writes start — no wiki page
-    is created, no existing page is updated, no escalation is written. This
-    is what makes "the over-bound result is discarded" true rather than
-    aspirational: checking the bound only AFTER ``process_one`` returned (the
-    pre-athenaeum#898-review shape) was too late — ``tier3_write``'s update flush and
-    ``process_one``'s own create-write loop had both already landed on disk
-    by then, so "discarding" only skipped the run's create/update bookkeeping
-    and the raw-file unlink, never the writes themselves; the raw file was
-    then reprocessed next run against a wiki that already contained its
-    output. ``bound`` is ``"llm_calls"`` or ``"wall_clock"``.
+    Checked INCREMENTALLY, after each entity action in the file's action
+    list completes — not once, post-hoc, after the whole file's actions have
+    all run. This is what makes the bound pre-emptive rather than post-hoc:
+    a file whose Nth action pushes it over the bound never starts action
+    N+1, so the file's *remaining* LLM spend is the one thing actually
+    prevented (the pre-athenaeum#994 shape checked once at the end, so a file
+    already destined to trip the bound still paid for every one of its
+    actions before the check ever ran).
+
+    ``new_entities`` / ``pending_updates`` / ``updated_uids`` / ``escalations``
+    (athenaeum#994) carry every action that completed BEFORE the bound
+    tripped, in exactly the shape :func:`athenaeum.tiers.tier3_derive_actions`
+    itself returns them on a clean run. The catching caller
+    (:func:`athenaeum.librarian.process_one`) writes these to disk — durable
+    partial progress — before propagating the error, rather than discarding
+    them. This supersedes the athenaeum#898-era contract (preserved verbatim
+    in git history) under which NOTHING from an over-bound file was ever
+    written; that all-or-nothing shape is what caused the same file to be
+    redone in full, at full LLM cost, on consecutive nights (the athenaeum#994
+    diagnosis). The un-started remainder of the file's actions is still
+    discarded — only actions that had ALREADY completed land — and the raw
+    file itself is left on disk exactly as before, so the entity loop's
+    existing quarantine/backoff ledger (unchanged by athenaeum#994) still
+    accumulates a consecutive-violation count and eventually quarantines a
+    file that keeps tripping the bound, rather than reprocessing its
+    unstarted remainder identically forever. ``bound`` is ``"llm_calls"`` or
+    ``"wall_clock"``.
     """
 
-    def __init__(self, ref: str, *, bound: str, detail: str) -> None:
+    def __init__(
+        self,
+        ref: str,
+        *,
+        bound: str,
+        detail: str,
+        new_entities: list[WikiEntity] | None = None,
+        pending_updates: list[tuple[Path, str]] | None = None,
+        updated_uids: list[str] | None = None,
+        escalations: list[EscalationItem] | None = None,
+    ) -> None:
         self.ref = ref
         self.bound = bound
         self.detail = detail
+        # Issue athenaeum#994: partial durable progress — everything derived
+        # (LLM calls already made) before the bound tripped, not yet
+        # written by tier3_derive_actions itself (it never writes) but
+        # ready for the caller to write verbatim.
+        self.new_entities: list[WikiEntity] = new_entities if new_entities is not None else []
+        self.pending_updates: list[tuple[Path, str]] = (
+            pending_updates if pending_updates is not None else []
+        )
+        self.updated_uids: list[str] = updated_uids if updated_uids is not None else []
+        self.escalations: list[EscalationItem] = (
+            escalations if escalations is not None else []
+        )
         super().__init__(f"{ref}: over its {bound} bound — {detail}")
 
 
