@@ -39,10 +39,12 @@ from athenaeum.batch import (
     BatchExecutionError,
     BatchRequest,
     execute_batch,
+    process_batch_run,
 )
 from athenaeum.cli import main
-from athenaeum.librarian import librarian_batch_mode, run
-from athenaeum.models import TokenUsage
+from athenaeum.intake import discover_raw_files
+from athenaeum.librarian import FALLBACK_ACCESS, FALLBACK_TAGS, FALLBACK_TYPES, librarian_batch_mode, run
+from athenaeum.models import EntityIndex, TokenUsage
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL
 
 # ---------------------------------------------------------------------------
@@ -429,6 +431,96 @@ class TestBatchModeCLI:
         # Synchronous path used despite env=on: no Batch API traffic.
         assert client.batches.submitted == []
         assert client.sync_calls
+
+
+# ---------------------------------------------------------------------------
+# process_batch_run — per-knob client routing (issue athenaeum#841)
+#
+# ``process_batch_run`` threads TWO clients: ``client`` (the tier-2 classify
+# batch) and ``write_client`` (the tier-3 write batch + its same-page-merge/
+# truncation-retry synchronous fallbacks). A direct unit call (not through
+# ``run()``) lets the test hold two GENUINELY DISTINCT fake clients — the
+# batch-mode startup guard forces both knobs onto the SAME provider in a
+# real run (claude-cli is rejected for batch mode on either knob), so
+# ``run()`` can never actually exercise two distinct client OBJECTS here;
+# this proves the wiring itself, independent of that production constraint.
+# ---------------------------------------------------------------------------
+
+
+class TestProcessBatchRunPerKnobClientRouting:
+    def test_tier2_batch_uses_client_tier3_batch_uses_write_client(
+        self, tmp_path: Path
+    ) -> None:
+        contents = [
+            "Standalone fact about WidgetRoute gadget.\n",
+        ]
+        root = _seed_root(tmp_path, "k", contents)
+        raw_files = discover_raw_files(root / "raw")
+        index = EntityIndex(root / "wiki")
+
+        classify_client = _FakeClient(_scripted_responder, allow_sync=False)
+        write_client = _FakeClient(_scripted_responder, allow_sync=False)
+
+        result = process_batch_run(
+            raw_files,
+            index,
+            root / "wiki",
+            classify_client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            write_client=write_client,
+        )
+        assert result.created == 1
+
+        # Tier-2 (classify) requests landed on classify_client's batch
+        # transport ONLY.
+        assert len(classify_client.batches.submitted) == 1
+        assert all(
+            req["params"]["model"] == DEFAULT_CLASSIFY_MODEL
+            for batch in classify_client.batches.submitted
+            for req in batch
+        )
+        # Tier-3 (write) requests landed on write_client's batch transport
+        # ONLY — never classify_client's.
+        assert len(write_client.batches.submitted) == 1
+        assert all(
+            req["params"]["model"] != DEFAULT_CLASSIFY_MODEL
+            for batch in write_client.batches.submitted
+            for req in batch
+        )
+        assert classify_client is not write_client
+
+    def test_no_write_client_falls_back_to_client_ac6(self, tmp_path: Path) -> None:
+        """AC6: every pre-athenaeum#841 caller only ever passed the one
+        positional ``client`` — omitting ``write_client`` must still serve
+        BOTH batches off that ONE client, byte-identical to before."""
+        contents = ["Standalone fact about WidgetSame gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        raw_files = discover_raw_files(root / "raw")
+        index = EntityIndex(root / "wiki")
+
+        client = _FakeClient(_scripted_responder, allow_sync=False)
+
+        result = process_batch_run(
+            raw_files,
+            index,
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+        )
+        assert result.created == 1
+        # Both the tier-2 and tier-3 batches submitted through the SAME
+        # (only) client.
+        assert len(client.batches.submitted) == 2
 
 
 # ---------------------------------------------------------------------------

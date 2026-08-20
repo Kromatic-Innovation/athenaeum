@@ -1381,6 +1381,204 @@ class TestPerKnobProviderRoutingLedger:
         }
 
 
+class TestRecordSpendPerKnobProvider:
+    """``record_spend_per_knob_provider`` (issue athenaeum#841 AC2) — splits ONE
+    librarian run's usage into one ledger row per DISTINCT provider its
+    knobs actually resolved to, instead of one row assuming a single
+    provider for the whole run. Mirrors
+    ``TestPerKnobProviderRoutingLedger`` above (the athenaeum#786 precedent for
+    query_topics/answers, which get their own SEPARATE record_spend calls
+    outside the librarian's single run) but for ONE run whose knobs
+    genuinely mix providers."""
+
+    def _mixed_usage(self) -> TokenUsage:
+        u = TokenUsage()
+        # classify + resolve + reasoning_t1 + reasoning_t2 stay on the
+        # global "api" default; "write" is overridden to "claude-cli".
+        # ``add_tokens`` (not ``add``) so ``api_calls`` is set explicitly
+        # below, matching how a real call-site loop counts attempts
+        # separately from token accumulation (models.TokenUsage.add_tokens's
+        # own documented convention).
+        u.add_tokens(1_000, 400, 0, 0, model="claude-haiku-4-5", knob="classify")
+        u.add_tokens(2_000, 800, 0, 0, model="claude-opus-4", knob="resolve")
+        u.add_tokens(500, 100, 0, 0, model="claude-haiku-4-5", knob="reasoning_t1")
+        u.add_tokens(500, 100, 0, 0, model="claude-opus-4", knob="reasoning_t2")
+        u.add_tokens(3_000, 1_200, 0, 0, model="claude-sonnet-4-6", knob="write")
+        u.api_calls = 5
+        return u
+
+    def _knob_providers_mixed(self) -> dict[str, str]:
+        return {
+            "classify": "api",
+            "resolve": "api",
+            "reasoning_t1": "api",
+            "reasoning_t2": "api",
+            "write": "claude-cli",
+        }
+
+    def _knob_models_mixed(self) -> dict[str, str]:
+        return {
+            "classify": "claude-haiku-4-5",
+            "resolve": "claude-opus-4",
+            "reasoning_t1": "claude-haiku-4-5",
+            "reasoning_t2": "claude-opus-4",
+            "write": "claude-sonnet-4-6",
+        }
+
+    def test_single_provider_writes_one_row_identical_to_record_spend(
+        self, ledger: Path
+    ) -> None:
+        """AC6: every knob resolving to the SAME provider (the default, no
+        overrides) writes exactly the row ``record_spend`` would have
+        written -- no behavior change for the common case."""
+        usage = TokenUsage()
+        usage.add_tokens(1_000, 400, model="claude-haiku-4-5", knob="classify")
+        usage.add_tokens(2_000, 800, model="claude-opus-4", knob="write")
+        usage.api_calls = 3
+        knob_providers = {"classify": "api", "write": "api"}
+        knob_models = {"classify": "claude-haiku-4-5", "write": "claude-opus-4"}
+
+        assert spend.record_spend_per_knob_provider(
+            usage,
+            knob_providers,
+            knob_models,
+            run_type="librarian",
+            default_provider="api",
+            files_processed=7,
+        )
+        records = spend.read_ledger(ledger)
+        assert len(records) == 1
+        row = records[0]
+        assert row["provider"] == "anthropic"
+        assert row["billing_mode"] == spend.BILLING_MODE_API
+        assert row["api_calls"] == 3
+        assert row["files_processed"] == 7
+        assert row["tokens_by_knob"]["classify"]["total"] == 1_400
+        assert row["tokens_by_knob"]["write"]["total"] == 2_800
+
+    def test_mixed_providers_write_two_rows_with_correct_billing_mode(
+        self, ledger: Path
+    ) -> None:
+        """AC2: two knobs on different providers in ONE run each record
+        their own provider and correct billing_mode."""
+        assert spend.record_spend_per_knob_provider(
+            self._mixed_usage(),
+            self._knob_providers_mixed(),
+            self._knob_models_mixed(),
+            run_type="librarian",
+            default_provider="api",
+            files_processed=4,
+        )
+        records = spend.read_ledger(ledger)
+        assert len(records) == 2
+
+        api_row = next(r for r in records if r["provider"] == "anthropic")
+        cli_row = next(r for r in records if r["provider"] == "claude-cli")
+
+        assert api_row["billing_mode"] == spend.BILLING_MODE_API
+        assert api_row["estimated_cost_usd"] > 0.0
+        assert set(api_row["tokens_by_knob"]) == {
+            "classify",
+            "resolve",
+            "reasoning_t1",
+            "reasoning_t2",
+        }
+        assert "write" not in api_row["tokens_by_knob"]
+
+        assert cli_row["billing_mode"] == spend.BILLING_MODE_SUBSCRIPTION
+        assert cli_row["estimated_cost_usd"] == 0.0
+        assert set(cli_row["tokens_by_knob"]) == {"write"}
+        assert cli_row["tokens_by_knob"]["write"]["total"] == 4_200
+
+    def test_api_calls_and_files_processed_only_on_default_row(
+        self, ledger: Path
+    ) -> None:
+        """api_calls/files_processed are run-level, not knob-attributed —
+        they must land on exactly ONE row (the default-provider one), never
+        split or duplicated across rows."""
+        spend.record_spend_per_knob_provider(
+            self._mixed_usage(),
+            self._knob_providers_mixed(),
+            self._knob_models_mixed(),
+            run_type="librarian",
+            default_provider="api",
+            files_processed=4,
+        )
+        records = spend.read_ledger(ledger)
+        api_row = next(r for r in records if r["provider"] == "anthropic")
+        cli_row = next(r for r in records if r["provider"] == "claude-cli")
+
+        assert api_row["api_calls"] == 5
+        assert api_row["files_processed"] == 4
+        assert cli_row["api_calls"] == 0
+        assert "files_processed" not in cli_row
+
+    def test_untagged_remainder_rides_on_default_provider_row(
+        self, ledger: Path
+    ) -> None:
+        """Tokens accumulated WITHOUT a knob= tag (e.g. a call site that
+        forgot to tag one) must not silently vanish from a mixed-provider
+        split -- they land on the default-provider row."""
+        usage = self._mixed_usage()
+        # Untagged remainder: total scalar counters exceed the per-knob-
+        # tagged subset by (500, 50, 0, 0).
+        usage.input_tokens += 500
+        usage.output_tokens += 50
+
+        spend.record_spend_per_knob_provider(
+            usage,
+            self._knob_providers_mixed(),
+            self._knob_models_mixed(),
+            run_type="librarian",
+            default_provider="api",
+        )
+        records = spend.read_ledger(ledger)
+        api_row = next(r for r in records if r["provider"] == "anthropic")
+        cli_row = next(r for r in records if r["provider"] == "claude-cli")
+
+        # Total input/output tokens across both rows equal the run's true
+        # totals -- nothing lost, nothing double-counted.
+        assert api_row["input_tokens"] + cli_row["input_tokens"] == usage.input_tokens
+        assert (
+            api_row["output_tokens"] + cli_row["output_tokens"]
+            == usage.output_tokens
+        )
+
+    def test_unmapped_knob_falls_back_to_default_provider(
+        self, ledger: Path
+    ) -> None:
+        """A knob with tokens but no entry in knob_providers (defensive —
+        should not happen for a caller that resolves every knob it tags)
+        falls back to default_provider rather than raising or vanishing."""
+        usage = TokenUsage()
+        usage.api_calls = 1
+        usage.add(100, 50, model="claude-haiku-4-5", knob="mystery-knob")
+        usage.add(3_000, 1_200, model="claude-sonnet-4-6", knob="write")
+
+        assert spend.record_spend_per_knob_provider(
+            usage,
+            {"write": "claude-cli"},  # "mystery-knob" deliberately absent
+            {"write": "claude-sonnet-4-6"},
+            run_type="librarian",
+            default_provider="api",
+        )
+        records = spend.read_ledger(ledger)
+        api_row = next(r for r in records if r["provider"] == "anthropic")
+        assert "mystery-knob" in api_row["tokens_by_knob"]
+
+    def test_returns_false_when_nothing_spent(self) -> None:
+        assert (
+            spend.record_spend_per_knob_provider(
+                TokenUsage(),
+                {},
+                {},
+                run_type="librarian",
+                default_provider="api",
+            )
+            is False
+        )
+
+
 # ---------------------------------------------------------------------------
 # query_topics ledger integration — the metered hot path is recorded
 # ---------------------------------------------------------------------------

@@ -75,25 +75,27 @@ but this module never writes the ledger itself).
 ``api`` backend's SDK) is imported lazily inside :func:`build_llm_client` so a
 ``claude-cli``-only deployment need not have it installed.
 
-**Per-knob routing (issue athenaeum#786, scaffolding only — no new backend here).**
-:func:`resolve_provider` and :func:`build_llm_client` both grow an optional
-``knob`` argument so a call site can route to a DIFFERENT provider than the
-run's global ``llm.provider`` default (``llm.providers.<knob>`` yaml /
-``ATHENAEUM_<KNOB>_LLM_PROVIDER`` env — the same env > yaml > default
-precedence as every other knob in this codebase, e.g.
-:func:`resolve_max_tokens`). :class:`LLMClientCache` memoizes clients by
+**Per-knob routing (issue athenaeum#786 scaffolding, athenaeum#841 wired the
+librarian pipeline).** :func:`resolve_provider` and :func:`build_llm_client`
+both grow an optional ``knob`` argument so a call site can route to a
+DIFFERENT provider than the run's global ``llm.provider`` default
+(``llm.providers.<knob>`` yaml / ``ATHENAEUM_<KNOB>_LLM_PROVIDER`` env — the
+same env > yaml > default precedence as every other knob in this codebase,
+e.g. :func:`resolve_max_tokens`). :class:`LLMClientCache` memoizes clients by
 resolved provider so several knobs sharing one provider construct ONE
-client, not one each. Wired at :mod:`athenaeum.query_topics` (``topic``) and
-the ``ingest-answers`` / ``reresolve-questions`` CLI commands (``resolve``) —
-each already resolves its own provider independently of the shared
-librarian pipeline, so routing them per-knob needed no signature changes
-upstream. **Known limitation, recorded not solved (see
-``docs/configuration.md``):** the librarian's entity/merge pipeline
-(``classify``/``write``/``resolve``/``reasoning_t1``/``reasoning_t2`` inside
-one librarian run) still shares ONE client built from the global provider —
-splitting that internal threading per knob is tracked in athenaeum#841, same
-spirit as the ``classify``-knob-shared-across-three-call-sites limitation
-this issue also documents rather than resolves.
+client, not one each. Wired at :mod:`athenaeum.query_topics` (``topic``), the
+``ingest-answers`` / ``reresolve-questions`` CLI commands (``resolve``), and
+(issue athenaeum#841) the librarian's entity/merge pipeline
+(:func:`athenaeum.librarian.run`), which now constructs one
+:class:`LLMClientCache`-backed client per knob (``classify``, ``write``,
+``resolve``, ``reasoning_t1``, ``reasoning_t2`` — see
+:func:`athenaeum.librarian._arm_run_deadline`) instead of one shared client
+for all five. **Known limitation, recorded not solved (see
+``docs/configuration.md``):** the ``classify`` knob is shared by
+``tiers.classify``, ``contradictions.detect_system``, and ``claim_kind`` —
+routing those three to DIFFERENT providers is not reachable through
+``llm.providers.classify`` alone; it needs the ``classify`` knob split into
+separate knobs first, a deliberate, separate refactor out of athenaeum#841's scope.
 """
 
 from __future__ import annotations
@@ -181,21 +183,19 @@ def resolve_provider(
     backend, or to the global provider. No seed in ``_DEFAULTS`` (issue
     athenaeum#231) so the code default stays reachable.
 
-    **Known limitation (issue athenaeum#786):** this function makes per-knob
-    provider ROUTING possible for any caller that resolves its own knob
-    independently — :mod:`athenaeum.query_topics` (``topic``) and the
+    **Per-knob routing is now fully wired (issue athenaeum#841):** every
+    caller that resolves its own knob gets a genuinely per-knob-routed
+    client — :mod:`athenaeum.query_topics` (``topic``), the
     ``athenaeum ingest-answers`` / ``reresolve-questions`` CLI commands
-    (``resolve``) do. The librarian's entity/merge pipeline
-    (:func:`athenaeum.librarian.run`) still constructs ONE shared client from
-    the GLOBAL provider for the ``classify``/``write``/``resolve``/
-    ``reasoning_t1``/``reasoning_t2`` knobs it serves — a per-knob override
-    for one of THOSE knobs is accepted here (no error, but
-    :func:`athenaeum.librarian._warn_if_knob_provider_override_inert` warns
-    loudly at startup — issue athenaeum#786) and has no effect on which client
-    actually serves a librarian run; wiring that pipeline to construct and
-    thread per-knob clients is tracked in athenaeum#841 (mirrors the
-    ``classify``-knob-granularity limitation documented in
-    ``docs/configuration.md``).
+    (``resolve``), and the librarian's entity/merge pipeline
+    (:func:`athenaeum.librarian.run`, all five of ``classify``/``write``/
+    ``resolve``/``reasoning_t1``/``reasoning_t2`` — see
+    :func:`athenaeum.librarian._arm_run_deadline`). **Remaining known
+    limitation (documented in ``docs/configuration.md``, unrelated to
+    routing):** the ``classify`` knob is shared by three call sites
+    (``tiers.classify``, ``contradictions.detect_system``, ``claim_kind``) —
+    a ``llm.providers.classify`` override applies to all three alike;
+    splitting that granularity is a separate, deliberate refactor.
     """
     if knob:
         env_var = f"ATHENAEUM_{knob.upper()}_LLM_PROVIDER"
@@ -626,17 +626,12 @@ def knob_provider_override_source(
     Returns the source description (``"env ATHENAEUM_<KNOB>_LLM_PROVIDER"`` or
     ``"yaml llm.providers.<knob>"``) if *knob* has an explicit override set,
     else ``None``. Does not validate the value or apply precedence — it only
-    answers "did the operator set something for this knob", which is exactly
-    what a caller warning about an INERT override needs (issue athenaeum#786): a
-    per-knob override for a knob whose client construction does not yet
-    route per-knob (see :func:`athenaeum.librarian._run_preconditions`'s
-    ``_warn_if_knob_provider_override_inert``) is accepted by
-    :func:`resolve_provider` (no error) but silently has no effect — mirrors
-    :func:`athenaeum.reasoning_tiers._warn_if_tier_model_knob_inert`'s
-    inert-knob-warning pattern (issue athenaeum#780), guarding against the same
-    silent-no-op failure class athenaeum#782's issue framing names: a misconfiguration
-    where the backend appears to work and the operator has no signal that
-    their override was never applied.
+    answers "did the operator set something for this knob". Originally added
+    (issue athenaeum#786) to power the librarian's now-removed
+    inert-override warning (every knob it names is genuinely routed as of
+    issue athenaeum#841); kept as a general-purpose diagnostic primitive —
+    "is this knob's provider operator-overridden, and from where" is useful
+    independent of that warning's removal.
     """
     env_var = f"ATHENAEUM_{knob.upper()}_LLM_PROVIDER"
     raw = os.environ.get(env_var)
