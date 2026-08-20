@@ -1185,7 +1185,7 @@ class TestCLIServe:
 
 
 class TestAllMcpToolWrappers:
-    """Invoke all 14 registered MCP tool wrappers through ``tool.fn()``."""
+    """Invoke all 16 registered MCP tool wrappers through ``tool.fn()``."""
 
     # One valid-args invocation per registered tool. Read tools take no args;
     # the write tools are called with a nonexistent id so a single call
@@ -1212,6 +1212,7 @@ class TestAllMcpToolWrappers:
         "read_person": lambda fn: fn("no-such-uid"),
         "read_entity": lambda fn: fn("no-such-uid", "person"),
         "entity_schema": lambda fn: fn(),
+        "enumerate_entities": lambda fn: fn("no-such-type"),
     }
     _EXPECTED_TYPE = {
         "recall": str,
@@ -1229,6 +1230,7 @@ class TestAllMcpToolWrappers:
         "read_person": str,
         "read_entity": str,
         "entity_schema": dict,
+        "enumerate_entities": dict,
     }
 
     def _server(self, tmp_path: Path, *, cache_dir: Path | None = None):
@@ -1270,10 +1272,11 @@ class TestAllMcpToolWrappers:
             f"map-only={set(self._INVOKE) - registered}"
         )
         # Issue athenaeum#964: +1 for `entity_schema`, the ONE new schema-query tool
-        # this issue adds. Bumping this number is exactly the tripwire this
-        # test exists for — a second new tool would fail the AC that scopes
-        # this issue to exactly one addition.
-        assert len(registered) == 15
+        # that issue adds. Issue athenaeum#965 adds one more: `enumerate_entities`,
+        # the generalized ENUMERATION primitive (a distinct code path from
+        # `recall` — no query text, never routed through ranking). Bumping
+        # this number is exactly the tripwire this test exists for.
+        assert len(registered) == 16
 
     @pytest.mark.parametrize("name", sorted(_INVOKE))
     def test_wrapper_marshals_args_and_returns_declared_type(
