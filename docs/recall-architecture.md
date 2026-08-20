@@ -159,7 +159,32 @@ The wiki itself never grows an in-tree "archived" marker page for this —
 `athenaeum decay-sweep` (`athenaeum.decay_sweep`) periodically `git rm`s an
 expired `bucket: daily` page from the live tree (never `weekly`/`durable`/
 unbucketed), leaving it recoverable from git history. Dry-run by default,
-same shape as `athenaeum auto-memory prune`.
+same shape as `athenaeum auto-memory prune`. Every archived page also gets a
+durable sweep-ledger record (`_decay_sweep_records.jsonl`, cache dir, never
+the wiki corpus) — which page, why, when, and the recovering commit SHA —
+and the sweep refuses to archive at all if that ledger write fails (issue
+athenaeum#969).
+
+**The expired-`daily` exemption is the SOLE exemption from the fail-closed
+expiry filter (issue athenaeum#969).** `_is_recall_inactive`'s divergence
+from `is_inactive_memory`, above, is scoped to exactly one condition —
+`bucket: daily` AND expired — and nothing else. Every other case the §8.3
+"currently-valid-by-default" filter governs (`docs/provenance-shape.md`
+§8.3) — a superseded/deprecated page, an expired `weekly`/`durable`/
+unbucketed page — stays hard-excluded exactly as before. There is no second
+carve-out anywhere in the recall path; a future one needs its own issue and
+its own review of this invariant, not a quiet extension of this one.
+
+**Swept ≠ cold.** Do not conflate this section's sweep with the memory
+model's planned cold tier (`embedded: false`, the storage-adapter
+`corpus_policy` bit — `docs/whole-store-adapter-design.md` §8 "Surface 1").
+A COLD page stays on disk in the live wiki tree: it is excluded from the
+FTS5/vector index, but it remains reachable through `KeywordBackend`'s
+full-corpus scan (`cheap_local_scan` — a deep-recall path that does not
+depend on the index). A SWEPT page has been `git rm`'d out of the live tree
+entirely (above): it has no recall path at all, indexed or not — the only
+way back is `git show`/`git log` against the recovering commit the sweep
+ledger records, never a `recall()` call of any kind.
 
 ## Handle-shaped queries — exact reverse lookup, not similarity search (athenaeum#907)
 
