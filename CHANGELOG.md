@@ -11,17 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Aligned code-side entity-type registry mirrors with `_schema/types.md`
   and gated the `corrections.py` write path (athenaeum#971, follow-up to
-  #970).** `schemas.KNOWN_TYPES`/`FALLBACK_TYPES` now include `incident` (the
-  10th declared type per #970's audit — previously every incident page
+  athenaeum#970).** `schemas.KNOWN_TYPES`/`FALLBACK_TYPES` now include `incident` (the
+  10th declared type per athenaeum#970's audit — previously every incident page
   warned as "unknown") and no longer include `feedback`/`user` (folded away
-  by #970); a page already on disk with one of those values keeps validating
+  by athenaeum#970); a page already on disk with one of those values keeps validating
   without raising (athenaeum#93's non-raising design), it just now takes the
   ordinary "unknown wiki type" path instead of the silent known-type path.
   `corrections.py`'s tier-0 create branch (`WikiEntity(type=resolution.
   entity_type, ...)`) previously had no `valid_types` gate at all, unlike the
   classifier (`tiers.py`) and the other two deterministic create/upsert
   paths (`intake.py`, `librarian.py`) — a correction batch could mint a page
-  under any string, including a #970-folded type, with zero enforcement.
+  under any string, including a athenaeum#970-folded type, with zero enforcement.
   It now loads `_schema/types.md` (falling back to `KNOWN_TYPES`, same
   pattern `librarian.py`/`entity_schema.py` use) and rejects-and-escalates
   (`disposition="raised-tier"`) an unrecognized or folded `type`, matching

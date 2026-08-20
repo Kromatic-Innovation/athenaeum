@@ -1243,7 +1243,7 @@ def process_correction_record(
         # safe there because tier-2 is the last stop for an already
         # LLM-judged entity. Here ``resolution.entity_type`` is an externally
         # declared string with zero LLM judgment in between (the same shape
-        # as a raw frontmatter ``type:``), AND coercing would misfile a #970
+        # as a raw frontmatter ``type:``), AND coercing would misfile a athenaeum#970
         # fold (e.g. a stale writer still declaring ``type: user``) into the
         # wrong bucket ("reference") instead of preserving it for correct
         # reclassification. Reject-and-escalate (this module's own idiom for

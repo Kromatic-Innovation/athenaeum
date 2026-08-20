@@ -413,9 +413,9 @@ class TestKnownTypes:
 
 
 class TestSchemaAlignment971:
-    """Follow-up to #970's ``_schema/types.md`` reconciliation: ``incident``
+    """Follow-up to athenaeum#970's ``_schema/types.md`` reconciliation: ``incident``
     is the 10th declared type and must stop warning as unknown; ``user``/
-    ``feedback`` are folded away by #970 and must stop counting as a
+    ``feedback`` are folded away by athenaeum#970 and must stop counting as a
     currently-valid type WITHOUT starting to raise for a page already on
     disk with one of those values (athenaeum#93's non-raising design)."""
 
@@ -468,7 +468,7 @@ class TestSchemaAlignment971:
 
         Uses a SYNTHETIC fixture ``types.md`` (never the live wiki's real
         registry — that file lives in the separate knowledge repo, not
-        this checkout) shaped like #970's reconciled 10 declared types.
+        this checkout) shaped like athenaeum#970's reconciled 10 declared types.
         """
         schema_dir = tmp_path / "_schema"
         schema_dir.mkdir()
