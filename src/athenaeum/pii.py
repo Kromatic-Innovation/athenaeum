@@ -3256,6 +3256,34 @@ class RedactionMarker:
         }
 
 
+def json_date_default(obj: object) -> str:
+    """``default=`` callback for ``json.dumps``: coerce dates to ISO-8601 (issue athenaeum#1002).
+
+    The ONE coercion point for every JSON-emitting read surface built over the
+    sanctioned excluded-field read path — ``read_entity``, ``read_person``
+    (:meth:`EntityRead.to_dict` carries ``frontmatter`` unconverted, and
+    ``read_person`` is a thin wrapper over ``read_entity``) and
+    ``recall(with_pii=True)`` (:mod:`athenaeum.mcp_server`'s excluded-facts
+    render and handle-resolution join, both of which can carry a
+    :class:`ContactClassification`'s ``source`` straight from record
+    frontmatter). Passed as ``default=`` at each call site rather than
+    reimplemented per site, so the three surfaces cannot drift in HOW they
+    coerce a date and a caller never has to walk its own payload first —
+    ``json.dumps`` already recurses into nested dicts/lists on its own and
+    calls this function for exactly the values it cannot otherwise encode.
+
+    :mod:`yaml`'s safe loader (:func:`athenaeum.models.parse_frontmatter`)
+    parses a bare frontmatter date (``dob: 1990-01-01``) into
+    ``datetime.date`` and a timestamp into ``datetime.datetime`` — neither of
+    which the stdlib ``json`` module can serialize on its own, so an affected
+    page previously crashed every read tool with ``Object of type date is not
+    JSON serializable`` before this existed.
+    """
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 @dataclass(frozen=True)
 class EntityRead:
     """Result of :func:`read_entity` — an entity's page plus excluded-data view.
