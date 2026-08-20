@@ -88,23 +88,21 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+# The ``memory_class`` vocabulary + rule map live in the leaf module
+# :mod:`athenaeum.memory_class` (issue athenaeum#996) so the WRITE model
+# (``models.WikiEntity``) can share them without closing an import cycle
+# through config/pii/storage. Re-exported here because ``MEMORY_CLASSES`` has
+# been importable from this module since athenaeum#424 and consumers
+# (merge_type_gate, reasoning_tiers, axiom_governance, _lint) import it that
+# way — moving it must not break them.
+from athenaeum.memory_class import (  # noqa: F401 — re-exported, see above
+    MACHINE_ASSIGNABLE_MEMORY_CLASSES,
+    MEMORY_CLASSES,
+    TYPE_TO_MEMORY_CLASS,
+    memory_class_for_type,
+)
 from athenaeum.pii import CONTACT_FRONTMATTER_FIELDS, is_pii_flagged
 from athenaeum.provenance import validate_field_sources, validate_source_value
-
-#: The 7 recognized ``memory_class:`` values (issue athenaeum#424). Deliberately does
-#: NOT include ``open-question`` / ``hypothesis`` — the settled taxonomy
-#: defers those rather than over-minting classes up front.
-MEMORY_CLASSES: frozenset[str] = frozenset(
-    {
-        "fact",
-        "guideline",
-        "axiom",
-        "reference",
-        "entity",
-        "decision",
-        "procedure",
-    }
-)
 
 
 class WikiBase(BaseModel):
