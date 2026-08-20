@@ -2000,6 +2000,80 @@ def resolve_screening(config: dict[str, Any] | None) -> dict[str, dict[str, str]
     return {"medical": {"action": action, "access": access}}
 
 
+def resolve_dimensions(config: dict[str, Any] | None) -> Any:
+    """Resolve the ``dimensions:`` config block into a validated registry (athenaeum#714).
+
+    Returns a :class:`athenaeum.dimensions.DimensionRegistry` — always
+    non-empty: the six kernel dimensions (recorded-time, observed-time,
+    valid-time, scope, subject, memory-class) are builtin and present
+    regardless of config. ``dimensions:`` in ``athenaeum.yaml`` is a list of
+    ADDITIONAL, deployment-declared dimensions (``engagement``, ``repo``,
+    ``maturity``, ...) layered on top; a fresh install with no ``dimensions:``
+    key gets the kernel-only registry, and ``athenaeum run`` behaves
+    unchanged either way (nothing in the librarian pipeline consults a
+    deployment dimension's ``applies_to`` unless one is declared).
+
+    No env var: ``dimensions:`` is a structural block (a list of typed
+    entries), not a scalar knob — there is no single value an env override
+    could sensibly replace. Raises
+    :class:`athenaeum.dimensions.DimensionRegistryError` on a malformed
+    entry (unknown ``kind``/``null_means``/``state``, non-kebab-case name,
+    duplicate name, an ``enum`` kind missing ``values``, or a name colliding
+    with a kernel dimension) — a mis-declared dimension is a real config
+    error, not something to silently drop, matching ``resolve_screening``'s
+    fail-loud posture for a structural (not scalar) knob.
+    """
+    from athenaeum.dimensions import DimensionRegistryError, build_registry
+
+    raw = config.get("dimensions") if isinstance(config, dict) else None
+    try:
+        return build_registry(raw)
+    except DimensionRegistryError:
+        raise
+
+
+def resolve_dimension_registry_epoch(config: dict[str, Any] | None) -> int:
+    """Resolve the dimension-registry epoch, for the verdict-ledger basis (athenaeum#714).
+
+    Bump ``librarian.dimensions_registry_epoch`` in ``athenaeum.yaml``
+    whenever a dimension's definition changes in a way that should
+    invalidate verdicts justified by the old definition (issue athenaeum#714 AC:
+    "Both must appear in the ledger basis of any verdict written after this
+    issue" — see :class:`athenaeum.verdicts.Basis`). Namespaced under
+    ``librarian.*`` alongside its athenaeum#712 sibling knobs
+    (``verdict_ledger_enabled``, ``verdict_epoch_batch_interval_days``), same
+    helper/coercion contract. Precedence:
+    ``ATHENAEUM_DIMENSION_REGISTRY_EPOCH`` env > yaml
+    ``librarian.dimensions_registry_epoch`` > ``1``. No seed in ``_DEFAULTS``
+    (issue athenaeum#231).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "dimensions_registry_epoch",
+        "ATHENAEUM_DIMENSION_REGISTRY_EPOCH",
+        1,
+    )
+
+
+def resolve_dimension_tree_epoch(config: dict[str, Any] | None) -> int:
+    """Resolve the scope-tree epoch, for the verdict-ledger basis (athenaeum#714).
+
+    Bump ``librarian.dimensions_tree_epoch`` in ``athenaeum.yaml`` on a
+    scope-tree reorg (renamed subtree) so athenaeum#712's targeted stale-marking
+    (:func:`athenaeum.verdicts.select_stale_for_tree_epoch_bump`) can
+    invalidate exactly the verdicts whose basis coordinates touch the
+    renamed subtree. Precedence: ``ATHENAEUM_DIMENSION_TREE_EPOCH`` env >
+    yaml ``librarian.dimensions_tree_epoch`` > ``1``. No seed in ``_DEFAULTS``
+    (issue athenaeum#231).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "dimensions_tree_epoch",
+        "ATHENAEUM_DIMENSION_TREE_EPOCH",
+        1,
+    )
+
+
 _DEFAULT_CONFIG_CONTENT = """\
 # Athenaeum sidecar configuration
 # See https://github.com/Kromatic-Innovation/athenaeum for docs.
@@ -2047,6 +2121,27 @@ search_backend: fts5
 #   medical:
 #     action: label_restrict   # label_restrict | off   (default: off)
 #     access: personal         # access level stamped when action=label_restrict
+
+# Dimension registry (issue athenaeum#714). Athenaeum ships the six KERNEL
+# dimensions (recorded-time, observed-time, valid-time, scope, subject,
+# memory-class) unconditionally — they need no config. `dimensions:` here
+# declares ADDITIONAL, deployment-specific axes on top; UNSET = kernel-only
+# (existing installs unchanged). See docs/configuration.md's "Dimension
+# registry" section for the full field reference.
+# dimensions:
+#   - name: engagement          # kebab-case, unique; must not collide with a
+#                                # kernel dimension name
+#     kind: identity             # interval | hierarchy | enum | identity
+#     null_means: unknown        # universal | unknown
+#     separates: true            # separator (may yield DISTINCT) vs sequencer
+#     applies_to:                # selector bounding which claims carry this
+#       memory_class: [entity]   # axis; {} / omitted = applies to every claim
+#     state: backfill            # backfill | enforced
+#     origin: operator           # builtin | operator | proposed:<id>
+#     since: 2026-08-01
+# librarian:
+#   dimensions_registry_epoch: 1  # bump on a dimension-definition change
+#   dimensions_tree_epoch: 1      # bump on a scope-tree reorg (renamed subtree)
 
 # Workspace owner identity (issue athenaeum#263). Designates the single canonical
 # person this knowledge base belongs to so the librarian keeps the owner a
