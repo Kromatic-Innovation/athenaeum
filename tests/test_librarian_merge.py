@@ -1047,7 +1047,8 @@ class TestContradictionFixture:
         ``contradiction_merge_root``'s cluster row is written with
         centroid_score=0.62 (>= the default 0.6 floor); overriding the floor
         to 0.65 makes it the one that fires, without touching the size cap
-        (n=2 stays under the default 25) or the complete-linkage arm
+        (n=2 stays under the active default of 5, tightened from 25 by
+        athenaeum#421) or the complete-linkage arm
         (min_pairwise defaults to 1.0 for this fixture's row)."""
         import logging
 
