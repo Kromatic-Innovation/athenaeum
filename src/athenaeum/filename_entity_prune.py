@@ -28,6 +28,7 @@ from typing import Any
 
 from athenaeum.models import parse_frontmatter
 from athenaeum.storage_migrate import iter_entity_pages
+from athenaeum.store import FilesystemStore, Store
 from athenaeum.tiers import classify_code_artifact_name
 
 log = logging.getLogger(__name__)
@@ -129,23 +130,34 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def apply_filename_entity_prune(
-    knowledge_root: Path, report: FilenameEntityReport
+    knowledge_root: Path,
+    report: FilenameEntityReport,
+    *,
+    store: Store | None = None,
 ) -> FilenameEntityReport:
     """``git rm`` the kill-list in one labeled commit (issue athenaeum#680).
 
-    Removal is git-only (recoverable) and refuses to act without a writable git
-    repo — the same safety contract as :func:`athenaeum.auto_memory_prune.
-    apply_prune`. A no-op when the kill-list is empty. The commit pathspec is
-    scoped to the kill-list so unrelated staged changes are never swept in.
-    Mutates and returns *report*."""
+    Removal is git-only (recoverable) and refuses to act against a store that
+    is not versioned (design note §4.4 R1; issue athenaeum#978) — the same
+    safety contract as :func:`athenaeum.auto_memory_prune.apply_prune`. A
+    no-op when the kill-list is empty. The commit pathspec is scoped to the
+    kill-list so unrelated staged changes are never swept in. Mutates and
+    returns *report*.
+
+    *store* is the Tier-A recoverability gate, injectable so a test can
+    supply a fake declaring ``capabilities.versioned=False`` without a real
+    git repo. Defaults to a :class:`~athenaeum.store.FilesystemStore` over
+    *knowledge_root*.
+    """
     if not report.kill:
         log.info("prune-filename-entities: kill-list empty - nothing to remove")
         return report
 
-    if not (knowledge_root / ".git").exists():
+    store = store if store is not None else FilesystemStore(knowledge_root, {})
+    if not store.capabilities.versioned:
         msg = (
-            f"no .git in {knowledge_root} - refusing to prune (removal is "
-            "git-only for recoverability)"
+            f"store at {knowledge_root} is not versioned - refusing to "
+            "prune (removal is git-only for recoverability)"
         )
         log.warning("prune-filename-entities: %s", msg)
         report.errors.append(msg)

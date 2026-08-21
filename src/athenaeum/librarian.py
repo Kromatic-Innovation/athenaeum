@@ -189,6 +189,7 @@ from athenaeum.registry import collect_handles
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
+from athenaeum.store import FilesystemStore
 from athenaeum.tiers import (
     Tier2ParseStats,
     partition_code_artifact_classifications,
@@ -487,35 +488,6 @@ def rebuild_index(wiki_root: Path) -> None:
     log.info(
         "Rebuilt _index.md with %d entities", sum(len(v) for v in by_type.values())
     )
-
-
-def git_snapshot(knowledge_root: Path, message: str) -> bool:
-    """Stage all changes and commit if there are any. Returns True if committed."""
-    if not (knowledge_root / ".git").exists():
-        log.warning("No .git in %s — skipping git snapshot", knowledge_root)
-        return False
-
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=str(knowledge_root),
-        capture_output=True,
-        text=True,
-    )
-    if not result.stdout.strip():
-        return False
-
-    subprocess.run(
-        ["git", "add", "-A"],
-        cwd=str(knowledge_root),
-        check=True,
-    )
-    subprocess.run(
-        ["git", "commit", "-m", message],
-        cwd=str(knowledge_root),
-        check=True,
-    )
-    log.info("Git commit: %s", message)
-    return True
 
 
 def _maybe_pull_before_run(
@@ -3009,8 +2981,7 @@ class RunContext:
             phase,
         )
         if not self.dry_run:
-            git_snapshot(
-                self.knowledge_root,
+            FilesystemStore(self.knowledge_root, {}).snapshot(
                 f"librarian: partial run (deadline {self.max_runtime}s exceeded "
                 f"during {phase})",
             )
@@ -3300,9 +3271,10 @@ def _run_git_vcs_io(ctx: RunContext) -> None:
 
     # Issue athenaeum#284: capture HEAD at run-start (before ANY commit site fires)
     # so the post-run push can detect whether the run produced any commit
-    # across librarian.git_snapshot, retire._commit_paths_if_staged, and
-    # the merge-only / cluster-only early-return paths. Per-call-site
-    # tracking would miss the commits inside the retire pass.
+    # across FilesystemStore.snapshot (issue athenaeum#978 — formerly
+    # librarian.git_snapshot), retire._commit_paths_if_staged, and the
+    # merge-only / cluster-only early-return paths. Per-call-site tracking
+    # would miss the commits inside the retire pass.
     ctx.head_at_start = _capture_head(ctx.knowledge_root) if not ctx.dry_run else None
 
 
@@ -3955,7 +3927,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             write_client = ctx.write_client
 
             if not ctx.dry_run:
-                git_snapshot(ctx.knowledge_root, "librarian: pre-processing snapshot")
+                FilesystemStore(ctx.knowledge_root, {}).snapshot(
+                    "librarian: pre-processing snapshot"
+                )
 
             # Issue athenaeum#337: a wall-clock timeout (the pre-dawn sweep's
             # `timeout`, which SIGTERMs then, after a grace, KILLs) would
@@ -4008,8 +3982,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     default_provider=ctx.provider,
                     files_processed=ctx.processed_count,
                 )
-                git_snapshot(
-                    ctx.knowledge_root,
+                FilesystemStore(ctx.knowledge_root, {}).snapshot(
                     f"librarian: partial run (interrupted after {ctx.processed_count} "
                     f"file(s), {ctx.total_created}C {ctx.total_updated}U "
                     f"{ctx.total_escalated}E {len(ctx.failed_files)}F)",
@@ -4575,7 +4548,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         f"({ctx.total_created}C {ctx.total_updated}U "
                         f"{ctx.total_escalated}E {len(ctx.failed_files)}F)"
                     )
-                    git_snapshot(ctx.knowledge_root, msg)
+                    FilesystemStore(ctx.knowledge_root, {}).snapshot(msg)
             finally:
                 for _s, _prev in _prev_handlers:
                     signal.signal(_s, _prev)

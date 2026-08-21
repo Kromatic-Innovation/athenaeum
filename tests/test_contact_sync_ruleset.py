@@ -12,6 +12,7 @@ recorded record fixtures.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -27,6 +28,18 @@ from athenaeum.registry import (
 from athenaeum.rules import load_rules, run_shape_rule_phase
 
 _RULESET = ("contact-sync-skip.yaml", "contact-sync-email-removal.yaml")
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args], cwd=str(root), capture_output=True, text=True, check=True
+    )
+
+
+def _git_init(root: Path) -> None:
+    _git(root, "init", "-b", "develop")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Contact Sync Test")
 
 
 def _copy_ruleset(knowledge_root: Path, *, live: bool = True) -> None:
@@ -191,6 +204,10 @@ class TestPackagedRuleset:
 
 class TestSkipRecordsAreDropped:
     def test_skip_record_is_dropped(self, tmp_path: Path) -> None:
+        # issue athenaeum#978 (S3): retirement now refuses against a store that
+        # is not versioned rather than falling back to a silent unlink, so
+        # this needs a real git repo to observe the dropped raw file.
+        _git_init(tmp_path)
         _copy_ruleset(tmp_path)
         raw_path = _write_record(
             tmp_path / "raw", "20260814T030000Z-9f3ac1d0.jsonl", _skip_record()

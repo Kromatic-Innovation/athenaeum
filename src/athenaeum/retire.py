@@ -72,6 +72,7 @@ from athenaeum.merge import (
     resolve_member_path,
 )
 from athenaeum.models import DEFAULT_SOURCE_TYPE, parse_frontmatter
+from athenaeum.store import FilesystemStore, Store
 from athenaeum.transcript_verify import verify_user_stated
 
 log = logging.getLogger(__name__)
@@ -441,6 +442,7 @@ def run_retire_pass(
     config: dict[str, object] | None = None,
     dry_run: bool = False,
     projects_root: Path | None = None,
+    store: Store | None = None,
 ) -> RetireReport:
     """Move non-contradictory raw into the wiki, hold contradictory, git rm moved.
 
@@ -458,6 +460,12 @@ def run_retire_pass(
         projects_root: Transcript root for origin verification (injectable in
             tests). Defaults to ``~/.claude/projects`` inside
             :func:`verify_user_stated`.
+        store: The Tier-A recoverability gate (design note §4.4 R1; issue
+            athenaeum#978), injectable so a test can supply a fake declaring
+            ``capabilities.versioned=False`` without a real git repo. Defaults
+            to a :class:`~athenaeum.store.FilesystemStore` over
+            *knowledge_root* — same effective check as the ad-hoc
+            ``(knowledge_root / ".git").exists()`` this replaces.
 
     Returns:
         A :class:`RetireReport` describing what was (or, on dry-run, would be)
@@ -565,11 +573,13 @@ def run_retire_pass(
         _log_report(report)
         return report
 
-    if not (knowledge_root / ".git").exists():
-        # Recovery is git-only: refuse to retire without a writable git repo.
+    store = store if store is not None else FilesystemStore(knowledge_root, {})
+    if not store.capabilities.versioned:
+        # Recovery is git-only (design note §4.4 R1): refuse to retire
+        # against a store that cannot produce a restore point.
         log.warning(
-            "retire: no .git in %s — refusing to retire raw (recovery is "
-            "git-only); leaving %d candidate file(s) in place",
+            "retire: store at %s is not versioned — refusing to retire raw "
+            "(recovery is git-only); leaving %d candidate file(s) in place",
             knowledge_root,
             len(report.moved),
         )

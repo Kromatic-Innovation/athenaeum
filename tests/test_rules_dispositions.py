@@ -229,6 +229,10 @@ class TestDispositionSchema:
 
 class TestDropDisposition:
     def test_drop_retires_the_file_and_counts_it(self, tmp_path: Path) -> None:
+        # issue athenaeum#978 (S3): retirement now refuses against a store that
+        # is not versioned rather than falling back to a silent unlink, so
+        # this needs a real git repo to observe the retired raw file.
+        _git_init(tmp_path)
         _write_rule(tmp_path / "rules", "r1.yaml", _drop_rule())
         raw_path = _write_raw_jsonl(
             tmp_path / "raw",
@@ -413,6 +417,11 @@ class TestRollupDisposition:
         assert "rollup of 3 record(s)" in records[0]["note"]
 
     def test_all_members_are_retired(self, tmp_path: Path) -> None:
+        # issue athenaeum#978 (S3): retirement now refuses against a store
+        # that is not versioned rather than falling back to a silent
+        # unlink, so this needs a real git repo to observe the rolled-up
+        # raw files retired.
+        _git_init(tmp_path)
         _write_rule(tmp_path / "rules", "r1.yaml", _rollup_rule())
         self._three_events(tmp_path)
         _run(tmp_path)

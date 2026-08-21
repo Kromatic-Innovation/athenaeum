@@ -6,6 +6,7 @@ field-correction fast path, docs/field-corrections.md).
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,18 @@ from athenaeum.models import EntityIndex, parse_frontmatter
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args], cwd=str(root), capture_output=True, text=True, check=True
+    )
+
+
+def _git_init(root: Path) -> None:
+    _git(root, "init", "-b", "develop")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Corrections Test")
 
 
 def _write_page(wiki: Path, filename: str, meta: dict, body: str = "Body.\n") -> Path:
@@ -2221,11 +2234,34 @@ class TestFallthroughHandoff:
 
 
 class TestRetirement:
-    def test_retire_without_git_unlinks(self, tmp_path: Path) -> None:
+    def test_retire_without_git_refuses(self, tmp_path: Path) -> None:
+        """issue athenaeum#978 (S3, Tier B): the old silent-``unlink``
+        fallback for a non-git *knowledge_root* is REMOVED (design note
+        §4.4 R1) — retirement now refuses, leaving the batch in place,
+        rather than silently discarding it unrecoverably."""
         batch = tmp_path / "batch.jsonl"
         batch.write_text("x\n")
-        assert retire_batch(tmp_path, batch) is True
-        assert not batch.exists()
+        assert retire_batch(tmp_path, batch) is False
+        assert batch.exists()
+
+    def test_retire_refuses_against_fake_declaring_no_recovery_capability(
+        self, tmp_path: Path
+    ) -> None:
+        """issue athenaeum#978 (S3, Tier B AC5): even with a REAL git repo
+        present, an injected store fake declaring neither ``versioned`` nor
+        ``purgeable`` (design note §4.4 R1) makes retirement refuse — proving
+        the gate is driven by the declared capability, not by probing
+        ``knowledge_root / ".git"`` directly."""
+        from tests.store_fakes import NoRecoveryStore
+
+        _git_init(tmp_path)
+        batch = tmp_path / "batch.jsonl"
+        batch.write_text("x\n")
+        _git(tmp_path, "add", "-A")
+        _git(tmp_path, "commit", "-m", "seed")
+
+        assert retire_batch(tmp_path, batch, store=NoRecoveryStore()) is False
+        assert batch.exists()
 
     def test_retire_with_git_removes_and_commits(self, tmp_path: Path) -> None:
         import subprocess
@@ -2415,6 +2451,10 @@ class TestVolumeBounds:
         assert batch.exists()
 
     def test_over_max_records_per_run_carries_second_batch(self, tmp_path: Path) -> None:
+        # issue athenaeum#978 (S3): retirement now refuses against a store
+        # that is not versioned rather than falling back to a silent
+        # unlink, so this needs a real git repo to observe batch1 retired.
+        _git_init(tmp_path)
         wiki = tmp_path / "wiki"
         _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
         _write_page(wiki, "q.md", {"uid": "person-b", "type": "person", "name": "B"})
