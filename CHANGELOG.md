@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Shape rules: nested-key `fields` resolution + one-level source-subdir
+  discovery (athenaeum#974 — unblocks athenaeum#940).** The two code gaps the
+  intended `log_group: hestia-lanes-*` rule needed:
+  - `MatchSpec.fields` now resolves a dotted-path key (`"session.log_group"`)
+    into a nested frontmatter/JSON value, via new
+    `athenaeum.rules.resolve_field_path`. Backward compatible by
+    construction: an exact top-level key (dots and all) always wins first,
+    so every pre-existing rule's plain `fields` key keeps matching exactly
+    as before.
+  - `discover_raw_files` now also globs one level below each
+    `raw/<source>/` directory (`raw/<source>/<subdir>/`), so a source that
+    organises its own drops into subdirectories is discovered. A nested
+    file's `RawFile.source` is still the top-level source name. The
+    `raw/auto-memory/` tree (or any configured
+    `recall.extra_intake_roots` entry) is excluded from this descent — it
+    already has its own dedicated discovery path
+    (`discover_auto_memory_files`).
+  See `docs/shape-rules.md` §3.2/§3.3.
+
 - **Memory model v6: usage sensor for tier movement, never-ingest class
   list, ingestion gate (athenaeum#968 — reshaped athenaeum#430, blocks athenaeum#718).**
   Three additive pieces, all off/inert by default:
