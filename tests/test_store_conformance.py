@@ -36,6 +36,7 @@ from athenaeum.store import (
     StoreConflictError,
     StoreKey,
     StoreKeyError,
+    append_line_durable,
 )
 from tests.store_fakes import InMemoryStore
 
@@ -433,3 +434,38 @@ class TestResolveStoreForClass:
         # surface_root_for_class's byte-identical-default guarantee.
         expected_root = storage.surface_root_for_class("secret", None, knowledge_root)
         assert expected_root == knowledge_root / "wiki"
+
+
+# ---------------------------------------------------------------------------
+# append_line_durable — issue athenaeum#980 (S5): the shared O_APPEND + fsync
+# primitive :meth:`FilesystemStore.append` and every collapsed per-module
+# ledger writer now delegate to, instead of each reimplementing it.
+# ---------------------------------------------------------------------------
+
+
+class TestAppendLineDurable:
+    def test_creates_parent_dir_and_file(self, tmp_path: Path) -> None:
+        path = tmp_path / "nested" / "dir" / "ledger.jsonl"
+        append_line_durable(path, b'{"a":1}\n')
+        assert path.read_bytes() == b'{"a":1}\n'
+
+    def test_accumulates_across_calls(self, tmp_path: Path) -> None:
+        path = tmp_path / "ledger.jsonl"
+        append_line_durable(path, b"first\n")
+        append_line_durable(path, b"second\n")
+        append_line_durable(path, b"third\n")
+        assert path.read_bytes() == b"first\nsecond\nthird\n"
+
+    def test_filesystem_store_append_matches_the_shared_primitive(self, tmp_path: Path) -> None:
+        """FilesystemStore.append and the free function must be the SAME
+        write, not two implementations that happen to agree today."""
+        knowledge_root = tmp_path / "knowledge_root"
+        (knowledge_root / "wiki").mkdir(parents=True)
+        store = FilesystemStore(knowledge_root, roots={_WIKI_SURFACE: knowledge_root / "wiki"})
+        key = StoreKey(surface=_WIKI_SURFACE, key="ledger.jsonl")
+        store.append(key, b"via-store\n")
+
+        direct_path = tmp_path / "direct" / "ledger.jsonl"
+        append_line_durable(direct_path, b"via-store\n")
+
+        assert (knowledge_root / "wiki" / "ledger.jsonl").read_bytes() == direct_path.read_bytes()

@@ -90,6 +90,7 @@ def compute_usage_report(
     *,
     cache_dir: Path | None = None,
     since: datetime | None = None,
+    wiki_root: Path | None = None,
 ) -> dict[str, ClaimUsage]:
     """Compute the per-claim usage report from the push-metrics ledgers.
 
@@ -99,10 +100,15 @@ def compute_usage_report(
     that appears in EITHER ledger within the window (an id pushed but never
     referenced yet has ``referenced_count=0``, ``last_referenced=None`` — the
     honest state, never fabricated).
+
+    *wiki_root* (issue athenaeum#980 AC4): forwarded to :func:`read_push_records`.
+    The reference-determination ledger keeps resolving under *cache_dir*
+    unchanged — see :func:`athenaeum.push_metrics.compute_baseline`'s
+    docstring for why.
     """
     from athenaeum.push_metrics import read_push_records, read_reference_records
 
-    pushes = read_push_records(cache_dir)
+    pushes = read_push_records(cache_dir, wiki_root=wiki_root)
     refs = read_reference_records(cache_dir)
 
     def _in_window(ts_raw: Any) -> bool:
@@ -161,14 +167,19 @@ def get_claim_usage(
     *,
     cache_dir: Path | None = None,
     since: datetime | None = None,
+    wiki_root: Path | None = None,
 ) -> ClaimUsage | None:
     """Single-claim usage lookup — THE documented interface issue athenaeum#718's
     tier-movement rules must call (see the module docstring). Returns
     ``None`` when *claim_id* has zero push or reference records in the
     window queried (an honest "never seen", never a fabricated zero-usage
     record for an id that was never pushed at all).
+
+    *wiki_root* (issue athenaeum#980 AC4): forwarded to :func:`compute_usage_report`.
     """
-    return compute_usage_report(cache_dir=cache_dir, since=since).get(claim_id)
+    return compute_usage_report(cache_dir=cache_dir, since=since, wiki_root=wiki_root).get(
+        claim_id
+    )
 
 
 def usage_report_to_list(report: dict[str, ClaimUsage]) -> list[dict[str, Any]]:

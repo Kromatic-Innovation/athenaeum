@@ -516,6 +516,7 @@ def process_batch_run(
                 owner=owner,
                 stats=t2_stats,
                 stop_reason=getattr(msg, "stop_reason", None),
+                wiki_root=wiki_root,
             )
             # athenaeum#476: a batch response TRUNCATED at max_tokens dropped every
             # entity — retry ONCE synchronously with a LARGER budget (the same
@@ -811,6 +812,7 @@ def process_batch_run(
                     st.raw.ref,
                     existing_body,
                     stop_reason=getattr(msg, "stop_reason", None),
+                    wiki_root=wiki_root,
                 )
                 if needs_fallback:
                     updated_body, esc = tier3_merge_full(
@@ -849,6 +851,7 @@ def process_batch_run(
                     AnthropicBatchClientBackend(effective_write_client),
                     usage=usage,
                     config=config,
+                    wiki_root=wiki_root,
                 )
                 if esc:
                     escalations.append(esc)

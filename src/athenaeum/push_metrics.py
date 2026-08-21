@@ -67,6 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.config import resolve_cache_dir
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 
@@ -122,25 +123,32 @@ def _now_iso() -> str:
 
 
 def _append_line(path: Path, line: str) -> None:
-    """Append one line to *path* durably (``O_APPEND`` + fsync).
-
-    Mirrors :func:`athenaeum.spend._append_line` exactly: a single small
-    ``O_APPEND`` write is atomic on local filesystems, so a crash can at worst
-    leave a torn TRAILING line (skipped by readers), never corrupt an
-    already-written record.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    try:
-        os.write(fd, line.encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    """Append one line to *path* durably (``O_APPEND`` + fsync), via
+    :func:`athenaeum.store.append_line_durable` — the single shared
+    implementation issue athenaeum#980 (S5) collapsed this module's copy onto
+    (design note §2.4 / §6.2)."""
+    append_line_durable(path, line.encode("utf-8"))
 
 
 def push_records_path(cache_dir: Path | None = None) -> Path:
     """Resolve the push-records ledger path: ``<cache_dir>/_push_records.jsonl``."""
     return resolve_cache_dir(cache_dir) / PUSH_RECORDS_FILENAME
+
+
+def durable_push_records_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
+    """The R3 ``operational``/``store-durable`` location (design note §5.2
+    table row 8; issue athenaeum#980 AC4): ``<wiki_root>/_push_records.jsonl``.
+
+    Same legacy-fallback contract as :func:`athenaeum.spend.durable_ledger_path`:
+    an existing installation's populated ``<cache_dir>/_push_records.jsonl``
+    keeps resolving there until migrated; a fresh or already-migrated store
+    resolves to the new, behind-the-seam location.
+    """
+    new_path = Path(wiki_root) / PUSH_RECORDS_FILENAME
+    legacy_path = push_records_path(cache_dir)
+    if new_path.exists() or not legacy_path.exists():
+        return new_path
+    return legacy_path
 
 
 def reference_records_path(cache_dir: Path | None = None) -> Path:
@@ -303,6 +311,7 @@ def record_push(
     record: PushRecord,
     *,
     cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
     config: dict[str, Any] | None = None,
 ) -> bool:
     """Append one push record to the durable ledger. Best-effort.
@@ -313,6 +322,10 @@ def record_push(
     swallowed and logged at warning level — a ledger write must NEVER break
     or slow the live recall path, but a silent failure here would produce the
     same "reads as zero forever" hazard athenaeum#568 fixed for the spend ledger.
+
+    *wiki_root*, when supplied, resolves the ledger behind the seam (issue
+    athenaeum#980 AC4) via :func:`durable_push_records_path`; omitted,
+    resolution is unchanged from before that issue.
     """
     try:
         from athenaeum.config import resolve_push_metrics_enabled
@@ -321,7 +334,11 @@ def record_push(
             return False
         if not record.session_id or not record.items:
             return False
-        path = push_records_path(cache_dir)
+        path = (
+            durable_push_records_path(wiki_root, cache_dir=cache_dir)
+            if wiki_root is not None
+            else push_records_path(cache_dir)
+        )
         _append_line(path, json.dumps(record.to_dict(), separators=(",", ":")) + "\n")
         return True
     except Exception as exc:  # noqa: BLE001 — must never break recall
@@ -334,9 +351,22 @@ def record_push(
         return False
 
 
-def read_push_records(cache_dir: Path | None = None) -> list[dict[str, Any]]:
-    """Read every push record. Tolerates a torn trailing line; never raises."""
-    path = push_records_path(cache_dir)
+def read_push_records(
+    cache_dir: Path | None = None, *, wiki_root: Path | None = None
+) -> list[dict[str, Any]]:
+    """Read every push record. Tolerates a torn trailing line; never raises.
+
+    *wiki_root*, when supplied, resolves via :func:`durable_push_records_path`
+    (issue athenaeum#980 AC4) — the SAME resolution :func:`record_push` uses, so a
+    read against a given store always finds exactly what the matching write
+    produced (never split across two locations). Omitted, resolution is
+    unchanged from before that issue.
+    """
+    path = (
+        durable_push_records_path(wiki_root, cache_dir=cache_dir)
+        if wiki_root is not None
+        else push_records_path(cache_dir)
+    )
     return _read_jsonl(path)
 
 
@@ -438,6 +468,7 @@ def determine_references(
     *,
     cache_dir: Path | None = None,
     projects_root: Path | None = None,
+    wiki_root: Path | None = None,
 ) -> ReferenceResult | None:
     """Determine which of *session_id*'s pushed ids were referenced afterward.
 
@@ -452,11 +483,15 @@ def determine_references(
     Returns ``None`` when there are no push records for this session (nothing
     to determine) or the transcript cannot be located (rolled off / never
     existed — an honest "cannot determine", never a fabricated 0 or 1).
+
+    *wiki_root* (issue athenaeum#980 AC4): forwarded to :func:`read_push_records`.
     """
     from athenaeum.transcript_verify import _iter_session_records, default_projects_root
 
     records = [
-        r for r in read_push_records(cache_dir) if r.get("session_id") == session_id
+        r
+        for r in read_push_records(cache_dir, wiki_root=wiki_root)
+        if r.get("session_id") == session_id
     ]
     if not records:
         return None
@@ -547,6 +582,7 @@ def run_reference_determination(
     cache_dir: Path | None = None,
     projects_root: Path | None = None,
     config: dict[str, Any] | None = None,
+    wiki_root: Path | None = None,
 ) -> ReferenceResult | None:
     """Determine + durably record one session's reference outcome. Best-effort.
 
@@ -555,6 +591,11 @@ def run_reference_determination(
     disabled, there is no session id, or :func:`determine_references` itself
     returns ``None``. Never raises — a reference-determination failure must
     not break ``session_end``.
+
+    *wiki_root* (issue athenaeum#980 AC4): forwarded to :func:`determine_references`
+    for the push-records read half only — the reference-determination WRITE
+    below stays under *cache_dir* (``_push_references.jsonl`` is not one of
+    the artifacts §5.2's table names for relocation).
     """
     try:
         from athenaeum.config import resolve_push_metrics_enabled
@@ -564,7 +605,7 @@ def run_reference_determination(
         if not session_id:
             return None
         result = determine_references(
-            session_id, cache_dir=cache_dir, projects_root=projects_root
+            session_id, cache_dir=cache_dir, projects_root=projects_root, wiki_root=wiki_root
         )
         if result is None:
             return None
@@ -718,6 +759,7 @@ def compute_baseline(
     cache_dir: Path | None = None,
     repo_root: Path | None = None,
     exclude_sessions: Iterable[str] | None = None,
+    wiki_root: Path | None = None,
 ) -> BaselineWindow:
     """Compute the push-precision baseline over ``[since, now]``.
 
@@ -750,9 +792,14 @@ def compute_baseline(
     be the full session id or an unambiguous prefix of exactly one known id
     (issue athenaeum#987); a value matching zero or more-than-one known
     session ids raises ``ValueError`` rather than silently excluding nothing.
+
+    *wiki_root* (issue athenaeum#980 AC4): forwarded to :func:`read_push_records`
+    for the push-records half of this window. The reference-determination
+    ledger (``_push_references.jsonl``) is a separate artifact §5.2's table
+    does not name, so it keeps resolving under *cache_dir* unchanged.
     """
     now = datetime.now(tz=timezone.utc)
-    pushes = read_push_records(cache_dir)
+    pushes = read_push_records(cache_dir, wiki_root=wiki_root)
     refs = _read_jsonl(reference_records_path(cache_dir))
     known_session_ids = {
         sid for r in (pushes + refs) if isinstance(sid := r.get("session_id"), str) and sid
@@ -956,6 +1003,7 @@ def sample_sessions(
     *,
     seed: int | None = None,
     exclude_sessions: Iterable[str] | None = None,
+    wiki_root: Path | None = None,
 ) -> list[str]:
     """Return up to *n* distinct session ids from the push-records ledger.
 
@@ -967,9 +1015,11 @@ def sample_sessions(
     :func:`compute_baseline`'s ``exclude_sessions`` — athenaeum#791): known-
     synthetic session ids are removed from the sampling pool entirely, so an
     excluded session can never be drawn into the sample.
+
+    *wiki_root* (issue athenaeum#980 AC4): forwarded to :func:`read_push_records`.
     """
     exclude_set = {s for s in (exclude_sessions or ()) if s}
-    records = read_push_records(cache_dir)
+    records = read_push_records(cache_dir, wiki_root=wiki_root)
     sessions = sorted(
         {
             sid
@@ -1041,7 +1091,7 @@ def build_coverage_worksheet(
     more-than-one known session ids raises ``ValueError`` rather than
     silently excluding nothing.
     """
-    records = read_push_records(cache_dir)
+    records = read_push_records(cache_dir, wiki_root=wiki_root)
     known_session_ids = {
         sid for r in records if isinstance(sid := r.get("session_id"), str) and sid
     }
@@ -1052,7 +1102,9 @@ def build_coverage_worksheet(
     if exclude_set:
         records = [r for r in records if r.get("session_id") not in exclude_set]
 
-    session_ids = sample_sessions(cache_dir, n, seed=seed, exclude_sessions=exclude_set)
+    session_ids = sample_sessions(
+        cache_dir, n, seed=seed, exclude_sessions=exclude_set, wiki_root=wiki_root
+    )
 
     by_session: dict[str, list[dict[str, Any]]] = {sid: [] for sid in session_ids}
     for rec in records:

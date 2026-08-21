@@ -886,7 +886,13 @@ def cmd_query_topics(args: argparse.Namespace) -> int:
         else None
     )
     config = load_config(knowledge_root)
-    for topic in extract_topics(args.prompt, timeout=args.timeout, config=config):
+    # Issue athenaeum#980 AC4: resolve the spend ledger behind the seam. Mirrors
+    # load_config's own "None falls back to ~/knowledge" default (this
+    # module's config.py DEFAULT_KNOWLEDGE_ROOT).
+    wiki_root = (knowledge_root or DEFAULT_KNOWLEDGE_ROOT.expanduser()) / "wiki"
+    for topic in extract_topics(
+        args.prompt, timeout=args.timeout, config=config, wiki_root=wiki_root
+    ):
         print(topic)
     return 0
 

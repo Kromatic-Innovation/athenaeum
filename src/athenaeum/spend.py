@@ -78,8 +78,11 @@ repricing reports a corrected number and never rewrites history. Rows with no
 per-model attribution stay *unpriceable* — counted and reported, never dropped
 and never priced at zero.
 
-**Layering:** L3 service. Module scope imports only :mod:`athenaeum.config`
-(L2); ``athenaeum.models.TokenUsage`` is a ``TYPE_CHECKING``-only import
+**Layering:** L3 service. Module scope imports :mod:`athenaeum.config` (L2)
+and, as of issue athenaeum#980 (S5), :mod:`athenaeum.store` (L0/L1, for the
+shared :func:`~athenaeum.store.append_line_durable` primitive — strictly
+DOWNWARD, so no cycle). ``athenaeum.models.TokenUsage`` is a
+``TYPE_CHECKING``-only import
 (the type is never constructed here — callers pass their own accumulator in)
 so this module carries no MODULE-SCOPE runtime dependency on
 :mod:`athenaeum.models`. The athenaeum#788 reprice path takes a FUNCTION-level
@@ -96,12 +99,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from athenaeum.config import resolve_cache_dir
+from athenaeum.store import append_line_durable
 
 if TYPE_CHECKING:  # avoid an import cycle at runtime (models imports nothing here)
     from athenaeum.models import TokenUsage
@@ -158,22 +161,50 @@ def default_ledger_path(cache_dir: Path | None = None) -> Path:
     return Path(base) / LEDGER_FILENAME
 
 
+def durable_ledger_path(wiki_root: Path, *, cache_dir: Path | None = None) -> Path:
+    """The R3 ``operational``/``store-durable`` location (design note §5.2
+    table row 8; issue athenaeum#980 AC4): ``<wiki_root>/spend.jsonl``, alongside
+    every other operational ledger this codebase already keeps behind the
+    seam (``_calibration.jsonl``, ``_axiom_governance.jsonl``, ...).
+
+    Backward-compatible with an on-disk store that pre-dates this move: if
+    the legacy ``<cache_dir>/spend.jsonl`` already has records and the new
+    location does not yet exist, this still resolves to the LEGACY path —
+    an existing installation keeps reading/writing exactly where it always
+    has until an explicit migration copies the file forward. A fresh store
+    (neither path populated yet) and an already-migrated store (the new path
+    already exists) both resolve to the new, behind-the-seam location.
+    """
+    new_path = Path(wiki_root) / LEDGER_FILENAME
+    legacy_path = default_ledger_path(cache_dir)
+    if new_path.exists() or not legacy_path.exists():
+        return new_path
+    return legacy_path
+
+
 def resolve_ledger_path(
     config: dict[str, Any] | None = None,
     *,
     cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
 ) -> Path:
     """Resolve the active ledger path: explicit override else the default.
 
     Honours ``spend.ledger_path`` / ``ATHENAEUM_SPEND_LEDGER`` (a full file
-    path); otherwise ``<cache_dir>/spend.jsonl``. Chiefly a test/relocation
-    seam — the common case leaves it unset and writes under the cache dir.
+    path) first. Otherwise: when *wiki_root* is supplied, resolves via
+    :func:`durable_ledger_path` (issue athenaeum#980 AC4 — behind the seam,
+    with the legacy-store fallback that function documents); when *wiki_root*
+    is omitted (every caller this slice did not migrate), behavior is
+    UNCHANGED from before athenaeum#980 — ``<cache_dir>/spend.jsonl``, so an
+    un-migrated caller's resolution is byte-for-byte identical to today.
     """
     from athenaeum.config import resolve_spend_ledger_path
 
     override = resolve_spend_ledger_path(config)
     if override is not None:
         return override
+    if wiki_root is not None:
+        return durable_ledger_path(wiki_root, cache_dir=cache_dir)
     return default_ledger_path(cache_dir)
 
 
@@ -320,19 +351,11 @@ def build_record(
 
 
 def _append_line(path: Path, line: str) -> None:
-    """Append one line to *path* durably (``O_APPEND`` + fsync).
-
-    A single small ``O_APPEND`` write is atomic on local filesystems, so a
-    crash can at worst leave a torn TRAILING line — which the reader skips —
-    but never corrupts an already-written record. Creates the parent dir.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    try:
-        os.write(fd, line.encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    """Append one line to *path* durably (``O_APPEND`` + fsync), via
+    :func:`athenaeum.store.append_line_durable` — the single shared
+    implementation issue athenaeum#980 (S5) collapsed this module's copy onto
+    (design note §2.4 / §6.2)."""
+    append_line_durable(path, line.encode("utf-8"))
 
 
 def record_spend(
@@ -344,6 +367,7 @@ def record_spend(
     files_processed: int | None = None,
     config: dict[str, Any] | None = None,
     cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
     ledger_path: Path | None = None,
 ) -> bool:
     """Append one spend record for a finished pipeline run. Best-effort.
@@ -352,6 +376,10 @@ def record_spend(
     nothing (no calls and no tokens). Every failure is swallowed and logged at
     debug level: a ledger write must NEVER break or slow the run it measures.
     Returns ``True`` when a record was written.
+
+    *wiki_root*, when supplied, resolves the ledger behind the seam (issue
+    athenaeum#980 AC4) via :func:`resolve_ledger_path`; omitted, resolution is
+    unchanged from before that issue.
     """
     try:
         from athenaeum.config import resolve_spend_ledger_enabled
@@ -369,7 +397,7 @@ def record_spend(
             files_processed=files_processed,
         )
         target = ledger_path if ledger_path is not None else resolve_ledger_path(
-            config, cache_dir=cache_dir
+            config, cache_dir=cache_dir, wiki_root=wiki_root
         )
         _append_line(target, json.dumps(record, separators=(",", ":")) + "\n")
         return True
@@ -401,6 +429,7 @@ def record_spend_per_knob_provider(
     files_processed: int | None = None,
     config: dict[str, Any] | None = None,
     cache_dir: Path | None = None,
+    wiki_root: Path | None = None,
     ledger_path: Path | None = None,
 ) -> bool:
     """Split *usage* into one ledger row PER DISTINCT PROVIDER actually used
@@ -461,6 +490,7 @@ def record_spend_per_knob_provider(
             files_processed=files_processed,
             config=config,
             cache_dir=cache_dir,
+            wiki_root=wiki_root,
             ledger_path=ledger_path,
         )
 
@@ -522,6 +552,7 @@ def record_spend_per_knob_provider(
             files_processed=files_processed if provider == default_provider else None,
             config=config,
             cache_dir=cache_dir,
+            wiki_root=wiki_root,
             ledger_path=ledger_path,
         )
         wrote_any = wrote_any or wrote

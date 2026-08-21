@@ -4157,6 +4157,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     run_type="librarian",
                     default_provider=ctx.provider,
                     files_processed=ctx.processed_count,
+                    wiki_root=ctx.wiki_root,
                 )
                 FilesystemStore(ctx.knowledge_root, {}).snapshot(
                     f"librarian: partial run (interrupted after {ctx.processed_count} "
@@ -4811,6 +4812,8 @@ def _stamp_unclassified_claim_kinds(
     client: Any,
     config: dict[str, object] | None,
     usage: TokenUsage | None,
+    *,
+    wiki_root: Path | None = None,
 ) -> None:
     """Stamp ``claim_kind:`` onto each not-yet-classified auto-memory file (athenaeum#742).
 
@@ -4868,7 +4871,7 @@ def _stamp_unclassified_claim_kinds(
         path = getattr(am, "path", None)
         if path is None:
             continue
-        kind = stamp_claim_kind(path, client, config=config, usage=usage)
+        kind = stamp_claim_kind(path, client, config=config, usage=usage, wiki_root=wiki_root)
         if kind:
             am.claim_kind = kind
             stamped += 1
@@ -4968,7 +4971,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         # — mirrors every other LLM-bearing step in this phase, which is
         # already skipped above for dry-run.
         _stamp_unclassified_claim_kinds(
-            auto_memory_files, ctx.classify_client, ctx.config, ctx.usage
+            auto_memory_files, ctx.classify_client, ctx.config, ctx.usage, wiki_root=ctx.wiki_root
         )
 
     # Issue athenaeum#463 (slice D of athenaeum#460): the nightly run's own delta
@@ -5331,6 +5334,7 @@ def _run_finalize_phase(ctx: RunContext) -> int:
             run_type="librarian",
             default_provider=ctx.provider,
             files_processed=ctx.files_processed_count,
+            wiki_root=ctx.wiki_root,
         )
         if not _ledger_written and (ctx.usage.api_calls > 0 or ctx.usage.total_tokens > 0):
             from athenaeum.config import resolve_spend_ledger_enabled
@@ -5502,7 +5506,9 @@ def _run_finalize_phase(ctx: RunContext) -> int:
 
             _advisory = build_advisory(
                 backlog=len(discover_raw_files(ctx.raw_root, ctx.config)),
-                ledger_records=spend.read_ledger(spend.resolve_ledger_path(ctx.config)),
+                ledger_records=spend.read_ledger(
+                    spend.resolve_ledger_path(ctx.config, wiki_root=ctx.wiki_root)
+                ),
                 warn_days=resolve_drain_warn_days(ctx.config),
                 this_run_files=ctx.files_processed_count,
                 config=ctx.config,
@@ -6819,7 +6825,7 @@ def session_end(
         from athenaeum import push_metrics
 
         push_metrics.run_reference_determination(
-            session, cache_dir=cache_dir, config=config
+            session, cache_dir=cache_dir, config=config, wiki_root=wiki_root
         )
 
     return SessionEndResult(

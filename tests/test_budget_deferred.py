@@ -774,11 +774,11 @@ class TestRunLevelBudgetThreading:
         )
         monkeypatch.setattr(
             "athenaeum.merge.detect_contradictions",
-            lambda members, client, config=None, usage=None: detected,
+            lambda members, client, config=None, usage=None, wiki_root=None: detected,
         )
         monkeypatch.setattr(
             "athenaeum.merge.propose_resolution",
-            lambda result, members, client, usage=None: SimpleNamespace(
+            lambda result, members, client, usage=None, wiki_root=None: SimpleNamespace(
                 action="keep_a", confidence=0.0
             ),
         )

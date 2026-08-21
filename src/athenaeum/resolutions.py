@@ -1581,7 +1581,9 @@ def _fallback(rationale: str, *, incomplete: bool = False) -> ResolutionProposal
     )
 
 
-def _parse_response(text: str) -> "ResolutionProposal | MergeProposal":
+def _parse_response(
+    text: str, *, wiki_root: Path | None = None
+) -> "ResolutionProposal | MergeProposal":
     """Parse the resolver's JSON output.
 
     Returns :class:`MergeProposal` when ``action="propose_merge"``;
@@ -1602,7 +1604,9 @@ def _parse_response(text: str) -> "ResolutionProposal | MergeProposal":
     # handling below. Lazy import keeps pydantic off the import graph until use.
     from athenaeum.llm_schemas import observe_resolutions
 
-    observe_resolutions(payload, call_site="resolutions._parse_response")
+    observe_resolutions(
+        payload, call_site="resolutions._parse_response", wiki_root=wiki_root
+    )
 
     action = str(payload.get("action", "")).strip()
     if action not in _VALID_ACTIONS:
@@ -1679,6 +1683,8 @@ def propose_resolution(
     client: "LLMBackend | None",
     config: dict[str, Any] | None = None,
     usage: TokenUsage | None = None,
+    *,
+    wiki_root: Path | None = None,
 ) -> "ResolutionProposal | MergeProposal":
     """Run one resolver call against a detected contradiction.
 
@@ -1869,7 +1875,7 @@ def propose_resolution(
         # A parseable object on this attempt — route it normally. This is the
         # common path; the retry only triggers on the no-JSON branch below.
         if extract_json_object(text) is not None:
-            return _parse_response(text)
+            return _parse_response(text, wiki_root=wiki_root)
 
         # No parseable JSON. Retry once with a strict-JSON reminder before
         # letting _parse_response emit the deterministic fallback.
@@ -1887,7 +1893,7 @@ def propose_resolution(
 
     # Attempts exhausted without a parseable object — _parse_response emits the
     # ``resolver-returned-no-json`` fallback (the last resort, as intended).
-    return _parse_response(text)
+    return _parse_response(text, wiki_root=wiki_root)
 
 
 # ---------------------------------------------------------------------------
