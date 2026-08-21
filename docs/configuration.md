@@ -58,7 +58,7 @@ See [exit-codes.md](exit-codes.md) for the full `athenaeum run` exit-code table 
 | Operational markers | — | — | `librarian.operational_markers` | `[]` | Lower-cased content substrings that, when `>= 2` are present in a raw auto-memory file, classify it as ephemeral operational boilerplate (athenaeum#280). Conservative multi-signal gate; default-empty so nothing fires until an operator opts in. Lower-precedence than an explicit `ephemeral: true` frontmatter flag or an `ephemeral_scopes` match. |
 | Cluster-cohesion floor | — | — | `librarian.min_cluster_cohesion` | `0.0` | Cohesion floor that suppresses low-cohesion cross-scope over-clusters (athenaeum#281). A cluster is withheld only when its `cluster_centroid_score` is strictly below this value **AND** it spans `>= min_cluster_cohesion_scopes` distinct origin scopes. Default `0.0` = OFF (the cutoff is corpus-specific); `0.47` is recommended for the reference corpus. Suppressed clusters leave their raw members in place (not retired). |
 | Cohesion-floor scope count | — | — | `librarian.min_cluster_cohesion_scopes` | `4` | Minimum distinct `origin_scope` count a low-cohesion cluster must span before the `min_cluster_cohesion` floor suppresses it (athenaeum#281). Legitimate pages span 1-3 scopes and over-clusters span 8-17, so `4` is the clean margin — a low-cohesion single-/few-scope cluster is never false-suppressed. Inert while `min_cluster_cohesion` is `0.0`. |
-| Merge-proposal source cap | — | `ATHENAEUM_MAX_MERGE_SOURCES` | `librarian.max_merge_sources` | `25` | Source-count cap on resolver merge proposals (athenaeum#400). A `propose_merge` folding more than N sources is a degenerate over-cluster (the incident: 1,600+ sources at ~0.33 confidence, re-proposed every run), not a pairwise/small-group refinement — it is dropped before it reaches `wiki/_pending_merges.md` (neither proposed nor escalated as a pending question). Default `25` (active, anchored to the cross-scope cluster-size cap); set `0` to disable. The cohesion floor above already withholds low-cohesion over-clusters upstream — this catches the *high*-cohesion degenerates it doesn't. |
+| Merge-proposal source cap | — | `ATHENAEUM_MAX_MERGE_SOURCES` | `librarian.max_merge_sources` | `5` | Source-count cap on resolver merge proposals (athenaeum#400). A `propose_merge` folding more than N sources is a degenerate over-cluster (the incident: 1,600+ sources at ~0.33 confidence, re-proposed every run), not a pairwise/small-group refinement — it is dropped before it reaches `wiki/_pending_merges.md` (neither proposed nor escalated as a pending question). Default `5` (active) — tightened from `25` (athenaeum#421, settled design); set `0` to disable. The cohesion floor above already withholds low-cohesion over-clusters upstream — this catches the *high*-cohesion degenerates it doesn't. |
 | Merge-proposal confidence floor | — | `ATHENAEUM_MIN_MERGE_CONFIDENCE` | `librarian.min_merge_confidence` | `0.0` | Optional confidence floor on resolver merge proposals (athenaeum#400): a proposal below this confidence is dropped before `wiki/_pending_merges.md`. Default `0.0` = OFF (the review bar is corpus-specific), opt-in via yaml. Complements `max_merge_sources` — the cap catches over-clusters by shape, this keeps low-confidence small merges out of the queue. A parsed env value is authoritative — `0` disables the floor even when yaml sets one (athenaeum#524); a malformed value logs a WARNING and falls back (athenaeum#528). |
 | Merge-proposal cohesion floor | — | `ATHENAEUM_MIN_MERGE_MEAN_SIMILARITY` | `librarian.min_merge_mean_similarity` | `0.6` | Mean-pairwise-cosine floor on resolver merge proposals (athenaeum#421): a proposal whose cluster mean pairwise cosine is strictly below this is suppressed before `wiki/_pending_merges.md`. Unlike the corpus-specific confidence floor above, this cohesion gate is **active by default**. `0` (or negative) disables it. A malformed env value logs a WARNING and falls back (athenaeum#528). |
 | Page warn size | — | `ATHENAEUM_PAGE_WARN_BYTES` | `librarian.page_warn_bytes` | `8192` | Soft byte threshold above which a wiki entity page is reported as a **warn**-level oversized page in `athenaeum status` (athenaeum#310). Warn-only: nothing is blocked or modified. A long page usually means poorly-factored knowledge that should be split into linked sub-entities. `bool` / non-int / `<= 0` values fall through to the default. |
@@ -162,6 +162,44 @@ is its own self-contained YAML file, not a config-table entry.
 |---|---|---|---|---|
 | Records per run | `ATHENAEUM_SHAPE_RULES_MAX_RECORDS_PER_RUN` | `librarian.shape_rules.max_records_per_run` | `50000` | Run-level cap on candidate raw files the engine evaluates against rules, mirroring `librarian.corrections.max_records_per_run`. Files beyond the cap are untouched and retried next run. |
 | Phase runtime share | `ATHENAEUM_SHAPE_RULES_RUNTIME_SHARE` | `librarian.shape_rules.runtime_share` | `0.05` | Fraction of `librarian.max_runtime` this phase may spend, mirroring `librarian.corrections.runtime_share`'s mechanism exactly (own budget — an overrun in one deterministic phase never starves the other). Checked at FILE boundaries only (never mid-file). |
+
+### Rule proposals (`librarian.rule_proposals.*`, athenaeum#905 / athenaeum#1063)
+
+The librarian's rule-proposal detector/drafter (`athenaeum.rule_proposals`,
+see [`shape-rules.md` §10](shape-rules.md)) — counts records the shape-rule
+engine above deferred to the reasoning tiers, drafts a candidate rule from
+exemplars once a shape crosses threshold, and puts it on the
+`list_pending_decisions` surface for a human to approve or reject. Wired
+into the nightly `athenaeum run` loop (issue athenaeum#1063,
+`librarian._run_rule_proposal_phase`) — **OFF by default.** Set
+`librarian.rule_proposals.enabled: true` (or the env var below) to turn it
+on; left off, the phase never builds a client, never reads the disposition
+ledger, and makes zero LLM calls.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Enabled | `ATHENAEUM_RULE_PROPOSALS_ENABLED` | `librarian.rule_proposals.enabled` | `false` | **Master gate.** With this off, `_run_rule_proposal_phase` returns immediately every run — no new spend, no behavior change. This wiring adds a NEW unattended model-drafting call to the nightly run, so it defaults off until an operator opts in. |
+| Threshold | `ATHENAEUM_RULE_PROPOSALS_THRESHOLD` | `librarian.rule_proposals.threshold` | `50` | Deferred-record count (per `(source, key_fingerprint)` shape, within the window below) that must be crossed before a shape is drafted. Also doubles as the phase's cadence control — see the note below. |
+| Window | `ATHENAEUM_RULE_PROPOSALS_WINDOW_DAYS` | `librarian.rule_proposals.window_days` | `30` | Only disposition rows whose `at` timestamp falls within this many days of "now" count toward the threshold. |
+| Exemplar count (K) | `ATHENAEUM_RULE_PROPOSALS_EXEMPLAR_COUNT` | `librarian.rule_proposals.exemplar_count` | `5` | How many readable raw records of a detected shape are embedded in the one drafting call. |
+
+Cadence note: once enabled, there is no separate once-per-period stamp —
+the `threshold` above IS the cadence control, together with the detector's
+own per-shape idempotency (a shape already carrying a pending or rejected
+proposal is never re-drafted). `run_shape_rule_phase` has no once-per-period
+guard beyond its own runtime share either, so there is nothing further to
+mirror.
+
+The drafting call's model/`max_tokens`/`thinking` route through the standard
+`resolve_model`/`resolve_max_tokens`/`resolve_thinking` knobs under knob name
+`rule_proposals` — same precedence as every other stage above (env > yaml >
+code default):
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Model | `ATHENAEUM_RULE_PROPOSALS_MODEL` | `models.rule_proposals` | `claude-opus-4-8` | Drafting-call model — T2's tier: drafting a rule is a judgment call, not cheap classification. |
+| Max tokens | `ATHENAEUM_RULE_PROPOSALS_MAX_TOKENS` | `max_tokens.rule_proposals` | `4096` | Output-token budget for the drafting call. |
+| Thinking | `ATHENAEUM_RULE_PROPOSALS_THINKING` | `thinking.rule_proposals` | `adaptive` | Thinking posture for the drafting call. |
 
 ### Run lock (single-machine concurrency guard, athenaeum#309)
 
@@ -306,6 +344,42 @@ Configuring `backlog_files` / `backlog_bytes` / `interval_hours` is what
 makes reasoning respond to actual load instead of a fixed clock. `athenaeum
 ingest` **without** `--if-triggered` is unaffected by any of this — it is the
 pre-existing on-demand poke (issue athenaeum#349) and always compiles.
+
+### Lock-free public evaluation (`--evaluate-only`, athenaeum#1001)
+
+`athenaeum ingest --evaluate-only` runs ONLY the trigger evaluation above —
+prints a one-line JSON verdict and returns — and, unlike `--if-triggered`,
+**never compiles even when a trigger fires** and never takes
+`.athenaeum.lock` (no lock is even considered):
+
+```
+athenaeum ingest --evaluate-only
+```
+
+```json
+{"command": "ingest", "mode": "evaluate-only", "fired": true, "trigger": "backlog-files", "exit_code": 2}
+```
+
+Exit codes mirror this repo's existing dry-run-found-something ternary
+(`athenaeum decay`, `athenaeum repair`): `0` — no trigger fired, `1` — an
+error occurred evaluating, `2` — a trigger fired (`trigger` names which
+one, same reasons as the table above). Cannot be combined with
+`--if-triggered`.
+
+This is the public surface a deployed evaluator (for example a
+launchd/cron unit polling on a schedule this repo does not own, such as
+`com.kromatic.athenaeum-reasoning-triggers`) should poll to decide whether
+to invoke `athenaeum ingest --if-triggered` next — instead of importing
+this module's private stamp symbols
+(`athenaeum.librarian.REASONING_TRIGGER_STAMP_NAME`,
+`athenaeum.librarian._load_timestamp_stamp`) directly, which breaks
+silently on any internal rename of those symbols. Both modes read the
+SAME reasoning-trigger stamp through the SAME shared internal helper, so
+the two can never drift out of sync — see
+`tests/test_ingest_reindex.py::TestIngestEvaluateOnlyCLI` for the tests
+proving the lock-free guarantee, the shared stamp path, and that the
+public mode's answer survives a simulated rename of those private symbols
+(issue athenaeum#1001's ACs).
 
 ## Surface-divergence guard (athenaeum#963)
 
@@ -966,6 +1040,49 @@ the ledger opts back in explicitly (see `tests/test_llm_schemas.py`'s
 wins over the env var per `resolve_cache_dir`'s precedence) and/or
 `monkeypatch.setenv("ATHENAEUM_SCHEMA_OBSERVATIONS_ENABLED", "1")`.
 
+### Per-contract strictness decision (M17 phase 2a, athenaeum#1035)
+
+Phase 1 above validates every in-scope contract against a uniform
+`extra="allow"` posture and never changes pipeline behavior. athenaeum#1035 (split
+from athenaeum#608) decides a per-contract posture for the two contracts with a
+measured, representative window — `tiers.tier2` and `tiers.tier3-merge` —
+recorded in code as `athenaeum.llm_schemas.STRICT_CONTRACTS`. The other four
+contracts (`query_topics`, `claim_kind`, `contradictions`, `resolutions`)
+remain phase 1 observe-only; the three C4-downstream ones are still starved of
+a representative sample and stay on athenaeum#608.
+
+Window measured: `~/.cache/athenaeum/_llm_schema_observations.jsonl`,
+2026-08-05T13:12Z to 2026-08-20T10:58Z, 3,634 records, 0 unparseable:
+
+| contract | records | mismatches | rate | mismatch classes |
+|---|---:|---:|---:|---|
+| `tiers.tier3-merge` | 2,961 | 4 | 0.135% | extra-keys 3 (`[].text2`, `[].append_section` x2), missing-required 1 (`0.op: Field required`) |
+| `tiers.tier2` | 150 | 0 | 0% | — |
+
+Decision, applying athenaeum#608's framework ("only missing-required mismatches
+justify rejection; extra keys are a different signal"):
+
+- **`tiers.tier2`** — 0% mismatch of any class at n=150: `Tier2Entity` tightens
+  from `extra="allow"` to `extra="forbid"`. Forbidding costs nothing observed
+  today and gives real protection against a silently-added field going
+  unnoticed. `name` stays the only required field.
+- **`tiers.tier3-merge`** — the two extra-key shapes observed (`[].text2`,
+  `[].append_section`) are real, repeated traffic, not sampling noise — the
+  framework's "different signal", not grounds for rejection. `MergeOp` stays
+  `extra="allow"`. The single missing-required hit (`0.op: Field required`)
+  confirms `op` stays required; that class is already enforced downstream —
+  `apply_merge_ops` raises `MergeOpsError` on a missing/unrecognized `op`
+  kind, and `parse_merge_ops_response` turns that into the guaranteed
+  no-worse-than-status-quo full-echo fallback.
+
+This is a schema-shape decision only: `observe()` for these two contracts
+still never raises to its caller and never gates the pipeline — the tightened
+`tiers.tier2` schema changes how a *future* mismatch is classified in the
+observation log, not whether today's response is accepted. No new
+`athenaeum.yaml` key or env var is introduced; the decision is a hardcoded,
+documented constant (`STRICT_CONTRACTS`), matching how `INSTRUMENTED_CONTRACTS`
+above is expressed.
+
 ## Contradiction detection and resolver
 
 Detection knobs live under the `contradiction:` yaml block; resolver behavior
@@ -1142,6 +1259,42 @@ build time, never a silent fallback:
 deployment with no `sensitivity:` block behaves exactly as it does today.
 The example at the end of this file is not amended for this section.
 
+### `storage.mapping` completeness lint + the deferred pair check (athenaeum#993)
+
+S5 of the design note's §9 — a lint over `storage.mapping`, not a new config
+knob. `src/athenaeum/sensitivity_lint.py` implements two checks the note
+defers rather than enforcing inside the resolver:
+
+1. **Completeness** — every sensitivity class name a scanned corpus's
+   content still carries (its own `sensitivity_class:` frontmatter field —
+   this lint's own scanning convention, see the module docstring) must have
+   a live `storage.mapping` entry naming a real adapter
+   (`athenaeum.storage.available_adapters`). A class with no entry falls
+   through, silently, to the default `wiki-markdown-embedded` surface at
+   read time — the exact footgun §6 point 2 (below) names; a class mapped to
+   an adapter name that does not exist already raises `StorageConfigError`
+   at read time, and this lint catches both earlier, at config-change time.
+2. **The deferred `(read_policy, storage adapter)` pair check** (§7
+   Decision D4) — a class whose resolved `read_policy.access` is
+   `confidential` or `personal` but whose mapped adapter's
+   `corpus_policy.embedded` is `True` is reported as advisory: the
+   read-policy layer believes the class is restricted while storage routes
+   it into the ordinary embedded corpus.
+
+Completeness findings and the D4 pair-check finding are kept as **distinct,
+separately-severity kinds** — the pair check is advisory and never blocks a
+gate on its own. `athenaeum storage lint-mapping --path <knowledge-root>
+[--corpus <root>] [--json]` is the CLI entry point (`src/athenaeum/
+_cmd_storage.py`); it exits non-zero only on a completeness finding. It is
+standalone — not wired into any existing CI check by this slice. The lint
+never scans a hardcoded or environment-derived path (`--corpus` always comes
+from the caller, defaulting to `--path`'s knowledge root) and never writes
+anything — both checks are read-only over config and the corpus tree.
+Committed synthetic fixtures under `tests/fixtures/sensitivity_mapping/`
+drive `tests/test_sensitivity_lint.py`. See
+[`docs/sensitivity-class-vocabulary.md`](sensitivity-class-vocabulary.md) §6
+point 2 / §7 Decision D4 / §9 S5 for the full rationale.
+
 ## Sensitivity routing (athenaeum#949, slice 1/4 — config)
 
 The routing config surface specified in
@@ -1277,6 +1430,83 @@ it (§6/AC10).
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
 | Authority manifest path | `ATHENAEUM_AUTHORITY_MANIFEST` | `librarian.authority_manifest_path` | `<knowledge_root>/authority-manifest.yaml` | Path to the authority manifest mapping authoritative LIVE sources. Relative yaml values resolve against the knowledge root; a missing file is treated as "no manifest configured". Full reference: [`docs/authority-manifest.md`](authority-manifest.md). |
+
+### Never-ingest classes (athenaeum#968)
+
+The authority manifest also carries an optional `never_ingest_classes:` list
+— write-refusal classes BOTH intake paths (auto-memory and entity tier)
+consult, extending the manifest mechanism above rather than adding a second
+config surface. Empty or absent by default (a manifest written before
+athenaeum#968, or one that never mentions the key, enforces nothing new). Two
+classes are recognised:
+
+- `mirror-of-live-source` — reuses the manifest's own topic-index lookup
+  (the same one `authority lint` uses) to refuse an intake file whose
+  `topics`/`tags`/`name` names a topic a `sources:` entry already owns.
+- `pending-state-todo` — refuses an intake file that asserts the current
+  presence/absence of something in an external artifact (an explicit
+  `pending_state: true` flag, or a phrase like "has it been added" / "still
+  needs" / "todo:").
+
+Enforced at each tier's own COMPILE choke point, never at discovery:
+auto-memory in `_run_auto_memory_phase` (`src/athenaeum/librarian.py`), right
+after `discover_auto_memory_files` and before clustering; entity tier in
+`process_one`, right after each raw file's frontmatter is parsed and before
+Tier 0 passthrough. Deliberately never inside
+`athenaeum.intake.discover_raw_files` itself — that function's return value
+is read directly, unmodified, by `backlog_price_sheet.py` /
+`ordinary_night_table.py` (issue athenaeum#713's backlog-count instruments, held
+pending an operator decision), so gating at discovery would silently move
+those numbers. A refused file (either tier) is excluded from that run's
+compilation and appended, ids-only, to
+`<cache_dir>/_never_ingest_refusals.jsonl` (never deleted from disk; it is
+re-evaluated on the next run). See `athenaeum.never_ingest` and
+[`docs/authority-manifest.md`](authority-manifest.md#never-ingest-classes-athenaeum968)
+for the full mechanism.
+
+## Usage report (athenaeum#968)
+
+A per-claim usage signal computed from the push-metrics ledgers
+(`athenaeum#711`/`athenaeum#734`): how many times a pushed id has been pushed, how
+many times it was actually referenced afterward, and when it was last
+referenced. Purely a REPORT — it makes no tier-movement decision itself.
+
+```
+athenaeum usage-report [--claim-id ID] [--since 7d] [--json]
+```
+
+ids-only output (same redaction discipline as `push-metrics`): every field
+is an id, a count, or a timestamp, never claim content.
+
+**The interface issue athenaeum#718's tier-movement rules must consume** —
+`athenaeum.usage_report.get_claim_usage(claim_id, cache_dir=...)` (single
+claim) or `compute_usage_report(cache_dir=...)` (bulk). Neither reads
+`_push_records.jsonl`/`_push_references.jsonl` directly, and no other module
+should either — this is the one seam through which usage data crosses to a
+tier-movement consumer.
+
+## Ingestion gate (athenaeum#968) — off by default
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Ingestion gate enabled | `ATHENAEUM_INGESTION_GATE_ENABLED` | `librarian.ingestion_gate_enabled` | `false` | When `true`, `_run_auto_memory_phase` checks push-metrics precision instrumentation before compiling any auto-memory intake this run — see below for "healthy". |
+
+"Healthy" is a **liveness** check, not a quality bar: push-metrics
+instrumentation is enabled (`push_metrics.enabled`) AND at least one
+reference-determination record exists in the ledger ever (precision is
+therefore computable, whatever its value). A fresh install with the gate
+turned on and zero sessions run yet reads as unhealthy until its first
+session completes — intentional and self-healing, not a bug; the gate stays
+off until an operator opts in. When unhealthy, the WHOLE auto-memory
+compilation phase is skipped for that run (no partial-volume throttle is
+implemented — the issue names no threshold to throttle against); nothing on
+disk is touched, and the same raw intake is re-evaluated next run. See
+`athenaeum.ingestion_gate`.
+
+```yaml
+librarian:
+  ingestion_gate_enabled: false   # off by default; see docs/configuration.md
+```
 
 ## Reasoning-tier screening (T1/T2) — off by default
 
@@ -1732,7 +1962,7 @@ librarian:
   operational_markers: []       # >=2 lower-cased substrings => ephemeral (athenaeum#280)
   min_cluster_cohesion: 0.0     # 0.0 = OFF; cohesion floor (athenaeum#281)
   min_cluster_cohesion_scopes: 4  # scope-span gate for the cohesion floor (athenaeum#281)
-  max_merge_sources: 25         # cap on resolver merge-proposal sources; 0 = OFF (athenaeum#400)
+  max_merge_sources: 5          # cap on resolver merge-proposal sources; 0 = OFF (athenaeum#400); tightened from 25 (athenaeum#421)
   min_merge_confidence: 0.0     # 0.0 = OFF; merge-proposal confidence floor (athenaeum#400)
   lock_timeout: 0               # run-lock wait seconds; 0 = fail-fast (athenaeum#309)
   page_warn_bytes: 8192         # warn on wiki pages over this size (athenaeum#310)
@@ -1744,6 +1974,7 @@ librarian:
   audit_sample_rate_t1_rejects: 0.075       # share of T1 rejects sampled for human audit (athenaeum#438)
   verdict_ledger_enabled: false              # off by default; verdict ledger + basis (athenaeum#712)
   verdict_epoch_batch_interval_days: 30      # comparator-epoch bump batching interval (athenaeum#712)
+  ingestion_gate_enabled: false               # off by default; skip auto-memory phase if push-metrics precision is unhealthy (athenaeum#968)
   delta:
     enabled: true               # delta-scoped incremental compile on client=None path (athenaeum#370)
     max_affected_clusters: 8    # > this many clusters touched => full compile (athenaeum#370)

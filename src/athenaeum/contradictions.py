@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 from athenaeum._retry import TransientAPIError, with_retry
@@ -307,6 +308,8 @@ def _get_model(config: dict[str, object] | None = None) -> str:
 def _parse_response(
     text: str,
     members: list[AutoMemoryFile],
+    *,
+    wiki_root: Path | None = None,
 ) -> ContradictionResult:
     """Parse the detector's JSON output into a :class:`ContradictionResult`.
 
@@ -332,6 +335,7 @@ def _parse_response(
             contract="contradictions",
             call_site="contradictions._parse_response",
             detail="detector-returned-no-json",
+            wiki_root=wiki_root,
         )
         return ContradictionResult(
             detected=False,
@@ -343,7 +347,9 @@ def _parse_response(
     # below. Lazy import keeps pydantic off the import graph until first use.
     from athenaeum.llm_schemas import observe_contradictions
 
-    observe_contradictions(payload, call_site="contradictions._parse_response")
+    observe_contradictions(
+        payload, call_site="contradictions._parse_response", wiki_root=wiki_root
+    )
 
     detected = bool(payload.get("detected"))
     if not detected:
@@ -400,6 +406,8 @@ def detect_contradictions(
     client: "LLMBackend | None",
     config: dict[str, object] | None = None,
     usage: TokenUsage | None = None,
+    *,
+    wiki_root: Path | None = None,
 ) -> ContradictionResult:
     """Run one detector call against a cluster; return the structured result.
 
@@ -550,4 +558,4 @@ def detect_contradictions(
             rationale="detector-malformed-response",
         )
 
-    return _parse_response(text, cluster_members)
+    return _parse_response(text, cluster_members, wiki_root=wiki_root)

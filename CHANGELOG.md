@@ -7,6 +7,184 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Anchored PII-restore repair tooling: rename-following + retro-filename
+  history lookup (athenaeum#1037, repairs the tool athenaeum#691's 2026-08-20 operator
+  lane found blind to 673/844 markers).** New `athenaeum pii-restore` CLI
+  (`src/athenaeum/_cmd_pii_restore.py`) over a new library module
+  (`src/athenaeum/pii_restore.py`), implementing the two methods
+  athenaeum#691 demonstrated instead of the preserved script's whole-file `difflib`
+  alignment (which fragments a marker's opcode the moment a librarian
+  reshape or a rename touches the page):
+  - **Anchored restore with rename-following** — recovers each marker's
+    pre-image by matching a small line-local anchor against the page's own
+    `git log --follow` history, so a page renamed since the migration is
+    still found under its old path(s).
+  - **Retro-filename class** — resolves a corrupted
+    `retros/<timestamp>--<issue-list>.md` citation by timestamp-key lookup
+    into `raw/retros/`'s own git-add history, independent of any per-page
+    diff and reachable even after the raw file has rotated out of the
+    working tree.
+  - Dry-run is the default; `--apply` is explicit. Dry-run reports per-class
+    counts split by method, and every residue reason is named (never a
+    silent skip) — `kept:real-pii`, `no-pre-image:page-created-after-
+    migration` (the reshaped/propagated-corruption class), `no-pre-
+    image:context-not-found`, `retro-filename:not-found-in-history`.
+  - **PII safety pins are in the write path, not only in tests:** every
+    restoration routes through one choke point (`_classify_or_refuse`) that
+    fails closed on an unrecognized token — the person-contact email/phone
+    axes are never restored regardless of flags; a hand-built plan that
+    tries to bypass classification under a forged class label is still
+    refused, because the token is re-classified at write time. The tool
+    refuses to write under an `excluded/` path component. The
+    migrated-address population (`athenaeum.pii.iter_contact_records`) is
+    counted before and after every apply and the apply raises
+    (`PiiRestoreSafetyError`) if it moved.
+  - `--apply --reindex` rebuilds the search index (matching `storage
+    migrate-pii`'s own `--reindex` convention) so restored text is
+    reachable via `recall`; without `--reindex` the command prints the same
+    "still carries the pre-restore text" instruction `migrate-pii` does.
+  - Fixture-only test coverage (`tests/test_pii_restore_tool.py`,
+    `tests/test_cmd_pii_restore.py`): a synthetic corpus with its own
+    throwaway git history covering a renamed page, a reshaped
+    (propagated-corruption) page, and a retro-filename case, plus the
+    email/phone safety-pin and over-restore-refusal cases. No test touches
+    a live store — the live-store run stays athenaeum#691's `~operator` job.
+- **`athenaeum repair --bounce-fold`: CLI surface for athenaeum#850's
+  bounce-fold path (athenaeum#1006).** Exposes
+  `find_orphaned_bounce_marks`/`fold_orphaned_bounce_marks` as a new mode in
+  `repair`'s mutually-exclusive mode group, alongside `--tag-indent` /
+  `--value-quoting` / `--legacy-source-slugs` / `--backfill-sources`.
+  Dry-run by default; `--apply` writes. Reports `pairs_found` / `folded` /
+  `residual`, resolves the contacts surface from `--knowledge-root` (or an
+  explicit `--contacts-root` override), and follows the same exit-code
+  contract as the other repair modes (0 clean/applied, 1 error, 2 dry-run
+  found candidates). Deliberately **not** folded into `--all` — it writes to
+  the contacts surface (PII-adjacent) rather than reformatting wiki
+  frontmatter, a materially bigger blast radius than the existing `--all`
+  passes; see the module docstring in `src/athenaeum/_cmd_repair.py`.
+- **Merge-inflow restoration analysis: proposed `max_merge_sources` value
+  (athenaeum#1030 — athenaeum#787 prerequisite).** `docs/merge-inflow-
+  restoration.md`: characterizes what the athenaeum#784 baseline's suppression
+  counts do and do not support (no per-cluster `n_sources` distribution was
+  ever recorded — stated plainly rather than estimated), establishes that
+  raising `max_merge_sources` above 5 adds zero T2 safe-class auto-apply
+  exposure at any candidate value (`SAFE_CLASS_MAX_PAGES=3` is checked before
+  `memory_class` homogeneity in `reasoning_tiers.safe_class_violation`),
+  proposes **8** for operator ratification, states the athenaeum#715 comparator
+  re-run's orthogonal relationship (backlog vs. stream), and names the
+  minimal instrumentation that would make the distribution measurable going
+  forward. No default or runtime behavior changes — analysis only; the
+  live-config flip stays athenaeum#787's.
+- **Publish the whole-store `Store` contract (athenaeum#983 — S8 of the
+  whole-store adapter design lock, athenaeum#911).** `athenaeum.store`'s `Store`
+  protocol, its data/error types (`StoreKey`, `ObjectMeta`, `Record`,
+  `StoreCapabilities`, `Lease`, `StoreKeyError`, `StoreConflictError`,
+  `LeaseHeldError`, `UnknownSurfaceError`), and the shipped `FilesystemStore`
+  adapter are now on the package root's stable `__all__` surface. The
+  contract's prose is published as `docs/store-contract.md`, alongside the
+  existing `docs/storage-adapter-contract.md`. The S1 conformance suite ships
+  as a runnable, importable third-party harness —
+  `athenaeum.store_conformance.StoreConformanceTests` — that an adapter
+  author subclasses against their own `Store` implementation without editing
+  any athenaeum source or test file; `tests/test_store_conformance_harness.py`
+  is a complete worked example (a from-scratch minimal implementation, not
+  athenaeum's own fixtures). The bundled `adapter-authoring` skill now
+  references the store harness alongside its intake-adapter counterpart.
+  `athenaeum.store_conformance`'s internal lease-primitive/artifact-registry
+  helpers stay off the published surface — see that module's docstring and
+  `athenaeum.store`'s module docstring for the exact split.
+
+- **Shape rules: nested-key `fields` resolution + one-level source-subdir
+  discovery (athenaeum#974 — unblocks athenaeum#940).** The two code gaps the
+  intended `log_group: hestia-lanes-*` rule needed:
+  - `MatchSpec.fields` now resolves a dotted-path key (`"session.log_group"`)
+    into a nested frontmatter/JSON value, via new
+    `athenaeum.rules.resolve_field_path`. Backward compatible by
+    construction: an exact top-level key (dots and all) always wins first,
+    so every pre-existing rule's plain `fields` key keeps matching exactly
+    as before.
+  - `discover_raw_files` now also globs one level below each
+    `raw/<source>/` directory (`raw/<source>/<subdir>/`), so a source that
+    organises its own drops into subdirectories is discovered. A nested
+    file's `RawFile.source` is still the top-level source name. The
+    `raw/auto-memory/` tree (or any configured
+    `recall.extra_intake_roots` entry) is excluded from this descent — it
+    already has its own dedicated discovery path
+    (`discover_auto_memory_files`).
+  See `docs/shape-rules.md` §3.2/§3.3.
+
+- **Memory model v6: usage sensor for tier movement, never-ingest class
+  list, ingestion gate (athenaeum#968 — reshaped athenaeum#430, blocks athenaeum#718).**
+  Three additive pieces, all off/inert by default:
+  - **Usage sensor** — new `athenaeum.usage_report` extends the shipped
+    push-metrics instrumentation (athenaeum#711/#734/#795) into a per-claim
+    usage signal (pushed-count, referenced-count, last-referenced),
+    computed from the existing `_push_records.jsonl` /
+    `_push_references.jsonl` ledgers. ids-only (same redaction discipline
+    as `push_metrics`). New CLI: `athenaeum usage-report [--claim-id ID]
+    [--since ...] [--json]` (`src/athenaeum/_cmd_usage_report.py`).
+    `get_claim_usage`/`compute_usage_report` are the documented interface
+    athenaeum#718's tier-movement rules must consume instead of re-reading raw
+    ledgers.
+  - **Never-ingest class list** — the authority manifest (athenaeum#426) gains
+    an optional `never_ingest_classes:` key (`mirror-of-live-source`,
+    `pending-state-todo`); new `src/athenaeum/never_ingest.py` enforces it at
+    BOTH intake tiers, each at its own COMPILE choke point, never at
+    discovery: auto-memory (`_run_auto_memory_phase`, right after
+    `discover_auto_memory_files`, before clustering) and the entity tier
+    (`process_one`, right after each raw file's frontmatter is parsed, via
+    the shared `check_and_refuse` primitive). `discover_raw_files` itself is
+    untouched — its return value is read directly by
+    `backlog_price_sheet.py` / `ordinary_night_table.py` (athenaeum#713, held
+    pending an operator decision), so the entity-tier gate lives at compile
+    time, never at discovery, to keep that backlog count byte-identical. A
+    refused file (either tier) is excluded from that run's compilation,
+    ledgered ids-only (now including a `tier` field) to
+    `_never_ingest_refusals.jsonl`, and never deleted from disk. Empty/absent
+    manifest key is a complete no-op. See
+    `docs/authority-manifest.md#never-ingest-classes-athenaeum968`.
+  - **Ingestion gate** — new `src/athenaeum/ingestion_gate.py` +
+    `librarian.ingestion_gate_enabled` (default `false`): when enabled,
+    skips the whole auto-memory compilation phase for a run if push-metrics
+    precision instrumentation looks unhealthy (disabled, or zero
+    reference-determination records ever) — a liveness check, not a
+    quality bar. Nothing is deleted either way.
+  - **No deletion anywhere** in this issue's scope — movement is tier
+    metadata only, mechanically asserted by a static source scan in
+    `tests/test_never_ingest.py::TestNoDeletionStaticScan`.
+
+### Deprecated
+
+- **`athenaeum people` — deprecated in favour of the generalized `athenaeum
+  enumerate` primitive (athenaeum#966).** Now that athenaeum#964 (narrow by
+  declared `type`) and athenaeum#965 (enumerate by declared type + field
+  predicates) have shipped, every question `people` answers is answerable
+  through `athenaeum enumerate --type person --where ...` — see
+  `docs/recall-architecture.md`'s capability-parity table (landed with
+  athenaeum#965) for the exact per-flag mapping, including the two rows
+  generalization deliberately drops: `--top-touch`'s computed composite sort
+  and `--format table|tsv` rendering, both presentation/scoring concerns
+  outside the generalized primitive's contract, not gaps in it. `people`
+  prints a one-line migration notice to **stderr** on every call — never to
+  stdout, which is a table or TSV a script may parse, and a notice there
+  would be a breaking output change dressed up as a deprecation.
+
+  **This changes zero behaviour** — the command keeps working identically;
+  flags, filtering, ordering and output format are byte-identical before and
+  after, asserted by regression test on a synthetic fixture corpus, alongside
+  parity tests proving each reproducible row's `enumerate` expression returns
+  the same set of pages as the `people` invocation it replaces.
+
+  Actual removal is a separate, later issue, gated on a real deprecation
+  window and on known consumers having migrated — **not** on this one
+  closing, and with no removal date set. Per the version-bump policy this
+  issue is a **patch** (a notice, no behaviour change); the removal will be a
+  breaking change and must bump **minor** at minimum, with a `### Removed`
+  entry — the same shape athenaeum#887 (deprecation) / athenaeum#888
+  (removal) already established for `athenaeum query person`.
+
 ### Fixed
 
 - **`storage lint-pii` now scans `raw/`, reported as a separate,
@@ -69,6 +247,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wrong bucket instead of preserving it for correct reclassification).
 ### Added
 
+- **`storage.mapping` completeness lint + the deferred `(read_policy,
+  adapter)` pair check (athenaeum#993, S5 of athenaeum#910's design note).** New
+  `src/athenaeum/sensitivity_lint.py`: given a resolved config and a
+  caller-supplied corpus root, reports every sensitivity class name a
+  scanned corpus's content still carries (via its own `sensitivity_class:`
+  frontmatter field) that has no live `storage.mapping` entry, or whose
+  entry names an adapter absent from `storage.available_adapters()` — the
+  config-change-time catch for the read-time footgun the design note's §6
+  point 2 names. Also implements Decision D4's deferred pair check: a class
+  whose resolved `read_policy.access` is `confidential`/`personal` but whose
+  mapped adapter's `corpus_policy.embedded` is `True` is reported as a
+  separate, advisory finding kind that never blocks the gate on its own.
+  Both checks are read-only (never rewrites config or content) and driven by
+  committed synthetic fixtures under `tests/fixtures/sensitivity_mapping/`.
+  New CLI: `athenaeum storage lint-mapping --path <root> [--corpus <root>]
+  [--json]` (`src/athenaeum/_cmd_storage.py`), exiting non-zero only on a
+  completeness finding — standalone, not wired into any existing CI gate.
+  Neither `athenaeum.storage.resolve_adapter_for_class` nor
+  `athenaeum.sensitivity.available_classes` changed.
+- **Per-contract LLM schema strictness for `tiers.tier2` and `tiers.tier3-merge`
+  (athenaeum#1035, M17 phase 2a, split from athenaeum#608).** Decided from the
+  measured observation window 2026-08-05T13:12Z-2026-08-20T10:58Z (3,634
+  records, 0 unparseable, recorded on athenaeum#608's 2026-08-20 comment):
+  `tiers.tier2` (150 obs, 0 mismatches) and `tiers.tier3-merge` (2,961 obs, 4
+  mismatches: extra-keys 3, missing-required 1) sit upstream of the C4
+  entity-phase bottleneck and have a representative sample. Applying
+  athenaeum#608's framework ("only missing-required mismatches justify
+  rejection; extra keys are a different signal"): `llm_schemas.Tier2Entity`
+  tightens from `extra="allow"` to `extra="forbid"` (0% mismatch of any class
+  observed — forbidding costs nothing today); `llm_schemas.MergeOp` stays
+  `extra="allow"` (its two observed extra-key shapes, `[].text2` and
+  `[].append_section`, are real repeated traffic, not grounds for rejection);
+  `op` stays required, matching the one missing-required hit in the window —
+  already enforced downstream via `apply_merge_ops`'s `MergeOpsError` ->
+  full-echo fallback. The decision is recorded in code as the new
+  `llm_schemas.STRICT_CONTRACTS` registry. The three C4-downstream contracts
+  (`contradictions`, `claim_kind`, `resolutions`) are explicitly untouched and
+  remain observe-only, decision deferred to athenaeum#608. See
+  `docs/configuration.md`'s "Per-contract strictness decision" section.
 - **`sensitivity.routing` config resolver (athenaeum#1022, slice 1/4 of
   athenaeum#949's design note).** New `resolve_sensitivity_routing` in
   `src/athenaeum/config.py`: resolves `{"enabled": bool, "classes":
@@ -270,6 +487,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`quarantine.py` migrated onto the whole-store adapter seam (athenaeum#982,
+  S7 of the whole-store adapter design lock, athenaeum#911 — "the slice that
+  proves the write half").** `src/athenaeum/quarantine.py` now contains no
+  `pathlib` and no `shutil` call: the ledger append (`quarantine_file` /
+  `release_quarantine`) routes through `Store.append`, and the physical move
+  in both directions routes through `Store.move`. Every public function gains
+  an optional keyword-only `store=` parameter; when omitted, a private
+  `FilesystemStore` scoped to the caller's existing `wiki_root`/`raw_root`
+  is built per call, so no existing caller changes. `put` does not appear as
+  a `quarantine.py` call site (2026-08-21 re-scope: the design doc's own
+  §2.3 inventory names only `append` + `move` for this module; `put` was a
+  transcription error in the original filing). The pre-migration test suite
+  (`tests/test_quarantine.py`) passes with exactly one bounded edit: the
+  ordering-guarantee test's `monkeypatch.setattr("athenaeum.quarantine.shutil.move", ...)`
+  no longer resolves once `shutil` is not imported, so it is retargeted to
+  `athenaeum.store.FilesystemStore.move` — the store seam the ordering
+  guarantee now actually runs through — with every assertion in that test
+  otherwise untouched. A new `tests/test_quarantine_store_parity.py`
+  parametrizes the same logical scenarios over both `FilesystemStore` and
+  `tests.store_fakes.InMemoryStore`, verified by reading back through the
+  store rather than the filesystem — demonstrating the "no caller can tell"
+  property rather than asserting it.
+
 - **Coarse embedding fallback is now observable (athenaeum#1032).** The chromadb
   embedding path used to degrade silently three layers deep — no log line
   ever recorded that the hashing-trick fallback embedder produced a
@@ -343,6 +583,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sites this slice did not migrate (push/pull/rev-parse and each Tier
   site's own scoped `git rm`-and-commit mechanics) to an explicit,
   monotonically-shrinking baseline.
+
+- **Lease is a declared store capability, backed by the same `flock` +
+  heartbeat + inode-race hardening `runlock` always had (athenaeum#979, S4 of
+  the whole-store adapter design lock, athenaeum#911).** `Store.lease()`
+  (S1's protocol member, previously inert) is now implemented for real:
+  `FilesystemStore.lease()` returns `FileLease`, a single non-blocking (or
+  `force=`) `flock` attempt built from the exact open/try-flock/inode-check/
+  metadata-write functions `athenaeum.runlock.RunLock` used to own directly —
+  moved, not duplicated, and generalized from `RunLock`'s hardcoded
+  `knowledge_root/.athenaeum.lock` to an arbitrary lockfile path.
+  `athenaeum.runlock.RunLock` now calls through `FileLease` for every
+  acquire/release/heartbeat, keeping its own `wait`/`force`/
+  `break_stale_after`/`warn_stale_after` policy, every existing exception
+  (`LockHeld`), and every log message unchanged — its entire existing test
+  suite (`tests/test_runlock.py`) passes unmodified against the relocated
+  primitive. `FilesystemStore.capabilities.leases` is `True`
+  unconditionally. `tests.store_fakes.InMemoryStore.lease()` is also real
+  now (`leases=True`), with genuinely TTL-driven expiry — the design note's
+  "onto flock for the filesystem adapter and onto a lease row ... elsewhere"
+  (§4.6) other half, since an in-memory fake has no kernel to reclaim a dead
+  holder's lock. `tests/test_store_conformance.py` gains shared
+  acquire/contention/release conformance tests plus a
+  `TestFakeAdapterLeaseExpiry` class proving the non-filesystem expiry path.
 
 - **v6 memory-model measurement pack: shadow-linkage count, backlog price
   sheet, ordinary-night steady-state table (athenaeum#713).** Three new
@@ -525,6 +788,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (athenaeum#898) is unchanged and still backstops a file that keeps
   tripping the bound after it is quarantined out of the discovery set, so a
   chronically over-bound file is still never retried identically forever.
+
+### Removed
+
+- **`pii.read_person` / `pii.read_people`, the `read_person` MCP tool, and the
+  `athenaeum query person` CLI command (athenaeum#888).** Deprecated in
+  athenaeum#887 once the generalized `recall(with_pii=True)` path
+  (athenaeum#885/#886) became the sanctioned entry point; removed now that
+  every known consumer has migrated. Use `pii.read_entity` / `read_entities`
+  (or `recall(with_pii=True)` when searching rather than resolving a uid you
+  already hold) instead — both answer for any entity class, not only
+  persons. The `PersonRead = EntityRead` back-compat alias (added in
+  athenaeum#883) is removed alongside them, having no remaining referrers.
+  The `athenaeum query entity` / `read_entity` generalized surfaces this
+  replaces are unaffected, as is the unrelated `athenaeum query people`
+  command (filter/list, not a single-uid read).
 
 ## [0.19.0] - 2026-08-15
 

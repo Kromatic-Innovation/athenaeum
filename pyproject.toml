@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "athenaeum"
-version = "0.19.16"
+version = "0.19.21"
 description = "Open source knowledge management pipeline — append-only intake, tiered compilation, configurable schemas"
 readme = "README.md"
 license = "Apache-2.0"
@@ -54,6 +54,13 @@ dev = [
     "pytest-cov>=5.0",
     "ruff==0.16.0",
     "fastmcp>=2.0.0,<4.0",
+    # athenaeum#1066: emits `::error file=...,line=...::` workflow commands for
+    # each failing test under `GITHUB_ACTIONS=true`, which GitHub turns into
+    # check-run annotations — readable via `gh api
+    # repos/{owner}/{repo}/check-runs/{id}/annotations` even from a lane that
+    # cannot reach Actions job logs. Purely additive: a no-op outside GitHub
+    # Actions (auto-detects the env var), so it changes no local test output.
+    "pytest-github-actions-annotate-failures>=0.2.0",
     # `build` + `hatchling` let tests/test_skill_packaging.py build the wheel
     # via `python -m build --no-isolation` and assert the bundled skills/
     # directory is present in the BUILT artifact (issue athenaeum#419) — the acceptance
@@ -194,12 +201,35 @@ testpaths = ["tests"]
 # override `--ignore`). See tests/benchmarks/test_search_bench.py.
 #
 # `eval` tests (tests/evals/) are DESELECTED by default via `-m "not eval"`
-# so the regular contributor / CI suite never hits the network — the eval
-# suite runs ONLY via evals.yml (workflow_dispatch or push:main) which
+# so the regular contributor / CI suite never hits the Anthropic API — the
+# eval suite runs ONLY via evals.yml (workflow_dispatch or push:main) which
 # invokes `pytest -m eval tests/evals/`. See tests/evals/README.md.
-addopts = "--ignore=tests/benchmarks -m 'not eval'"
+#
+# athenaeum#1091: the default selection is offline w.r.t. OUTBOUND NETWORK —
+# not just the Anthropic API. Two test-only mechanisms in tests/conftest.py
+# make that true: (1) `_offline_embedding_function` routes chromadb's
+# default embedding function (which otherwise downloads an ONNX model over
+# HTTP on first use — chromadb/utils/embedding_functions/onnx_mini_lm_l6_v2.py)
+# through a deterministic, offline, lexical stand-in
+# (tests/offline_embeddings.py) for every default-selection test; (2)
+# `_block_non_local_network` (tests/test_network_guard.py pins this one)
+# patches `socket.socket.connect`/`connect_ex`/`socket.create_connection` to
+# reject any non-loopback destination, so a regression in (1) — or any other
+# accidental network caller — fails loudly instead of silently phoning home.
+# Both are disabled for tests marked `eval`, `live`, or `embedding`, which
+# opted in.
+#
+# The one documented exception: `embedding`-marked tests assert on real
+# MiniLM cosine-similarity values that the offline lexical stand-in cannot
+# reproduce (see tests/test_delta_compile_equivalence.py's module docstring
+# and `test_chain_transitive_repartition`, the sole test currently marked).
+# Deselected by default alongside `eval`; runs in evals.yml's
+# `embedding-suite` job (workflow_dispatch or push:main), same non-required
+# cadence as the eval suite.
+addopts = "--ignore=tests/benchmarks -m 'not eval and not embedding'"
 markers = [
     "regression: contract regression tests pinning resolver outputs against canonical fixtures",
     "live: opt-in live-LLM tests; require ATHENAEUM_LIVE_TESTS=1 and ANTHROPIC_API_KEY",
     "eval: live-API eval suite under tests/evals/; deselected by default (see evals.yml)",
+    "embedding: asserts on real MiniLM cosine values; deselected by default, runs in evals.yml's embedding-suite job (athenaeum#1091)",
 ]

@@ -88,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_merges import add_merges_subparser
     from athenaeum._cmd_outbound import add_outbound_subparser
     from athenaeum._cmd_pending import add_pending_subparsers
+    from athenaeum._cmd_pii_restore import add_pii_restore_subparser
     from athenaeum._cmd_push_metrics import add_push_metrics_subparser
     from athenaeum._cmd_query import add_query_subparsers
     from athenaeum._cmd_questions import add_questions_subparser
@@ -96,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
+    from athenaeum._cmd_usage_report import add_usage_report_subparser
     from athenaeum._cmd_verdicts import add_verdicts_subparser
 
     parser = argparse.ArgumentParser(
@@ -122,6 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_curate_subparsers(subparsers)  # dedupe, claims, auto-memory
     add_decay_subparser(subparsers)  # decay-sweep
     add_repair_subparser(subparsers)  # repair
+    add_pii_restore_subparser(subparsers)  # pii-restore (issue athenaeum#1037)
     add_questions_subparser(subparsers)  # questions
     add_merges_subparser(subparsers)  # merges
     add_decisions_subparser(subparsers)  # decisions
@@ -136,6 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_drain_subparser(subparsers)  # drain
     add_storage_subparser(subparsers)  # storage
     add_push_metrics_subparser(subparsers)  # push-metrics
+    add_usage_report_subparser(subparsers)  # usage-report (issue athenaeum#968)
     add_measure_subparser(subparsers)  # measure (shadow-linkage, backlog-price, ordinary-night)
     add_memory_class_subparser(subparsers)  # memory-class backfill
     add_verdicts_subparser(subparsers)  # verdicts (issue athenaeum#712)

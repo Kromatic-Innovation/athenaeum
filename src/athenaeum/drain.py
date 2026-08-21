@@ -194,7 +194,7 @@ def run_drain(
 
     run_fn = run_fn or librarian_run
     backlog_fn = backlog_fn or (lambda root: len(discover_raw_files(root, config)))
-    ledger_path = ledger_path or spend.resolve_ledger_path(config)
+    ledger_path = ledger_path or spend.resolve_ledger_path(config, wiki_root=wiki_root)
 
     # Issue athenaeum#568 (H1): the cumulative dollar ceiling below is only as trustworthy
     # as the ledger it reads. Verify the ledger is writable BEFORE spending a

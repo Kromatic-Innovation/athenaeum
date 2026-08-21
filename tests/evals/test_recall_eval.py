@@ -132,6 +132,11 @@ def test_recall_case(
     wiki_root = _fixture_wiki_root()
     # Point the keyword backend at a scratch cache dir so an operator
     # running evals locally does not pollute their real ``~/.cache/athenaeum``.
+    # Issue athenaeum#980 AC4: recall_search's push-metrics instrumentation now
+    # writes behind the seam (wiki_root=), and wiki_root here is the REAL,
+    # tracked fixture directory, not a tmp copy — disable instrumentation so
+    # a push record never lands in source-controlled eval data.
+    monkeypatch.setenv("ATHENAEUM_PUSH_METRICS_ENABLED", "0")
     output = recall_search(
         wiki_root,
         query,

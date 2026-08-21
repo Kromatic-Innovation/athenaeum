@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum {recall,people,person,query-topics,stopwords,test-mcp}`` — read-only query tools.
+"""``athenaeum {recall,people,query-topics,stopwords,test-mcp}`` — read-only query tools.
 
 Six subcommands grouped here because each is a shell-accessible, read-only
 query or diagnostic over the compiled wiki / search stack, used by validation
@@ -70,11 +70,16 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
     )
     test_mcp_parser.set_defaults(func=cmd_test_mcp)
 
-    # people command — frontmatter-only filter over type:person wikis
+    # people command — frontmatter-only filter over type:person wikis.
+    # DEPRECATED as of athenaeum#966 in favour of the generalized `enumerate`
+    # primitive (athenaeum#964/#965); retained, unchanged, until a separate
+    # follow-up removal issue (linked from athenaeum#966) takes it out.
     people_parser = subparsers.add_parser(
         "people",
-        help="List type:person wikis filtered by frontmatter (company / tag / tier / score). "
-        "No LLM, no embeddings — deterministic over the wiki tree.",
+        help="DEPRECATED (athenaeum#966; use `enumerate --type person --where "
+        "...` — see docs/recall-architecture.md's capability-parity table). "
+        "List type:person wikis filtered by frontmatter (company / tag / tier / "
+        "score). No LLM, no embeddings — deterministic over the wiki tree.",
     )
     people_parser.add_argument(
         "--path",
@@ -141,52 +146,9 @@ def add_query_subparsers(subparsers: argparse._SubParsersAction) -> None:
     )
     people_parser.set_defaults(func=cmd_people)
 
-    # person command — one-call person read by uid (issue athenaeum#864). Distinct
-    # from `people` above: `people` filters/lists many type:person wikis by
-    # frontmatter; `person` reads exactly ONE person's page (+ optional
-    # contact data) by uid. DEPRECATED as of athenaeum#887 in favour of the
-    # class-generic `entity` command below and `recall --with-pii`; retained,
-    # unchanged, until athenaeum#888 removes it.
-    person_parser = subparsers.add_parser(
-        "person",
-        help="DEPRECATED (athenaeum#887; use `entity` or `recall --with-pii`). "
-        "One-call read of a SINGLE person's page by uid, with an explicit "
-        "--include-contact flag (default off). Not `people` (which filters/lists "
-        "many person wikis by frontmatter) — this reads exactly one person.",
-    )
-    person_parser.add_argument(
-        "--uid",
-        required=True,
-        help="The person's durable uid.",
-    )
-    person_parser.add_argument(
-        "--include-contact",
-        action="store_true",
-        help="Include the actual contact values (default: off — withheld "
-        "fields carry a redaction marker instead).",
-    )
-    person_parser.add_argument(
-        "--usage-class",
-        action="append",
-        choices=list(USAGE_CLASSES),
-        default=[],
-        metavar="CLASS",
-        help="Return only contact values of this usage class (repeatable; "
-        f"one of {', '.join(USAGE_CLASSES)}). Default: every value, each "
-        "carrying its class. `--usage-class observed` is the "
-        "outreach-eligible set — address-book population and outreach "
-        "eligibility are different permissions (issue athenaeum#866).",
-    )
-    person_parser.add_argument(
-        "--path",
-        type=Path,
-        default=DEFAULT_KNOWLEDGE_ROOT,
-        help="Knowledge directory (default: ~/knowledge)",
-    )
-    person_parser.set_defaults(func=cmd_person)
-
-    # entity command (issue athenaeum#886) — the generic form of `person`, reading
-    # ANY entity class's excluded record. `person` delegates to the same body.
+    # entity command (issue athenaeum#886) — the generic form of the former
+    # `person` command (removed in athenaeum#888), reading ANY entity class's
+    # excluded record.
     entity_parser = subparsers.add_parser(
         "entity",
         help="One-call read of a SINGLE entity's page by uid, for any entity "
@@ -641,8 +603,41 @@ def _excluded_suffix_for_hit(
     return "".join(f"\t{part}" for part in parts)
 
 
+#: Issue athenaeum#966: `people` is a typed, per-consumer surface — one CLI
+#: subcommand hardcoded to `type:person`, not exposed on MCP. Now that
+#: athenaeum#964 (narrow by declared `type`) and athenaeum#965 (enumerate by
+#: declared type + field predicates) have shipped, every question `people`
+#: answers is answerable through `athenaeum enumerate` (see
+#: docs/recall-architecture.md's capability-parity table for the exact
+#: mapping, including the two rows that generalization deliberately drops:
+#: `--top-touch`'s computed composite sort, and `--format table|tsv`
+#: rendering). Deprecation only — behaviour, flags, ordering and output are
+#: unchanged. Removal is a separate, later issue with no removal date set,
+#: linked from athenaeum#966; not filed as of this notice, so it is named
+#: here by its parent issue rather than its own number.
+PEOPLE_SURFACE_DEPRECATION = (
+    "`athenaeum people` is deprecated (athenaeum#966) in favour of the "
+    "generalized `athenaeum enumerate --type person --where ...` primitive "
+    "(athenaeum#964/#965) — see docs/recall-architecture.md's "
+    "capability-parity table. Behaviour and output are unchanged for now; "
+    "removal is a separate follow-up issue linked from athenaeum#966, not "
+    "yet filed."
+)
+
+
 def cmd_people(args: argparse.Namespace) -> int:
     """List type:person wikis filtered by frontmatter — frontmatter-only, no LLM.
+
+    DEPRECATED (issue athenaeum#966) — use ``athenaeum enumerate --type
+    person --where ...``, the generalized form; see
+    docs/recall-architecture.md's capability-parity table for the exact
+    mapping from each of this command's flags to an ``enumerate``
+    expression. This command keeps working identically and is not removed
+    here (removal is a separate, later issue, linked from athenaeum#966,
+    with no removal date set). It prints a one-line migration notice to
+    **stderr**, never to stdout: stdout is a table or TSV a script may
+    parse, and a notice there would be a breaking output change dressed up
+    as a deprecation.
 
     Filters AND together. Companies match current_company OR
     linkedin_company_at_connect (case-insensitive substring). Tags must
@@ -653,6 +648,8 @@ def cmd_people(args: argparse.Namespace) -> int:
     import re
 
     from athenaeum.models import parse_frontmatter
+
+    print(f"[deprecated] {PEOPLE_SURFACE_DEPRECATION}", file=sys.stderr)
 
     knowledge_root = args.path.expanduser().resolve()
     wiki_root = knowledge_root / "wiki"
@@ -801,58 +798,11 @@ def cmd_people(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_person(args: argparse.Namespace) -> int:
-    """One-call person read by uid — the person-shaped read surface (issue athenaeum#864).
-
-    DEPRECATED (issue athenaeum#887) — use ``athenaeum query entity``, or
-    ``athenaeum recall --with-pii``; both answer for any entity class. This
-    command keeps working identically and is not removed here (removal is
-    athenaeum#888). It prints a one-line migration notice to **stderr**, never
-    to stdout: stdout is a JSON object a script parses, and a notice there
-    would be a breaking output change dressed up as a deprecation.
-
-    Prints a single JSON object to stdout: ``pii.EntityRead.to_dict()``.
-    With ``--include-contact`` unset (default), withheld contact fields carry
-    a redaction marker (field name + that a value exists) instead of the
-    value; a person with no contact record at all prints the page with no
-    redaction markers — not an error. Loads ``athenaeum.yaml`` the same way
-    the sibling commands do, so the contact surface resolves per the
-    operator's ``storage.mapping``.
-
-    Every returned contact value carries its usage classification (issue
-    athenaeum#866) under ``classifications``, co-indexed with ``contact``.
-    ``--usage-class`` (repeatable) returns only values of the named classes —
-    ``--usage-class observed`` is the outreach-eligible set.
-
-    An unknown uid prints an error to stderr and returns exit code 1.
-
-    Since issue athenaeum#886 this DELEGATES to :func:`cmd_entity` with the class
-    fixed to ``person``. Its flags, stdout and exit codes are unchanged —
-    byte-identical stdout is asserted by test, including a
-    ``--usage-class``-filtered case.
-    """
-    from athenaeum.mcp_server import READ_PERSON_SURFACE_DEPRECATION
-
-    print(
-        f"[deprecated] {READ_PERSON_SURFACE_DEPRECATION} "
-        "(shell: `athenaeum query entity --uid ... --class person "
-        "[--include-excluded]`, or `athenaeum recall --with-pii`)",
-        file=sys.stderr,
-    )
-    return _read_entity_to_stdout(
-        args.path,
-        args.uid,
-        page_class="person",
-        include_excluded=args.include_contact,
-        usage_classes=args.usage_class or None,
-        not_found_label="person",
-    )
-
-
 def cmd_entity(args: argparse.Namespace) -> int:
     """One-call entity read by uid, for ANY entity class (issue athenaeum#886).
 
-    The generic form of :func:`cmd_person`, printing the SAME JSON object shape
+    The generic form of the former ``person`` command (removed in
+    athenaeum#888), printing the SAME JSON object shape
     (``pii.EntityRead.to_dict()``) to stdout. With ``--include-excluded`` unset
     (the default), withheld fields carry a redaction marker instead of the
     value; an entity with no excluded record at all prints the page with no
@@ -936,7 +886,13 @@ def cmd_query_topics(args: argparse.Namespace) -> int:
         else None
     )
     config = load_config(knowledge_root)
-    for topic in extract_topics(args.prompt, timeout=args.timeout, config=config):
+    # Issue athenaeum#980 AC4: resolve the spend ledger behind the seam. Mirrors
+    # load_config's own "None falls back to ~/knowledge" default (this
+    # module's config.py DEFAULT_KNOWLEDGE_ROOT).
+    wiki_root = (knowledge_root or DEFAULT_KNOWLEDGE_ROOT.expanduser()) / "wiki"
+    for topic in extract_topics(
+        args.prompt, timeout=args.timeout, config=config, wiki_root=wiki_root
+    ):
         print(topic)
     return 0
 
