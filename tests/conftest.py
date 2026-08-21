@@ -337,12 +337,3 @@ def wiki_dir(tmp_path: Path) -> Path:
     (wiki / "MEMORY.md").write_text("# Memory Index\n")
 
     return wiki
-
-
-# TEMPORARY DIAGNOSTIC (removed before merge): surface pytest failures as
-# GitHub Actions annotations. Actions job logs are served from blob storage
-# that the build container cannot reach, so a red CI run is otherwise opaque.
-def pytest_runtest_logreport(report):  # pragma: no cover - diagnostic only
-    if report.failed:
-        detail = str(report.longreprtext or report.longrepr or "")[-400:].replace("\n", " | ")
-        print(f"\n::error::PYTEST_FAIL {report.nodeid} :: {detail}")
