@@ -109,6 +109,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `librarian.process_one` (athenaeum#1025) are follow-on slices. See
   `docs/configuration.md` → "Sensitivity routing/redaction mechanism" and
   the module's own docstring for the full disposition of every criterion.
+- **Sensitivity routing record-keyed read path (athenaeum#1024, slice 3/4 of
+  athenaeum#949's design note).** New `resolve_sensitive_record()` in
+  `src/athenaeum/sensitivity_routing.py`: resolves a routed pointer's
+  `(sensitivity_class, record_id)` back to its original value — the read
+  half of slice 2's write (athenaeum#1023). Gates on the matched class's
+  `read_policy.access`/`audience` (athenaeum#910's vocabulary) via
+  `models.is_page_authorized` — the same function the existing uid-keyed
+  excluded-surface read path's caller already gates on, so the two
+  independent read paths this design accepts (design note §2/§8, AC8)
+  cannot silently drift on how an access decision is *computed*, only on
+  which policy each supplies to it. Resolves to the original value or to
+  nothing resolvable — never raises with any content in the exception —
+  for a malformed `record_id`; a malformed or path-traversal-shaped
+  `sensitivity_class`/`record_id` (validated against a strict charset
+  before any path is built, then re-checked for containment under the
+  resolved vault root); an unknown class; a `record_id` with no matching
+  record; a `record_id` that resolves under a different class than
+  requested; or a caller not authorized by the class's read policy.
+  Reuses slice 2's `_vault_root_for_class` so a read always resolves
+  against the same root a write landed on. **Standalone in this slice** —
+  not called from anywhere in this repo; wiring both halves into
+  `librarian.process_one` is athenaeum#1025 (slice 4). No version bump —
+  matching slices 1 and 2's own precedent (athenaeum#1022, athenaeum#1023)
+  of deferring the bump to the slice that actually changes runtime
+  behavior.
 - **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
   memory-model v6 dimension chain (child of epic athenaeum#709; athenaeum#715,
   athenaeum#716, athenaeum#719 all depend on this). New `src/athenaeum/dimensions.py`:

@@ -1172,11 +1172,9 @@ storage surface, or an operator's own safe `storage.mapping` target),
 substitute a resolvable pointer for the matched span, and return the
 redacted text. **Not called from anywhere in this repo yet** — no config
 knob added by this slice, and no behavior change for any running
-deployment. That wiring is athenaeum#1025 (slice 4); reading a pointer's
-value back is athenaeum#1024 (slice 3) and is not implemented here either
-— the pointer text names the read function the design proposes
-(`resolve_sensitive_record`) because the design note's pointer format
-fixes that name, not because slice 2 implements it.
+deployment. Wiring this into `librarian.process_one` is athenaeum#1025
+(slice 4). Reading a pointer's value back is `resolve_sensitive_record`,
+covered in the next section (slice 3, athenaeum#1024).
 
 **Pointer format**, substituted for each routed span, byte-for-byte per the
 design note §1:
@@ -1205,6 +1203,42 @@ itself. With no explicit `storage.mapping` entry for a routed class, the
 vault root resolves directly to the built-in `excluded` adapter — not the
 storage layer's own "undeclared maps to wiki" default, which is correct for
 every other class but unsafe here.
+
+## Sensitivity routing record-keyed read path (athenaeum#1024, slice 3/4 — standalone, not wired)
+
+`src/athenaeum/sensitivity_routing.py`'s `resolve_sensitive_record()` is the
+read half of the pointer above — the design note §2's disposition (b): a
+NEW read path, keyed by `(sensitivity_class, record_id)` rather than by an
+entity `uid`, because this stage runs before most raw content has a `uid`
+to key on (§2 explains why the existing `pii.ExcludedRecordIndex.by_uid`
+path cannot be reused here). **Not called from anywhere in this repo
+yet** — same standalone posture as slice 2; `librarian.process_one` wiring
+remains athenaeum#1025.
+
+**Access control — no new mechanism.** Gates on the matched class's
+`read_policy.access`/`audience` (athenaeum#910's vocabulary, unchanged) by
+calling `athenaeum.models.is_page_authorized` — the same function the
+existing uid-keyed excluded-surface read path's caller already gates
+through (`mcp_server`'s Layer C: `is_page_authorized(fm, caller_audience)`,
+run *after* the audience predicate, before any excluded-field join is
+attempted). Both paths therefore share the one place that decision is
+computed; only the policy each supplies to it differs, by design (§2/§8,
+AC8: this design ships two permanently-independent read paths onto the
+excluded surface, not one unified path).
+
+**Never raises with any content in the exception — resolves to the
+original value, or to nothing resolvable**, for: a malformed `record_id`
+(validated against the exact 32-character lowercase-hex shape
+`route_sensitive_values` mints, `uuid.UUID.hex`); a malformed or
+path-traversal-shaped `sensitivity_class`/`record_id` (checked against a
+strict identifier charset before any path is built, then re-checked for
+containment under the resolved vault root — defense in depth, not either
+check alone); an unknown class; a `record_id` with no matching record on
+disk; a `record_id` that resolves under a different class than the one
+requested; or a caller the class's `read_policy` does not authorize. This
+matches design note §2's requirement that "resolution failure cannot be
+used to probe the vault's contents" — every failure mode above is
+indistinguishable from every other from the return value alone.
 
 ## Authority manifest (athenaeum#426)
 
