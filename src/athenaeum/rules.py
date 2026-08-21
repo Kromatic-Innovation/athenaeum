@@ -1117,14 +1117,14 @@ def append_shape_rules_ledger(wiki_root: Path, record: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-record disposition rows (issue athenaeum#975, #905 prerequisite)
+# Per-record disposition rows (issue athenaeum#975, athenaeum#905 prerequisite)
 # ---------------------------------------------------------------------------
 #
 # `_shape_rules_applied.jsonl` above is a per-`(rule, mode)` AGGREGATE: it
 # answers "how often did this rule fire", not "which record got what
 # treatment". This ledger is the per-record complement -- one row per
 # candidate the shape-rules pass evaluates, including the ones no rule
-# matched at all, so #905's shape-frequency detector has a real per-record
+# matched at all, so athenaeum#905's shape-frequency detector has a real per-record
 # data source (athenaeum#923: "everything is dispositioned and the
 # disposition is audited"). Same `_`-prefixed, wiki-root, append-only-JSONL
 # discipline as the aggregate above -- every corpus walker in this repo
@@ -1358,7 +1358,7 @@ def run_shape_rule_phase(
             (r for r in rules if r.match.matches(raw=raw, record=record, fmt=fmt)), None
         )
         if matched_rule is None:
-            # Issue athenaeum#975: the interesting shapes for #905's detector are
+            # Issue athenaeum#975: the interesting shapes for athenaeum#905's detector are
             # precisely the ones no rule claims -- so this candidate still gets
             # a disposition row, just with no rule/tier to attribute it to.
             if not dry_run:
