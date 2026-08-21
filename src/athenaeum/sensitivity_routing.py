@@ -662,8 +662,9 @@ def resolve_sensitive_record(
             return None
 
         return _value_from_vault_body(body)
-    except Exception:
-        # Belt-and-suspenders (see docstring): no anticipated path reaches
-        # here, but this function's contract is "value or nothing resolvable
-        # — never raise", full stop.
+    except Exception:  # noqa: BLE001 — never-raise contract is the anti-probing
+        # boundary: a distinguishable failure would leak whether a record
+        # exists. Belt-and-suspenders (see docstring): no anticipated path
+        # reaches here, but this function's contract is "value or nothing
+        # resolvable — never raise", full stop.
         return None
