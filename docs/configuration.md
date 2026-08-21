@@ -163,6 +163,34 @@ is its own self-contained YAML file, not a config-table entry.
 | Records per run | `ATHENAEUM_SHAPE_RULES_MAX_RECORDS_PER_RUN` | `librarian.shape_rules.max_records_per_run` | `50000` | Run-level cap on candidate raw files the engine evaluates against rules, mirroring `librarian.corrections.max_records_per_run`. Files beyond the cap are untouched and retried next run. |
 | Phase runtime share | `ATHENAEUM_SHAPE_RULES_RUNTIME_SHARE` | `librarian.shape_rules.runtime_share` | `0.05` | Fraction of `librarian.max_runtime` this phase may spend, mirroring `librarian.corrections.runtime_share`'s mechanism exactly (own budget — an overrun in one deterministic phase never starves the other). Checked at FILE boundaries only (never mid-file). |
 
+### Rule proposals (`librarian.rule_proposals.*`, athenaeum#905)
+
+The librarian's rule-proposal detector/drafter (`athenaeum.rule_proposals`,
+see [`shape-rules.md` §10](shape-rules.md)) — counts records the shape-rule
+engine above deferred to the reasoning tiers, drafts a candidate rule from
+exemplars once a shape crosses threshold, and puts it on the
+`list_pending_decisions` surface for a human to approve or reject. Not wired
+into the nightly `athenaeum run` loop by athenaeum#905 (see that section's "Not
+wired" note) — these knobs govern `run_rule_proposal_detection` whenever/
+however it is invoked.
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Threshold | `ATHENAEUM_RULE_PROPOSALS_THRESHOLD` | `librarian.rule_proposals.threshold` | `50` | Deferred-record count (per `(source, key_fingerprint)` shape, within the window below) that must be crossed before a shape is drafted. |
+| Window | `ATHENAEUM_RULE_PROPOSALS_WINDOW_DAYS` | `librarian.rule_proposals.window_days` | `30` | Only disposition rows whose `at` timestamp falls within this many days of "now" count toward the threshold. |
+| Exemplar count (K) | `ATHENAEUM_RULE_PROPOSALS_EXEMPLAR_COUNT` | `librarian.rule_proposals.exemplar_count` | `5` | How many readable raw records of a detected shape are embedded in the one drafting call. |
+
+The drafting call's model/`max_tokens`/`thinking` route through the standard
+`resolve_model`/`resolve_max_tokens`/`resolve_thinking` knobs under knob name
+`rule_proposals` — same precedence as every other stage above (env > yaml >
+code default):
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Model | `ATHENAEUM_RULE_PROPOSALS_MODEL` | `models.rule_proposals` | `claude-opus-4-8` | Drafting-call model — T2's tier: drafting a rule is a judgment call, not cheap classification. |
+| Max tokens | `ATHENAEUM_RULE_PROPOSALS_MAX_TOKENS` | `max_tokens.rule_proposals` | `4096` | Output-token budget for the drafting call. |
+| Thinking | `ATHENAEUM_RULE_PROPOSALS_THINKING` | `thinking.rule_proposals` | `adaptive` | Thinking posture for the drafting call. |
+
 ### Run lock (single-machine concurrency guard, athenaeum#309)
 
 Every **mutating** command acquires an exclusive advisory
