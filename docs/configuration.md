@@ -1142,17 +1142,16 @@ build time, never a silent fallback:
 deployment with no `sensitivity:` block behaves exactly as it does today.
 The example at the end of this file is not amended for this section.
 
-## Sensitivity routing (athenaeum#949, slice 1/4 — config only)
+## Sensitivity routing (athenaeum#949, slice 1/4 — config)
 
 The routing config surface specified in
 [`docs/sensitivity-value-routing.md`](sensitivity-value-routing.md) §8 — a
 deliberately separate axis from the "Sensitivity classes" section above.
-That section defines *which classes exist*; this one will decide *whether a
+That section defines *which classes exist*; this one decides *whether a
 matched class gets intercepted at intake*, so a class can be defined without
-being routed. **This slice adds no behavior on its own** —
-`resolve_sensitivity_routing` exists in `config.py`, but nothing reads it
-yet. The routing/redaction mechanism, the read path, and the librarian
-wiring are follow-on slices (athenaeum#1023-athenaeum#1025).
+being routed. **Slice 1 (athenaeum#1022) adds no behavior on its own** —
+`resolve_sensitivity_routing` in `config.py` resolves this surface, but
+nothing reads it from anywhere reachable in a running deployment yet.
 
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
@@ -1162,6 +1161,50 @@ wiring are follow-on slices (athenaeum#1023-athenaeum#1025).
 **Example `athenaeum.yaml`: unchanged.** The defaults need no config — a
 deployment with no `sensitivity.routing` block behaves exactly as it does
 today. The example at the end of this file is not amended for this section.
+
+## Sensitivity routing/redaction mechanism (athenaeum#1023, slice 2/4 — standalone, not wired)
+
+`src/athenaeum/sensitivity_routing.py`'s `route_sensitive_values()`
+implements the mechanism the design note's §2/§4/§6/§7 specify: scan text
+via `sensitivity.classify()` (unchanged, athenaeum#910), route each
+configured-on match's value to the secret vault (the built-in `excluded`
+storage surface, or an operator's own safe `storage.mapping` target),
+substitute a resolvable pointer for the matched span, and return the
+redacted text. **Not called from anywhere in this repo yet** — no config
+knob added by this slice, and no behavior change for any running
+deployment. That wiring is athenaeum#1025 (slice 4); reading a pointer's
+value back is athenaeum#1024 (slice 3) and is not implemented here either
+— the pointer text names the read function the design proposes
+(`resolve_sensitive_record`) because the design note's pointer format
+fixes that name, not because slice 2 implements it.
+
+**Pointer format**, substituted for each routed span, byte-for-byte per the
+design note §1:
+
+```
+[sensitive:<class>:<record_id> — value withheld; resolve via
+athenaeum.sensitivity_routing.resolve_sensitive_record()]
+```
+
+`record_id` is a deterministic `uuid5` derived from the raw file's own
+reference, the sensitivity class, and the match's character span — **never
+from the matched value itself** — so re-scanning identical input mints the
+identical id and overwrites the same vault record rather than duplicating
+it (§7.1/AC11), and the id cannot be used to infer anything about the value
+it names (§2/AC3, §8/AC12). See the module's docstring for the full
+disposition of every criterion, including the deliberate choice **not** to
+deduplicate a value across raw files: a vault record count is not a proxy
+for distinct-secret count.
+
+Fails closed (raises `SensitivityRoutingError`, built only from non-secret
+metadata) on: a malformed `sensitivity.*` config; a match with no character
+span (a hypothetical frontmatter-`field` recogniser — none ships today); an
+operator `storage.mapping` entry routing the class onto an adapter that
+participates in the corpus; or any exception writing the vault record
+itself. With no explicit `storage.mapping` entry for a routed class, the
+vault root resolves directly to the built-in `excluded` adapter — not the
+storage layer's own "undeclared maps to wiki" default, which is correct for
+every other class but unsafe here.
 
 ## Authority manifest (athenaeum#426)
 
