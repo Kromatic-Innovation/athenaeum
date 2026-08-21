@@ -1319,6 +1319,83 @@ every other class but unsafe here.
 |---|---|---|---|---|
 | Authority manifest path | `ATHENAEUM_AUTHORITY_MANIFEST` | `librarian.authority_manifest_path` | `<knowledge_root>/authority-manifest.yaml` | Path to the authority manifest mapping authoritative LIVE sources. Relative yaml values resolve against the knowledge root; a missing file is treated as "no manifest configured". Full reference: [`docs/authority-manifest.md`](authority-manifest.md). |
 
+### Never-ingest classes (athenaeum#968)
+
+The authority manifest also carries an optional `never_ingest_classes:` list
+— write-refusal classes BOTH intake paths (auto-memory and entity tier)
+consult, extending the manifest mechanism above rather than adding a second
+config surface. Empty or absent by default (a manifest written before
+athenaeum#968, or one that never mentions the key, enforces nothing new). Two
+classes are recognised:
+
+- `mirror-of-live-source` — reuses the manifest's own topic-index lookup
+  (the same one `authority lint` uses) to refuse an intake file whose
+  `topics`/`tags`/`name` names a topic a `sources:` entry already owns.
+- `pending-state-todo` — refuses an intake file that asserts the current
+  presence/absence of something in an external artifact (an explicit
+  `pending_state: true` flag, or a phrase like "has it been added" / "still
+  needs" / "todo:").
+
+Enforced at each tier's own COMPILE choke point, never at discovery:
+auto-memory in `_run_auto_memory_phase` (`src/athenaeum/librarian.py`), right
+after `discover_auto_memory_files` and before clustering; entity tier in
+`process_one`, right after each raw file's frontmatter is parsed and before
+Tier 0 passthrough. Deliberately never inside
+`athenaeum.intake.discover_raw_files` itself — that function's return value
+is read directly, unmodified, by `backlog_price_sheet.py` /
+`ordinary_night_table.py` (issue athenaeum#713's backlog-count instruments, held
+pending an operator decision), so gating at discovery would silently move
+those numbers. A refused file (either tier) is excluded from that run's
+compilation and appended, ids-only, to
+`<cache_dir>/_never_ingest_refusals.jsonl` (never deleted from disk; it is
+re-evaluated on the next run). See `athenaeum.never_ingest` and
+[`docs/authority-manifest.md`](authority-manifest.md#never-ingest-classes-athenaeum968)
+for the full mechanism.
+
+## Usage report (athenaeum#968)
+
+A per-claim usage signal computed from the push-metrics ledgers
+(`athenaeum#711`/`athenaeum#734`): how many times a pushed id has been pushed, how
+many times it was actually referenced afterward, and when it was last
+referenced. Purely a REPORT — it makes no tier-movement decision itself.
+
+```
+athenaeum usage-report [--claim-id ID] [--since 7d] [--json]
+```
+
+ids-only output (same redaction discipline as `push-metrics`): every field
+is an id, a count, or a timestamp, never claim content.
+
+**The interface issue athenaeum#718's tier-movement rules must consume** —
+`athenaeum.usage_report.get_claim_usage(claim_id, cache_dir=...)` (single
+claim) or `compute_usage_report(cache_dir=...)` (bulk). Neither reads
+`_push_records.jsonl`/`_push_references.jsonl` directly, and no other module
+should either — this is the one seam through which usage data crosses to a
+tier-movement consumer.
+
+## Ingestion gate (athenaeum#968) — off by default
+
+| Knob | Env var | YAML key | Default | What it does |
+|---|---|---|---|---|
+| Ingestion gate enabled | `ATHENAEUM_INGESTION_GATE_ENABLED` | `librarian.ingestion_gate_enabled` | `false` | When `true`, `_run_auto_memory_phase` checks push-metrics precision instrumentation before compiling any auto-memory intake this run — see below for "healthy". |
+
+"Healthy" is a **liveness** check, not a quality bar: push-metrics
+instrumentation is enabled (`push_metrics.enabled`) AND at least one
+reference-determination record exists in the ledger ever (precision is
+therefore computable, whatever its value). A fresh install with the gate
+turned on and zero sessions run yet reads as unhealthy until its first
+session completes — intentional and self-healing, not a bug; the gate stays
+off until an operator opts in. When unhealthy, the WHOLE auto-memory
+compilation phase is skipped for that run (no partial-volume throttle is
+implemented — the issue names no threshold to throttle against); nothing on
+disk is touched, and the same raw intake is re-evaluated next run. See
+`athenaeum.ingestion_gate`.
+
+```yaml
+librarian:
+  ingestion_gate_enabled: false   # off by default; see docs/configuration.md
+```
+
 ## Reasoning-tier screening (T1/T2) — off by default
 
 A cheap-to-expensive cascade (`src/athenaeum/reasoning_tiers.py`, issues
@@ -1785,6 +1862,7 @@ librarian:
   audit_sample_rate_t1_rejects: 0.075       # share of T1 rejects sampled for human audit (athenaeum#438)
   verdict_ledger_enabled: false              # off by default; verdict ledger + basis (athenaeum#712)
   verdict_epoch_batch_interval_days: 30      # comparator-epoch bump batching interval (athenaeum#712)
+  ingestion_gate_enabled: false               # off by default; skip auto-memory phase if push-metrics precision is unhealthy (athenaeum#968)
   delta:
     enabled: true               # delta-scoped incremental compile on client=None path (athenaeum#370)
     max_affected_clusters: 8    # > this many clusters touched => full compile (athenaeum#370)
