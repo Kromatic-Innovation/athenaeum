@@ -137,7 +137,7 @@ class TestQuarantineFile:
         def _boom(*args, **kwargs):
             raise OSError("simulated disk-full mid-move")
 
-        monkeypatch.setattr("athenaeum.quarantine.shutil.move", _boom)
+        monkeypatch.setattr("athenaeum.store.FilesystemStore.move", _boom)
 
         with pytest.raises(OSError, match="simulated disk-full"):
             quarantine_file(
