@@ -43,6 +43,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing reads this resolver yet; the routing/redaction mechanism, the
   read path, and the librarian wiring are follow-on slices
   (athenaeum#1023-athenaeum#1025).
+- **Sensitivity routing/redaction mechanism (athenaeum#1023, slice 2/4 of
+  athenaeum#949's design note).** New `src/athenaeum/sensitivity_routing.py`:
+  `route_sensitive_values()` scans text via `sensitivity.classify()`
+  (athenaeum#910, unchanged) and routes each match whose class resolves to
+  the `route` action (slice 1's `resolve_sensitivity_routing`) to the
+  secret vault, substituting a resolvable pointer
+  (`[sensitive:<class>:<record_id> — value withheld; resolve via
+  athenaeum.sensitivity_routing.resolve_sensitive_record()]`) for the
+  matched span. `record_id` is a deterministic `uuid5` over the raw file's
+  reference, class, and span — never the matched value — so a re-scan
+  overwrites the same vault record rather than duplicating it (AC11), and
+  distinct/repeated values on one page get distinguishable pointers (AC2).
+  Deterministic `(span start, class name)` precedence resolves overlapping
+  or multiply-classified matches (AC7); a class's vault root resolves via
+  the existing `storage.mapping`/adapter layer when explicitly mapped to a
+  safe (not-in-corpus) surface, and falls back to the built-in `excluded`
+  adapter directly otherwise — never the storage layer's own "undeclared
+  maps to wiki" default. Raises the new `SensitivityRoutingError` (message
+  built from non-secret metadata only) rather than falling through
+  un-redacted for: a malformed `sensitivity.*` config; a match with no
+  character span; an unsafe (in-corpus) resolved vault target; or any vault
+  write failure. **Standalone in this slice** — not called from anywhere in
+  this repo. Reading a routed value back
+  (`resolve_sensitive_record`, athenaeum#1024) and wiring this into
+  `librarian.process_one` (athenaeum#1025) are follow-on slices. See
+  `docs/configuration.md` → "Sensitivity routing/redaction mechanism" and
+  the module's own docstring for the full disposition of every criterion.
 - **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
   memory-model v6 dimension chain (child of epic athenaeum#709; athenaeum#715,
   athenaeum#716, athenaeum#719 all depend on this). New `src/athenaeum/dimensions.py`:
