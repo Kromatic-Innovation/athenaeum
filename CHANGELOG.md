@@ -30,6 +30,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wrong bucket instead of preserving it for correct reclassification).
 ### Added
 
+- **`storage.mapping` completeness lint + the deferred `(read_policy,
+  adapter)` pair check (athenaeum#993, S5 of athenaeum#910's design note).** New
+  `src/athenaeum/sensitivity_lint.py`: given a resolved config and a
+  caller-supplied corpus root, reports every sensitivity class name a
+  scanned corpus's content still carries (via its own `sensitivity_class:`
+  frontmatter field) that has no live `storage.mapping` entry, or whose
+  entry names an adapter absent from `storage.available_adapters()` — the
+  config-change-time catch for the read-time footgun the design note's §6
+  point 2 names. Also implements Decision D4's deferred pair check: a class
+  whose resolved `read_policy.access` is `confidential`/`personal` but whose
+  mapped adapter's `corpus_policy.embedded` is `True` is reported as a
+  separate, advisory finding kind that never blocks the gate on its own.
+  Both checks are read-only (never rewrites config or content) and driven by
+  committed synthetic fixtures under `tests/fixtures/sensitivity_mapping/`.
+  New CLI: `athenaeum storage lint-mapping --path <root> [--corpus <root>]
+  [--json]` (`src/athenaeum/_cmd_storage.py`), exiting non-zero only on a
+  completeness finding — standalone, not wired into any existing CI gate.
+  Neither `athenaeum.storage.resolve_adapter_for_class` nor
+  `athenaeum.sensitivity.available_classes` changed.
 - **Dimension registry + kernel dimensions (athenaeum#714).** Root of the
   memory-model v6 dimension chain (child of epic athenaeum#709; athenaeum#715,
   athenaeum#716, athenaeum#719 all depend on this). New `src/athenaeum/dimensions.py`:
