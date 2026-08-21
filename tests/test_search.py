@@ -403,12 +403,28 @@ class TestReindexUnderLiveServer:
         wiki = tmp_path / "wiki"
         wiki.mkdir()
 
+        # Issue athenaeum#1091: this subprocess is a genuinely SEPARATE Python
+        # process (that's the point of the test — athenaeum#489's out-of-process
+        # reindex incident) so pytest's in-process autouse
+        # ``_offline_embedding_function`` fixture (tests/conftest.py) never
+        # runs in it. Without patching the subprocess's chromadb the same
+        # way, it would fall through to a real ONNX model download —
+        # reintroducing exactly the network dependency this issue removes
+        # from the default suite, just one process removed. Reproduce the
+        # patch inline before importing ``VectorBackend`` (``cwd=repo_root``
+        # so ``tests.offline_embeddings`` is importable — ``tests/`` is a
+        # regular package, see ``tests/__init__.py``).
+        repo_root = Path(__file__).resolve().parents[1]
+
         def reindex_in_subprocess() -> None:
             subprocess.run(
                 [
                     sys.executable,
                     "-c",
                     "import pathlib,sys;"
+                    "import chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 as _onnx;"
+                    "from tests.offline_embeddings import OfflineONNXMiniLMStub;"
+                    "_onnx.ONNXMiniLM_L6_V2 = OfflineONNXMiniLMStub;"
                     "from athenaeum.search import VectorBackend;"
                     "VectorBackend().build_index("
                     "pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]),"
@@ -417,6 +433,7 @@ class TestReindexUnderLiveServer:
                     str(cache),
                 ],
                 check=True,
+                cwd=str(repo_root),
             )
 
         (wiki / "a.md").write_text(
