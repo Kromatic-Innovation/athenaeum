@@ -9,12 +9,15 @@ import pytest
 from athenaeum import search as search_module
 from athenaeum.search import (
     FTS5Backend,
+    KeywordBackend,
+    KeywordScanNotSupportedError,
     SearchBackend,
     VectorBackend,
     build_fts5_index,
     get_backend,
     query_fts5_index,
 )
+from athenaeum.store import FilesystemStore
 
 
 @pytest.fixture
@@ -668,6 +671,52 @@ class TestGetBackend:
     def test_unknown(self) -> None:
         with pytest.raises(KeyError, match="unknown"):
             get_backend("unknown")
+
+
+class TestKeywordCheapLocalScan:
+    """Issue athenaeum#981 (S6): ``KeywordBackend`` gates its scan-on-query walk
+    on the ``cheap_local_scan`` capability (design note §7 honest-refusal
+    rule)."""
+
+    def test_refuses_on_surface_without_cheap_local_scan(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        from tests.store_fakes import NoCheapScanStore
+
+        backend = KeywordBackend()
+        cache = tmp_path / "cache"
+        with pytest.raises(KeywordScanNotSupportedError, match="FTS5"):
+            backend.query(
+                "lean startup",
+                cache,
+                wiki_root=wiki_with_pages,
+                store=NoCheapScanStore(),
+            )
+
+    def test_queries_normally_on_filesystem_store(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        backend = KeywordBackend()
+        cache = tmp_path / "cache"
+        results = backend.query(
+            "lean startup",
+            cache,
+            wiki_root=wiki_with_pages,
+            store=FilesystemStore(wiki_with_pages, {}),
+        )
+        filenames = {fn for fn, _n, _s in results}
+        assert "lean-startup.md" in filenames
+
+    def test_default_store_is_filesystem_and_unaffected(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        """No ``store=`` passed (every pre-existing call site) still works —
+        the zero-setup fallback is unchanged (AC3)."""
+        backend = KeywordBackend()
+        cache = tmp_path / "cache"
+        results = backend.query("lean startup", cache, wiki_root=wiki_with_pages)
+        filenames = {fn for fn, _n, _s in results}
+        assert "lean-startup.md" in filenames
 
 
 class TestConvenienceFunctions:
