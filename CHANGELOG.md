@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Narrowed the `do_not_email` surface-divergence predicate to the direction
+  the ratified design actually forbids (athenaeum#1039, holds athenaeum#1038).**
+  Both `athenaeum surface-divergence --field do_not_email` and the standalone
+  `athenaeum do-not-email-divergence` command exited non-zero (`EXIT_DIVERGED`)
+  on EITHER direction of disagreement between the wiki and excluded surfaces —
+  but athenaeum#960's Out-of-scope explicitly rejects "any backfill,
+  migration, or dual-write of `do_not_email` marks onto the excluded
+  surface", making the wiki page the sole authoring surface. That means
+  `marked_on_wiki_not_excluded` is the design's ONLY legal steady state, not
+  a divergence, and the check alerted on every legal store state (observed
+  live 2026-08-20: 4 wiki marks / 0 excluded records → `EXIT_DIVERGED`).
+  Both entry points now alert only on `marked_on_excluded_not_wiki` — the
+  excluded surface newly carrying the field, the direction
+  `athenaeum.pii.do_not_email_state`'s precedence note names as this guard's
+  actual job. The `bounced` field's predicate is unchanged; its
+  `marked_not_on_wiki` direction remains a real signal.
+
 - **Aligned code-side entity-type registry mirrors with `_schema/types.md`
   and gated the `corrections.py` write path (athenaeum#971, follow-up to
   athenaeum#970).** `schemas.KNOWN_TYPES`/`FALLBACK_TYPES` now include `incident` (the
