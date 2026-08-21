@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import ipaddress
+import logging
 import os
 import shutil
 import socket
@@ -260,13 +262,130 @@ def _offline_embedding_function(
     monkeypatch.setattr(onnx_module, "ONNXMiniLM_L6_V2", OfflineONNXMiniLMStub)
 
 
-class NetworkBlockedInDefaultSuite(RuntimeError):
+@pytest.fixture(autouse=True)
+def _fast_retry_backoff_in_default_suite(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neutralize ``athenaeum._retry.with_retry``'s real backoff sleep for
+    the default (non-eval/live/embedding) suite (issue athenaeum#1091).
+
+    Fixing ``NetworkBlockedInDefaultSuite``'s exception type (below) makes a
+    blocked connection fail as fast, cleanly-classified ``httpx.ConnectError``
+    -- but a connection error is STILL a legitimate, intentionally-retried
+    condition for both the ``anthropic`` SDK's own internal retry (2 attempts)
+    and athenaeum's OWN ``with_retry`` wrapper around it (5 attempts,
+    exponential backoff up to a 60s cap) -- retrying is the CORRECT
+    production behavior for a transient network blip, so the exception-type
+    fix alone does not (and should not try to) eliminate the retries
+    themselves. What it should not do is spend real wall-clock time
+    sleeping between retries that are guaranteed-futile in an
+    intentionally-offline test suite: several tests (e.g.
+    tests/test_contradiction_sweep.py, tests/test_live_delta_cadence.py)
+    exercise ``librarian.run()``'s full auto-memory phase against a REAL
+    (deliberately fake-keyed, per their own ``monkeypatch.setenv
+    ("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")``) anthropic client
+    that, before this fix existed, relied on a real, unblocked, fast-failing
+    (401, not retried) network round-trip -- a call this issue's whole point
+    is to stop making by default. Once genuinely blocked, that round-trip
+    becomes a real (correctly retried) connection failure, and
+    ``with_retry``'s default backoff (real ``time.sleep``, exponential,
+    5 attempts) turns a sub-second test into one taking 80-100+ seconds
+    (measured on tests/test_contradiction_sweep.py and
+    tests/test_live_delta_cadence.py individually) -- multiplied across every
+    such test in the default suite, this is a real wall-clock regression.
+
+    ``with_retry``'s ``sleep`` parameter is keyword-only and explicitly
+    documented as the test seam for exactly this ("Injectable sleep, patched
+    in tests so they don't wait") -- but it is a per-call default bound to
+    the REAL ``time.sleep`` function object at ``athenaeum._retry`` import
+    time (``sleep: Callable[[float], None] = time.sleep``), so a plain
+    ``monkeypatch.setattr(time, "sleep", ...)`` does NOT reach call sites
+    that don't pass ``sleep=`` explicitly (none of the production call
+    sites do -- that kwarg exists for tests to use). Rewriting the ONE
+    dict entry backing that default (``with_retry.__kwdefaults__["sleep"]``,
+    a real, mutable dict for keyword-only defaults) reaches every call site
+    uniformly, for the whole default suite, without touching any
+    ``src/athenaeum`` file. Retry COUNT and classification are unaffected --
+    only the sleep DURATION between retries drops to ~0, so a test that
+    asserts on retry attempts/log messages (e.g. tests/test_retry.py) is
+    unaffected, and any test that already passes its own ``sleep=`` spy
+    (the documented, correct way to test backoff timing itself) still gets
+    its own explicit value, since an explicit kwarg always overrides a
+    default.
+
+    That alone was still not enough: a faulthandler dump on the still-slow
+    tests showed the same real wall-clock cost one layer DEEPER than
+    athenaeum's own wrapper -- inside the ``anthropic`` SDK's OWN internal
+    retry (``DEFAULT_MAX_RETRIES=2``), which sleeps via a direct,
+    dynamically-looked-up ``time.sleep(timeout)`` call in
+    ``SyncAPIClient._sleep_for_retry`` (``anthropic/_base_client.py``) --
+    entirely independent of ``with_retry``'s injectable ``sleep`` above,
+    since that call happens INSIDE ``client.messages.create(...)``, below
+    where ``with_retry`` can reach. Patched narrowly (the method on the
+    class, not a blanket ``time.sleep`` override) so it cannot affect any
+    OTHER test's real, legitimate use of ``time.sleep`` for actual timing
+    behavior elsewhere in this 6600+-test suite -- only anthropic's own
+    retry-backoff wait is skipped, for both the sync and async client
+    (batch/async code paths use the latter).
+    """
+    if not _default_selection(request):
+        return
+    try:
+        from athenaeum._retry import with_retry
+    except ImportError:
+        pass
+    else:
+        if with_retry.__kwdefaults__ is not None and "sleep" in with_retry.__kwdefaults__:
+            monkeypatch.setitem(with_retry.__kwdefaults__, "sleep", lambda _delay: None)
+
+    try:
+        import anthropic._base_client as anthropic_base_client
+    except ImportError:
+        return  # anthropic not installed here; nothing to patch
+
+    def _no_sleep_for_retry(self: object, **_kwargs: object) -> None:
+        return None
+
+    async def _no_async_sleep_for_retry(self: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        anthropic_base_client.SyncAPIClient, "_sleep_for_retry", _no_sleep_for_retry
+    )
+    monkeypatch.setattr(
+        anthropic_base_client.AsyncAPIClient,
+        "_sleep_for_retry",
+        _no_async_sleep_for_retry,
+    )
+
+
+class NetworkBlockedInDefaultSuite(ConnectionError):
     """Raised when the default (non-eval/live) pytest selection attempts an
     outbound connection to a non-local address (issue athenaeum#1091).
 
-    Naming the destination in the message is deliberate — this is meant to
-    be immediately diagnosable from a CI failure, not just "test hung/failed
-    for some reason."
+    Subclasses ``ConnectionError`` (an ``OSError`` subclass) DELIBERATELY,
+    not ``RuntimeError``: httpcore/httpx only map ``OSError`` subclasses
+    raised during ``connect()`` into ``httpx.ConnectError`` (see
+    ``httpx._transports.default.map_httpcore_exceptions``). A plain
+    ``RuntimeError`` escapes that mapping entirely, so a caller like the
+    ``anthropic`` SDK's connection-pool/retry classifier
+    (``_should_retry_exception`` in ``anthropic/_base_client.py``) never
+    recognizes it as the connection failure it is — it falls through to a
+    long default-timeout wait path instead of the fast
+    ``ConnectionRefusedError`` failure this guard is standing in for
+    (observed: ``tests/test_live_delta_cadence.py`` went from ~7s to a
+    240s+ hang under the ``RuntimeError`` version, entirely inside
+    ``anthropic/_base_client.py:_sleep_for_retry``). Every default-selection
+    test that reaches a real, unstubbed network client (chromadb's ONNX
+    download, or a test-fixture fake-keyed ``anthropic`` client — see
+    ``tests/test_contradiction_sweep.py``/``tests/test_live_delta_cadence.py``,
+    which deliberately exercise a real client against a REAL, normally
+    fast-failing 401) needs this exception to be type-indistinguishable
+    from the genuine ``ConnectionRefusedError`` this container's blocked
+    egress already produces for the chromadb case, so both fail equally
+    fast. Naming the destination in the message is still deliberate — this
+    is meant to be immediately diagnosable from a CI failure, not just
+    "test hung/failed for some reason."
     """
 
 
@@ -334,12 +453,22 @@ def _block_non_local_network(
     def guarded_connect_ex(
         self: socket.socket, address: Any, *a: Any, **kw: Any
     ) -> Any:
+        # connect_ex's documented contract is to RETURN an error code rather
+        # than raise (that's the whole point of the "_ex" variant) — a
+        # caller doing `if sock.connect_ex(addr): ...` without a try/except
+        # would be broken by an unexpected raise here. Return the same
+        # errno a real blocked/refused connection would (ECONNREFUSED)
+        # instead, so this stays behaviorally consistent with connect_ex
+        # everywhere else, not just for the exception TYPE reasoning
+        # documented on NetworkBlockedInDefaultSuite above.
         if not _is_local_address(address):
-            raise NetworkBlockedInDefaultSuite(
-                f"blocked outbound socket.connect_ex to {address!r}: the default "
-                "pytest selection must stay offline (athenaeum#1091) — mark "
-                "the test `eval` or `live` if it legitimately needs the network"
+            logging.getLogger(__name__).warning(
+                "blocked outbound socket.connect_ex to %r: the default pytest "
+                "selection must stay offline (athenaeum#1091) — mark the test "
+                "`eval` or `live` if it legitimately needs the network",
+                address,
             )
+            return errno.ECONNREFUSED
         return orig_connect_ex(self, address, *a, **kw)
 
     def guarded_create_connection(address: Any, *a: Any, **kw: Any) -> Any:
