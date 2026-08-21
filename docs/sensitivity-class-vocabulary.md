@@ -82,7 +82,7 @@ avoid paying twice.
 | `find_inline_emails()` / `find_inline_phones()` | `src/athenaeum/pii.py:602`, `:612` | The de facto detector functions. **As of athenaeum#992 (S3), no cross-module caller imports either by name.** Before that slice they were consumed directly (not through any lookup) by `src/athenaeum/storage_migrate.py:69-70` (the athenaeum#479/#502 migration sweep) and by `src/athenaeum/bounce_contract.py:62` (the athenaeum#854 Tier-0 bounce-note conformance check — **omitted from this row in the original version of this note**; a genuine direct importer). **`src/athenaeum/outbound_pii.py` never imported these two functions at all** (a claim this note originally got wrong): it always imported `athenaeum.pii`'s *private compiled patterns and helpers* — `_EMAIL_RE`, `_PHONE_RE`, `_has_enough_digits`, `_is_excluded_phone_shape` (`outbound_pii.py:60-64` pre-athenaeum#992) — never the `find_inline_*` functions themselves; the comment there justifying "one definition... rather than a second, driftable copy" (`outbound_pii.py:47-52` pre-athenaeum#992) was about those regex/helper primitives, not about `find_inline_emails`. athenaeum#992 migrated all three call sites (`storage_migrate`, `bounce_contract`, `outbound_pii`) onto `sensitivity.classify()` — see §9 S3. **Not** consumed by `sensitivity.py`'s built-in recognisers themselves — see §3.2's corrected span decision: these two functions return a deduped `list[str]` with no offsets, so a recogniser needing `SensitivityMatch.span` cannot wrap them and instead iterates the compiled patterns directly. Neither function, nor its own remaining callers inside `pii.py`, changed — this slice removed cross-module callers, not the functions. |
 | `CONTACT_IDENTIFIER_FIELDS = ("emails", "former_emails", "alt_emails")` | `src/athenaeum/pii.py:1693` | Hardcodes which frontmatter fields the `pii` class's contact recognisers look at. A `hipaa` class would need its own field allowlist with no shared mechanism to declare it. |
 | `USAGE_CLASSES` (`observed`/`provider`/`unclassified`) | `src/athenaeum/pii.py:1731` | **A different axis, not sensitivity class** — worth naming so this design does not conflate them. `usage_class` is a per-*value* permission (may this specific address be used for outreach), scoped entirely inside the `pii` class per `docs/security-posture.md` §2.3. Sensitivity class (this design) is which regulatory bucket a fact belongs to at all. A `hipaa` class gets its own read policy (§4); it does not need a `usage_class`-shaped table unless a follow-on slice decides that regime needs one too. |
-| **A "street address" recogniser** | — (searched, not found) | Athenaeum#910's own summary states "shipped recognisers cover email, phone and street address." A repo-wide search (`rg -i 'street|postal|zip.code'` across `src/athenaeum/`) finds no such detector. **This design corrects that premise**: athenaeum ships two recognisers today, not three. Street-address detection is real future scope, not existing behavior — see §5 and slice S2 in §9. Stating it as already-shipped would misrepresent the starting point to a reader who did not check. |
+| **A "street address" recogniser** | `src/athenaeum/sensitivity.py`'s `_StreetAddressRecognizer` (as of athenaeum#991, S2) | Athenaeum#910's own summary states "shipped recognisers cover email, phone and street address." At the time this note was filed that was **not yet true** — a repo-wide search (`rg -i 'street|postal|zip.code'` across `src/athenaeum/`) found no such detector, so this design corrected the premise to "two recognisers, not three." **Superseded by athenaeum#991 (S2, §9):** a third built-in, `street-address`, now ships — fixture-bounded keyword + regex, not general-purpose address detection (see the recogniser's own docstring and `tests/fixtures/street_address_fixtures.py`) — registered through the same S1 contract and bound to `pii` by default. `pii`'s resolved `recognizers:` is now `[email, phone, street-address]`, superseding this row's and §5's earlier "two-item list" statement. |
 
 ### 2.2 The `storage.mapping` seam `pii: excluded` already routes through
 
@@ -547,7 +547,7 @@ is at least reachable through the read interface (`recall(with_pii=True)` /
 sensitivity:
   classes:
     pii:
-      recognizers: [email, phone]
+      recognizers: [email, phone, street-address]
       read_policy:
         access: personal          # matches security-posture.md §2.1's
                                    # owner-only-for-restricted-caller posture
@@ -561,19 +561,28 @@ storage:
 This is the `_BUILTIN_CLASSES` module constant §3.1 references — the shipped
 default that ships when a deployment writes no `sensitivity:` config at all,
 merged in by `sensitivity.available_classes()` exactly as
-`pii.DEFAULT_EXCLUDED_READ_MAPPING` is merged in today (§2.4). **A fresh
-install's behavior is unchanged**: `email`/`phone` recognisers exist,
-register at import time, and feed the `pii` class, which routes through
-`storage.mapping.pii` (or the identity default if unset) precisely as
-`PII_ENTITY_CLASS`-literal code does before this design lands. Nothing about
-how the `pii` class is handled changes — per athenaeum#910's own "out of
-scope: changing how any currently shipped class is handled."
+`pii.DEFAULT_EXCLUDED_READ_MAPPING` is merged in today (§2.4). **Unchanged by
+S1a/S1b (athenaeum#989/athenaeum#990) themselves**: `email`/`phone` recognisers
+exist, register at import time, and feed the `pii` class, which routes
+through `storage.mapping.pii` (or the identity default if unset) precisely
+as `PII_ENTITY_CLASS`-literal code did before this design landed — those two
+slices added no detection, only a registry around what already existed.
+**athenaeum#991 (S2) is a real behavior change, stated as such rather than
+folded into "unchanged":** it adds a third recogniser and binds it into
+`pii` by default, so a fresh install's `pii` class now detects
+street-address-shaped values it did not detect before. Nothing about *how*
+the `pii` class is *handled* — routing, read policy — changes; *what it
+detects* does. See athenaeum#991's own PR for the disclosure this causes for
+the three call sites athenaeum#992 (S3) already migrated onto `classify()`
+before S2 existed.
 
-**The one class the issue's own summary claims is shipped but is not
-(§2.1):** a `street-address` recognizer. Expressing it in the new vocabulary
-is future work (§9, S2), and until it ships, `pii`'s `recognizers:` list
-above stays `[email, phone]` — a two-item list, honestly stated, not a
-three-item list copied from the issue text.
+**The one class the issue's own summary claims is shipped but, at S1's
+filing time, was not (§2.1):** a `street-address` recognizer — since shipped
+by athenaeum#991 (S2, §9). `pii`'s `recognizers:` list above is now the
+three-item `[email, phone, street-address]` the issue's summary originally
+(and, as of this slice, accurately) describes — fixture-bounded, not
+general-purpose address detection; see the recogniser's own docstring in
+`sensitivity.py` and `tests/fixtures/street_address_fixtures.py`.
 
 ---
 
@@ -759,9 +768,20 @@ retroactively is a bulk edit, not a config change.
     D6), the shipped `pii` class from §5, and `classify()` (§3.2), binding
     class names to the S1a registry by recogniser name. No caller migrated
     onto `classify()` yet — that remains S3's job.
-- **S2 — street-address recognizer.** The recogniser athenaeum#910's own
-  summary describes as already shipped (§2.1) but is not; implement and
-  register it through the S1 contract, bound to `pii` by default per §5.
+- **S2 (athenaeum#991, shipped) — street-address recognizer.** The recogniser
+  athenaeum#910's own summary describes as already shipped (§2.1) — not true at
+  S1's filing time, true as of this slice. Implemented and registered
+  through the S1 contract (`_StreetAddressRecognizer` in `sensitivity.py`),
+  bound to `pii` by default per §5. Fixture-bounded per this slice's own
+  issue text — a committed positive/negative corpus
+  (`tests/fixtures/street_address_fixtures.py`) with a numerically asserted
+  precision/recall floor, not open-ended address detection. **Landed after
+  S3 (athenaeum#992)**, which had already migrated `storage_migrate.py`,
+  `bounce_contract.py` and `outbound_pii.py` onto `classify()` — so, per
+  athenaeum#991's own "Edges" section (which named this exact ordering as a
+  possible outcome), merging S2 changes what those three already-shipped
+  sweeps report for street-address-shaped text; it does not change how any
+  of them route or handle a match once detected.
 - **S3 (athenaeum#992, shipped) — migrate the modules that imported detection by
   name onto `sensitivity.classify()`.** The corrected call-site inventory (see
   §2.1's `find_inline_emails()`/`find_inline_phones()` row, corrected in the

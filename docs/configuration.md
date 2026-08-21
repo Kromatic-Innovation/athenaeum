@@ -1088,16 +1088,23 @@ documented elsewhere in this file (they are not repeated here — see
 | Knob | Env var | YAML key | Default | What it does |
 |---|---|---|---|---|
 | Class definitions | — | `sensitivity.classes.<name>` | `{}` (operator entries) — the built-in `pii` class is always resolved regardless, see below | Defines a sensitivity class: `recognizers` (a list of recogniser names bound to it — code-registered, never config-defined) and `read_policy` (`access` + `audience`, below). No env override — a dict has no single scalar encoding (`resolve_storage_mapping`'s precedent). |
-| Bound recognisers | — | `sensitivity.classes.<name>.recognizers` | `[]` when omitted | The recogniser names (e.g. `email`, `phone`, or a deployment's own code-registered one) whose matches count toward this class. **Not inherited** — only `read_policy` inherits (see below). An empty list — explicit `[]` or the key simply omitted — is honoured literally: the class is never auto-detected, reachable only by explicit operator/agent tagging. Naming a recogniser `available_recognizers()` doesn't know about raises `SensitivityConfigError` at build time. |
+| Bound recognisers | — | `sensitivity.classes.<name>.recognizers` | `[]` when omitted | The recogniser names (e.g. `email`, `phone`, `street-address`, or a deployment's own code-registered one) whose matches count toward this class. **Not inherited** — only `read_policy` inherits (see below). An empty list — explicit `[]` or the key simply omitted — is honoured literally: the class is never auto-detected, reachable only by explicit operator/agent tagging. Naming a recogniser `available_recognizers()` doesn't know about raises `SensitivityConfigError` at build time. |
 | Read policy | — | `sensitivity.classes.<name>.read_policy.access` | none (must resolve, directly or via `inherits`) | One of the four existing `access:` levels (`open` / `internal` / `confidential` / `personal` — the same vocabulary athenaeum#312 already ships, not a new one). An out-of-vocabulary value raises `SensitivityConfigError` rather than defaulting; so does a class whose `access` never resolves at all (no value set anywhere in its `inherits` chain). |
 | Read policy audience | — | `sensitivity.classes.<name>.read_policy.audience` | `[]` when omitted | The same opaque role-list mechanism `athenaeum serve --audience` already documents (`docs/security-posture.md` §2.1). **Unvalidated** — any role name is accepted; there is no known-role vocabulary to check against. |
 | Inheritance | — | `sensitivity.classes.<name>.inherits` | unset (no parent) | Names another class in the resolved config (built-in or operator-defined) whose `read_policy` this class defaults from. See "Inheritance semantics" below. |
 
 **Built-in `pii` class, unless overridden.** With no `sensitivity:` config at
-all, `pii` resolves to `recognizers: [email, phone]` and
-`read_policy: {access: personal}` — byte-identical to today's hardcoded
-`PII_ENTITY_CLASS` behaviour. The shipped default lives in
-`sensitivity._BUILTIN_CLASSES` (a module constant), **not** in this module's
+all, `pii` resolves to `recognizers: [email, phone, street-address]` (the
+third, `street-address`, shipped by athenaeum#991 — a fixture-bounded
+keyword+regex recogniser, not general-purpose address detection; see
+`sensitivity.py`'s `_StreetAddressRecognizer` docstring and
+`tests/fixtures/street_address_fixtures.py` for its exact in-scope forms and
+non-goals) and `read_policy: {access: personal}`. The `read_policy` is
+byte-identical to today's hardcoded `PII_ENTITY_CLASS` behaviour; the
+recogniser set is not — a fresh install now detects street-address-shaped
+values under `pii` that the pre-athenaeum#991 hardcoded regime never did. The
+shipped default lives in `sensitivity._BUILTIN_CLASSES` (a module constant),
+**not** in this module's
 `_DEFAULTS` — the same "shipped default lives beside the owning domain
 module, not seeded into config's defaults dict" pattern
 `excluded_read_mapping` already uses, so the code default stays reachable

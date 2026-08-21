@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`street-address` sensitivity recogniser — fixture-bounded, bound to `pii`
+  by default (athenaeum#991, S2 of `docs/sensitivity-class-vocabulary.md` §9).**
+  A third built-in `SensitivityRecognizer` (alongside `email`/`phone`,
+  athenaeum#989), registered through the same public `register_recognizer()`
+  call at `athenaeum.sensitivity` import time. Matches a US-style
+  `<number> <street-name> <street-type>` line — with or without a unit
+  designator, with or without a trailing `City, ST 12345` component —
+  against a small, deliberately non-exhaustive street-type/state
+  vocabulary; keyword + regex, not ML/NER, matching the posture
+  `screening.py` and the shipped `email`/`phone` recognisers already commit
+  to. **Fixture-bounded, not general-purpose address detection**: a
+  committed synthetic corpus (`tests/fixtures/street_address_fixtures.py`)
+  states the in-scope forms and non-goals (non-US formats, PO-box-only
+  lines, bare postal codes) in its header comment, and
+  `tests/test_sensitivity.py::TestStreetAddressRecognizer` asserts 100%
+  precision/recall on it, including negative fixtures for the shapes most
+  likely to collide with corpus prose (a numbered list item, a version/build
+  string, a date-like run, a labeled record id). `pii`'s resolved
+  `recognizers:` is now `[email, phone, street-address]`
+  (`sensitivity._BUILTIN_CLASSES`); the partition invariant still resolves
+  cleanly on the default config. **Behavior change, not purely additive:**
+  athenaeum#992 (S3) had already migrated `storage_migrate.py`,
+  `bounce_contract.py` and `outbound_pii.py` onto `sensitivity.classify()`
+  before this recogniser existed, so those three sweeps now additionally
+  report street-address matches — routing/handling for every class is
+  otherwise unchanged. `docs/sensitivity-class-vocabulary.md` (§2.1, §5, §9)
+  and `docs/configuration.md`'s sensitivity-classes section are updated to
+  match.
+
 ### Fixed
 
 - **Aligned code-side entity-type registry mirrors with `_schema/types.md`
