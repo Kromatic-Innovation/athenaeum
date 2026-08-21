@@ -16,10 +16,11 @@ Full rationale: ``docs/whole-store-adapter-design.md`` §6 (the published draft
 contract this module implements verbatim from §6.2, plus the §6.1 design
 decisions D1-D6). **No existing caller is migrated onto this seam in this
 slice** — S2 (athenaeum#977), S3 (athenaeum#978), S4 (athenaeum#979) and S7
-(athenaeum#982) do that. Three protocol members are therefore deliberately
-inert here and named as such at each call site: ``snapshot`` (git-backed
-recoverability lands in S3), ``lease`` (the ``runlock`` migration lands in
-S4), and the R3 persistence-class enforcement §5.2 defines (S5, athenaeum#980).
+(athenaeum#982) do that. ``snapshot`` is implemented for real as of S3
+(athenaeum#978) — see :meth:`FilesystemStore.snapshot`. Two protocol members
+remain deliberately inert here and named as such at each call site: ``lease``
+(the ``runlock`` migration lands in S4), and the R3 persistence-class
+enforcement §5.2 defines (S5, athenaeum#980).
 
 Like :mod:`athenaeum.storage` and :class:`athenaeum.search.SearchBackend`,
 this is an INTERNAL seam: importable but not on the stable ``__all__`` surface
@@ -64,6 +65,7 @@ asserts both the import list and the one-directional edge mechanically.
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -301,11 +303,20 @@ class FilesystemStore:
     naming a surface absent from *roots* raises :class:`UnknownSurfaceError`
     (fail-closed — D6).
 
-    S1 capability profile (design note §9.2 slice table): ``versioned=False``
-    and ``leases=False`` — both flip to ``True`` only once S3/S4 wire their
-    primitives behind ``snapshot``/``lease``. Everything else this slice's
-    conformance suite exercises for real: ``compare_and_swap``, ``append``,
-    ``bulk_list``, ``bulk_read``, ``cheap_local_scan``.
+    ``versioned`` (design note §4.4 R1, wired in S3, athenaeum#978): ``True``
+    iff ``knowledge_root/.git`` exists at construction time — the same
+    precondition ``librarian.git_snapshot`` checked before this slice moved
+    its body onto :meth:`snapshot`, now expressed as a declared capability
+    rather than an ad-hoc check duplicated at every destructive call site. A
+    caller that needs a fresh read re-constructs the store (e.g. via
+    :func:`athenaeum.storage.resolve_store_for_class`) rather than expecting
+    this instance to notice a ``git init`` that happened after it was built —
+    consistent with D4 ("declared, not probed"): the declaration is a
+    snapshot-in-time of the adapter's capability, not a live re-check on every
+    access. ``leases=False`` for the same reason ``versioned`` used to be
+    hardcoded: S4 (athenaeum#979) has not wired ``lease`` yet. Everything
+    else this slice's conformance suite exercises for real: ``compare_and_swap``,
+    ``append``, ``bulk_list``, ``bulk_read``, ``cheap_local_scan``.
 
     Text-only in this slice: ``put``/``append`` route through
     :func:`athenaeum.atomic_io.atomic_write_text`, which is str-based (design
@@ -323,7 +334,13 @@ class FilesystemStore:
         self.capabilities = StoreCapabilities(
             classes=PERSISTENCE_CLASSES,
             operational_scopes=OPERATIONAL_SCOPES,
-            versioned=False,  # S3 (athenaeum#978) wires git snapshot behind this
+            # design note §4.4 R1 / issue athenaeum#978 (S3): declared from
+            # whether *knowledge_root* is actually a git working tree, so a
+            # Tier-A/Tier-B caller gating on this flag gets the identical
+            # refusal the old ad-hoc ``(knowledge_root / ".git").exists()``
+            # check gave — just expressed as a capability instead of a
+            # duplicated filesystem probe.
+            versioned=(self._knowledge_root / ".git").exists(),
             purgeable=True,
             compare_and_swap=True,
             leases=False,  # S4 (athenaeum#979) wires runlock behind this
@@ -480,16 +497,59 @@ class FilesystemStore:
     # -- recoverability / concurrency / lifecycle ------------------------
 
     def snapshot(self, label: str) -> str | None:
-        """No restore point in this slice (``capabilities.versioned`` is ``False``).
+        """Stage every change under ``knowledge_root`` and commit if there is
+        anything staged (design note §4.4 R1; issue athenaeum#978, slice S3).
 
-        S3 (athenaeum#978) moves ``librarian.git_snapshot``'s body here
-        verbatim and flips ``versioned`` to ``True``. Returning ``None`` (a
-        valid value under the protocol's ``str | None`` return type) rather
-        than raising is the honest answer the type already allows, and
-        matches R4's "declared alternative, or refuse" — a caller that checks
-        ``capabilities.versioned`` first never reaches this branch.
+        MOVED (not copied) from ``librarian.git_snapshot``
+        (``librarian.py:492-518`` prior to this slice) — same three
+        ``subprocess`` calls (``git status --porcelain`` / ``git add -A`` /
+        ``git commit -m``), now against ``self._knowledge_root`` instead of a
+        passed-in ``knowledge_root`` argument. ``librarian.py`` no longer
+        defines ``git_snapshot`` at all; every former call site now goes
+        through this method (see ``tests/test_no_git_shelling_outside_store.py``
+        for the mechanical guard against a duplicate reappearing elsewhere).
+
+        Returns the new commit SHA (``git rev-parse HEAD``) on a real commit,
+        or ``None`` when there was nothing to commit — a legitimate outcome
+        under the protocol's ``str | None`` return type, not a failure. A
+        caller that has already checked ``capabilities.versioned`` (``True``
+        only when ``knowledge_root/.git`` existed at construction, see
+        ``__init__``) will not hit the "no ``.git``" branch below in normal
+        operation; the check is kept anyway as the same defensive fail-closed
+        posture ``git_snapshot`` always had, in case ``.git`` is removed
+        out-of-band between construction and this call.
         """
-        return None
+        knowledge_root = self._knowledge_root
+        if not (knowledge_root / ".git").exists():
+            return None
+
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(knowledge_root),
+            capture_output=True,
+            text=True,
+        )
+        if not status.stdout.strip():
+            return None
+
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=str(knowledge_root),
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", label],
+            cwd=str(knowledge_root),
+            check=True,
+        )
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(knowledge_root),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        return sha
 
     def lease(self, name: str, ttl_seconds: float) -> AbstractContextManager[Lease]:
         raise NotImplementedError(

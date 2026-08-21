@@ -126,6 +126,7 @@ from athenaeum.models import (
     parse_frontmatter,
 )
 from athenaeum.provenance import parse_source
+from athenaeum.store import FilesystemStore, Store
 
 log = logging.getLogger(__name__)
 
@@ -831,7 +832,13 @@ def write_correction_batch(
     return out_path
 
 
-def retire_compiled_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: str) -> bool:
+def retire_compiled_raw_file(
+    knowledge_root: Path,
+    raw_path: Path,
+    *,
+    rule_tag: str,
+    store: Store | None = None,
+) -> bool:
     """Retire a raw intake file the shape-rule engine has fully compiled
     into a correction batch (`emit`, live mode) — `git rm` after a
     provenance-snapshot commit, recoverable from git history, never
@@ -840,18 +847,28 @@ def retire_compiled_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: 
     commit wording (see module docstring "Decisions" for why this is not a
     call to `corrections.retire_batch`).
 
-    Best-effort: falls back to a plain unlink outside a git repo (test
-    fixtures), same fallback `retire_batch` uses. Returns `True` on success.
+    Refuses (returns `False`) against a store that is not versioned (design
+    note §4.4 R1; issue athenaeum#978) — no unlink fallback outside a git
+    repo. *store* is injectable for tests; defaults to a
+    :class:`~athenaeum.store.FilesystemStore` over *knowledge_root*. Returns
+    `True` on success.
     """
     return _retire_raw_file(
         knowledge_root,
         raw_path,
         snapshot_reason="before compile",
         retire_reason=f"compiled into a correction batch by {rule_tag}",
+        store=store,
     )
 
 
-def drop_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: str) -> bool:
+def drop_raw_file(
+    knowledge_root: Path,
+    raw_path: Path,
+    *,
+    rule_tag: str,
+    store: Store | None = None,
+) -> bool:
     """Retire a raw intake file a `drop` rule judged information-free
     (issue athenaeum#903) — the SAME two-commit provenance-snapshot-then-`git rm`
     convention :func:`retire_compiled_raw_file` uses, with drop wording.
@@ -862,12 +879,18 @@ def drop_raw_file(knowledge_root: Path, raw_path: Path, *, rule_tag: str) -> boo
     recoverable from history (athenaeum#903 AC: "the discard is recoverable from
     history") and the audit counter in the ledger says how many were discarded
     and by which rule.
+
+    Refuses (returns `False`) against a store that is not versioned (design
+    note §4.4 R1; issue athenaeum#978) — no unlink fallback outside a git
+    repo. *store* is injectable for tests; defaults to a
+    :class:`~athenaeum.store.FilesystemStore` over *knowledge_root*.
     """
     return _retire_raw_file(
         knowledge_root,
         raw_path,
         snapshot_reason="before drop",
         retire_reason=f"dropped as information-free by {rule_tag}",
+        store=store,
     )
 
 
@@ -1003,44 +1026,65 @@ def _retire_raw_file(
     *,
     snapshot_reason: str,
     retire_reason: str,
+    store: Store | None = None,
 ) -> bool:
     """Shared two-commit retirement: snapshot the content, then `git rm` it.
 
     Committing BEFORE the removal is what makes every retirement recoverable —
     a file that was never committed would be unrecoverable once unlinked, which
     is the difference between an audited discard and a deletion.
+
+    Refuses (returns ``False``) against a store that is not versioned
+    (design note §4.4 R1; issue athenaeum#978): the plain-``unlink`` fallback
+    this used to fall through to when ``knowledge_root`` was not a git repo
+    is REMOVED — that was exactly the silent degradation to an unrecoverable
+    delete R1 prohibits, "documented as a best-effort fallback for test
+    fixtures" until a non-git surface became the normal case. A ``git rm``
+    that itself fails (rather than "no git repo" at all) also now refuses
+    rather than falling through to ``unlink`` — the old fallback covered
+    both cases identically, so removing it removes both. *store* is
+    injectable for tests; defaults to a
+    :class:`~athenaeum.store.FilesystemStore` over *knowledge_root*.
     """
     if not raw_path.exists():
         return True
-    if (knowledge_root / ".git").is_dir():
-        try:
-            rel = str(raw_path.resolve().relative_to(knowledge_root.resolve()))
-        except ValueError:
-            rel = str(raw_path)
-        _git(knowledge_root, "add", "--", rel)
-        staged = _git(knowledge_root, "diff", "--cached", "--quiet")
-        if staged.returncode != 0:
-            _git(
-                knowledge_root,
-                "commit",
-                "-m",
-                f"shape-rules: raw-intake provenance snapshot {snapshot_reason} ({rel})",
-            )
-        rm_result = _git(knowledge_root, "rm", "--quiet", "-f", "--", rel)
-        if rm_result.returncode == 0:
-            _git(
-                knowledge_root,
-                "commit",
-                "-m",
-                f"shape-rules: {rel} {retire_reason}",
-            )
-            return True
-    try:
-        raw_path.unlink()
-        return True
-    except OSError:
-        log.warning("shape-rules: failed to retire raw file %s", raw_path)
+    store = store if store is not None else FilesystemStore(knowledge_root, {})
+    if not store.capabilities.versioned:
+        log.warning(
+            "shape-rules: store at %s is not versioned — refusing to retire "
+            "%s (recovery is git-only)",
+            knowledge_root,
+            raw_path,
+        )
         return False
+    try:
+        rel = str(raw_path.resolve().relative_to(knowledge_root.resolve()))
+    except ValueError:
+        rel = str(raw_path)
+    _git(knowledge_root, "add", "--", rel)
+    staged = _git(knowledge_root, "diff", "--cached", "--quiet")
+    if staged.returncode != 0:
+        _git(
+            knowledge_root,
+            "commit",
+            "-m",
+            f"shape-rules: raw-intake provenance snapshot {snapshot_reason} ({rel})",
+        )
+    rm_result = _git(knowledge_root, "rm", "--quiet", "-f", "--", rel)
+    if rm_result.returncode != 0:
+        log.warning(
+            "shape-rules: git rm failed for %s — refusing to retire (no "
+            "unlink fallback)",
+            raw_path,
+        )
+        return False
+    _git(
+        knowledge_root,
+        "commit",
+        "-m",
+        f"shape-rules: {rel} {retire_reason}",
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,7 @@ from pathlib import Path
 
 from athenaeum.ephemeral import classify_ephemeral_page
 from athenaeum.models import parse_frontmatter
+from athenaeum.store import FilesystemStore, Store
 
 log = logging.getLogger(__name__)
 
@@ -125,21 +126,30 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def apply_prune(
     knowledge_root: Path,
     report: PruneReport,
+    *,
+    store: Store | None = None,
 ) -> PruneReport:
     """``git rm`` the kill-list in one labeled commit (issue athenaeum#278).
 
-    Removal is git-only (recoverable). Refuses to act without a writable git
-    repo -- mirrors the move-then-retire safety contract. A no-op (no commit)
-    when the kill-list is empty. Mutates and returns *report*.
+    Removal is git-only (recoverable). Refuses to act against a store that
+    is not versioned (design note §4.4 R1; issue athenaeum#978) -- mirrors
+    the move-then-retire safety contract. A no-op (no commit) when the
+    kill-list is empty. Mutates and returns *report*.
+
+    *store* is the Tier-A recoverability gate, injectable so a test can
+    supply a fake declaring ``capabilities.versioned=False`` without a real
+    git repo. Defaults to a :class:`~athenaeum.store.FilesystemStore` over
+    *knowledge_root*.
     """
     if not report.kill:
         log.info("prune: kill-list empty - nothing to remove")
         return report
 
-    if not (knowledge_root / ".git").exists():
+    store = store if store is not None else FilesystemStore(knowledge_root, {})
+    if not store.capabilities.versioned:
         msg = (
-            f"no .git in {knowledge_root} - refusing to prune (removal is "
-            "git-only for recoverability)"
+            f"store at {knowledge_root} is not versioned - refusing to "
+            "prune (removal is git-only for recoverability)"
         )
         log.warning("prune: %s", msg)
         report.errors.append(msg)
