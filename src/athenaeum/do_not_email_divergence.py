@@ -16,17 +16,25 @@ empty-vs-unreadable distinction and opaque-handle shape apply unchanged,
 and importing rather than re-deriving them keeps there from being two
 definitions of "a surface could not be read".
 
-**Why this field's residual is zero, unlike bounce's.** `docs/bounce-surface-
-convergence.md` documents that a bounce-surface difference is often expected
-(a list-verification verdict is not a hard bounce, so it correctly never
-mints a wiki page tag). `do_not_email` carries no such evidence-class
-asymmetry — it is a single fact about one person's stated intent, and the AC
-this module satisfies requires the tolerated residual to be exactly zero.
-That is why, unlike ``bounce-divergence``, this module's CLI command
-(:mod:`athenaeum._cmd_do_not_email_divergence`) exits non-zero on ANY
-divergence, not only on an unreadable surface — the mistake athenaeum#853
-shipped and athenaeum#960's issue names explicitly (a check that only ever
-exits 0 or 2 is silent about the number moving).
+**Why this field's residual is zero, unlike bounce's — but only in ONE
+direction (issue athenaeum#1039).** `docs/bounce-surface-convergence.md`
+documents that a bounce-surface difference is often expected (a
+list-verification verdict is not a hard bounce, so it correctly never mints
+a wiki page tag). `do_not_email` carries no such evidence-class asymmetry
+for the direction the design actually forbids: the wiki page is the sole
+authoring surface (athenaeum#960's Out-of-scope rejects any backfill onto
+the excluded surface), so ``marked_on_wiki_not_excluded`` is the design's
+ONLY legal steady state, not a residual to tolerate away — it is simply not
+a divergence. The tolerated residual is exactly zero only for
+``marked_on_excluded_not_wiki``, the excluded surface newly carrying the
+field. That is why, unlike ``bounce-divergence``, this module's CLI command
+(:mod:`athenaeum._cmd_do_not_email_divergence`) exits non-zero on that ONE
+direction of divergence, not only on an unreadable surface — the mistake
+athenaeum#853 shipped and athenaeum#960's issue names explicitly (a check
+that only ever exits 0 or 2 is silent about the number moving). Before
+athenaeum#1039, the CLI command (and the equivalent `surface-divergence
+--field do_not_email` predicate) alerted on EITHER direction, which meant
+alerting on the design's only legal state.
 
 **Both surfaces are keyed by ``uid``, not by address.** Unlike bounce (which
 marks individual email ADDRESSES), ``do_not_email`` is a per-RECORD /
@@ -219,9 +227,15 @@ class DoNotEmailDivergenceReport:
     def diverged(self) -> bool:
         """True when either direction of the difference is non-empty.
 
-        The tolerated residual for this field is zero (issue athenaeum#960) —
-        unlike :attr:`athenaeum.bounce_divergence.DivergenceReport.diverged`,
-        ANY ``True`` here is a defect the CLI command must exit non-zero for.
+        Purely descriptive of the two surfaces' set difference — it does
+        NOT by itself say whether that difference is a defect. As of issue
+        athenaeum#1039, ``marked_on_wiki_not_excluded`` alone is the
+        design's legal steady state (athenaeum#960 forbids backfill onto
+        the excluded surface), so this property is ``True`` in that case
+        without it being anything to alert on. The CLI commands' exit-code
+        decisions key off ``marked_on_excluded_not_wiki`` specifically, not
+        this property — see :mod:`athenaeum._cmd_do_not_email_divergence`
+        and :mod:`athenaeum.surface_divergence`.
         """
         return bool(self.marked_on_wiki_not_excluded or self.marked_on_excluded_not_wiki)
 
