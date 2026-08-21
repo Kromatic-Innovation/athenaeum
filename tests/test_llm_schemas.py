@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
+from pydantic import ValidationError
 
 from athenaeum import contradictions, llm_schemas, push_metrics, query_topics, resolutions, spend
 from athenaeum.config import resolve_cache_dir
@@ -109,8 +110,15 @@ def test_observe_reports_unexpected_top_level_key(caplog: pytest.LogCaptureFixtu
 def test_observe_reports_per_item_extra_key_in_array(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Uses tiers.tier3-merge (not tiers.tier2) for this general "post-hoc
+    # per-item extra key" path: athenaeum#1035 (M17 phase 2a) tightened
+    # tiers.tier2 to extra="forbid", so an extra key there now fails
+    # validation up front (see TestPhase2aStrictness) rather than reaching
+    # the model_extra-based [].* reporting this test exercises.
     with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
-        llm_schemas.observe_tier2_classify([{"name": "Acme", "surprise": 9}], call_site="t")
+        llm_schemas.observe_tier3_merge_ops(
+            [{"op": "append_section", "text": "x", "surprise": 9}], call_site="t"
+        )
     recs = _mismatch_records(caplog)
     assert len(recs) == 1
     assert "[].surprise" in recs[0].getMessage()
@@ -221,6 +229,138 @@ def test_tier2_schema_violation_is_behavior_neutral(
     recs = _mismatch_records(caplog)
     assert recs, "expected at least one schema-mismatch WARNING"
     assert all("contract=tiers.tier2" in r.getMessage() for r in recs)
+
+
+# ---------------------------------------------------------------------------
+# M17 phase 2a (athenaeum#1035) — per-contract strictness decision for
+# tiers.tier2 (now extra="forbid") and tiers.tier3-merge (extra="allow"
+# confirmed, unchanged). Every other contract's posture must be untouched.
+# ---------------------------------------------------------------------------
+
+
+class TestPhase2aStrictness:
+    def test_strict_contracts_registry_matches_the_decision(self) -> None:
+        assert llm_schemas.STRICT_CONTRACTS == frozenset(
+            {"tiers.tier2", "tiers.tier3-merge"}
+        )
+        # the three starved contracts and query_topics must NOT be in the
+        # decided set — AC4 (they stay observe-only, decision deferred to #608)
+        assert not llm_schemas.STRICT_CONTRACTS & {
+            "query_topics",
+            "claim_kind",
+            "contradictions",
+            "resolutions",
+        }
+
+    # --- tiers.tier2: strict-pass / strict-fail on extra="forbid" -----------
+
+    def test_tier2_clean_payload_is_strict_pass(self) -> None:
+        # Only documented keys present — validates cleanly under extra="forbid".
+        llm_schemas.Tier2ClassifyResponse.model_validate(
+            [{"name": "Acme", "entity_type": "org", "access": "internal"}]
+        )
+
+    def test_tier2_extra_key_is_strict_fail(self) -> None:
+        # Before athenaeum#1035 this validated cleanly (extra="allow") and only the
+        # key NAME was reported via model_extra; now it fails validation
+        # outright — the decided "teeth where mismatch is ~0%" posture.
+        with pytest.raises(ValidationError):
+            llm_schemas.Tier2ClassifyResponse.model_validate(
+                [{"name": "Acme", "surprise": 1}]
+            )
+
+    def test_tier2_extra_key_observed_as_validation_error_not_extra_keys(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # observe()'s WARNING classification changes shape (ValidationError
+        # instead of the old post-hoc ExtraKeys report) but the ledger's
+        # mismatch CLASS is still extra-keys either way — same signal, new path.
+        with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
+            llm_schemas.observe_tier2_classify(
+                [{"name": "Acme", "surprise": 1}], call_site="t"
+            )
+        recs = _mismatch_records(caplog)
+        assert len(recs) == 1
+        msg = recs[0].getMessage()
+        assert "error_class=ValidationError" in msg
+        assert "surprise" in msg
+        agg = llm_schemas.aggregate_observations()
+        assert agg["tiers.tier2"]["by_class"].get(llm_schemas.MISMATCH_EXTRA_KEYS) == 1
+
+    def test_tier2_missing_name_is_still_strict_fail(self) -> None:
+        # Unchanged: name was already required pre-athenaeum#1035, and it is the one
+        # field with a confirmed missing-required posture (0 instances observed,
+        # but the framework's own rule is that a required field STAYS required).
+        with pytest.raises(ValidationError):
+            llm_schemas.Tier2ClassifyResponse.model_validate([{"entity_type": "org"}])
+
+    def test_tier2_pipeline_stays_behavior_neutral_under_the_tightened_schema(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # AC5: the schema tightened, but parse_tier2_entities' own hand-rolled
+        # per-item tolerance is untouched — observe() still never gates the
+        # pipeline, even for a contract in STRICT_CONTRACTS.
+        text = '[{"name": "Acme", "surprise": 1}]'
+        with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
+            results = parse_tier2_entities(
+                text, "sessions/x.md", ["person", "reference"], [], ["internal", "external"]
+            )
+        assert [e.name for e in results] == ["Acme"]
+        assert _mismatch_records(caplog)  # still observed and logged
+
+    # --- tiers.tier3-merge: strict-pass (extra tolerated) / strict-fail -----
+
+    def test_tier3_merge_extra_key_shapes_from_the_window_are_strict_pass(self) -> None:
+        # [].text2 and [].append_section are the two extra-key shapes actually
+        # observed in the measured window — both must still validate cleanly
+        # (extra="allow" confirmed, not tightened).
+        llm_schemas.Tier3MergeOpsResponse.model_validate(
+            [{"op": "append_section", "text": "New.", "text2": "extra"}]
+        )
+        llm_schemas.Tier3MergeOpsResponse.model_validate(
+            [{"op": "append_section", "text": "New.", "append_section": True}]
+        )
+
+    def test_tier3_merge_missing_op_is_strict_fail(self) -> None:
+        # The one missing-required hit in the measured window: "0.op: Field
+        # required". Confirms `op` stays required.
+        with pytest.raises(ValidationError):
+            llm_schemas.Tier3MergeOpsResponse.model_validate(
+                [{"anchor": "x", "text": "y"}]
+            )
+
+    def test_tier3_merge_missing_op_mismatch_class_is_missing_required(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger=_SCHEMA_LOGGER):
+            llm_schemas.observe_tier3_merge_ops([{"anchor": "x", "text": "y"}], call_site="t")
+        agg = llm_schemas.aggregate_observations()
+        assert (
+            agg["tiers.tier3-merge"]["by_class"].get(llm_schemas.MISMATCH_MISSING_REQUIRED) == 1
+        )
+
+    # --- regression guard: the other four contracts are untouched (AC4) -----
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            llm_schemas.ClaimKindResponse,
+            llm_schemas.ContradictionResponse,
+            llm_schemas.ResolutionResponse,
+        ],
+    )
+    def test_other_contracts_extra_policy_is_unchanged(self, model: type) -> None:
+        assert model.model_config.get("extra") == "allow"
+
+    def test_query_topics_and_starved_contracts_still_tolerate_extra_shape(self) -> None:
+        # query_topics is a RootModel[list[str]] with no extra-key concept;
+        # the three starved BaseModel contracts must still accept an
+        # unexpected key without raising (untouched by athenaeum#1035).
+        llm_schemas.ClaimKindResponse.model_validate({"claim_kind": "fact", "new_field": 1})
+        llm_schemas.ContradictionResponse.model_validate({"detected": False, "new_field": 1})
+        llm_schemas.ResolutionResponse.model_validate(
+            {"action": "keep_a", "new_field": 1}
+        )
 
 
 # ---------------------------------------------------------------------------
