@@ -52,6 +52,36 @@ permissions:
   contents: read
 
 jobs:
+  embedding-suite:
+    # Issue athenaeum#1091: tests marked `embedding` assert on real MiniLM
+    # cosine-similarity values (e.g. tests/test_delta_compile_equivalence.py's
+    # `test_chain_transitive_repartition`, which pins a specific
+    # complete-linkage clique shape that only holds for the real model's
+    # cosines — see that test file's module docstring). They are deselected
+    # from the default `pytest tests/` selection (`-m 'not eval and not
+    # embedding'`) so the regular contributor/CI suite never downloads the
+    # ONNX model, but still need to run SOMEWHERE so the coverage isn't
+    # silently dropped. This job is that "somewhere": no Anthropic API key
+    # needed (unlike the `eval` job below), just the `[vector]` extra and
+    # real network egress for chromadb's one-time ONNX model fetch.
+    name: MiniLM-dependent suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,vector]"
+
+      - name: Run MiniLM-dependent suite
+        run: pytest tests/ -m embedding -v --tb=short --no-cov
+
   eval:
     name: Live-API eval suite
     runs-on: ubuntu-latest
