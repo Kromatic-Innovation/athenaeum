@@ -340,6 +340,29 @@ this note nor athenaeum#437 as things stand today. Leaving this open
 rather than asserting a false sense of coverage is the point of stating it
 here.
 
+**Update (athenaeum#1049 — the measurement half, filed and closed
+separately from this design's own slices in §10).** `storage lint-pii`
+now scans `raw/` in addition to `wiki/`, reusing the same email/phone
+detectors, and reports it as a **separate, non-gating** count (plain text:
+a second summary line; `--json`: a distinct `"raw"` key) — never summed
+into the wiki finding count, never flipping the exit code. This closes the
+*observability* half of the gap this section names: an operator (and this
+epic's definition of done) can now cite a raw-tree residue count instead
+of it going unmeasured. It does **not** close the *retention* half, and
+was not scoped to: the raw-tree lint reports, it does not mutate, exactly
+as proposed above.
+
+**Retention disposition (the question this section left open):**
+**indefinite, unchanged by athenaeum#1049 or by this design.** Raw intake
+remains append-only by contract elsewhere in this codebase (see "What this
+design does NOT change" above); nothing in the codebase today time-bounds
+or routes `raw/` residue once written, and athenaeum#1049 did not add such
+a mechanism — it only made the existing, indefinite retention observable.
+Time-bounding or routing `raw/` residue (e.g. a scrub-after-N-days policy,
+or moving flagged raw files to the athenaeum#427 excluded surface) remains
+a genuinely open, separate design question — not decided here, and not
+implied by the lint now existing.
+
 ---
 
 ## 6. AC10 — fail-closed behavior

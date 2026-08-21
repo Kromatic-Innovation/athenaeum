@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`storage lint-pii` now scans `raw/`, reported as a separate,
+  non-gating surface (athenaeum#1049, filed from the athenaeum#949
+  close-out).** `_cmd_storage_lint_pii` resolved its scan root as
+  `knowledge_root / "wiki"` only; `raw/` is a SIBLING of `wiki/`, not a
+  descendant, and was never opened. Once athenaeum#1025's standing
+  sensitivity filter ships, a routed value's original bytes stay in
+  `raw/` in the clear (append-only by contract) while only a pointer
+  reaches `wiki/` — so a clean `lint-pii` would read as "no retained
+  values anywhere" while every original sat unmeasured in `raw/`, the
+  exact blind spot `docs/sensitivity-value-routing.md` §5 names as a
+  real, unresolved measurement gap. `lint-pii` now also scans `raw/`
+  with the same email/phone detectors and reports its count as a
+  DISTINCT surface — both in plain text (a second summary line) and in
+  `--json` (the top-level shape changes from a bare list to `{"wiki":
+  [...], "raw": [...]}`, no other known consumer of the prior shape).
+  Raw findings never flip the exit code: raw retention is today's
+  normal, unavoidable state (nothing in this change scrubs or
+  time-bounds it — athenaeum#437 owns existing residue, out of scope
+  here), so gating on it would fail every corpus permanently and would
+  make a clean wiki look dirty, destroying the wiki gate's existing
+  meaning. See `docs/sensitivity-value-routing.md` §5 for the updated
+  disposition note.
+
 - **Aligned code-side entity-type registry mirrors with `_schema/types.md`
   and gated the `corrections.py` write path (athenaeum#971, follow-up to
   athenaeum#970).** `schemas.KNOWN_TYPES`/`FALLBACK_TYPES` now include `incident` (the

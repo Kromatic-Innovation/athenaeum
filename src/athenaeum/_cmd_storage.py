@@ -22,6 +22,11 @@ Two sub-commands:
   only entity pages — ``_``-prefixed queue/index/archive files and ``.bak``
   files included) for an inline email/phone and exit non-zero on any finding,
   so a body-text email cannot silently regrow after the sweep (issue athenaeum#495).
+  Also scans ``raw/`` (issue athenaeum#1049) and reports it as a SEPARATE,
+  non-gating surface: ``raw/`` is append-only and retains every original
+  value by contract, so folding its count into the gate would make the
+  command permanently fail with no fix in scope — see athenaeum#1049 and
+  ``docs/sensitivity-value-routing.md`` §5.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — this
@@ -212,7 +217,9 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/"
             "archive/_-prefixed and .bak files included) for an inline email/"
-            "phone; exit non-zero on any finding (issue athenaeum#495)."
+            "phone; exit non-zero on any finding (issue athenaeum#495). Also "
+            "reports raw/ retention as a separate, non-gating count (issue "
+            "athenaeum#1049)."
         ),
     )
     lint_p.add_argument(
@@ -605,9 +612,25 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
     exactly as before — a value is never tolerated by OMISSION. The allowlist
     is excluded from its own scan, without which exit 0 is unreachable (the
     artifact is by construction a list of verbatim contact values).
+
+    athenaeum#1049 additionally scans ``raw/`` (a SIBLING of ``wiki/``, never a
+    descendant — this command never opened it before) and reports it as a
+    SEPARATE surface, using the same detectors as the wiki scan. Raw findings
+    do NOT affect the exit code: raw intake is append-only by contract
+    elsewhere in this codebase (the sweep's stuck-file/quarantine ledgers and
+    Tier 3's partial-progress contract both depend on that holding), so an
+    original value sitting in ``raw/`` is today's normal, unavoidable state —
+    not a regression this gate could ever clear. Folding it into the existing
+    gate would make ``lint-pii`` fail permanently with no fix in scope, and
+    would make a clean wiki look dirty, destroying the existing gate's
+    meaning (`docs/sensitivity-value-routing.md` §5). The raw count exists so
+    an operator — and this epic's definition of done — can CITE raw
+    retention instead of it going unmeasured; it is reporting, not mutation,
+    and carries no allowlist/adjudication of its own.
     """
     knowledge_root = _resolve_knowledge_root(args)
     wiki_root = knowledge_root / "wiki"
+    raw_root = knowledge_root / "raw"
     allowlist_path = getattr(args, "allowlist", None) or (
         wiki_root / PII_ALLOWLIST_FILENAME
     )
@@ -616,6 +639,11 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
     # a fresh finding and put exit 0 permanently out of reach.
     findings = scan_corpus_pii(wiki_root, exclude=[allowlist_path])
     result = adjudicate_corpus_pii(findings, entries, errors=errors)
+    # raw/ is scanned with the same self-exclusion (defensive: the allowlist
+    # is conventionally under wiki/, but an operator-supplied --allowlist
+    # could in principle point elsewhere) and NO adjudication — it is a raw
+    # count, not a second gate.
+    raw_findings = scan_corpus_pii(raw_root, exclude=[allowlist_path])
 
     for err in result.errors:
         print(f"warning: allowlist entry ignored -- {err}", file=sys.stderr)
@@ -629,7 +657,7 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
     if args.json:
         import json
 
-        payload = [
+        wiki_payload = [
             {
                 "path": str(f.path),
                 # Back-compat: `emails`/`phones` remain the UNEXPLAINED tokens,
@@ -641,6 +669,16 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
             }
             for f in result.findings
         ]
+        raw_payload = [
+            {"path": str(f.path), "emails": f.emails, "phones": f.phones}
+            for f in raw_findings
+        ]
+        # athenaeum#1049: the top-level shape changes from a bare list to a dict
+        # with "wiki" (the pre-existing payload, unchanged) and "raw" (new) so
+        # the two surfaces stay distinguishable rather than summed. No known
+        # consumer besides this repo's own test suite depends on the prior
+        # bare-list shape (grepped at filing time).
+        payload = {"wiki": wiki_payload, "raw": raw_payload}
         sys.stdout.write(json.dumps(payload) + "\n")
         return 0 if result.is_clean else EXIT_PII_FOUND
 
@@ -654,18 +692,42 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
 
     if result.is_clean:
         print(f"0 {qualifier}inline PII findings under {wiki_root}{residue}")
-        return 0
+        wiki_rc = 0
+    else:
+        unexplained_files = [f for f in result.findings if not f.is_adjudicated]
+        print(
+            f"{result.unexplained_count} {qualifier}inline PII finding(s) in "
+            f"{len(unexplained_files)} file(s) under {wiki_root}{residue}:"
+        )
+        for f in unexplained_files:
+            parts: list[str] = []
+            if f.unexplained_emails:
+                parts.append(f"emails={f.unexplained_emails}")
+            if f.unexplained_phones:
+                parts.append(f"phones={f.unexplained_phones}")
+            print(f"  {f.path}: {'; '.join(parts)}")
+        wiki_rc = EXIT_PII_FOUND
 
-    unexplained_files = [f for f in result.findings if not f.is_adjudicated]
-    print(
-        f"{result.unexplained_count} {qualifier}inline PII finding(s) in "
-        f"{len(unexplained_files)} file(s) under {wiki_root}{residue}:"
-    )
-    for f in unexplained_files:
-        parts: list[str] = []
-        if f.unexplained_emails:
-            parts.append(f"emails={f.unexplained_emails}")
-        if f.unexplained_phones:
-            parts.append(f"phones={f.unexplained_phones}")
-        print(f"  {f.path}: {'; '.join(parts)}")
-    return EXIT_PII_FOUND
+    # athenaeum#1049: raw/ is reported unconditionally, informational only —
+    # never gates the exit code (see the docstring for why).
+    raw_count = sum(len(f.emails) + len(f.phones) for f in raw_findings)
+    if raw_findings:
+        print(
+            f"{raw_count} inline PII finding(s) in {len(raw_findings)} file(s) "
+            f"under {raw_root} (raw retention -- informational only, not "
+            "gated; athenaeum#1049):"
+        )
+        for f in raw_findings:
+            parts = []
+            if f.emails:
+                parts.append(f"emails={f.emails}")
+            if f.phones:
+                parts.append(f"phones={f.phones}")
+            print(f"  {f.path}: {'; '.join(parts)}")
+    else:
+        print(
+            f"0 inline PII findings under {raw_root} (raw retention -- "
+            "informational only, not gated; athenaeum#1049)"
+        )
+
+    return wiki_rc
