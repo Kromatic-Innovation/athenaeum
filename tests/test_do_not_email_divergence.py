@@ -5,11 +5,20 @@ Structure mirrors ``tests/test_bounce_divergence.py`` (issue athenaeum#853),
 whose report shape this module reuses — same four surface cases, same
 empty-vs-unreadable distinction, same public-safety posture. The one
 deliberate difference this file exists to prove: unlike ``bounce-divergence``,
-the CLI here exits non-zero on ANY divergence, not only on an unreadable
+the CLI here exits non-zero on a real divergence, not only on an unreadable
 surface — that is the anti-recurrence criterion issue athenaeum#960 requires,
 and the class of defect ``bounce-divergence`` shipped without ("exits 0 even
-when diverged"): ``TestCli::test_diverged_but_readable_store_exits_nonzero``
-is the test that fails against the ``bounce-divergence`` exit-code shape.
+when diverged"): ``TestCli::test_excluded_only_mark_exits_nonzero`` is the
+test that fails against the ``bounce-divergence`` exit-code shape.
+
+**Only one direction is a real divergence (issue athenaeum#1039).** The wiki
+page is the sole authoring surface, and athenaeum#960's Out-of-scope forbids
+backfilling marks onto the excluded surface — so a wiki-only mark
+(``marked_on_wiki_not_excluded``) is the design's legal steady state, not a
+defect to alert on. Before athenaeum#1039, this CLI's exit code (like
+``surface-divergence --field do_not_email``'s predicate) alerted on EITHER
+direction, which meant alerting on the design's only legal state.
+``TestCli::test_wiki_only_mark_exits_zero`` is the regression test for that.
 
 All fixtures are synthetic and built in ``tmp_path``; nothing reads a live
 store.
@@ -276,11 +285,13 @@ class TestCli:
         assert rc == 0
         assert "neither holds a do_not_email mark" in capsys.readouterr().out
 
-    def test_diverged_but_readable_store_exits_nonzero(self, tmp_path: Path, capsys) -> None:
-        """The anti-recurrence criterion itself: unlike `bounce-divergence`
-        (which returns 0 whenever both surfaces were merely READABLE,
-        regardless of whether they agree), this command's exit code reflects
-        the divergence, not just readability."""
+    def test_wiki_only_mark_exits_zero(self, tmp_path: Path, capsys) -> None:
+        """Issue athenaeum#1039's regression case: the design's only legal
+        steady state — wiki carries a mark, excluded surface carries zero
+        records (the live shape all production marks are in) — must exit 0,
+        not `EXIT_DIVERGED`. Before athenaeum#1039 this asserted `rc != 0`,
+        which was the exact defect the issue reports (observed live as 4
+        wiki marks / 0 excluded records incorrectly exiting 3)."""
         contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
         _wiki_page(wiki_root, marked=True)
         _contact_record(contacts_root)  # present, unmarked — the live shape
@@ -297,10 +308,36 @@ class TestCli:
             ]
         )
 
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "marked on wiki, not on excluded: 1" in out
+
+    def test_excluded_only_mark_exits_nonzero(self, tmp_path: Path, capsys) -> None:
+        """The anti-recurrence criterion itself: unlike `bounce-divergence`
+        (which returns 0 whenever both surfaces were merely READABLE,
+        regardless of whether they agree), this command's exit code reflects
+        the real divergence — the excluded surface newly carrying the field —
+        not just readability."""
+        contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
+        _wiki_page(wiki_root)  # present, unmarked
+        _contact_record(contacts_root, marked=True)
+
+        rc = main(
+            [
+                "do-not-email-divergence",
+                "--path",
+                str(tmp_path),
+                "--wiki-root",
+                str(wiki_root),
+                "--contacts-root",
+                str(contacts_root),
+            ]
+        )
+
         assert rc != 0
         assert rc not in (0,)
         out = capsys.readouterr().out
-        assert "marked on wiki, not on excluded: 1" in out
+        assert "marked on excluded, not on wiki: 1" in out
 
     def test_unreadable_surface_exits_nonzero_and_differently_from_diverged(
         self, tmp_path: Path, capsys
@@ -323,9 +360,12 @@ class TestCli:
         assert "NOT READ" in capsys.readouterr().out
 
     def test_json_output(self, tmp_path: Path, capsys) -> None:
+        """Uses the real divergence direction (excluded-only mark) so `rc`
+        reflects `EXIT_DIVERGED`, exercising the JSON payload shape on the
+        one case this command still alerts on post-athenaeum#1039."""
         contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
-        _wiki_page(wiki_root, marked=True)
-        _contact_record(contacts_root)
+        _wiki_page(wiki_root)
+        _contact_record(contacts_root, marked=True)
 
         rc = main(
             [
@@ -344,7 +384,37 @@ class TestCli:
         payload = json.loads(capsys.readouterr().out)
         assert payload["complete"] is True
         assert payload["diverged"] is True
+        assert len(payload["marked_on_excluded_not_wiki"]) == 1
+
+    def test_json_output_wiki_only_mark_diverged_but_exits_zero(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """`diverged` in the JSON payload stays purely descriptive (the two
+        surfaces DO differ) even though the exit code is 0 — only
+        `marked_on_excluded_not_wiki` drives the exit code post-athenaeum#1039."""
+        contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"
+        _wiki_page(wiki_root, marked=True)
+        _contact_record(contacts_root)
+
+        rc = main(
+            [
+                "do-not-email-divergence",
+                "--path",
+                str(tmp_path),
+                "--wiki-root",
+                str(wiki_root),
+                "--contacts-root",
+                str(contacts_root),
+                "--json",
+            ]
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["complete"] is True
+        assert payload["diverged"] is True
         assert len(payload["marked_on_wiki_not_excluded"]) == 1
+        assert payload["marked_on_excluded_not_wiki"] == []
 
     def test_report_writes_to_neither_surface(self, tmp_path: Path) -> None:
         contacts_root, wiki_root = tmp_path / "contacts", tmp_path / "wiki"

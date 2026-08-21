@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`storage lint-pii` now scans `raw/`, reported as a separate,
+  non-gating surface (athenaeum#1049, filed from the athenaeum#949
+  close-out).** `_cmd_storage_lint_pii` resolved its scan root as
+  `knowledge_root / "wiki"` only; `raw/` is a SIBLING of `wiki/`, not a
+  descendant, and was never opened. Once athenaeum#1025's standing
+  sensitivity filter ships, a routed value's original bytes stay in
+  `raw/` in the clear (append-only by contract) while only a pointer
+  reaches `wiki/` — so a clean `lint-pii` would read as "no retained
+  values anywhere" while every original sat unmeasured in `raw/`, the
+  exact blind spot `docs/sensitivity-value-routing.md` §5 names as a
+  real, unresolved measurement gap. `lint-pii` now also scans `raw/`
+  with the same email/phone detectors and reports its count as a
+  DISTINCT surface — both in plain text (a second summary line) and in
+  `--json` (the top-level shape changes from a bare list to `{"wiki":
+  [...], "raw": [...]}`, no other known consumer of the prior shape).
+  Raw findings never flip the exit code: raw retention is today's
+  normal, unavoidable state (nothing in this change scrubs or
+  time-bounds it — athenaeum#437 owns existing residue, out of scope
+  here), so gating on it would fail every corpus permanently and would
+  make a clean wiki look dirty, destroying the wiki gate's existing
+  meaning. See `docs/sensitivity-value-routing.md` §5 for the updated
+  disposition note.
+- **Narrowed the `do_not_email` surface-divergence predicate to the direction
+  the ratified design actually forbids (athenaeum#1039, holds athenaeum#1038).**
+  Both `athenaeum surface-divergence --field do_not_email` and the standalone
+  `athenaeum do-not-email-divergence` command exited non-zero (`EXIT_DIVERGED`)
+  on EITHER direction of disagreement between the wiki and excluded surfaces —
+  but athenaeum#960's Out-of-scope explicitly rejects "any backfill,
+  migration, or dual-write of `do_not_email` marks onto the excluded
+  surface", making the wiki page the sole authoring surface. That means
+  `marked_on_wiki_not_excluded` is the design's ONLY legal steady state, not
+  a divergence, and the check alerted on every legal store state (observed
+  live 2026-08-20: 4 wiki marks / 0 excluded records → `EXIT_DIVERGED`).
+  Both entry points now alert only on `marked_on_excluded_not_wiki` — the
+  excluded surface newly carrying the field, the direction
+  `athenaeum.pii.do_not_email_state`'s precedence note names as this guard's
+  actual job. The `bounced` field's predicate is unchanged; its
+  `marked_not_on_wiki` direction remains a real signal.
+
 - **Aligned code-side entity-type registry mirrors with `_schema/types.md`
   and gated the `corrections.py` write path (athenaeum#971, follow-up to
   athenaeum#970).** `schemas.KNOWN_TYPES`/`FALLBACK_TYPES` now include `incident` (the
