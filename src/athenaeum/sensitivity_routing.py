@@ -1,19 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Sensitive-value routing/redaction mechanism (issue athenaeum#1023).
+"""Sensitive-value routing/redaction mechanism (issues athenaeum#1023, athenaeum#1024).
 
-Slice 2/4 of athenaeum#949's design note
-(`docs/sensitivity-value-routing.md`). :func:`route_sensitive_values` scans
-text for :func:`athenaeum.sensitivity.classify` matches, routes each
-configured-on match's value to the secret vault (the existing ``excluded``
-storage surface, athenaeum#429), and returns the text with every routed
-span replaced by a resolvable pointer. **This module is standalone in this
-slice** — nothing calls it yet. Wiring it into the top of
-:func:`athenaeum.librarian.process_one`, before ``tier0_passthrough`` and
-both LLM exposures, is athenaeum#1025 (slice 4); reading a pointer's value
-back via ``resolve_sensitive_record`` is athenaeum#1024 (slice 3) and is
-NOT implemented here — the pointer text below names that function because
-the design note's proposed pointer format (§1) names it, not because it
-exists yet in this repo.
+Slices 2/4 and 3/4 of athenaeum#949's design note
+(`docs/sensitivity-value-routing.md`). :func:`route_sensitive_values` (slice
+2, athenaeum#1023) scans text for :func:`athenaeum.sensitivity.classify`
+matches, routes each configured-on match's value to the secret vault (the
+existing ``excluded`` storage surface, athenaeum#429), and returns the text
+with every routed span replaced by a resolvable pointer.
+:func:`resolve_sensitive_record` (slice 3, athenaeum#1024) is that
+pointer's read path: it resolves a ``(sensitivity_class, record_id)`` pair
+back to the original value, gated on the matched class's ``read_policy``
+(§2's disposition (b) — see that function's own docstring for the full
+contract). **This module is standalone in this slice** — nothing in the
+rest of the repo calls either function yet. Wiring ``route_sensitive_values``
+into the top of :func:`athenaeum.librarian.process_one`, before
+``tier0_passthrough`` and both LLM exposures, remains athenaeum#1025 (slice
+4) and is NOT implemented here.
 
 **Dark by default (no half-wired state).** :func:`route_sensitive_values`
 returns its input completely UNCHANGED whenever
@@ -44,8 +46,8 @@ explicitly rather than left implicit:
     stage's own input. Design note §2 evaluates and rejects the two
     alternatives (scoping to uid-bearing pages only; an advisory-only
     pointer with no read path) and proposes disposition (b): a NEW,
-    record-keyed read path, independent of entity uid, resolved later by
-    a function this module names but does not implement (athenaeum#1024).
+    record-keyed read path, independent of entity uid, resolved by
+    :func:`resolve_sensitive_record` below (athenaeum#1024).
     The issue's non-goal that must not change is the READ PATH'S ACCESS
     CONTROL, not its key — resolution will gate on the matched class's
     ``read_policy.access`` exactly as the uid-keyed path gates on an
@@ -190,6 +192,7 @@ the full disposition.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import date
 from pathlib import Path
@@ -197,8 +200,13 @@ from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import resolve_sensitivity_routing, resolve_storage_mapping
-from athenaeum.models import render_frontmatter
-from athenaeum.sensitivity import ClassifiedMatch, SensitivityConfigError, classify
+from athenaeum.models import is_page_authorized, parse_frontmatter, render_frontmatter
+from athenaeum.sensitivity import (
+    ClassifiedMatch,
+    SensitivityConfigError,
+    available_classes,
+    classify,
+)
 from athenaeum.storage import EXCLUDED, StorageConfigError, resolve_adapter_for_class
 
 #: Marker key on a vault record, mirroring :data:`athenaeum.pii.PII_FLAG`'s
@@ -271,10 +279,9 @@ def _record_id_for(raw_ref: str, sensitivity_class: str, start: int, end: int) -
 def _pointer_text(sensitivity_class: str, record_id: str) -> str:
     """The resolvable, non-leaking pointer substituted for a routed span (AC2).
 
-    Names ``resolve_sensitive_record`` per the design note's proposed
-    format (§1) even though that function is not implemented until
-    athenaeum#1024 (slice 3) — the pointer text is fixed by the design, not
-    by this module's own scope.
+    Names :func:`resolve_sensitive_record` per the design note's proposed
+    format (§1) — the pointer text is fixed by the design, not by this
+    module's own scope.
     """
     return (
         f"[{POINTER_PREFIX}:{sensitivity_class}:{record_id} — value withheld; "
@@ -447,3 +454,217 @@ def route_sensitive_values(
     for start, end, _m in sorted(kept, key=lambda t: t[0], reverse=True):
         redacted = redacted[:start] + pointers[(start, end)] + redacted[end:]
     return redacted
+
+
+# ---------------------------------------------------------------------------
+# Slice 3/4 (athenaeum#1024) — the record-keyed read path. Standalone from
+# the write path above except for the two pieces it deliberately reuses:
+# :func:`_vault_root_for_class` (so a read is resolved from the SAME root a
+# write landed on, never re-derived) and the ``(record_id, sensitivity_class)``
+# shape :func:`_pointer_text`/:func:`_render_vault_record` already define.
+# ---------------------------------------------------------------------------
+
+#: A record id this module ever mints is exactly ``uuid.UUID.hex`` — 32
+#: lowercase hex characters, no dashes, no path separators (see
+#: :func:`_record_id_for`). Any other shape is rejected before it is used to
+#: build a path, rather than sanitized: silently coercing a malformed id
+#: into "the nearest safe-looking string" could resolve to an existing
+#: record that was never the caller's intended target.
+_RECORD_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+#: A sensitivity class name, restricted to the identifier-shaped charset
+#: every example in the design note and this codebase's own built-in
+#: ``pii``/config-driven classes uses (``pii``, ``secret``, ``api_key``,
+#: ``hipaa``, ...). Deliberately excludes ``/``, ``\``, ``.``, whitespace,
+#: and every other character that could make ``sensitivity_class`` behave
+#: as more than one path segment once it reaches
+#: :func:`_vault_root_for_class`, which (like :func:`route_sensitive_values`,
+#: its only other caller) trusts the string it is given — there it comes
+#: from operator config; here it comes from a caller-supplied pointer, which
+#: this module must treat as untrusted input.
+_SENSITIVITY_CLASS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _value_from_vault_body(body: str) -> str | None:
+    """Invert :func:`_render_vault_record`'s body shape, or ``None`` if it doesn't match.
+
+    ``_render_vault_record`` always writes ``"<one-line prose>\\n\\n<value>\\n"``
+    as the body (the caller's raw ``value`` is never itself further encoded).
+    Splitting on the FIRST blank line recovers ``value`` exactly, including a
+    value that happens to contain its own blank lines — ``maxsplit=1`` stops
+    after the prose/value boundary, so nothing past it is touched. Stripping
+    exactly one trailing newline undoes exactly the one ``_render_vault_record``
+    appended, no more. A body with no blank line at all (never produced by
+    this module's own writer, but possible if a vault record was hand-edited
+    or truncated) does not match the shape and returns ``None`` rather than
+    guessing.
+    """
+    parts = body.split("\n\n", 1)
+    if len(parts) != 2:
+        return None
+    value_section = parts[1]
+    if value_section.endswith("\n"):
+        value_section = value_section[:-1]
+    return value_section
+
+
+def resolve_sensitive_record(
+    sensitivity_class: str,
+    record_id: str,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+    *,
+    caller_audience: set[str] | None = None,
+) -> str | None:
+    """Resolve a pointer's ``(sensitivity_class, record_id)`` back to its value.
+
+    The read half of AC2/AC3's disposition (b) — see this module's own
+    docstring and design note §2. :func:`route_sensitive_values` mints the
+    pointer this function resolves; the two are the write/read halves of one
+    contract, standalone from each other in this slice (see the "Follow-on
+    implementation slices" list in ``docs/sensitivity-value-routing.md``
+    §10) but sharing :func:`_vault_root_for_class` so a read is always
+    resolved against the SAME root a write landed on.
+
+    **Contract: resolves to the original value, or to nothing resolvable —
+    never raises with any content in the exception.** Every failure mode
+    below — a malformed ``record_id``; a malformed or path-traversal-shaped
+    ``sensitivity_class``/``record_id``; an unknown class; a class this
+    ``config`` cannot safely resolve a vault root for; a ``record_id`` that
+    does not exist; a ``record_id`` that resolves under a DIFFERENT class
+    than the one requested; a caller not authorized by the class's
+    ``read_policy``; or any I/O/parse error reading the record — returns
+    ``None``, indistinguishably from every other failure mode. This is
+    deliberate, not merely convenient: per design note §2, "resolution
+    failure cannot be used to probe the vault's contents" — a caller
+    (or an attacker driving this function through a crafted pointer) must
+    not be able to tell "wrong class" from "doesn't exist" from "not
+    authorized" from the return value alone. The outer ``try/except`` is
+    belt-and-suspenders over the explicit checks below it, so an
+    unanticipated failure (a permission error, a symlink cycle, ...) fails
+    closed the same way rather than propagating a bare traceback.
+
+    **Access control — no new mechanism (AC2, and the issue's own
+    athenaeum#1024 comment thread, "AC14").** This function gates on the
+    matched class's ``read_policy.access``/``audience`` by calling
+    :func:`athenaeum.models.is_page_authorized` — the SAME function the
+    existing uid-keyed excluded-surface read path's caller
+    (``mcp_server``'s Layer C, ``is_page_authorized(fm, caller_audience)``)
+    already gates on, not a re-implementation of its access/audience
+    comparison logic. Both read paths therefore share the one place that
+    decision is actually made: a future fix to ``is_page_authorized`` (a new
+    audience special-case, a bounce-mark posture change) applies to both
+    paths at once, rather than needing to be ported across two independent
+    implementations and risking the silent-divergence failure the comment
+    thread flags. What legitimately differs between the two paths — by
+    design, not by oversight (§2) — is only the INPUT each supplies to that
+    one shared function: the uid-keyed path passes a page's own frontmatter;
+    this function passes a synthetic ``{"access": ..., "audience": [...]}``
+    built from the class's resolved :class:`~athenaeum.sensitivity.ReadPolicy`,
+    since a routed value has no owning page to read a frontmatter block
+    from. ``caller_audience`` follows the exact convention
+    ``mcp_server.py``'s ``caller_audience: set[str] | None`` already
+    establishes: ``None`` is the trusted/owner caller (authorized for
+    everything, matching :func:`athenaeum.models.is_page_authorized`'s own
+    ``None`` semantics); a non-``None`` set is a restricted caller, gated
+    exactly as any other restricted read is. This parameter is not named in
+    the issue's literal ``(sensitivity_class, record_id, config,
+    knowledge_root)`` signature sketch, but the AC that follows it —
+    "Gates on the matched class's ``read_policy``" — is unsatisfiable
+    without a way to know who is asking; every other caller-facing gate in
+    this codebase (``mcp_server.py``) reaches that same conclusion the same
+    way.
+
+    Args:
+        sensitivity_class: The class named in the pointer, e.g. the
+            ``pii`` in ``[sensitive:pii:<record_id> — ...]``. Untrusted —
+            validated against an identifier-shaped charset before it is
+            ever used to build a path.
+        record_id: The record id named in the pointer. Untrusted —
+            validated against the exact ``uuid.UUID.hex`` shape
+            :func:`_record_id_for` mints before it is ever used to build a
+            path.
+        config: Resolved ``athenaeum.yaml`` — the SAME config the write
+            path was called with, so class definitions and
+            ``storage.mapping`` resolve identically.
+        knowledge_root: Root of the knowledge base (parent of ``wiki/``) —
+            the SAME root the write path was called with.
+        caller_audience: Read-scope pin (issue athenaeum#312/#538
+            convention). ``None`` (default) is the owner/trusted caller.
+
+    Returns:
+        The original value substituted at routing time, or ``None`` when
+        nothing is resolvable for any reason above.
+    """
+    try:
+        if not isinstance(record_id, str) or not isinstance(sensitivity_class, str):
+            return None
+
+        wanted_record_id = record_id.strip()
+        if not _RECORD_ID_RE.match(wanted_record_id):
+            return None
+
+        wanted_class = sensitivity_class.strip()
+        if not wanted_class or not _SENSITIVITY_CLASS_RE.match(wanted_class):
+            return None
+
+        # Gate BEFORE touching the specific record's bytes on disk — an
+        # unauthorized caller never causes this function to read (or even
+        # stat) the record file it was refused. Resolving `available_classes`
+        # itself does no I/O beyond the already-in-hand `config` dict.
+        try:
+            classes = available_classes(config)
+        except SensitivityConfigError:
+            return None
+        sensitivity_class_obj = classes.get(wanted_class)
+        if sensitivity_class_obj is None:
+            return None
+        policy = sensitivity_class_obj.read_policy
+        policy_meta: dict[str, Any] = {
+            "access": policy.access,
+            "audience": list(policy.audience),
+        }
+        if not is_page_authorized(policy_meta, caller_audience):
+            return None
+
+        try:
+            vault_root = _vault_root_for_class(wanted_class, config, knowledge_root)
+        except SensitivityRoutingError:
+            return None
+
+        vault_root_resolved = vault_root.resolve()
+        record_path = (vault_root / f"{wanted_record_id}.md").resolve()
+        # Defense-in-depth: the charset check above already rules out any
+        # segment that could escape `vault_root`, but this containment check
+        # (the same `Path.is_relative_to` idiom `mcp_server.py`'s raw-write
+        # guard uses, never a string-prefix compare) holds even if that
+        # charset is ever loosened without this check being revisited.
+        if not record_path.is_relative_to(vault_root_resolved):
+            return None
+        if not record_path.is_file():
+            return None
+
+        try:
+            text = record_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+        record_meta, body = parse_frontmatter(text)
+        if not record_meta.get(SENSITIVITY_ROUTED_FLAG):
+            return None
+        recorded_class = str(record_meta.get("sensitivity_class", "")).strip()
+        if recorded_class != wanted_class:
+            # The record this id resolved to (under the vault root already
+            # scoped to `wanted_class`) does not itself claim that class —
+            # a `storage.mapping` misconfiguration could in principle make
+            # two classes share a physical root; refuse rather than trust
+            # path placement alone (AC3's "different class" failure mode).
+            return None
+
+        return _value_from_vault_body(body)
+    except Exception:  # noqa: BLE001 — never-raise contract is the anti-probing
+        # boundary: a distinguishable failure would leak whether a record
+        # exists. Belt-and-suspenders (see docstring): no anticipated path
+        # reaches here, but this function's contract is "value or nothing
+        # resolvable — never raise", full stop.
+        return None
