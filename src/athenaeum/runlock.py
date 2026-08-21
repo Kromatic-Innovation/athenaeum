@@ -99,23 +99,43 @@ A process that mutates the knowledge root WITHOUT going through
 :class:`RunLock` is invisible to this guard entirely — the lock only protects
 cooperating callers.
 
-Layering: L0 primitive (leaf). May import only stdlib (``fcntl``/``os``/
-``socket``/``time``/``datetime``). Factoring rule: this module owns ONLY the
-lock/heartbeat mechanism — it has no knowledge of what a "run" does; that
-belongs to :mod:`athenaeum.librarian` and the CLI, which call
+Layering (revised, issue athenaeum#979, S4): this module now imports
+:mod:`athenaeum.store` — a normal downward edge (this module is now a
+CONSUMER of the store seam's ``lease`` primitive, never the reverse; that
+module's own layering test, ``tests/test_store_layering.py``, mechanically
+forbids it from ever importing this one back, so there is no cycle). What
+used to be this module's own raw ``fcntl``/inode-race/heartbeat-write
+mechanism is MOVED to :mod:`athenaeum.store` (:class:`athenaeum.store.FileLease`
+and its supporting functions), generalized from this module's hardcoded
+``knowledge_root/.athenaeum.lock`` to an arbitrary lockfile path — see that
+module's docstring for the full explanation and why the two modules split the
+work this way (this module keeps the wait/force/staleness-auto-break POLICY
+and every existing exception/log message; ``athenaeum.store`` owns the raw
+open/flock/inode-check/metadata-write mechanism). Otherwise unchanged: this
+module owns the lock/heartbeat *policy* — it has no knowledge of what a "run"
+does; that belongs to :mod:`athenaeum.librarian` and the CLI, which call
 :meth:`RunLock.acquire` / :meth:`RunLock.heartbeat` around their own logic.
-Nothing above L0 may leak into this module's imports.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
+
+from athenaeum.store import (
+    FileLease,
+    LeaseHeldError,
+    _pid_alive,
+    heartbeat_age_seconds,
+    is_stale,
+    lease_break_lockfile,
+    lease_holds_current_inode,
+    lease_open_fd,
+    read_holder,
+)
 
 try:  # pragma: no cover - exercised via monkeypatch in tests
     import fcntl
@@ -187,96 +207,17 @@ def _age_str(iso_ts: str | None) -> str:
     return f"{secs // 86400}d ago"
 
 
-def read_holder(lockfile: Path) -> dict[str, str] | None:
-    """Parse the ``key: value`` holder metadata from *lockfile*.
-
-    Returns ``None`` when the file is absent or carries no parseable metadata.
-    """
-    try:
-        text = lockfile.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    holder: dict[str, str] = {}
-    for line in text.splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            holder[key.strip()] = value.strip()
-    return holder or None
-
-
-def _pid_alive(pid: int) -> bool:
-    """True if *pid* names a live process on this machine."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Exists but owned by another user — still a live process.
-        return True
-    except OSError:
-        return False
-    return True
-
-
-def _parse_iso_age_seconds(iso_ts: str | None) -> float | None:
-    """Age in seconds of an ISO-8601 timestamp, or ``None`` if unparseable."""
-    if not iso_ts:
-        return None
-    try:
-        then = datetime.fromisoformat(iso_ts)
-    except ValueError:
-        return None
-    if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - then).total_seconds()
-
-
-def heartbeat_age_seconds(lockfile: Path) -> float | None:
-    """Age in seconds of the holder's effective heartbeat (issue athenaeum#397).
-
-    Prefers the ``heartbeat:`` line; falls back to ``timestamp:`` when
-    ``heartbeat`` is absent (backward-compat with lockfiles written before
-    this feature existed). Returns ``None`` when the file, its metadata, or
-    both timestamps are absent or unparseable.
-    """
-    holder = read_holder(lockfile)
-    if not holder:
-        return None
-    iso_ts = holder.get("heartbeat") or holder.get("timestamp")
-    return _parse_iso_age_seconds(iso_ts)
-
-
-def is_stale(lockfile: Path) -> bool:
-    """True if *lockfile* names a PID that is no longer alive (issue athenaeum#309).
-
-    A crashed run leaves its metadata behind even though the kernel has already
-    released the ``flock``. This is a DIAGNOSTIC only — it does not gate
-    ``--force`` (which breaks the lock unconditionally); it is used to label the
-    audit-log line and by callers that want to report staleness. A lockfile with
-    no parseable PID is treated as NOT stale (conservative).
-
-    Interpreting the result (issue athenaeum#763): ``True`` (dead PID) is the
-    **benign** case — the kernel already released that holder's ``flock``, so
-    the residual lockfile blocks nothing and a normal :meth:`RunLock.acquire`
-    succeeds regardless of it; it needs no intervention (it is not even unlinked
-    until the next ``--force``/auto-break). The **actionable** case is the
-    opposite: a holder that is still alive but heartbeat-stale (hung) — that one
-    genuinely holds the ``flock`` and blocks others (the athenaeum#397 auto-break
-    path). So a ``True`` here is "safe to ignore", not "leak to clean up".
-    """
-    holder = read_holder(lockfile)
-    if not holder:
-        return False
-    pid_raw = holder.get("pid")
-    if not pid_raw:
-        return False
-    try:
-        pid = int(pid_raw)
-    except ValueError:
-        return False
-    return not _pid_alive(pid)
+#: ``read_holder``, ``is_stale``, ``heartbeat_age_seconds``, ``_pid_alive`` are
+#: imported from :mod:`athenaeum.store` above (issue athenaeum#979, S4 — MOVED,
+#: not copied, generalized from this module's hardcoded lockfile path to an
+#: arbitrary one; see that module's docstring). Re-exported here unchanged so
+#: every existing caller of ``from athenaeum.runlock import read_holder`` (etc.)
+#: and every ``monkeypatch.setattr(runlock, "_pid_alive", ...)`` /
+#: ``monkeypatch.setattr(runlock, "heartbeat_age_seconds", ...)`` in
+#: ``tests/test_runlock.py`` keeps working: the acquire() control-flow below
+#: references these by bare name, which Python resolves against THIS module's
+#: globals at call time regardless of where the function object was
+#: originally defined, so patching ``runlock.<name>`` still intercepts it.
 
 
 class RunLock:
@@ -312,55 +253,31 @@ class RunLock:
         )
         self._fd: int | None = None
         self._acquired = False
-        self._acquired_at: str | None = None
+        self._lease: FileLease | None = None
 
-    # -- internals ---------------------------------------------------------
-
-    def _write_metadata(self, fd: int) -> None:
-        """Truncate the lockfile and write this holder's diagnostics."""
-        now_iso = datetime.now(timezone.utc).isoformat()
-        self._acquired_at = now_iso
-        payload = (
-            f"pid: {os.getpid()}\n"
-            f"timestamp: {now_iso}\n"
-            f"host: {socket.gethostname()}\n"
-            f"heartbeat: {now_iso}\n"
-        )
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.ftruncate(fd, 0)
-        os.write(fd, payload.encode("utf-8"))
-        os.fsync(fd)
+    # -- internals -----------------------------------------------------------
+    #
+    # These three delegate to athenaeum.store (issue athenaeum#979, S4 — MOVED,
+    # not copied: see that module's docstring). ``acquire``/``release``/
+    # ``heartbeat`` below no longer call them directly (they go through
+    # athenaeum.store.FileLease instead, the same engine these delegate to) —
+    # they are kept, unchanged in name/behavior, because tests exercise them
+    # directly (``lock._open_fd()``, ``lock._holds_current_inode(fd)``,
+    # ``lock._break_lock()``) as this module's own test-observable surface.
 
     def _open_fd(self) -> int:
-        self.knowledge_root.mkdir(parents=True, exist_ok=True)
-        return os.open(self.lockfile, os.O_RDWR | os.O_CREAT, 0o644)
-
-    def _try_flock(self, fd: int) -> bool:
-        """Non-blocking ``flock`` attempt; True on success."""
-        assert fcntl is not None
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return False
-        return True
+        return lease_open_fd(self.lockfile)
 
     def _holds_current_inode(self, fd: int) -> bool:
-        """True if *fd* refers to the inode currently at the lock path (issue athenaeum#526).
+        """True if *fd* refers to the inode currently at the lock path (issue athenaeum#526)."""
+        return lease_holds_current_inode(fd, self.lockfile)
 
-        After a break (``--force`` or auto-break) unlinks and re-creates the
-        lockfile, a descriptor opened *before* the break refers to an orphan
-        inode: ``flock`` on it still succeeds (nothing holds the orphan), but
-        any metadata written lands in a file no longer at the lock path, so two
-        processes each believe they "hold the lock" on two different inodes
-        (finding M6). Comparing ``fstat``/``stat`` ``st_ino`` catches that — the
-        descriptor is only valid if it names the file currently at the path.
-        Any ``OSError`` (e.g. the lockfile was unlinked mid-check) means the
-        descriptor is not the current inode.
-        """
+    def _break_lock(self) -> None:
+        """Unlink the lockfile so a fresh ``flock`` inode can be acquired."""
         try:
-            return os.fstat(fd).st_ino == os.stat(self.lockfile).st_ino
-        except OSError:
-            return False
+            lease_break_lockfile(self.lockfile)
+        except OSError as exc:  # pragma: no cover - unusual FS error
+            log.warning("runlock: could not unlink stale lockfile: %s", exc)
 
     # -- public API --------------------------------------------------------
 
@@ -379,6 +296,13 @@ class RunLock:
         """Acquire the lock, honoring *wait* / *force*. Returns ``self``.
 
         Raises :class:`LockHeld` when contended beyond the wait budget.
+
+        Issue athenaeum#979 (S4): the actual open/flock/inode-check/metadata-write
+        mechanics below are :class:`athenaeum.store.FileLease` — a fresh
+        instance per attempt, each doing its own single non-blocking (or
+        forced) try. This method keeps every bit of its former CONTROL FLOW
+        and every log message unchanged; only the leaf-level "try to grab the
+        lock right now" step moved. See the module docstring.
         """
         if self._acquired:
             return self
@@ -391,9 +315,17 @@ class RunLock:
             self._acquired = True
             return self
 
-        fd = self._open_fd()
-        if self._try_flock(fd):
-            self._finish_acquire(fd)
+        def _attempt(*, force: bool) -> FileLease | None:
+            lease = FileLease(self.lockfile, force=force)
+            try:
+                lease.__enter__()
+            except LeaseHeldError:
+                return None
+            return lease
+
+        lease = _attempt(force=False)
+        if lease is not None:
+            self._finish_acquire(lease)
             return self
 
         # Contended. --force breaks the lock UNCONDITIONALLY (even a live
@@ -428,38 +360,28 @@ class RunLock:
                     "runlock: --force breaking lock with no holder metadata on %s",
                     self.lockfile,
                 )
-            os.close(fd)
-            self._break_lock()
-            fd = self._open_fd()
-            if self._try_flock(fd):
-                self._finish_acquire(fd)
+            lease = _attempt(force=True)
+            if lease is not None:
+                self._finish_acquire(lease)
                 return self
             # A live holder re-grabbed the fresh inode between unlink and open.
-            os.close(fd)
             raise LockHeld(self.lockfile, read_holder(self.lockfile))
 
         if self.wait > 0:
             deadline = time.monotonic() + self.wait
             while time.monotonic() < deadline:
                 time.sleep(_POLL_INTERVAL)
-                # Issue athenaeum#526 (M6): the fd above was opened BEFORE contention
-                # began. If the holder's lock is broken while we wait (--force
-                # or an auto-break from another waiter), the lockfile is
-                # unlinked and re-created, and THIS fd is left pointing at an
-                # orphan inode. Re-flocking that orphan "succeeds" while the
-                # real lock path is now a different inode → two holders. So
-                # re-open the fd on every poll to flock the inode currently at
-                # the path, and verify the inode after acquiring.
-                os.close(fd)
-                fd = self._open_fd()
-                if self._try_flock(fd):
-                    if self._holds_current_inode(fd):
-                        self._finish_acquire(fd)
-                        return self
-                    # We locked an inode that is no longer the file at the lock
-                    # path (a concurrent break rotated it). Drop the flock; the
-                    # next poll re-opens the current inode.
-                    fcntl.flock(fd, fcntl.LOCK_UN)
+                # Issue athenaeum#526 (M6): each poll's ``_attempt`` opens a
+                # FRESH fd and verifies the inode it flocked is still the one
+                # currently at the lock path (FileLease.__enter__ does this
+                # internally) — never reuses a descriptor across polls, so a
+                # concurrent break (--force or an auto-break from another
+                # waiter) rotating the lockfile mid-wait can never leave this
+                # waiter holding a stale orphan inode.
+                lease = _attempt(force=False)
+                if lease is not None:
+                    self._finish_acquire(lease)
+                    return self
 
         # Still contended. Determine the holder's heartbeat age once and reuse
         # it for both the auto-break and the loud-warning checks below
@@ -494,14 +416,11 @@ class RunLock:
                 heartbeat_age,
                 self.break_stale_after,
             )
-            os.close(fd)
-            self._break_lock()
-            fd = self._open_fd()
-            if self._try_flock(fd):
-                self._finish_acquire(fd)
+            lease = _attempt(force=True)
+            if lease is not None:
+                self._finish_acquire(lease)
                 return self
             # A live holder re-grabbed the fresh inode between unlink and open.
-            os.close(fd)
             raise LockHeld(self.lockfile, read_holder(self.lockfile))
 
         # Option 2: even when auto-break is off or below threshold, loudly
@@ -520,25 +439,12 @@ class RunLock:
                 holder_pid,
             )
 
-        os.close(fd)
         raise LockHeld(self.lockfile, holder)
 
-    def _break_lock(self) -> None:
-        """Unlink the lockfile so a fresh ``flock`` inode can be acquired."""
-        try:
-            os.unlink(self.lockfile)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:  # pragma: no cover - unusual FS error
-            log.warning("runlock: could not unlink stale lockfile: %s", exc)
-
-    def _finish_acquire(self, fd: int) -> None:
-        self._fd = fd
+    def _finish_acquire(self, lease: FileLease) -> None:
+        self._lease = lease
+        self._fd = lease.fd
         self._acquired = True
-        try:
-            self._write_metadata(fd)
-        except OSError as exc:  # pragma: no cover - diagnostics only
-            log.warning("runlock: could not write lock metadata: %s", exc)
 
     def heartbeat(self) -> None:
         """Refresh the lockfile's ``heartbeat`` line (issue athenaeum#397).
@@ -551,20 +457,10 @@ class RunLock:
         raise) when the lock was never acquired or the no-fcntl degrade path
         left no fd. Failures are diagnostics-only (logged, not raised).
         """
-        if not self._acquired or self._fd is None:
+        if not self._acquired or self._lease is None:
             return
         try:
-            now_iso = datetime.now(timezone.utc).isoformat()
-            payload = (
-                f"pid: {os.getpid()}\n"
-                f"timestamp: {self._acquired_at}\n"
-                f"host: {socket.gethostname()}\n"
-                f"heartbeat: {now_iso}\n"
-            )
-            os.lseek(self._fd, 0, os.SEEK_SET)
-            os.ftruncate(self._fd, 0)
-            os.write(self._fd, payload.encode("utf-8"))
-            os.fsync(self._fd)
+            self._lease.heartbeat()
         except OSError as exc:  # pragma: no cover - diagnostics only
             log.warning("runlock: could not refresh heartbeat: %s", exc)
 
@@ -586,28 +482,19 @@ class RunLock:
         if not self._acquired:
             return
         self._acquired = False
-        fd = self._fd
+        lease = self._lease
+        self._lease = None
         self._fd = None
-        if fd is None:  # no-fcntl degrade path held no fd
+        if lease is None:  # no-fcntl degrade path held no lease
             return
-        # Issue athenaeum#763: deliberately NO os.unlink here. Unlinking on release
-        # would reintroduce the athenaeum#526 orphan-inode race: a waiter polling
-        # inside acquire() can hold an fd on an inode that a concurrent release
-        # just unlinked, then "successfully" re-flock the orphan while a new
-        # holder owns the fresh inode at the path (see _holds_current_inode).
-        # The no-unlink design is exactly what keeps the path's inode stable;
-        # the residual file is benign (blocks nothing — see the docstring). Do
-        # NOT "tidy up" by adding an unlink here — it is an active regression.
+        # Issue athenaeum#763: deliberately NO os.unlink here — FileLease.__exit__
+        # only drops the flock and closes the fd, matching this module's
+        # original no-unlink policy exactly (see below for why: unlinking on
+        # release would reintroduce the athenaeum#526 orphan-inode race).
         try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+            lease.__exit__(None, None, None)
         except OSError as exc:  # pragma: no cover
             log.warning("runlock: error releasing flock: %s", exc)
-        finally:
-            try:
-                os.close(fd)
-            except OSError:  # pragma: no cover
-                pass
 
     # -- context manager ---------------------------------------------------
 
