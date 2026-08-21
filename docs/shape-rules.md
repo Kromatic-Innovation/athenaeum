@@ -451,6 +451,43 @@ increment the invariant would be a tautology and could never catch a
 disposition that forgot to tally. A violation is logged at ERROR with both
 figures.
 
+### 6.1 Per-record disposition rows (athenaeum#975)
+
+`_shape_rules_applied.jsonl` above is a per-`(rule, mode)` **aggregate**: it
+answers "how often did this rule fire", not "which record got what
+treatment". `wiki/_shape_rule_dispositions.jsonl` is the per-record
+complement — same `_`-prefixed, wiki-root, append-only-JSONL discipline
+(:func:`athenaeum.rules.append_shape_rule_disposition_row`,
+:func:`athenaeum.rules.default_shape_rule_dispositions_path`), so it can
+never become a claim or enter the embedded index. Every candidate the phase
+evaluates gets exactly one row, **including the ones no rule matched**
+(`rule_id: null`, `disposition: "no-match"`) — those are the shapes a
+frequency detector (athenaeum#905) actually needs to see:
+
+```json
+{"schema_version":1,"at":"2026-08-15T03:00:00Z","source":"delivery-monitor","source_ref":"delivery-monitor/20260815T030000Z-9f3ac1d2.jsonl","key_fingerprint":"a5149e5b057b68f7","tier":0,"rule_id":"example-contact-bounce@1","disposition":"emit"}
+```
+
+`key_fingerprint` is the same top-level-key-set fingerprint
+(`record_key_fingerprint`) the match spec uses — never a raw value.
+`source`/`source_ref` come from the raw file's own `source` (the raw source
+directory, what a frequency query groups by) and `ref` (`source/filename`),
+both already non-sensitive.
+
+**`tier`** encodes whether the shape-rules pass — the deterministic, no-LLM
+layer, tier 0 on the ladder in `field-corrections.md` §2 — actually disposed
+of the record:
+
+| `tier` | When |
+|---|---|
+| `0` | `emit` / `drop` / `retain` / `preserve` / `rollup`, and their `observed-*` forms — this pass resolved it. |
+| `null` | `no-match` (no rule matched at all), `fallthrough` / `observed-fallthrough`, or a soft failure (`transform-error`, `preserve-unconfigured`, `preserve-failed`) — deferred to the reasoning ladder (tier ≥1), which this pass cannot know in advance. `null` is deliberate: a guessed tier number would be a lie. |
+
+Rows are written unless `dry_run` is set, mirroring the aggregate ledger's
+own dry-run behaviour. **Forward-only:** this ledger starts accumulating
+from the run it first ships in — no backfill of historical intake is
+attempted.
+
 ---
 
 ## 7. Example rules — packaged, never engine defaults
