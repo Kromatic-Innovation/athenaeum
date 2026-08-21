@@ -236,6 +236,12 @@ that in place, the existing "Exact commands" recipe in
 `n_sources` per night, over both call sites, and the actual survivor counts
 at any candidate cap become a one-line query instead of a guess.
 
+**Landed (athenaeum#1085):** both call sites now emit `n_sources` unconditionally
+as a structured field, and the "Exact commands" recipe in
+`reasoning-tier-measurements.md` has the per-night, per-call-site `n_sources`
+bucketing this section proposed. AC1's distribution is answerable once a
+week of live data accumulates under it.
+
 ## 7. Interaction with athenaeum#715
 
 athenaeum#715 (comparator re-run, blocked on athenaeum#713/athenaeum#714) re-runs the five-verdict
