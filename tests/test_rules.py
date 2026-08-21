@@ -414,7 +414,7 @@ class TestResolveFieldPath:
 # demonstrated end-to-end against a fixture record shaped like a real
 # hestia-lane raw file living in a nested source subdirectory -- proving
 # BOTH gaps (AC1 nested-field resolution, AC2 nested-subdir discovery)
-# together make the rule #940 wants expressible.
+# together make the rule athenaeum#940 wants expressible.
 # ---------------------------------------------------------------------------
 
 
