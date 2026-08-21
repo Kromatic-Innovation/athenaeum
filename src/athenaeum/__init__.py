@@ -10,10 +10,13 @@ this file itself.
 Factoring rule: adding a name to ``__all__`` is a public-API commitment: do it
 only for something a library consumer (not the CLI) genuinely needs, and keep
 the list in sync with the imports above it. Most functionality is exercised
-through the CLI subcommands (``athenaeum people``, ``athenaeum recall``,
+through the CLI subcommands (``athenaeum enumerate``, ``athenaeum recall``,
 ``athenaeum repair``, ``athenaeum dedupe``, ``athenaeum questions``,
 ``athenaeum ingest-answers``, ``athenaeum ingest-merges``, etc.) — see
-``README.md`` and ``athenaeum --help``. Internal modules (``contradictions``,
+``README.md`` and ``athenaeum --help``. (``athenaeum people`` is deprecated,
+issue athenaeum#966 — ``athenaeum enumerate --type person --where ...`` is
+the generalized replacement; see docs/recall-architecture.md's
+capability-parity table.) Internal modules (``contradictions``,
 ``merge``, ``clusters``, ``delta``, ``dedupe``, ``repair``, ``answers``,
 ``provenance``, ``resolutions``, ``json_utils``, ``retire``, ``owner``,
 ``transcript_verify``, ``wiki_dedupe``) are importable but not part of the
