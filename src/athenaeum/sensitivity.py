@@ -342,8 +342,12 @@ _TITLE_WORD = r"[A-Z][a-z]*(?:['\-][A-Za-z]+)?"
 _STREET_ADDRESS_RE = re.compile(
     r"(?<!\d)(?P<number>\d{1,6})(?!\d)"
     r"\s+(?P<name>" + _TITLE_WORD + r"(?:\s+" + _TITLE_WORD + r"){0,3})"
-    r"\s+(?P<type>(?:" + "|".join(sorted(_STREET_TYPES, key=len, reverse=True)) + r"))(?![A-Za-z])\.?"
-    r"(?:[,\s]+(?P<unit_kw>(?:" + "|".join(sorted(_UNIT_TYPES, key=len, reverse=True)) + r"))(?![A-Za-z])\.?\s*#?\s*(?P<unit_no>[A-Za-z0-9-]+)"
+    r"\s+(?P<type>(?:"
+    + "|".join(sorted(_STREET_TYPES, key=len, reverse=True))
+    + r"))(?![A-Za-z])\.?"
+    r"(?:[,\s]+(?P<unit_kw>(?:"
+    + "|".join(sorted(_UNIT_TYPES, key=len, reverse=True))
+    + r"))(?![A-Za-z])\.?\s*#?\s*(?P<unit_no>[A-Za-z0-9-]+)"
     r"|[,\s]+#\s*(?P<hash_unit_no>[A-Za-z0-9-]+))?"
     r"(?:,\s*(?P<city>" + _TITLE_WORD + r"(?:\s+" + _TITLE_WORD + r"){0,2})"
     r",\s*(?P<state>(?:" + "|".join(_US_STATE_ABBREVIATIONS) + r"))"
